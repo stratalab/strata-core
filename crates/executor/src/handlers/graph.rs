@@ -262,6 +262,64 @@ pub fn graph_bfs(
     }))
 }
 
+/// Handle GraphBulkInsert command.
+pub fn graph_bulk_insert(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+    nodes: Vec<crate::types::BulkGraphNode>,
+    edges: Vec<crate::types::BulkGraphEdge>,
+    chunk_size: Option<usize>,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+
+    // Convert BulkGraphNode → (String, NodeData)
+    let node_data: Vec<(String, NodeData)> = nodes
+        .into_iter()
+        .map(|n| {
+            let props = match n.properties {
+                Some(v) => Some(crate::bridge::value_to_serde_json_public(v)?),
+                None => None,
+            };
+            Ok((
+                n.node_id,
+                NodeData {
+                    entity_ref: n.entity_ref,
+                    properties: props,
+                },
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // Convert BulkGraphEdge → (String, String, String, EdgeData)
+    let edge_data: Vec<(String, String, String, EdgeData)> = edges
+        .into_iter()
+        .map(|e| {
+            let props = match e.properties {
+                Some(v) => Some(crate::bridge::value_to_serde_json_public(v)?),
+                None => None,
+            };
+            Ok((
+                e.src,
+                e.dst,
+                e.edge_type,
+                EdgeData {
+                    weight: e.weight.unwrap_or(1.0),
+                    properties: props,
+                },
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let (ni, ei) =
+        convert_result(p.graph.bulk_insert(core_branch, &graph, &node_data, &edge_data, chunk_size))?;
+
+    Ok(Output::GraphBulkInsertResult {
+        nodes_inserted: ni as u64,
+        edges_inserted: ei as u64,
+    })
+}
+
 /// Convert serde_json::Value to strata_core::Value.
 fn serde_json_to_value(json: serde_json::Value) -> Result<Value> {
     crate::bridge::serde_json_to_value_public(json).map_err(|e| Error::Serialization {

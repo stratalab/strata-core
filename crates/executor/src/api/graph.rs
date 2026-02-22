@@ -192,6 +192,58 @@ impl Strata {
     }
 
     // =========================================================================
+    // Bulk Insert
+    // =========================================================================
+
+    /// Bulk insert nodes and edges into a graph using chunked transactions.
+    ///
+    /// Much faster than individual `graph_add_node`/`graph_add_edge` calls for
+    /// loading large datasets.
+    ///
+    /// Returns `(nodes_inserted, edges_inserted)`.
+    pub fn graph_bulk_insert(
+        &self,
+        graph: &str,
+        nodes: &[(&str, Option<&str>, Option<Value>)],
+        edges: &[(&str, &str, &str, Option<f64>, Option<Value>)],
+    ) -> Result<(u64, u64)> {
+        let bulk_nodes: Vec<crate::types::BulkGraphNode> = nodes
+            .iter()
+            .map(|(node_id, entity_ref, properties)| crate::types::BulkGraphNode {
+                node_id: node_id.to_string(),
+                entity_ref: entity_ref.map(|s| s.to_string()),
+                properties: properties.clone(),
+            })
+            .collect();
+        let bulk_edges: Vec<crate::types::BulkGraphEdge> = edges
+            .iter()
+            .map(|(src, dst, edge_type, weight, properties)| crate::types::BulkGraphEdge {
+                src: src.to_string(),
+                dst: dst.to_string(),
+                edge_type: edge_type.to_string(),
+                weight: *weight,
+                properties: properties.clone(),
+            })
+            .collect();
+
+        match self.executor.execute(Command::GraphBulkInsert {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+            nodes: bulk_nodes,
+            edges: bulk_edges,
+            chunk_size: None,
+        })? {
+            Output::GraphBulkInsertResult {
+                nodes_inserted,
+                edges_inserted,
+            } => Ok((nodes_inserted, edges_inserted)),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphBulkInsert".into(),
+            }),
+        }
+    }
+
+    // =========================================================================
     // Traversal
     // =========================================================================
 

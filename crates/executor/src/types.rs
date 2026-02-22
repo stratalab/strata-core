@@ -511,3 +511,33 @@ pub struct GraphBfsResult {
     /// Edges traversed: (src, dst, edge_type).
     pub edges: Vec<(String, String, String)>,
 }
+
+/// A node entry for bulk graph insertion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BulkGraphNode {
+    /// Node identifier.
+    pub node_id: String,
+    /// Optional entity reference URI (e.g. `"kv://main/key"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_ref: Option<String>,
+    /// Optional properties to attach to the node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<Value>,
+}
+
+/// An edge entry for bulk graph insertion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BulkGraphEdge {
+    /// Source node ID.
+    pub src: String,
+    /// Destination node ID.
+    pub dst: String,
+    /// Edge type label.
+    pub edge_type: String,
+    /// Optional edge weight (default 1.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f64>,
+    /// Optional properties to attach to the edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<Value>,
+}

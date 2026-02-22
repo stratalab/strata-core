@@ -1139,6 +1139,25 @@ impl Executor {
                     edge_type,
                 )
             }
+            Command::GraphBulkInsert {
+                branch,
+                graph,
+                nodes,
+                edges,
+                chunk_size,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_bulk_insert(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    nodes,
+                    edges,
+                    chunk_size,
+                )
+            }
             Command::GraphBfs {
                 branch,
                 graph,

@@ -199,6 +199,14 @@ pub enum Output {
     /// Graph BFS traversal results
     GraphBfs(GraphBfsResult),
 
+    /// Graph bulk insert result
+    GraphBulkInsertResult {
+        /// Number of nodes inserted.
+        nodes_inserted: u64,
+        /// Number of edges inserted.
+        edges_inserted: u64,
+    },
+
     /// Model successfully pulled/downloaded
     ModelsPulled {
         /// Name of the model that was pulled.
