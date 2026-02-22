@@ -20,11 +20,7 @@ impl GraphStore {
     ///
     /// Errors during individual graph operations are logged but don't propagate,
     /// so the caller's delete always succeeds.
-    pub fn on_entity_deleted(
-        &self,
-        branch_id: BranchId,
-        entity_ref_uri: &str,
-    ) -> StrataResult<()> {
+    pub fn on_entity_deleted(&self, branch_id: BranchId, entity_ref_uri: &str) -> StrataResult<()> {
         let bindings = self.nodes_for_entity(branch_id, entity_ref_uri)?;
 
         for (graph, node_id) in bindings {
@@ -176,10 +172,7 @@ mod tests {
         gs.on_entity_deleted(b, "kv://main/key1").unwrap();
 
         let node = gs.get_node(b, "g", "n1").unwrap().unwrap();
-        assert_eq!(
-            node.entity_ref,
-            Some("kv://main/key1".to_string())
-        );
+        assert_eq!(node.entity_ref, Some("kv://main/key1".to_string()));
     }
 
     #[test]

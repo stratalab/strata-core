@@ -209,21 +209,25 @@ impl Strata {
     ) -> Result<(u64, u64)> {
         let bulk_nodes: Vec<crate::types::BulkGraphNode> = nodes
             .iter()
-            .map(|(node_id, entity_ref, properties)| crate::types::BulkGraphNode {
-                node_id: node_id.to_string(),
-                entity_ref: entity_ref.map(|s| s.to_string()),
-                properties: properties.clone(),
-            })
+            .map(
+                |(node_id, entity_ref, properties)| crate::types::BulkGraphNode {
+                    node_id: node_id.to_string(),
+                    entity_ref: entity_ref.map(|s| s.to_string()),
+                    properties: properties.clone(),
+                },
+            )
             .collect();
         let bulk_edges: Vec<crate::types::BulkGraphEdge> = edges
             .iter()
-            .map(|(src, dst, edge_type, weight, properties)| crate::types::BulkGraphEdge {
-                src: src.to_string(),
-                dst: dst.to_string(),
-                edge_type: edge_type.to_string(),
-                weight: *weight,
-                properties: properties.clone(),
-            })
+            .map(
+                |(src, dst, edge_type, weight, properties)| crate::types::BulkGraphEdge {
+                    src: src.to_string(),
+                    dst: dst.to_string(),
+                    edge_type: edge_type.to_string(),
+                    weight: *weight,
+                    properties: properties.clone(),
+                },
+            )
             .collect();
 
         match self.executor.execute(Command::GraphBulkInsert {

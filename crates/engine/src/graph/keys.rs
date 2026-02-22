@@ -3,9 +3,9 @@
 //! All graph data is stored under the `_graph_` space using KV-type keys.
 //! Key format uses `/` as a separator between path segments.
 
-use strata_core::types::{BranchId, Key, Namespace};
 #[cfg(test)]
 use strata_core::types::TypeTag;
+use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::{StrataError, StrataResult};
 
 /// Separator used between path segments in graph keys.
@@ -50,9 +50,7 @@ pub fn validate_edge_type(t: &str) -> StrataResult<()> {
         return Err(StrataError::invalid_input("Edge type must not be empty"));
     }
     if t.contains(SEP) {
-        return Err(StrataError::invalid_input(
-            "Edge type must not contain '/'",
-        ));
+        return Err(StrataError::invalid_input("Edge type must not contain '/'"));
     }
     Ok(())
 }
@@ -483,12 +481,14 @@ mod tests {
     #[test]
     fn forward_edge_key_not_parseable_as_node() {
         let key = forward_edge_key("g", "A", "T", "B");
-        assert!(parse_node_key("g", &key).is_none() || {
-            // It may parse as a node key but the result should not be "A"
-            // since the format is different
-            let parsed = parse_node_key("g", &key).unwrap();
-            parsed != "A"
-        });
+        assert!(
+            parse_node_key("g", &key).is_none() || {
+                // It may parse as a node key but the result should not be "A"
+                // since the format is different
+                let parsed = parse_node_key("g", &key).unwrap();
+                parsed != "A"
+            }
+        );
     }
 
     #[test]

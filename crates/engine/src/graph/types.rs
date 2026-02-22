@@ -168,9 +168,11 @@ impl GraphSnapshot {
     pub fn to_adjacency_list(&self) -> HashMap<String, Vec<(String, String, f64)>> {
         let mut adj: HashMap<String, Vec<(String, String, f64)>> = HashMap::new();
         for e in &self.edges {
-            adj.entry(e.src.clone())
-                .or_default()
-                .push((e.dst.clone(), e.edge_type.clone(), e.data.weight));
+            adj.entry(e.src.clone()).or_default().push((
+                e.dst.clone(),
+                e.edge_type.clone(),
+                e.data.weight,
+            ));
         }
         adj
     }
@@ -183,7 +185,10 @@ impl GraphSnapshot {
             let src = csv_escape(&e.src);
             let dst = csv_escape(&e.dst);
             let edge_type = csv_escape(&e.edge_type);
-            out.push_str(&format!("{},{},{},{}\n", src, dst, edge_type, e.data.weight));
+            out.push_str(&format!(
+                "{},{},{},{}\n",
+                src, dst, edge_type, e.data.weight
+            ));
         }
         out
     }

@@ -372,8 +372,14 @@ fn format_raw(output: &Output) -> String {
         Output::Text(t) => t.clone(),
         Output::GraphNeighbors(hits) => serde_json::to_string(&hits).unwrap_or_default(),
         Output::GraphBfs(result) => serde_json::to_string(&result).unwrap_or_default(),
-        Output::GraphBulkInsertResult { nodes_inserted, edges_inserted } => {
-            format!("{{\"nodes_inserted\":{},\"edges_inserted\":{}}}", nodes_inserted, edges_inserted)
+        Output::GraphBulkInsertResult {
+            nodes_inserted,
+            edges_inserted,
+        } => {
+            format!(
+                "{{\"nodes_inserted\":{},\"edges_inserted\":{}}}",
+                nodes_inserted, edges_inserted
+            )
         }
     }
 }
@@ -805,7 +811,10 @@ fn format_human(output: &Output) -> String {
                 serde_json::to_string_pretty(&result).unwrap_or_default()
             )
         }
-        Output::GraphBulkInsertResult { nodes_inserted, edges_inserted } => {
+        Output::GraphBulkInsertResult {
+            nodes_inserted,
+            edges_inserted,
+        } => {
             format!(
                 "(bulk insert) {} node(s), {} edge(s) inserted",
                 nodes_inserted, edges_inserted

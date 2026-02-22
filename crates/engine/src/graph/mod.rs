@@ -48,8 +48,8 @@ impl GraphStore {
     ) -> StrataResult<()> {
         keys::validate_graph_name(graph)?;
         let meta = meta.unwrap_or_default();
-        let meta_json = serde_json::to_string(&meta)
-            .map_err(|e| StrataError::serialization(e.to_string()))?;
+        let meta_json =
+            serde_json::to_string(&meta).map_err(|e| StrataError::serialization(e.to_string()))?;
         let user_key = keys::meta_key(graph);
         let storage_key = keys::storage_key(branch_id, &user_key);
 
@@ -123,12 +123,9 @@ impl GraphStore {
                         if let Value::String(json) = val {
                             if let Ok(data) = serde_json::from_str::<NodeData>(json) {
                                 if let Some(uri) = data.entity_ref {
-                                    if let Some(node_id) =
-                                        keys::parse_node_key(graph, &user_key)
-                                    {
+                                    if let Some(node_id) = keys::parse_node_key(graph, &user_key) {
                                         let rk = keys::ref_index_key(&uri, graph, &node_id);
-                                        ref_keys_to_delete
-                                            .push(keys::storage_key(branch_id, &rk));
+                                        ref_keys_to_delete.push(keys::storage_key(branch_id, &rk));
                                     }
                                 }
                             }
@@ -165,8 +162,8 @@ impl GraphStore {
         keys::validate_graph_name(graph)?;
         keys::validate_node_id(node_id)?;
 
-        let node_json = serde_json::to_string(&data)
-            .map_err(|e| StrataError::serialization(e.to_string()))?;
+        let node_json =
+            serde_json::to_string(&data).map_err(|e| StrataError::serialization(e.to_string()))?;
         let user_key = keys::node_key(graph, node_id);
         let storage_key = keys::storage_key(branch_id, &user_key);
 
@@ -246,12 +243,7 @@ impl GraphStore {
     }
 
     /// Remove a node and all its incident edges.
-    pub fn remove_node(
-        &self,
-        branch_id: BranchId,
-        graph: &str,
-        node_id: &str,
-    ) -> StrataResult<()> {
+    pub fn remove_node(&self, branch_id: BranchId, graph: &str, node_id: &str) -> StrataResult<()> {
         let node_user_key = keys::node_key(graph, node_id);
         let node_storage_key = keys::storage_key(branch_id, &node_user_key);
 
@@ -337,8 +329,8 @@ impl GraphStore {
         keys::validate_node_id(dst)?;
         keys::validate_edge_type(edge_type)?;
 
-        let edge_json = serde_json::to_string(&data)
-            .map_err(|e| StrataError::serialization(e.to_string()))?;
+        let edge_json =
+            serde_json::to_string(&data).map_err(|e| StrataError::serialization(e.to_string()))?;
 
         let fwd = keys::forward_edge_key(graph, src, edge_type, dst);
         let rev = keys::reverse_edge_key(graph, dst, edge_type, src);
@@ -589,7 +581,8 @@ impl GraphStore {
         let mut nodes_inserted = 0usize;
         for chunk in nodes.chunks(chunk_size) {
             // Pre-compute keys and serialized values outside the transaction
-            let mut entries: Vec<(strata_core::types::Key, String)> = Vec::with_capacity(chunk.len());
+            let mut entries: Vec<(strata_core::types::Key, String)> =
+                Vec::with_capacity(chunk.len());
             let mut ref_entries: Vec<strata_core::types::Key> = Vec::new();
 
             for (node_id, data) in chunk {
@@ -814,10 +807,7 @@ mod tests {
         .unwrap();
 
         let node = gs.get_node(branch, "ng", "n1").unwrap().unwrap();
-        assert_eq!(
-            node.properties,
-            Some(serde_json::json!({"name": "Alice"}))
-        );
+        assert_eq!(node.properties, Some(serde_json::json!({"name": "Alice"})));
     }
 
     #[test]
@@ -838,10 +828,7 @@ mod tests {
         .unwrap();
 
         let node = gs.get_node(branch, "ng", "n1").unwrap().unwrap();
-        assert_eq!(
-            node.entity_ref,
-            Some("kv://main/patient-4821".to_string())
-        );
+        assert_eq!(node.entity_ref, Some("kv://main/patient-4821".to_string()));
     }
 
     #[test]
@@ -935,14 +922,8 @@ mod tests {
         gs.remove_node(branch, "ng", "A").unwrap();
 
         // Both edges involving A should be gone
-        assert!(gs
-            .get_edge(branch, "ng", "A", "B", "E1")
-            .unwrap()
-            .is_none());
-        assert!(gs
-            .get_edge(branch, "ng", "C", "A", "E2")
-            .unwrap()
-            .is_none());
+        assert!(gs.get_edge(branch, "ng", "A", "B", "E1").unwrap().is_none());
+        assert!(gs.get_edge(branch, "ng", "C", "A", "E2").unwrap().is_none());
         // B and C still exist
         assert!(gs.get_node(branch, "ng", "B").unwrap().is_some());
         assert!(gs.get_node(branch, "ng", "C").unwrap().is_some());
@@ -1030,14 +1011,8 @@ mod tests {
         let fwd_sk = keys::storage_key(branch, &fwd);
         let rev_sk = keys::storage_key(branch, &rev);
 
-        let fwd_exists = gs
-            .db
-            .transaction(branch, |txn| txn.get(&fwd_sk))
-            .unwrap();
-        let rev_exists = gs
-            .db
-            .transaction(branch, |txn| txn.get(&rev_sk))
-            .unwrap();
+        let fwd_exists = gs.db.transaction(branch, |txn| txn.get(&fwd_sk)).unwrap();
+        let rev_exists = gs.db.transaction(branch, |txn| txn.get(&rev_sk)).unwrap();
         assert!(fwd_exists.is_some());
         assert!(rev_exists.is_some());
     }
@@ -1060,10 +1035,7 @@ mod tests {
         // Verify reverse is also gone
         let rev = keys::reverse_edge_key("eg", "B", "KNOWS", "A");
         let rev_sk = keys::storage_key(branch, &rev);
-        let rev_exists = gs
-            .db
-            .transaction(branch, |txn| txn.get(&rev_sk))
-            .unwrap();
+        let rev_exists = gs.db.transaction(branch, |txn| txn.get(&rev_sk)).unwrap();
         assert!(rev_exists.is_none());
     }
 
@@ -1213,9 +1185,7 @@ mod tests {
         )
         .unwrap();
 
-        let refs = gs
-            .nodes_for_entity(branch, "kv://main/key1")
-            .unwrap();
+        let refs = gs.nodes_for_entity(branch, "kv://main/key1").unwrap();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0], ("rg".to_string(), "n1".to_string()));
     }
@@ -1237,9 +1207,7 @@ mod tests {
         )
         .unwrap();
 
-        let refs = gs
-            .nodes_for_entity(branch, "kv://main/key1")
-            .unwrap();
+        let refs = gs.nodes_for_entity(branch, "kv://main/key1").unwrap();
         assert!(refs.is_empty());
     }
 
@@ -1296,9 +1264,7 @@ mod tests {
         .unwrap();
         gs.remove_node(branch, "rg", "n1").unwrap();
 
-        let refs = gs
-            .nodes_for_entity(branch, "kv://main/key1")
-            .unwrap();
+        let refs = gs.nodes_for_entity(branch, "kv://main/key1").unwrap();
         assert!(refs.is_empty());
     }
 
@@ -1331,14 +1297,10 @@ mod tests {
         )
         .unwrap();
 
-        let old_refs = gs
-            .nodes_for_entity(branch, "kv://main/old")
-            .unwrap();
+        let old_refs = gs.nodes_for_entity(branch, "kv://main/old").unwrap();
         assert!(old_refs.is_empty());
 
-        let new_refs = gs
-            .nodes_for_entity(branch, "kv://main/new")
-            .unwrap();
+        let new_refs = gs.nodes_for_entity(branch, "kv://main/new").unwrap();
         assert_eq!(new_refs.len(), 1);
     }
 
@@ -1370,14 +1332,26 @@ mod tests {
         .unwrap();
 
         // Verify ref index entries exist before deletion
-        assert_eq!(gs.nodes_for_entity(branch, "kv://main/key1").unwrap().len(), 1);
-        assert_eq!(gs.nodes_for_entity(branch, "kv://main/key2").unwrap().len(), 1);
+        assert_eq!(
+            gs.nodes_for_entity(branch, "kv://main/key1").unwrap().len(),
+            1
+        );
+        assert_eq!(
+            gs.nodes_for_entity(branch, "kv://main/key2").unwrap().len(),
+            1
+        );
 
         gs.delete_graph(branch, "rg").unwrap();
 
         // Ref index entries should be cleaned up
-        assert!(gs.nodes_for_entity(branch, "kv://main/key1").unwrap().is_empty());
-        assert!(gs.nodes_for_entity(branch, "kv://main/key2").unwrap().is_empty());
+        assert!(gs
+            .nodes_for_entity(branch, "kv://main/key1")
+            .unwrap()
+            .is_empty());
+        assert!(gs
+            .nodes_for_entity(branch, "kv://main/key2")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1461,7 +1435,10 @@ mod tests {
         )
         .unwrap();
 
-        let edge = gs.get_edge(branch, "eg", "A", "B", "SCORED").unwrap().unwrap();
+        let edge = gs
+            .get_edge(branch, "eg", "A", "B", "SCORED")
+            .unwrap()
+            .unwrap();
         assert_eq!(edge.weight, 0.75);
         let props = edge.properties.unwrap();
         assert_eq!(props["source"], "model");
@@ -1497,9 +1474,7 @@ mod tests {
         )
         .unwrap();
 
-        let refs = gs
-            .nodes_for_entity(branch, "kv://main/key1")
-            .unwrap();
+        let refs = gs.nodes_for_entity(branch, "kv://main/key1").unwrap();
         assert!(refs.is_empty());
     }
 
@@ -1515,9 +1490,27 @@ mod tests {
         gs.create_graph(branch, "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = vec![
-            ("A".into(), NodeData { entity_ref: None, properties: None }),
-            ("B".into(), NodeData { entity_ref: None, properties: None }),
-            ("C".into(), NodeData { entity_ref: None, properties: None }),
+            (
+                "A".into(),
+                NodeData {
+                    entity_ref: None,
+                    properties: None,
+                },
+            ),
+            (
+                "B".into(),
+                NodeData {
+                    entity_ref: None,
+                    properties: None,
+                },
+            ),
+            (
+                "C".into(),
+                NodeData {
+                    entity_ref: None,
+                    properties: None,
+                },
+            ),
         ];
         let edges: Vec<(String, String, String, EdgeData)> = vec![
             ("A".into(), "B".into(), "KNOWS".into(), EdgeData::default()),
@@ -1536,11 +1529,17 @@ mod tests {
         }
 
         // Verify forward edges
-        let edge_ab = gs.get_edge(branch, "bg", "A", "B", "KNOWS").unwrap().unwrap();
+        let edge_ab = gs
+            .get_edge(branch, "bg", "A", "B", "KNOWS")
+            .unwrap()
+            .unwrap();
         assert_eq!(edge_ab.weight, 1.0);
         assert!(edge_ab.properties.is_none());
 
-        let edge_bc = gs.get_edge(branch, "bg", "B", "C", "KNOWS").unwrap().unwrap();
+        let edge_bc = gs
+            .get_edge(branch, "bg", "B", "C", "KNOWS")
+            .unwrap()
+            .unwrap();
         assert_eq!(edge_bc.weight, 1.0);
 
         // Verify outgoing neighbors (forward keys)
@@ -1566,22 +1565,34 @@ mod tests {
         gs.create_graph(branch, "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = vec![
-            ("n1".into(), NodeData {
-                entity_ref: Some("kv://main/key1".into()),
-                properties: None,
-            }),
-            ("n2".into(), NodeData {
-                entity_ref: Some("kv://main/key2".into()),
-                properties: None,
-            }),
-            ("n3".into(), NodeData {
-                entity_ref: None,
-                properties: None,
-            }),
-            ("n4".into(), NodeData {
-                entity_ref: Some("kv://main/key1".into()),
-                properties: None,
-            }),
+            (
+                "n1".into(),
+                NodeData {
+                    entity_ref: Some("kv://main/key1".into()),
+                    properties: None,
+                },
+            ),
+            (
+                "n2".into(),
+                NodeData {
+                    entity_ref: Some("kv://main/key2".into()),
+                    properties: None,
+                },
+            ),
+            (
+                "n3".into(),
+                NodeData {
+                    entity_ref: None,
+                    properties: None,
+                },
+            ),
+            (
+                "n4".into(),
+                NodeData {
+                    entity_ref: Some("kv://main/key1".into()),
+                    properties: None,
+                },
+            ),
         ];
 
         gs.bulk_insert(branch, "bg", &nodes, &[], None).unwrap();
@@ -1610,18 +1621,22 @@ mod tests {
 
         gs.create_graph(branch, "bg", None).unwrap();
 
-        let nodes: Vec<(String, NodeData)> = vec![
-            ("n1".into(), NodeData {
+        let nodes: Vec<(String, NodeData)> = vec![(
+            "n1".into(),
+            NodeData {
                 entity_ref: Some("kv://main/p1".into()),
                 properties: Some(serde_json::json!({"name": "Alice", "age": 30})),
-            }),
-        ];
-        let edges: Vec<(String, String, String, EdgeData)> = vec![
-            ("n1".into(), "n1".into(), "SELF".into(), EdgeData {
+            },
+        )];
+        let edges: Vec<(String, String, String, EdgeData)> = vec![(
+            "n1".into(),
+            "n1".into(),
+            "SELF".into(),
+            EdgeData {
                 weight: 0.5,
                 properties: Some(serde_json::json!({"reason": "test", "score": 0.9})),
-            }),
-        ];
+            },
+        )];
 
         gs.bulk_insert(branch, "bg", &nodes, &edges, None).unwrap();
 
@@ -1633,7 +1648,10 @@ mod tests {
         assert_eq!(props["age"], 30);
 
         // Verify edge data round-trips completely
-        let edge = gs.get_edge(branch, "bg", "n1", "n1", "SELF").unwrap().unwrap();
+        let edge = gs
+            .get_edge(branch, "bg", "n1", "n1", "SELF")
+            .unwrap()
+            .unwrap();
         assert_eq!(edge.weight, 0.5);
         let eprops = edge.properties.unwrap();
         assert_eq!(eprops["reason"], "test");
@@ -1649,12 +1667,23 @@ mod tests {
         gs.create_graph(branch, "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = vec![
-            ("A".into(), NodeData { entity_ref: None, properties: None }),
-            ("B".into(), NodeData { entity_ref: None, properties: None }),
+            (
+                "A".into(),
+                NodeData {
+                    entity_ref: None,
+                    properties: None,
+                },
+            ),
+            (
+                "B".into(),
+                NodeData {
+                    entity_ref: None,
+                    properties: None,
+                },
+            ),
         ];
-        let edges: Vec<(String, String, String, EdgeData)> = vec![
-            ("A".into(), "B".into(), "E".into(), EdgeData::default()),
-        ];
+        let edges: Vec<(String, String, String, EdgeData)> =
+            vec![("A".into(), "B".into(), "E".into(), EdgeData::default())];
 
         gs.bulk_insert(branch, "bg", &nodes, &edges, None).unwrap();
 
@@ -1683,7 +1712,15 @@ mod tests {
 
         // 7 nodes, chunk_size=3 → chunks of [3, 3, 1]
         let nodes: Vec<(String, NodeData)> = (0..7)
-            .map(|i| (format!("n{}", i), NodeData { entity_ref: None, properties: None }))
+            .map(|i| {
+                (
+                    format!("n{}", i),
+                    NodeData {
+                        entity_ref: None,
+                        properties: None,
+                    },
+                )
+            })
             .collect();
 
         // 5 edges, edge_chunk_size = max(1, 3/2) = 1 → chunks of [1, 1, 1, 1, 1]
@@ -1698,7 +1735,9 @@ mod tests {
             })
             .collect();
 
-        let (ni, ei) = gs.bulk_insert(branch, "bg", &nodes, &edges, Some(3)).unwrap();
+        let (ni, ei) = gs
+            .bulk_insert(branch, "bg", &nodes, &edges, Some(3))
+            .unwrap();
         assert_eq!(ni, 7);
         assert_eq!(ei, 5);
 
@@ -1710,7 +1749,13 @@ mod tests {
         // Verify all edges (including cross-chunk-boundary edges)
         for i in 0..5 {
             let edge = gs
-                .get_edge(branch, "bg", &format!("n{}", i), &format!("n{}", i + 1), "NEXT")
+                .get_edge(
+                    branch,
+                    "bg",
+                    &format!("n{}", i),
+                    &format!("n{}", i + 1),
+                    "NEXT",
+                )
                 .unwrap();
             assert!(edge.is_some(), "edge n{} -> n{} missing", i, i + 1);
         }
@@ -1728,9 +1773,13 @@ mod tests {
 
         gs.create_graph(branch, "bg", None).unwrap();
 
-        let nodes: Vec<(String, NodeData)> = vec![
-            ("A".into(), NodeData { entity_ref: None, properties: None }),
-        ];
+        let nodes: Vec<(String, NodeData)> = vec![(
+            "A".into(),
+            NodeData {
+                entity_ref: None,
+                properties: None,
+            },
+        )];
 
         // chunk_size=0 should be clamped to 1, not panic
         let (ni, _) = gs.bulk_insert(branch, "bg", &nodes, &[], Some(0)).unwrap();
@@ -1746,15 +1795,28 @@ mod tests {
         gs.create_graph(branch, "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = vec![
-            ("A".into(), NodeData { entity_ref: None, properties: None }),
-            ("B".into(), NodeData { entity_ref: None, properties: None }),
+            (
+                "A".into(),
+                NodeData {
+                    entity_ref: None,
+                    properties: None,
+                },
+            ),
+            (
+                "B".into(),
+                NodeData {
+                    entity_ref: None,
+                    properties: None,
+                },
+            ),
         ];
-        let edges: Vec<(String, String, String, EdgeData)> = vec![
-            ("A".into(), "B".into(), "E".into(), EdgeData::default()),
-        ];
+        let edges: Vec<(String, String, String, EdgeData)> =
+            vec![("A".into(), "B".into(), "E".into(), EdgeData::default())];
 
         // chunk_size=1 → each node/edge in its own transaction
-        let (ni, ei) = gs.bulk_insert(branch, "bg", &nodes, &edges, Some(1)).unwrap();
+        let (ni, ei) = gs
+            .bulk_insert(branch, "bg", &nodes, &edges, Some(1))
+            .unwrap();
         assert_eq!(ni, 2);
         assert_eq!(ei, 1);
 
@@ -1769,9 +1831,27 @@ mod tests {
         gs.create_graph(branch, "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = vec![
-            ("good1".into(), NodeData { entity_ref: None, properties: None }),
-            ("".into(), NodeData { entity_ref: None, properties: None }), // invalid
-            ("good2".into(), NodeData { entity_ref: None, properties: None }),
+            (
+                "good1".into(),
+                NodeData {
+                    entity_ref: None,
+                    properties: None,
+                },
+            ),
+            (
+                "".into(),
+                NodeData {
+                    entity_ref: None,
+                    properties: None,
+                },
+            ), // invalid
+            (
+                "good2".into(),
+                NodeData {
+                    entity_ref: None,
+                    properties: None,
+                },
+            ),
         ];
 
         let result = gs.bulk_insert(branch, "bg", &nodes, &[], None);
@@ -1786,28 +1866,36 @@ mod tests {
         gs.create_graph(branch, "bg", None).unwrap();
 
         // Invalid src (empty)
-        let edges_bad_src: Vec<(String, String, String, EdgeData)> = vec![
-            ("".into(), "B".into(), "E".into(), EdgeData::default()),
-        ];
-        assert!(gs.bulk_insert(branch, "bg", &[], &edges_bad_src, None).is_err());
+        let edges_bad_src: Vec<(String, String, String, EdgeData)> =
+            vec![("".into(), "B".into(), "E".into(), EdgeData::default())];
+        assert!(gs
+            .bulk_insert(branch, "bg", &[], &edges_bad_src, None)
+            .is_err());
 
         // Invalid dst (empty)
-        let edges_bad_dst: Vec<(String, String, String, EdgeData)> = vec![
-            ("A".into(), "".into(), "E".into(), EdgeData::default()),
-        ];
-        assert!(gs.bulk_insert(branch, "bg", &[], &edges_bad_dst, None).is_err());
+        let edges_bad_dst: Vec<(String, String, String, EdgeData)> =
+            vec![("A".into(), "".into(), "E".into(), EdgeData::default())];
+        assert!(gs
+            .bulk_insert(branch, "bg", &[], &edges_bad_dst, None)
+            .is_err());
 
         // Invalid edge_type (empty)
-        let edges_bad_type: Vec<(String, String, String, EdgeData)> = vec![
-            ("A".into(), "B".into(), "".into(), EdgeData::default()),
-        ];
-        assert!(gs.bulk_insert(branch, "bg", &[], &edges_bad_type, None).is_err());
+        let edges_bad_type: Vec<(String, String, String, EdgeData)> =
+            vec![("A".into(), "B".into(), "".into(), EdgeData::default())];
+        assert!(gs
+            .bulk_insert(branch, "bg", &[], &edges_bad_type, None)
+            .is_err());
 
         // Invalid edge_type (contains /)
-        let edges_slash: Vec<(String, String, String, EdgeData)> = vec![
-            ("A".into(), "B".into(), "has/slash".into(), EdgeData::default()),
-        ];
-        assert!(gs.bulk_insert(branch, "bg", &[], &edges_slash, None).is_err());
+        let edges_slash: Vec<(String, String, String, EdgeData)> = vec![(
+            "A".into(),
+            "B".into(),
+            "has/slash".into(),
+            EdgeData::default(),
+        )];
+        assert!(gs
+            .bulk_insert(branch, "bg", &[], &edges_slash, None)
+            .is_err());
     }
 
     #[test]
@@ -1829,7 +1917,9 @@ mod tests {
 
         assert!(gs.bulk_insert(branch, "", &[], &[], None).is_err());
         assert!(gs.bulk_insert(branch, "has/slash", &[], &[], None).is_err());
-        assert!(gs.bulk_insert(branch, "__reserved", &[], &[], None).is_err());
+        assert!(gs
+            .bulk_insert(branch, "__reserved", &[], &[], None)
+            .is_err());
     }
 
     #[test]
@@ -1841,10 +1931,34 @@ mod tests {
 
         // Build a small graph: A -> B -> C -> D
         let nodes: Vec<(String, NodeData)> = vec![
-            ("A".into(), NodeData { entity_ref: None, properties: None }),
-            ("B".into(), NodeData { entity_ref: None, properties: None }),
-            ("C".into(), NodeData { entity_ref: None, properties: None }),
-            ("D".into(), NodeData { entity_ref: None, properties: None }),
+            (
+                "A".into(),
+                NodeData {
+                    entity_ref: None,
+                    properties: None,
+                },
+            ),
+            (
+                "B".into(),
+                NodeData {
+                    entity_ref: None,
+                    properties: None,
+                },
+            ),
+            (
+                "C".into(),
+                NodeData {
+                    entity_ref: None,
+                    properties: None,
+                },
+            ),
+            (
+                "D".into(),
+                NodeData {
+                    entity_ref: None,
+                    properties: None,
+                },
+            ),
         ];
         let edges: Vec<(String, String, String, EdgeData)> = vec![
             ("A".into(), "B".into(), "NEXT".into(), EdgeData::default()),
@@ -1900,7 +2014,15 @@ mod tests {
         gs.create_graph(branch, "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = (0..100)
-            .map(|i| (format!("v{}", i), NodeData { entity_ref: None, properties: None }))
+            .map(|i| {
+                (
+                    format!("v{}", i),
+                    NodeData {
+                        entity_ref: None,
+                        properties: None,
+                    },
+                )
+            })
             .collect();
 
         let (ni, ei) = gs.bulk_insert(branch, "bg", &nodes, &[], Some(10)).unwrap();
@@ -1919,9 +2041,8 @@ mod tests {
         gs.create_graph(branch, "bg", None).unwrap();
 
         // Edges without corresponding node entries (graph allows this)
-        let edges: Vec<(String, String, String, EdgeData)> = vec![
-            ("X".into(), "Y".into(), "E".into(), EdgeData::default()),
-        ];
+        let edges: Vec<(String, String, String, EdgeData)> =
+            vec![("X".into(), "Y".into(), "E".into(), EdgeData::default())];
 
         let (ni, ei) = gs.bulk_insert(branch, "bg", &[], &edges, None).unwrap();
         assert_eq!(ni, 0);
@@ -1938,12 +2059,30 @@ mod tests {
         gs.create_graph(branch, "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = vec![
-            ("A".into(), NodeData { entity_ref: None, properties: None }),
-            ("B".into(), NodeData { entity_ref: None, properties: None }),
+            (
+                "A".into(),
+                NodeData {
+                    entity_ref: None,
+                    properties: None,
+                },
+            ),
+            (
+                "B".into(),
+                NodeData {
+                    entity_ref: None,
+                    properties: None,
+                },
+            ),
         ];
-        let edges: Vec<(String, String, String, EdgeData)> = vec![
-            ("A".into(), "B".into(), "E1".into(), EdgeData { weight: 2.5, properties: None }),
-        ];
+        let edges: Vec<(String, String, String, EdgeData)> = vec![(
+            "A".into(),
+            "B".into(),
+            "E1".into(),
+            EdgeData {
+                weight: 2.5,
+                properties: None,
+            },
+        )];
 
         gs.bulk_insert(branch, "bg", &nodes, &edges, None).unwrap();
 

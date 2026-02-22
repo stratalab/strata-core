@@ -55,14 +55,16 @@ impl AdjacencyIndex {
 
     /// Add an edge to the index.
     pub fn add_edge(&mut self, src: &str, dst: &str, edge_type: &str, data: EdgeData) {
-        self.outgoing
-            .entry(src.to_string())
-            .or_default()
-            .push((dst.to_string(), edge_type.to_string(), data.clone()));
-        self.incoming
-            .entry(dst.to_string())
-            .or_default()
-            .push((src.to_string(), edge_type.to_string(), data));
+        self.outgoing.entry(src.to_string()).or_default().push((
+            dst.to_string(),
+            edge_type.to_string(),
+            data.clone(),
+        ));
+        self.incoming.entry(dst.to_string()).or_default().push((
+            src.to_string(),
+            edge_type.to_string(),
+            data,
+        ));
     }
 
     /// Remove an edge from the index.
@@ -86,9 +88,7 @@ impl AdjacencyIndex {
             .map(|edges| {
                 edges
                     .iter()
-                    .filter(|(_, et, _)| {
-                        edge_type_filter.map_or(true, |f| et == f)
-                    })
+                    .filter(|(_, et, _)| edge_type_filter.map_or(true, |f| et == f))
                     .map(|(dst, et, data)| Neighbor {
                         node_id: dst.clone(),
                         edge_type: et.clone(),
@@ -110,9 +110,7 @@ impl AdjacencyIndex {
             .map(|edges| {
                 edges
                     .iter()
-                    .filter(|(_, et, _)| {
-                        edge_type_filter.map_or(true, |f| et == f)
-                    })
+                    .filter(|(_, et, _)| edge_type_filter.map_or(true, |f| et == f))
                     .map(|(src, et, data)| Neighbor {
                         node_id: src.clone(),
                         edge_type: et.clone(),
@@ -205,7 +203,15 @@ mod tests {
     fn add_edge_duplicate_appends() {
         let mut idx = AdjacencyIndex::new();
         idx.add_edge("A", "B", "KNOWS", EdgeData::default());
-        idx.add_edge("A", "B", "KNOWS", EdgeData { weight: 2.0, properties: None });
+        idx.add_edge(
+            "A",
+            "B",
+            "KNOWS",
+            EdgeData {
+                weight: 2.0,
+                properties: None,
+            },
+        );
 
         // AdjacencyIndex doesn't deduplicate — caller is responsible
         let out = idx.outgoing_neighbors("A", None);
@@ -215,8 +221,24 @@ mod tests {
     #[test]
     fn mutual_edges_tracked_separately() {
         let mut idx = AdjacencyIndex::new();
-        idx.add_edge("A", "B", "TRUST", EdgeData { weight: 0.9, properties: None });
-        idx.add_edge("B", "A", "TRUST", EdgeData { weight: 0.3, properties: None });
+        idx.add_edge(
+            "A",
+            "B",
+            "TRUST",
+            EdgeData {
+                weight: 0.9,
+                properties: None,
+            },
+        );
+        idx.add_edge(
+            "B",
+            "A",
+            "TRUST",
+            EdgeData {
+                weight: 0.3,
+                properties: None,
+            },
+        );
 
         let a_out = idx.outgoing_neighbors("A", None);
         assert_eq!(a_out.len(), 1);

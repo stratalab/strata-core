@@ -73,11 +73,7 @@ pub fn graph_list(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
 }
 
 /// Handle GraphGetMeta command.
-pub fn graph_get_meta(
-    p: &Arc<Primitives>,
-    branch: BranchId,
-    graph: String,
-) -> Result<Output> {
+pub fn graph_get_meta(p: &Arc<Primitives>, branch: BranchId, graph: String) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
     let meta = convert_result(p.graph.get_graph_meta(core_branch, &graph))?;
     match meta {
@@ -149,11 +145,7 @@ pub fn graph_remove_node(
 }
 
 /// Handle GraphListNodes command.
-pub fn graph_list_nodes(
-    p: &Arc<Primitives>,
-    branch: BranchId,
-    graph: String,
-) -> Result<Output> {
+pub fn graph_list_nodes(p: &Arc<Primitives>, branch: BranchId, graph: String) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
     let nodes = convert_result(p.graph.list_nodes(core_branch, &graph))?;
     Ok(Output::Keys(nodes))
@@ -183,7 +175,10 @@ pub fn graph_add_edge(
         weight: weight.unwrap_or(1.0),
         properties: props,
     };
-    convert_result(p.graph.add_edge(core_branch, &graph, &src, &dst, &edge_type, data))?;
+    convert_result(
+        p.graph
+            .add_edge(core_branch, &graph, &src, &dst, &edge_type, data),
+    )?;
     Ok(Output::Unit)
 }
 
@@ -197,7 +192,10 @@ pub fn graph_remove_edge(
     edge_type: String,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    convert_result(p.graph.remove_edge(core_branch, &graph, &src, &dst, &edge_type))?;
+    convert_result(
+        p.graph
+            .remove_edge(core_branch, &graph, &src, &dst, &edge_type),
+    )?;
     Ok(Output::Unit)
 }
 
@@ -311,8 +309,13 @@ pub fn graph_bulk_insert(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let (ni, ei) =
-        convert_result(p.graph.bulk_insert(core_branch, &graph, &node_data, &edge_data, chunk_size))?;
+    let (ni, ei) = convert_result(p.graph.bulk_insert(
+        core_branch,
+        &graph,
+        &node_data,
+        &edge_data,
+        chunk_size,
+    ))?;
 
     Ok(Output::GraphBulkInsertResult {
         nodes_inserted: ni as u64,
