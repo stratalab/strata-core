@@ -11,20 +11,16 @@ description = "Embedding and inference infrastructure for Strata"
 
 [features]
 default = []
-embed = ["dep:ureq", "dep:tar", "dep:zstd"]
-embed-cuda = ["embed"]
-embed-metal = ["embed"]
+embed = ["dep:strata-inference"]
+embed-cuda = ["embed", "strata-inference/cuda"]
+embed-metal = ["embed", "strata-inference/metal"]
 
 [dependencies]
 strata-core = { path = "../core" }
 strata-engine = { path = "../engine" }
-serde = { workspace = true }
-serde_json = { workspace = true }
 tracing = { workspace = true }
 once_cell = { workspace = true }
-ureq = { workspace = true, optional = true }
-tar = { workspace = true, optional = true }
-zstd = { workspace = true, optional = true }
+strata-inference = { path = "../../../strata-inference", optional = true, features = ["registry"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 use strata_core::Value;
+use strata_engine::branch_ops::{BranchDiffResult, ForkInfo, MergeInfo};
+use strata_engine::{StrataConfig, WalCounters};
 
 use crate::types::*;
 
@@ -103,6 +105,21 @@ pub enum Output {
         version: u64,
     },
 
+    /// Branch fork result
+    BranchForked(ForkInfo),
+
+    /// Branch diff result
+    BranchDiff(BranchDiffResult),
+
+    /// Branch merge result
+    BranchMerged(MergeInfo),
+
+    /// Database configuration snapshot
+    Config(StrataConfig),
+
+    /// WAL durability counters
+    DurabilityCounters(WalCounters),
+
     // ==================== Transaction-specific ====================
     /// Transaction info
     TxnInfo(Option<TransactionInfo>),
@@ -157,6 +174,46 @@ pub enum Output {
 
     /// Embedding pipeline status
     EmbedStatus(EmbedStatusInfo),
+
+    /// Single embedding vector
+    Embedding(Vec<f32>),
+
+    /// Batch of embedding vectors
+    Embeddings(Vec<Vec<f32>>),
+
+    /// List of available models
+    ModelsList(Vec<ModelInfoOutput>),
+
+    /// Text generation result
+    Generated(GenerationResult),
+
+    /// Tokenization result (text → token IDs)
+    TokenIds(TokenizeResult),
+
+    /// Plain text result (detokenization)
+    Text(String),
+
+    /// Graph neighbor query results
+    GraphNeighbors(Vec<GraphNeighborHit>),
+
+    /// Graph BFS traversal results
+    GraphBfs(GraphBfsResult),
+
+    /// Graph bulk insert result
+    GraphBulkInsertResult {
+        /// Number of nodes inserted.
+        nodes_inserted: u64,
+        /// Number of edges inserted.
+        edges_inserted: u64,
+    },
+
+    /// Model successfully pulled/downloaded
+    ModelsPulled {
+        /// Name of the model that was pulled.
+        name: String,
+        /// Local file path where the model was saved.
+        path: String,
+    },
 }
 
 /// Snapshot of the embedding pipeline status.

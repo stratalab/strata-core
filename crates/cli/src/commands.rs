@@ -85,6 +85,11 @@ pub fn build_cli() -> Command {
         .subcommand(build_search())
         .subcommand(build_setup())
         .subcommand(build_configure_model())
+        .subcommand(build_embed())
+        .subcommand(build_models())
+        .subcommand(build_generate())
+        .subcommand(build_tokenize())
+        .subcommand(build_detokenize())
 }
 
 /// Build a command tree for REPL mode (no global flags).
@@ -109,6 +114,11 @@ pub fn build_repl_cmd() -> Command {
         .subcommand(build_compact())
         .subcommand(build_search())
         .subcommand(build_configure_model())
+        .subcommand(build_embed())
+        .subcommand(build_models())
+        .subcommand(build_generate())
+        .subcommand(build_tokenize())
+        .subcommand(build_detokenize())
 }
 
 // =========================================================================
@@ -764,5 +774,111 @@ fn build_configure_model() -> Command {
             Arg::new("timeout")
                 .long("timeout")
                 .help("Request timeout in milliseconds (default: 5000)"),
+        )
+}
+
+// =========================================================================
+// Embed
+// =========================================================================
+
+fn build_embed() -> Command {
+    Command::new("embed").about("Embed text into a vector").arg(
+        Arg::new("texts")
+            .required(true)
+            .num_args(1..)
+            .value_name("TEXT")
+            .help("Text(s) to embed (single text → embed, multiple → embed-batch)"),
+    )
+}
+
+// =========================================================================
+// Models
+// =========================================================================
+
+fn build_models() -> Command {
+    Command::new("models")
+        .about("Model management")
+        .subcommand_required(true)
+        .subcommand(Command::new("list").about("List all available models"))
+        .subcommand(Command::new("local").about("List locally downloaded models"))
+        .subcommand(
+            Command::new("pull").about("Download a model").arg(
+                Arg::new("name")
+                    .required(true)
+                    .help("Model name (e.g. miniLM, nomic-embed)"),
+            ),
+        )
+}
+
+// =========================================================================
+// Generate
+// =========================================================================
+
+fn build_generate() -> Command {
+    Command::new("generate")
+        .about("Generate text from a prompt using a local model")
+        .arg(
+            Arg::new("model")
+                .required(true)
+                .help("Model name (e.g. qwen3:8b)"),
+        )
+        .arg(Arg::new("prompt").required(true).help("Input prompt text"))
+        .arg(
+            Arg::new("max-tokens")
+                .long("max-tokens")
+                .help("Maximum tokens to generate (default: 256)"),
+        )
+        .arg(
+            Arg::new("temperature")
+                .long("temperature")
+                .help("Sampling temperature (0.0 = greedy)"),
+        )
+        .arg(
+            Arg::new("top-k")
+                .long("top-k")
+                .help("Top-K sampling (0 = disabled)"),
+        )
+        .arg(
+            Arg::new("top-p")
+                .long("top-p")
+                .help("Top-P nucleus sampling (1.0 = disabled)"),
+        )
+        .arg(
+            Arg::new("seed")
+                .long("seed")
+                .help("Random seed for reproducibility"),
+        )
+}
+
+// =========================================================================
+// Tokenize
+// =========================================================================
+
+fn build_tokenize() -> Command {
+    Command::new("tokenize")
+        .about("Tokenize text into token IDs")
+        .arg(Arg::new("model").required(true).help("Model name"))
+        .arg(Arg::new("text").required(true).help("Text to tokenize"))
+        .arg(
+            Arg::new("no-special")
+                .long("no-special")
+                .action(clap::ArgAction::SetTrue)
+                .help("Do not add special tokens (BOS/EOS)"),
+        )
+}
+
+// =========================================================================
+// Detokenize
+// =========================================================================
+
+fn build_detokenize() -> Command {
+    Command::new("detokenize")
+        .about("Decode token IDs back to text")
+        .arg(Arg::new("model").required(true).help("Model name"))
+        .arg(
+            Arg::new("ids")
+                .required(true)
+                .num_args(1..)
+                .help("Token IDs to decode"),
         )
 }

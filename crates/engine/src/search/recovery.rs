@@ -130,10 +130,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                 None => continue,
             };
 
-            let entity_ref = crate::search::EntityRef::State {
-                branch_id,
-                name,
-            };
+            let entity_ref = crate::search::EntityRef::State { branch_id, name };
             index.index_document(&entity_ref, &text, None);
             docs_indexed += 1;
         }

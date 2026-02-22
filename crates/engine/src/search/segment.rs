@@ -151,10 +151,7 @@ impl SealedSegment {
             ));
         }
         if &bytes[0..4] != SIDX_MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "bad SIDX magic",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad SIDX magic"));
         }
         let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
         if version != SIDX_VERSION {
@@ -365,14 +362,11 @@ impl SealedSegment {
 
             match entry_term.cmp(term) {
                 std::cmp::Ordering::Equal => {
-                    let df =
-                        u32::from_le_bytes(bytes[term_end..term_end + 4].try_into().unwrap());
-                    let p_offset = u32::from_le_bytes(
-                        bytes[term_end + 4..term_end + 8].try_into().unwrap(),
-                    );
-                    let p_len = u32::from_le_bytes(
-                        bytes[term_end + 8..term_end + 12].try_into().unwrap(),
-                    );
+                    let df = u32::from_le_bytes(bytes[term_end..term_end + 4].try_into().unwrap());
+                    let p_offset =
+                        u32::from_le_bytes(bytes[term_end + 4..term_end + 8].try_into().unwrap());
+                    let p_len =
+                        u32::from_le_bytes(bytes[term_end + 8..term_end + 12].try_into().unwrap());
                     return Some((dict_offset as u32, df, p_offset, p_len));
                 }
                 std::cmp::Ordering::Less => lo = mid + 1,
@@ -721,10 +715,7 @@ mod tests {
     fn test_many_terms_binary_search() {
         let mut terms = BTreeMap::new();
         for i in 0..100 {
-            terms.insert(
-                format!("term_{:04}", i),
-                vec![PostingEntry::new(i, 1, 10)],
-            );
+            terms.insert(format!("term_{:04}", i), vec![PostingEntry::new(i, 1, 10)]);
         }
         let seg = build_sealed_segment(1, terms, 100, 1000);
 
@@ -759,10 +750,7 @@ mod tests {
             "hello".to_string(),
             vec![PostingEntry::new(0, 2, 5), PostingEntry::new(3, 1, 3)],
         );
-        terms.insert(
-            "world".to_string(),
-            vec![PostingEntry::new(1, 4, 7)],
-        );
+        terms.insert("world".to_string(), vec![PostingEntry::new(1, 4, 7)]);
 
         let seg = build_sealed_segment(1, terms, 3, 15);
 
@@ -819,7 +807,11 @@ mod tests {
         let mut terms = BTreeMap::new();
         terms.insert(
             "word".to_string(),
-            vec![PostingEntry::new(0, 1, 5), PostingEntry::new(1, 1, 5), PostingEntry::new(2, 1, 5)],
+            vec![
+                PostingEntry::new(0, 1, 5),
+                PostingEntry::new(1, 1, 5),
+                PostingEntry::new(2, 1, 5),
+            ],
         );
         let seg = build_sealed_segment(1, terms, 3, 15);
 
@@ -899,10 +891,7 @@ mod tests {
             "hello".to_string(),
             vec![PostingEntry::new(0, 2, 5), PostingEntry::new(3, 1, 3)],
         );
-        terms.insert(
-            "world".to_string(),
-            vec![PostingEntry::new(1, 4, 7)],
-        );
+        terms.insert("world".to_string(), vec![PostingEntry::new(1, 4, 7)]);
         let seg = build_sealed_segment(1, terms, 3, 15);
 
         for term in &["hello", "world"] {

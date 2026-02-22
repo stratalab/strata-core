@@ -14,7 +14,7 @@ use strata_core::limits::Limits;
 use strata_core::primitives::json::{JsonPath, JsonValue};
 use strata_core::{StrataError, StrataResult, Value};
 use strata_engine::{
-    BranchIndex as PrimitiveBranchIndex, Database, EventLog as PrimitiveEventLog,
+    BranchIndex as PrimitiveBranchIndex, Database, EventLog as PrimitiveEventLog, GraphStore,
     JsonStore as PrimitiveJsonStore, KVStore as PrimitiveKVStore,
     SpaceIndex as PrimitiveSpaceIndex, StateCell as PrimitiveStateCell,
     VectorStore as PrimitiveVectorStore,
@@ -48,6 +48,8 @@ pub struct Primitives {
     pub vector: PrimitiveVectorStore,
     /// Space primitive
     pub space: PrimitiveSpaceIndex,
+    /// Graph primitive
+    pub graph: GraphStore,
     /// Size limits for keys, values, and vectors
     pub limits: Limits,
 }
@@ -63,6 +65,7 @@ impl Primitives {
             branch: PrimitiveBranchIndex::new(db.clone()),
             vector: PrimitiveVectorStore::new(db.clone()),
             space: PrimitiveSpaceIndex::new(db.clone()),
+            graph: GraphStore::new(db.clone()),
             db,
             limits: Limits::default(),
         }

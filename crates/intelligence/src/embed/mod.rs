@@ -1,72 +1,70 @@
-//! Auto-embedding module: MiniLM-L6-v2 text embeddings.
+//! Auto-embedding module: text embeddings via strata-inference GGUF engine.
 //!
 //! Provides a lazy-loading model lifecycle via [`EmbedModelState`] and
 //! text extraction from Strata [`Value`] types.
 
 pub mod download;
 pub mod extract;
-pub mod model;
-pub mod tokenizer;
 
-use std::path::Path;
 use std::sync::Arc;
 
-use model::EmbedModel;
+use strata_inference::EmbeddingEngine;
+
+/// Default model name used for embedding (resolved by strata-inference registry).
+pub const DEFAULT_MODEL: &str = "miniLM";
 
 /// Lazy-loading model state stored as a Database extension.
 ///
-/// On first use, loads the MiniLM-L6-v2 model from the model directory.
-/// If model files are missing, stores the error and never retries.
+/// On first use, loads the embedding model from the strata-inference registry.
+/// If model loading fails, stores the error and never retries.
 pub struct EmbedModelState {
-    model: once_cell::sync::OnceCell<Result<Arc<EmbedModel>, String>>,
+    engine: once_cell::sync::OnceCell<Result<Arc<EmbeddingEngine>, String>>,
 }
 
 impl Default for EmbedModelState {
     fn default() -> Self {
         Self {
-            model: once_cell::sync::OnceCell::new(),
+            engine: once_cell::sync::OnceCell::new(),
         }
     }
 }
 
 impl EmbedModelState {
-    /// Get or load the embedding model.
+    /// Get or load the embedding engine.
     ///
-    /// Loads from `model_dir/model.safetensors` and `model_dir/vocab.txt`.
-    /// Caches the result (success or failure) so filesystem is probed at most once.
-    pub fn get_or_load(&self, model_dir: &Path) -> Result<Arc<EmbedModel>, String> {
-        self.model
+    /// Loads the model via `EmbeddingEngine::from_registry(DEFAULT_MODEL)`.
+    /// The `_model_dir` parameter is accepted for backwards compatibility but
+    /// ignored — the registry manages model storage in `~/.strata/models/`.
+    /// Caches the result (success or failure) so loading is attempted at most once.
+    pub fn get_or_load(
+        &self,
+        _model_dir: &std::path::Path,
+    ) -> Result<Arc<EmbeddingEngine>, String> {
+        self.engine
             .get_or_init(|| {
-                let safetensors_path = model_dir.join("model.safetensors");
-                let vocab_path = model_dir.join("vocab.txt");
-
-                let safetensors_bytes = std::fs::read(&safetensors_path).map_err(|e| {
-                    format!(
-                        "Failed to read model file '{}': {}",
-                        safetensors_path.display(),
-                        e
-                    )
+                let engine = EmbeddingEngine::from_registry(DEFAULT_MODEL).map_err(|e| {
+                    format!("Failed to load embedding model '{}': {}", DEFAULT_MODEL, e)
                 })?;
-
-                let vocab_text = std::fs::read_to_string(&vocab_path).map_err(|e| {
-                    format!(
-                        "Failed to read vocab file '{}': {}",
-                        vocab_path.display(),
-                        e
-                    )
-                })?;
-
-                let model = EmbedModel::load(&safetensors_bytes, &vocab_text)?;
-                Ok(Arc::new(model))
+                Ok(Arc::new(engine))
             })
             .clone()
     }
+
+    /// The dimensionality of output embedding vectors.
+    ///
+    /// Returns `None` if the engine hasn't been loaded yet or failed to load.
+    pub fn embedding_dim(&self) -> Option<usize> {
+        self.engine
+            .get()
+            .and_then(|r| r.as_ref().ok())
+            .map(|e| e.embedding_dim())
+    }
 }
 
-/// Embed a query string using the cached MiniLM model from the database.
+/// Embed a query string using the cached embedding engine from the database.
 ///
-/// Loads or retrieves the cached model via [`EmbedModelState`], then embeds the
-/// given text. Returns `None` (with a warning log) if the model cannot be loaded
+/// Loads or retrieves the cached engine via [`EmbedModelState`], then embeds the
+/// given text. Returns `None` (with a warning log) if the engine cannot be loaded
 /// or embedding fails. This is a best-effort helper for hybrid search.
 pub fn embed_query(db: &strata_engine::Database, text: &str) -> Option<Vec<f32>> {
     let model_dir = db.model_dir();
@@ -77,14 +75,20 @@ pub fn embed_query(db: &strata_engine::Database, text: &str) -> Option<Vec<f32>>
             return None;
         }
     };
-    let model = match state.get_or_load(&model_dir) {
-        Ok(m) => m,
+    let engine = match state.get_or_load(&model_dir) {
+        Ok(e) => e,
         Err(e) => {
             tracing::warn!(target: "strata::hybrid", error = %e, "Failed to load embed model for hybrid search");
             return None;
         }
     };
-    Some(model.embed(text))
+    match engine.embed(text) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!(target: "strata::hybrid", error = %e, "Embedding failed");
+            None
+        }
+    }
 }
 
 /// Batch-embed multiple query strings using the cached MiniLM model.
@@ -117,56 +121,73 @@ pub fn embed_batch_queries(db: &strata_engine::Database, texts: &[&str]) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
-    fn test_default_state_is_empty() {
+    fn test_embedding_dim_none_before_load() {
+        let state = EmbedModelState::default();
+        assert!(
+            state.embedding_dim().is_none(),
+            "dim should be None before any load attempt"
+        );
+    }
+
+    #[test]
+    fn test_get_or_load_returns_deterministic_result() {
         let state = EmbedModelState::default();
         let result = state.get_or_load(Path::new("/nonexistent/path"));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_missing_model_file_error_message() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = EmbedModelState::default();
-        let result = state.get_or_load(dir.path());
-        assert!(result.is_err());
-        let err = result.err().unwrap();
-        assert!(
-            err.contains(dir.path().to_str().unwrap()),
-            "error should contain the path: {}",
-            err
+        // On CI without model files this will be Err; locally with model it may be Ok.
+        // Either way, calling it again must return the exact same outcome.
+        let result2 = state.get_or_load(Path::new("/different/path"));
+        assert_eq!(
+            result.is_ok(),
+            result2.is_ok(),
+            "OnceCell should return the same result regardless of path arg"
         );
     }
 
     #[test]
-    fn test_error_is_cached() {
-        let dir = tempfile::tempdir().unwrap();
+    fn test_error_is_cached_with_identical_message() {
         let state = EmbedModelState::default();
-        let err1 = state.get_or_load(dir.path()).err().unwrap();
-        let err2 = state.get_or_load(dir.path()).err().unwrap();
-        assert_eq!(err1, err2, "error should be cached and identical");
+        let r1 = state.get_or_load(Path::new("/nonexistent"));
+        let r2 = state.get_or_load(Path::new("/nonexistent"));
+        assert_eq!(r1.is_ok(), r2.is_ok());
+        if let (Err(e1), Err(e2)) = (&r1, &r2) {
+            assert_eq!(e1, e2, "cached error message must be identical");
+            assert!(
+                e1.contains(DEFAULT_MODEL),
+                "error should mention model name '{}', got: {}",
+                DEFAULT_MODEL,
+                e1
+            );
+        }
     }
 
     #[test]
-    fn test_missing_vocab_file() {
-        let dir = tempfile::tempdir().unwrap();
-        // Create a model.safetensors file (minimal valid safetensors)
-        let header = b"{}";
-        let header_len = header.len() as u64;
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&header_len.to_le_bytes());
-        buf.extend_from_slice(header);
-        std::fs::write(dir.path().join("model.safetensors"), &buf).unwrap();
-
+    fn test_embedding_dim_none_after_failed_load() {
         let state = EmbedModelState::default();
-        let result = state.get_or_load(dir.path());
-        assert!(result.is_err());
-        let err = result.err().unwrap();
-        assert!(
-            err.contains("vocab"),
-            "error should mention 'vocab': {}",
-            err
-        );
+        // Trigger a load attempt (may fail if model not installed).
+        let _ = state.get_or_load(Path::new("/nonexistent"));
+        // If load failed, dim should still be None.
+        if state.get_or_load(Path::new("/unused")).is_err() {
+            assert!(
+                state.embedding_dim().is_none(),
+                "dim should be None after a failed load"
+            );
+        }
+    }
+
+    #[test]
+    fn test_model_dir_param_is_ignored() {
+        // Two calls with different paths must return the same result,
+        // proving the path argument is truly ignored.
+        let state = EmbedModelState::default();
+        let r1 = state.get_or_load(Path::new("/path/a"));
+        let r2 = state.get_or_load(Path::new("/path/b"));
+        match (&r1, &r2) {
+            (Ok(a), Ok(b)) => assert!(Arc::ptr_eq(a, b), "same Arc regardless of path"),
+            (Err(a), Err(b)) => assert_eq!(a, b, "same error regardless of path"),
+            _ => panic!("r1 and r2 should have same Ok/Err variant"),
+        }
     }
 }

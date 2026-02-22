@@ -71,7 +71,7 @@ Check database connectivity.
 
 **Returns:**
 ```json
-{"pong": true, "version": "0.5.1"}
+{"pong": true, "version": "0.6.0"}
 ```
 
 #### strata_db_info
@@ -83,7 +83,7 @@ Get database information.
 **Returns:**
 ```json
 {
-  "version": "0.5.1",
+  "version": "0.6.0",
   "uptime_secs": 3600,
   "branch_count": 3,
   "total_keys": 1500

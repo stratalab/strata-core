@@ -200,6 +200,16 @@ impl Executor {
                 let info = crate::handlers::embed_hook::embed_status(&self.primitives);
                 Ok(Output::EmbedStatus(info))
             }
+            Command::ConfigGet => crate::handlers::config::config_get(&self.primitives),
+            Command::ConfigSetAutoEmbed { enabled } => {
+                crate::handlers::config::config_set_auto_embed(&self.primitives, enabled)
+            }
+            Command::AutoEmbedStatus => {
+                crate::handlers::config::auto_embed_status(&self.primitives)
+            }
+            Command::DurabilityCounters => {
+                crate::handlers::config::durability_counters(&self.primitives)
+            }
             Command::TimeRange { branch } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
@@ -831,6 +841,18 @@ impl Executor {
             Command::BranchDelete { branch } => {
                 crate::handlers::branch::branch_delete(&self.primitives, branch)
             }
+            Command::BranchFork {
+                source,
+                destination,
+            } => crate::handlers::branch::branch_fork(&self.primitives, source, destination),
+            Command::BranchDiff { branch_a, branch_b } => {
+                crate::handlers::branch::branch_diff(&self.primitives, branch_a, branch_b)
+            }
+            Command::BranchMerge {
+                source,
+                target,
+                strategy,
+            } => crate::handlers::branch::branch_merge(&self.primitives, source, target, strategy),
 
             // Transaction commands - handled by Session, not Executor
             Command::TxnBegin { .. }
@@ -869,6 +891,57 @@ impl Executor {
             }
             Command::BranchBundleValidate { path } => {
                 crate::handlers::branch::branch_bundle_validate(path)
+            }
+
+            // Embedding commands
+            Command::Embed { text } => crate::handlers::embed::embed(&self.primitives, text),
+            Command::EmbedBatch { texts } => {
+                crate::handlers::embed::embed_batch(&self.primitives, texts)
+            }
+
+            // Model management commands
+            Command::ModelsList => crate::handlers::models::models_list(&self.primitives),
+            Command::ModelsPull { name } => {
+                crate::handlers::models::models_pull(&self.primitives, name)
+            }
+            Command::ModelsLocal => crate::handlers::models::models_local(&self.primitives),
+
+            // Generation commands
+            Command::Generate {
+                model,
+                prompt,
+                max_tokens,
+                temperature,
+                top_k,
+                top_p,
+                seed,
+                stop_tokens,
+            } => crate::handlers::generate::generate(
+                &self.primitives,
+                model,
+                prompt,
+                max_tokens,
+                temperature,
+                top_k,
+                top_p,
+                seed,
+                stop_tokens,
+            ),
+            Command::Tokenize {
+                model,
+                text,
+                add_special_tokens,
+            } => crate::handlers::generate::tokenize(
+                &self.primitives,
+                model,
+                text,
+                add_special_tokens,
+            ),
+            Command::Detokenize { model, ids } => {
+                crate::handlers::generate::detokenize(&self.primitives, model, ids)
+            }
+            Command::GenerateUnload { model } => {
+                crate::handlers::generate::generate_unload(&self.primitives, model)
             }
 
             // Intelligence commands
@@ -925,6 +998,189 @@ impl Executor {
                 })?;
                 crate::handlers::space::space_exists(&self.primitives, branch, space)
             }
+
+            // Graph commands
+            Command::GraphCreate {
+                branch,
+                graph,
+                cascade_policy,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_create(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    cascade_policy,
+                )
+            }
+            Command::GraphDelete { branch, graph } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_delete(&self.primitives, branch, graph)
+            }
+            Command::GraphList { branch } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_list(&self.primitives, branch)
+            }
+            Command::GraphGetMeta { branch, graph } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_get_meta(&self.primitives, branch, graph)
+            }
+            Command::GraphAddNode {
+                branch,
+                graph,
+                node_id,
+                entity_ref,
+                properties,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_add_node(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    node_id,
+                    entity_ref,
+                    properties,
+                )
+            }
+            Command::GraphGetNode {
+                branch,
+                graph,
+                node_id,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_get_node(&self.primitives, branch, graph, node_id)
+            }
+            Command::GraphRemoveNode {
+                branch,
+                graph,
+                node_id,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_remove_node(&self.primitives, branch, graph, node_id)
+            }
+            Command::GraphListNodes { branch, graph } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_list_nodes(&self.primitives, branch, graph)
+            }
+            Command::GraphAddEdge {
+                branch,
+                graph,
+                src,
+                dst,
+                edge_type,
+                weight,
+                properties,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_add_edge(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    src,
+                    dst,
+                    edge_type,
+                    weight,
+                    properties,
+                )
+            }
+            Command::GraphRemoveEdge {
+                branch,
+                graph,
+                src,
+                dst,
+                edge_type,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_remove_edge(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    src,
+                    dst,
+                    edge_type,
+                )
+            }
+            Command::GraphNeighbors {
+                branch,
+                graph,
+                node_id,
+                direction,
+                edge_type,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_neighbors(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    node_id,
+                    direction,
+                    edge_type,
+                )
+            }
+            Command::GraphBulkInsert {
+                branch,
+                graph,
+                nodes,
+                edges,
+                chunk_size,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_bulk_insert(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    nodes,
+                    edges,
+                    chunk_size,
+                )
+            }
+            Command::GraphBfs {
+                branch,
+                graph,
+                start,
+                max_depth,
+                max_nodes,
+                edge_types,
+                direction,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_bfs(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    start,
+                    max_depth,
+                    max_nodes,
+                    edge_types,
+                    direction,
+                )
+            }
         };
 
         match &result {
@@ -948,7 +1204,7 @@ impl Executor {
     }
 
     /// Get a reference to the underlying primitives.
-    pub fn primitives(&self) -> &Arc<Primitives> {
+    pub(crate) fn primitives(&self) -> &Arc<Primitives> {
         &self.primitives
     }
 }

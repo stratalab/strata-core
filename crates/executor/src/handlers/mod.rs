@@ -15,11 +15,16 @@
 //! | `database` | 4 | Database-level |
 
 pub mod branch;
+pub mod config;
 pub mod configure_model;
+pub mod embed;
 pub mod embed_hook;
 pub mod event;
+pub mod generate;
+pub mod graph;
 pub mod json;
 pub mod kv;
+pub mod models;
 pub mod search;
 pub mod space;
 pub mod state;

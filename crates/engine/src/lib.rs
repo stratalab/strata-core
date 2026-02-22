@@ -48,6 +48,7 @@ pub use transaction_ops::TransactionOps;
 
 pub mod branch_ops;
 pub mod bundle;
+pub mod graph;
 pub mod primitives;
 pub mod search;
 
@@ -134,6 +135,14 @@ pub use primitives::{
     VectorStore,
     VectorStoreExt,
 };
+
+// Re-export graph types at crate root
+pub use graph::boost::{apply_boost, compute_proximity_map, GraphBoost};
+pub use graph::types::{
+    BfsOptions, BfsResult, CascadePolicy, Direction, Edge, EdgeData, GraphAlgorithm, GraphMeta,
+    GraphSnapshot, Neighbor, NodeData,
+};
+pub use graph::GraphStore;
 
 // Re-export bundle types at crate root
 pub use bundle::{BundleInfo, ExportInfo, ImportInfo};

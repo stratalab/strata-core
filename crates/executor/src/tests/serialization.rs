@@ -6,6 +6,7 @@
 use crate::types::*;
 use crate::Value;
 use crate::{Command, Output};
+use strata_engine::MergeStrategy;
 
 /// Helper to test round-trip serialization of a Command.
 fn test_command_round_trip(cmd: Command) {
@@ -579,4 +580,143 @@ fn test_command_json_explicit_branch_deserializes() {
         }
         _ => panic!("Wrong command variant"),
     }
+}
+
+// =============================================================================
+// New Command Variant Round-Trip Tests
+// =============================================================================
+
+#[test]
+fn test_command_branch_fork() {
+    test_command_round_trip(Command::BranchFork {
+        source: "main".to_string(),
+        destination: "experiment".to_string(),
+    });
+}
+
+#[test]
+fn test_command_branch_diff() {
+    test_command_round_trip(Command::BranchDiff {
+        branch_a: "main".to_string(),
+        branch_b: "experiment".to_string(),
+    });
+}
+
+#[test]
+fn test_command_branch_merge_lww() {
+    test_command_round_trip(Command::BranchMerge {
+        source: "experiment".to_string(),
+        target: "main".to_string(),
+        strategy: MergeStrategy::LastWriterWins,
+    });
+}
+
+#[test]
+fn test_command_branch_merge_strict() {
+    test_command_round_trip(Command::BranchMerge {
+        source: "experiment".to_string(),
+        target: "main".to_string(),
+        strategy: MergeStrategy::Strict,
+    });
+}
+
+#[test]
+fn test_command_config_get() {
+    test_command_round_trip(Command::ConfigGet);
+}
+
+#[test]
+fn test_command_config_set_auto_embed() {
+    test_command_round_trip(Command::ConfigSetAutoEmbed { enabled: true });
+    test_command_round_trip(Command::ConfigSetAutoEmbed { enabled: false });
+}
+
+#[test]
+fn test_command_auto_embed_status() {
+    test_command_round_trip(Command::AutoEmbedStatus);
+}
+
+#[test]
+fn test_command_durability_counters() {
+    test_command_round_trip(Command::DurabilityCounters);
+}
+
+// =============================================================================
+// New Output Variant Serialization Tests (#1200 + #1205)
+// =============================================================================
+
+#[test]
+fn test_output_branch_forked() {
+    test_output_round_trip(Output::BranchForked(strata_engine::branch_ops::ForkInfo {
+        source: "main".to_string(),
+        destination: "experiment".to_string(),
+        keys_copied: 42,
+        spaces_copied: 2,
+    }));
+}
+
+#[test]
+fn test_output_branch_diff() {
+    use strata_engine::branch_ops::*;
+    test_output_round_trip(Output::BranchDiff(BranchDiffResult {
+        branch_a: "main".to_string(),
+        branch_b: "experiment".to_string(),
+        spaces: vec![SpaceDiff {
+            space: "default".to_string(),
+            added: vec![BranchDiffEntry {
+                key: "new-key".to_string(),
+                raw_key: b"new-key".to_vec(),
+                primitive: strata_core::PrimitiveType::Kv,
+                space: "default".to_string(),
+                value_a: None,
+                value_b: Some("hello".to_string()),
+            }],
+            removed: vec![],
+            modified: vec![],
+        }],
+        summary: DiffSummary {
+            total_added: 1,
+            total_removed: 0,
+            total_modified: 0,
+            spaces_only_in_a: vec![],
+            spaces_only_in_b: vec![],
+        },
+    }));
+}
+
+#[test]
+fn test_output_branch_merged() {
+    test_output_round_trip(Output::BranchMerged(strata_engine::branch_ops::MergeInfo {
+        source: "experiment".to_string(),
+        target: "main".to_string(),
+        keys_applied: 5,
+        conflicts: vec![],
+        spaces_merged: 1,
+    }));
+}
+
+#[test]
+fn test_output_config() {
+    test_output_round_trip(Output::Config(strata_engine::StrataConfig {
+        durability: "standard".to_string(),
+        auto_embed: false,
+        model: None,
+        embed_batch_size: None,
+        bm25_k1: None,
+        bm25_b: None,
+    }));
+}
+
+#[test]
+fn test_output_durability_counters() {
+    test_output_round_trip(Output::DurabilityCounters(strata_engine::WalCounters {
+        wal_appends: 100,
+        sync_calls: 10,
+        bytes_written: 4096,
+        sync_nanos: 500_000,
+    }));
+    // Also test default (cache databases)
+    test_output_round_trip(Output::DurabilityCounters(
+        strata_engine::WalCounters::default(),
+    ));
 }

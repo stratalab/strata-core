@@ -3,6 +3,8 @@
 //! The writer handles appending WAL records to segments with proper
 //! durability guarantees based on the configured mode.
 
+use serde::{Deserialize, Serialize};
+
 use super::DurabilityMode;
 use crate::codec::StorageCodec;
 use crate::format::segment_meta::SegmentMeta;
@@ -18,7 +20,7 @@ use tracing::{debug, info, warn};
 /// These counters accumulate over the lifetime of the WalWriter
 /// and are never reset. Use them to observe how many WAL operations
 /// a workload triggers.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WalCounters {
     /// Total WAL record appends (calls to append() that did work)
     pub wal_appends: u64,

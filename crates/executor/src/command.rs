@@ -11,6 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 use strata_core::Value;
+use strata_engine::MergeStrategy;
 
 use crate::types::*;
 
@@ -652,6 +653,35 @@ pub enum Command {
         branch: BranchId,
     },
 
+    /// Fork a branch, creating a complete copy of all its data.
+    /// Returns: `Output::BranchForked`
+    BranchFork {
+        /// Source branch name.
+        source: String,
+        /// Destination branch name.
+        destination: String,
+    },
+
+    /// Compare two branches and return structured differences.
+    /// Returns: `Output::BranchDiff`
+    BranchDiff {
+        /// First branch to compare.
+        branch_a: String,
+        /// Second branch to compare.
+        branch_b: String,
+    },
+
+    /// Merge data from source branch into target branch.
+    /// Returns: `Output::BranchMerged`
+    BranchMerge {
+        /// Source branch name.
+        source: String,
+        /// Target branch name.
+        target: String,
+        /// Conflict resolution strategy.
+        strategy: MergeStrategy,
+    },
+
     // ==================== Transaction (5) ====================
     /// Begin a new transaction.
     /// Returns: `Output::TxnBegun`
@@ -780,6 +810,93 @@ pub enum Command {
         search: SearchQuery,
     },
 
+    // ==================== Embedding (2) ====================
+    /// Embed a single text string.
+    /// Returns: `Output::Embedding`
+    Embed {
+        /// Text to embed.
+        text: String,
+    },
+
+    /// Embed a batch of text strings.
+    /// Returns: `Output::Embeddings`
+    EmbedBatch {
+        /// Texts to embed.
+        texts: Vec<String>,
+    },
+
+    // ==================== Model Management (2) ====================
+    /// List all available models in the registry.
+    /// Returns: `Output::ModelsList`
+    ModelsList,
+
+    /// Download a model by name.
+    /// Returns: `Output::ModelsPulled`
+    ModelsPull {
+        /// Model name to download (e.g., "miniLM", "nomic-embed").
+        name: String,
+    },
+
+    // ==================== Generation (3) ====================
+    /// Generate text from a prompt using a local model.
+    /// Returns: `Output::Generated`
+    Generate {
+        /// Model name (e.g. "qwen3:8b").
+        model: String,
+        /// Input prompt text.
+        prompt: String,
+        /// Maximum tokens to generate.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_tokens: Option<usize>,
+        /// Sampling temperature (0.0 = greedy).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        temperature: Option<f32>,
+        /// Top-K sampling (0 = disabled).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top_k: Option<usize>,
+        /// Top-P (nucleus) sampling (1.0 = disabled).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top_p: Option<f32>,
+        /// Random seed for reproducibility.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seed: Option<u64>,
+        /// Stop generation when any of these token IDs are produced.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_tokens: Option<Vec<u32>>,
+    },
+
+    /// Tokenize text into token IDs using a model's tokenizer.
+    /// Returns: `Output::TokenIds`
+    Tokenize {
+        /// Model name.
+        model: String,
+        /// Text to tokenize.
+        text: String,
+        /// Whether to add special tokens (default: true).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        add_special_tokens: Option<bool>,
+    },
+
+    /// Detokenize token IDs back to text.
+    /// Returns: `Output::Text`
+    Detokenize {
+        /// Model name.
+        model: String,
+        /// Token IDs to decode.
+        ids: Vec<u32>,
+    },
+
+    /// Unload a generation model from memory.
+    /// Returns: `Output::Bool` (true if model was loaded)
+    GenerateUnload {
+        /// Model name to unload.
+        model: String,
+    },
+
+    /// List locally downloaded models.
+    /// Returns: `Output::ModelsList`
+    ModelsLocal,
+
     // ==================== Space (4) ====================
     /// List spaces in a branch.
     /// Returns: `Output::SpaceList`
@@ -803,6 +920,25 @@ pub enum Command {
     /// Returns: `Output::EmbedStatus`
     EmbedStatus,
 
+    /// Get the current database configuration.
+    /// Returns: `Output::Config`
+    ConfigGet,
+
+    /// Enable or disable auto-embedding.
+    /// Returns: `Output::Unit`
+    ConfigSetAutoEmbed {
+        /// Whether to enable auto-embedding.
+        enabled: bool,
+    },
+
+    /// Check whether auto-embedding is enabled.
+    /// Returns: `Output::Bool`
+    AutoEmbedStatus,
+
+    /// Get WAL durability counters.
+    /// Returns: `Output::DurabilityCounters`
+    DurabilityCounters,
+
     /// Delete a space (must be empty unless force=true).
     /// Returns: `Output::Unit`
     SpaceDelete {
@@ -824,6 +960,196 @@ pub enum Command {
         branch: Option<BranchId>,
         /// Space name.
         space: String,
+    },
+
+    // ==================== Graph ====================
+    /// Create a new graph.
+    /// Returns: `Output::Unit`
+    GraphCreate {
+        /// Target branch (resolved from context if absent).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Optional cascade policy: `"cascade"`, `"detach"`, or `"ignore"`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cascade_policy: Option<String>,
+    },
+
+    /// Delete a graph and all its data.
+    /// Returns: `Output::Unit`
+    GraphDelete {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+    },
+
+    /// List all graphs.
+    /// Returns: `Output::Keys`
+    GraphList {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+    },
+
+    /// Get graph metadata.
+    /// Returns: `Output::Maybe`
+    GraphGetMeta {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+    },
+
+    /// Add or update a node.
+    /// Returns: `Output::Unit`
+    GraphAddNode {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Node identifier.
+        node_id: String,
+        /// Optional entity reference URI (e.g. `"kv://main/key"`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entity_ref: Option<String>,
+        /// Optional properties to attach to the node.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        properties: Option<Value>,
+    },
+
+    /// Get a node.
+    /// Returns: `Output::Maybe`
+    GraphGetNode {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Node identifier.
+        node_id: String,
+    },
+
+    /// Remove a node and its incident edges.
+    /// Returns: `Output::Unit`
+    GraphRemoveNode {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Node identifier.
+        node_id: String,
+    },
+
+    /// List all node IDs in a graph.
+    /// Returns: `Output::Keys`
+    GraphListNodes {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+    },
+
+    /// Add or update an edge.
+    /// Returns: `Output::Unit`
+    GraphAddEdge {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Source node ID.
+        src: String,
+        /// Destination node ID.
+        dst: String,
+        /// Edge type label.
+        edge_type: String,
+        /// Optional edge weight (default 1.0).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        weight: Option<f64>,
+        /// Optional properties to attach to the edge.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        properties: Option<Value>,
+    },
+
+    /// Remove an edge.
+    /// Returns: `Output::Unit`
+    GraphRemoveEdge {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Source node ID.
+        src: String,
+        /// Destination node ID.
+        dst: String,
+        /// Edge type label.
+        edge_type: String,
+    },
+
+    /// Get neighbors of a node.
+    /// Returns: `Output::GraphNeighbors`
+    GraphNeighbors {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Node identifier.
+        node_id: String,
+        /// Direction: `"outgoing"`, `"incoming"`, or `"both"`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        direction: Option<String>,
+        /// Optional edge type filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edge_type: Option<String>,
+    },
+
+    /// Bulk insert nodes and edges into a graph.
+    /// Returns: `Output::GraphBulkInsertResult`
+    GraphBulkInsert {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Nodes to insert.
+        nodes: Vec<BulkGraphNode>,
+        /// Edges to insert.
+        edges: Vec<BulkGraphEdge>,
+        /// Optional chunk size for batching (default 10,000).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chunk_size: Option<usize>,
+    },
+
+    /// BFS traversal.
+    /// Returns: `Output::GraphBfs`
+    GraphBfs {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Start node ID.
+        start: String,
+        /// Maximum traversal depth.
+        max_depth: usize,
+        /// Maximum number of nodes to visit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_nodes: Option<usize>,
+        /// Only traverse edges of these types.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edge_types: Option<Vec<String>>,
+        /// Traversal direction.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        direction: Option<String>,
     },
 }
 
@@ -855,6 +1181,9 @@ impl Command {
                 | Command::VectorBatchUpsert { .. }
                 | Command::BranchCreate { .. }
                 | Command::BranchDelete { .. }
+                | Command::BranchFork { .. }
+                | Command::BranchMerge { .. }
+                | Command::ConfigSetAutoEmbed { .. }
                 | Command::SpaceCreate { .. }
                 | Command::SpaceDelete { .. }
                 | Command::TxnBegin { .. }
@@ -866,6 +1195,14 @@ impl Command {
                 | Command::BranchExport { .. }
                 | Command::BranchImport { .. }
                 | Command::ConfigureModel { .. }
+                | Command::ModelsPull { .. }
+                | Command::GraphCreate { .. }
+                | Command::GraphDelete { .. }
+                | Command::GraphAddNode { .. }
+                | Command::GraphRemoveNode { .. }
+                | Command::GraphAddEdge { .. }
+                | Command::GraphRemoveEdge { .. }
+                | Command::GraphBulkInsert { .. }
         )
     }
 
@@ -914,6 +1251,9 @@ impl Command {
             Command::BranchList { .. } => "BranchList",
             Command::BranchExists { .. } => "BranchExists",
             Command::BranchDelete { .. } => "BranchDelete",
+            Command::BranchFork { .. } => "BranchFork",
+            Command::BranchDiff { .. } => "BranchDiff",
+            Command::BranchMerge { .. } => "BranchMerge",
             Command::TxnBegin { .. } => "TxnBegin",
             Command::TxnCommit => "TxnCommit",
             Command::TxnRollback => "TxnRollback",
@@ -933,10 +1273,36 @@ impl Command {
             Command::ConfigureModel { .. } => "ConfigureModel",
             Command::Search { .. } => "Search",
             Command::EmbedStatus => "EmbedStatus",
+            Command::ConfigGet => "ConfigGet",
+            Command::ConfigSetAutoEmbed { .. } => "ConfigSetAutoEmbed",
+            Command::AutoEmbedStatus => "AutoEmbedStatus",
+            Command::DurabilityCounters => "DurabilityCounters",
+            Command::Embed { .. } => "Embed",
+            Command::EmbedBatch { .. } => "EmbedBatch",
+            Command::ModelsList => "ModelsList",
+            Command::ModelsPull { .. } => "ModelsPull",
+            Command::Generate { .. } => "Generate",
+            Command::Tokenize { .. } => "Tokenize",
+            Command::Detokenize { .. } => "Detokenize",
+            Command::GenerateUnload { .. } => "GenerateUnload",
+            Command::ModelsLocal => "ModelsLocal",
             Command::SpaceList { .. } => "SpaceList",
             Command::SpaceCreate { .. } => "SpaceCreate",
             Command::SpaceDelete { .. } => "SpaceDelete",
             Command::SpaceExists { .. } => "SpaceExists",
+            Command::GraphCreate { .. } => "GraphCreate",
+            Command::GraphDelete { .. } => "GraphDelete",
+            Command::GraphList { .. } => "GraphList",
+            Command::GraphGetMeta { .. } => "GraphGetMeta",
+            Command::GraphAddNode { .. } => "GraphAddNode",
+            Command::GraphGetNode { .. } => "GraphGetNode",
+            Command::GraphRemoveNode { .. } => "GraphRemoveNode",
+            Command::GraphListNodes { .. } => "GraphListNodes",
+            Command::GraphAddEdge { .. } => "GraphAddEdge",
+            Command::GraphRemoveEdge { .. } => "GraphRemoveEdge",
+            Command::GraphNeighbors { .. } => "GraphNeighbors",
+            Command::GraphBulkInsert { .. } => "GraphBulkInsert",
+            Command::GraphBfs { .. } => "GraphBfs",
         }
     }
 
@@ -1023,6 +1389,23 @@ impl Command {
                 resolve_branch!(branch);
             }
 
+            // Graph commands — only have branch
+            Command::GraphCreate { branch, .. }
+            | Command::GraphDelete { branch, .. }
+            | Command::GraphList { branch, .. }
+            | Command::GraphGetMeta { branch, .. }
+            | Command::GraphAddNode { branch, .. }
+            | Command::GraphGetNode { branch, .. }
+            | Command::GraphRemoveNode { branch, .. }
+            | Command::GraphListNodes { branch, .. }
+            | Command::GraphAddEdge { branch, .. }
+            | Command::GraphRemoveEdge { branch, .. }
+            | Command::GraphNeighbors { branch, .. }
+            | Command::GraphBulkInsert { branch, .. }
+            | Command::GraphBfs { branch, .. } => {
+                resolve_branch!(branch);
+            }
+
             // Branch lifecycle, Transaction, and Database commands have no
             // optional branch to resolve.
             Command::BranchCreate { .. }
@@ -1030,6 +1413,9 @@ impl Command {
             | Command::BranchList { .. }
             | Command::BranchExists { .. }
             | Command::BranchDelete { .. }
+            | Command::BranchFork { .. }
+            | Command::BranchDiff { .. }
+            | Command::BranchMerge { .. }
             | Command::TxnCommit
             | Command::TxnRollback
             | Command::TxnInfo
@@ -1039,6 +1425,19 @@ impl Command {
             | Command::Flush
             | Command::Compact
             | Command::EmbedStatus
+            | Command::ConfigGet
+            | Command::ConfigSetAutoEmbed { .. }
+            | Command::AutoEmbedStatus
+            | Command::DurabilityCounters
+            | Command::Embed { .. }
+            | Command::EmbedBatch { .. }
+            | Command::ModelsList
+            | Command::ModelsPull { .. }
+            | Command::Generate { .. }
+            | Command::Tokenize { .. }
+            | Command::Detokenize { .. }
+            | Command::GenerateUnload { .. }
+            | Command::ModelsLocal
             | Command::BranchExport { .. }
             | Command::BranchImport { .. }
             | Command::BranchBundleValidate { .. }

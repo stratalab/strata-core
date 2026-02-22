@@ -483,6 +483,7 @@ impl InvertedIndex {
         // [Opt 2] Combined IDF + posting location caching.
         // One find_term per (segment, term) — result cached for posting iteration.
         // Each entry: (term_str, idf, Vec<Option<(posting_offset, posting_byte_len)>>)
+        #[allow(clippy::type_complexity)]
         let term_data: Vec<(&str, f32, Vec<Option<(u32, u32)>>)> = query_terms
             .iter()
             .map(|t| {
@@ -619,12 +620,11 @@ impl InvertedIndex {
             })
             .collect();
 
-        let cmp =
-            |a: &ScoredDocId, b: &ScoredDocId| -> std::cmp::Ordering {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            };
+        let cmp = |a: &ScoredDocId, b: &ScoredDocId| -> std::cmp::Ordering {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        };
 
         if result.len() > k {
             // O(n) partition: puts top-k elements in [0..k] (unordered)
@@ -1490,7 +1490,11 @@ mod tests {
         // The "rare" term score for doc0 should be higher than "common" term
         // score for doc0, because rare terms have higher IDF
         let doc0_id = index.doc_id_map.get(&kv_ref(branch_id, "doc0")).unwrap();
-        let rare_score = rare_result.iter().find(|r| r.doc_id == doc0_id).unwrap().score;
+        let rare_score = rare_result
+            .iter()
+            .find(|r| r.doc_id == doc0_id)
+            .unwrap()
+            .score;
         let common_score = common_result
             .iter()
             .find(|r| r.doc_id == doc0_id)
@@ -1611,7 +1615,10 @@ mod tests {
 
         let terms = vec!["hello".to_string()];
         let result = index.score_top_k(&terms, &branch_nonexistent, 10, 0.9, 0.4);
-        assert!(result.is_empty(), "No docs should match a non-existent branch");
+        assert!(
+            result.is_empty(),
+            "No docs should match a non-existent branch"
+        );
     }
 
     #[test]
@@ -2214,8 +2221,14 @@ mod tests {
         // Before any removals: both segments have no tombstones
         {
             let sealed = index.sealed.read().unwrap();
-            assert!(!sealed[0].has_tombstones(), "Segment 0 should have no tombstones before removal");
-            assert!(!sealed[1].has_tombstones(), "Segment 1 should have no tombstones before removal");
+            assert!(
+                !sealed[0].has_tombstones(),
+                "Segment 0 should have no tombstones before removal"
+            );
+            assert!(
+                !sealed[1].has_tombstones(),
+                "Segment 1 should have no tombstones before removal"
+            );
         }
 
         // All 4 docs found
@@ -2241,7 +2254,10 @@ mod tests {
             .iter()
             .map(|r| index.resolve_doc_id(r.doc_id).unwrap())
             .collect();
-        assert!(!resolved.contains(&doc2), "Tombstoned doc2 should not appear");
+        assert!(
+            !resolved.contains(&doc2),
+            "Tombstoned doc2 should not appear"
+        );
         assert!(resolved.contains(&doc1));
         assert!(resolved.contains(&doc3));
         assert!(resolved.contains(&doc4));
@@ -2417,7 +2433,17 @@ mod tests {
         let doc3_score = result.iter().find(|r| r.doc_id == doc3_id).unwrap().score;
 
         // Both-term docs should score higher than single-term doc
-        assert!(doc1_score > doc2_score, "doc1 ({}) > doc2 ({})", doc1_score, doc2_score);
-        assert!(doc3_score > doc2_score, "doc3 ({}) > doc2 ({})", doc3_score, doc2_score);
+        assert!(
+            doc1_score > doc2_score,
+            "doc1 ({}) > doc2 ({})",
+            doc1_score,
+            doc2_score
+        );
+        assert!(
+            doc3_score > doc2_score,
+            "doc3 ({}) > doc2 ({})",
+            doc3_score,
+            doc2_score
+        );
     }
 }

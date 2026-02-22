@@ -352,7 +352,7 @@ fn run_shell_mode(matches: &clap::ArgMatches, state: &mut SessionState, mode: Ou
 fn run_setup() {
     #[cfg(feature = "embed")]
     {
-        eprintln!("Downloading MiniLM-L6-v2 model files...");
+        eprintln!("Downloading MiniLM-L6-v2 embedding model...");
         match strata_intelligence::embed::download::ensure_model() {
             Ok(path) => {
                 eprintln!("Model files ready at {}", path.display());

@@ -426,6 +426,55 @@ pub struct SearchQuery {
     pub precomputed_embedding: Option<Vec<f32>>,
 }
 
+/// Information about a model in the registry (serializable output type).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelInfoOutput {
+    /// Model name (e.g., "miniLM", "qwen3:8b").
+    pub name: String,
+    /// Model task ("embed" or "generate").
+    pub task: String,
+    /// Architecture (e.g., "bert", "llama").
+    pub architecture: String,
+    /// Default quantization variant.
+    pub default_quant: String,
+    /// Embedding dimension (0 for generation models).
+    pub embedding_dim: usize,
+    /// Whether the model has been downloaded locally.
+    pub is_local: bool,
+    /// Approximate model size in bytes.
+    pub size_bytes: u64,
+}
+
+// =============================================================================
+// Generation Types
+// =============================================================================
+
+/// Result of text generation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GenerationResult {
+    /// Generated text.
+    pub text: String,
+    /// Why generation stopped ("eos", "max_tokens", "context_length", "cancelled").
+    pub stop_reason: String,
+    /// Number of tokens in the prompt.
+    pub prompt_tokens: usize,
+    /// Number of tokens generated.
+    pub completion_tokens: usize,
+    /// Model name used for generation.
+    pub model: String,
+}
+
+/// Result of tokenization (text → token IDs).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TokenizeResult {
+    /// Token IDs.
+    pub ids: Vec<u32>,
+    /// Number of tokens.
+    pub count: usize,
+    /// Model name used for tokenization.
+    pub model: String,
+}
+
 /// A single hit from a cross-primitive search
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchResultHit {
@@ -439,4 +488,60 @@ pub struct SearchResultHit {
     pub rank: u32,
     /// Optional text snippet
     pub snippet: Option<String>,
+}
+
+// =============================================================================
+// Graph Types
+// =============================================================================
+
+/// A neighbor entry returned by graph neighbor queries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GraphNeighborHit {
+    /// The neighbor node ID.
+    pub node_id: String,
+    /// The edge type connecting to this neighbor.
+    pub edge_type: String,
+    /// Edge weight.
+    pub weight: f64,
+}
+
+/// BFS traversal result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GraphBfsResult {
+    /// Visited node IDs in BFS order.
+    pub visited: Vec<String>,
+    /// Depth at which each node was first discovered.
+    pub depths: std::collections::HashMap<String, usize>,
+    /// Edges traversed: (src, dst, edge_type).
+    pub edges: Vec<(String, String, String)>,
+}
+
+/// A node entry for bulk graph insertion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BulkGraphNode {
+    /// Node identifier.
+    pub node_id: String,
+    /// Optional entity reference URI (e.g. `"kv://main/key"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_ref: Option<String>,
+    /// Optional properties to attach to the node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<Value>,
+}
+
+/// An edge entry for bulk graph insertion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BulkGraphEdge {
+    /// Source node ID.
+    pub src: String,
+    /// Destination node ID.
+    pub dst: String,
+    /// Edge type label.
+    pub edge_type: String,
+    /// Optional edge weight (default 1.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f64>,
+    /// Optional properties to attach to the edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<Value>,
 }

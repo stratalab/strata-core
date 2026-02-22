@@ -16,6 +16,7 @@ use crate::SpaceIndex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 use strata_core::value::Value;
 use strata_core::PrimitiveType;
@@ -41,7 +42,7 @@ const DATA_TYPE_TAGS: [TypeTag; 6] = [
 // =============================================================================
 
 /// Information returned after forking a branch.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ForkInfo {
     /// Source branch name
     pub source: String,
@@ -57,7 +58,7 @@ pub struct ForkInfo {
 ///
 /// Named `BranchDiffEntry` to distinguish from [`crate::recovery::replay::DiffEntry`]
 /// which is used for recovery replay diffs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BranchDiffEntry {
     /// User key (UTF-8 or hex-encoded for binary keys)
     pub key: String,
@@ -74,7 +75,7 @@ pub struct BranchDiffEntry {
 }
 
 /// Per-space diff between two branches.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpaceDiff {
     /// Space name
     pub space: String,
@@ -87,7 +88,7 @@ pub struct SpaceDiff {
 }
 
 /// Summary statistics for a branch diff.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DiffSummary {
     /// Total entries added (in B but not A)
     pub total_added: usize,
@@ -102,7 +103,7 @@ pub struct DiffSummary {
 }
 
 /// Complete result of comparing two branches.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BranchDiffResult {
     /// Name of branch A
     pub branch_a: String,
@@ -115,7 +116,7 @@ pub struct BranchDiffResult {
 }
 
 /// Strategy for resolving conflicts during merge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MergeStrategy {
     /// Source values overwrite target values on conflict
     LastWriterWins,
@@ -124,7 +125,7 @@ pub enum MergeStrategy {
 }
 
 /// A conflict detected during merge.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConflictEntry {
     /// User key
     pub key: String,
@@ -139,7 +140,7 @@ pub struct ConflictEntry {
 }
 
 /// Information returned after merging branches.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MergeInfo {
     /// Source branch name
     pub source: String,

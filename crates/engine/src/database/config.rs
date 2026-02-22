@@ -62,7 +62,7 @@ fn default_timeout_ms() -> u64 {
 /// # endpoint = "http://localhost:11434/v1"
 /// # model = "qwen3:1.7b"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StrataConfig {
     /// Durability mode: `"standard"` or `"always"`.
     #[serde(default = "default_durability_str")]

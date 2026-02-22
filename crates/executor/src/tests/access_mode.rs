@@ -17,7 +17,7 @@ use crate::{Command, Error, Executor, Session, Strata, Value};
 /// tests can build read-only executors/sessions on top of it.
 fn setup_rw_db() -> Arc<Database> {
     let strata = Strata::cache().unwrap();
-    strata.executor().primitives().db.clone()
+    strata.database()
 }
 
 // =============================================================================
@@ -154,6 +154,16 @@ fn test_read_only_blocks_all_writes() {
         Command::BranchDelete {
             branch: crate::types::BranchId::from("x"),
         },
+        Command::BranchFork {
+            source: "default".into(),
+            destination: "fork".into(),
+        },
+        Command::BranchMerge {
+            source: "a".into(),
+            target: "b".into(),
+            strategy: strata_engine::MergeStrategy::LastWriterWins,
+        },
+        Command::ConfigSetAutoEmbed { enabled: true },
         Command::TxnBegin {
             branch: None,
             options: None,
@@ -291,6 +301,13 @@ fn test_read_only_allows_all_reads() {
                 precomputed_embedding: None,
             },
         },
+        Command::BranchDiff {
+            branch_a: "default".into(),
+            branch_b: "default".into(),
+        },
+        Command::ConfigGet,
+        Command::AutoEmbedStatus,
+        Command::DurabilityCounters,
     ];
 
     for cmd in read_commands {
@@ -470,6 +487,16 @@ fn test_is_write_classification() {
             path: "".into(),
         },
         Command::BranchImport { path: "".into() },
+        Command::BranchFork {
+            source: "".into(),
+            destination: "".into(),
+        },
+        Command::BranchMerge {
+            source: "".into(),
+            target: "".into(),
+            strategy: strata_engine::MergeStrategy::LastWriterWins,
+        },
+        Command::ConfigSetAutoEmbed { enabled: false },
     ];
 
     for cmd in &writes {
@@ -612,6 +639,13 @@ fn test_is_write_classification() {
                 precomputed_embedding: None,
             },
         },
+        Command::BranchDiff {
+            branch_a: "".into(),
+            branch_b: "".into(),
+        },
+        Command::ConfigGet,
+        Command::AutoEmbedStatus,
+        Command::DurabilityCounters,
     ];
 
     for cmd in &reads {

@@ -40,6 +40,7 @@ mod branch;
 mod branches;
 mod db;
 mod event;
+mod graph;
 mod json;
 mod kv;
 mod state;
@@ -245,7 +246,7 @@ impl Strata {
     /// });
     /// ```
     pub fn new_handle(&self) -> Result<Self> {
-        let db = self.executor.primitives().db.clone();
+        let db = self.database();
         Self::from_database_with_mode(db, self.access_mode)
     }
 
@@ -317,9 +318,14 @@ impl Strata {
         }
     }
 
-    /// Get the underlying executor.
+    /// Get the underlying executor for direct command execution.
     pub fn executor(&self) -> &Executor {
         &self.executor
+    }
+
+    /// Get a clone of the underlying database handle.
+    pub fn database(&self) -> Arc<Database> {
+        self.executor.primitives().db.clone()
     }
 
     /// Returns the access mode of this database handle.
@@ -329,9 +335,14 @@ impl Strata {
 
     /// Get WAL durability counters for diagnostics.
     ///
-    /// Returns `None` for cache (in-memory) databases.
-    pub fn durability_counters(&self) -> Option<strata_engine::WalCounters> {
-        self.executor.primitives().db.durability_counters()
+    /// Returns the current WAL counters (default zeroes for cache databases).
+    pub fn durability_counters(&self) -> Result<strata_engine::WalCounters> {
+        match self.executor.execute(Command::DurabilityCounters)? {
+            Output::DurabilityCounters(c) => Ok(c),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for DurabilityCounters".into(),
+            }),
+        }
     }
 
     /// Get a handle for branch management operations.
@@ -364,7 +375,7 @@ impl Strata {
     /// optional open transaction across multiple `execute()` calls.
     /// The session inherits the access mode of this handle.
     pub fn session(&self) -> Session {
-        Session::new_with_mode(self.executor.primitives().db.clone(), self.access_mode)
+        Session::new_with_mode(self.database(), self.access_mode)
     }
 
     // =========================================================================
@@ -1000,7 +1011,7 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let db = create_strata();
-        let cfg = db.config();
+        let cfg = db.config().unwrap();
         assert_eq!(cfg.durability, "standard");
         assert!(!cfg.auto_embed);
         assert!(cfg.model.is_none());
@@ -1012,7 +1023,7 @@ mod tests {
         db.configure_model("http://localhost:11434/v1", "qwen3:1.7b", None, None)
             .unwrap();
 
-        let cfg = db.config();
+        let cfg = db.config().unwrap();
         let model = cfg.model.unwrap();
         assert_eq!(model.endpoint, "http://localhost:11434/v1");
         assert_eq!(model.model, "qwen3:1.7b");
@@ -1031,7 +1042,7 @@ mod tests {
         )
         .unwrap();
 
-        let cfg = db.config();
+        let cfg = db.config().unwrap();
         let model = cfg.model.unwrap();
         assert_eq!(model.api_key.as_deref(), Some("sk-test-key"));
         assert_eq!(model.timeout_ms, 10000);
@@ -1040,13 +1051,13 @@ mod tests {
     #[test]
     fn test_auto_embed_toggle() {
         let db = create_strata();
-        assert!(!db.auto_embed_enabled());
+        assert!(!db.auto_embed_enabled().unwrap());
 
         db.set_auto_embed(true).unwrap();
-        assert!(db.auto_embed_enabled());
+        assert!(db.auto_embed_enabled().unwrap());
 
         db.set_auto_embed(false).unwrap();
-        assert!(!db.auto_embed_enabled());
+        assert!(!db.auto_embed_enabled().unwrap());
     }
 
     #[test]
@@ -1063,13 +1074,419 @@ mod tests {
         // Reopen — model config should survive via strata.toml
         {
             let db = Strata::open(dir.path()).unwrap();
-            let cfg = db.config();
+            let cfg = db.config().unwrap();
             let model = cfg
                 .model
                 .expect("model config should persist across reopen");
             assert_eq!(model.endpoint, "http://localhost:11434/v1");
             assert_eq!(model.model, "qwen3:1.7b");
             assert_eq!(model.timeout_ms, 5000);
+        }
+    }
+
+    // =========================================================================
+    // Graph API Tests
+    // =========================================================================
+
+    #[test]
+    fn test_graph_create_list_delete() {
+        let db = create_strata();
+
+        db.graph_create("my_graph").unwrap();
+
+        let graphs = db.graph_list().unwrap();
+        assert!(graphs.contains(&"my_graph".to_string()));
+
+        let meta = db.graph_get_meta("my_graph").unwrap();
+        assert!(meta.is_some());
+
+        db.graph_delete("my_graph").unwrap();
+        let graphs = db.graph_list().unwrap();
+        assert!(!graphs.contains(&"my_graph".to_string()));
+    }
+
+    #[test]
+    fn test_graph_node_crud() {
+        let db = create_strata();
+        db.graph_create("ng").unwrap();
+
+        db.graph_add_node(
+            "ng",
+            "n1",
+            None,
+            Some(Value::Object(
+                [("name".to_string(), Value::String("Alice".into()))]
+                    .into_iter()
+                    .collect(),
+            )),
+        )
+        .unwrap();
+
+        let node = db.graph_get_node("ng", "n1").unwrap();
+        assert!(node.is_some());
+
+        let nodes = db.graph_list_nodes("ng").unwrap();
+        assert_eq!(nodes, vec!["n1"]);
+
+        db.graph_remove_node("ng", "n1").unwrap();
+        assert!(db.graph_get_node("ng", "n1").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_graph_edge_crud() {
+        let db = create_strata();
+        db.graph_create("eg").unwrap();
+
+        db.graph_add_edge("eg", "A", "B", "KNOWS", None, None)
+            .unwrap();
+
+        let neighbors = db.graph_neighbors("eg", "A", "outgoing", None).unwrap();
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors[0].node_id, "B");
+        assert_eq!(neighbors[0].edge_type, "KNOWS");
+        assert_eq!(neighbors[0].weight, 1.0);
+
+        db.graph_remove_edge("eg", "A", "B", "KNOWS").unwrap();
+        let neighbors = db.graph_neighbors("eg", "A", "outgoing", None).unwrap();
+        assert!(neighbors.is_empty());
+    }
+
+    #[test]
+    fn test_graph_bfs() {
+        let db = create_strata();
+        db.graph_create("bg").unwrap();
+
+        db.graph_add_edge("bg", "A", "B", "E", None, None).unwrap();
+        db.graph_add_edge("bg", "B", "C", "E", None, None).unwrap();
+        db.graph_add_edge("bg", "C", "D", "E", None, None).unwrap();
+
+        let result = db.graph_bfs("bg", "A", 10, None, None, None).unwrap();
+        assert_eq!(result.visited.len(), 4);
+        assert_eq!(result.visited[0], "A");
+    }
+
+    #[test]
+    fn test_graph_branch_isolation() {
+        let mut db = create_strata();
+
+        // Create graph on default branch
+        db.graph_create("isolated").unwrap();
+        db.graph_add_node("isolated", "n1", None, None).unwrap();
+
+        // Create and switch to new branch
+        db.create_branch("graph-branch").unwrap();
+        db.set_branch("graph-branch").unwrap();
+
+        // Graph should not exist on the new branch
+        let graphs = db.graph_list().unwrap();
+        assert!(!graphs.contains(&"isolated".to_string()));
+
+        // Switch back — graph should still be there
+        db.set_branch("default").unwrap();
+        let graphs = db.graph_list().unwrap();
+        assert!(graphs.contains(&"isolated".to_string()));
+        assert!(db.graph_get_node("isolated", "n1").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_patient_care_graph_end_to_end() {
+        let db = create_strata();
+
+        // Create graph
+        db.graph_create("patient_care").unwrap();
+
+        // Add nodes
+        db.graph_add_node(
+            "patient_care",
+            "patient-4821",
+            Some("json://main/patient-4821"),
+            Some(Value::Object(
+                [(
+                    "department".to_string(),
+                    Value::String("endocrinology".into()),
+                )]
+                .into_iter()
+                .collect(),
+            )),
+        )
+        .unwrap();
+        db.graph_add_node(
+            "patient_care",
+            "ICD:E11.9",
+            None,
+            Some(Value::Object(
+                [(
+                    "description".to_string(),
+                    Value::String("Type 2 Diabetes".into()),
+                )]
+                .into_iter()
+                .collect(),
+            )),
+        )
+        .unwrap();
+        db.graph_add_node(
+            "patient_care",
+            "lab:HbA1c",
+            Some("kv://main/lab:4821:HbA1c:2026-01"),
+            None,
+        )
+        .unwrap();
+        db.graph_add_node("patient_care", "med:metformin", None, None)
+            .unwrap();
+        db.graph_add_node(
+            "patient_care",
+            "ICD:N18.3",
+            None,
+            Some(Value::Object(
+                [(
+                    "description".to_string(),
+                    Value::String("CKD Stage 3".into()),
+                )]
+                .into_iter()
+                .collect(),
+            )),
+        )
+        .unwrap();
+
+        // Add edges
+        db.graph_add_edge(
+            "patient_care",
+            "patient-4821",
+            "ICD:E11.9",
+            "DIAGNOSED_WITH",
+            None,
+            None,
+        )
+        .unwrap();
+        db.graph_add_edge(
+            "patient_care",
+            "patient-4821",
+            "lab:HbA1c",
+            "HAS_LAB_RESULT",
+            None,
+            None,
+        )
+        .unwrap();
+        db.graph_add_edge(
+            "patient_care",
+            "lab:HbA1c",
+            "ICD:E11.9",
+            "SUPPORTS",
+            Some(0.95),
+            None,
+        )
+        .unwrap();
+        db.graph_add_edge(
+            "patient_care",
+            "ICD:E11.9",
+            "med:metformin",
+            "TREATED_BY",
+            None,
+            None,
+        )
+        .unwrap();
+        db.graph_add_edge(
+            "patient_care",
+            "med:metformin",
+            "ICD:N18.3",
+            "CONTRAINDICATES",
+            Some(0.8),
+            None,
+        )
+        .unwrap();
+
+        // Query: what supports the diabetes diagnosis?
+        let supporters = db
+            .graph_neighbors("patient_care", "ICD:E11.9", "incoming", Some("SUPPORTS"))
+            .unwrap();
+        assert_eq!(supporters.len(), 1);
+        assert_eq!(supporters[0].node_id, "lab:HbA1c");
+
+        // Contraindication check via BFS
+        let risks = db
+            .graph_bfs(
+                "patient_care",
+                "med:metformin",
+                2,
+                None,
+                Some(vec!["CONTRAINDICATES".into()]),
+                Some("outgoing"),
+            )
+            .unwrap();
+        assert!(risks.visited.contains(&"ICD:N18.3".to_string()));
+
+        // Verify node count
+        let mut nodes = db.graph_list_nodes("patient_care").unwrap();
+        nodes.sort();
+        assert_eq!(nodes.len(), 5);
+
+        // Verify all 5 edges exist
+        let all_neighbors = db
+            .graph_neighbors("patient_care", "patient-4821", "outgoing", None)
+            .unwrap();
+        assert_eq!(all_neighbors.len(), 2); // DIAGNOSED_WITH + HAS_LAB_RESULT
+    }
+
+    #[test]
+    fn test_graph_node_data_roundtrip() {
+        let db = create_strata();
+        db.graph_create("ng").unwrap();
+
+        // Add node with entity_ref and properties
+        db.graph_add_node(
+            "ng",
+            "patient-1",
+            Some("kv://main/p1"),
+            Some(Value::Object(
+                [
+                    ("department".to_string(), Value::String("cardiology".into())),
+                    ("age".to_string(), Value::Int(45)),
+                ]
+                .into_iter()
+                .collect(),
+            )),
+        )
+        .unwrap();
+
+        // Read back and verify the data round-trips
+        let node = db.graph_get_node("ng", "patient-1").unwrap();
+        assert!(node.is_some());
+        let node_val = node.unwrap();
+        // Node data is returned as a Value::Object with entity_ref and properties
+        match node_val {
+            Value::Object(map) => {
+                assert_eq!(
+                    map.get("entity_ref"),
+                    Some(&Value::String("kv://main/p1".into()))
+                );
+                // Properties should be present
+                assert!(map.contains_key("properties"));
+            }
+            _ => panic!("Expected Value::Object for node data, got {:?}", node_val),
+        }
+    }
+
+    #[test]
+    fn test_graph_create_with_cascade_policy() {
+        let db = create_strata();
+        db.graph_create_with_policy("cascade_g", Some("cascade"))
+            .unwrap();
+
+        let meta = db.graph_get_meta("cascade_g").unwrap();
+        assert!(meta.is_some());
+        let meta_val = meta.unwrap();
+        match meta_val {
+            Value::Object(map) => {
+                assert_eq!(
+                    map.get("cascade_policy"),
+                    Some(&Value::String("cascade".into()))
+                );
+            }
+            _ => panic!("Expected Value::Object for meta"),
+        }
+    }
+
+    #[test]
+    fn test_graph_invalid_name_errors() {
+        let db = create_strata();
+        assert!(db.graph_create("").is_err());
+        assert!(db.graph_create("has/slash").is_err());
+        assert!(db.graph_create("__reserved").is_err());
+    }
+
+    #[test]
+    fn test_graph_invalid_direction_errors() {
+        let db = create_strata();
+        db.graph_create("dg").unwrap();
+        db.graph_add_node("dg", "A", None, None).unwrap();
+
+        // Invalid direction string should error
+        let result = db.graph_neighbors("dg", "A", "invalid_dir", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_graph_edge_with_weight_and_properties() {
+        let db = create_strata();
+        db.graph_create("wg").unwrap();
+
+        db.graph_add_edge(
+            "wg",
+            "A",
+            "B",
+            "SCORED",
+            Some(0.95),
+            Some(Value::Object(
+                [("confidence".to_string(), Value::String("high".into()))]
+                    .into_iter()
+                    .collect(),
+            )),
+        )
+        .unwrap();
+
+        // Verify weight comes back through neighbors API
+        let neighbors = db.graph_neighbors("wg", "A", "outgoing", None).unwrap();
+        assert_eq!(neighbors.len(), 1);
+        assert!((neighbors[0].weight - 0.95).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_graph_bfs_with_max_depth() {
+        let db = create_strata();
+        db.graph_create("bg").unwrap();
+
+        // A → B → C → D
+        db.graph_add_edge("bg", "A", "B", "E", None, None).unwrap();
+        db.graph_add_edge("bg", "B", "C", "E", None, None).unwrap();
+        db.graph_add_edge("bg", "C", "D", "E", None, None).unwrap();
+
+        // Depth 1 should only reach A and B
+        let result = db.graph_bfs("bg", "A", 1, None, None, None).unwrap();
+        assert_eq!(result.visited.len(), 2);
+        assert!(result.visited.contains(&"A".to_string()));
+        assert!(result.visited.contains(&"B".to_string()));
+    }
+
+    #[test]
+    fn test_graph_bfs_depths_correct() {
+        let db = create_strata();
+        db.graph_create("dg").unwrap();
+
+        db.graph_add_edge("dg", "A", "B", "E", None, None).unwrap();
+        db.graph_add_edge("dg", "B", "C", "E", None, None).unwrap();
+
+        let result = db.graph_bfs("dg", "A", 10, None, None, None).unwrap();
+        assert_eq!(result.depths.get("A"), Some(&0));
+        assert_eq!(result.depths.get("B"), Some(&1));
+        assert_eq!(result.depths.get("C"), Some(&2));
+    }
+
+    #[test]
+    fn test_graph_read_only_rejects_writes() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create a database with a graph
+        {
+            let db = Strata::open(dir.path()).unwrap();
+            db.graph_create("rg").unwrap();
+        }
+
+        // Reopen in read-only mode
+        {
+            let db = Strata::open_with(
+                dir.path(),
+                OpenOptions::new().access_mode(AccessMode::ReadOnly),
+            )
+            .unwrap();
+
+            // Reads should work
+            let graphs = db.graph_list().unwrap();
+            assert!(graphs.contains(&"rg".to_string()));
+
+            // Writes should fail
+            assert!(db.graph_create("new_graph").is_err());
+            assert!(db.graph_add_node("rg", "n1", None, None).is_err());
+            assert!(db.graph_add_edge("rg", "A", "B", "E", None, None).is_err());
         }
     }
 }

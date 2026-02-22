@@ -4,31 +4,40 @@ on:
   pull_request:
     branches: [ develop, main ]
   push:
-    branches: [ develop ]
+    branches: [ develop, main ]
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-      - name: Run tests
-        run: cargo test --all
+      - uses: actions/checkout@v4
+
+      - name: Checkout strata-inference (sibling path dependency)
+        run: git clone --depth 1 https://github.com/strata-ai-labs/strata-inference.git ../strata-inference
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Format strata-inference (path dependency)
+        run: cargo fmt --manifest-path ../strata-inference/Cargo.toml --all
+
       - name: Check formatting
         run: cargo fmt --all -- --check
+
       - name: Run clippy
-        run: cargo clippy --all -- -D warnings
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace
 
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
+      - uses: actions/checkout@v4
+
+      - name: Checkout strata-inference (sibling path dependency)
+        run: git clone --depth 1 https://github.com/strata-ai-labs/strata-inference.git ../strata-inference
+
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Build
         run: cargo build --release --all

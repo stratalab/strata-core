@@ -260,6 +260,28 @@ fn format_raw(output: &Output) -> String {
         Output::BranchWithVersion { info, version } => {
             format!("{}\t{}", info.id, version)
         }
+        Output::BranchForked(info) => {
+            format!(
+                "{}\t{}\t{}",
+                info.source, info.destination, info.keys_copied
+            )
+        }
+        Output::BranchDiff(result) => {
+            format!(
+                "{}\t{}\t{}\t{}\t{}",
+                result.branch_a,
+                result.branch_b,
+                result.summary.total_added,
+                result.summary.total_removed,
+                result.summary.total_modified
+            )
+        }
+        Output::BranchMerged(info) => {
+            format!("{}\t{}\t{}", info.source, info.target, info.keys_applied)
+        }
+        Output::Config(_) | Output::DurabilityCounters(_) => {
+            serde_json::to_string(output).unwrap_or_default()
+        }
         Output::TxnInfo(None) => String::new(),
         Output::TxnInfo(Some(info)) => info.id.clone(),
         Output::TxnBegun => "OK".to_string(),
@@ -316,6 +338,49 @@ fn format_raw(output: &Output) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
+        Output::Embedding(vec) => vec
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(" "),
+        Output::Embeddings(vecs) => vecs
+            .iter()
+            .map(|v| {
+                v.iter()
+                    .map(|f| f.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Output::ModelsList(models) => models
+            .iter()
+            .map(|m| {
+                let local = if m.is_local { "local" } else { "remote" };
+                format!("{}\t{}\t{}\t{}", m.name, m.task, m.architecture, local)
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Output::ModelsPulled { name, path } => format!("{}\t{}", name, path),
+        Output::Generated(r) => r.text.clone(),
+        Output::TokenIds(r) => r
+            .ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(" "),
+        Output::Text(t) => t.clone(),
+        Output::GraphNeighbors(hits) => serde_json::to_string(&hits).unwrap_or_default(),
+        Output::GraphBfs(result) => serde_json::to_string(&result).unwrap_or_default(),
+        Output::GraphBulkInsertResult {
+            nodes_inserted,
+            edges_inserted,
+        } => {
+            format!(
+                "{{\"nodes_inserted\":{},\"edges_inserted\":{}}}",
+                nodes_inserted, edges_inserted
+            )
+        }
     }
 }
 
@@ -495,6 +560,57 @@ fn format_human(output: &Output) -> String {
         Output::BranchWithVersion { info, version } => {
             format!("Branch \"{}\" created (v{})", info.id, version)
         }
+        Output::BranchForked(info) => {
+            format!(
+                "Forked \"{}\" → \"{}\" ({} keys, {} spaces)",
+                info.source, info.destination, info.keys_copied, info.spaces_copied
+            )
+        }
+        Output::BranchDiff(result) => {
+            let mut lines = vec![format!(
+                "Diff: \"{}\" vs \"{}\"",
+                result.branch_a, result.branch_b
+            )];
+            lines.push(format!(
+                "  added: {}, removed: {}, modified: {}",
+                result.summary.total_added,
+                result.summary.total_removed,
+                result.summary.total_modified
+            ));
+            for space in &result.spaces {
+                lines.push(format!(
+                    "  space \"{}\": +{} -{} ~{}",
+                    space.space,
+                    space.added.len(),
+                    space.removed.len(),
+                    space.modified.len()
+                ));
+            }
+            lines.join("\n")
+        }
+        Output::BranchMerged(info) => {
+            let conflict_msg = if info.conflicts.is_empty() {
+                String::new()
+            } else {
+                format!(", {} conflicts", info.conflicts.len())
+            };
+            format!(
+                "Merged \"{}\" → \"{}\" ({} keys applied, {} spaces{})",
+                info.source, info.target, info.keys_applied, info.spaces_merged, conflict_msg
+            )
+        }
+        Output::Config(cfg) => {
+            serde_json::to_string_pretty(cfg).unwrap_or_else(|_| format!("{:?}", cfg))
+        }
+        Output::DurabilityCounters(counters) => {
+            format!(
+                "wal_appends: {}\nsync_calls: {}\nbytes_written: {}\nsync_nanos: {}",
+                counters.wal_appends,
+                counters.sync_calls,
+                counters.bytes_written,
+                counters.sync_nanos
+            )
+        }
         Output::TxnInfo(None) => "(nil)".to_string(),
         Output::TxnInfo(Some(info)) => {
             format!(
@@ -595,6 +711,114 @@ fn format_human(output: &Output) -> String {
                     .collect::<Vec<_>>()
                     .join("\n")
             }
+        }
+        Output::Embedding(vec) => {
+            if vec.is_empty() {
+                "(empty embedding)".to_string()
+            } else {
+                let preview: Vec<String> =
+                    vec.iter().take(5).map(|v| format!("{:.6}", v)).collect();
+                format!(
+                    "(embedding) [{} dimensions] [{}{}]",
+                    vec.len(),
+                    preview.join(", "),
+                    if vec.len() > 5 { ", ..." } else { "" }
+                )
+            }
+        }
+        Output::Embeddings(vecs) => {
+            if vecs.is_empty() {
+                "(empty list)".to_string()
+            } else {
+                vecs.iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let preview: Vec<String> =
+                            v.iter().take(5).map(|f| format!("{:.6}", f)).collect();
+                        format!(
+                            "{}) [{} dimensions] [{}{}]",
+                            i + 1,
+                            v.len(),
+                            preview.join(", "),
+                            if v.len() > 5 { ", ..." } else { "" }
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+        Output::ModelsList(models) => {
+            if models.is_empty() {
+                "(empty list)".to_string()
+            } else {
+                models
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| {
+                        let local_indicator = if m.is_local { " [local]" } else { "" };
+                        let dim_info = if m.embedding_dim > 0 {
+                            format!(", dim: {}", m.embedding_dim)
+                        } else {
+                            String::new()
+                        };
+                        format!(
+                            "{}) \"{}\" ({}, {}{}){}",
+                            i + 1,
+                            m.name,
+                            m.task,
+                            m.architecture,
+                            dim_info,
+                            local_indicator
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+        Output::ModelsPulled { name, path } => {
+            format!("Model \"{}\" downloaded to {}", name, path)
+        }
+        Output::Generated(r) => {
+            format!(
+                "(generated) [{}, stop: {}, prompt: {} tok, completion: {} tok]\n{}",
+                r.model, r.stop_reason, r.prompt_tokens, r.completion_tokens, r.text
+            )
+        }
+        Output::TokenIds(r) => {
+            format!(
+                "(tokens) [{}, {} tokens] [{}]",
+                r.model,
+                r.count,
+                r.ids
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+        Output::Text(t) => format!("\"{}\"", t),
+        Output::GraphNeighbors(hits) => {
+            format!(
+                "(neighbors) {} result(s)\n{}",
+                hits.len(),
+                serde_json::to_string_pretty(&hits).unwrap_or_default()
+            )
+        }
+        Output::GraphBfs(result) => {
+            format!(
+                "(bfs) {} node(s) visited\n{}",
+                result.visited.len(),
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            )
+        }
+        Output::GraphBulkInsertResult {
+            nodes_inserted,
+            edges_inserted,
+        } => {
+            format!(
+                "(bulk insert) {} node(s), {} edge(s) inserted",
+                nodes_inserted, edges_inserted
+            )
         }
     }
 }
@@ -742,8 +966,8 @@ mod tests {
     #[test]
     fn test_format_pong() {
         let pong = Output::Pong {
-            version: "0.5.2".to_string(),
+            version: "0.6.0".to_string(),
         };
-        assert_eq!(format_output(&pong, OutputMode::Human), "PONG 0.5.2");
+        assert_eq!(format_output(&pong, OutputMode::Human), "PONG 0.6.0");
     }
 }

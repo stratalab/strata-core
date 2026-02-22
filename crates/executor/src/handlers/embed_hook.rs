@@ -219,7 +219,7 @@ pub fn flush_embed_buffer(p: &Arc<Primitives>) {
 
     let batch_len = batch.len() as u64;
 
-    // Load model once for the whole batch.
+    // Load engine once for the whole batch.
     let model_dir = p.db.model_dir();
     let embed_state = match p.db.extension::<EmbedModelState>() {
         Ok(s) => s,
@@ -231,8 +231,8 @@ pub fn flush_embed_buffer(p: &Arc<Primitives>) {
         }
     };
 
-    let model = match embed_state.get_or_load(&model_dir) {
-        Ok(m) => m,
+    let engine = match embed_state.get_or_load(&model_dir) {
+        Ok(e) => e,
         Err(e) => {
             tracing::warn!(target: "strata::embed", error = %e, "Failed to load embedding model");
             buf.total_failed
@@ -243,7 +243,15 @@ pub fn flush_embed_buffer(p: &Arc<Primitives>) {
 
     // Compute all embeddings in one Rust call (back-to-back forward passes).
     let texts: Vec<&str> = batch.iter().map(|pe| pe.text.as_str()).collect();
-    let embeddings = model.embed_batch(&texts);
+    let embeddings = match engine.embed_batch(&texts) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(target: "strata::embed", error = %e, "Batch embedding failed");
+            buf.total_failed
+                .fetch_add(batch_len, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+    };
     let count = batch.len();
 
     // Insert each embedding into its shadow collection.
@@ -260,7 +268,7 @@ pub fn flush_embed_buffer(p: &Arc<Primitives>) {
             pe.branch_id,
             pe.shadow_collection,
             &composite_key,
-            &embedding,
+            embedding,
             Some(metadata),
             pe.source_ref,
         ) {

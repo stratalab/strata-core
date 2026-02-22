@@ -874,9 +874,7 @@ mod tests {
     fn setup_with_index() -> (TempDir, Arc<Database>, KVStore) {
         let (temp, db, kv) = setup();
         // Database::open() already enables the index; assert it.
-        let index = db
-            .extension::<crate::search::InvertedIndex>()
-            .unwrap();
+        let index = db.extension::<crate::search::InvertedIndex>().unwrap();
         assert!(index.is_enabled());
         (temp, db, kv)
     }
@@ -906,7 +904,10 @@ mod tests {
         let req = crate::SearchRequest::new(branch_id, "lazy");
         let response = kv.search(&req).unwrap();
 
-        assert!(!response.is_empty(), "Should find documents containing 'lazy'");
+        assert!(
+            !response.is_empty(),
+            "Should find documents containing 'lazy'"
+        );
         assert!(response.stats.index_used);
         // Both docs contain "lazy"
         assert_eq!(response.len(), 2);
@@ -1122,20 +1123,12 @@ mod tests {
         kv.put(&branch_id, "default", "bool_doc", Value::Bool(true))
             .unwrap();
         // But JSON-serializable values should be
-        kv.put(
-            &branch_id,
-            "default",
-            "float_doc",
-            Value::Float(3.14),
-        )
-        .unwrap();
+        kv.put(&branch_id, "default", "float_doc", Value::Float(3.14))
+            .unwrap();
 
         let req = crate::SearchRequest::new(branch_id, "42");
         let response = kv.search(&req).unwrap();
         // Int value gets serialized to "42" which should be indexed
-        assert!(
-            response.len() <= 1,
-            "At most 1 result for '42'"
-        );
+        assert!(response.len() <= 1, "At most 1 result for '42'");
     }
 }

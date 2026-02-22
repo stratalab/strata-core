@@ -180,6 +180,46 @@ pub fn branch_delete(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
 }
 
 // =============================================================================
+// Branch Operations (fork, diff, merge)
+// =============================================================================
+
+/// Handle BranchFork command.
+pub fn branch_fork(p: &Arc<Primitives>, source: String, destination: String) -> Result<Output> {
+    let info =
+        strata_engine::branch_ops::fork_branch(&p.db, &source, &destination).map_err(|e| {
+            Error::Internal {
+                reason: e.to_string(),
+            }
+        })?;
+    Ok(Output::BranchForked(info))
+}
+
+/// Handle BranchDiff command.
+pub fn branch_diff(p: &Arc<Primitives>, branch_a: String, branch_b: String) -> Result<Output> {
+    let result =
+        strata_engine::branch_ops::diff_branches(&p.db, &branch_a, &branch_b).map_err(|e| {
+            Error::Internal {
+                reason: e.to_string(),
+            }
+        })?;
+    Ok(Output::BranchDiff(result))
+}
+
+/// Handle BranchMerge command.
+pub fn branch_merge(
+    p: &Arc<Primitives>,
+    source: String,
+    target: String,
+    strategy: strata_engine::MergeStrategy,
+) -> Result<Output> {
+    let info = strata_engine::branch_ops::merge_branches(&p.db, &source, &target, strategy)
+        .map_err(|e| Error::Internal {
+            reason: e.to_string(),
+        })?;
+    Ok(Output::BranchMerged(info))
+}
+
+// =============================================================================
 // Bundle Handlers
 // =============================================================================
 

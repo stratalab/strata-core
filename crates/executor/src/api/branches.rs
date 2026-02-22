@@ -47,14 +47,6 @@ impl<'a> Branches<'a> {
     }
 
     /// List all branch names.
-    ///
-    /// # Example
-    ///
-    /// ```text
-    /// for branch in db.branches().list()? {
-    ///     println!("Branch: {}", branch);
-    /// }
-    /// ```
     pub fn list(&self) -> Result<Vec<String>> {
         match self.executor.execute(Command::BranchList {
             state: None,
@@ -83,13 +75,6 @@ impl<'a> Branches<'a> {
     }
 
     /// Create a new empty branch.
-    ///
-    /// The branch starts with no data. Use `fork()` to create a branch
-    /// with copied data.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the branch already exists.
     pub fn create(&self, name: &str) -> Result<()> {
         match self.executor.execute(Command::BranchCreate {
             branch_id: Some(name.to_string()),
@@ -103,13 +88,6 @@ impl<'a> Branches<'a> {
     }
 
     /// Delete a branch and all its data.
-    ///
-    /// **WARNING**: This is irreversible! All data in the branch will be deleted.
-    ///
-    /// # Errors
-    ///
-    /// - Returns an error if trying to delete the "default" branch
-    /// - Returns an error if the branch doesn't exist
     pub fn delete(&self, name: &str) -> Result<()> {
         if name == "default" {
             return Err(Error::ConstraintViolation {
@@ -128,80 +106,42 @@ impl<'a> Branches<'a> {
     }
 
     /// Fork a branch, creating a copy with all its data.
-    ///
-    /// Creates a new branch named `destination` containing a complete copy
-    /// of all data (KV, State, Events, JSON, Vectors) from `source`.
-    ///
-    /// # Arguments
-    ///
-    /// * `source` - Name of the branch to copy from
-    /// * `destination` - Name for the new forked branch
-    ///
-    /// # Errors
-    ///
-    /// - Source branch does not exist
-    /// - Destination branch already exists
-    ///
-    /// # Example
-    ///
-    /// ```text
-    /// db.branches().fork("main", "experiment")?;
-    /// ```
     pub fn fork(&self, source: &str, destination: &str) -> Result<ForkInfo> {
-        let db = &self.executor.primitives().db;
-        strata_engine::branch_ops::fork_branch(db, source, destination).map_err(|e| {
-            Error::Internal {
-                reason: e.to_string(),
-            }
-        })
+        match self.executor.execute(Command::BranchFork {
+            source: source.to_string(),
+            destination: destination.to_string(),
+        })? {
+            Output::BranchForked(info) => Ok(info),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for BranchFork".into(),
+            }),
+        }
     }
 
     /// Compare two branches and return their differences.
-    ///
-    /// Returns a structured diff showing per-space added, removed, and
-    /// modified entries between the two branches.
-    ///
-    /// # Example
-    ///
-    /// ```text
-    /// let diff = db.branches().diff("main", "experiment")?;
-    /// println!("Added: {}", diff.summary.total_added);
-    /// println!("Removed: {}", diff.summary.total_removed);
-    /// println!("Modified: {}", diff.summary.total_modified);
-    /// ```
     pub fn diff(&self, branch_a: &str, branch_b: &str) -> Result<BranchDiffResult> {
-        let db = &self.executor.primitives().db;
-        strata_engine::branch_ops::diff_branches(db, branch_a, branch_b).map_err(|e| {
-            Error::Internal {
-                reason: e.to_string(),
-            }
-        })
+        match self.executor.execute(Command::BranchDiff {
+            branch_a: branch_a.to_string(),
+            branch_b: branch_b.to_string(),
+        })? {
+            Output::BranchDiff(result) => Ok(result),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for BranchDiff".into(),
+            }),
+        }
     }
 
     /// Merge data from source branch into target branch.
-    ///
-    /// Applies changes from `source` into `target`:
-    /// - Added entries (in source but not target) are written to target
-    /// - Modified entries depend on strategy:
-    ///   - `LastWriterWins`: source value overwrites target
-    ///   - `Strict`: merge fails if any conflicts exist
-    /// - Removed entries (in target but not source) are left unchanged
-    ///
-    /// # Example
-    ///
-    /// ```text
-    /// use strata_engine::MergeStrategy;
-    ///
-    /// // Merge with last-writer-wins conflict resolution
-    /// let info = db.branches().merge("feature", "main", MergeStrategy::LastWriterWins)?;
-    /// println!("Applied {} keys", info.keys_applied);
-    /// ```
     pub fn merge(&self, source: &str, target: &str, strategy: MergeStrategy) -> Result<MergeInfo> {
-        let db = &self.executor.primitives().db;
-        strata_engine::branch_ops::merge_branches(db, source, target, strategy).map_err(|e| {
-            Error::Internal {
-                reason: e.to_string(),
-            }
-        })
+        match self.executor.execute(Command::BranchMerge {
+            source: source.to_string(),
+            target: target.to_string(),
+            strategy,
+        })? {
+            Output::BranchMerged(info) => Ok(info),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for BranchMerge".into(),
+            }),
+        }
     }
 }
