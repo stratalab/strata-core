@@ -33,15 +33,25 @@ pub fn compute_similarity(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
 ///
 /// Range: [-1, 1], higher = more similar
 /// Returns 0.0 if either vector has zero norm (avoids division by zero)
+///
+/// Uses a single-pass accumulation of dot product and both norms
+/// to reduce memory traffic by ~3x compared to separate passes.
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let dot = dot_product(a, b);
-    let norm_a = l2_norm(a);
-    let norm_b = l2_norm(b);
+    let mut dot = 0.0f32;
+    let mut norm_a_sq = 0.0f32;
+    let mut norm_b_sq = 0.0f32;
 
-    if norm_a == 0.0 || norm_b == 0.0 {
+    for (ai, bi) in a.iter().zip(b.iter()) {
+        dot += ai * bi;
+        norm_a_sq += ai * ai;
+        norm_b_sq += bi * bi;
+    }
+
+    let denom = (norm_a_sq * norm_b_sq).sqrt();
+    if denom == 0.0 {
         0.0
     } else {
-        dot / (norm_a * norm_b)
+        dot / denom
     }
 }
 

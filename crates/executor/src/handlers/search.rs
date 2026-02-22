@@ -103,6 +103,11 @@ pub fn search(
     };
     req = req.with_mode(mode);
 
+    // Pass precomputed embedding if provided (skips GPU inference during search)
+    if let Some(emb) = sq.precomputed_embedding {
+        req = req.with_precomputed_embedding(emb);
+    }
+
     let hybrid = build_hybrid_search(&p.db);
 
     // Check if a model is configured for query expansion
@@ -311,6 +316,10 @@ struct IntelligenceEmbedder {
 impl strata_search::QueryEmbedder for IntelligenceEmbedder {
     fn embed(&self, text: &str) -> Option<Vec<f32>> {
         strata_intelligence::embed::embed_query(&self.db, text)
+    }
+
+    fn embed_batch(&self, texts: &[&str]) -> Vec<Option<Vec<f32>>> {
+        strata_intelligence::embed::embed_batch_queries(&self.db, texts)
     }
 }
 

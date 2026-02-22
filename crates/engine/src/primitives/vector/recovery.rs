@@ -194,7 +194,8 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                 }
             };
 
-            for (_vec_key, vec_versioned) in &vector_entries {
+            let collection_prefix = format!("{}/", collection_name);
+            for (vec_key, vec_versioned) in &vector_entries {
                 let vec_bytes = match &vec_versioned.value {
                     Value::Bytes(b) => b,
                     _ => continue,
@@ -240,6 +241,19 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                     );
                     stats.vectors_upserted += 1;
                 }
+
+                // Populate inline metadata for O(1) search resolution
+                let vector_key = String::from_utf8(vec_key.user_key.clone())
+                    .ok()
+                    .and_then(|uk| uk.strip_prefix(&collection_prefix).map(|s| s.to_string()))
+                    .unwrap_or_default();
+                backend.set_inline_meta(
+                    vid,
+                    super::types::InlineMeta {
+                        key: vector_key,
+                        source_ref: vec_record.source_ref.clone(),
+                    },
+                );
             }
 
             state
@@ -247,6 +261,36 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                 .write()
                 .insert(collection_id.clone(), backend);
             stats.collections_created += 1;
+        }
+    }
+
+    // -----------------------------------------------------------
+    // Rebuild HNSW graphs (or load from mmap cache)
+    // -----------------------------------------------------------
+    {
+        let mut backends = state.backends.write();
+        for (cid, backend) in backends.iter_mut() {
+            let mut loaded = false;
+            if use_mmap {
+                let gdir = super::graph_dir(data_dir, cid.branch_id, &cid.name);
+                if let Ok(true) = backend.load_graphs_from_disk(&gdir) {
+                    loaded = true;
+                }
+            }
+            if !loaded {
+                backend.rebuild_index();
+            }
+
+            // Seal any remaining active buffer entries into HNSW segments.
+            // After graph loading, partial chunks may remain in the active
+            // buffer for O(n) brute-force search. Sealing them into HNSW
+            // segments ensures all vectors benefit from O(log n) search.
+            backend.seal_remaining_active();
+
+            if use_mmap {
+                let gdir = super::graph_dir(data_dir, cid.branch_id, &cid.name);
+                let _ = backend.freeze_graphs_to_disk(&gdir);
+            }
         }
     }
 

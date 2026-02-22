@@ -1085,6 +1085,7 @@ fn parse_search(matches: &ArgMatches, state: &SessionState) -> Result<CliAction,
             mode,
             expand,
             rerank,
+            precomputed_embedding: None,
         },
     }))
 }

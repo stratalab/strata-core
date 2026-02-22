@@ -485,6 +485,9 @@ impl VectorStore {
         // Check existence under write lock
         let existing = self.get_vector_record_by_key(&kv_key)?;
 
+        // Clone source_ref for inline meta before the match consumes it
+        let inline_source_ref = source_ref.as_ref().cloned();
+
         let (vector_id, record) = if let Some(existing_record) = existing {
             // Update existing: keep the same VectorId
             let mut updated = existing_record;
@@ -514,6 +517,15 @@ impl VectorStore {
 
         // Only update backend AFTER KV commit succeeds
         backend.insert_with_timestamp(vector_id, embedding, record.created_at)?;
+
+        // Store inline metadata for O(1) search resolution
+        backend.set_inline_meta(
+            vector_id,
+            super::types::InlineMeta {
+                key: key.to_string(),
+                source_ref: inline_source_ref,
+            },
+        );
 
         drop(backends);
 
@@ -689,6 +701,7 @@ impl VectorStore {
             let mut backends = state.backends.write();
             if let Some(backend) = backends.get_mut(&collection_id) {
                 backend.delete_with_timestamp(vector_id, now_micros())?;
+                backend.remove_inline_meta(vector_id);
             }
         }
 
@@ -760,7 +773,8 @@ impl VectorStore {
 
         // Prepare all records and accumulate KV writes for a single transaction
         let mut kv_writes: Vec<(Key, Value)> = Vec::with_capacity(entries.len());
-        let mut backend_updates: Vec<(VectorId, Vec<f32>, u64)> = Vec::with_capacity(entries.len());
+        let mut backend_updates: Vec<(VectorId, String, Vec<f32>, u64)> =
+            Vec::with_capacity(entries.len());
 
         for (key, embedding, metadata) in entries {
             let kv_key = Key::new_vector(self.namespace_for(branch_id, space), collection, &key);
@@ -781,7 +795,7 @@ impl VectorStore {
             let record_version = record.version;
             let record_bytes = record.to_bytes()?;
             kv_writes.push((kv_key, Value::Bytes(record_bytes)));
-            backend_updates.push((vector_id, embedding, record.created_at));
+            backend_updates.push((vector_id, key, embedding, record.created_at));
             versions.push(Version::counter(record_version));
         }
 
@@ -796,8 +810,15 @@ impl VectorStore {
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
         // Update backend for each entry (after successful KV commit)
-        for (vector_id, embedding, created_at) in backend_updates {
+        for (vector_id, key, embedding, created_at) in backend_updates {
             backend.insert_with_timestamp(vector_id, &embedding, created_at)?;
+            backend.set_inline_meta(
+                vector_id,
+                super::types::InlineMeta {
+                    key,
+                    source_ref: None,
+                },
+            );
         }
 
         drop(backends);
@@ -858,35 +879,49 @@ impl VectorStore {
         let mut matches = Vec::with_capacity(k);
 
         if filter.is_none() {
-            // No filter - simple case, fetch exactly k
-            let candidates = {
-                let state = self.state()?;
-                let backends = state.backends.read();
-                let backend = backends.get(&collection_id).ok_or_else(|| {
-                    VectorError::CollectionNotFound {
+            // No filter - simple case, fetch exactly k with O(1) inline meta lookup
+            let state = self.state()?;
+            let backends = state.backends.read();
+            let backend =
+                backends
+                    .get(&collection_id)
+                    .ok_or_else(|| VectorError::CollectionNotFound {
                         name: collection.to_string(),
-                    }
-                })?;
-                backend.search(query, k)
-            };
+                    })?;
+            let candidates = backend.search(query, k);
 
             for (vector_id, score) in candidates {
-                let (key, metadata) =
-                    self.get_key_and_metadata(branch_id, space, collection, vector_id)?;
-                matches.push(VectorMatch {
-                    key,
-                    score,
-                    metadata,
-                });
+                if let Some(meta) = backend.get_inline_meta(vector_id) {
+                    matches.push(VectorMatch {
+                        key: meta.key.clone(),
+                        score,
+                        metadata: None,
+                    });
+                } else {
+                    // Fallback to KV scan for vectors without inline meta
+                    let (key, metadata) =
+                        self.get_key_and_metadata(branch_id, space, collection, vector_id)?;
+                    matches.push(VectorMatch {
+                        key,
+                        score,
+                        metadata,
+                    });
+                }
             }
+            drop(backends);
         } else {
-            // Filter active - use adaptive over-fetch
+            // Filter active - use adaptive over-fetch with O(1) key lookup + point-get for metadata
             let multipliers = [3, 6, 12];
-            let collection_size = {
-                let state = self.state()?;
-                let backends = state.backends.read();
-                backends.get(&collection_id).map(|b| b.len()).unwrap_or(0)
-            };
+            let state = self.state()?;
+            let backends = state.backends.read();
+            let backend =
+                backends
+                    .get(&collection_id)
+                    .ok_or_else(|| VectorError::CollectionNotFound {
+                        name: collection.to_string(),
+                    })?;
+            let collection_size = backend.len();
+            let namespace = self.namespace_for(branch_id, space);
 
             for &mult in &multipliers {
                 let fetch_k = (k * mult).min(collection_size);
@@ -894,21 +929,20 @@ impl VectorStore {
                     break;
                 }
 
-                let candidates = {
-                    let state = self.state()?;
-                    let backends = state.backends.read();
-                    let backend = backends.get(&collection_id).ok_or_else(|| {
-                        VectorError::CollectionNotFound {
-                            name: collection.to_string(),
-                        }
-                    })?;
-                    backend.search(query, fetch_k)
-                };
+                let candidates = backend.search(query, fetch_k);
 
                 matches.clear();
                 for (vector_id, score) in candidates {
-                    let (key, metadata) =
-                        self.get_key_and_metadata(branch_id, space, collection, vector_id)?;
+                    // Use inline meta for O(1) key lookup, then point-get for metadata
+                    let (key, metadata) = if let Some(meta) = backend.get_inline_meta(vector_id) {
+                        let kv_key = Key::new_vector(namespace.clone(), collection, &meta.key);
+                        let md = self
+                            .get_vector_record_by_key(&kv_key)?
+                            .and_then(|r| r.metadata);
+                        (meta.key.clone(), md)
+                    } else {
+                        self.get_key_and_metadata(branch_id, space, collection, vector_id)?
+                    };
 
                     // Apply filter
                     if let Some(ref f) = filter {
@@ -932,6 +966,7 @@ impl VectorStore {
                     break;
                 }
             }
+            drop(backends);
         }
 
         // Apply facade-level tie-breaking (score desc, key asc)
@@ -1240,75 +1275,6 @@ impl VectorStore {
             "VectorId {:?} not found in KV",
             target_id
         )))
-    }
-
-    /// Batch-resolve metadata for multiple VectorIds in a single prefix scan.
-    ///
-    /// Instead of calling `get_key_metadata_and_source()` per candidate (each
-    /// doing a full O(n) scan), this scans the collection prefix once and
-    /// collects metadata for all requested VectorIds.
-    fn batch_get_metadata(
-        &self,
-        branch_id: BranchId,
-        space: &str,
-        collection: &str,
-        candidates: &[(VectorId, f32)],
-    ) -> VectorResult<Vec<VectorMatchWithSource>> {
-        use std::collections::HashMap;
-        use strata_core::traits::SnapshotView;
-
-        // Build a lookup set of target VectorIds → score
-        let mut target_map: HashMap<u64, f32> = HashMap::with_capacity(candidates.len());
-        for &(vid, score) in candidates {
-            target_map.insert(vid.0, score);
-        }
-
-        let namespace = self.namespace_for(branch_id, space);
-        let prefix = Key::vector_collection_prefix(namespace, collection);
-        let collection_prefix = format!("{}/", collection);
-
-        let snapshot = self.db.storage().create_snapshot();
-        let entries = snapshot
-            .scan_prefix(&prefix)
-            .map_err(|e| VectorError::Storage(e.to_string()))?;
-
-        let mut matches: Vec<VectorMatchWithSource> = Vec::with_capacity(candidates.len());
-
-        for (key, versioned) in entries {
-            if target_map.is_empty() {
-                break; // Found all candidates, stop scanning
-            }
-
-            let bytes = match &versioned.value {
-                Value::Bytes(b) => b,
-                _ => continue,
-            };
-
-            let record = match VectorRecord::from_bytes(bytes) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-
-            if let Some(score) = target_map.remove(&record.vector_id) {
-                let user_key = String::from_utf8(key.user_key.clone())
-                    .map_err(|e| VectorError::Serialization(e.to_string()))?;
-
-                let vector_key = user_key
-                    .strip_prefix(&collection_prefix)
-                    .unwrap_or(&user_key)
-                    .to_string();
-
-                matches.push(VectorMatchWithSource::new(
-                    vector_key,
-                    score,
-                    record.metadata,
-                    record.source_ref,
-                    record.version,
-                ));
-            }
-        }
-
-        Ok(matches)
     }
 
     /// Get the current vector count for a collection
@@ -1690,6 +1656,18 @@ impl VectorStore {
         )
     }
 
+    /// Get the vector count for a system collection (for filtering empty collections).
+    pub fn system_collection_len(
+        &self,
+        branch_id: BranchId,
+        collection: &str,
+    ) -> VectorResult<usize> {
+        let cid = CollectionId::new(branch_id, collection);
+        let state = self.state()?;
+        let backends = state.backends.read();
+        Ok(backends.get(&cid).map(|b| b.len()).unwrap_or(0))
+    }
+
     /// Search a system collection (internal use only)
     pub fn system_search(
         &self,
@@ -1723,8 +1701,7 @@ impl VectorStore {
 
     /// Search returning results with source references (internal)
     ///
-    /// Mirrors `search()` but uses `get_key_metadata_and_source()` to build
-    /// `VectorMatchWithSource` results that include `source_ref` and `version`.
+    /// Uses O(1) inline metadata lookup per candidate instead of O(n) KV prefix scans.
     fn search_with_sources(
         &self,
         branch_id: BranchId,
@@ -1751,20 +1728,45 @@ impl VectorStore {
             });
         }
 
-        // Search backend (no filter support — shadow collections don't need it)
-        let candidates = {
-            let state = self.state()?;
-            let backends = state.backends.read();
-            let backend =
-                backends
-                    .get(&collection_id)
-                    .ok_or_else(|| VectorError::CollectionNotFound {
-                        name: collection.to_string(),
-                    })?;
-            backend.search(query, k)
-        };
+        // Search backend + resolve inline metadata under a single lock
+        let state = self.state()?;
+        let backends = state.backends.read();
+        let backend =
+            backends
+                .get(&collection_id)
+                .ok_or_else(|| VectorError::CollectionNotFound {
+                    name: collection.to_string(),
+                })?;
 
-        let mut matches = self.batch_get_metadata(branch_id, space, collection, &candidates)?;
+        let candidates = backend.search(query, k);
+
+        let mut matches: Vec<VectorMatchWithSource> = Vec::with_capacity(candidates.len());
+        let mut fallback_candidates: Vec<(VectorId, f32)> = Vec::new();
+
+        for &(vid, score) in &candidates {
+            if let Some(meta) = backend.get_inline_meta(vid) {
+                matches.push(VectorMatchWithSource::new(
+                    meta.key.clone(),
+                    score,
+                    None,
+                    meta.source_ref.clone(),
+                    0,
+                ));
+            } else {
+                fallback_candidates.push((vid, score));
+            }
+        }
+
+        drop(backends);
+
+        // Resolve any candidates missing inline meta via KV fallback
+        for (vid, score) in fallback_candidates {
+            if let Ok((key, _metadata)) =
+                self.get_key_and_metadata(branch_id, space, collection, vid)
+            {
+                matches.push(VectorMatchWithSource::new(key, score, None, None, 0));
+            }
+        }
 
         // Facade-level tie-breaking (score desc, key asc)
         matches.sort_by(|a, b| {
@@ -1800,6 +1802,8 @@ impl VectorStore {
     }
 
     /// Search returning results with source references, filtered by time range.
+    ///
+    /// Uses O(1) inline metadata lookup per candidate instead of O(n) KV prefix scans.
     #[allow(clippy::too_many_arguments)]
     fn search_with_sources_in_range(
         &self,
@@ -1829,20 +1833,45 @@ impl VectorStore {
             });
         }
 
-        // Search backend with time range
-        let candidates = {
-            let state = self.state()?;
-            let backends = state.backends.read();
-            let backend =
-                backends
-                    .get(&collection_id)
-                    .ok_or_else(|| VectorError::CollectionNotFound {
-                        name: collection.to_string(),
-                    })?;
-            backend.search_in_range(query, k, start_ts, end_ts)
-        };
+        // Search backend + resolve inline metadata under a single lock
+        let state = self.state()?;
+        let backends = state.backends.read();
+        let backend =
+            backends
+                .get(&collection_id)
+                .ok_or_else(|| VectorError::CollectionNotFound {
+                    name: collection.to_string(),
+                })?;
 
-        let mut matches = self.batch_get_metadata(branch_id, space, collection, &candidates)?;
+        let candidates = backend.search_in_range(query, k, start_ts, end_ts);
+
+        let mut matches: Vec<VectorMatchWithSource> = Vec::with_capacity(candidates.len());
+        let mut fallback_candidates: Vec<(VectorId, f32)> = Vec::new();
+
+        for &(vid, score) in &candidates {
+            if let Some(meta) = backend.get_inline_meta(vid) {
+                matches.push(VectorMatchWithSource::new(
+                    meta.key.clone(),
+                    score,
+                    None,
+                    meta.source_ref.clone(),
+                    0,
+                ));
+            } else {
+                fallback_candidates.push((vid, score));
+            }
+        }
+
+        drop(backends);
+
+        // Resolve any candidates missing inline meta via KV fallback
+        for (vid, score) in fallback_candidates {
+            if let Ok((key, _metadata)) =
+                self.get_key_and_metadata(branch_id, space, collection, vid)
+            {
+                matches.push(VectorMatchWithSource::new(key, score, None, None, 0));
+            }
+        }
 
         // Facade-level tie-breaking (score desc, key asc)
         matches.sort_by(|a, b| {
@@ -3537,5 +3566,259 @@ mod tests {
             .value;
         assert_eq!(z.embedding, vec![0.0, 0.0, 1.0]);
         assert!(z.metadata.is_none());
+    }
+
+    // ========================================
+    // InlineMeta Tests
+    // ========================================
+
+    #[test]
+    fn test_inline_meta_populated_on_insert() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "vec_a",
+                &[1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "vec_b",
+                &[0.0, 1.0, 0.0],
+                None,
+            )
+            .unwrap();
+
+        // Search should return keys from inline meta (no KV fallback needed)
+        let results = store
+            .search(branch_id, "default", "test", &[1.0, 0.0, 0.0], 2, None)
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].key, "vec_a"); // Most similar
+        assert_eq!(results[1].key, "vec_b");
+    }
+
+    #[test]
+    fn test_inline_meta_populated_on_batch_insert() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        let entries = vec![
+            ("alpha".to_string(), vec![1.0, 0.0, 0.0], None),
+            ("beta".to_string(), vec![0.0, 1.0, 0.0], None),
+            ("gamma".to_string(), vec![0.0, 0.0, 1.0], None),
+        ];
+        store
+            .batch_insert(branch_id, "default", "test", entries)
+            .unwrap();
+
+        // Verify inline meta works by searching
+        let results = store
+            .search(branch_id, "default", "test", &[1.0, 0.0, 0.0], 3, None)
+            .unwrap();
+        assert_eq!(results.len(), 3);
+        // Most similar to [1,0,0] should be "alpha"
+        assert_eq!(results[0].key, "alpha");
+
+        // Verify all three keys appear
+        let keys: Vec<&str> = results.iter().map(|r| r.key.as_str()).collect();
+        assert!(keys.contains(&"alpha"));
+        assert!(keys.contains(&"beta"));
+        assert!(keys.contains(&"gamma"));
+    }
+
+    #[test]
+    fn test_inline_meta_updated_on_upsert() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        // Insert
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "my_key",
+                &[1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+
+        // Upsert with new embedding (same key, different direction)
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "my_key",
+                &[0.0, 0.0, 1.0],
+                None,
+            )
+            .unwrap();
+
+        // Search for new direction should still find "my_key"
+        let results = store
+            .search(branch_id, "default", "test", &[0.0, 0.0, 1.0], 1, None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "my_key");
+    }
+
+    #[test]
+    fn test_inline_meta_removed_on_delete() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "to_delete",
+                &[1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "to_keep",
+                &[0.9, 0.1, 0.0],
+                None,
+            )
+            .unwrap();
+
+        // Delete first vector
+        let deleted = store
+            .delete(branch_id, "default", "test", "to_delete")
+            .unwrap();
+        assert!(deleted);
+
+        // Search should only return the surviving vector
+        let results = store
+            .search(branch_id, "default", "test", &[1.0, 0.0, 0.0], 2, None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "to_keep");
+    }
+
+    #[test]
+    fn test_inline_meta_with_source_ref() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_system_collection(branch_id, "_system_test", config)
+            .unwrap();
+
+        let source = EntityRef::Kv {
+            branch_id,
+            key: "original_key".to_string(),
+        };
+        store
+            .system_insert_with_source(
+                branch_id,
+                "_system_test",
+                "shadow_key",
+                &[1.0, 0.0, 0.0],
+                None,
+                source.clone(),
+            )
+            .unwrap();
+
+        // system_search_with_sources should return the source_ref from inline meta
+        let results = store
+            .system_search_with_sources(branch_id, "_system_test", &[1.0, 0.0, 0.0], 1)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "shadow_key");
+        assert!(results[0].source_ref.is_some());
+        // Verify it's the right EntityRef variant with the right key
+        match results[0].source_ref.as_ref().unwrap() {
+            EntityRef::Kv { key, .. } => assert_eq!(key, "original_key"),
+            other => panic!("Expected EntityRef::Kv, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_system_collection_len_nonexistent() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        // Non-existent collection should return 0
+        let len = store
+            .system_collection_len(branch_id, "_system_missing")
+            .unwrap();
+        assert_eq!(len, 0);
+    }
+
+    #[test]
+    fn test_system_collection_len_with_vectors() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_system_collection(branch_id, "_system_test", config)
+            .unwrap();
+
+        assert_eq!(
+            store
+                .system_collection_len(branch_id, "_system_test")
+                .unwrap(),
+            0
+        );
+
+        store
+            .system_insert(branch_id, "_system_test", "k1", &[1.0, 0.0, 0.0], None)
+            .unwrap();
+        assert_eq!(
+            store
+                .system_collection_len(branch_id, "_system_test")
+                .unwrap(),
+            1
+        );
+
+        store
+            .system_insert(branch_id, "_system_test", "k2", &[0.0, 1.0, 0.0], None)
+            .unwrap();
+        assert_eq!(
+            store
+                .system_collection_len(branch_id, "_system_test")
+                .unwrap(),
+            2
+        );
     }
 }

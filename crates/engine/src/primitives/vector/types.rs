@@ -34,6 +34,16 @@ pub(crate) fn now_micros() -> u64 {
         .unwrap_or(0)
 }
 
+/// Lightweight metadata stored inline with VectorId for O(1) search resolution.
+/// Eliminates the need for O(n) KV prefix scans during search.
+#[derive(Debug, Clone)]
+pub struct InlineMeta {
+    /// The user-facing key for this vector (collection-relative).
+    pub key: String,
+    /// Optional source entity reference for hybrid search resolution.
+    pub source_ref: Option<EntityRef>,
+}
+
 /// Metadata and embedding stored in KV (MessagePack serialized)
 ///
 /// This is stored in the versioned KV storage for:

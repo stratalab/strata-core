@@ -10,6 +10,7 @@ use std::cmp::Ordering;
 
 use crate::primitives::vector::backend::VectorIndexBackend;
 use crate::primitives::vector::distance::compute_similarity;
+use crate::primitives::vector::types::InlineMeta;
 use crate::primitives::vector::{DistanceMetric, VectorConfig, VectorError, VectorHeap, VectorId};
 
 /// Brute-force vector search backend
@@ -157,6 +158,18 @@ impl VectorIndexBackend for BruteForceBackend {
 
     fn restore_snapshot_state(&mut self, next_id: u64, free_slots: Vec<usize>) {
         self.heap.restore_snapshot_state(next_id, free_slots);
+    }
+
+    fn set_inline_meta(&mut self, id: VectorId, meta: InlineMeta) {
+        self.heap.set_inline_meta(id, meta);
+    }
+
+    fn get_inline_meta(&self, id: VectorId) -> Option<&InlineMeta> {
+        self.heap.get_inline_meta(id)
+    }
+
+    fn remove_inline_meta(&mut self, id: VectorId) {
+        self.heap.remove_inline_meta(id);
     }
 }
 

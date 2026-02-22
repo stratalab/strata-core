@@ -420,6 +420,10 @@ pub struct SearchQuery {
     /// Enable/disable reranking. Absent = auto (use if model configured).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rerank: Option<bool>,
+
+    /// Precomputed query embedding (skips embedder call in hybrid search).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precomputed_embedding: Option<Vec<f32>>,
 }
 
 /// Information about a model in the registry (serializable output type).

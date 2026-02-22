@@ -298,6 +298,7 @@ fn test_read_only_allows_all_reads() {
                 mode: None,
                 expand: None,
                 rerank: None,
+                precomputed_embedding: None,
             },
         },
         Command::BranchDiff {
@@ -635,6 +636,7 @@ fn test_is_write_classification() {
                 mode: None,
                 expand: None,
                 rerank: None,
+                precomputed_embedding: None,
             },
         },
         Command::BranchDiff {
