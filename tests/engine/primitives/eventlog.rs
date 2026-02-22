@@ -203,13 +203,12 @@ fn read_range_empty_when_start_equals_end() {
         .append(&test_db.branch_id, "default", "type", payload_int(1))
         .unwrap();
 
-    // read_range(0, 0) means empty range; rewritten using loop with 0..0
-    let mut range = Vec::new();
-    for seq in 0u64..0u64 {
-        if let Some(e) = event.get(&test_db.branch_id, "default", seq).unwrap() {
-            range.push(e);
-        }
-    }
+    // read_range(0, 0) means empty range — verify no events in that span
+    let start: u64 = 0;
+    let end: u64 = 0;
+    let range: Vec<_> = (start..end)
+        .filter_map(|seq| event.get(&test_db.branch_id, "default", seq).unwrap())
+        .collect();
     assert!(range.is_empty());
 }
 

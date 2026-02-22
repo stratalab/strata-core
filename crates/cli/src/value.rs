@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn test_parse_floats() {
-        assert_eq!(parse_value("3.14"), Value::Float(3.14));
+        assert_eq!(parse_value("3.125"), Value::Float(3.125));
         assert_eq!(parse_value("-0.5"), Value::Float(-0.5));
         assert_eq!(parse_value("1.0e10"), Value::Float(1.0e10));
     }

@@ -451,7 +451,7 @@ fn test_command_with_complex_value() {
         [
             ("string".to_string(), Value::String("hello".to_string())),
             ("int".to_string(), Value::Int(42)),
-            ("float".to_string(), Value::Float(3.14)),
+            ("float".to_string(), Value::Float(3.125)),
             ("bool".to_string(), Value::Bool(true)),
             ("null".to_string(), Value::Null),
             (

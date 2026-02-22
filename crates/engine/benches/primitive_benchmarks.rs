@@ -36,8 +36,13 @@ fn bench_kv_put(c: &mut Criterion) {
     group.bench_function("put", |b| {
         b.iter(|| {
             let i = counter.fetch_add(1, Ordering::SeqCst);
-            kv.put(&branch_id, &format!("key{}", i), Value::Int(i as i64))
-                .unwrap()
+            kv.put(
+                &branch_id,
+                "default",
+                &format!("key{}", i),
+                Value::Int(i as i64),
+            )
+            .unwrap()
         })
     });
     group.finish();
@@ -51,8 +56,13 @@ fn bench_kv_get(c: &mut Criterion) {
 
     // Pre-populate 1000 keys
     for i in 0..1000 {
-        kv.put(&branch_id, &format!("key{}", i), Value::Int(i as i64))
-            .unwrap();
+        kv.put(
+            &branch_id,
+            "default",
+            &format!("key{}", i),
+            Value::Int(i as i64),
+        )
+        .unwrap();
     }
 
     let mut group = c.benchmark_group("kv");
@@ -62,7 +72,7 @@ fn bench_kv_get(c: &mut Criterion) {
     group.bench_function("get", |b| {
         b.iter(|| {
             let i = counter.fetch_add(1, Ordering::SeqCst) % 1000;
-            kv.get(&branch_id, &format!("key{}", i)).unwrap()
+            kv.get(&branch_id, "default", &format!("key{}", i)).unwrap()
         })
     });
     group.finish();
@@ -80,7 +90,7 @@ fn bench_event_append(c: &mut Criterion) {
     group.bench_function("append", |b| {
         b.iter(|| {
             event_log
-                .append(&branch_id, "benchmark_event", Value::Int(42))
+                .append(&branch_id, "default", "benchmark_event", Value::Int(42))
                 .unwrap()
         })
     });
@@ -95,7 +105,7 @@ fn bench_state_cas(c: &mut Criterion) {
 
     // Initialize the cell
     state_cell
-        .init(&branch_id, "bench_cell", Value::Int(0))
+        .init(&branch_id, "default", "bench_cell", Value::Int(0))
         .unwrap();
 
     let mut group = c.benchmark_group("state_cell");
@@ -105,7 +115,7 @@ fn bench_state_cas(c: &mut Criterion) {
     group.bench_function("cas", |b| {
         b.iter(|| {
             let current = state_cell
-                .get_versioned(&branch_id, "bench_cell")
+                .get_versioned(&branch_id, "default", "bench_cell")
                 .unwrap()
                 .unwrap();
             let val = match current.value {
@@ -115,6 +125,7 @@ fn bench_state_cas(c: &mut Criterion) {
             state_cell
                 .cas(
                     &branch_id,
+                    "default",
                     "bench_cell",
                     current.version,
                     Value::Int(val + 1),
@@ -133,7 +144,7 @@ fn bench_cross_primitive_transaction(c: &mut Criterion) {
     // Initialize state cell for the transaction
     let state_cell = StateCell::new(db.clone());
     state_cell
-        .init(&branch_id, "txn_cell", Value::Int(0))
+        .init(&branch_id, "default", "txn_cell", Value::Int(0))
         .unwrap();
 
     let mut group = c.benchmark_group("cross_primitive");
@@ -163,7 +174,7 @@ fn bench_event_get(c: &mut Criterion) {
     // Pre-populate 1000 events
     for i in 0..1000 {
         event_log
-            .append(&branch_id, "numbered", Value::Int(i as i64))
+            .append(&branch_id, "default", "numbered", Value::Int(i as i64))
             .unwrap();
     }
 
@@ -174,7 +185,7 @@ fn bench_event_get(c: &mut Criterion) {
     group.bench_function("read", |b| {
         b.iter(|| {
             let i = counter.fetch_add(1, Ordering::SeqCst) % 1000;
-            event_log.get(&branch_id, i).unwrap()
+            event_log.get(&branch_id, "default", i).unwrap()
         })
     });
     group.finish();
@@ -208,21 +219,27 @@ fn bench_kv_list(c: &mut Criterion) {
     for i in 0..100 {
         kv.put(
             &branch_id,
+            "default",
             &format!("prefix/key{}", i),
             Value::Int(i as i64),
         )
         .unwrap();
     }
     for i in 0..100 {
-        kv.put(&branch_id, &format!("other/key{}", i), Value::Int(i as i64))
-            .unwrap();
+        kv.put(
+            &branch_id,
+            "default",
+            &format!("other/key{}", i),
+            Value::Int(i as i64),
+        )
+        .unwrap();
     }
 
     let mut group = c.benchmark_group("kv");
     group.throughput(Throughput::Elements(1));
 
     group.bench_function("list", |b| {
-        b.iter(|| kv.list(&branch_id, Some("prefix/")).unwrap())
+        b.iter(|| kv.list(&branch_id, "default", Some("prefix/")).unwrap())
     });
     group.finish();
 }

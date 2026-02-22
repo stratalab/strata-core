@@ -191,9 +191,9 @@ impl HybridSearch {
                 },
                 || -> Option<Vec<f32>> {
                     // Use precomputed embedding if available, otherwise compute it
-                    req.precomputed_embedding.clone().or_else(|| {
-                        self.embedder.as_ref().and_then(|e| e.embed(&req.query))
-                    })
+                    req.precomputed_embedding
+                        .clone()
+                        .or_else(|| self.embedder.as_ref().and_then(|e| e.embed(&req.query)))
                 },
             )
         } else {

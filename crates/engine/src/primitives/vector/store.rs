@@ -882,11 +882,12 @@ impl VectorStore {
             // No filter - simple case, fetch exactly k with O(1) inline meta lookup
             let state = self.state()?;
             let backends = state.backends.read();
-            let backend = backends.get(&collection_id).ok_or_else(|| {
-                VectorError::CollectionNotFound {
-                    name: collection.to_string(),
-                }
-            })?;
+            let backend =
+                backends
+                    .get(&collection_id)
+                    .ok_or_else(|| VectorError::CollectionNotFound {
+                        name: collection.to_string(),
+                    })?;
             let candidates = backend.search(query, k);
 
             for (vector_id, score) in candidates {
@@ -913,11 +914,12 @@ impl VectorStore {
             let multipliers = [3, 6, 12];
             let state = self.state()?;
             let backends = state.backends.read();
-            let backend = backends.get(&collection_id).ok_or_else(|| {
-                VectorError::CollectionNotFound {
-                    name: collection.to_string(),
-                }
-            })?;
+            let backend =
+                backends
+                    .get(&collection_id)
+                    .ok_or_else(|| VectorError::CollectionNotFound {
+                        name: collection.to_string(),
+                    })?;
             let collection_size = backend.len();
             let namespace = self.namespace_for(branch_id, space);
 
@@ -932,22 +934,15 @@ impl VectorStore {
                 matches.clear();
                 for (vector_id, score) in candidates {
                     // Use inline meta for O(1) key lookup, then point-get for metadata
-                    let (key, metadata) =
-                        if let Some(meta) = backend.get_inline_meta(vector_id) {
-                            let kv_key = Key::new_vector(
-                                namespace.clone(),
-                                collection,
-                                &meta.key,
-                            );
-                            let md = self
-                                .get_vector_record_by_key(&kv_key)?
-                                .and_then(|r| r.metadata);
-                            (meta.key.clone(), md)
-                        } else {
-                            self.get_key_and_metadata(
-                                branch_id, space, collection, vector_id,
-                            )?
-                        };
+                    let (key, metadata) = if let Some(meta) = backend.get_inline_meta(vector_id) {
+                        let kv_key = Key::new_vector(namespace.clone(), collection, &meta.key);
+                        let md = self
+                            .get_vector_record_by_key(&kv_key)?
+                            .and_then(|r| r.metadata);
+                        (meta.key.clone(), md)
+                    } else {
+                        self.get_key_and_metadata(branch_id, space, collection, vector_id)?
+                    };
 
                     // Apply filter
                     if let Some(ref f) = filter {
@@ -3588,10 +3583,24 @@ mod tests {
             .unwrap();
 
         store
-            .insert(branch_id, "default", "test", "vec_a", &[1.0, 0.0, 0.0], None)
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "vec_a",
+                &[1.0, 0.0, 0.0],
+                None,
+            )
             .unwrap();
         store
-            .insert(branch_id, "default", "test", "vec_b", &[0.0, 1.0, 0.0], None)
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "vec_b",
+                &[0.0, 1.0, 0.0],
+                None,
+            )
             .unwrap();
 
         // Search should return keys from inline meta (no KV fallback needed)
@@ -3649,12 +3658,26 @@ mod tests {
 
         // Insert
         store
-            .insert(branch_id, "default", "test", "my_key", &[1.0, 0.0, 0.0], None)
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "my_key",
+                &[1.0, 0.0, 0.0],
+                None,
+            )
             .unwrap();
 
         // Upsert with new embedding (same key, different direction)
         store
-            .insert(branch_id, "default", "test", "my_key", &[0.0, 0.0, 1.0], None)
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "my_key",
+                &[0.0, 0.0, 1.0],
+                None,
+            )
             .unwrap();
 
         // Search for new direction should still find "my_key"
@@ -3676,14 +3699,30 @@ mod tests {
             .unwrap();
 
         store
-            .insert(branch_id, "default", "test", "to_delete", &[1.0, 0.0, 0.0], None)
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "to_delete",
+                &[1.0, 0.0, 0.0],
+                None,
+            )
             .unwrap();
         store
-            .insert(branch_id, "default", "test", "to_keep", &[0.9, 0.1, 0.0], None)
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "to_keep",
+                &[0.9, 0.1, 0.0],
+                None,
+            )
             .unwrap();
 
         // Delete first vector
-        let deleted = store.delete(branch_id, "default", "test", "to_delete").unwrap();
+        let deleted = store
+            .delete(branch_id, "default", "test", "to_delete")
+            .unwrap();
         assert!(deleted);
 
         // Search should only return the surviving vector
@@ -3721,12 +3760,7 @@ mod tests {
 
         // system_search_with_sources should return the source_ref from inline meta
         let results = store
-            .system_search_with_sources(
-                branch_id,
-                "_system_test",
-                &[1.0, 0.0, 0.0],
-                1,
-            )
+            .system_search_with_sources(branch_id, "_system_test", &[1.0, 0.0, 0.0], 1)
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].key, "shadow_key");
@@ -3744,7 +3778,9 @@ mod tests {
         let branch_id = BranchId::new();
 
         // Non-existent collection should return 0
-        let len = store.system_collection_len(branch_id, "_system_missing").unwrap();
+        let len = store
+            .system_collection_len(branch_id, "_system_missing")
+            .unwrap();
         assert_eq!(len, 0);
     }
 
@@ -3758,16 +3794,31 @@ mod tests {
             .create_system_collection(branch_id, "_system_test", config)
             .unwrap();
 
-        assert_eq!(store.system_collection_len(branch_id, "_system_test").unwrap(), 0);
+        assert_eq!(
+            store
+                .system_collection_len(branch_id, "_system_test")
+                .unwrap(),
+            0
+        );
 
         store
             .system_insert(branch_id, "_system_test", "k1", &[1.0, 0.0, 0.0], None)
             .unwrap();
-        assert_eq!(store.system_collection_len(branch_id, "_system_test").unwrap(), 1);
+        assert_eq!(
+            store
+                .system_collection_len(branch_id, "_system_test")
+                .unwrap(),
+            1
+        );
 
         store
             .system_insert(branch_id, "_system_test", "k2", &[0.0, 1.0, 0.0], None)
             .unwrap();
-        assert_eq!(store.system_collection_len(branch_id, "_system_test").unwrap(), 2);
+        assert_eq!(
+            store
+                .system_collection_len(branch_id, "_system_test")
+                .unwrap(),
+            2
+        );
     }
 }
