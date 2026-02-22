@@ -87,18 +87,11 @@ impl GraphStore {
 
             // Get neighbors in the specified direction
             let neighbors = match opts.direction {
-                Direction::Outgoing => {
-                    self.outgoing_neighbors(branch_id, graph, &current, None)?
-                }
-                Direction::Incoming => {
-                    self.incoming_neighbors(branch_id, graph, &current, None)?
-                }
+                Direction::Outgoing => self.outgoing_neighbors(branch_id, graph, &current, None)?,
+                Direction::Incoming => self.incoming_neighbors(branch_id, graph, &current, None)?,
                 Direction::Both => {
-                    let mut out =
-                        self.outgoing_neighbors(branch_id, graph, &current, None)?;
-                    out.extend(
-                        self.incoming_neighbors(branch_id, graph, &current, None)?,
-                    );
+                    let mut out = self.outgoing_neighbors(branch_id, graph, &current, None)?;
+                    out.extend(self.incoming_neighbors(branch_id, graph, &current, None)?);
                     out
                 }
             };
@@ -217,7 +210,13 @@ mod tests {
         let (_db, gs) = setup();
         let b = branch();
         add_nodes(&gs, b, "g", &["A", "B", "C", "D", "E", "F"]);
-        for (dst, et) in &[("B", "T1"), ("C", "T2"), ("D", "T1"), ("E", "T3"), ("F", "T2")] {
+        for (dst, et) in &[
+            ("B", "T1"),
+            ("C", "T2"),
+            ("D", "T1"),
+            ("E", "T3"),
+            ("F", "T2"),
+        ] {
             gs.add_edge(b, "g", "A", dst, et, EdgeData::default())
                 .unwrap();
         }
@@ -268,9 +267,7 @@ mod tests {
             .unwrap();
         gs.add_edge(b, "g", "C", "A", "E", EdgeData::default())
             .unwrap();
-        let n = gs
-            .neighbors(b, "g", "A", Direction::Both, None)
-            .unwrap();
+        let n = gs.neighbors(b, "g", "A", Direction::Both, None).unwrap();
         assert_eq!(n.len(), 2);
     }
 
@@ -325,9 +322,7 @@ mod tests {
         gs.add_edge(b, "g", "B", "A", "KNOWS", EdgeData::default())
             .unwrap();
 
-        let n = gs
-            .neighbors(b, "g", "A", Direction::Both, None)
-            .unwrap();
+        let n = gs.neighbors(b, "g", "A", Direction::Both, None).unwrap();
         // Should see both edges: outgoing A→B and incoming B→A
         assert_eq!(n.len(), 2);
         assert!(n.iter().all(|nb| nb.node_id == "B"));
@@ -363,9 +358,7 @@ mod tests {
         )
         .unwrap();
 
-        let n = gs
-            .neighbors(b, "g", "A", Direction::Both, None)
-            .unwrap();
+        let n = gs.neighbors(b, "g", "A", Direction::Both, None).unwrap();
         assert_eq!(n.len(), 2);
         let mut weights: Vec<f64> = n.iter().map(|nb| nb.edge_data.weight).collect();
         weights.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -553,14 +546,7 @@ mod tests {
             .unwrap();
         assert_eq!(result.visited.len(), 4);
         // D should appear exactly once in visited
-        assert_eq!(
-            result
-                .visited
-                .iter()
-                .filter(|&v| v == "D")
-                .count(),
-            1
-        );
+        assert_eq!(result.visited.iter().filter(|&v| v == "D").count(), 1);
     }
 
     #[test]
@@ -674,9 +660,7 @@ mod tests {
         let b = branch();
         gs.create_graph(b, "g", None).unwrap();
 
-        let result = gs
-            .bfs(b, "g", "ghost", BfsOptions::default())
-            .unwrap();
+        let result = gs.bfs(b, "g", "ghost", BfsOptions::default()).unwrap();
         assert_eq!(result.visited.len(), 1);
         assert_eq!(result.visited[0], "ghost");
         assert_eq!(*result.depths.get("ghost").unwrap(), 0);
@@ -715,9 +699,7 @@ mod tests {
         gs.add_edge(b, "g", "B", "C", "E", EdgeData::default())
             .unwrap();
 
-        let result = gs
-            .bfs(b, "g", "A", BfsOptions::default())
-            .unwrap();
+        let result = gs.bfs(b, "g", "A", BfsOptions::default()).unwrap();
         assert_eq!(*result.depths.get("A").unwrap(), 0);
         assert_eq!(*result.depths.get("B").unwrap(), 1);
         assert_eq!(*result.depths.get("C").unwrap(), 2);
@@ -731,11 +713,12 @@ mod tests {
         gs.add_edge(b, "g", "A", "B", "E", EdgeData::default())
             .unwrap();
 
-        let result = gs
-            .bfs(b, "g", "A", BfsOptions::default())
-            .unwrap();
+        let result = gs.bfs(b, "g", "A", BfsOptions::default()).unwrap();
         assert_eq!(result.edges.len(), 1);
-        assert_eq!(result.edges[0], ("A".to_string(), "B".to_string(), "E".to_string()));
+        assert_eq!(
+            result.edges[0],
+            ("A".to_string(), "B".to_string(), "E".to_string())
+        );
     }
 
     #[test]
@@ -753,9 +736,7 @@ mod tests {
         gs.add_edge(b, "g", "C", "E", "E", EdgeData::default())
             .unwrap();
 
-        let result = gs
-            .bfs(b, "g", "A", BfsOptions::default())
-            .unwrap();
+        let result = gs.bfs(b, "g", "A", BfsOptions::default()).unwrap();
 
         // A should be first (depth 0)
         assert_eq!(result.visited[0], "A");
@@ -840,11 +821,7 @@ mod tests {
             .unwrap();
 
         let sub = gs
-            .subgraph(
-                b,
-                "g",
-                &["A".into(), "B".into(), "C".into()],
-            )
+            .subgraph(b, "g", &["A".into(), "B".into(), "C".into()])
             .unwrap();
         assert_eq!(sub.node_count(), 3);
         assert_eq!(sub.edge_count(), 2);
@@ -860,9 +837,7 @@ mod tests {
         gs.add_edge(b, "g", "B", "C", "E", EdgeData::default())
             .unwrap();
 
-        let sub = gs
-            .subgraph(b, "g", &["A".into(), "B".into()])
-            .unwrap();
+        let sub = gs.subgraph(b, "g", &["A".into(), "B".into()]).unwrap();
         assert_eq!(sub.node_count(), 2);
         assert_eq!(sub.edge_count(), 1); // Only A→B
     }
@@ -886,9 +861,7 @@ mod tests {
         gs.add_edge(b, "g", "A", "B", "E", EdgeData::default())
             .unwrap();
 
-        let sub = gs
-            .subgraph(b, "g", &["A".into()])
-            .unwrap();
+        let sub = gs.subgraph(b, "g", &["A".into()]).unwrap();
         assert_eq!(sub.node_count(), 1);
         assert_eq!(sub.edge_count(), 0); // No edge because B is not in set
     }
@@ -901,9 +874,7 @@ mod tests {
         gs.add_edge(b, "g", "A", "B", "E", EdgeData::default())
             .unwrap();
 
-        let sub = gs
-            .subgraph(b, "g", &["A".into(), "C".into()])
-            .unwrap();
+        let sub = gs.subgraph(b, "g", &["A".into(), "C".into()]).unwrap();
         assert_eq!(sub.node_count(), 2);
         assert_eq!(sub.edge_count(), 0);
     }
@@ -914,9 +885,7 @@ mod tests {
         let b = branch();
         add_nodes(&gs, b, "g", &["A"]);
 
-        let sub = gs
-            .subgraph(b, "g", &["A".into(), "ghost".into()])
-            .unwrap();
+        let sub = gs.subgraph(b, "g", &["A".into(), "ghost".into()]).unwrap();
         assert_eq!(sub.node_count(), 1);
     }
 }

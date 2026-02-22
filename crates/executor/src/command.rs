@@ -1112,6 +1112,23 @@ pub enum Command {
         edge_type: Option<String>,
     },
 
+    /// Bulk insert nodes and edges into a graph.
+    /// Returns: `Output::GraphBulkInsertResult`
+    GraphBulkInsert {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Nodes to insert.
+        nodes: Vec<BulkGraphNode>,
+        /// Edges to insert.
+        edges: Vec<BulkGraphEdge>,
+        /// Optional chunk size for batching (default 10,000).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chunk_size: Option<usize>,
+    },
+
     /// BFS traversal.
     /// Returns: `Output::GraphBfs`
     GraphBfs {
@@ -1185,6 +1202,7 @@ impl Command {
                 | Command::GraphRemoveNode { .. }
                 | Command::GraphAddEdge { .. }
                 | Command::GraphRemoveEdge { .. }
+                | Command::GraphBulkInsert { .. }
         )
     }
 
@@ -1283,6 +1301,7 @@ impl Command {
             Command::GraphAddEdge { .. } => "GraphAddEdge",
             Command::GraphRemoveEdge { .. } => "GraphRemoveEdge",
             Command::GraphNeighbors { .. } => "GraphNeighbors",
+            Command::GraphBulkInsert { .. } => "GraphBulkInsert",
             Command::GraphBfs { .. } => "GraphBfs",
         }
     }
@@ -1382,6 +1401,7 @@ impl Command {
             | Command::GraphAddEdge { branch, .. }
             | Command::GraphRemoveEdge { branch, .. }
             | Command::GraphNeighbors { branch, .. }
+            | Command::GraphBulkInsert { branch, .. }
             | Command::GraphBfs { branch, .. } => {
                 resolve_branch!(branch);
             }

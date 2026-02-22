@@ -14,8 +14,8 @@ use strata_core::limits::Limits;
 use strata_core::primitives::json::{JsonPath, JsonValue};
 use strata_core::{StrataError, StrataResult, Value};
 use strata_engine::{
-    BranchIndex as PrimitiveBranchIndex, Database, EventLog as PrimitiveEventLog,
-    GraphStore, JsonStore as PrimitiveJsonStore, KVStore as PrimitiveKVStore,
+    BranchIndex as PrimitiveBranchIndex, Database, EventLog as PrimitiveEventLog, GraphStore,
+    JsonStore as PrimitiveJsonStore, KVStore as PrimitiveKVStore,
     SpaceIndex as PrimitiveSpaceIndex, StateCell as PrimitiveStateCell,
     VectorStore as PrimitiveVectorStore,
 };

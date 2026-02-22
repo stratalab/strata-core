@@ -1110,9 +1110,17 @@ mod tests {
         let db = create_strata();
         db.graph_create("ng").unwrap();
 
-        db.graph_add_node("ng", "n1", None, Some(Value::Object(
-            [("name".to_string(), Value::String("Alice".into()))].into_iter().collect()
-        ))).unwrap();
+        db.graph_add_node(
+            "ng",
+            "n1",
+            None,
+            Some(Value::Object(
+                [("name".to_string(), Value::String("Alice".into()))]
+                    .into_iter()
+                    .collect(),
+            )),
+        )
+        .unwrap();
 
         let node = db.graph_get_node("ng", "n1").unwrap();
         assert!(node.is_some());
@@ -1129,7 +1137,8 @@ mod tests {
         let db = create_strata();
         db.graph_create("eg").unwrap();
 
-        db.graph_add_edge("eg", "A", "B", "KNOWS", None, None).unwrap();
+        db.graph_add_edge("eg", "A", "B", "KNOWS", None, None)
+            .unwrap();
 
         let neighbors = db.graph_neighbors("eg", "A", "outgoing", None).unwrap();
         assert_eq!(neighbors.len(), 1);
@@ -1192,9 +1201,12 @@ mod tests {
             "patient-4821",
             Some("json://main/patient-4821"),
             Some(Value::Object(
-                [("department".to_string(), Value::String("endocrinology".into()))]
-                    .into_iter()
-                    .collect(),
+                [(
+                    "department".to_string(),
+                    Value::String("endocrinology".into()),
+                )]
+                .into_iter()
+                .collect(),
             )),
         )
         .unwrap();
@@ -1203,9 +1215,12 @@ mod tests {
             "ICD:E11.9",
             None,
             Some(Value::Object(
-                [("description".to_string(), Value::String("Type 2 Diabetes".into()))]
-                    .into_iter()
-                    .collect(),
+                [(
+                    "description".to_string(),
+                    Value::String("Type 2 Diabetes".into()),
+                )]
+                .into_iter()
+                .collect(),
             )),
         )
         .unwrap();
@@ -1223,29 +1238,62 @@ mod tests {
             "ICD:N18.3",
             None,
             Some(Value::Object(
-                [("description".to_string(), Value::String("CKD Stage 3".into()))]
-                    .into_iter()
-                    .collect(),
+                [(
+                    "description".to_string(),
+                    Value::String("CKD Stage 3".into()),
+                )]
+                .into_iter()
+                .collect(),
             )),
         )
         .unwrap();
 
         // Add edges
         db.graph_add_edge(
-            "patient_care", "patient-4821", "ICD:E11.9", "DIAGNOSED_WITH", None, None,
-        ).unwrap();
+            "patient_care",
+            "patient-4821",
+            "ICD:E11.9",
+            "DIAGNOSED_WITH",
+            None,
+            None,
+        )
+        .unwrap();
         db.graph_add_edge(
-            "patient_care", "patient-4821", "lab:HbA1c", "HAS_LAB_RESULT", None, None,
-        ).unwrap();
+            "patient_care",
+            "patient-4821",
+            "lab:HbA1c",
+            "HAS_LAB_RESULT",
+            None,
+            None,
+        )
+        .unwrap();
         db.graph_add_edge(
-            "patient_care", "lab:HbA1c", "ICD:E11.9", "SUPPORTS", Some(0.95), None,
-        ).unwrap();
+            "patient_care",
+            "lab:HbA1c",
+            "ICD:E11.9",
+            "SUPPORTS",
+            Some(0.95),
+            None,
+        )
+        .unwrap();
         db.graph_add_edge(
-            "patient_care", "ICD:E11.9", "med:metformin", "TREATED_BY", None, None,
-        ).unwrap();
+            "patient_care",
+            "ICD:E11.9",
+            "med:metformin",
+            "TREATED_BY",
+            None,
+            None,
+        )
+        .unwrap();
         db.graph_add_edge(
-            "patient_care", "med:metformin", "ICD:N18.3", "CONTRAINDICATES", Some(0.8), None,
-        ).unwrap();
+            "patient_care",
+            "med:metformin",
+            "ICD:N18.3",
+            "CONTRAINDICATES",
+            Some(0.8),
+            None,
+        )
+        .unwrap();
 
         // Query: what supports the diabetes diagnosis?
         let supporters = db
@@ -1321,7 +1369,8 @@ mod tests {
     #[test]
     fn test_graph_create_with_cascade_policy() {
         let db = create_strata();
-        db.graph_create_with_policy("cascade_g", Some("cascade")).unwrap();
+        db.graph_create_with_policy("cascade_g", Some("cascade"))
+            .unwrap();
 
         let meta = db.graph_get_meta("cascade_g").unwrap();
         assert!(meta.is_some());
