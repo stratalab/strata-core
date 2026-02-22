@@ -201,6 +201,7 @@ impl Strata {
     /// loading large datasets.
     ///
     /// Returns `(nodes_inserted, edges_inserted)`.
+    #[allow(clippy::type_complexity)]
     pub fn graph_bulk_insert(
         &self,
         graph: &str,
