@@ -3,7 +3,13 @@ mod error;
 #[cfg(feature = "local")]
 pub mod llama;
 
+#[cfg(feature = "local")]
+mod embed;
+
 pub use error::InferenceError;
+
+#[cfg(feature = "local")]
+pub use embed::EmbeddingEngine;
 
 use std::fmt;
 use std::str::FromStr;
