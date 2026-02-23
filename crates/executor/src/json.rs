@@ -256,10 +256,10 @@ mod tests {
 
     #[test]
     fn test_regular_float_round_trip() {
-        let original = Value::Float(3.14159);
+        let original = Value::Float(3.125);
         let json = value_to_json(&original);
         let restored = json_to_value(&json).unwrap();
-        assert_eq!(restored, Value::Float(3.14159));
+        assert_eq!(restored, Value::Float(3.125));
     }
 
     #[test]

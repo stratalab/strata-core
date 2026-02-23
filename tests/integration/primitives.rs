@@ -72,7 +72,7 @@ mod kv_single {
 
         kv.put(&branch_id, "default", "int", Value::Int(42))
             .unwrap();
-        kv.put(&branch_id, "default", "float", Value::Float(3.14))
+        kv.put(&branch_id, "default", "float", Value::Float(3.125))
             .unwrap();
         kv.put(
             &branch_id,

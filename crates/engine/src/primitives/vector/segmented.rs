@@ -30,6 +30,7 @@ use crate::primitives::vector::backend::VectorIndexBackend;
 use crate::primitives::vector::distance::compute_similarity;
 use crate::primitives::vector::heap::VectorHeap;
 use crate::primitives::vector::hnsw::{CompactHnswGraph, HnswConfig, HnswGraph};
+use crate::primitives::vector::types::InlineMeta;
 use crate::primitives::vector::{DistanceMetric, VectorConfig, VectorError, VectorId};
 
 /// Dedicated thread pool for parallel vector search.
@@ -838,20 +839,11 @@ impl VectorIndexBackend for SegmentedHnswBackend {
 
         if live_ids.len() >= self.config.seal_threshold {
             let chunks: Vec<&[VectorId]> = live_ids.chunks(self.config.seal_threshold).collect();
-            let num_chunks = chunks.len();
 
-            for (i, chunk) in chunks.into_iter().enumerate() {
-                let is_last = i == num_chunks - 1;
-                let is_partial = chunk.len() < self.config.seal_threshold;
-
-                if is_last && is_partial {
-                    // Last partial chunk stays in active buffer
-                    for &id in chunk {
-                        let ts = all_timestamps.get(&id).copied().unwrap_or((0, None));
-                        self.active.ids.push(id);
-                        self.active.timestamps.insert(id, ts);
-                    }
-                } else {
+            for chunk in chunks {
+                // Seal all chunks into HNSW segments (including partial last chunk).
+                // Even small chunks benefit from O(log n) HNSW search vs O(n) brute-force.
+                {
                     // Build sealed segment (graph-only, no embedding duplication)
                     let mut graph = HnswGraph::new(&self.vector_config, self.config.hnsw.clone());
                     let mut live_count = 0;
@@ -888,6 +880,48 @@ impl VectorIndexBackend for SegmentedHnswBackend {
                 self.active.timestamps.insert(id, ts);
             }
         }
+    }
+
+    fn seal_remaining_active(&mut self) {
+        if self.active.is_empty() {
+            return;
+        }
+
+        let (ids, timestamps) = self.active.drain_sorted();
+        let live_ids: Vec<VectorId> = ids
+            .into_iter()
+            .filter(|id| self.heap.contains(*id))
+            .collect();
+
+        if live_ids.is_empty() {
+            return;
+        }
+
+        let mut graph = HnswGraph::new(&self.vector_config, self.config.hnsw.clone());
+        let mut live_count = 0;
+
+        for &id in &live_ids {
+            if let Some(embedding) = self.heap.get(id) {
+                let embedding = embedding.to_vec();
+                let created_at = timestamps.get(&id).map(|t| t.0).unwrap_or(0);
+                graph.insert_into_graph(id, &embedding, created_at, &self.heap);
+                if let Some(&(_, Some(deleted_at))) = timestamps.get(&id) {
+                    graph.delete_with_timestamp(id, deleted_at);
+                } else {
+                    live_count += 1;
+                }
+            }
+        }
+
+        let segment_id = self.next_segment_id;
+        self.next_segment_id += 1;
+
+        self.sealed.push(SealedSegment {
+            segment_id,
+            graph: CompactHnswGraph::from_graph(&graph),
+            live_count,
+            source_branch: None,
+        });
     }
 
     fn vector_ids(&self) -> Vec<VectorId> {
@@ -939,6 +973,18 @@ impl VectorIndexBackend for SegmentedHnswBackend {
 
     fn is_heap_mmap(&self) -> bool {
         self.heap.is_mmap()
+    }
+
+    fn set_inline_meta(&mut self, id: VectorId, meta: InlineMeta) {
+        self.heap.set_inline_meta(id, meta);
+    }
+
+    fn get_inline_meta(&self, id: VectorId) -> Option<&InlineMeta> {
+        self.heap.get_inline_meta(id)
+    }
+
+    fn remove_inline_meta(&mut self, id: VectorId) {
+        self.heap.remove_inline_meta(id);
     }
 
     fn freeze_graphs_to_disk(&self, dir: &std::path::Path) -> Result<(), VectorError> {
@@ -1308,9 +1354,9 @@ mod tests {
         // Rebuild
         backend.rebuild_index();
 
-        // Should have sealed segments + remainder in active
-        assert_eq!(backend.sealed.len(), 2); // 10 / 4 = 2 full chunks
-        assert_eq!(backend.active.len(), 2); // 10 % 4 = 2 remainder
+        // All chunks sealed (including partial last chunk)
+        assert_eq!(backend.sealed.len(), 3); // 10 / 4 = 2 full + 1 partial
+        assert_eq!(backend.active.len(), 0); // no remainder in active
 
         // Verify search returns the correct top result
         let results = backend.search(&[1.0, 0.0, 0.0], 3);
@@ -1351,9 +1397,9 @@ mod tests {
         // Rebuild
         backend.rebuild_index();
 
-        // 5 live vectors, threshold=4: should have 1 sealed segment + 1 in active
-        assert_eq!(backend.sealed.len(), 1);
-        assert_eq!(backend.active.len(), 1);
+        // 5 live vectors, threshold=4: all sealed (1 full + 1 partial)
+        assert_eq!(backend.sealed.len(), 2);
+        assert_eq!(backend.active.len(), 0);
 
         // Search should find only live vectors
         let results = backend.search(&[8.0, 0.0, 0.0], 10);

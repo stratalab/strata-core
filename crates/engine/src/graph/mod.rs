@@ -172,6 +172,7 @@ impl GraphStore {
             }
         }
 
+
         let node_json =
             serde_json::to_string(&data).map_err(|e| StrataError::serialization(e.to_string()))?;
         let user_key = keys::node_key(graph, node_id);
@@ -365,6 +366,7 @@ impl GraphStore {
                 self.validate_edge(branch_id, graph, src, dst, edge_type)?;
             }
         }
+
 
         let edge_json =
             serde_json::to_string(&data).map_err(|e| StrataError::serialization(e.to_string()))?;
@@ -613,6 +615,7 @@ impl GraphStore {
             .and_then(|m| m.ontology_status)
             == Some(types::OntologyStatus::Frozen);
 
+
         let chunk_size = std::cmp::max(1, chunk_size.unwrap_or(Self::DEFAULT_BULK_CHUNK_SIZE));
         let empty_json = "{}";
         let default_edge_json = "{\"weight\":1.0}";
@@ -678,6 +681,7 @@ impl GraphStore {
                     }
                 }
 
+
                 for (sk, json) in &entries {
                     txn.put(sk.clone(), Value::String(json.clone()))?;
                 }
@@ -709,6 +713,7 @@ impl GraphStore {
                 if is_frozen {
                     self.validate_edge(branch_id, graph, src, dst, edge_type)?;
                 }
+
 
                 let fwd = keys::forward_edge_key(graph, src, edge_type, dst);
                 let rev = keys::reverse_edge_key(graph, dst, edge_type, src);

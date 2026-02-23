@@ -381,7 +381,7 @@ fn value_types_roundtrip() {
         branch: None,
         space: None,
         key: "k".into(),
-        value: Value::Float(3.14),
+        value: Value::Float(3.125),
     };
     let json = serde_json::to_string(&cmd).unwrap();
     let parsed: Command = serde_json::from_str(&json).unwrap();

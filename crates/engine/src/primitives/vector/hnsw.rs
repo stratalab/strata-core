@@ -29,6 +29,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use crate::primitives::vector::backend::VectorIndexBackend;
 use crate::primitives::vector::distance::compute_similarity;
 use crate::primitives::vector::heap::VectorHeap;
+use crate::primitives::vector::types::InlineMeta;
 use crate::primitives::vector::{DistanceMetric, VectorConfig, VectorError, VectorId};
 
 /// HNSW configuration parameters
@@ -1573,6 +1574,18 @@ impl VectorIndexBackend for HnswBackend {
 
     fn is_heap_mmap(&self) -> bool {
         self.heap.is_mmap()
+    }
+
+    fn set_inline_meta(&mut self, id: VectorId, meta: InlineMeta) {
+        self.heap.set_inline_meta(id, meta);
+    }
+
+    fn get_inline_meta(&self, id: VectorId) -> Option<&InlineMeta> {
+        self.heap.get_inline_meta(id)
+    }
+
+    fn remove_inline_meta(&mut self, id: VectorId) {
+        self.heap.remove_inline_meta(id);
     }
 }
 

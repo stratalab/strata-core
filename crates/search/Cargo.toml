@@ -17,6 +17,7 @@ rerank = ["dep:ureq"]
 [dependencies]
 strata-core = { path = "../core" }
 strata-engine = { path = "../engine" }
+rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

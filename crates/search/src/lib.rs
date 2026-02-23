@@ -17,6 +17,15 @@ pub use hybrid::HybridSearch;
 pub trait QueryEmbedder: Send + Sync {
     /// Embed the given text, returning None on failure.
     fn embed(&self, text: &str) -> Option<Vec<f32>>;
+
+    /// Embed multiple texts in a single batched call.
+    ///
+    /// Default implementation falls back to serial `embed()` calls.
+    /// Implementations backed by a batch-capable model should override this
+    /// to use tensor-batched inference for better throughput.
+    fn embed_batch(&self, texts: &[&str]) -> Vec<Option<Vec<f32>>> {
+        texts.iter().map(|t| self.embed(t)).collect()
+    }
 }
 
 /// Extension trait for Database to provide search functionality.

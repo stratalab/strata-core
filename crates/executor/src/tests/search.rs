@@ -30,6 +30,7 @@ fn test_search_empty_database() {
             mode: None,
             expand: None,
             rerank: None,
+            precomputed_embedding: None,
         },
     });
 
@@ -76,6 +77,7 @@ fn test_search_returns_empty_for_kv_primitive() {
             mode: None,
             expand: None,
             rerank: None,
+            precomputed_embedding: None,
         },
     });
 
@@ -114,6 +116,7 @@ fn test_search_with_primitive_filter() {
             mode: None,
             expand: None,
             rerank: None,
+            precomputed_embedding: None,
         },
     });
 
@@ -143,6 +146,7 @@ fn test_search_command_infrastructure_works() {
             mode: None,
             expand: None,
             rerank: None,
+            precomputed_embedding: None,
         },
     });
 
@@ -171,6 +175,7 @@ fn test_search_with_mode_override() {
             mode: Some("keyword".to_string()),
             expand: None,
             rerank: None,
+            precomputed_embedding: None,
         },
     });
     assert!(result.is_ok());
@@ -187,6 +192,7 @@ fn test_search_with_mode_override() {
             mode: Some("hybrid".to_string()),
             expand: None,
             rerank: None,
+            precomputed_embedding: None,
         },
     });
     assert!(result.is_ok());
@@ -207,6 +213,7 @@ fn test_search_with_expand_rerank_disabled() {
             mode: None,
             expand: Some(false),
             rerank: Some(false),
+            precomputed_embedding: None,
         },
     });
     assert!(result.is_ok());

@@ -4,6 +4,7 @@
 //! BruteForceBackend (O(n) search)
 //! HnswBackend (O(log n) search) - reserved
 
+use crate::primitives::vector::types::InlineMeta;
 use crate::primitives::vector::{DistanceMetric, VectorConfig, VectorError, VectorId};
 
 /// Trait for swappable vector index implementations
@@ -150,6 +151,14 @@ pub trait VectorIndexBackend: Send + Sync {
         // Default: no-op (BruteForce has no derived structures)
     }
 
+    /// Seal any remaining active buffer entries into HNSW segments.
+    ///
+    /// Called after loading graphs from mmap cache to ensure no vectors
+    /// remain in the brute-force active buffer. Default: no-op.
+    fn seal_remaining_active(&mut self) {
+        // Default: no-op (backends without active buffers ignore this)
+    }
+
     /// Write the embedding heap to a `.vec` mmap cache file.
     ///
     /// Called after recovery to create a disk cache that speeds up subsequent
@@ -208,6 +217,26 @@ pub trait VectorIndexBackend: Send + Sync {
     /// Default: returns `false` (backends without sealed segments).
     fn load_graphs_from_disk(&mut self, _dir: &std::path::Path) -> Result<bool, VectorError> {
         Ok(false)
+    }
+
+    // ========================================================================
+    // Inline Metadata (O(1) search resolution)
+    // ========================================================================
+
+    /// Store inline metadata for a VectorId (key + source_ref).
+    /// Used to avoid O(n) KV prefix scans during search result resolution.
+    fn set_inline_meta(&mut self, _id: VectorId, _meta: InlineMeta) {
+        // Default: no-op (BruteForce ignores inline meta)
+    }
+
+    /// Get inline metadata for a VectorId.
+    fn get_inline_meta(&self, _id: VectorId) -> Option<&InlineMeta> {
+        None
+    }
+
+    /// Remove inline metadata for a VectorId.
+    fn remove_inline_meta(&mut self, _id: VectorId) {
+        // Default: no-op
     }
 
     // ========================================================================

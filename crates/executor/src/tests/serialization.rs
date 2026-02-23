@@ -415,6 +415,7 @@ fn test_command_search_minimal() {
             mode: None,
             expand: None,
             rerank: None,
+            precomputed_embedding: None,
         },
     });
 }
@@ -435,6 +436,7 @@ fn test_command_search_full() {
             mode: Some("hybrid".to_string()),
             expand: Some(true),
             rerank: Some(false),
+            precomputed_embedding: None,
         },
     });
 }
@@ -449,7 +451,7 @@ fn test_command_with_complex_value() {
         [
             ("string".to_string(), Value::String("hello".to_string())),
             ("int".to_string(), Value::Int(42)),
-            ("float".to_string(), Value::Float(3.14)),
+            ("float".to_string(), Value::Float(3.125)),
             ("bool".to_string(), Value::Bool(true)),
             ("null".to_string(), Value::Null),
             (

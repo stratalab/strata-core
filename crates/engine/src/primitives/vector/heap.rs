@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::primitives::vector::error::{VectorError, VectorResult};
 use crate::primitives::vector::mmap::{self, MmapVectorData};
-use crate::primitives::vector::types::{DistanceMetric, VectorConfig, VectorId};
+use crate::primitives::vector::types::{DistanceMetric, InlineMeta, VectorConfig, VectorId};
 
 /// Backing storage for vector embeddings.
 ///
@@ -97,6 +97,10 @@ pub struct VectorHeap {
 
     /// Version counter for snapshot consistency
     version: AtomicU64,
+
+    /// Inline metadata for O(1) search resolution (VectorId → key + source_ref).
+    /// Populated during insert and recovery, queried during search.
+    inline_meta: BTreeMap<VectorId, InlineMeta>,
 }
 
 impl VectorHeap {
@@ -112,6 +116,7 @@ impl VectorHeap {
             free_slots: Vec::new(),
             next_id: AtomicU64::new(1),
             version: AtomicU64::new(0),
+            inline_meta: BTreeMap::new(),
         }
     }
 
@@ -133,6 +138,7 @@ impl VectorHeap {
             free_slots,
             next_id: AtomicU64::new(next_id),
             version: AtomicU64::new(0),
+            inline_meta: BTreeMap::new(),
         }
     }
 
@@ -152,6 +158,7 @@ impl VectorHeap {
             free_slots,
             next_id: AtomicU64::new(next_id),
             version: AtomicU64::new(0),
+            inline_meta: BTreeMap::new(),
         })
     }
 
@@ -394,8 +401,28 @@ impl VectorHeap {
         self.data = VectorData::InMemory(Vec::new());
         self.id_to_offset.clear();
         self.free_slots.clear();
+        self.inline_meta.clear();
         // Note: next_id is NOT reset — IDs are never reused
         self.version.fetch_add(1, Ordering::Release);
+    }
+
+    // ========================================================================
+    // Inline Metadata (O(1) search resolution)
+    // ========================================================================
+
+    /// Set inline metadata for a VectorId (for O(1) search resolution).
+    pub(crate) fn set_inline_meta(&mut self, id: VectorId, meta: InlineMeta) {
+        self.inline_meta.insert(id, meta);
+    }
+
+    /// Get inline metadata for a VectorId.
+    pub(crate) fn get_inline_meta(&self, id: VectorId) -> Option<&InlineMeta> {
+        self.inline_meta.get(&id)
+    }
+
+    /// Remove inline metadata for a VectorId.
+    pub(crate) fn remove_inline_meta(&mut self, id: VectorId) {
+        self.inline_meta.remove(&id);
     }
 
     // ========================================================================

@@ -157,6 +157,10 @@ pub struct SearchRequest {
 
     /// Optional: tag filter (match any)
     pub tags_any: Vec<String>,
+
+    /// Optional: precomputed query embedding (skip embedder call in hybrid search).
+    /// Used by `search_expanded()` to batch-embed all expansion texts upfront.
+    pub precomputed_embedding: Option<Vec<f32>>,
 }
 
 impl SearchRequest {
@@ -169,6 +173,7 @@ impl SearchRequest {
     /// - primitive_filter: None (search all primitives)
     /// - time_range: None
     /// - tags_any: empty
+    /// - precomputed_embedding: None
     pub fn new(branch_id: BranchId, query: impl Into<String>) -> Self {
         SearchRequest {
             branch_id,
@@ -179,6 +184,7 @@ impl SearchRequest {
             primitive_filter: None,
             time_range: None,
             tags_any: vec![],
+            precomputed_embedding: None,
         }
     }
 
@@ -215,6 +221,12 @@ impl SearchRequest {
     /// Builder: set tags filter
     pub fn with_tags(mut self, tags: Vec<String>) -> Self {
         self.tags_any = tags;
+        self
+    }
+
+    /// Builder: set precomputed query embedding (avoids re-embedding in hybrid search)
+    pub fn with_precomputed_embedding(mut self, embedding: Vec<f32>) -> Self {
+        self.precomputed_embedding = Some(embedding);
         self
     }
 

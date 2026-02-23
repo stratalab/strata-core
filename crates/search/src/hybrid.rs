@@ -16,6 +16,7 @@
 //! HybridSearch is STATELESS. It holds only references to Database and primitives.
 
 use crate::fuser::{Fuser, RRFFuser};
+use rayon::prelude::*;
 use std::sync::Arc;
 use std::time::Instant;
 use strata_core::PrimitiveType;
@@ -157,80 +158,122 @@ impl HybridSearch {
         // 2. Allocate budgets
         let budgets = self.allocate_budgets(req, primitives.len());
 
-        // 3. Execute searches
-        let mut primitive_results = Vec::new();
-        let mut total_candidates = 0;
-        let mut any_truncated = false;
+        // 3 & 4. In Hybrid mode, overlap BM25 primitive searches with query
+        // embedding (rayon::join), then parallelize shadow collection vector
+        // searches (par_iter). In Keyword mode, run BM25 sequentially as before.
+        let is_hybrid = req.mode == SearchMode::Hybrid;
 
-        for (primitive, budget) in primitives.iter().zip(budgets.iter()) {
-            // In Hybrid mode, skip the Vector primitive in the BM25 loop —
-            // vector search is handled separately in step 4 via shadow collections.
-            if req.mode == SearchMode::Hybrid && *primitive == PrimitiveType::Vector {
-                continue;
-            }
+        // Compute the query embedding in parallel with BM25 searches (Hybrid only).
+        let (bm25_result, query_embedding) = if is_hybrid {
+            rayon::join(
+                || -> StrataResult<(Vec<(PrimitiveType, SearchResponse)>, usize, bool)> {
+                    let mut primitive_results = Vec::new();
+                    let mut total_candidates = 0;
+                    let mut any_truncated = false;
 
-            // Check overall time budget
-            if start.elapsed().as_micros() as u64 >= req.budget.max_wall_time_micros {
-                any_truncated = true;
-                break;
-            }
-
-            // Create sub-request with allocated budget
-            let sub_req = req.clone().with_budget(*budget);
-
-            // Execute search on this primitive
-            let result = self.search_primitive(*primitive, &sub_req)?;
-
-            total_candidates += result.stats.candidates_considered;
-            if result.truncated {
-                any_truncated = true;
-            }
-
-            primitive_results.push((*primitive, result));
-        }
-
-        // 4. Vector search for Hybrid mode (requires an injected embedder)
-        if req.mode == SearchMode::Hybrid {
-            if let Some(query_embedding) = self.embedder.as_ref().and_then(|e| e.embed(&req.query))
-            {
-                let shadow_collections = [SHADOW_KV, SHADOW_JSON, SHADOW_EVENT, SHADOW_STATE];
-                let mut vector_hits: Vec<SearchHit> = Vec::new();
-
-                for collection in &shadow_collections {
-                    let matches = if let Some((start, end)) = req.time_range {
-                        self.vector.system_search_with_sources_in_range(
-                            req.branch_id,
-                            collection,
-                            &query_embedding,
-                            req.k,
-                            start,
-                            end,
-                        )
-                    } else {
-                        self.vector.system_search_with_sources(
-                            req.branch_id,
-                            collection,
-                            &query_embedding,
-                            req.k,
-                        )
-                    };
-
-                    if let Ok(results) = matches {
-                        for m in results {
-                            if let Some(source_ref) = m.source_ref {
-                                vector_hits.push(SearchHit::new(
-                                    source_ref, m.score,
-                                    0, // placeholder — re-assigned after global sort
-                                ));
-                            }
+                    for (primitive, budget) in primitives.iter().zip(budgets.iter()) {
+                        if *primitive == PrimitiveType::Vector {
+                            continue;
                         }
+                        if start.elapsed().as_micros() as u64 >= req.budget.max_wall_time_micros {
+                            any_truncated = true;
+                            break;
+                        }
+                        let sub_req = req.clone().with_budget(*budget);
+                        let result = self.search_primitive(*primitive, &sub_req)?;
+                        total_candidates += result.stats.candidates_considered;
+                        if result.truncated {
+                            any_truncated = true;
+                        }
+                        primitive_results.push((*primitive, result));
                     }
-                    // Silently skip collections that don't exist yet
+                    Ok((primitive_results, total_candidates, any_truncated))
+                },
+                || -> Option<Vec<f32>> {
+                    // Use precomputed embedding if available, otherwise compute it
+                    req.precomputed_embedding
+                        .clone()
+                        .or_else(|| self.embedder.as_ref().and_then(|e| e.embed(&req.query)))
+                },
+            )
+        } else {
+            // Keyword mode: no embedding needed
+            let bm25 = (|| -> StrataResult<(Vec<(PrimitiveType, SearchResponse)>, usize, bool)> {
+                let mut primitive_results = Vec::new();
+                let mut total_candidates = 0;
+                let mut any_truncated = false;
+
+                for (primitive, budget) in primitives.iter().zip(budgets.iter()) {
+                    if start.elapsed().as_micros() as u64 >= req.budget.max_wall_time_micros {
+                        any_truncated = true;
+                        break;
+                    }
+                    let sub_req = req.clone().with_budget(*budget);
+                    let result = self.search_primitive(*primitive, &sub_req)?;
+                    total_candidates += result.stats.candidates_considered;
+                    if result.truncated {
+                        any_truncated = true;
+                    }
+                    primitive_results.push((*primitive, result));
                 }
+                Ok((primitive_results, total_candidates, any_truncated))
+            })();
+            (bm25, None)
+        };
+
+        let (mut primitive_results, mut total_candidates, any_truncated) = bm25_result?;
+
+        // Vector search for Hybrid mode: search shadow collections in parallel
+        if is_hybrid {
+            if let Some(query_embedding) = query_embedding {
+                let shadow_collections = [SHADOW_KV, SHADOW_JSON, SHADOW_EVENT, SHADOW_STATE];
+
+                let vector_hits: Vec<SearchHit> = shadow_collections
+                    .par_iter()
+                    .filter(|coll| {
+                        self.vector
+                            .system_collection_len(req.branch_id, coll)
+                            .unwrap_or(0)
+                            > 0
+                    })
+                    .flat_map(|collection| {
+                        let matches = if let Some((start, end)) = req.time_range {
+                            self.vector.system_search_with_sources_in_range(
+                                req.branch_id,
+                                collection,
+                                &query_embedding,
+                                req.k,
+                                start,
+                                end,
+                            )
+                        } else {
+                            self.vector.system_search_with_sources(
+                                req.branch_id,
+                                collection,
+                                &query_embedding,
+                                req.k,
+                            )
+                        };
+
+                        matches
+                            .into_iter()
+                            .flat_map(|results| results.into_iter())
+                            .filter_map(|m| {
+                                m.source_ref.map(|source_ref| {
+                                    SearchHit::new(
+                                        source_ref, m.score,
+                                        0, // placeholder — re-assigned after global sort
+                                    )
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
 
                 if !vector_hits.is_empty() {
                     // Sort by score descending so RRF ranks reflect global relevance,
                     // not the arbitrary shadow-collection iteration order.
+                    let mut vector_hits = vector_hits;
                     vector_hits.sort_by(|a, b| {
                         b.score
                             .partial_cmp(&a.score)
@@ -337,6 +380,9 @@ impl HybridSearch {
     /// through the full HybridSearch pipeline. Results are fused with weighted RRF
     /// where the original query gets `original_weight` and expansions get 1.0.
     ///
+    /// Batch-embeds all hybrid expansion texts upfront (single batched GPU call)
+    /// to avoid N serial embedding calls.
+    ///
     /// # Search mode by query type
     ///
     /// - `Lex` expansions: Keyword mode (BM25 only)
@@ -354,13 +400,41 @@ impl HybridSearch {
         let start = Instant::now();
         let mut result_lists: Vec<(SearchResponse, f32)> = Vec::new();
 
+        // Batch-embed all texts that need embedding (original query + Vec/Hyde expansions).
+        // This turns N serial GPU calls into 1 batched call.
+        let mut texts_to_embed: Vec<&str> = Vec::new();
+        // Index 0 = original query
+        texts_to_embed.push(&req.query);
+        // Indices 1..N = expansion texts that need embedding (Vec/Hyde only)
+        let mut expansion_embed_indices: Vec<Option<usize>> = Vec::new();
+        for expansion in expansions {
+            match expansion.query_type {
+                QueryType::Vec | QueryType::Hyde => {
+                    expansion_embed_indices.push(Some(texts_to_embed.len()));
+                    texts_to_embed.push(&expansion.text);
+                }
+                QueryType::Lex => {
+                    expansion_embed_indices.push(None);
+                }
+            }
+        }
+
+        let embeddings = if let Some(embedder) = &self.embedder {
+            embedder.embed_batch(&texts_to_embed)
+        } else {
+            vec![None; texts_to_embed.len()]
+        };
+
         // Pass 0: original query with Hybrid mode and original_weight
-        let original_req = req.clone().with_mode(SearchMode::Hybrid);
+        let mut original_req = req.clone().with_mode(SearchMode::Hybrid);
+        if let Some(emb) = embeddings[0].clone() {
+            original_req = original_req.with_precomputed_embedding(emb);
+        }
         let original_response = self.search(&original_req)?;
         result_lists.push((original_response, original_weight));
 
         // Expansion passes
-        for expansion in expansions {
+        for (i, expansion) in expansions.iter().enumerate() {
             let mode = match expansion.query_type {
                 QueryType::Lex => SearchMode::Keyword,
                 QueryType::Vec | QueryType::Hyde => SearchMode::Hybrid,
@@ -376,6 +450,13 @@ impl HybridSearch {
             }
             if let Some((start, end)) = req.time_range {
                 exp_req = exp_req.with_time_range(start, end);
+            }
+
+            // Attach precomputed embedding for Vec/Hyde expansions
+            if let Some(embed_idx) = expansion_embed_indices[i] {
+                if let Some(emb) = embeddings[embed_idx].clone() {
+                    exp_req = exp_req.with_precomputed_embedding(emb);
+                }
             }
 
             match self.search(&exp_req) {
