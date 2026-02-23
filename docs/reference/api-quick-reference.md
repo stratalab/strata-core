@@ -111,6 +111,43 @@ Every method on the `Strata` struct, grouped by category.
 | `vector_search` | `(collection: &str, query: Vec<f32>, k: u64) -> Result<Vec<VectorMatch>>` | Top-k matches | 8 metadata filter operators |
 | `vector_search_at` | `(collection: &str, query: Vec<f32>, k: u64, as_of_ts: u64) -> Result<Vec<VectorMatch>>` | Historical top-k matches | Temporal HNSW filtering |
 
+## Graph Store
+
+| Method | Signature | Returns | Notes |
+|--------|-----------|---------|-------|
+| `graph_create` | `(graph: &str) -> Result<()>` | | Creates empty graph |
+| `graph_create_with_policy` | `(graph: &str, cascade_policy: Option<&str>) -> Result<()>` | | `"cascade"`, `"detach"`, or `"ignore"` |
+| `graph_delete` | `(graph: &str) -> Result<()>` | | Deletes graph + all data |
+| `graph_list` | `() -> Result<Vec<String>>` | Graph names | |
+| `graph_get_meta` | `(graph: &str) -> Result<Option<Value>>` | Metadata or None | |
+| `graph_add_node` | `(graph: &str, node_id: &str, entity_ref: Option<&str>, properties: Option<Value>) -> Result<()>` | | Creates or updates |
+| `graph_add_node_typed` | `(graph: &str, node_id: &str, entity_ref: Option<&str>, properties: Option<Value>, object_type: Option<&str>) -> Result<()>` | | With ontology type |
+| `graph_get_node` | `(graph: &str, node_id: &str) -> Result<Option<Value>>` | Node data or None | |
+| `graph_remove_node` | `(graph: &str, node_id: &str) -> Result<()>` | | Cascades to edges |
+| `graph_list_nodes` | `(graph: &str) -> Result<Vec<String>>` | Node IDs | |
+| `graph_add_edge` | `(graph: &str, src: &str, dst: &str, edge_type: &str, weight: Option<f64>, properties: Option<Value>) -> Result<()>` | | Directed typed edge |
+| `graph_remove_edge` | `(graph: &str, src: &str, dst: &str, edge_type: &str) -> Result<()>` | | |
+| `graph_bulk_insert` | `(graph: &str, nodes: &[...], edges: &[...]) -> Result<(u64, u64)>` | (nodes, edges) inserted | Chunked transactions |
+| `graph_neighbors` | `(graph: &str, node_id: &str, direction: &str, edge_type: Option<&str>) -> Result<Vec<GraphNeighborHit>>` | Neighbor list | Direction: `"outgoing"`, `"incoming"`, `"both"` |
+| `graph_bfs` | `(graph: &str, start: &str, max_depth: usize, max_nodes: Option<usize>, edge_types: Option<Vec<String>>, direction: Option<&str>) -> Result<GraphBfsResult>` | BFS result | visited + depths + edges |
+
+## Graph Ontology
+
+| Method | Signature | Returns | Notes |
+|--------|-----------|---------|-------|
+| `graph_define_object_type` | `(graph: &str, definition: Value) -> Result<()>` | | Draft mode only |
+| `graph_get_object_type` | `(graph: &str, name: &str) -> Result<Option<Value>>` | Definition or None | |
+| `graph_list_object_types` | `(graph: &str) -> Result<Vec<String>>` | Type names | |
+| `graph_delete_object_type` | `(graph: &str, name: &str) -> Result<()>` | | Draft mode only |
+| `graph_define_link_type` | `(graph: &str, definition: Value) -> Result<()>` | | Draft mode only |
+| `graph_get_link_type` | `(graph: &str, name: &str) -> Result<Option<Value>>` | Definition or None | |
+| `graph_list_link_types` | `(graph: &str) -> Result<Vec<String>>` | Type names | |
+| `graph_delete_link_type` | `(graph: &str, name: &str) -> Result<()>` | | Draft mode only |
+| `graph_freeze_ontology` | `(graph: &str) -> Result<()>` | | Enables validation |
+| `graph_ontology_status` | `(graph: &str) -> Result<Option<Value>>` | Status or None | `"draft"` or `"frozen"` |
+| `graph_ontology_summary` | `(graph: &str) -> Result<Option<Value>>` | Full summary or None | Types + counts |
+| `graph_nodes_by_type` | `(graph: &str, object_type: &str) -> Result<Vec<String>>` | Node IDs | |
+
 ## Search
 
 | Method | Signature | Returns | Notes |

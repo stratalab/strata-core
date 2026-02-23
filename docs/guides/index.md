@@ -9,6 +9,8 @@ Detailed walkthroughs for each StrataDB feature.
 - **[State Cell](state-cell.md)** — mutable state with CAS, coordination patterns
 - **[JSON Store](json-store.md)** — structured documents with path-level access
 - **[Vector Store](vector-store.md)** — collections, similarity search, metadata filtering
+- **[Graph Store](graph.md)** — property graph with typed nodes, edges, and traversal
+- **[Ontology](ontology.md)** — typed schemas for graphs with validation
 - **[Branch Management](branch-management.md)** — creating, switching, listing, and deleting branches
 - **[Spaces](spaces.md)** — organizing data within branches using spaces
 
