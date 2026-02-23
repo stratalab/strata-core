@@ -1204,9 +1204,7 @@ mod tests {
         assert!(filtered.is_empty());
 
         // Watermark=u64::MAX: extreme case
-        let filtered = reader
-            .read_all_after_watermark(&wal_dir, u64::MAX)
-            .unwrap();
+        let filtered = reader.read_all_after_watermark(&wal_dir, u64::MAX).unwrap();
         assert!(filtered.is_empty());
     }
 

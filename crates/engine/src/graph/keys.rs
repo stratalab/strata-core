@@ -268,9 +268,7 @@ pub fn validate_type_name(name: &str) -> StrataResult<()> {
         return Err(StrataError::invalid_input("Type name must not be empty"));
     }
     if name.contains(SEP) {
-        return Err(StrataError::invalid_input(
-            "Type name must not contain '/'",
-        ));
+        return Err(StrataError::invalid_input("Type name must not contain '/'"));
     }
     if name.starts_with("__") {
         return Err(StrataError::invalid_input(

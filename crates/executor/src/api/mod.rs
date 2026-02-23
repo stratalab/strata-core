@@ -188,9 +188,10 @@ impl Strata {
             })?;
             // Write config to strata.toml so restarts pick it up
             let config_path = data_dir.join(strata_engine::database::config::CONFIG_FILE_NAME);
-            cfg.write_to_file(&config_path).map_err(|e| Error::Internal {
-                reason: format!("Failed to write config: {}", e),
-            })?;
+            cfg.write_to_file(&config_path)
+                .map_err(|e| Error::Internal {
+                    reason: format!("Failed to write config: {}", e),
+                })?;
             Database::open_multi_process(&data_dir, mode, cfg).map_err(|e| Error::Internal {
                 reason: format!("Failed to open database (multi-process): {}", e),
             })?

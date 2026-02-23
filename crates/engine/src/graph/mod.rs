@@ -172,7 +172,6 @@ impl GraphStore {
             }
         }
 
-
         let node_json =
             serde_json::to_string(&data).map_err(|e| StrataError::serialization(e.to_string()))?;
         let user_key = keys::node_key(graph, node_id);
@@ -366,7 +365,6 @@ impl GraphStore {
                 self.validate_edge(branch_id, graph, src, dst, edge_type)?;
             }
         }
-
 
         let edge_json =
             serde_json::to_string(&data).map_err(|e| StrataError::serialization(e.to_string()))?;
@@ -615,7 +613,6 @@ impl GraphStore {
             .and_then(|m| m.ontology_status)
             == Some(types::OntologyStatus::Frozen);
 
-
         let chunk_size = std::cmp::max(1, chunk_size.unwrap_or(Self::DEFAULT_BULK_CHUNK_SIZE));
         let empty_json = "{}";
         let default_edge_json = "{\"weight\":1.0}";
@@ -640,14 +637,15 @@ impl GraphStore {
                 let user_key = keys::node_key(graph, node_id);
                 let sk = keys::storage_key(branch_id, &user_key);
 
-                let json =
-                    if data.entity_ref.is_none() && data.properties.is_none() && data.object_type.is_none()
-                    {
-                        empty_json.to_string()
-                    } else {
-                        serde_json::to_string(data)
-                            .map_err(|e| StrataError::serialization(e.to_string()))?
-                    };
+                let json = if data.entity_ref.is_none()
+                    && data.properties.is_none()
+                    && data.object_type.is_none()
+                {
+                    empty_json.to_string()
+                } else {
+                    serde_json::to_string(data)
+                        .map_err(|e| StrataError::serialization(e.to_string()))?
+                };
 
                 entries.push((sk, json));
 
@@ -681,7 +679,6 @@ impl GraphStore {
                     }
                 }
 
-
                 for (sk, json) in &entries {
                     txn.put(sk.clone(), Value::String(json.clone()))?;
                 }
@@ -713,7 +710,6 @@ impl GraphStore {
                 if is_frozen {
                     self.validate_edge(branch_id, graph, src, dst, edge_type)?;
                 }
-
 
                 let fwd = keys::forward_edge_key(graph, src, edge_type, dst);
                 let rev = keys::reverse_edge_key(graph, dst, edge_type, src);
@@ -852,20 +848,8 @@ mod tests {
         let branch = default_branch();
 
         gs.create_graph(branch, "dg", None).unwrap();
-        gs.add_node(
-            branch,
-            "dg",
-            "A",
-            NodeData::default(),
-        )
-        .unwrap();
-        gs.add_node(
-            branch,
-            "dg",
-            "B",
-            NodeData::default(),
-        )
-        .unwrap();
+        gs.add_node(branch, "dg", "A", NodeData::default()).unwrap();
+        gs.add_node(branch, "dg", "B", NodeData::default()).unwrap();
         gs.add_edge(branch, "dg", "A", "B", "KNOWS", EdgeData::default())
             .unwrap();
 
@@ -941,13 +925,8 @@ mod tests {
         let branch = default_branch();
 
         gs.create_graph(branch, "ng", None).unwrap();
-        gs.add_node(
-            branch,
-            "ng",
-            "n1",
-            NodeData::default(),
-        )
-        .unwrap();
+        gs.add_node(branch, "ng", "n1", NodeData::default())
+            .unwrap();
 
         let node = gs.get_node(branch, "ng", "n1").unwrap().unwrap();
         assert!(node.entity_ref.is_none());
@@ -960,13 +939,7 @@ mod tests {
 
         gs.create_graph(branch, "ng", None).unwrap();
         for id in &["a", "b", "c"] {
-            gs.add_node(
-                branch,
-                "ng",
-                id,
-                NodeData::default(),
-            )
-            .unwrap();
+            gs.add_node(branch, "ng", id, NodeData::default()).unwrap();
         }
 
         let mut nodes = gs.list_nodes(branch, "ng").unwrap();
@@ -980,13 +953,8 @@ mod tests {
         let branch = default_branch();
 
         gs.create_graph(branch, "ng", None).unwrap();
-        gs.add_node(
-            branch,
-            "ng",
-            "n1",
-            NodeData::default(),
-        )
-        .unwrap();
+        gs.add_node(branch, "ng", "n1", NodeData::default())
+            .unwrap();
         gs.remove_node(branch, "ng", "n1").unwrap();
         assert!(gs.get_node(branch, "ng", "n1").unwrap().is_none());
     }
@@ -998,13 +966,7 @@ mod tests {
 
         gs.create_graph(branch, "ng", None).unwrap();
         for id in &["A", "B", "C"] {
-            gs.add_node(
-                branch,
-                "ng",
-                id,
-                NodeData::default(),
-            )
-            .unwrap();
+            gs.add_node(branch, "ng", id, NodeData::default()).unwrap();
         }
         gs.add_edge(branch, "ng", "A", "B", "E1", EdgeData::default())
             .unwrap();
@@ -1027,14 +989,7 @@ mod tests {
         let branch = default_branch();
 
         gs.create_graph(branch, "ng", None).unwrap();
-        assert!(gs
-            .add_node(
-                branch,
-                "ng",
-                "",
-                NodeData::default(),
-            )
-            .is_err());
+        assert!(gs.add_node(branch, "ng", "", NodeData::default(),).is_err());
     }
 
     // =========================================================================
@@ -1155,20 +1110,10 @@ mod tests {
 
         gs.create_graph(branch, "gA", None).unwrap();
         gs.create_graph(branch, "gB", None).unwrap();
-        gs.add_node(
-            branch,
-            "gA",
-            "n1",
-            NodeData::default(),
-        )
-        .unwrap();
-        gs.add_node(
-            branch,
-            "gB",
-            "n1",
-            NodeData::default(),
-        )
-        .unwrap();
+        gs.add_node(branch, "gA", "n1", NodeData::default())
+            .unwrap();
+        gs.add_node(branch, "gB", "n1", NodeData::default())
+            .unwrap();
 
         gs.delete_graph(branch, "gA").unwrap();
 
@@ -1282,13 +1227,8 @@ mod tests {
         let branch = default_branch();
 
         gs.create_graph(branch, "rg", None).unwrap();
-        gs.add_node(
-            branch,
-            "rg",
-            "n1",
-            NodeData::default(),
-        )
-        .unwrap();
+        gs.add_node(branch, "rg", "n1", NodeData::default())
+            .unwrap();
 
         let refs = gs.nodes_for_entity(branch, "kv://main/key1").unwrap();
         assert!(refs.is_empty());
@@ -1557,13 +1497,8 @@ mod tests {
         .unwrap();
 
         // Update with entity_ref=None
-        gs.add_node(
-            branch,
-            "rg",
-            "n1",
-            NodeData::default(),
-        )
-        .unwrap();
+        gs.add_node(branch, "rg", "n1", NodeData::default())
+            .unwrap();
 
         let refs = gs.nodes_for_entity(branch, "kv://main/key1").unwrap();
         assert!(refs.is_empty());
@@ -1581,18 +1516,9 @@ mod tests {
         gs.create_graph(branch, "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = vec![
-            (
-                "A".into(),
-                NodeData::default(),
-            ),
-            (
-                "B".into(),
-                NodeData::default(),
-            ),
-            (
-                "C".into(),
-                NodeData::default(),
-            ),
+            ("A".into(), NodeData::default()),
+            ("B".into(), NodeData::default()),
+            ("C".into(), NodeData::default()),
         ];
         let edges: Vec<(String, String, String, EdgeData)> = vec![
             ("A".into(), "B".into(), "KNOWS".into(), EdgeData::default()),
@@ -1663,10 +1589,7 @@ mod tests {
                     ..Default::default()
                 },
             ),
-            (
-                "n3".into(),
-                NodeData::default(),
-            ),
+            ("n3".into(), NodeData::default()),
             (
                 "n4".into(),
                 NodeData {
@@ -1750,14 +1673,8 @@ mod tests {
         gs.create_graph(branch, "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = vec![
-            (
-                "A".into(),
-                NodeData::default(),
-            ),
-            (
-                "B".into(),
-                NodeData::default(),
-            ),
+            ("A".into(), NodeData::default()),
+            ("B".into(), NodeData::default()),
         ];
         let edges: Vec<(String, String, String, EdgeData)> =
             vec![("A".into(), "B".into(), "E".into(), EdgeData::default())];
@@ -1851,10 +1768,7 @@ mod tests {
 
         gs.create_graph(branch, "bg", None).unwrap();
 
-        let nodes: Vec<(String, NodeData)> = vec![(
-            "A".into(),
-            NodeData::default(),
-        )];
+        let nodes: Vec<(String, NodeData)> = vec![("A".into(), NodeData::default())];
 
         // chunk_size=0 should be clamped to 1, not panic
         let (ni, _) = gs.bulk_insert(branch, "bg", &nodes, &[], Some(0)).unwrap();
@@ -1870,14 +1784,8 @@ mod tests {
         gs.create_graph(branch, "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = vec![
-            (
-                "A".into(),
-                NodeData::default(),
-            ),
-            (
-                "B".into(),
-                NodeData::default(),
-            ),
+            ("A".into(), NodeData::default()),
+            ("B".into(), NodeData::default()),
         ];
         let edges: Vec<(String, String, String, EdgeData)> =
             vec![("A".into(), "B".into(), "E".into(), EdgeData::default())];
@@ -1900,18 +1808,9 @@ mod tests {
         gs.create_graph(branch, "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = vec![
-            (
-                "good1".into(),
-                NodeData::default(),
-            ),
-            (
-                "".into(),
-                NodeData::default(),
-            ), // invalid
-            (
-                "good2".into(),
-                NodeData::default(),
-            ),
+            ("good1".into(), NodeData::default()),
+            ("".into(), NodeData::default()), // invalid
+            ("good2".into(), NodeData::default()),
         ];
 
         let result = gs.bulk_insert(branch, "bg", &nodes, &[], None);
@@ -1991,22 +1890,10 @@ mod tests {
 
         // Build a small graph: A -> B -> C -> D
         let nodes: Vec<(String, NodeData)> = vec![
-            (
-                "A".into(),
-                NodeData::default(),
-            ),
-            (
-                "B".into(),
-                NodeData::default(),
-            ),
-            (
-                "C".into(),
-                NodeData::default(),
-            ),
-            (
-                "D".into(),
-                NodeData::default(),
-            ),
+            ("A".into(), NodeData::default()),
+            ("B".into(), NodeData::default()),
+            ("C".into(), NodeData::default()),
+            ("D".into(), NodeData::default()),
         ];
         let edges: Vec<(String, String, String, EdgeData)> = vec![
             ("A".into(), "B".into(), "NEXT".into(), EdgeData::default()),
@@ -2108,14 +1995,8 @@ mod tests {
         gs.create_graph(branch, "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = vec![
-            (
-                "A".into(),
-                NodeData::default(),
-            ),
-            (
-                "B".into(),
-                NodeData::default(),
-            ),
+            ("A".into(), NodeData::default()),
+            ("B".into(), NodeData::default()),
         ];
         let edges: Vec<(String, String, String, EdgeData)> = vec![(
             "A".into(),

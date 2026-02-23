@@ -34,6 +34,7 @@ use dashmap::DashMap;
 use parking_lot::Mutex as ParkingMutex;
 use std::any::{Any, TypeId};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use strata_concurrency::{RecoveryCoordinator, TransactionContext};
@@ -51,7 +52,6 @@ use strata_durability::{
     ManifestManager, WalOnlyCompactor,
 };
 use strata_storage::ShardedStore;
-use std::sync::atomic::AtomicU64;
 use tracing::{info, warn};
 
 // ============================================================================
@@ -428,9 +428,8 @@ impl Database {
             .write(true)
             .open(&lock_path)
             .map_err(|e| StrataError::storage(format!("failed to open lock file: {}", e)))?;
-        fs2::FileExt::lock_shared(&lock_file).map_err(|e| {
-            StrataError::storage(format!("failed to acquire shared lock: {}", e))
-        })?;
+        fs2::FileExt::lock_shared(&lock_file)
+            .map_err(|e| StrataError::storage(format!("failed to acquire shared lock: {}", e)))?;
 
         let db = Self::open_finish(
             canonical_path,
@@ -503,9 +502,9 @@ impl Database {
         if multi_process {
             use strata_durability::coordination::CounterFile;
             let counter_file = CounterFile::new(&wal_dir);
-            let (cf_version, cf_txn_id) = counter_file.read_or_default().map_err(|e| {
-                StrataError::storage(format!("Failed to read counter file: {}", e))
-            })?;
+            let (cf_version, cf_txn_id) = counter_file
+                .read_or_default()
+                .map_err(|e| StrataError::storage(format!("Failed to read counter file: {}", e)))?;
 
             // Only update if recovery found higher values (never go backward)
             let recovered_version = result.stats.final_version;
@@ -947,19 +946,16 @@ impl Database {
             .extension::<crate::primitives::vector::store::VectorBackendState>()
             .ok();
 
-
         for record in &records {
             max_txn_id = max_txn_id.max(record.txn_id);
 
-            let payload =
-                strata_concurrency::TransactionPayload::from_bytes(&record.writeset).map_err(
-                    |e| {
-                        StrataError::storage(format!(
-                            "Failed to decode WAL payload for txn {}: {}",
-                            record.txn_id, e
-                        ))
-                    },
-                )?;
+            let payload = strata_concurrency::TransactionPayload::from_bytes(&record.writeset)
+                .map_err(|e| {
+                    StrataError::storage(format!(
+                        "Failed to decode WAL payload for txn {}: {}",
+                        record.txn_id, e
+                    ))
+                })?;
 
             max_version = max_version.max(payload.version);
 
@@ -987,7 +983,6 @@ impl Database {
                 }
             }
 
-
             // Apply puts
             for (key, value) in &payload.puts {
                 use strata_core::traits::Storage;
@@ -1014,20 +1009,18 @@ impl Database {
                     let branch_id = key.namespace.branch_id;
                     match key.type_tag {
                         TypeTag::KV => {
-                            if let Some(text) =
-                                crate::search::extract_indexable_text(value)
-                            {
+                            if let Some(text) = crate::search::extract_indexable_text(value) {
                                 if let Some(user_key) = key.user_key_string() {
-                                    let entity_ref =
-                                        strata_core::EntityRef::Kv { branch_id, key: user_key };
+                                    let entity_ref = strata_core::EntityRef::Kv {
+                                        branch_id,
+                                        key: user_key,
+                                    };
                                     index.index_document(&entity_ref, &text, None);
                                 }
                             }
                         }
                         TypeTag::State => {
-                            if let Some(text) =
-                                crate::search::extract_indexable_text(value)
-                            {
+                            if let Some(text) = crate::search::extract_indexable_text(value) {
                                 if let Some(name) = key.user_key_string() {
                                     let entity_ref =
                                         strata_core::EntityRef::State { branch_id, name };
@@ -1036,20 +1029,19 @@ impl Database {
                             }
                         }
                         TypeTag::Event => {
-                            if key.user_key == b"__meta__"
-                                || key.user_key.starts_with(b"__tidx__")
+                            if key.user_key == b"__meta__" || key.user_key.starts_with(b"__tidx__")
                             {
                                 continue;
                             }
-                            if let Some(text) =
-                                crate::search::extract_indexable_text(value)
-                            {
+                            if let Some(text) = crate::search::extract_indexable_text(value) {
                                 if key.user_key.len() == 8 {
                                     let sequence = u64::from_be_bytes(
                                         key.user_key.as_slice().try_into().unwrap_or([0; 8]),
                                     );
-                                    let entity_ref =
-                                        strata_core::EntityRef::Event { branch_id, sequence };
+                                    let entity_ref = strata_core::EntityRef::Event {
+                                        branch_id,
+                                        sequence,
+                                    };
                                     index.index_document(&entity_ref, &text, None);
                                 }
                             }
@@ -1063,21 +1055,21 @@ impl Database {
                     match key.type_tag {
                         TypeTag::KV => {
                             if let Some(user_key) = key.user_key_string() {
-                                let entity_ref =
-                                    strata_core::EntityRef::Kv { branch_id, key: user_key };
+                                let entity_ref = strata_core::EntityRef::Kv {
+                                    branch_id,
+                                    key: user_key,
+                                };
                                 index.remove_document(&entity_ref);
                             }
                         }
                         TypeTag::State => {
                             if let Some(name) = key.user_key_string() {
-                                let entity_ref =
-                                    strata_core::EntityRef::State { branch_id, name };
+                                let entity_ref = strata_core::EntityRef::State { branch_id, name };
                                 index.remove_document(&entity_ref);
                             }
                         }
                         TypeTag::Event => {
-                            if key.user_key == b"__meta__"
-                                || key.user_key.starts_with(b"__tidx__")
+                            if key.user_key == b"__meta__" || key.user_key.starts_with(b"__tidx__")
                             {
                                 continue;
                             }
@@ -1086,8 +1078,10 @@ impl Database {
                                     key.user_key.as_slice().try_into().unwrap_or([0; 8]),
                                 );
                                 let branch_id = key.namespace.branch_id;
-                                let entity_ref =
-                                    strata_core::EntityRef::Event { branch_id, sequence };
+                                let entity_ref = strata_core::EntityRef::Event {
+                                    branch_id,
+                                    sequence,
+                                };
                                 index.remove_document(&entity_ref);
                             }
                         }
@@ -1109,12 +1103,11 @@ impl Database {
                         strata_core::value::Value::Bytes(b) => b,
                         _ => continue,
                     };
-                    let record = match crate::primitives::vector::types::VectorRecord::from_bytes(
-                        bytes,
-                    ) {
-                        Ok(r) => r,
-                        Err(_) => continue,
-                    };
+                    let record =
+                        match crate::primitives::vector::types::VectorRecord::from_bytes(bytes) {
+                            Ok(r) => r,
+                            Err(_) => continue,
+                        };
                     let user_key_str = match key.user_key_string() {
                         Some(s) => s,
                         None => continue,
@@ -1775,9 +1768,8 @@ impl Database {
         }
 
         // Acquire WAL file lock (blocks until available)
-        let _wal_lock = WalFileLock::acquire(&self.wal_dir).map_err(|e| {
-            StrataError::storage(format!("Failed to acquire WAL file lock: {}", e))
-        })?;
+        let _wal_lock = WalFileLock::acquire(&self.wal_dir)
+            .map_err(|e| StrataError::storage(format!("Failed to acquire WAL file lock: {}", e)))?;
 
         // Step 1: Refresh from WAL (apply other processes' writes)
         self.refresh()?;
@@ -1792,9 +1784,9 @@ impl Database {
         // The local coordinator already reflects WAL reality (from recovery + refresh),
         // so we take the max to ensure we never allocate a duplicate version/txn_id.
         let counter_file = CounterFile::new(&self.wal_dir);
-        let (cf_version, cf_txn_id) = counter_file.read_or_default().map_err(|e| {
-            StrataError::storage(format!("Failed to read counter file: {}", e))
-        })?;
+        let (cf_version, cf_txn_id) = counter_file
+            .read_or_default()
+            .map_err(|e| StrataError::storage(format!("Failed to read counter file: {}", e)))?;
 
         let local_version = self.coordinator.current_version();
         let local_max_txn_id = self.wal_watermark.load(std::sync::atomic::Ordering::SeqCst);
@@ -1841,9 +1833,9 @@ impl Database {
         }
 
         // Step 5: Update counter file
-        counter_file.write(new_version, new_txn_id).map_err(|e| {
-            StrataError::storage(format!("Failed to update counter file: {}", e))
-        })?;
+        counter_file
+            .write(new_version, new_txn_id)
+            .map_err(|e| StrataError::storage(format!("Failed to update counter file: {}", e)))?;
 
         // Step 6: Update local watermark
         self.wal_watermark

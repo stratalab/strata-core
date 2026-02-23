@@ -1156,7 +1156,6 @@ pub enum Command {
     },
 
     // ==================== Graph Ontology ====================
-
     /// Define an object type in the graph's ontology.
     /// Returns: `Output::Unit`
     GraphDefineObjectType {
