@@ -197,18 +197,66 @@ impl WalReader {
     }
 
     /// Read all records after a watermark from all segments.
+    ///
+    /// Uses segment metadata (`.meta` sidecars) to skip entire closed segments
+    /// whose `max_txn_id <= watermark`. The active (latest) segment is always
+    /// read since it has no `.meta` file. If a `.meta` file is missing for a
+    /// closed segment, that segment is read in full as a fallback.
     pub fn read_all_after_watermark(
         &self,
         wal_dir: &Path,
         watermark: u64,
     ) -> Result<Vec<WalRecord>, WalReaderError> {
-        let result = self.read_all(wal_dir)?;
+        let mut segments = self.list_segments(wal_dir)?;
+        segments.sort();
 
-        Ok(result
-            .records
-            .into_iter()
-            .filter(|r| r.txn_id > watermark)
-            .collect())
+        if segments.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let latest_segment = *segments.last().unwrap();
+        let mut result = Vec::new();
+
+        for &segment_number in &segments {
+            if segment_number != latest_segment {
+                // Closed segment — check .meta to see if we can skip it
+                match SegmentMeta::read_from_file(wal_dir, segment_number) {
+                    Ok(Some(meta))
+                        if meta.segment_number == segment_number
+                            && meta.max_txn_id <= watermark =>
+                    {
+                        // All records in this segment are at or below the watermark — skip
+                        continue;
+                    }
+                    Ok(Some(meta)) if meta.segment_number != segment_number => {
+                        warn!(
+                            target: "strata::wal",
+                            segment = segment_number,
+                            meta_segment = meta.segment_number,
+                            "Segment meta has mismatched segment number, reading full segment"
+                        );
+                        // Fall through to read the segment
+                    }
+                    Err(e) => {
+                        warn!(
+                            target: "strata::wal",
+                            segment = segment_number,
+                            error = %e,
+                            "Could not read .meta sidecar, reading full segment"
+                        );
+                        // Fall through to read the segment
+                    }
+                    _ => {
+                        // meta.max_txn_id > watermark, or meta missing — read segment
+                    }
+                }
+            }
+            // Active segment (no .meta) or closed segment that may have records above watermark
+            let (records, _, _, _) = self.read_segment(wal_dir, segment_number)?;
+            result.extend(records.into_iter().filter(|r| r.txn_id > watermark));
+        }
+
+        Ok(result)
     }
 
     /// List all segment numbers in the WAL directory.
@@ -927,5 +975,286 @@ mod tests {
         assert_eq!(meta.min_txn_id, 1);
         assert_eq!(meta.max_txn_id, 2);
         assert_eq!(meta.record_count, 2);
+    }
+
+    // ---- Incremental watermark refresh (segment-skipping) tests ----
+
+    /// Helper: create 2 closed segments with .meta + 1 active segment without .meta.
+    ///
+    /// Segment 1 (closed): txn_ids 1-2, timestamps 1000-2000
+    /// Segment 2 (closed): txn_ids 3-4, timestamps 3000-4000
+    /// Segment 3 (active): txn_ids 5-6, timestamps 5000-6000, NO .meta
+    fn create_segments_with_active(wal_dir: &Path) {
+        std::fs::create_dir_all(wal_dir).unwrap();
+
+        // Closed segments with .meta
+        for (seg_num, txn_ids, timestamps) in [
+            (1u64, [1u64, 2], [1000u64, 2000]),
+            (2, [3, 4], [3000, 4000]),
+        ] {
+            let mut segment = WalSegment::create(wal_dir, seg_num, [1u8; 16]).unwrap();
+            let mut meta = SegmentMeta::new_empty(seg_num);
+            for (&txn_id, &ts) in txn_ids.iter().zip(timestamps.iter()) {
+                let record = WalRecord::new(txn_id, [1u8; 16], ts, vec![txn_id as u8; 10]);
+                segment.write(&record.to_bytes()).unwrap();
+                meta.track_record(txn_id, ts);
+            }
+            segment.close().unwrap();
+            meta.write_to_file(wal_dir).unwrap();
+        }
+
+        // Active segment — no .meta
+        let mut segment = WalSegment::create(wal_dir, 3, [1u8; 16]).unwrap();
+        for (&txn_id, &ts) in [5u64, 6].iter().zip([5000u64, 6000].iter()) {
+            let record = WalRecord::new(txn_id, [1u8; 16], ts, vec![txn_id as u8; 10]);
+            segment.write(&record.to_bytes()).unwrap();
+        }
+        // Deliberately NOT closing or writing .meta — this is the active segment
+    }
+
+    #[test]
+    fn test_read_after_watermark_skips_old_segments() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        // 2 closed segments with .meta + 1 active without .meta
+        create_segments_with_active(&wal_dir);
+
+        let reader = WalReader::new(make_codec());
+
+        // Verify precondition: segments 1,2 have .meta; segment 3 does not
+        assert!(SegmentMeta::read_from_file(&wal_dir, 1).unwrap().is_some());
+        assert!(SegmentMeta::read_from_file(&wal_dir, 2).unwrap().is_some());
+        assert!(SegmentMeta::read_from_file(&wal_dir, 3).unwrap().is_none());
+
+        // Watermark=4: segments 1 (max_txn_id=2) and 2 (max_txn_id=4) should be
+        // skipped via .meta check. Segment 3 (active, no .meta) is always read.
+        let filtered = reader.read_all_after_watermark(&wal_dir, 4).unwrap();
+        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id).collect();
+        assert_eq!(txn_ids, vec![5, 6]);
+
+        // Watermark=0: nothing skippable, all 6 records returned
+        let filtered = reader.read_all_after_watermark(&wal_dir, 0).unwrap();
+        assert_eq!(filtered.len(), 6);
+
+        // Watermark=2: segment 1 (max_txn_id=2 <= 2) skipped.
+        // Segment 2 (max_txn_id=4 > 2) read. Segment 3 (active) read.
+        let filtered = reader.read_all_after_watermark(&wal_dir, 2).unwrap();
+        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id).collect();
+        assert_eq!(txn_ids, vec![3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn test_read_after_watermark_proves_segment_skipped() {
+        // Proves the optimization actually skips segment I/O: corrupt a closed
+        // segment's .seg file but leave its .meta intact. If the segment were
+        // read, it would error. If correctly skipped, the call succeeds.
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        create_segments_with_active(&wal_dir);
+
+        // Corrupt segment 1's .seg file (overwrite contents after header with garbage)
+        let seg1_path = WalSegment::segment_path(&wal_dir, 1);
+        let mut seg1_data = std::fs::read(&seg1_path).unwrap();
+        // Overwrite record data (after the 36-byte v2 segment header) with garbage
+        for byte in seg1_data[36..].iter_mut() {
+            *byte = 0xFF;
+        }
+        std::fs::write(&seg1_path, &seg1_data).unwrap();
+
+        // .meta for segment 1 still says max_txn_id=2
+        let meta = SegmentMeta::read_from_file(&wal_dir, 1).unwrap().unwrap();
+        assert_eq!(meta.max_txn_id, 2);
+
+        let reader = WalReader::new(make_codec());
+
+        // Watermark=2: segment 1 (max_txn_id=2 <= 2) should be SKIPPED via .meta.
+        // If it were read, the corrupted data would cause an error or wrong results.
+        let filtered = reader.read_all_after_watermark(&wal_dir, 2).unwrap();
+        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id).collect();
+        assert_eq!(txn_ids, vec![3, 4, 5, 6]);
+
+        // Watermark=0: segment 1 MUST be read — and it's corrupted.
+        // Verify we get fewer records (corruption causes early stop in segment 1).
+        let filtered = reader.read_all_after_watermark(&wal_dir, 0).unwrap();
+        // Segment 1 is corrupted so its records may be missing or partial.
+        // The important thing: txn_ids 3-6 from segments 2+3 are still present.
+        assert!(
+            filtered.len() < 6,
+            "Should get fewer than 6 records due to corruption in segment 1, got {}",
+            filtered.len()
+        );
+        let has_seg2_and_3: Vec<u64> = filtered
+            .iter()
+            .filter(|r| r.txn_id >= 3)
+            .map(|r| r.txn_id)
+            .collect();
+        assert_eq!(has_seg2_and_3, vec![3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn test_read_after_watermark_boundary_max_txn_equals_watermark() {
+        // Explicitly tests the <= boundary: segment 2 has max_txn_id=4,
+        // watermark=4 means 4 <= 4 is true, so segment 2 must be skipped.
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        create_segments_with_active(&wal_dir);
+
+        let reader = WalReader::new(make_codec());
+
+        // Watermark=3: segment 2 max_txn_id=4 > 3, so segment 2 is NOT skipped
+        let filtered = reader.read_all_after_watermark(&wal_dir, 3).unwrap();
+        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id).collect();
+        assert_eq!(txn_ids, vec![4, 5, 6], "txn_id=4 should be included");
+
+        // Watermark=4: segment 2 max_txn_id=4 <= 4, so segment 2 IS skipped
+        let filtered = reader.read_all_after_watermark(&wal_dir, 4).unwrap();
+        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id).collect();
+        assert_eq!(txn_ids, vec![5, 6], "txn_ids 3,4 should be excluded");
+    }
+
+    #[test]
+    fn test_read_after_watermark_reads_active_segment_without_meta() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        // Write records to a single segment (no rotation, no .meta)
+        let records: Vec<_> = (1..=5)
+            .map(|i| WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8]))
+            .collect();
+        write_records(&wal_dir, &records);
+
+        // Verify precondition: exactly 1 segment, no .meta
+        let reader = WalReader::new(make_codec());
+        let segments = reader.list_segments(&wal_dir).unwrap();
+        assert_eq!(segments.len(), 1);
+        assert!(
+            SegmentMeta::read_from_file(&wal_dir, segments[0])
+                .unwrap()
+                .is_none(),
+            "Active segment should not have .meta"
+        );
+
+        // Watermark=3: only txn_ids 4,5 returned
+        let filtered = reader.read_all_after_watermark(&wal_dir, 3).unwrap();
+        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id).collect();
+        assert_eq!(txn_ids, vec![4, 5]);
+
+        // Watermark=0: all records
+        let filtered = reader.read_all_after_watermark(&wal_dir, 0).unwrap();
+        assert_eq!(filtered.len(), 5);
+
+        // Watermark=5: nothing above watermark
+        let filtered = reader.read_all_after_watermark(&wal_dir, 5).unwrap();
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_read_after_watermark_handles_missing_meta_gracefully() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        // Create 3 closed segments with .meta
+        create_segments_with_meta(&wal_dir);
+
+        // Delete .meta for segment 1 to simulate legacy/corrupted state
+        let meta_path = SegmentMeta::meta_path(&wal_dir, 1);
+        std::fs::remove_file(&meta_path).unwrap();
+
+        let reader = WalReader::new(make_codec());
+
+        // Watermark=0: all records returned despite missing .meta
+        let filtered = reader.read_all_after_watermark(&wal_dir, 0).unwrap();
+        assert_eq!(filtered.len(), 6);
+
+        // Watermark=4: segment 1 (no meta) falls through to full read,
+        // its records (txn_ids 1,2) get filtered out at record level.
+        // Segment 2 (meta max_txn_id=4 <= 4) is skipped.
+        // Segment 3 (latest) is always read.
+        let filtered = reader.read_all_after_watermark(&wal_dir, 4).unwrap();
+        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id).collect();
+        assert_eq!(txn_ids, vec![5, 6]);
+    }
+
+    #[test]
+    fn test_read_after_watermark_empty_wal() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        let reader = WalReader::new(make_codec());
+        let filtered = reader.read_all_after_watermark(&wal_dir, 0).unwrap();
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_read_after_watermark_above_all_records() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        create_segments_with_active(&wal_dir);
+
+        let reader = WalReader::new(make_codec());
+
+        // Watermark=100: far above all records (max txn_id=6).
+        // Closed segments skipped via meta, active segment read but all filtered.
+        let filtered = reader.read_all_after_watermark(&wal_dir, 100).unwrap();
+        assert!(filtered.is_empty());
+
+        // Watermark=u64::MAX: extreme case
+        let filtered = reader
+            .read_all_after_watermark(&wal_dir, u64::MAX)
+            .unwrap();
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_read_after_watermark_with_writer_rotation() {
+        // End-to-end test using WalWriter with forced rotation (tiny segment size).
+        // Verifies the optimization works correctly with real WalWriter-produced
+        // segments and .meta files.
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let config = WalConfig::new()
+            .with_segment_size(100)
+            .with_buffered_sync_bytes(50);
+
+        let mut writer = WalWriter::new(
+            wal_dir.to_path_buf(),
+            [1u8; 16],
+            DurabilityMode::Always,
+            config,
+            make_codec(),
+        )
+        .unwrap();
+
+        // Write enough records to force multiple rotations
+        for i in 1..=6 {
+            writer
+                .append(&WalRecord::new(i, [1u8; 16], i * 1000, vec![0; 50]))
+                .unwrap();
+        }
+        // close() writes .meta for the final segment too
+        writer.close().unwrap();
+
+        let reader = WalReader::new(make_codec());
+        let segments = reader.list_segments(&wal_dir).unwrap();
+        assert!(
+            segments.len() > 1,
+            "Should have rotated, got {} segments",
+            segments.len()
+        );
+
+        // Verify watermark filtering returns correct records across rotated segments
+        let all = reader.read_all_after_watermark(&wal_dir, 0).unwrap();
+        assert_eq!(all.len(), 6);
+
+        let filtered = reader.read_all_after_watermark(&wal_dir, 3).unwrap();
+        assert!(filtered.iter().all(|r| r.txn_id > 3));
+        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id).collect();
+        assert_eq!(txn_ids, vec![4, 5, 6]);
     }
 }
