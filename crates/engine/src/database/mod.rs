@@ -938,6 +938,15 @@ impl Database {
         let mut max_version = 0u64;
         let mut max_txn_id = watermark;
 
+        // Get search index (if available) for incremental updates
+        let search_index = self.extension::<crate::search::InvertedIndex>().ok();
+        let search_enabled = search_index.as_ref().is_some_and(|idx| idx.is_enabled());
+
+        // Get vector backend state (if available) for incremental updates
+        let vector_state = self
+            .extension::<crate::primitives::vector::store::VectorBackendState>()
+            .ok();
+
         for record in &records {
             max_txn_id = max_txn_id.max(record.txn_id);
 
@@ -952,6 +961,30 @@ impl Database {
                 )?;
 
             max_version = max_version.max(payload.version);
+
+            // Pre-read vector records for deletes (must happen before storage mutations)
+            let mut vector_delete_pre_reads: Vec<(
+                Key,
+                crate::primitives::vector::types::VectorRecord,
+            )> = Vec::new();
+            if vector_state.is_some() {
+                for key in &payload.deletes {
+                    if key.type_tag == TypeTag::Vector {
+                        use strata_core::traits::Storage;
+                        if let Ok(Some(vv)) = Storage::get(self.storage.as_ref(), key) {
+                            if let strata_core::value::Value::Bytes(ref bytes) = vv.value {
+                                if let Ok(record) =
+                                    crate::primitives::vector::types::VectorRecord::from_bytes(
+                                        bytes,
+                                    )
+                                {
+                                    vector_delete_pre_reads.push((key.clone(), record));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             // Apply puts
             for (key, value) in &payload.puts {
@@ -969,6 +1002,176 @@ impl Database {
             for key in &payload.deletes {
                 use strata_core::traits::Storage;
                 Storage::delete_with_version(self.storage.as_ref(), key, payload.version)?;
+            }
+
+            // --- Update BM25 search index ---
+            if search_enabled {
+                let index = search_index.as_ref().unwrap();
+
+                for (key, value) in &payload.puts {
+                    let branch_id = key.namespace.branch_id;
+                    match key.type_tag {
+                        TypeTag::KV => {
+                            if let Some(text) =
+                                crate::search::extract_indexable_text(value)
+                            {
+                                if let Some(user_key) = key.user_key_string() {
+                                    let entity_ref =
+                                        strata_core::EntityRef::Kv { branch_id, key: user_key };
+                                    index.index_document(&entity_ref, &text, None);
+                                }
+                            }
+                        }
+                        TypeTag::State => {
+                            if let Some(text) =
+                                crate::search::extract_indexable_text(value)
+                            {
+                                if let Some(name) = key.user_key_string() {
+                                    let entity_ref =
+                                        strata_core::EntityRef::State { branch_id, name };
+                                    index.index_document(&entity_ref, &text, None);
+                                }
+                            }
+                        }
+                        TypeTag::Event => {
+                            if key.user_key == b"__meta__"
+                                || key.user_key.starts_with(b"__tidx__")
+                            {
+                                continue;
+                            }
+                            if let Some(text) =
+                                crate::search::extract_indexable_text(value)
+                            {
+                                if key.user_key.len() == 8 {
+                                    let sequence = u64::from_be_bytes(
+                                        key.user_key.as_slice().try_into().unwrap_or([0; 8]),
+                                    );
+                                    let entity_ref =
+                                        strata_core::EntityRef::Event { branch_id, sequence };
+                                    index.index_document(&entity_ref, &text, None);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                for key in &payload.deletes {
+                    let branch_id = key.namespace.branch_id;
+                    match key.type_tag {
+                        TypeTag::KV => {
+                            if let Some(user_key) = key.user_key_string() {
+                                let entity_ref =
+                                    strata_core::EntityRef::Kv { branch_id, key: user_key };
+                                index.remove_document(&entity_ref);
+                            }
+                        }
+                        TypeTag::State => {
+                            if let Some(name) = key.user_key_string() {
+                                let entity_ref =
+                                    strata_core::EntityRef::State { branch_id, name };
+                                index.remove_document(&entity_ref);
+                            }
+                        }
+                        TypeTag::Event => {
+                            if key.user_key == b"__meta__"
+                                || key.user_key.starts_with(b"__tidx__")
+                            {
+                                continue;
+                            }
+                            if key.user_key.len() == 8 {
+                                let sequence = u64::from_be_bytes(
+                                    key.user_key.as_slice().try_into().unwrap_or([0; 8]),
+                                );
+                                let branch_id = key.namespace.branch_id;
+                                let entity_ref =
+                                    strata_core::EntityRef::Event { branch_id, sequence };
+                                index.remove_document(&entity_ref);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // --- Update vector backends ---
+            if let Some(ref vs) = vector_state {
+                use strata_core::primitives::vector::{CollectionId, VectorId};
+
+                // Vector puts: insert into backend
+                for (key, value) in &payload.puts {
+                    if key.type_tag != TypeTag::Vector {
+                        continue;
+                    }
+                    let bytes = match value {
+                        strata_core::value::Value::Bytes(b) => b,
+                        _ => continue,
+                    };
+                    let record = match crate::primitives::vector::types::VectorRecord::from_bytes(
+                        bytes,
+                    ) {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    };
+                    let user_key_str = match key.user_key_string() {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    let (collection, vector_key) = match user_key_str.split_once('/') {
+                        Some(pair) => pair,
+                        None => continue,
+                    };
+                    let branch_id = key.namespace.branch_id;
+                    let cid = CollectionId::new(branch_id, collection);
+                    let vid = VectorId::new(record.vector_id);
+
+                    let mut backends = vs.backends.write();
+                    if let Some(backend) = backends.get_mut(&cid) {
+                        let _ = backend.insert_with_timestamp(
+                            vid,
+                            &record.embedding,
+                            record.created_at,
+                        );
+                        backend.set_inline_meta(
+                            vid,
+                            crate::primitives::vector::types::InlineMeta {
+                                key: vector_key.to_string(),
+                                source_ref: record.source_ref.clone(),
+                            },
+                        );
+                    } else {
+                        tracing::debug!(
+                            target: "strata::refresh",
+                            collection = collection,
+                            "Skipping vector insert for unknown collection (will be picked up on restart)"
+                        );
+                    }
+                }
+
+                // Vector deletes: remove from backend using pre-reads
+                for (key, record) in &vector_delete_pre_reads {
+                    let user_key_str = match key.user_key_string() {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    let collection = match user_key_str.split_once('/') {
+                        Some((coll, _)) => coll,
+                        None => continue,
+                    };
+                    let branch_id = key.namespace.branch_id;
+                    let cid = CollectionId::new(branch_id, collection);
+                    let vid = VectorId::new(record.vector_id);
+
+                    let mut backends = vs.backends.write();
+                    if let Some(backend) = backends.get_mut(&cid) {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_micros() as u64)
+                            .unwrap_or(0);
+                        let _ = backend.delete_with_timestamp(vid, now);
+                        backend.remove_inline_meta(vid);
+                    }
+                }
             }
 
             applied += 1;

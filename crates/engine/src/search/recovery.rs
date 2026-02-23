@@ -30,6 +30,18 @@ use strata_core::value::Value;
 use strata_core::StrataResult;
 use tracing::info;
 
+/// Extract indexable text from a Value.
+///
+/// Returns `Some(text)` for String and JSON-serializable values.
+/// Returns `None` for Null, Bool, Bytes (not searchable).
+pub fn extract_indexable_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Null | Value::Bool(_) | Value::Bytes(_) => None,
+        other => serde_json::to_string(other).ok(),
+    }
+}
+
 /// Recovery function for the InvertedIndex.
 ///
 /// Called by Database during startup to restore search index state.
@@ -92,13 +104,9 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
 
         // --- KV entries ---
         for (key, vv) in db.storage().list_by_type(&branch_id, TypeTag::KV) {
-            let text = match &vv.value {
-                Value::String(s) => s.clone(),
-                Value::Null | Value::Bool(_) | Value::Bytes(_) => continue,
-                other => match serde_json::to_string(other) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                },
+            let text = match extract_indexable_text(&vv.value) {
+                Some(t) => t,
+                None => continue,
             };
 
             let user_key = match key.user_key_string() {
@@ -116,13 +124,9 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
 
         // --- State entries ---
         for (key, vv) in db.storage().list_by_type(&branch_id, TypeTag::State) {
-            let text = match &vv.value {
-                Value::String(s) => s.clone(),
-                Value::Null | Value::Bool(_) | Value::Bytes(_) => continue,
-                other => match serde_json::to_string(other) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                },
+            let text = match extract_indexable_text(&vv.value) {
+                Some(t) => t,
+                None => continue,
             };
 
             let name = match key.user_key_string() {
@@ -142,13 +146,9 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                 continue;
             }
 
-            let text = match &vv.value {
-                Value::String(s) => s.clone(),
-                Value::Null | Value::Bool(_) | Value::Bytes(_) => continue,
-                other => match serde_json::to_string(other) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                },
+            let text = match extract_indexable_text(&vv.value) {
+                Some(t) => t,
+                None => continue,
             };
 
             // Parse sequence from the key (8-byte big-endian u64)

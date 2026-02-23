@@ -6,12 +6,21 @@
 //! - Coordinated commit detects conflicts across instances
 //! - Crash recovery preserves both instances' committed data
 
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
 use strata_engine::database::config::StrataConfig;
-use strata_engine::Database;
+use strata_engine::search::InvertedIndex;
+use strata_engine::{register_search_recovery, Database};
 use tempfile::TempDir;
+
+static INIT_RECOVERY: Once = Once::new();
+
+fn ensure_recovery_registered() {
+    INIT_RECOVERY.call_once(|| {
+        register_search_recovery();
+    });
+}
 
 fn create_test_namespace(branch_id: BranchId) -> Namespace {
     Namespace::new(
@@ -803,4 +812,148 @@ fn test_crash_recovery_counter_file_consistency() {
         read_key(&db, branch_id, &Key::new_kv(ns.clone(), "after_reopen")),
         Some(Value::Int(3))
     );
+}
+
+// ============================================================================
+// Incremental Index Refresh Tests
+// ============================================================================
+
+/// After refresh, the BM25 search index should contain documents from the other instance.
+#[test]
+fn test_refresh_updates_search_index() {
+    ensure_recovery_registered();
+
+    let dir = TempDir::new().unwrap();
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+
+    let cfg = StrataConfig::default();
+    let mode = cfg.durability_mode().unwrap();
+    let db1 = Database::open_multi_process(dir.path(), mode, cfg.clone()).unwrap();
+    let db2 = Database::open_multi_process(dir.path(), mode, cfg).unwrap();
+
+    // db1 writes KV entries with string values
+    db1.transaction(branch_id, |txn| {
+        txn.put(
+            Key::new_kv(ns.clone(), "doc1"),
+            Value::String("the quick brown fox".to_string()),
+        )?;
+        txn.put(
+            Key::new_kv(ns.clone(), "doc2"),
+            Value::String("jumped over the lazy dog".to_string()),
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    db1.flush().unwrap();
+
+    // db2 refreshes — should update its local search index
+    db2.refresh().unwrap();
+
+    // Verify search index on db2 contains the documents
+    let index = db2.extension::<InvertedIndex>().unwrap();
+    assert!(index.is_enabled(), "Search index should be enabled");
+
+    let terms = strata_engine::search::tokenize("fox");
+    let results = index.score_top_k(&terms, &branch_id, 10, 1.2, 0.75);
+    assert!(
+        !results.is_empty(),
+        "Search should find 'fox' after refresh"
+    );
+
+    let terms = strata_engine::search::tokenize("lazy");
+    let results = index.score_top_k(&terms, &branch_id, 10, 1.2, 0.75);
+    assert!(
+        !results.is_empty(),
+        "Search should find 'lazy' after refresh"
+    );
+}
+
+/// After a delete is refreshed, the search index should no longer contain the deleted document.
+#[test]
+fn test_refresh_updates_search_index_on_delete() {
+    ensure_recovery_registered();
+
+    let dir = TempDir::new().unwrap();
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+    let key = Key::new_kv(ns.clone(), "to_remove");
+
+    let cfg = StrataConfig::default();
+    let mode = cfg.durability_mode().unwrap();
+    let db1 = Database::open_multi_process(dir.path(), mode, cfg.clone()).unwrap();
+    let db2 = Database::open_multi_process(dir.path(), mode, cfg).unwrap();
+
+    // db1 writes a searchable entry
+    db1.transaction(branch_id, |txn| {
+        txn.put(
+            key.clone(),
+            Value::String("unique_searchterm_xyzzy".to_string()),
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    db1.flush().unwrap();
+
+    // db2 refreshes and verifies it's searchable
+    db2.refresh().unwrap();
+    let index = db2.extension::<InvertedIndex>().unwrap();
+    let terms = strata_engine::search::tokenize("unique_searchterm_xyzzy");
+    let results = index.score_top_k(&terms, &branch_id, 10, 1.2, 0.75);
+    assert!(
+        !results.is_empty(),
+        "Should find the document after first refresh"
+    );
+
+    // db1 deletes the entry
+    db1.transaction(branch_id, |txn| {
+        txn.delete(key.clone())?;
+        Ok(())
+    })
+    .unwrap();
+    db1.flush().unwrap();
+
+    // db2 refreshes again — document should be removed from search
+    db2.refresh().unwrap();
+    let results = index.score_top_k(&terms, &branch_id, 10, 1.2, 0.75);
+    assert!(
+        results.is_empty(),
+        "Deleted document should not appear in search after refresh"
+    );
+}
+
+/// Refresh with a disabled search index should not error.
+#[test]
+fn test_refresh_search_index_disabled_no_overhead() {
+    let dir = TempDir::new().unwrap();
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+
+    let cfg = StrataConfig::default();
+    let mode = cfg.durability_mode().unwrap();
+    let db1 = Database::open_multi_process(dir.path(), mode, cfg.clone()).unwrap();
+    let db2 = Database::open_multi_process(dir.path(), mode, cfg).unwrap();
+
+    // Disable search index on db2
+    let index = db2.extension::<InvertedIndex>().unwrap();
+    index.disable();
+
+    // db1 writes data
+    db1.transaction(branch_id, |txn| {
+        txn.put(
+            Key::new_kv(ns.clone(), "key"),
+            Value::String("hello world".to_string()),
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    db1.flush().unwrap();
+
+    // Refresh should succeed without errors even with disabled index
+    let applied = db2.refresh().unwrap();
+    assert!(applied > 0);
+
+    // Data should still be applied to storage
+    let val = read_key(&db2, branch_id, &Key::new_kv(ns.clone(), "key"));
+    assert_eq!(val, Some(Value::String("hello world".to_string())));
 }
