@@ -11,14 +11,16 @@ description = "Inference engine for Strata — local (llama.cpp) and cloud provi
 
 [features]
 default = []
-local = []          # Enable local llama.cpp inference
-download = []       # Enable model download from HuggingFace
-anthropic = []      # Enable Anthropic (Claude) cloud provider
-openai = []         # Enable OpenAI (GPT) cloud provider
-google = []         # Enable Google (Gemini) cloud provider
+local = []              # Enable local llama.cpp inference
+download = ["ureq"]     # Enable model download from HuggingFace
+anthropic = []          # Enable Anthropic (Claude) cloud provider
+openai = []             # Enable OpenAI (GPT) cloud provider
+google = []             # Enable Google (Gemini) cloud provider
 
 [dependencies]
 thiserror = { workspace = true }
 tracing = { workspace = true }
+ureq = { workspace = true, optional = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }

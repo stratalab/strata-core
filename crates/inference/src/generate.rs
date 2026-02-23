@@ -91,11 +91,12 @@ impl GenerationEngine {
 
     /// Load a generation engine by model name from the registry.
     ///
-    /// Blocked until Epic 5 (registry); returns `NotSupported` for now.
-    pub fn from_registry(_name: &str) -> Result<Self, InferenceError> {
-        Err(InferenceError::NotSupported(
-            "model registry not yet implemented (Epic 5)".to_string(),
-        ))
+    /// Resolves the name (e.g., `"gpt2"`) to a local GGUF file path,
+    /// then loads the model with default context size.
+    pub fn from_registry(name: &str) -> Result<Self, InferenceError> {
+        let registry = crate::registry::ModelRegistry::new();
+        let path = registry.resolve(name)?;
+        Self::from_gguf(path)
     }
 
     /// Create a generation engine backed by a cloud provider.
@@ -172,29 +173,42 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn from_registry_returns_not_supported() {
+    fn from_registry_known_model_not_local_returns_error() {
+        // Known model but not downloaded → Registry error with helpful message
         let result = GenerationEngine::from_registry("gpt2");
         assert!(result.is_err());
         let err = result.unwrap_err();
+        let msg = err.to_string();
+        // Could be Registry (model not found locally) or LlamaCpp (libllama not found)
         assert!(
-            matches!(err, InferenceError::NotSupported(_)),
-            "should be NotSupported, got: {err}"
-        );
-        assert!(
-            err.to_string().contains("registry"),
-            "error should mention registry: {err}"
+            matches!(err, InferenceError::Registry(_) | InferenceError::LlamaCpp(_)),
+            "should be Registry or LlamaCpp error, got: {msg}"
         );
     }
 
     #[test]
-    fn from_registry_with_any_name_returns_not_supported() {
-        for name in &["gpt2", "", "   ", "nonexistent-model"] {
-            let result = GenerationEngine::from_registry(name);
-            assert!(
-                matches!(result.unwrap_err(), InferenceError::NotSupported(_)),
-                "from_registry({name:?}) should be NotSupported"
-            );
-        }
+    fn from_registry_unknown_model_returns_registry_error() {
+        let result = GenerationEngine::from_registry("nonexistent-model");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, InferenceError::Registry(_)),
+            "should be Registry error, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("Unknown model"),
+            "error should mention unknown model: {err}"
+        );
+    }
+
+    #[test]
+    fn from_registry_empty_name_returns_error() {
+        let result = GenerationEngine::from_registry("");
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            InferenceError::Registry(_)
+        ));
     }
 
     #[test]
@@ -365,12 +379,17 @@ mod tests {
     }
 
     #[test]
-    fn from_registry_error_mentions_epic() {
+    fn from_registry_error_is_descriptive() {
+        // "any" doesn't exist in catalog → Registry error
         let err = GenerationEngine::from_registry("any").unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("Epic 5") || msg.contains("registry"),
-            "error should mention Epic 5 or registry: {msg}"
+            msg.contains("Unknown model"),
+            "error should mention unknown model: {msg}"
+        );
+        assert!(
+            msg.contains("strata models list"),
+            "error should suggest listing models: {msg}"
         );
     }
 

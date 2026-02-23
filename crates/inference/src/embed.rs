@@ -69,12 +69,12 @@ impl EmbeddingEngine {
 
     /// Load an embedding engine by model name from the registry.
     ///
-    /// Resolves the name (e.g., `"miniLM"`) to a local GGUF file path.
-    /// Blocked until Epic 5 (registry); returns `NotSupported` for now.
-    pub fn from_registry(_name: &str) -> Result<Self, InferenceError> {
-        Err(InferenceError::NotSupported(
-            "model registry not yet implemented (Epic 5)".to_string(),
-        ))
+    /// Resolves the name (e.g., `"miniLM"`) to a local GGUF file path,
+    /// then loads the model.
+    pub fn from_registry(name: &str) -> Result<Self, InferenceError> {
+        let registry = crate::registry::ModelRegistry::new();
+        let path = registry.resolve(name)?;
+        Self::from_gguf(path)
     }
 
     /// Produce an L2-normalized embedding vector for the given text.
@@ -360,40 +360,42 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn from_registry_returns_not_supported() {
+    fn from_registry_known_model_not_local_returns_registry_error() {
+        // Known model but not downloaded → Registry error with helpful message
         let result = EmbeddingEngine::from_registry("miniLM");
         assert!(result.is_err());
         let err = result.unwrap_err();
+        let msg = err.to_string();
+        // Could be Registry (model not found locally) or LlamaCpp (libllama not found)
         assert!(
-            matches!(err, InferenceError::NotSupported(_)),
-            "should be NotSupported, got: {err}"
-        );
-        assert!(
-            err.to_string().contains("registry"),
-            "error should mention registry: {err}"
+            matches!(err, InferenceError::Registry(_) | InferenceError::LlamaCpp(_)),
+            "should be Registry or LlamaCpp error, got: {msg}"
         );
     }
 
     #[test]
-    fn from_registry_with_empty_name_returns_not_supported() {
+    fn from_registry_unknown_model_returns_registry_error() {
+        let result = EmbeddingEngine::from_registry("nonexistent-model");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, InferenceError::Registry(_)),
+            "should be Registry error, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("Unknown model"),
+            "error should mention unknown model: {err}"
+        );
+    }
+
+    #[test]
+    fn from_registry_empty_name_returns_error() {
         let result = EmbeddingEngine::from_registry("");
+        assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            InferenceError::NotSupported(_)
+            InferenceError::Registry(_)
         ));
-    }
-
-    #[test]
-    fn from_registry_with_any_name_returns_same_error() {
-        // All names should fail identically since registry is stubbed
-        for name in &["miniLM", "", "   ", "nonexistent-model", "GPT-4"] {
-            let result = EmbeddingEngine::from_registry(name);
-            assert!(result.is_err(), "from_registry({name:?}) should fail");
-            assert!(
-                matches!(result.unwrap_err(), InferenceError::NotSupported(_)),
-                "from_registry({name:?}) should be NotSupported"
-            );
-        }
     }
 
     #[test]

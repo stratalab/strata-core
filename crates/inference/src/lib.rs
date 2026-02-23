@@ -1,4 +1,5 @@
 mod error;
+pub mod registry;
 
 #[cfg(feature = "local")]
 pub mod llama;
@@ -13,6 +14,7 @@ mod provider;
 mod generate;
 
 pub use error::InferenceError;
+pub use registry::{ModelRegistry, ModelInfo, ModelTask};
 
 #[cfg(feature = "local")]
 pub use embed::EmbeddingEngine;
