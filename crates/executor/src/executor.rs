@@ -1039,6 +1039,7 @@ impl Executor {
                 node_id,
                 entity_ref,
                 properties,
+                object_type,
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
@@ -1050,6 +1051,7 @@ impl Executor {
                     node_id,
                     entity_ref,
                     properties,
+                    object_type,
                 )
             }
             Command::GraphGetNode {
@@ -1179,6 +1181,143 @@ impl Executor {
                     max_nodes,
                     edge_types,
                     direction,
+                )
+            }
+
+            // Ontology commands
+            Command::GraphDefineObjectType {
+                branch,
+                graph,
+                definition,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_define_object_type(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    definition,
+                )
+            }
+            Command::GraphGetObjectType {
+                branch,
+                graph,
+                name,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_get_object_type(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    name,
+                )
+            }
+            Command::GraphListObjectTypes { branch, graph } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_list_object_types(&self.primitives, branch, graph)
+            }
+            Command::GraphDeleteObjectType {
+                branch,
+                graph,
+                name,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_delete_object_type(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    name,
+                )
+            }
+            Command::GraphDefineLinkType {
+                branch,
+                graph,
+                definition,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_define_link_type(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    definition,
+                )
+            }
+            Command::GraphGetLinkType {
+                branch,
+                graph,
+                name,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_get_link_type(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    name,
+                )
+            }
+            Command::GraphListLinkTypes { branch, graph } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_list_link_types(&self.primitives, branch, graph)
+            }
+            Command::GraphDeleteLinkType {
+                branch,
+                graph,
+                name,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_delete_link_type(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    name,
+                )
+            }
+            Command::GraphFreezeOntology { branch, graph } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_freeze_ontology(&self.primitives, branch, graph)
+            }
+            Command::GraphOntologyStatus { branch, graph } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_ontology_status(&self.primitives, branch, graph)
+            }
+            Command::GraphOntologySummary { branch, graph } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_ontology_summary(&self.primitives, branch, graph)
+            }
+            Command::GraphNodesByType {
+                branch,
+                graph,
+                object_type,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_nodes_by_type(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    object_type,
                 )
             }
         };

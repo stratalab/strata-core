@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use strata_core::Value;
 use strata_engine::graph::types::{
-    BfsOptions, CascadePolicy, Direction, EdgeData, GraphMeta, NodeData,
+    BfsOptions, CascadePolicy, Direction, EdgeData, GraphMeta, LinkTypeDef, NodeData,
+    ObjectTypeDef,
 };
 
 use crate::bridge::{to_core_branch_id, Primitives};
@@ -53,6 +54,7 @@ pub fn graph_create(
     let policy = parse_cascade_policy(cascade_policy.as_deref())?;
     let meta = GraphMeta {
         cascade_policy: policy,
+        ..Default::default()
     };
     convert_result(p.graph.create_graph(core_branch, &graph, Some(meta)))?;
     Ok(Output::Unit)
@@ -88,6 +90,7 @@ pub fn graph_get_meta(p: &Arc<Primitives>, branch: BranchId, graph: String) -> R
 }
 
 /// Handle GraphAddNode command.
+#[allow(clippy::too_many_arguments)]
 pub fn graph_add_node(
     p: &Arc<Primitives>,
     branch: BranchId,
@@ -95,6 +98,7 @@ pub fn graph_add_node(
     node_id: String,
     entity_ref: Option<String>,
     properties: Option<Value>,
+    object_type: Option<String>,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
     let props = match properties {
@@ -107,6 +111,7 @@ pub fn graph_add_node(
     let data = NodeData {
         entity_ref,
         properties: props,
+        object_type,
     };
     convert_result(p.graph.add_node(core_branch, &graph, &node_id, data))?;
     Ok(Output::Unit)
@@ -284,6 +289,7 @@ pub fn graph_bulk_insert(
                 NodeData {
                     entity_ref: n.entity_ref,
                     properties: props,
+                    object_type: n.object_type,
                 },
             ))
         })
@@ -322,6 +328,192 @@ pub fn graph_bulk_insert(
         edges_inserted: ei as u64,
     })
 }
+
+// =============================================================================
+// Ontology handlers
+// =============================================================================
+
+/// Handle GraphDefineObjectType command.
+pub fn graph_define_object_type(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+    definition: Value,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    let json = crate::bridge::value_to_serde_json_public(definition)?;
+    let def: ObjectTypeDef =
+        serde_json::from_value(json).map_err(|e| Error::InvalidInput {
+            reason: format!("Invalid object type definition: {}", e),
+        })?;
+    convert_result(p.graph.define_object_type(core_branch, &graph, def))?;
+    Ok(Output::Unit)
+}
+
+/// Handle GraphGetObjectType command.
+pub fn graph_get_object_type(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+    name: String,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    let def = convert_result(p.graph.get_object_type(core_branch, &graph, &name))?;
+    match def {
+        Some(d) => {
+            let json = serde_json::to_value(&d).map_err(|e| Error::Serialization {
+                reason: e.to_string(),
+            })?;
+            Ok(Output::Maybe(Some(serde_json_to_value(json)?)))
+        }
+        None => Ok(Output::Maybe(None)),
+    }
+}
+
+/// Handle GraphListObjectTypes command.
+pub fn graph_list_object_types(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    let names = convert_result(p.graph.list_object_types(core_branch, &graph))?;
+    Ok(Output::Keys(names))
+}
+
+/// Handle GraphDeleteObjectType command.
+pub fn graph_delete_object_type(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+    name: String,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    convert_result(p.graph.delete_object_type(core_branch, &graph, &name))?;
+    Ok(Output::Unit)
+}
+
+/// Handle GraphDefineLinkType command.
+pub fn graph_define_link_type(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+    definition: Value,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    let json = crate::bridge::value_to_serde_json_public(definition)?;
+    let def: LinkTypeDef =
+        serde_json::from_value(json).map_err(|e| Error::InvalidInput {
+            reason: format!("Invalid link type definition: {}", e),
+        })?;
+    convert_result(p.graph.define_link_type(core_branch, &graph, def))?;
+    Ok(Output::Unit)
+}
+
+/// Handle GraphGetLinkType command.
+pub fn graph_get_link_type(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+    name: String,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    let def = convert_result(p.graph.get_link_type(core_branch, &graph, &name))?;
+    match def {
+        Some(d) => {
+            let json = serde_json::to_value(&d).map_err(|e| Error::Serialization {
+                reason: e.to_string(),
+            })?;
+            Ok(Output::Maybe(Some(serde_json_to_value(json)?)))
+        }
+        None => Ok(Output::Maybe(None)),
+    }
+}
+
+/// Handle GraphListLinkTypes command.
+pub fn graph_list_link_types(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    let names = convert_result(p.graph.list_link_types(core_branch, &graph))?;
+    Ok(Output::Keys(names))
+}
+
+/// Handle GraphDeleteLinkType command.
+pub fn graph_delete_link_type(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+    name: String,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    convert_result(p.graph.delete_link_type(core_branch, &graph, &name))?;
+    Ok(Output::Unit)
+}
+
+/// Handle GraphFreezeOntology command.
+pub fn graph_freeze_ontology(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    convert_result(p.graph.freeze_ontology(core_branch, &graph))?;
+    Ok(Output::Unit)
+}
+
+/// Handle GraphOntologyStatus command.
+pub fn graph_ontology_status(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    let status = convert_result(p.graph.ontology_status(core_branch, &graph))?;
+    match status {
+        Some(s) => {
+            let json = serde_json::to_value(s).map_err(|e| Error::Serialization {
+                reason: e.to_string(),
+            })?;
+            Ok(Output::Maybe(Some(serde_json_to_value(json)?)))
+        }
+        None => Ok(Output::Maybe(None)),
+    }
+}
+
+/// Handle GraphOntologySummary command.
+pub fn graph_ontology_summary(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    let summary = convert_result(p.graph.ontology_summary(core_branch, &graph))?;
+    match summary {
+        Some(s) => {
+            let json = serde_json::to_value(&s).map_err(|e| Error::Serialization {
+                reason: e.to_string(),
+            })?;
+            Ok(Output::Maybe(Some(serde_json_to_value(json)?)))
+        }
+        None => Ok(Output::Maybe(None)),
+    }
+}
+
+/// Handle GraphNodesByType command.
+pub fn graph_nodes_by_type(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+    object_type: String,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    let node_ids = convert_result(p.graph.nodes_by_type(core_branch, &graph, &object_type))?;
+    Ok(Output::Keys(node_ids))
+}
+
 
 /// Convert serde_json::Value to strata_core::Value.
 fn serde_json_to_value(json: serde_json::Value) -> Result<Value> {

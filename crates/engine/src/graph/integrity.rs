@@ -86,6 +86,7 @@ mod tests {
             "g",
             Some(GraphMeta {
                 cascade_policy: CascadePolicy::Cascade,
+                ..Default::default()
             }),
         )
         .unwrap();
@@ -96,6 +97,7 @@ mod tests {
             NodeData {
                 entity_ref: Some("kv://main/key1".to_string()),
                 properties: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -121,6 +123,7 @@ mod tests {
             "g",
             Some(GraphMeta {
                 cascade_policy: CascadePolicy::Detach,
+                ..Default::default()
             }),
         )
         .unwrap();
@@ -131,6 +134,7 @@ mod tests {
             NodeData {
                 entity_ref: Some("kv://main/key1".to_string()),
                 properties: Some(serde_json::json!({"important": true})),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -155,6 +159,7 @@ mod tests {
             "g",
             Some(GraphMeta {
                 cascade_policy: CascadePolicy::Ignore,
+                ..Default::default()
             }),
         )
         .unwrap();
@@ -165,6 +170,7 @@ mod tests {
             NodeData {
                 entity_ref: Some("kv://main/key1".to_string()),
                 properties: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -185,6 +191,7 @@ mod tests {
             "cascade_g",
             Some(GraphMeta {
                 cascade_policy: CascadePolicy::Cascade,
+                ..Default::default()
             }),
         )
         .unwrap();
@@ -193,6 +200,7 @@ mod tests {
             "detach_g",
             Some(GraphMeta {
                 cascade_policy: CascadePolicy::Detach,
+                ..Default::default()
             }),
         )
         .unwrap();
@@ -205,6 +213,7 @@ mod tests {
             NodeData {
                 entity_ref: Some(uri.to_string()),
                 properties: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -215,6 +224,7 @@ mod tests {
             NodeData {
                 entity_ref: Some(uri.to_string()),
                 properties: None,
+                ..Default::default()
             },
         )
         .unwrap();

@@ -527,6 +527,9 @@ pub struct BulkGraphNode {
     /// Optional properties to attach to the node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub properties: Option<Value>,
+    /// Optional ontology object type (e.g. `"Patient"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_type: Option<String>,
 }
 
 /// An edge entry for bulk graph insertion.
