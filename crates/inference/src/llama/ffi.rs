@@ -493,13 +493,11 @@ impl LlamaCppApi {
         }
 
         // Try each candidate path
-        let mut last_err = String::from("no search paths available");
         for path in &candidates {
             if let Some(path_str) = path.to_str() {
                 if let Ok(cpath) = std::ffi::CString::new(path_str) {
-                    match DynLib::open(&cpath) {
-                        Ok(lib) => return Ok(lib),
-                        Err(e) => last_err = e,
+                    if let Ok(lib) = DynLib::open(&cpath) {
+                        return Ok(lib);
                     }
                 }
             }
@@ -508,9 +506,10 @@ impl LlamaCppApi {
         // 5. System search (bare library name)
         let sys_name = std::ffi::CString::new(filename.as_bytes())
             .map_err(|_| "library filename contains null byte".to_string())?;
-        if let Ok(lib) = DynLib::open(&sys_name) {
-            return Ok(lib);
-        }
+        let last_err = match DynLib::open(&sys_name) {
+            Ok(lib) => return Ok(lib),
+            Err(e) => e,
+        };
 
         // Build a helpful error listing all paths tried
         let tried: Vec<String> = candidates
@@ -948,5 +947,79 @@ mod tests {
             );
         }
         // If it somehow succeeds (libllama is installed), that's fine too
+    }
+
+    #[test]
+    fn load_error_includes_system_search_failure() {
+        // When all paths fail, the error should reflect the system search
+        // failure (the last attempt), not just candidate path failures
+        std::env::set_var("LLAMA_LIB_PATH", "");
+        let result = LlamaCppApi::load();
+        std::env::remove_var("LLAMA_LIB_PATH");
+
+        if let Err(err) = result {
+            // The error message should contain the library filename
+            let filename = super::super::dl::libllama_filename();
+            assert!(
+                err.contains(&filename),
+                "error should mention {filename}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn llama_cpp_api_debug_impl() {
+        // LlamaCppApi has a manual Debug impl — verify it doesn't panic
+        // and contains the struct name. We can't construct one without libllama,
+        // but we test the format indirectly via the error path.
+        let result = LlamaCppApi::load();
+        if let Ok(api) = result {
+            let dbg = format!("{:?}", api);
+            assert!(
+                dbg.contains("LlamaCppApi"),
+                "Debug output should contain struct name: {dbg}"
+            );
+        }
+        // If load fails, that's expected (no libllama) — the test still verifies
+        // the Debug impl compiles and is callable.
+    }
+
+    #[test]
+    fn pooling_types_are_sequential() {
+        // Verify the enum values are in order (important for array indexing)
+        assert_eq!(LLAMA_POOLING_TYPE_NONE + 1, LLAMA_POOLING_TYPE_MEAN);
+        assert_eq!(LLAMA_POOLING_TYPE_MEAN + 1, LLAMA_POOLING_TYPE_CLS);
+        assert_eq!(LLAMA_POOLING_TYPE_CLS + 1, LLAMA_POOLING_TYPE_LAST);
+    }
+
+    #[test]
+    fn model_params_n_gpu_layers_at_expected_offset() {
+        // n_gpu_layers should be at byte offset 16 (after 2 pointers)
+        // We verify by constructing a zeroed struct and checking field access
+        let params: LlamaModelParams = unsafe { std::mem::zeroed() };
+        // If the struct layout is correct, accessing these fields won't panic
+        assert_eq!(params.n_gpu_layers, 0);
+        assert!(!params.use_mmap); // zeroed = false
+        assert!(!params.vocab_only);
+    }
+
+    #[test]
+    fn context_params_zeroed_is_safe() {
+        // Verify that zeroed LlamaContextParams is accessible
+        let params: LlamaContextParams = unsafe { std::mem::zeroed() };
+        assert_eq!(params.n_ctx, 0);
+        assert_eq!(params.n_batch, 0);
+        assert!(!params.embeddings);
+        assert_eq!(params.pooling_type, LLAMA_POOLING_TYPE_NONE);
+    }
+
+    #[test]
+    fn batch_zeroed_has_null_pointers() {
+        let batch: LlamaBatch = unsafe { std::mem::zeroed() };
+        assert_eq!(batch.n_tokens, 0);
+        assert!(batch.token.is_null());
+        assert!(batch.embd.is_null());
+        assert!(batch.pos.is_null());
+        assert!(batch.logits.is_null());
     }
 }

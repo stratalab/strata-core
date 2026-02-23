@@ -48,11 +48,20 @@ impl LlamaCppContext {
             .map_err(InferenceError::LlamaCpp)?;
 
         let vocab = api.model_get_vocab(model);
-        let n_embd = api.model_n_embd(model) as usize;
+        let n_embd_raw = api.model_n_embd(model);
         let has_encoder = api.model_has_encoder(model);
-        let vocab_size = api.vocab_n_tokens(vocab) as usize;
+        let vocab_size_raw = api.vocab_n_tokens(vocab);
         let bos_id = api.vocab_bos(vocab);
         let eos_id = api.vocab_eos(vocab);
+
+        if n_embd_raw <= 0 || vocab_size_raw <= 0 {
+            api.model_free(model);
+            return Err(InferenceError::LlamaCpp(format!(
+                "invalid model metadata: n_embd={n_embd_raw}, vocab_size={vocab_size_raw}"
+            )));
+        }
+        let n_embd = n_embd_raw as usize;
+        let vocab_size = vocab_size_raw as usize;
 
         // Context params: enable embeddings, set pooling to MEAN
         let mut cparams = api.context_default_params();
@@ -61,11 +70,14 @@ impl LlamaCppContext {
         // Use model's training context size
         cparams.n_ctx = 0; // 0 = from model
 
-        let ctx = api
-            .init_from_model(model, cparams)
-            .map_err(InferenceError::LlamaCpp)?;
+        let ctx = api.init_from_model(model, cparams).map_err(|e| {
+            // Free model on context creation failure to avoid leak
+            api.model_free(model);
+            InferenceError::LlamaCpp(e)
+        })?;
 
-        let n_ctx = api.model_n_ctx_train(model) as usize;
+        let n_ctx_raw = api.model_n_ctx_train(model);
+        let n_ctx = if n_ctx_raw > 0 { n_ctx_raw as usize } else { 512 };
 
         info!(
             n_embd = n_embd,
@@ -110,12 +122,22 @@ impl LlamaCppContext {
             .map_err(InferenceError::LlamaCpp)?;
 
         let vocab = api.model_get_vocab(model);
-        let n_embd = api.model_n_embd(model) as usize;
+        let n_embd_raw = api.model_n_embd(model);
         let has_encoder = api.model_has_encoder(model);
-        let vocab_size = api.vocab_n_tokens(vocab) as usize;
+        let vocab_size_raw = api.vocab_n_tokens(vocab);
         let bos_id = api.vocab_bos(vocab);
         let eos_id = api.vocab_eos(vocab);
-        let train_ctx = api.model_n_ctx_train(model) as usize;
+        let train_ctx_raw = api.model_n_ctx_train(model);
+
+        if n_embd_raw <= 0 || vocab_size_raw <= 0 {
+            api.model_free(model);
+            return Err(InferenceError::LlamaCpp(format!(
+                "invalid model metadata: n_embd={n_embd_raw}, vocab_size={vocab_size_raw}"
+            )));
+        }
+        let n_embd = n_embd_raw as usize;
+        let vocab_size = vocab_size_raw as usize;
+        let train_ctx = if train_ctx_raw > 0 { train_ctx_raw as usize } else { 2048 };
 
         // Context params
         let mut cparams = api.context_default_params();
@@ -127,9 +149,11 @@ impl LlamaCppContext {
         };
         cparams.n_ctx = n_ctx as u32;
 
-        let ctx = api
-            .init_from_model(model, cparams)
-            .map_err(InferenceError::LlamaCpp)?;
+        let ctx = api.init_from_model(model, cparams).map_err(|e| {
+            // Free model on context creation failure to avoid leak
+            api.model_free(model);
+            InferenceError::LlamaCpp(e)
+        })?;
 
         info!(
             n_embd = n_embd,
@@ -295,6 +319,8 @@ mod tests {
     fn path_to_cstring_with_unicode() {
         let result = path_to_cstring(Path::new("/tmp/модель.gguf"));
         assert!(result.is_ok());
+        let cstr = result.unwrap();
+        assert_eq!(cstr.to_str().unwrap(), "/tmp/модель.gguf");
     }
 
     #[test]
@@ -311,5 +337,45 @@ mod tests {
         let result = path_to_cstring(Path::new(""));
         // Empty string is a valid CString (just a null terminator)
         assert!(result.is_ok());
+        let cstr = result.unwrap();
+        assert_eq!(cstr.to_str().unwrap(), "");
+    }
+
+    #[test]
+    fn path_to_cstring_relative_path() {
+        let result = path_to_cstring(Path::new("models/model.gguf"));
+        assert!(result.is_ok());
+        let cstr = result.unwrap();
+        assert_eq!(cstr.to_str().unwrap(), "models/model.gguf");
+    }
+
+    #[test]
+    fn path_to_cstring_deeply_nested() {
+        let result = path_to_cstring(Path::new("/a/b/c/d/e/f/g/h/model.gguf"));
+        assert!(result.is_ok());
+        let cstr = result.unwrap();
+        assert_eq!(cstr.to_str().unwrap(), "/a/b/c/d/e/f/g/h/model.gguf");
+    }
+
+    #[test]
+    fn path_to_cstring_with_special_chars() {
+        let result = path_to_cstring(Path::new("/tmp/model (1) [copy].gguf"));
+        assert!(result.is_ok());
+        let cstr = result.unwrap();
+        assert_eq!(cstr.to_str().unwrap(), "/tmp/model (1) [copy].gguf");
+    }
+
+    #[test]
+    fn path_to_cstring_preserves_dot_segments() {
+        // CString conversion should not normalize the path
+        let result = path_to_cstring(Path::new("/tmp/../tmp/./model.gguf"));
+        assert!(result.is_ok());
+        // Path::new normalizes some things, but the CString should match
+        // what Path gives us
+        let expected = Path::new("/tmp/../tmp/./model.gguf")
+            .to_str()
+            .unwrap();
+        let cstr = result.unwrap();
+        assert_eq!(cstr.to_str().unwrap(), expected);
     }
 }

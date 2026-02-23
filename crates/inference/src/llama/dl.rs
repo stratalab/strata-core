@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn sym_on_invalid_symbol_returns_error() {
+    fn sym_on_invalid_symbol_returns_error_with_symbol_name() {
         // Load a library we know exists (libc on Unix)
         #[cfg(target_os = "linux")]
         let lib = DynLib::open(c"libc.so.6");
@@ -223,6 +223,13 @@ mod tests {
             let lib = lib.expect("should be able to load system libc");
             let result = unsafe { lib.sym(c"__this_symbol_definitely_does_not_exist_xyz__") };
             assert!(result.is_err());
+            let err = result.unwrap_err();
+            assert!(!err.is_empty(), "error message should not be empty");
+            // dlsym errors typically mention the symbol name
+            assert!(
+                err.contains("__this_symbol_definitely_does_not_exist_xyz__"),
+                "error should mention the symbol name: {err}"
+            );
         }
     }
 
@@ -309,6 +316,66 @@ mod tests {
                 let lib = DynLib::open(c"libSystem.B.dylib").unwrap();
                 drop(lib);
             }
+        }
+    }
+
+    #[test]
+    fn debug_impl_shows_struct_name_and_handle() {
+        let lib = DynLib {
+            handle: std::ptr::null_mut(),
+        };
+        let dbg = format!("{:?}", lib);
+        assert!(dbg.contains("DynLib"), "Debug output should contain struct name: {dbg}");
+        assert!(dbg.contains("handle"), "Debug output should contain field name: {dbg}");
+        // Don't drop this normally — null handle is safe due to our guard
+    }
+
+    #[test]
+    fn resolved_symbol_is_callable() {
+        // Verify that a resolved function pointer can actually be called
+        #[cfg(target_os = "linux")]
+        let lib = DynLib::open(c"libc.so.6");
+        #[cfg(target_os = "macos")]
+        let lib = DynLib::open(c"libSystem.B.dylib");
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        return;
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let lib = lib.expect("should load system libc");
+            let ptr = unsafe { lib.sym(c"strlen") }.expect("strlen should resolve");
+
+            // Cast to the correct function signature and call it
+            let strlen_fn: unsafe extern "C" fn(*const c_char) -> usize =
+                unsafe { std::mem::transmute(ptr) };
+            let test_str = c"hello";
+            let len = unsafe { strlen_fn(test_str.as_ptr()) };
+            assert_eq!(len, 5, "strlen(\"hello\") should be 5");
+        }
+    }
+
+    #[test]
+    fn open_same_library_twice_succeeds() {
+        // Opening the same library twice should work (refcount in dlopen)
+        #[cfg(target_os = "linux")]
+        {
+            let lib1 = DynLib::open(c"libc.so.6").unwrap();
+            let lib2 = DynLib::open(c"libc.so.6").unwrap();
+            // Both handles should be valid (non-null)
+            let dbg1 = format!("{:?}", lib1);
+            let dbg2 = format!("{:?}", lib2);
+            assert!(dbg1.contains("DynLib"));
+            assert!(dbg2.contains("DynLib"));
+            // Dropping both should not crash
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let lib1 = DynLib::open(c"libSystem.B.dylib").unwrap();
+            let lib2 = DynLib::open(c"libSystem.B.dylib").unwrap();
+            let dbg1 = format!("{:?}", lib1);
+            let dbg2 = format!("{:?}", lib2);
+            assert!(dbg1.contains("DynLib"));
+            assert!(dbg2.contains("DynLib"));
         }
     }
 }
