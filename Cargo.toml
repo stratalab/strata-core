@@ -12,6 +12,7 @@ members = [
     "crates/concurrency",
     "crates/durability",
     "crates/engine",
+    "crates/inference",
     "crates/intelligence",
     "crates/cli",
     "crates/security",
