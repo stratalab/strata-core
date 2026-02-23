@@ -1,16 +1,18 @@
 //! Generation engine: prompt → text via local llama.cpp or cloud providers.
 //!
 //! [`GenerationEngine`] provides a unified API for text generation across
-//! different backends. Currently only the local llama.cpp backend is implemented;
-//! cloud providers (Anthropic, OpenAI, Google) will be added in Epic 7.
+//! different backends: local llama.cpp, Anthropic (Claude), OpenAI (GPT),
+//! and Google (Gemini).
 //!
 //! The engine takes `&mut self` — callers needing thread-safety should wrap
 //! in a `Mutex`.
 
+#[cfg(feature = "local")]
 use std::path::Path;
 
 use tracing::info;
 
+#[cfg(feature = "local")]
 use crate::provider::local::LocalProvider;
 use crate::{GenerateRequest, GenerateResponse, InferenceError, ProviderKind};
 
@@ -19,12 +21,14 @@ use crate::StopReason;
 
 /// High-level generation engine with provider dispatch.
 ///
-/// Currently wraps a local llama.cpp provider. In the future, cloud providers
-/// will be added as enum variants for provider dispatch.
+/// Wraps a local llama.cpp provider or a cloud provider (Anthropic, OpenAI,
+/// Google) and dispatches `generate()` calls to the underlying backend.
 ///
-/// # Example
+/// # Example (local)
 ///
 /// ```no_run
+/// # #[cfg(feature = "local")]
+/// # fn example() -> Result<(), strata_inference::InferenceError> {
 /// use strata_inference::{GenerationEngine, GenerateRequest};
 ///
 /// let mut engine = GenerationEngine::from_gguf("model.gguf")?;
@@ -34,27 +38,61 @@ use crate::StopReason;
 ///     ..Default::default()
 /// })?;
 /// println!("{}", response.text);
-/// # Ok::<(), strata_inference::InferenceError>(())
+/// # Ok(())
+/// # }
 /// ```
 pub struct GenerationEngine {
     provider: Provider,
 }
 
-/// Internal provider dispatch.
+/// Internal provider dispatch enum.
 ///
-/// Cloud variants will be added in Epic 7.
+/// Each variant is gated behind its feature flag. At least one provider
+/// feature must be enabled for `GenerationEngine` to be constructible.
 enum Provider {
+    #[cfg(feature = "local")]
     Local(LocalProvider),
+
+    #[cfg(feature = "anthropic")]
+    Anthropic(crate::provider::anthropic::AnthropicProvider),
+
+    #[cfg(feature = "openai")]
+    OpenAI(crate::provider::openai::OpenAIProvider),
+
+    #[cfg(feature = "google")]
+    Google(crate::provider::google::GoogleProvider),
 }
 
 impl std::fmt::Debug for GenerationEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.provider {
+            #[cfg(feature = "local")]
             Provider::Local(p) => f
                 .debug_struct("GenerationEngine")
                 .field("provider", &"local")
                 .field("vocab_size", &p.vocab_size())
                 .field("context_size", &p.context_size())
+                .finish(),
+
+            #[cfg(feature = "anthropic")]
+            Provider::Anthropic(p) => f
+                .debug_struct("GenerationEngine")
+                .field("provider", &"anthropic")
+                .field("model", &p.model())
+                .finish(),
+
+            #[cfg(feature = "openai")]
+            Provider::OpenAI(p) => f
+                .debug_struct("GenerationEngine")
+                .field("provider", &"openai")
+                .field("model", &p.model())
+                .finish(),
+
+            #[cfg(feature = "google")]
+            Provider::Google(p) => f
+                .debug_struct("GenerationEngine")
+                .field("provider", &"google")
+                .field("model", &p.model())
                 .finish(),
         }
     }
@@ -65,6 +103,7 @@ impl GenerationEngine {
     ///
     /// The model is loaded with GPU offloading enabled and the context size
     /// capped at min(training_ctx, 4096).
+    #[cfg(feature = "local")]
     pub fn from_gguf(path: impl AsRef<Path>) -> Result<Self, InferenceError> {
         Self::from_gguf_with_ctx(path, None)
     }
@@ -72,6 +111,7 @@ impl GenerationEngine {
     /// Load a generation engine from a GGUF file with a custom context size.
     ///
     /// The context size is capped at the model's training context length.
+    #[cfg(feature = "local")]
     pub fn from_gguf_with_ctx(
         path: impl AsRef<Path>,
         ctx_size: Option<usize>,
@@ -93,6 +133,7 @@ impl GenerationEngine {
     ///
     /// Resolves the name (e.g., `"gpt2"`) to a local GGUF file path,
     /// then loads the model with default context size.
+    #[cfg(feature = "local")]
     pub fn from_registry(name: &str) -> Result<Self, InferenceError> {
         let registry = crate::registry::ModelRegistry::new();
         let path = registry.resolve(name)?;
@@ -101,15 +142,80 @@ impl GenerationEngine {
 
     /// Create a generation engine backed by a cloud provider.
     ///
-    /// Blocked until Epic 7 (cloud providers); returns `NotSupported` for now.
+    /// The `provider` selects which cloud API to use. `api_key` and `model`
+    /// are validated (must not be empty). `ProviderKind::Local` is rejected —
+    /// use `from_gguf` or `from_registry` for local models.
+    ///
+    /// Returns `NotSupported` if the requested provider's feature flag is not
+    /// enabled at compile time.
     pub fn cloud(
-        _provider: ProviderKind,
-        _api_key: String,
-        _model: String,
+        provider: ProviderKind,
+        api_key: String,
+        model: String,
     ) -> Result<Self, InferenceError> {
-        Err(InferenceError::NotSupported(
-            "cloud providers not yet implemented (Epic 7)".to_string(),
-        ))
+        if provider == ProviderKind::Local {
+            return Err(InferenceError::Provider(
+                "use from_gguf() or from_registry() for local models, not cloud()".to_string(),
+            ));
+        }
+
+        match provider {
+            ProviderKind::Local => unreachable!(),
+
+            ProviderKind::Anthropic => {
+                #[cfg(feature = "anthropic")]
+                {
+                    let p = crate::provider::anthropic::AnthropicProvider::new(api_key, model)?;
+                    info!(provider = "anthropic", model = p.model(), "Cloud generation engine ready");
+                    Ok(Self {
+                        provider: Provider::Anthropic(p),
+                    })
+                }
+                #[cfg(not(feature = "anthropic"))]
+                {
+                    let _ = (api_key, model);
+                    Err(InferenceError::NotSupported(
+                        "Anthropic provider not enabled (compile with --features anthropic)".to_string(),
+                    ))
+                }
+            }
+
+            ProviderKind::OpenAI => {
+                #[cfg(feature = "openai")]
+                {
+                    let p = crate::provider::openai::OpenAIProvider::new(api_key, model)?;
+                    info!(provider = "openai", model = p.model(), "Cloud generation engine ready");
+                    Ok(Self {
+                        provider: Provider::OpenAI(p),
+                    })
+                }
+                #[cfg(not(feature = "openai"))]
+                {
+                    let _ = (api_key, model);
+                    Err(InferenceError::NotSupported(
+                        "OpenAI provider not enabled (compile with --features openai)".to_string(),
+                    ))
+                }
+            }
+
+            ProviderKind::Google => {
+                #[cfg(feature = "google")]
+                {
+                    let p = crate::provider::google::GoogleProvider::new(api_key, model)?;
+                    info!(provider = "google", model = p.model(), "Cloud generation engine ready");
+                    Ok(Self {
+                        provider: Provider::Google(p),
+                    })
+                }
+                #[cfg(not(feature = "google"))]
+                {
+                    let _ = (api_key, model);
+                    Err(InferenceError::NotSupported(
+                        "Google provider not enabled (compile with --features google)".to_string(),
+                    ))
+                }
+            }
+        }
     }
 
     /// Generate text from a prompt.
@@ -120,7 +226,17 @@ impl GenerationEngine {
         request: &GenerateRequest,
     ) -> Result<GenerateResponse, InferenceError> {
         match &mut self.provider {
+            #[cfg(feature = "local")]
             Provider::Local(p) => p.generate(request),
+
+            #[cfg(feature = "anthropic")]
+            Provider::Anthropic(p) => p.generate(request),
+
+            #[cfg(feature = "openai")]
+            Provider::OpenAI(p) => p.generate(request),
+
+            #[cfg(feature = "google")]
+            Provider::Google(p) => p.generate(request),
         }
     }
 
@@ -131,7 +247,32 @@ impl GenerationEngine {
     /// providers return `NotSupported`.
     pub fn encode(&self, text: &str, add_special: bool) -> Result<Vec<u32>, InferenceError> {
         match &self.provider {
+            #[cfg(feature = "local")]
             Provider::Local(p) => Ok(p.encode(text, add_special)),
+
+            #[cfg(feature = "anthropic")]
+            Provider::Anthropic(_) => {
+                let _ = (text, add_special);
+                Err(InferenceError::NotSupported(
+                    "tokenization not available for Anthropic cloud provider".to_string(),
+                ))
+            }
+
+            #[cfg(feature = "openai")]
+            Provider::OpenAI(_) => {
+                let _ = (text, add_special);
+                Err(InferenceError::NotSupported(
+                    "tokenization not available for OpenAI cloud provider".to_string(),
+                ))
+            }
+
+            #[cfg(feature = "google")]
+            Provider::Google(_) => {
+                let _ = (text, add_special);
+                Err(InferenceError::NotSupported(
+                    "tokenization not available for Google cloud provider".to_string(),
+                ))
+            }
         }
     }
 
@@ -140,19 +281,66 @@ impl GenerationEngine {
     /// Only available for local providers. Cloud providers return `NotSupported`.
     pub fn decode(&self, ids: &[u32]) -> Result<String, InferenceError> {
         match &self.provider {
+            #[cfg(feature = "local")]
             Provider::Local(p) => Ok(p.decode(ids)),
+
+            #[cfg(feature = "anthropic")]
+            Provider::Anthropic(_) => {
+                let _ = ids;
+                Err(InferenceError::NotSupported(
+                    "detokenization not available for Anthropic cloud provider".to_string(),
+                ))
+            }
+
+            #[cfg(feature = "openai")]
+            Provider::OpenAI(_) => {
+                let _ = ids;
+                Err(InferenceError::NotSupported(
+                    "detokenization not available for OpenAI cloud provider".to_string(),
+                ))
+            }
+
+            #[cfg(feature = "google")]
+            Provider::Google(_) => {
+                let _ = ids;
+                Err(InferenceError::NotSupported(
+                    "detokenization not available for Google cloud provider".to_string(),
+                ))
+            }
         }
     }
 
     /// Returns `true` if this engine uses a local llama.cpp backend.
     pub fn is_local(&self) -> bool {
-        matches!(self.provider, Provider::Local(_))
+        match &self.provider {
+            #[cfg(feature = "local")]
+            Provider::Local(_) => true,
+
+            #[cfg(feature = "anthropic")]
+            Provider::Anthropic(_) => false,
+
+            #[cfg(feature = "openai")]
+            Provider::OpenAI(_) => false,
+
+            #[cfg(feature = "google")]
+            Provider::Google(_) => false,
+        }
     }
 
     /// Returns which provider this engine uses.
     pub fn provider(&self) -> ProviderKind {
         match &self.provider {
+            #[cfg(feature = "local")]
             Provider::Local(_) => ProviderKind::Local,
+
+            #[cfg(feature = "anthropic")]
+            Provider::Anthropic(_) => ProviderKind::Anthropic,
+
+            #[cfg(feature = "openai")]
+            Provider::OpenAI(_) => ProviderKind::OpenAI,
+
+            #[cfg(feature = "google")]
+            Provider::Google(_) => ProviderKind::Google,
         }
     }
 }
@@ -174,20 +362,20 @@ mod tests {
     // Constructor tests (no libllama needed for error paths)
     // -----------------------------------------------------------------------
 
+    #[cfg(feature = "local")]
     #[test]
     fn from_registry_known_model_not_local_returns_error() {
-        // Known model but not downloaded → Registry error with helpful message
         let result = GenerationEngine::from_registry("gpt2");
         assert!(result.is_err());
         let err = result.unwrap_err();
         let msg = err.to_string();
-        // Could be Registry (model not found locally) or LlamaCpp (libllama not found)
         assert!(
             matches!(err, InferenceError::Registry(_) | InferenceError::LlamaCpp(_)),
             "should be Registry or LlamaCpp error, got: {msg}"
         );
     }
 
+    #[cfg(feature = "local")]
     #[test]
     fn from_registry_unknown_model_returns_registry_error() {
         let result = GenerationEngine::from_registry("nonexistent-model");
@@ -203,6 +391,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "local")]
     #[test]
     fn from_registry_empty_name_returns_error() {
         let result = GenerationEngine::from_registry("");
@@ -213,44 +402,7 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn cloud_returns_not_supported() {
-        let result = GenerationEngine::cloud(
-            ProviderKind::Anthropic,
-            "sk-test".to_string(),
-            "claude-3".to_string(),
-        );
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, InferenceError::NotSupported(_)),
-            "should be NotSupported, got: {err}"
-        );
-        assert!(
-            err.to_string().contains("cloud"),
-            "error should mention cloud: {err}"
-        );
-    }
-
-    #[test]
-    fn cloud_with_all_providers_returns_not_supported() {
-        for provider in &[
-            ProviderKind::Anthropic,
-            ProviderKind::OpenAI,
-            ProviderKind::Google,
-        ] {
-            let result = GenerationEngine::cloud(
-                *provider,
-                "key".to_string(),
-                "model".to_string(),
-            );
-            assert!(
-                matches!(result.unwrap_err(), InferenceError::NotSupported(_)),
-                "cloud({provider}) should be NotSupported"
-            );
-        }
-    }
-
+    #[cfg(feature = "local")]
     #[test]
     fn from_gguf_nonexistent_returns_descriptive_error() {
         let result = GenerationEngine::from_gguf("/nonexistent/path/model.gguf");
@@ -264,6 +416,7 @@ mod tests {
         assert!(!msg.is_empty(), "error should not be empty");
     }
 
+    #[cfg(feature = "local")]
     #[test]
     fn from_gguf_with_ctx_nonexistent_returns_descriptive_error() {
         let result =
@@ -278,15 +431,49 @@ mod tests {
         assert!(!msg.is_empty(), "error should not be empty");
     }
 
+    #[cfg(feature = "local")]
     #[test]
     fn from_gguf_accepts_path_types() {
-        // All fail without libllama, but verify AsRef<Path> works
         let r1 = GenerationEngine::from_gguf("/tmp/model.gguf");
         let r2 = GenerationEngine::from_gguf(String::from("/tmp/model.gguf"));
         let r3 = GenerationEngine::from_gguf(std::path::PathBuf::from("/tmp/model.gguf"));
         assert!(r1.is_err());
         assert!(r2.is_err());
         assert!(r3.is_err());
+    }
+
+    #[cfg(feature = "local")]
+    #[test]
+    fn from_gguf_with_ctx_zero_returns_error() {
+        let result =
+            GenerationEngine::from_gguf_with_ctx("/nonexistent/model.gguf", Some(0));
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "local")]
+    #[test]
+    fn from_gguf_with_ctx_none_delegates_to_from_gguf() {
+        let r1 = GenerationEngine::from_gguf("/nonexistent/model.gguf");
+        let r2 = GenerationEngine::from_gguf_with_ctx("/nonexistent/model.gguf", None);
+        assert!(r1.is_err());
+        assert!(r2.is_err());
+        assert!(matches!(r1.unwrap_err(), InferenceError::LlamaCpp(_)));
+        assert!(matches!(r2.unwrap_err(), InferenceError::LlamaCpp(_)));
+    }
+
+    #[cfg(feature = "local")]
+    #[test]
+    fn from_registry_error_is_descriptive() {
+        let err = GenerationEngine::from_registry("any").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Unknown model"),
+            "error should mention unknown model: {msg}"
+        );
+        assert!(
+            msg.contains("strata models list"),
+            "error should suggest listing models: {msg}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -320,7 +507,6 @@ mod tests {
 
     #[test]
     fn stop_reason_display_exhaustive() {
-        // Verify all StopReason variants that generate() can return
         assert_eq!(StopReason::StopToken.to_string(), "stop_token");
         assert_eq!(StopReason::MaxTokens.to_string(), "max_tokens");
         assert_eq!(StopReason::ContextLength.to_string(), "context_length");
@@ -328,85 +514,326 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // cloud() edge cases
+    // cloud() constructor tests
     // -----------------------------------------------------------------------
 
     #[test]
-    fn cloud_with_local_provider_returns_not_supported() {
-        // ProviderKind::Local is semantically wrong for cloud(), but the stub
-        // rejects all providers uniformly.
+    fn cloud_local_provider_returns_provider_error() {
         let result = GenerationEngine::cloud(
             ProviderKind::Local,
             "key".to_string(),
             "model".to_string(),
         );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
         assert!(
-            matches!(result.unwrap_err(), InferenceError::NotSupported(_)),
-            "cloud(Local) should be NotSupported"
+            matches!(err, InferenceError::Provider(_)),
+            "cloud(Local) should be Provider error, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("from_gguf"),
+            "error should suggest from_gguf: {err}"
         );
     }
 
     #[test]
-    fn cloud_with_empty_key_and_model_returns_not_supported() {
+    fn cloud_local_provider_with_empty_key_still_rejects_local() {
+        // The Local check happens before key validation
+        let result = GenerationEngine::cloud(
+            ProviderKind::Local,
+            String::new(),
+            String::new(),
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            InferenceError::Provider(_)
+        ));
+    }
+
+    #[cfg(feature = "anthropic")]
+    #[test]
+    fn cloud_anthropic_constructs_successfully() {
+        let engine = GenerationEngine::cloud(
+            ProviderKind::Anthropic,
+            "sk-ant-test-key".to_string(),
+            "claude-sonnet-4-20250514".to_string(),
+        );
+        assert!(engine.is_ok());
+        let engine = engine.unwrap();
+        assert!(!engine.is_local());
+        assert_eq!(engine.provider(), ProviderKind::Anthropic);
+    }
+
+    #[cfg(feature = "anthropic")]
+    #[test]
+    fn cloud_anthropic_empty_key_returns_error() {
         let result = GenerationEngine::cloud(
             ProviderKind::Anthropic,
             String::new(),
-            String::new(),
+            "claude-sonnet-4-20250514".to_string(),
         );
-        assert!(
-            matches!(result.unwrap_err(), InferenceError::NotSupported(_)),
-            "cloud with empty strings should still be NotSupported"
-        );
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), InferenceError::Provider(_)));
     }
 
+    #[cfg(feature = "anthropic")]
     #[test]
-    fn from_gguf_with_ctx_zero_returns_error() {
-        // ctx_size=0 should fail (or be handled gracefully)
-        let result =
-            GenerationEngine::from_gguf_with_ctx("/nonexistent/model.gguf", Some(0));
+    fn cloud_anthropic_empty_model_returns_error() {
+        let result = GenerationEngine::cloud(
+            ProviderKind::Anthropic,
+            "sk-test".to_string(),
+            String::new(),
+        );
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), InferenceError::Provider(_)));
+    }
+
+    #[cfg(feature = "anthropic")]
+    #[test]
+    fn cloud_anthropic_encode_returns_not_supported() {
+        let engine = GenerationEngine::cloud(
+            ProviderKind::Anthropic,
+            "sk-test".to_string(),
+            "model".to_string(),
+        )
+        .unwrap();
+        let result = engine.encode("hello", false);
+        assert!(matches!(
+            result.unwrap_err(),
+            InferenceError::NotSupported(_)
+        ));
+    }
+
+    #[cfg(feature = "anthropic")]
+    #[test]
+    fn cloud_anthropic_decode_returns_not_supported() {
+        let engine = GenerationEngine::cloud(
+            ProviderKind::Anthropic,
+            "sk-test".to_string(),
+            "model".to_string(),
+        )
+        .unwrap();
+        let result = engine.decode(&[1, 2, 3]);
+        assert!(matches!(
+            result.unwrap_err(),
+            InferenceError::NotSupported(_)
+        ));
+    }
+
+    #[cfg(feature = "anthropic")]
+    #[test]
+    fn cloud_anthropic_debug_contains_model() {
+        let engine = GenerationEngine::cloud(
+            ProviderKind::Anthropic,
+            "sk-test".to_string(),
+            "claude-sonnet-4-20250514".to_string(),
+        )
+        .unwrap();
+        let dbg = format!("{:?}", engine);
+        assert!(dbg.contains("anthropic"), "debug: {dbg}");
+        assert!(dbg.contains("claude-sonnet-4-20250514"), "debug: {dbg}");
+    }
+
+    #[cfg(feature = "openai")]
+    #[test]
+    fn cloud_openai_constructs_successfully() {
+        let engine = GenerationEngine::cloud(
+            ProviderKind::OpenAI,
+            "sk-test-key".to_string(),
+            "gpt-4".to_string(),
+        );
+        assert!(engine.is_ok());
+        let engine = engine.unwrap();
+        assert!(!engine.is_local());
+        assert_eq!(engine.provider(), ProviderKind::OpenAI);
+    }
+
+    #[cfg(feature = "openai")]
+    #[test]
+    fn cloud_openai_empty_key_returns_error() {
+        let result = GenerationEngine::cloud(
+            ProviderKind::OpenAI,
+            String::new(),
+            "gpt-4".to_string(),
+        );
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "openai")]
     #[test]
-    fn from_gguf_with_ctx_none_delegates_to_from_gguf() {
-        // from_gguf(path) calls from_gguf_with_ctx(path, None); verify both
-        // fail the same way for a nonexistent file
-        let r1 = GenerationEngine::from_gguf("/nonexistent/model.gguf");
-        let r2 = GenerationEngine::from_gguf_with_ctx("/nonexistent/model.gguf", None);
-        assert!(r1.is_err());
-        assert!(r2.is_err());
-        // Both should produce the same error type
-        assert!(matches!(r1.unwrap_err(), InferenceError::LlamaCpp(_)));
-        assert!(matches!(r2.unwrap_err(), InferenceError::LlamaCpp(_)));
-    }
-
-    #[test]
-    fn from_registry_error_is_descriptive() {
-        // "any" doesn't exist in catalog → Registry error
-        let err = GenerationEngine::from_registry("any").unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Unknown model"),
-            "error should mention unknown model: {msg}"
-        );
-        assert!(
-            msg.contains("strata models list"),
-            "error should suggest listing models: {msg}"
-        );
-    }
-
-    #[test]
-    fn cloud_error_mentions_epic() {
-        let err = GenerationEngine::cloud(
-            ProviderKind::Anthropic,
-            "k".into(),
-            "m".into(),
+    fn cloud_openai_encode_returns_not_supported() {
+        let engine = GenerationEngine::cloud(
+            ProviderKind::OpenAI,
+            "sk-test".to_string(),
+            "gpt-4".to_string(),
         )
-        .unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Epic 7") || msg.contains("cloud"),
-            "error should mention Epic 7 or cloud: {msg}"
+        .unwrap();
+        assert!(matches!(
+            engine.encode("hi", true).unwrap_err(),
+            InferenceError::NotSupported(_)
+        ));
+    }
+
+    #[cfg(feature = "openai")]
+    #[test]
+    fn cloud_openai_decode_returns_not_supported() {
+        let engine = GenerationEngine::cloud(
+            ProviderKind::OpenAI,
+            "sk-test".to_string(),
+            "gpt-4".to_string(),
+        )
+        .unwrap();
+        assert!(matches!(
+            engine.decode(&[1]).unwrap_err(),
+            InferenceError::NotSupported(_)
+        ));
+    }
+
+    #[cfg(feature = "google")]
+    #[test]
+    fn cloud_google_constructs_successfully() {
+        let engine = GenerationEngine::cloud(
+            ProviderKind::Google,
+            "AIza-test".to_string(),
+            "gemini-pro".to_string(),
         );
+        assert!(engine.is_ok());
+        let engine = engine.unwrap();
+        assert!(!engine.is_local());
+        assert_eq!(engine.provider(), ProviderKind::Google);
+    }
+
+    #[cfg(feature = "google")]
+    #[test]
+    fn cloud_google_empty_key_returns_error() {
+        let result = GenerationEngine::cloud(
+            ProviderKind::Google,
+            String::new(),
+            "gemini-pro".to_string(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "google")]
+    #[test]
+    fn cloud_google_encode_returns_not_supported() {
+        let engine = GenerationEngine::cloud(
+            ProviderKind::Google,
+            "key".to_string(),
+            "gemini-pro".to_string(),
+        )
+        .unwrap();
+        assert!(matches!(
+            engine.encode("hi", false).unwrap_err(),
+            InferenceError::NotSupported(_)
+        ));
+    }
+
+    #[cfg(feature = "google")]
+    #[test]
+    fn cloud_google_decode_returns_not_supported() {
+        let engine = GenerationEngine::cloud(
+            ProviderKind::Google,
+            "key".to_string(),
+            "gemini-pro".to_string(),
+        )
+        .unwrap();
+        assert!(matches!(
+            engine.decode(&[1]).unwrap_err(),
+            InferenceError::NotSupported(_)
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // cloud() with disabled features returns NotSupported
+    // -----------------------------------------------------------------------
+
+    #[cfg(not(feature = "anthropic"))]
+    #[test]
+    fn cloud_anthropic_disabled_returns_not_supported() {
+        let result = GenerationEngine::cloud(
+            ProviderKind::Anthropic,
+            "key".to_string(),
+            "model".to_string(),
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            InferenceError::NotSupported(_)
+        ));
+    }
+
+    #[cfg(not(feature = "openai"))]
+    #[test]
+    fn cloud_openai_disabled_returns_not_supported() {
+        let result = GenerationEngine::cloud(
+            ProviderKind::OpenAI,
+            "key".to_string(),
+            "model".to_string(),
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            InferenceError::NotSupported(_)
+        ));
+    }
+
+    #[cfg(not(feature = "google"))]
+    #[test]
+    fn cloud_google_disabled_returns_not_supported() {
+        let result = GenerationEngine::cloud(
+            ProviderKind::Google,
+            "key".to_string(),
+            "model".to_string(),
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            InferenceError::NotSupported(_)
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Debug output: model visible, API key never leaked
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "openai")]
+    #[test]
+    fn cloud_openai_debug_contains_model_not_key() {
+        let engine = GenerationEngine::cloud(
+            ProviderKind::OpenAI,
+            "sk-secret-key-do-not-leak".to_string(),
+            "gpt-4-turbo".to_string(),
+        )
+        .unwrap();
+        let dbg = format!("{:?}", engine);
+        assert!(dbg.contains("openai"), "debug: {dbg}");
+        assert!(dbg.contains("gpt-4-turbo"), "debug: {dbg}");
+        assert!(!dbg.contains("sk-secret-key-do-not-leak"), "API key leaked in Debug: {dbg}");
+    }
+
+    #[cfg(feature = "google")]
+    #[test]
+    fn cloud_google_debug_contains_model_not_key() {
+        let engine = GenerationEngine::cloud(
+            ProviderKind::Google,
+            "AIza-secret-key-do-not-leak".to_string(),
+            "gemini-1.5-pro".to_string(),
+        )
+        .unwrap();
+        let dbg = format!("{:?}", engine);
+        assert!(dbg.contains("google"), "debug: {dbg}");
+        assert!(dbg.contains("gemini-1.5-pro"), "debug: {dbg}");
+        assert!(!dbg.contains("AIza-secret-key-do-not-leak"), "API key leaked in Debug: {dbg}");
+    }
+
+    #[cfg(feature = "anthropic")]
+    #[test]
+    fn cloud_anthropic_debug_does_not_leak_key() {
+        let engine = GenerationEngine::cloud(
+            ProviderKind::Anthropic,
+            "sk-ant-secret-key-do-not-leak".to_string(),
+            "claude-sonnet-4-20250514".to_string(),
+        )
+        .unwrap();
+        let dbg = format!("{:?}", engine);
+        assert!(!dbg.contains("sk-ant-secret-key-do-not-leak"), "API key leaked in Debug: {dbg}");
     }
 }

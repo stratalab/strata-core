@@ -1,6 +1,16 @@
 //! Generation providers — pluggable backends for text generation.
 //!
-//! Currently only the local llama.cpp provider is implemented.
-//! Cloud providers (Anthropic, OpenAI, Google) will be added in Epic 7.
+//! The local provider uses llama.cpp; cloud providers send HTTP requests to
+//! Anthropic, OpenAI, or Google APIs.
 
+#[cfg(feature = "local")]
 pub(crate) mod local;
+
+#[cfg(feature = "anthropic")]
+pub(crate) mod anthropic;
+
+#[cfg(feature = "openai")]
+pub(crate) mod openai;
+
+#[cfg(feature = "google")]
+pub(crate) mod google;

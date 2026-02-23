@@ -7,10 +7,20 @@ pub mod llama;
 #[cfg(feature = "local")]
 mod embed;
 
-#[cfg(feature = "local")]
+#[cfg(any(
+    feature = "local",
+    feature = "anthropic",
+    feature = "openai",
+    feature = "google"
+))]
 mod provider;
 
-#[cfg(feature = "local")]
+#[cfg(any(
+    feature = "local",
+    feature = "anthropic",
+    feature = "openai",
+    feature = "google"
+))]
 mod generate;
 
 pub use error::InferenceError;
@@ -19,7 +29,12 @@ pub use registry::{ModelRegistry, ModelInfo, ModelTask};
 #[cfg(feature = "local")]
 pub use embed::EmbeddingEngine;
 
-#[cfg(feature = "local")]
+#[cfg(any(
+    feature = "local",
+    feature = "anthropic",
+    feature = "openai",
+    feature = "google"
+))]
 pub use generate::GenerationEngine;
 
 use std::fmt;
