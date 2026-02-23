@@ -84,12 +84,27 @@ impl Strata {
         entity_ref: Option<&str>,
         properties: Option<Value>,
     ) -> Result<()> {
+        self.graph_add_node_typed(graph, node_id, entity_ref, properties, None)
+    }
+
+    /// Add or update a typed node in a graph.
+    ///
+    /// `object_type` associates the node with an ontology object type (e.g. `"Patient"`).
+    pub fn graph_add_node_typed(
+        &self,
+        graph: &str,
+        node_id: &str,
+        entity_ref: Option<&str>,
+        properties: Option<Value>,
+        object_type: Option<&str>,
+    ) -> Result<()> {
         match self.executor.execute(Command::GraphAddNode {
             branch: self.branch_id(),
             graph: graph.to_string(),
             node_id: node_id.to_string(),
             entity_ref: entity_ref.map(|s| s.to_string()),
             properties,
+            object_type: object_type.map(|s| s.to_string()),
         })? {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
@@ -215,6 +230,7 @@ impl Strata {
                     node_id: node_id.to_string(),
                     entity_ref: entity_ref.map(|s| s.to_string()),
                     properties: properties.clone(),
+                    object_type: None,
                 },
             )
             .collect();
@@ -298,6 +314,179 @@ impl Strata {
             Output::GraphBfs(result) => Ok(result),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphBfs".into(),
+            }),
+        }
+    }
+
+    // =========================================================================
+    // Ontology
+    // =========================================================================
+
+    /// Define an object type in the graph's ontology.
+    ///
+    /// `definition` must be a Value::Map with at least a `"name"` field.
+    pub fn graph_define_object_type(&self, graph: &str, definition: Value) -> Result<()> {
+        match self.executor.execute(Command::GraphDefineObjectType {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+            definition,
+        })? {
+            Output::Unit => Ok(()),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphDefineObjectType".into(),
+            }),
+        }
+    }
+
+    /// Get an object type definition by name, or None if not defined.
+    pub fn graph_get_object_type(&self, graph: &str, name: &str) -> Result<Option<Value>> {
+        match self.executor.execute(Command::GraphGetObjectType {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+            name: name.to_string(),
+        })? {
+            Output::Maybe(v) => Ok(v),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphGetObjectType".into(),
+            }),
+        }
+    }
+
+    /// List all object type names in the graph's ontology.
+    pub fn graph_list_object_types(&self, graph: &str) -> Result<Vec<String>> {
+        match self.executor.execute(Command::GraphListObjectTypes {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+        })? {
+            Output::Keys(names) => Ok(names),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphListObjectTypes".into(),
+            }),
+        }
+    }
+
+    /// Delete an object type definition (only in draft mode).
+    pub fn graph_delete_object_type(&self, graph: &str, name: &str) -> Result<()> {
+        match self.executor.execute(Command::GraphDeleteObjectType {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+            name: name.to_string(),
+        })? {
+            Output::Unit => Ok(()),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphDeleteObjectType".into(),
+            }),
+        }
+    }
+
+    /// Define a link type in the graph's ontology.
+    ///
+    /// `definition` must be a Value::Map with `"name"`, `"source"`, and `"target"` fields.
+    pub fn graph_define_link_type(&self, graph: &str, definition: Value) -> Result<()> {
+        match self.executor.execute(Command::GraphDefineLinkType {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+            definition,
+        })? {
+            Output::Unit => Ok(()),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphDefineLinkType".into(),
+            }),
+        }
+    }
+
+    /// Get a link type definition by name, or None if not defined.
+    pub fn graph_get_link_type(&self, graph: &str, name: &str) -> Result<Option<Value>> {
+        match self.executor.execute(Command::GraphGetLinkType {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+            name: name.to_string(),
+        })? {
+            Output::Maybe(v) => Ok(v),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphGetLinkType".into(),
+            }),
+        }
+    }
+
+    /// List all link type names in the graph's ontology.
+    pub fn graph_list_link_types(&self, graph: &str) -> Result<Vec<String>> {
+        match self.executor.execute(Command::GraphListLinkTypes {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+        })? {
+            Output::Keys(names) => Ok(names),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphListLinkTypes".into(),
+            }),
+        }
+    }
+
+    /// Delete a link type definition (only in draft mode).
+    pub fn graph_delete_link_type(&self, graph: &str, name: &str) -> Result<()> {
+        match self.executor.execute(Command::GraphDeleteLinkType {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+            name: name.to_string(),
+        })? {
+            Output::Unit => Ok(()),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphDeleteLinkType".into(),
+            }),
+        }
+    }
+
+    /// Freeze the graph's ontology, enabling validation on writes.
+    pub fn graph_freeze_ontology(&self, graph: &str) -> Result<()> {
+        match self.executor.execute(Command::GraphFreezeOntology {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+        })? {
+            Output::Unit => Ok(()),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphFreezeOntology".into(),
+            }),
+        }
+    }
+
+    /// Get the ontology status ("draft", "frozen"), or None if no ontology.
+    pub fn graph_ontology_status(&self, graph: &str) -> Result<Option<Value>> {
+        match self.executor.execute(Command::GraphOntologyStatus {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+        })? {
+            Output::Maybe(v) => Ok(v),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphOntologyStatus".into(),
+            }),
+        }
+    }
+
+    /// Get a full ontology summary with type definitions and counts.
+    ///
+    /// Returns None if no ontology is defined on the graph.
+    pub fn graph_ontology_summary(&self, graph: &str) -> Result<Option<Value>> {
+        match self.executor.execute(Command::GraphOntologySummary {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+        })? {
+            Output::Maybe(v) => Ok(v),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphOntologySummary".into(),
+            }),
+        }
+    }
+
+    /// Get all node IDs with a given object type.
+    pub fn graph_nodes_by_type(&self, graph: &str, object_type: &str) -> Result<Vec<String>> {
+        match self.executor.execute(Command::GraphNodesByType {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+            object_type: object_type.to_string(),
+        })? {
+            Output::Keys(ids) => Ok(ids),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphNodesByType".into(),
             }),
         }
     }

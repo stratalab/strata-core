@@ -201,6 +201,85 @@ pub fn parse_ref_index_key(user_key: &str) -> Option<(String, String, String)> {
     }
 }
 
+// --- Ontology type keys ---
+
+/// Key for an object type definition: `{graph}/__types__/object/{name}`
+pub fn object_type_key(graph: &str, name: &str) -> String {
+    format!("{}{SEP}__types__{SEP}object{SEP}{}", graph, name)
+}
+
+/// Key for a link type definition: `{graph}/__types__/link/{name}`
+pub fn link_type_key(graph: &str, name: &str) -> String {
+    format!("{}{SEP}__types__{SEP}link{SEP}{}", graph, name)
+}
+
+/// Prefix for all object type definitions: `{graph}/__types__/object/`
+pub fn all_object_types_prefix(graph: &str) -> String {
+    format!("{}{SEP}__types__{SEP}object{SEP}", graph)
+}
+
+/// Prefix for all link type definitions: `{graph}/__types__/link/`
+pub fn all_link_types_prefix(graph: &str) -> String {
+    format!("{}{SEP}__types__{SEP}link{SEP}", graph)
+}
+
+/// Parse an object type key back into the type name.
+pub fn parse_object_type_key(graph: &str, user_key: &str) -> Option<String> {
+    let prefix = format!("{}{SEP}__types__{SEP}object{SEP}", graph);
+    user_key.strip_prefix(&prefix).map(|s| s.to_string())
+}
+
+/// Parse a link type key back into the type name.
+pub fn parse_link_type_key(graph: &str, user_key: &str) -> Option<String> {
+    let prefix = format!("{}{SEP}__types__{SEP}link{SEP}", graph);
+    user_key.strip_prefix(&prefix).map(|s| s.to_string())
+}
+
+// --- Type index keys ---
+
+/// Key for the type index: `{graph}/__by_type__/{object_type}/{node_id}`
+pub fn type_index_key(graph: &str, object_type: &str, node_id: &str) -> String {
+    format!(
+        "{}{SEP}__by_type__{SEP}{}{SEP}{}",
+        graph, object_type, node_id
+    )
+}
+
+/// Prefix for all type index entries of a given type: `{graph}/__by_type__/{object_type}/`
+pub fn type_index_prefix(graph: &str, object_type: &str) -> String {
+    format!("{}{SEP}__by_type__{SEP}{}{SEP}", graph, object_type)
+}
+
+/// Parse a type index key back into (object_type, node_id).
+pub fn parse_type_index_key(graph: &str, user_key: &str) -> Option<(String, String)> {
+    let prefix = format!("{}{SEP}__by_type__{SEP}", graph);
+    let rest = user_key.strip_prefix(&prefix)?;
+    let parts: Vec<&str> = rest.splitn(2, SEP).collect();
+    if parts.len() == 2 {
+        Some((parts[0].to_string(), parts[1].to_string()))
+    } else {
+        None
+    }
+}
+
+/// Validate a type name (same rules as edge types: non-empty, no `/`, no `__` prefix).
+pub fn validate_type_name(name: &str) -> StrataResult<()> {
+    if name.is_empty() {
+        return Err(StrataError::invalid_input("Type name must not be empty"));
+    }
+    if name.contains(SEP) {
+        return Err(StrataError::invalid_input(
+            "Type name must not contain '/'",
+        ));
+    }
+    if name.starts_with("__") {
+        return Err(StrataError::invalid_input(
+            "Type name must not start with '__' (reserved)",
+        ));
+    }
+    Ok(())
+}
+
 // --- Broad prefixes ---
 
 /// Prefix for all forward edge keys in a graph: `{graph}/e/`
@@ -495,5 +574,107 @@ mod tests {
     fn node_key_not_parseable_as_forward_edge() {
         let key = node_key("g", "mynode");
         assert!(parse_forward_edge_key("g", &key).is_none());
+    }
+
+    // --- Ontology key tests ---
+
+    #[test]
+    fn object_type_key_roundtrip() {
+        let key = object_type_key("g", "Patient");
+        let name = parse_object_type_key("g", &key).unwrap();
+        assert_eq!(name, "Patient");
+    }
+
+    #[test]
+    fn link_type_key_roundtrip() {
+        let key = link_type_key("g", "HAS_RESULT");
+        let name = parse_link_type_key("g", &key).unwrap();
+        assert_eq!(name, "HAS_RESULT");
+    }
+
+    #[test]
+    fn object_type_key_prefix_correctness() {
+        let key = object_type_key("g", "Patient");
+        assert!(key.starts_with(&all_object_types_prefix("g")));
+    }
+
+    #[test]
+    fn link_type_key_prefix_correctness() {
+        let key = link_type_key("g", "HAS_RESULT");
+        assert!(key.starts_with(&all_link_types_prefix("g")));
+    }
+
+    #[test]
+    fn type_index_key_roundtrip() {
+        let key = type_index_key("g", "Patient", "p1");
+        let (obj_type, node_id) = parse_type_index_key("g", &key).unwrap();
+        assert_eq!(obj_type, "Patient");
+        assert_eq!(node_id, "p1");
+    }
+
+    #[test]
+    fn type_index_key_prefix_correctness() {
+        let key = type_index_key("g", "Patient", "p1");
+        assert!(key.starts_with(&type_index_prefix("g", "Patient")));
+    }
+
+    #[test]
+    fn type_index_key_different_types_different_prefixes() {
+        let key_patient = type_index_key("g", "Patient", "p1");
+        let key_lab = type_index_key("g", "LabResult", "l1");
+        assert!(key_patient.starts_with(&type_index_prefix("g", "Patient")));
+        assert!(!key_patient.starts_with(&type_index_prefix("g", "LabResult")));
+        assert!(key_lab.starts_with(&type_index_prefix("g", "LabResult")));
+    }
+
+    #[test]
+    fn ontology_keys_under_graph_prefix() {
+        let otk = object_type_key("g", "Patient");
+        let ltk = link_type_key("g", "HAS_RESULT");
+        let tik = type_index_key("g", "Patient", "p1");
+        let pfx = graph_prefix("g");
+        assert!(otk.starts_with(&pfx));
+        assert!(ltk.starts_with(&pfx));
+        assert!(tik.starts_with(&pfx));
+    }
+
+    #[test]
+    fn validate_type_name_empty() {
+        assert!(validate_type_name("").is_err());
+    }
+
+    #[test]
+    fn validate_type_name_slash() {
+        assert!(validate_type_name("has/slash").is_err());
+    }
+
+    #[test]
+    fn validate_type_name_reserved_prefix() {
+        assert!(validate_type_name("__reserved").is_err());
+    }
+
+    #[test]
+    fn validate_type_name_valid() {
+        assert!(validate_type_name("Patient").is_ok());
+        assert!(validate_type_name("HAS_RESULT").is_ok());
+        assert!(validate_type_name("my-type").is_ok());
+    }
+
+    #[test]
+    fn parse_object_type_key_wrong_graph_returns_none() {
+        let key = object_type_key("g", "Patient");
+        assert!(parse_object_type_key("other", &key).is_none());
+    }
+
+    #[test]
+    fn parse_link_type_key_wrong_graph_returns_none() {
+        let key = link_type_key("g", "KNOWS");
+        assert!(parse_link_type_key("other", &key).is_none());
+    }
+
+    #[test]
+    fn parse_type_index_key_wrong_graph_returns_none() {
+        let key = type_index_key("g", "Patient", "p1");
+        assert!(parse_type_index_key("other", &key).is_none());
     }
 }

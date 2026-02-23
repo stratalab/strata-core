@@ -1020,6 +1020,9 @@ pub enum Command {
         /// Optional properties to attach to the node.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         properties: Option<Value>,
+        /// Optional ontology object type (e.g. `"Patient"`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        object_type: Option<String>,
     },
 
     /// Get a node.
@@ -1151,6 +1154,142 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         direction: Option<String>,
     },
+
+    // ==================== Graph Ontology ====================
+
+    /// Define an object type in the graph's ontology.
+    /// Returns: `Output::Unit`
+    GraphDefineObjectType {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Object type definition as JSON.
+        definition: Value,
+    },
+
+    /// Get an object type definition.
+    /// Returns: `Output::Maybe`
+    GraphGetObjectType {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Type name.
+        name: String,
+    },
+
+    /// List all object type names.
+    /// Returns: `Output::Keys`
+    GraphListObjectTypes {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+    },
+
+    /// Delete an object type definition.
+    /// Returns: `Output::Unit`
+    GraphDeleteObjectType {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Type name.
+        name: String,
+    },
+
+    /// Define a link type in the graph's ontology.
+    /// Returns: `Output::Unit`
+    GraphDefineLinkType {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Link type definition as JSON.
+        definition: Value,
+    },
+
+    /// Get a link type definition.
+    /// Returns: `Output::Maybe`
+    GraphGetLinkType {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Type name.
+        name: String,
+    },
+
+    /// List all link type names.
+    /// Returns: `Output::Keys`
+    GraphListLinkTypes {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+    },
+
+    /// Delete a link type definition.
+    /// Returns: `Output::Unit`
+    GraphDeleteLinkType {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Type name.
+        name: String,
+    },
+
+    /// Freeze the graph's ontology.
+    /// Returns: `Output::Unit`
+    GraphFreezeOntology {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+    },
+
+    /// Get the ontology status of a graph.
+    /// Returns: `Output::Maybe`
+    GraphOntologyStatus {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+    },
+
+    /// Get a complete ontology summary for AI orientation.
+    /// Returns: `Output::Maybe`
+    GraphOntologySummary {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+    },
+
+    /// Get all node IDs of a given object type.
+    /// Returns: `Output::Keys`
+    GraphNodesByType {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Object type name.
+        object_type: String,
+    },
 }
 
 impl Command {
@@ -1203,6 +1342,11 @@ impl Command {
                 | Command::GraphAddEdge { .. }
                 | Command::GraphRemoveEdge { .. }
                 | Command::GraphBulkInsert { .. }
+                | Command::GraphDefineObjectType { .. }
+                | Command::GraphDeleteObjectType { .. }
+                | Command::GraphDefineLinkType { .. }
+                | Command::GraphDeleteLinkType { .. }
+                | Command::GraphFreezeOntology { .. }
         )
     }
 
@@ -1303,6 +1447,18 @@ impl Command {
             Command::GraphNeighbors { .. } => "GraphNeighbors",
             Command::GraphBulkInsert { .. } => "GraphBulkInsert",
             Command::GraphBfs { .. } => "GraphBfs",
+            Command::GraphDefineObjectType { .. } => "GraphDefineObjectType",
+            Command::GraphGetObjectType { .. } => "GraphGetObjectType",
+            Command::GraphListObjectTypes { .. } => "GraphListObjectTypes",
+            Command::GraphDeleteObjectType { .. } => "GraphDeleteObjectType",
+            Command::GraphDefineLinkType { .. } => "GraphDefineLinkType",
+            Command::GraphGetLinkType { .. } => "GraphGetLinkType",
+            Command::GraphListLinkTypes { .. } => "GraphListLinkTypes",
+            Command::GraphDeleteLinkType { .. } => "GraphDeleteLinkType",
+            Command::GraphFreezeOntology { .. } => "GraphFreezeOntology",
+            Command::GraphOntologyStatus { .. } => "GraphOntologyStatus",
+            Command::GraphOntologySummary { .. } => "GraphOntologySummary",
+            Command::GraphNodesByType { .. } => "GraphNodesByType",
         }
     }
 
@@ -1402,7 +1558,19 @@ impl Command {
             | Command::GraphRemoveEdge { branch, .. }
             | Command::GraphNeighbors { branch, .. }
             | Command::GraphBulkInsert { branch, .. }
-            | Command::GraphBfs { branch, .. } => {
+            | Command::GraphBfs { branch, .. }
+            | Command::GraphDefineObjectType { branch, .. }
+            | Command::GraphGetObjectType { branch, .. }
+            | Command::GraphListObjectTypes { branch, .. }
+            | Command::GraphDeleteObjectType { branch, .. }
+            | Command::GraphDefineLinkType { branch, .. }
+            | Command::GraphGetLinkType { branch, .. }
+            | Command::GraphListLinkTypes { branch, .. }
+            | Command::GraphDeleteLinkType { branch, .. }
+            | Command::GraphFreezeOntology { branch, .. }
+            | Command::GraphOntologyStatus { branch, .. }
+            | Command::GraphOntologySummary { branch, .. }
+            | Command::GraphNodesByType { branch, .. } => {
                 resolve_branch!(branch);
             }
 

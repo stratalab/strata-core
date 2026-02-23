@@ -128,6 +128,7 @@ mod tests {
                 NodeData {
                     entity_ref: Some(uri.to_string()),
                     properties: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -286,6 +287,7 @@ mod tests {
                 NodeData {
                     entity_ref: Some(uri.to_string()),
                     properties: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -330,6 +332,7 @@ mod tests {
             NodeData {
                 entity_ref: Some("kv://main/A".to_string()),
                 properties: None,
+                ..Default::default()
             },
         )
         .unwrap();

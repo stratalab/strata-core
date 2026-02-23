@@ -8,6 +8,7 @@ pub mod adjacency;
 pub mod boost;
 pub mod integrity;
 pub mod keys;
+pub mod ontology;
 mod snapshot;
 pub mod traversal;
 pub mod types;
@@ -162,6 +163,15 @@ impl GraphStore {
         keys::validate_graph_name(graph)?;
         keys::validate_node_id(node_id)?;
 
+        // Validate against frozen ontology if applicable
+        if data.object_type.is_some() {
+            if let Some(meta) = self.get_graph_meta(branch_id, graph)? {
+                if meta.ontology_status == Some(types::OntologyStatus::Frozen) {
+                    self.validate_node(branch_id, graph, node_id, &data)?;
+                }
+            }
+        }
+
         let node_json =
             serde_json::to_string(&data).map_err(|e| StrataError::serialization(e.to_string()))?;
         let user_key = keys::node_key(graph, node_id);
@@ -173,15 +183,25 @@ impl GraphStore {
             keys::storage_key(branch_id, &rk)
         });
 
+        // Build type index key if object_type is present
+        let type_key = data.object_type.as_ref().map(|ot| {
+            let tk = keys::type_index_key(graph, ot, node_id);
+            keys::storage_key(branch_id, &tk)
+        });
+
         self.db.transaction(branch_id, |txn| {
-            // If updating, clean up old ref index entry
+            // If updating, clean up old ref index and type index entries
             let old_val = txn.get(&storage_key)?;
             if let Some(Value::String(old_json)) = old_val {
                 if let Ok(old_data) = serde_json::from_str::<NodeData>(&old_json) {
                     if let Some(old_uri) = old_data.entity_ref {
-                        // Remove old ref index entry
                         let old_rk = keys::ref_index_key(&old_uri, graph, node_id);
                         let old_sk = keys::storage_key(branch_id, &old_rk);
+                        txn.delete(old_sk)?;
+                    }
+                    if let Some(old_ot) = old_data.object_type {
+                        let old_tk = keys::type_index_key(graph, &old_ot, node_id);
+                        let old_sk = keys::storage_key(branch_id, &old_tk);
                         txn.delete(old_sk)?;
                     }
                 }
@@ -192,6 +212,11 @@ impl GraphStore {
             // Write ref index
             if let Some(rk) = ref_key.clone() {
                 txn.put(rk, Value::String(String::new()))?;
+            }
+
+            // Write type index
+            if let Some(tk) = type_key.clone() {
+                txn.put(tk, Value::String(String::new()))?;
             }
             Ok(())
         })
@@ -260,12 +285,17 @@ impl GraphStore {
                 return Ok(());
             }
 
-            // Clean up ref index
+            // Clean up ref index and type index
             if let Some(Value::String(json)) = &node_val {
                 if let Ok(data) = serde_json::from_str::<NodeData>(json) {
                     if let Some(uri) = data.entity_ref {
                         let rk = keys::ref_index_key(&uri, graph, node_id);
                         let sk = keys::storage_key(branch_id, &rk);
+                        txn.delete(sk)?;
+                    }
+                    if let Some(ot) = data.object_type {
+                        let tk = keys::type_index_key(graph, &ot, node_id);
+                        let sk = keys::storage_key(branch_id, &tk);
                         txn.delete(sk)?;
                     }
                 }
@@ -328,6 +358,13 @@ impl GraphStore {
         keys::validate_node_id(src)?;
         keys::validate_node_id(dst)?;
         keys::validate_edge_type(edge_type)?;
+
+        // Validate against frozen ontology
+        if let Some(meta) = self.get_graph_meta(branch_id, graph)? {
+            if meta.ontology_status == Some(types::OntologyStatus::Frozen) {
+                self.validate_edge(branch_id, graph, src, dst, edge_type)?;
+            }
+        }
 
         let edge_json =
             serde_json::to_string(&data).map_err(|e| StrataError::serialization(e.to_string()))?;
@@ -526,10 +563,7 @@ impl GraphStore {
                         let data = if let Value::String(s) = val {
                             serde_json::from_str(&s).unwrap_or_default()
                         } else {
-                            NodeData {
-                                entity_ref: None,
-                                properties: None,
-                            }
+                            NodeData::default()
                         };
                         nodes.insert(node_id, data);
                     }
@@ -559,8 +593,8 @@ impl GraphStore {
     /// it batches many operations into fewer transactions. Each chunk of nodes
     /// or edges is committed atomically.
     ///
-    /// This method assumes fresh insertion (not upsert) — it does not check for
-    /// or clean up old values. For updating existing nodes, use `add_node`.
+    /// For best performance, use this for fresh insertion. It also handles
+    /// re-insertion (upsert) correctly by cleaning up old index entries.
     ///
     /// Returns `(nodes_inserted, edges_inserted)`.
     pub fn bulk_insert(
@@ -573,6 +607,12 @@ impl GraphStore {
     ) -> StrataResult<(usize, usize)> {
         keys::validate_graph_name(graph)?;
 
+        // Read ontology status once before the loop
+        let is_frozen = self
+            .get_graph_meta(branch_id, graph)?
+            .and_then(|m| m.ontology_status)
+            == Some(types::OntologyStatus::Frozen);
+
         let chunk_size = std::cmp::max(1, chunk_size.unwrap_or(Self::DEFAULT_BULK_CHUNK_SIZE));
         let empty_json = "{}";
         let default_edge_json = "{\"weight\":1.0}";
@@ -584,19 +624,27 @@ impl GraphStore {
             let mut entries: Vec<(strata_core::types::Key, String)> =
                 Vec::with_capacity(chunk.len());
             let mut ref_entries: Vec<strata_core::types::Key> = Vec::new();
+            let mut type_entries: Vec<strata_core::types::Key> = Vec::new();
 
             for (node_id, data) in chunk {
                 keys::validate_node_id(node_id)?;
 
+                // Validate against frozen ontology
+                if is_frozen && data.object_type.is_some() {
+                    self.validate_node(branch_id, graph, node_id, data)?;
+                }
+
                 let user_key = keys::node_key(graph, node_id);
                 let sk = keys::storage_key(branch_id, &user_key);
 
-                let json = if data.entity_ref.is_none() && data.properties.is_none() {
-                    empty_json.to_string()
-                } else {
-                    serde_json::to_string(data)
-                        .map_err(|e| StrataError::serialization(e.to_string()))?
-                };
+                let json =
+                    if data.entity_ref.is_none() && data.properties.is_none() && data.object_type.is_none()
+                    {
+                        empty_json.to_string()
+                    } else {
+                        serde_json::to_string(data)
+                            .map_err(|e| StrataError::serialization(e.to_string()))?
+                    };
 
                 entries.push((sk, json));
 
@@ -604,14 +652,40 @@ impl GraphStore {
                     let rk = keys::ref_index_key(uri, graph, node_id);
                     ref_entries.push(keys::storage_key(branch_id, &rk));
                 }
+
+                if let Some(ot) = &data.object_type {
+                    let tk = keys::type_index_key(graph, ot, node_id);
+                    type_entries.push(keys::storage_key(branch_id, &tk));
+                }
             }
 
             self.db.transaction(branch_id, |txn| {
+                // Clean up old index entries for nodes being re-inserted (upsert)
+                for (node_id, _data) in chunk {
+                    let user_key = keys::node_key(graph, node_id);
+                    let sk = keys::storage_key(branch_id, &user_key);
+                    if let Some(Value::String(old_json)) = txn.get(&sk)? {
+                        if let Ok(old_data) = serde_json::from_str::<NodeData>(&old_json) {
+                            if let Some(old_uri) = old_data.entity_ref {
+                                let old_rk = keys::ref_index_key(&old_uri, graph, node_id);
+                                txn.delete(keys::storage_key(branch_id, &old_rk))?;
+                            }
+                            if let Some(old_ot) = old_data.object_type {
+                                let old_tk = keys::type_index_key(graph, &old_ot, node_id);
+                                txn.delete(keys::storage_key(branch_id, &old_tk))?;
+                            }
+                        }
+                    }
+                }
+
                 for (sk, json) in &entries {
                     txn.put(sk.clone(), Value::String(json.clone()))?;
                 }
                 for rk in &ref_entries {
                     txn.put(rk.clone(), Value::String(String::new()))?;
+                }
+                for tk in &type_entries {
+                    txn.put(tk.clone(), Value::String(String::new()))?;
                 }
                 Ok(())
             })?;
@@ -630,6 +704,11 @@ impl GraphStore {
                 keys::validate_node_id(src)?;
                 keys::validate_node_id(dst)?;
                 keys::validate_edge_type(edge_type)?;
+
+                // Validate edge against frozen ontology
+                if is_frozen {
+                    self.validate_edge(branch_id, graph, src, dst, edge_type)?;
+                }
 
                 let fwd = keys::forward_edge_key(graph, src, edge_type, dst);
                 let rev = keys::reverse_edge_key(graph, dst, edge_type, src);
@@ -681,6 +760,30 @@ impl GraphStore {
                 }
             }
             Ok(entries)
+        })
+    }
+
+    /// Get all node IDs of a given object type via the `__by_type__` index.
+    pub fn nodes_by_type(
+        &self,
+        branch_id: BranchId,
+        graph: &str,
+        object_type: &str,
+    ) -> StrataResult<Vec<String>> {
+        let prefix = keys::type_index_prefix(graph, object_type);
+        let prefix_key = keys::storage_key(branch_id, &prefix);
+
+        self.db.transaction(branch_id, |txn| {
+            let results = txn.scan_prefix(&prefix_key)?;
+            let mut node_ids = Vec::new();
+            for (key, _) in results {
+                if let Some(user_key) = key.user_key_string() {
+                    if let Some((_ot, node_id)) = keys::parse_type_index_key(graph, &user_key) {
+                        node_ids.push(node_id);
+                    }
+                }
+            }
+            Ok(node_ids)
         })
     }
 }
@@ -748,20 +851,14 @@ mod tests {
             branch,
             "dg",
             "A",
-            NodeData {
-                entity_ref: None,
-                properties: None,
-            },
+            NodeData::default(),
         )
         .unwrap();
         gs.add_node(
             branch,
             "dg",
             "B",
-            NodeData {
-                entity_ref: None,
-                properties: None,
-            },
+            NodeData::default(),
         )
         .unwrap();
         gs.add_edge(branch, "dg", "A", "B", "KNOWS", EdgeData::default())
@@ -802,6 +899,7 @@ mod tests {
             NodeData {
                 entity_ref: None,
                 properties: Some(serde_json::json!({"name": "Alice"})),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -823,6 +921,7 @@ mod tests {
             NodeData {
                 entity_ref: Some("kv://main/patient-4821".to_string()),
                 properties: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -841,10 +940,7 @@ mod tests {
             branch,
             "ng",
             "n1",
-            NodeData {
-                entity_ref: None,
-                properties: None,
-            },
+            NodeData::default(),
         )
         .unwrap();
 
@@ -863,10 +959,7 @@ mod tests {
                 branch,
                 "ng",
                 id,
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             )
             .unwrap();
         }
@@ -886,10 +979,7 @@ mod tests {
             branch,
             "ng",
             "n1",
-            NodeData {
-                entity_ref: None,
-                properties: None,
-            },
+            NodeData::default(),
         )
         .unwrap();
         gs.remove_node(branch, "ng", "n1").unwrap();
@@ -907,10 +997,7 @@ mod tests {
                 branch,
                 "ng",
                 id,
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             )
             .unwrap();
         }
@@ -940,10 +1027,7 @@ mod tests {
                 branch,
                 "ng",
                 "",
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             )
             .is_err());
     }
@@ -1070,20 +1154,14 @@ mod tests {
             branch,
             "gA",
             "n1",
-            NodeData {
-                entity_ref: None,
-                properties: None,
-            },
+            NodeData::default(),
         )
         .unwrap();
         gs.add_node(
             branch,
             "gB",
             "n1",
-            NodeData {
-                entity_ref: None,
-                properties: None,
-            },
+            NodeData::default(),
         )
         .unwrap();
 
@@ -1150,6 +1228,7 @@ mod tests {
             NodeData {
                 entity_ref: None,
                 properties: Some(serde_json::json!({"v": 1})),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1160,6 +1239,7 @@ mod tests {
             NodeData {
                 entity_ref: None,
                 properties: Some(serde_json::json!({"v": 2})),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1181,6 +1261,7 @@ mod tests {
             NodeData {
                 entity_ref: Some("kv://main/key1".to_string()),
                 properties: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1200,10 +1281,7 @@ mod tests {
             branch,
             "rg",
             "n1",
-            NodeData {
-                entity_ref: None,
-                properties: None,
-            },
+            NodeData::default(),
         )
         .unwrap();
 
@@ -1227,6 +1305,7 @@ mod tests {
             NodeData {
                 entity_ref: Some(uri.to_string()),
                 properties: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1237,6 +1316,7 @@ mod tests {
             NodeData {
                 entity_ref: Some(uri.to_string()),
                 properties: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1259,6 +1339,7 @@ mod tests {
             NodeData {
                 entity_ref: Some("kv://main/key1".to_string()),
                 properties: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1281,6 +1362,7 @@ mod tests {
             NodeData {
                 entity_ref: Some("kv://main/old".to_string()),
                 properties: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1293,6 +1375,7 @@ mod tests {
             NodeData {
                 entity_ref: Some("kv://main/new".to_string()),
                 properties: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1317,6 +1400,7 @@ mod tests {
             NodeData {
                 entity_ref: Some("kv://main/key1".to_string()),
                 properties: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1327,6 +1411,7 @@ mod tests {
             NodeData {
                 entity_ref: Some("kv://main/key2".to_string()),
                 properties: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1370,6 +1455,7 @@ mod tests {
             NodeData {
                 entity_ref: Some(uri.to_string()),
                 properties: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1380,6 +1466,7 @@ mod tests {
             NodeData {
                 entity_ref: Some(uri.to_string()),
                 properties: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1405,6 +1492,7 @@ mod tests {
             NodeData {
                 entity_ref: Some("kv://main/p1".to_string()),
                 properties: Some(serde_json::json!({"department": "cardiology", "age": 45})),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1458,6 +1546,7 @@ mod tests {
             NodeData {
                 entity_ref: Some("kv://main/key1".to_string()),
                 properties: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1467,10 +1556,7 @@ mod tests {
             branch,
             "rg",
             "n1",
-            NodeData {
-                entity_ref: None,
-                properties: None,
-            },
+            NodeData::default(),
         )
         .unwrap();
 
@@ -1492,24 +1578,15 @@ mod tests {
         let nodes: Vec<(String, NodeData)> = vec![
             (
                 "A".into(),
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             ),
             (
                 "B".into(),
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             ),
             (
                 "C".into(),
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             ),
         ];
         let edges: Vec<(String, String, String, EdgeData)> = vec![
@@ -1570,6 +1647,7 @@ mod tests {
                 NodeData {
                     entity_ref: Some("kv://main/key1".into()),
                     properties: None,
+                    ..Default::default()
                 },
             ),
             (
@@ -1577,20 +1655,19 @@ mod tests {
                 NodeData {
                     entity_ref: Some("kv://main/key2".into()),
                     properties: None,
+                    ..Default::default()
                 },
             ),
             (
                 "n3".into(),
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             ),
             (
                 "n4".into(),
                 NodeData {
                     entity_ref: Some("kv://main/key1".into()),
                     properties: None,
+                    ..Default::default()
                 },
             ),
         ];
@@ -1626,6 +1703,7 @@ mod tests {
             NodeData {
                 entity_ref: Some("kv://main/p1".into()),
                 properties: Some(serde_json::json!({"name": "Alice", "age": 30})),
+                ..Default::default()
             },
         )];
         let edges: Vec<(String, String, String, EdgeData)> = vec![(
@@ -1669,17 +1747,11 @@ mod tests {
         let nodes: Vec<(String, NodeData)> = vec![
             (
                 "A".into(),
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             ),
             (
                 "B".into(),
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             ),
         ];
         let edges: Vec<(String, String, String, EdgeData)> =
@@ -1718,6 +1790,7 @@ mod tests {
                     NodeData {
                         entity_ref: None,
                         properties: None,
+                        ..Default::default()
                     },
                 )
             })
@@ -1775,10 +1848,7 @@ mod tests {
 
         let nodes: Vec<(String, NodeData)> = vec![(
             "A".into(),
-            NodeData {
-                entity_ref: None,
-                properties: None,
-            },
+            NodeData::default(),
         )];
 
         // chunk_size=0 should be clamped to 1, not panic
@@ -1797,17 +1867,11 @@ mod tests {
         let nodes: Vec<(String, NodeData)> = vec![
             (
                 "A".into(),
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             ),
             (
                 "B".into(),
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             ),
         ];
         let edges: Vec<(String, String, String, EdgeData)> =
@@ -1833,24 +1897,15 @@ mod tests {
         let nodes: Vec<(String, NodeData)> = vec![
             (
                 "good1".into(),
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             ),
             (
                 "".into(),
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             ), // invalid
             (
                 "good2".into(),
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             ),
         ];
 
@@ -1933,31 +1988,19 @@ mod tests {
         let nodes: Vec<(String, NodeData)> = vec![
             (
                 "A".into(),
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             ),
             (
                 "B".into(),
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             ),
             (
                 "C".into(),
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             ),
             (
                 "D".into(),
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             ),
         ];
         let edges: Vec<(String, String, String, EdgeData)> = vec![
@@ -2020,6 +2063,7 @@ mod tests {
                     NodeData {
                         entity_ref: None,
                         properties: None,
+                        ..Default::default()
                     },
                 )
             })
@@ -2061,17 +2105,11 @@ mod tests {
         let nodes: Vec<(String, NodeData)> = vec![
             (
                 "A".into(),
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             ),
             (
                 "B".into(),
-                NodeData {
-                    entity_ref: None,
-                    properties: None,
-                },
+                NodeData::default(),
             ),
         ];
         let edges: Vec<(String, String, String, EdgeData)> = vec![(
