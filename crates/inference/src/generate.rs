@@ -249,10 +249,17 @@ mod tests {
     }
 
     #[test]
-    fn from_gguf_with_ctx_nonexistent_returns_error() {
+    fn from_gguf_with_ctx_nonexistent_returns_descriptive_error() {
         let result =
             GenerationEngine::from_gguf_with_ctx("/nonexistent/model.gguf", Some(2048));
         assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            matches!(err, InferenceError::LlamaCpp(_)),
+            "should be LlamaCpp error, got: {msg}"
+        );
+        assert!(!msg.is_empty(), "error should not be empty");
     }
 
     #[test]
@@ -302,5 +309,83 @@ mod tests {
         assert_eq!(StopReason::MaxTokens.to_string(), "max_tokens");
         assert_eq!(StopReason::ContextLength.to_string(), "context_length");
         assert_eq!(StopReason::Cancelled.to_string(), "cancelled");
+    }
+
+    // -----------------------------------------------------------------------
+    // cloud() edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cloud_with_local_provider_returns_not_supported() {
+        // ProviderKind::Local is semantically wrong for cloud(), but the stub
+        // rejects all providers uniformly.
+        let result = GenerationEngine::cloud(
+            ProviderKind::Local,
+            "key".to_string(),
+            "model".to_string(),
+        );
+        assert!(
+            matches!(result.unwrap_err(), InferenceError::NotSupported(_)),
+            "cloud(Local) should be NotSupported"
+        );
+    }
+
+    #[test]
+    fn cloud_with_empty_key_and_model_returns_not_supported() {
+        let result = GenerationEngine::cloud(
+            ProviderKind::Anthropic,
+            String::new(),
+            String::new(),
+        );
+        assert!(
+            matches!(result.unwrap_err(), InferenceError::NotSupported(_)),
+            "cloud with empty strings should still be NotSupported"
+        );
+    }
+
+    #[test]
+    fn from_gguf_with_ctx_zero_returns_error() {
+        // ctx_size=0 should fail (or be handled gracefully)
+        let result =
+            GenerationEngine::from_gguf_with_ctx("/nonexistent/model.gguf", Some(0));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_gguf_with_ctx_none_delegates_to_from_gguf() {
+        // from_gguf(path) calls from_gguf_with_ctx(path, None); verify both
+        // fail the same way for a nonexistent file
+        let r1 = GenerationEngine::from_gguf("/nonexistent/model.gguf");
+        let r2 = GenerationEngine::from_gguf_with_ctx("/nonexistent/model.gguf", None);
+        assert!(r1.is_err());
+        assert!(r2.is_err());
+        // Both should produce the same error type
+        assert!(matches!(r1.unwrap_err(), InferenceError::LlamaCpp(_)));
+        assert!(matches!(r2.unwrap_err(), InferenceError::LlamaCpp(_)));
+    }
+
+    #[test]
+    fn from_registry_error_mentions_epic() {
+        let err = GenerationEngine::from_registry("any").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Epic 5") || msg.contains("registry"),
+            "error should mention Epic 5 or registry: {msg}"
+        );
+    }
+
+    #[test]
+    fn cloud_error_mentions_epic() {
+        let err = GenerationEngine::cloud(
+            ProviderKind::Anthropic,
+            "k".into(),
+            "m".into(),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Epic 7") || msg.contains("cloud"),
+            "error should mention Epic 7 or cloud: {msg}"
+        );
     }
 }

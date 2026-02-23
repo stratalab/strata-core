@@ -217,22 +217,33 @@ impl LocalProvider {
 
 /// Check generated text against stop sequences.
 ///
-/// If a stop sequence is found, the text is truncated before it and the
-/// stop reason is changed to `StopToken`.
+/// If any stop sequence is found, the text is truncated at the earliest
+/// occurrence across all sequences and the stop reason is changed to
+/// `StopToken`.
 fn check_stop_sequences(
     text: &str,
     stop_sequences: &[String],
     original_reason: StopReason,
 ) -> (String, StopReason) {
+    let mut earliest_pos: Option<usize> = None;
+
     for seq in stop_sequences {
         if seq.is_empty() {
             continue;
         }
         if let Some(pos) = text.find(seq.as_str()) {
-            return (text[..pos].to_string(), StopReason::StopToken);
+            match earliest_pos {
+                None => earliest_pos = Some(pos),
+                Some(prev) if pos < prev => earliest_pos = Some(pos),
+                _ => {}
+            }
         }
     }
-    (text.to_string(), original_reason)
+
+    match earliest_pos {
+        Some(pos) => (text[..pos].to_string(), StopReason::StopToken),
+        None => (text.to_string(), original_reason),
+    }
 }
 
 #[cfg(test)]
@@ -285,16 +296,16 @@ mod tests {
     }
 
     #[test]
-    fn stop_sequences_first_match_wins() {
+    fn stop_sequences_earliest_position_wins() {
         let (text, reason) = check_stop_sequences(
             "Hello STOP1 and STOP2 end",
             &["STOP2".into(), "STOP1".into()],
             StopReason::MaxTokens,
         );
-        // STOP2 is checked first in iteration order, but STOP1 appears earlier in text.
-        // Actually, we iterate stop_sequences in order. STOP2 appears at position 16,
-        // STOP1 appears at position 6. STOP2 is found first in the iteration.
-        assert_eq!(text, "Hello STOP1 and ");
+        // STOP1 appears at position 6, STOP2 at position 16.
+        // Even though STOP2 is listed first in the array, STOP1 has the
+        // earliest position in the text, so it wins.
+        assert_eq!(text, "Hello ");
         assert_eq!(reason, StopReason::StopToken);
     }
 
@@ -365,6 +376,84 @@ mod tests {
             StopReason::MaxTokens,
         );
         assert_eq!(text, "Hello ");
+        assert_eq!(reason, StopReason::StopToken);
+    }
+
+    #[test]
+    fn stop_sequences_overlapping_prefix() {
+        // "STOP" is a prefix of "STOP1"; both match but "STOP" is at the same
+        // position (6) and shorter — earliest_pos wins.
+        let (text, reason) = check_stop_sequences(
+            "Hello STOP1 end",
+            &["STOP1".into(), "STOP".into()],
+            StopReason::MaxTokens,
+        );
+        // Both match at position 6; the first one found sets earliest_pos,
+        // the second doesn't improve it. Either way, truncation at position 6.
+        assert_eq!(text, "Hello ");
+        assert_eq!(reason, StopReason::StopToken);
+    }
+
+    #[test]
+    fn stop_sequences_text_equals_sequence() {
+        let (text, reason) = check_stop_sequences(
+            "STOP",
+            &["STOP".into()],
+            StopReason::MaxTokens,
+        );
+        assert_eq!(text, "");
+        assert_eq!(reason, StopReason::StopToken);
+    }
+
+    #[test]
+    fn stop_sequences_repeated_occurrences() {
+        // Same sequence appears twice; should truncate at the first occurrence.
+        let (text, reason) = check_stop_sequences(
+            "aXbXc",
+            &["X".into()],
+            StopReason::MaxTokens,
+        );
+        assert_eq!(text, "a");
+        assert_eq!(reason, StopReason::StopToken);
+    }
+
+    #[test]
+    fn stop_sequences_iteration_order_does_not_matter() {
+        // Verify that listing order doesn't change the result
+        let text_input = "AAA BBB CCC";
+        let (text_a, _) = check_stop_sequences(
+            text_input,
+            &["CCC".into(), "BBB".into(), "AAA".into()],
+            StopReason::MaxTokens,
+        );
+        let (text_b, _) = check_stop_sequences(
+            text_input,
+            &["AAA".into(), "BBB".into(), "CCC".into()],
+            StopReason::MaxTokens,
+        );
+        assert_eq!(text_a, text_b, "order of stop_sequences should not matter");
+        assert_eq!(text_a, "");
+    }
+
+    #[test]
+    fn stop_sequences_all_empty_strings_returns_original() {
+        let (text, reason) = check_stop_sequences(
+            "Hello world",
+            &[String::new(), String::new()],
+            StopReason::MaxTokens,
+        );
+        assert_eq!(text, "Hello world");
+        assert_eq!(reason, StopReason::MaxTokens);
+    }
+
+    #[test]
+    fn stop_sequences_multiline_text() {
+        let (text, reason) = check_stop_sequences(
+            "line1\nline2\nEND\nline3",
+            &["END".into()],
+            StopReason::MaxTokens,
+        );
+        assert_eq!(text, "line1\nline2\n");
         assert_eq!(reason, StopReason::StopToken);
     }
 }
