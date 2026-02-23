@@ -46,6 +46,7 @@ The `BackgroundScheduler` already exists and is general-purpose — auto-embeddi
 | 8 | Clone-based snapshots (M2 design) | SEVERE | N/A (design limitation) | `crates/storage/src/sharded.rs:892` |
 | 9 | Vector soft-deletes never purged | MEDIUM | `soft_delete()` | `crates/engine/src/primitives/vector/segmented.rs:124` |
 | 10 | No maintenance observability | MEDIUM | Only `SchedulerStats` | `crates/engine/src/background.rs:38` |
+| 11 | Multi-process index staleness | HIGH | `Database::refresh()` (manual) | `crates/engine/src/database/mod.rs` |
 
 ### Detailed Findings
 
@@ -88,6 +89,10 @@ This is a documented M2 limitation. Snapshots use `Arc::clone` (line 818), not d
 **10. No Maintenance Observability (MEDIUM)**
 
 The only observability is `SchedulerStats` (`background.rs:38`) which reports queue depth, active tasks, completed count, and worker count. There are no metrics for: versions pruned, bytes reclaimed, tombstones cleaned, segments merged, expired keys removed, or time since last maintenance pass.
+
+**11. Multi-Process Index Staleness (HIGH)**
+
+In multi-process mode, each process has its own in-memory BM25 `InvertedIndex` and `VectorBackendState`. `Database::refresh()` tails the shared WAL and applies other processes' writes to local storage, and as of PR #1231 also updates the BM25 and vector indexes incrementally. However, `refresh()` must be called explicitly — there is no automatic periodic refresh. A process that doesn't call `refresh()` will serve stale search and vector query results indefinitely. The building blocks exist (`refresh()` with incremental index updates, `BackgroundScheduler` for async work), but there is no auto-refresh task to connect them.
 
 ---
 
@@ -281,6 +286,8 @@ pub struct MaintenanceStatus {
     pub last_segments_merged: u64,
     /// Orphaned branches cleaned in last pass
     pub last_orphans_cleaned: u64,
+    /// WAL records applied in last refresh pass
+    pub last_refresh_records_applied: u64,
     /// Timestamp of last maintenance cycle (epoch micros)
     pub last_run_timestamp: u64,
     /// Total maintenance cycles completed
@@ -291,6 +298,28 @@ pub struct MaintenanceStatus {
 ```
 
 **Exposure:** New `Command::MaintenanceStatus` returning `Output::MaintenanceStatus(MaintenanceStatus)`, following the `EmbedStatus` pattern in `executor.rs:200`.
+
+### Feature 8: Auto-Refresh (Multi-Process Index Sync)
+
+**Description:** Periodically call `Database::refresh()` in the background so that search and vector indexes stay current with writes from other processes sharing the same WAL.
+
+**Builds on:** `Database::refresh()` (`database/mod.rs`) with incremental BM25 + vector index updates (PR #1231), `BackgroundScheduler` (`background.rs`)
+
+**Context:** In multi-process mode, each process maintains its own in-memory BM25 `InvertedIndex` and `VectorBackendState`. `refresh()` tails the shared WAL above a watermark, applies puts/deletes to local storage, and incrementally updates both indexes. Without automatic refresh, a process only sees other processes' writes when it explicitly calls `refresh()`, leading to stale search and similarity results.
+
+**Config knobs:**
+
+| Knob | Type | Default | Description |
+|------|------|---------|-------------|
+| `auto_refresh` | `bool` | `false` | Enable automatic WAL refresh (only useful in multi-process mode) |
+| `refresh_interval_ms` | `u64` | `500` | Milliseconds between refresh cycles |
+
+**Default justification:** Disabled by default because single-process deployments (the common case) gain nothing from periodic refresh — a process always sees its own writes. 500ms interval when enabled provides near-real-time visibility of other processes' writes with minimal overhead; `refresh()` is cheap when there are no new WAL records (just reads the watermark and returns). SQLite's WAL auto-checkpoint runs inline on commit, but Strata's multi-process model requires polling since there is no cross-process notification mechanism.
+
+**Implementation notes:**
+- Submit `refresh()` via `BackgroundScheduler` at `TaskPriority::Normal` (higher than maintenance tasks at `Low`, since query freshness is user-facing)
+- `refresh()` is a no-op when there are no new WAL records, so frequent polling has negligible cost
+- In the future, could be enhanced with file-system notifications (`inotify`/`kqueue`) to wake on WAL writes instead of polling, reducing latency to near-zero
 
 ---
 
@@ -430,6 +459,12 @@ pub struct MaintenanceConfig {
     pub cleanup_orphaned_branches: bool,
     #[serde(default = "default_orphan_grace")]
     pub orphan_grace_period_secs: u64,  // 300
+
+    // -- Auto-refresh (multi-process) --
+    #[serde(default)]
+    pub auto_refresh: bool,             // false (only useful in multi-process mode)
+    #[serde(default = "default_refresh_interval")]
+    pub refresh_interval_ms: u64,       // 500
 }
 ```
 
@@ -467,6 +502,10 @@ segment_merge_threshold = 10
 # Orphaned branch cleanup
 cleanup_orphaned_branches = true
 orphan_grace_period_secs = 300
+
+# Auto-refresh (multi-process WAL tailing)
+auto_refresh = false           # Enable for multi-process deployments
+refresh_interval_ms = 500
 ```
 
 ### StrataConfig Changes
@@ -531,9 +570,9 @@ No restart required — the `MaintenanceCoordinator` reads `config` through the 
 
 ## 7. Implementation Roadmap
 
-### Phase 1: Critical (Auto-GC + Auto-Compaction)
+### Phase 1: Critical (Auto-GC + Auto-Compaction + Auto-Refresh)
 
-**Goal:** Eliminate the two most impactful maintenance gaps — unbounded memory growth from version chains and unbounded disk growth from WAL segments.
+**Goal:** Eliminate the two most impactful maintenance gaps — unbounded memory growth from version chains and unbounded disk growth from WAL segments — and enable automatic index freshness in multi-process deployments.
 
 **Tasks:**
 1. Add `MaintenanceConfig` to `StrataConfig` with serde defaults
@@ -545,9 +584,13 @@ No restart required — the `MaintenanceCoordinator` reads `config` through the 
 4. Implement auto-compaction
    - Query WAL directory size on each wake
    - Submit `compact(CompactMode::WALOnly)` when threshold exceeded
-5. Wire `MaintenanceCoordinator` into `Database::open()` and `Database::close()`
-6. Add `[maintenance]` section to default `strata.toml` template
-7. Tests: verify GC respects safe point, compaction triggers at threshold, shutdown is clean
+5. Implement auto-refresh for multi-process mode
+   - Submit `Database::refresh()` via `BackgroundScheduler` at `TaskPriority::Normal`
+   - Use dedicated timer (500ms default) separate from maintenance wake cycle
+   - No-op when disabled or when no new WAL records exist
+6. Wire `MaintenanceCoordinator` into `Database::open()` and `Database::close()`
+7. Add `[maintenance]` section to default `strata.toml` template
+8. Tests: verify GC respects safe point, compaction triggers at threshold, refresh updates indexes, shutdown is clean
 
 ### Phase 2: High (Tombstone Cleanup + TTL Enforcement)
 
