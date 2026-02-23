@@ -22,6 +22,7 @@ fn ensure_recovery_registered() {
     });
 }
 
+
 fn create_test_namespace(branch_id: BranchId) -> Namespace {
     Namespace::new(
         "tenant".to_string(),

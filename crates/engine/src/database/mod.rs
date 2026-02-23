@@ -947,6 +947,7 @@ impl Database {
             .extension::<crate::primitives::vector::store::VectorBackendState>()
             .ok();
 
+
         for record in &records {
             max_txn_id = max_txn_id.max(record.txn_id);
 
@@ -985,6 +986,7 @@ impl Database {
                     }
                 }
             }
+
 
             // Apply puts
             for (key, value) in &payload.puts {
