@@ -32,6 +32,9 @@ pub mod format; // Binary on-disk formats (WAL segments, snapshots, manifest, wr
 pub mod retention; // Version retention policies (KeepAll, KeepLast, KeepFor, Composite)
 pub mod testing; // Crash test harness and reference model
 
+// === Multi-process WAL coordination ===
+pub mod coordination; // WAL file lock + counter file for multi-process access
+
 // === Phase 2: Database lifecycle coordination ===
 pub mod database; // Database handle, config, paths (DatabaseHandle, DatabaseConfig, etc.)
 

@@ -182,9 +182,23 @@ impl Strata {
                 .unwrap_or(cfg.embed_batch_size.unwrap_or(512)),
         );
 
-        let db = Database::open_with_config(&data_dir, cfg).map_err(|e| Error::Internal {
-            reason: format!("Failed to open database: {}", e),
-        })?;
+        let db = if opts.multi_process {
+            let mode = cfg.durability_mode().map_err(|e| Error::Internal {
+                reason: format!("Failed to parse durability mode: {}", e),
+            })?;
+            // Write config to strata.toml so restarts pick it up
+            let config_path = data_dir.join(strata_engine::database::config::CONFIG_FILE_NAME);
+            cfg.write_to_file(&config_path).map_err(|e| Error::Internal {
+                reason: format!("Failed to write config: {}", e),
+            })?;
+            Database::open_multi_process(&data_dir, mode, cfg).map_err(|e| Error::Internal {
+                reason: format!("Failed to open database (multi-process): {}", e),
+            })?
+        } else {
+            Database::open_with_config(&data_dir, cfg).map_err(|e| Error::Internal {
+                reason: format!("Failed to open database: {}", e),
+            })?
+        };
 
         let access_mode = opts.access_mode;
         let executor = Executor::new_with_mode(db, access_mode);

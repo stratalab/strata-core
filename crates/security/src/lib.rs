@@ -50,6 +50,14 @@ pub struct OpenOptions {
     /// Override embedding batch size for auto-embed.
     /// `None` means "use the config file value, or 512 if unset".
     pub embed_batch_size: Option<usize>,
+    /// Enable multi-process coordination mode.
+    ///
+    /// When `true`, multiple processes can open the same database directory
+    /// concurrently. A shared file lock is used instead of an exclusive one,
+    /// and commits are coordinated through the WAL.
+    ///
+    /// Default: `false` (exclusive single-process access).
+    pub multi_process: bool,
 }
 
 impl OpenOptions {
@@ -100,6 +108,15 @@ impl OpenOptions {
         self.embed_batch_size = Some(size);
         self
     }
+
+    /// Enable multi-process coordination mode.
+    ///
+    /// When enabled, multiple processes can open the same database directory
+    /// concurrently. Commits are coordinated through the WAL file lock.
+    pub fn multi_process(mut self, enabled: bool) -> Self {
+        self.multi_process = enabled;
+        self
+    }
 }
 
 impl Default for OpenOptions {
@@ -113,6 +130,7 @@ impl Default for OpenOptions {
             model_api_key: None,
             model_timeout_ms: None,
             embed_batch_size: None,
+            multi_process: false,
         }
     }
 }
