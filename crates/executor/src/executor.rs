@@ -201,6 +201,12 @@ impl Executor {
                 Ok(Output::EmbedStatus(info))
             }
             Command::ConfigGet => crate::handlers::config::config_get(&self.primitives),
+            Command::ConfigureSet { key, value } => {
+                crate::handlers::config::configure_set(&self.primitives, key, value)
+            }
+            Command::ConfigureGetKey { key } => {
+                crate::handlers::config::configure_get_key(&self.primitives, key)
+            }
             Command::ConfigSetAutoEmbed { enabled } => {
                 crate::handlers::config::config_set_auto_embed(&self.primitives, enabled)
             }

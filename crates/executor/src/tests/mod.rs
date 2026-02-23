@@ -1,6 +1,7 @@
 //! Test modules for the executor crate.
 
 pub mod access_mode;
+pub mod config;
 pub mod determinism;
 pub mod execute_many;
 pub mod parity;

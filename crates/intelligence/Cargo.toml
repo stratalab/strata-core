@@ -16,6 +16,11 @@ embed = ["dep:strata-inference"]
 # are kept for backwards compatibility but simply enable 'embed'.
 embed-cuda = ["embed"]
 embed-metal = ["embed"]
+# Cloud generation providers — each enables the corresponding
+# strata-inference feature. Requires 'embed' to be useful.
+anthropic = ["embed", "strata-inference/anthropic"]
+openai = ["embed", "strata-inference/openai"]
+google = ["embed", "strata-inference/google"]
 
 [dependencies]
 strata-core = { path = "../core" }

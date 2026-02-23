@@ -22,6 +22,8 @@ pub use strata_inference::GenerationEngine;
 pub use strata_inference::InferenceError;
 #[cfg(feature = "embed")]
 pub use strata_inference::ModelRegistry;
+#[cfg(feature = "embed")]
+pub use strata_inference::ProviderKind;
 
 // ---------------------------------------------------------------------------
 // Re-export validation tests — ensure the wiring from strata-intelligence
@@ -143,5 +145,20 @@ mod reexport_tests {
             err,
             InferenceError::Registry(_) | InferenceError::LlamaCpp(_)
         ));
+    }
+
+    #[test]
+    fn provider_kind_reexported() {
+        assert_eq!(ProviderKind::Local.to_string(), "local");
+        assert_eq!(ProviderKind::Anthropic.to_string(), "anthropic");
+        assert_eq!(ProviderKind::OpenAI.to_string(), "openai");
+        assert_eq!(ProviderKind::Google.to_string(), "google");
+    }
+
+    #[test]
+    fn provider_kind_from_str_via_reexport() {
+        assert_eq!("local".parse::<ProviderKind>().unwrap(), ProviderKind::Local);
+        assert_eq!("anthropic".parse::<ProviderKind>().unwrap(), ProviderKind::Anthropic);
+        assert!("bad".parse::<ProviderKind>().is_err());
     }
 }

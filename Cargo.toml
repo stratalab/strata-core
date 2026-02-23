@@ -106,6 +106,10 @@ embed = ["strata-executor/embed"]
 embed-cuda = ["strata-executor/embed-cuda"]
 # GPU-accelerated embedding via Metal (macOS with Apple GPU)
 embed-metal = ["strata-executor/embed-metal"]
+# Cloud generation providers
+anthropic = ["strata-executor/anthropic"]
+openai = ["strata-executor/openai"]
+google = ["strata-executor/google"]
 
 [dependencies]
 strata-executor = { path = "crates/executor" }
