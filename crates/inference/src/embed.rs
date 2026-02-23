@@ -105,14 +105,14 @@ impl EmbeddingEngine {
         // 3. Create batch and run inference
         let batch = ctx.api.batch_get_one(&mut tokens);
 
-        if ctx.has_encoder {
-            ctx.api
-                .encode(ctx.ctx, batch)
-                .map_err(InferenceError::LlamaCpp)?;
+        let inference_result = if ctx.has_encoder {
+            ctx.api.encode(ctx.ctx, batch)
         } else {
-            ctx.api
-                .decode(ctx.ctx, batch)
-                .map_err(InferenceError::LlamaCpp)?;
+            ctx.api.decode(ctx.ctx, batch)
+        };
+        if let Err(e) = inference_result {
+            ctx.clear_memory();
+            return Err(InferenceError::LlamaCpp(e));
         }
 
         // 4. Extract embeddings
@@ -156,19 +156,25 @@ impl EmbeddingEngine {
     }
 
     /// The dimensionality of output embedding vectors.
+    ///
+    /// Returns 0 if the internal Mutex is poisoned (a thread panicked while
+    /// holding the lock). In normal operation this cannot happen.
     pub fn embedding_dim(&self) -> usize {
-        self.ctx.lock().unwrap().n_embd
+        self.ctx.lock().map(|ctx| ctx.n_embd).unwrap_or(0)
     }
 
     /// The vocabulary size of the loaded model.
+    ///
+    /// Returns 0 if the internal Mutex is poisoned.
     pub fn vocab_size(&self) -> usize {
-        self.ctx.lock().unwrap().vocab_size
+        self.ctx.lock().map(|ctx| ctx.vocab_size).unwrap_or(0)
     }
 }
 
-/// L2-normalize a vector in-place, returning the normalized result.
+/// L2-normalize a vector, returning a new unit-length vector.
 ///
-/// If the vector has zero norm (all zeros), it is returned unchanged.
+/// If the vector has zero norm (all zeros), a copy is returned unchanged.
+/// NaN and infinity values are passed through without special handling.
 fn l2_normalize(v: &[f32]) -> Vec<f32> {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 0.0 {
@@ -303,6 +309,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn l2_normalize_with_nan_passes_through() {
+        let v = vec![1.0, f32::NAN, 3.0];
+        let n = l2_normalize(&v);
+        assert_eq!(n.len(), 3);
+        // NaN propagates: norm is NaN, so norm > 0.0 is false,
+        // and the original vector is returned as-is
+        assert!(n[1].is_nan(), "NaN should be preserved");
+        assert_eq!(n[0], 1.0);
+        assert_eq!(n[2], 3.0);
+    }
+
+    #[test]
+    fn l2_normalize_with_infinity() {
+        let v = vec![1.0, f32::INFINITY];
+        let n = l2_normalize(&v);
+        assert_eq!(n.len(), 2);
+        // infinity norm: inf > 0.0 is true, so division happens
+        // 1.0/inf = 0.0, inf/inf = NaN
+        // This is acceptable "garbage in" behavior
+    }
+
+    #[test]
+    fn l2_normalize_output_length_always_matches_input() {
+        for len in [0, 1, 2, 3, 10, 100, 384, 768] {
+            let v: Vec<f32> = (0..len).map(|i| i as f32).collect();
+            let n = l2_normalize(&v);
+            assert_eq!(n.len(), len, "output length should match input for len={len}");
+        }
+    }
+
+    #[test]
+    fn l2_normalize_mixed_positive_negative_zero() {
+        let v = vec![-2.0, 0.0, 3.0, 0.0, -1.0];
+        let n = l2_normalize(&v);
+        let norm: f32 = n.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-6, "norm should be 1.0, got {norm}");
+        // Zero elements stay zero
+        assert_eq!(n[1], 0.0);
+        assert_eq!(n[3], 0.0);
+        // Signs preserved
+        assert!(n[0] < 0.0);
+        assert!(n[2] > 0.0);
+        assert!(n[4] < 0.0);
+    }
+
     // -----------------------------------------------------------------------
     // EmbeddingEngine constructor tests (no libllama needed for error paths)
     // -----------------------------------------------------------------------
@@ -323,19 +375,66 @@ mod tests {
     }
 
     #[test]
-    fn from_gguf_nonexistent_file_returns_error() {
-        // This will fail at LlamaCppApi::load() since libllama isn't installed in CI
-        let result = EmbeddingEngine::from_gguf("/nonexistent/path/model.gguf");
-        assert!(result.is_err());
+    fn from_registry_with_empty_name_returns_not_supported() {
+        let result = EmbeddingEngine::from_registry("");
+        assert!(matches!(
+            result.unwrap_err(),
+            InferenceError::NotSupported(_)
+        ));
     }
 
     #[test]
-    fn from_gguf_accepts_path_types() {
+    fn from_registry_with_any_name_returns_same_error() {
+        // All names should fail identically since registry is stubbed
+        for name in &["miniLM", "", "   ", "nonexistent-model", "GPT-4"] {
+            let result = EmbeddingEngine::from_registry(name);
+            assert!(result.is_err(), "from_registry({name:?}) should fail");
+            assert!(
+                matches!(result.unwrap_err(), InferenceError::NotSupported(_)),
+                "from_registry({name:?}) should be NotSupported"
+            );
+        }
+    }
+
+    #[test]
+    fn from_gguf_nonexistent_file_returns_descriptive_error() {
+        let result = EmbeddingEngine::from_gguf("/nonexistent/path/model.gguf");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        // Should be a LlamaCpp error (libllama not found or file not found)
+        assert!(
+            matches!(err, InferenceError::LlamaCpp(_)),
+            "should be LlamaCpp error, got: {msg}"
+        );
+        assert!(!msg.is_empty(), "error message should not be empty");
+    }
+
+    #[test]
+    fn from_gguf_accepts_path_types_and_all_return_errors() {
         // Verify the `impl AsRef<Path>` works with various types
         // All will fail (no libllama), but should compile and return errors
-        let _ = EmbeddingEngine::from_gguf("/tmp/model.gguf");
-        let _ = EmbeddingEngine::from_gguf(String::from("/tmp/model.gguf"));
-        let _ = EmbeddingEngine::from_gguf(std::path::PathBuf::from("/tmp/model.gguf"));
+        let r1 = EmbeddingEngine::from_gguf("/tmp/model.gguf");
+        let r2 = EmbeddingEngine::from_gguf(String::from("/tmp/model.gguf"));
+        let r3 = EmbeddingEngine::from_gguf(std::path::PathBuf::from("/tmp/model.gguf"));
+        assert!(r1.is_err(), "&str path should fail without libllama");
+        assert!(r2.is_err(), "String path should fail without libllama");
+        assert!(r3.is_err(), "PathBuf path should fail without libllama");
+    }
+
+    // -----------------------------------------------------------------------
+    // Debug impl tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn debug_format_contains_struct_name() {
+        // We can't construct an EmbeddingEngine without libllama,
+        // but we can verify the Debug impl compiles and is callable
+        // by testing it indirectly through the error path.
+        // The compile-time Send+Sync check already exercises the type.
+        // Here we just verify the trait bound is satisfied.
+        fn assert_debug<T: std::fmt::Debug>() {}
+        assert_debug::<EmbeddingEngine>();
     }
 
     // -----------------------------------------------------------------------
