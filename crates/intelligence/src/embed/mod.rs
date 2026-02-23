@@ -93,9 +93,10 @@ pub fn embed_query(db: &strata_engine::Database, text: &str) -> Option<Vec<f32>>
 
 /// Batch-embed multiple query strings using the cached MiniLM model.
 ///
-/// Uses [`EmbedModel::embed_batch`] for tensor-batched inference. Returns one
-/// `Option<Vec<f32>>` per input text — `None` only if the model fails to load
-/// (in which case all entries are `None`).
+/// Uses [`EmbeddingEngine::embed_batch`] for batched inference. Returns one
+/// `Option<Vec<f32>>` per input text — `None` if the model fails to load or
+/// if the batch embedding call itself fails (in either case, all entries are
+/// `None`).
 pub fn embed_batch_queries(db: &strata_engine::Database, texts: &[&str]) -> Vec<Option<Vec<f32>>> {
     if texts.is_empty() {
         return vec![];
@@ -115,7 +116,13 @@ pub fn embed_batch_queries(db: &strata_engine::Database, texts: &[&str]) -> Vec<
             return vec![None; texts.len()];
         }
     };
-    model.embed_batch(texts).into_iter().map(Some).collect()
+    match model.embed_batch(texts) {
+        Ok(embeddings) => embeddings.into_iter().map(Some).collect(),
+        Err(e) => {
+            tracing::warn!(target: "strata::hybrid", error = %e, "Batch embedding failed");
+            vec![None; texts.len()]
+        }
+    }
 }
 
 #[cfg(test)]

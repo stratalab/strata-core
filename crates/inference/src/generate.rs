@@ -126,10 +126,12 @@ impl GenerationEngine {
 
     /// Encode text to token IDs using the model's tokenizer.
     ///
-    /// Only available for local providers. Cloud providers return `NotSupported`.
-    pub fn encode(&self, text: &str) -> Result<Vec<u32>, InferenceError> {
+    /// When `add_special` is true, BOS/EOS tokens are added per the model's
+    /// tokenizer configuration. Only available for local providers; cloud
+    /// providers return `NotSupported`.
+    pub fn encode(&self, text: &str, add_special: bool) -> Result<Vec<u32>, InferenceError> {
         match &self.provider {
-            Provider::Local(p) => Ok(p.encode(text)),
+            Provider::Local(p) => Ok(p.encode(text, add_special)),
         }
     }
 

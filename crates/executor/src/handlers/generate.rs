@@ -38,27 +38,25 @@ pub fn generate(
         .get_or_load(&model)
         .map_err(|e| Error::Internal { reason: e })?;
 
-    let gen_config = strata_intelligence::GenerationConfig {
+    let request = strata_intelligence::GenerateRequest {
+        prompt,
         max_tokens: max_tokens.unwrap_or(256),
+        temperature: temperature.unwrap_or(0.0),
+        top_k: top_k.unwrap_or(0),
+        top_p: top_p.unwrap_or(1.0),
+        seed,
+        stop_sequences: vec![],
         stop_tokens: stop_tokens.unwrap_or_default(),
-        sampling: strata_intelligence::SamplingConfig {
-            temperature: temperature.unwrap_or(0.0),
-            top_k: top_k.unwrap_or(0),
-            top_p: top_p.unwrap_or(1.0),
-            seed,
-        },
     };
 
     let (text, stop_reason, prompt_tokens, completion_tokens) =
         strata_intelligence::generate::with_engine(&entry, |engine| {
-            let output = engine.generate_full(&prompt, &gen_config)?;
-            let text = engine.decode(&output.token_ids);
-            let completion_tokens = output.token_ids.len();
+            let response = engine.generate(&request)?;
             Ok::<_, strata_intelligence::InferenceError>((
-                text,
-                output.stop_reason.to_string(),
-                output.prompt_tokens,
-                completion_tokens,
+                response.text,
+                response.stop_reason.to_string(),
+                response.prompt_tokens,
+                response.completion_tokens,
             ))
         })
         .map_err(|e| Error::Internal { reason: e })?
@@ -101,7 +99,10 @@ pub fn tokenize(
     let ids = strata_intelligence::generate::with_engine(&entry, |engine| {
         engine.encode(&text, add_special)
     })
-    .map_err(|e| Error::Internal { reason: e })?;
+    .map_err(|e| Error::Internal { reason: e })?
+    .map_err(|e| Error::Internal {
+        reason: format!("Tokenization failed: {}", e),
+    })?;
 
     let count = ids.len();
     Ok(Output::TokenIds(TokenizeResult { ids, count, model }))
@@ -123,7 +124,10 @@ pub fn detokenize(p: &Arc<Primitives>, model: String, ids: Vec<u32>) -> Result<O
         .map_err(|e| Error::Internal { reason: e })?;
 
     let text = strata_intelligence::generate::with_engine(&entry, |engine| engine.decode(&ids))
-        .map_err(|e| Error::Internal { reason: e })?;
+        .map_err(|e| Error::Internal { reason: e })?
+        .map_err(|e| Error::Internal {
+            reason: format!("Detokenization failed: {}", e),
+        })?;
 
     Ok(Output::Text(text))
 }

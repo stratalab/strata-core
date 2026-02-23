@@ -190,9 +190,9 @@ impl LocalProvider {
     }
 
     /// Encode text to token IDs using the model's tokenizer.
-    pub fn encode(&self, text: &str) -> Vec<u32> {
+    pub fn encode(&self, text: &str, add_special: bool) -> Vec<u32> {
         self.ctx
-            .tokenize(text, true)
+            .tokenize(text, add_special)
             .into_iter()
             .map(|id| id as u32)
             .collect()
