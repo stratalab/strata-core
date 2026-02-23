@@ -6,10 +6,19 @@ pub mod llama;
 #[cfg(feature = "local")]
 mod embed;
 
+#[cfg(feature = "local")]
+mod provider;
+
+#[cfg(feature = "local")]
+mod generate;
+
 pub use error::InferenceError;
 
 #[cfg(feature = "local")]
 pub use embed::EmbeddingEngine;
+
+#[cfg(feature = "local")]
+pub use generate::GenerationEngine;
 
 use std::fmt;
 use std::str::FromStr;
