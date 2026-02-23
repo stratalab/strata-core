@@ -1,5 +1,8 @@
 mod error;
 
+#[cfg(feature = "local")]
+pub mod llama;
+
 pub use error::InferenceError;
 
 use std::fmt;
