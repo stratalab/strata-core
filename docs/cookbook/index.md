@@ -8,3 +8,4 @@ Real-world patterns and recipes for building with StrataDB.
 - **[Deterministic Replay](deterministic-replay.md)** — record nondeterministic inputs, replay later
 - **[Intelligent Search](intelligent-search.md)** — time-scoped cross-primitive search with expansion and reranking
 - **[A/B Testing with Branches](ab-testing-with-branches.md)** — run two strategies, compare results
+- **[Knowledge Graph](knowledge-graph.md)** — typed knowledge graph with ontology validation and bulk loading
