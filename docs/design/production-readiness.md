@@ -8,7 +8,7 @@
 
 ## 1. Executive Summary
 
-Strata is a well-designed embedded database with strong Rust type safety, correct MVCC fundamentals, and a thoughtful modular architecture. However, **it is not yet production-ready**. A crate-by-crate audit found **16 critical issues, 37 high-severity issues, and 24 medium/low issues** across the codebase.
+Strata is a well-designed embedded database with strong Rust type safety, correct MVCC fundamentals, and a thoughtful modular architecture. However, **it is not yet production-ready**. A crate-by-crate audit plus deep-dive reviews of the graph and vector subsystems found **17 critical, 50 high, 43 medium, and 12 low issues** (122 total) across the codebase.
 
 The most important gaps fall into five cross-cutting themes:
 
@@ -234,6 +234,80 @@ The most important gaps fall into five cross-cutting themes:
 
 ---
 
+### 2.11 engine/graph — Graph Subsystem
+
+**Verdict:** Zero unsafe code and zero production panics (excellent), but pervasive O(E) full-scans, unbounded result sets, and silent corruption swallowing.
+
+| # | Finding | Severity | Code Reference | Comparison |
+|---|---------|----------|----------------|------------|
+| G-1 | `unwrap_or_default()` silently replaces corrupted edge/node data | **HIGH** | `graph/mod.rs:460, 501, 531, 564` | Neo4j/JanusGraph surface deserialization errors |
+| G-2 | `subgraph()` full-scans all edges O(E) then filters client-side | **HIGH** | `graph/traversal.rs:127-153` | Neo4j uses per-node index lookups for subgraph projection |
+| G-4 | BFS default `max_depth: usize::MAX` — unbounded traversal on connected graphs | **HIGH** | `graph/types.rs:193-202` | Neo4j/DGraph require explicit depth/result limits |
+| G-3 | `count_edges_by_type()` full-scans all edges per type — O(L * E) for summary | **MEDIUM** | `graph/ontology.rs:506-529` | Production graph DBs maintain per-type count metadata |
+| G-5 | `list_graphs()` scans entire `_graph_` namespace including all data | **MEDIUM** | `graph/mod.rs:88-108` | Production DBs maintain a graph catalog/registry |
+| G-6 | No max-length on node IDs, graph names, edge types, or entity_ref URIs | **MEDIUM** | `graph/keys.rs:19-56` | Neo4j limits label names to 65534 bytes |
+| G-7 | Edges allowed between non-existent nodes (dangling edges) | **MEDIUM** | `graph/mod.rs:348-382` | Neo4j requires nodes to exist before creating relationships |
+| G-8 | `on_entity_deleted()` cascade errors logged but not returned | **MEDIUM** | `graph/integrity.rs:47-55` | — |
+| G-11 | `delete_graph()` loads all graph data into memory in a single scan | **MEDIUM** | `graph/mod.rs:111-149` | Neo4j uses batched deletion |
+| G-12 | `snapshot()` loads entire graph into memory (all nodes + all edges) | **MEDIUM** | `graph/mod.rs:518-581` | Neo4j/DGraph stream results; never load full graph |
+| G-14 | Frozen ontology uses open-world semantics — undeclared types bypass all checks | **MEDIUM** | `graph/ontology.rs:307-309, 344-347` | — |
+| G-18 | `list_nodes()` and `list_graphs()` return unbounded `Vec<String>` | **MEDIUM** | `graph/mod.rs:88-108, 252-268` | All production graph DBs support pagination |
+| G-9 | `degree()` materializes all neighbors just to count them | **LOW** | `graph/traversal.rs:43-52` | Neo4j returns degree count without materialization |
+| G-10 | `AdjacencyIndex` allows duplicate edges and has no size bound | **LOW** | `graph/adjacency.rs:57-68` | — |
+| G-13 | Bulk insert does per-node KV read for ontology validation | **LOW** | `graph/mod.rs:633-635` | — |
+| G-15 | `freeze_ontology()` read-then-write is not atomic | **LOW** | `graph/ontology.rs:220-285` | Neo4j holds schema write lock for the entire operation |
+| G-16 | Property types recorded but not enforced, even when ontology is frozen | **LOW** | `graph/types.rs:22-30` | Neo4j property type constraints enforce at write time |
+| G-17 | Hand-rolled URI encoding/decoding is fragile | **LOW** | `graph/keys.rs:164-171` | — |
+
+**Strengths:** Zero `unsafe` code in 6,917 lines. Zero panics in production paths — all error handling uses `?` propagation. Comprehensive input validation on write paths. Atomic forward+reverse edge updates within a single transaction. Well-designed ontology lifecycle (Draft -> Frozen with cross-reference validation). Referential integrity hooks with configurable cascade policies (Cascade/Detach/Ignore). Extensive test coverage across all 9 files.
+
+> **Key comparison:** The graph subsystem's safety profile is excellent — it has the best `unsafe`/panic discipline of any subsystem in Strata. The primary concern is performance: nearly every read operation involves a full prefix scan of the KV namespace, making performance O(total data) rather than O(relevant data). Production graph databases like Neo4j use native index structures (B+ trees, skip lists) that make traversal O(degree) per hop. At small scale this is invisible; at >100K edges, graph queries will become a bottleneck.
+
+---
+
+### 2.12 engine/vector — Vector Subsystem
+
+**Verdict:** Sophisticated segmented HNSW architecture with strong determinism guarantees, but `unsafe` alignment checks disappear in release builds, production `panic!()` calls in the heap, and no SIMD or quantization for competitive performance.
+
+| # | Finding | Severity | Code Reference | Comparison |
+|---|---------|----------|----------------|------------|
+| V-1 | `debug_assert!` guards alignment before `unsafe` pointer cast — disappears in release | **CRITICAL** | `vector/hnsw.rs:958-967` | Qdrant uses `safe_transmute` with runtime validation |
+| V-2 | f32 alignment not validated on mmap open; corrupt file causes UB | **HIGH** | `vector/mmap.rs:228` | pgvector uses typed storage guaranteeing alignment |
+| V-5 | `panic!("cannot mutate mmap-backed VectorHeap")` in production path | **HIGH** | `vector/heap.rs:268` | Production DBs never panic on data-plane operations |
+| V-6 | `panic!("raw_data() not available")` for Mmap and Tiered variants | **HIGH** | `vector/heap.rs:520-521` | — |
+| V-7 | `.expect()` in hot iteration path — panics on stale `id_to_offset` | **HIGH** | `vector/heap.rs:490, 501` | — |
+| V-13 | `delete()` removes from backend first, then KV — reversed from insert ordering | **HIGH** | `vector/store.rs:697-711` | Pinecone uses single transactional delete |
+| V-15 | `delete()` has no lock around check-then-mutate (TOCTOU race) | **HIGH** | `vector/store.rs:677-714` | Insert path correctly holds lock (citing issue #936) |
+| V-17 | No `fsync` before atomic rename of mmap files — crash can lose cache | **HIGH** | `vector/mmap.rs:334-338`, `mmap_graph.rs:152-156` | SQLite/RocksDB/Qdrant all fsync before rename |
+| V-19 | `debug_assert_eq!` for dimension mismatch in distance computation | **HIGH** | `vector/distance.rs:19-23` | FAISS uses runtime assertions; Qdrant validates at all layers |
+| V-23 | No SIMD distance computation — scalar f32 loops only | **HIGH** | `vector/distance.rs` | Qdrant/FAISS/Milvus all use AVX2/NEON SIMD |
+| V-25 | No quantization support — all vectors stored as full-precision f32 | **HIGH** | entire subsystem | Qdrant supports SQ/PQ/binary; Milvus supports IVF_SQ8/PQ |
+| V-27 | No pre-filtering for metadata — post-filter only with adaptive over-fetch | **HIGH** | `vector/store.rs:872-970`, `vector/filter.rs` | Pinecone/Qdrant/Weaviate support pre-filtering |
+| V-3 | `&[f32]` to `&[u8]` cast lacks endianness guard (mmap.rs only; mmap_graph.rs has it) | **MEDIUM** | `vector/mmap.rs:330` | — |
+| V-4 | Mmap lifetime relies on external file not being modified/deleted | **MEDIUM** | `vector/mmap.rs:124`, `mmap_graph.rs:176` | Qdrant uses advisory file locks |
+| V-8 | `.unwrap()` on `entry_point` after None check — fragile to refactoring | **MEDIUM** | `vector/hnsw.rs:508` | — |
+| V-9 | Thread pool `expect()` at first search — delayed crash under resource constraints | **MEDIUM** | `vector/segmented.rs:51` | — |
+| V-10 | Unbounded `inline_meta: BTreeMap` — always in anonymous memory | **MEDIUM** | `vector/heap.rs:101-103` | Qdrant stores metadata with disk backing |
+| V-11 | WAL embeds full vectors (~6KB per 1536-dim entry) | **MEDIUM** | `vector/wal.rs` | Milvus uses separate binlog for vector data |
+| V-12 | O(n) KV scan fallback for VectorId-to-key resolution | **MEDIUM** | `vector/store.rs:1167-1216` | — |
+| V-16 | `ensure_collection_loaded()` has TOCTOU window — two threads can double-init | **MEDIUM** | `vector/store.rs:1377-1406` | — |
+| V-18 | No parent directory fsync after rename | **MEDIUM** | same as V-17 | LevelDB/RocksDB fsync directory after rename |
+| V-20 | No NaN/Infinity validation in distance functions | **MEDIUM** | `vector/distance.rs` | Qdrant rejects NaN/Infinity at ingestion |
+| V-21 | Temporal search uses fixed 4x over-fetch (no adaptive retry like `search()`) | **MEDIUM** | `vector/store.rs:1026` | Pinecone/Weaviate apply filters during traversal (pre-filter) |
+| V-22 | `search()` doesn't validate query vector for NaN (but `search_at()` does) | **MEDIUM** | `vector/store.rs:842-987` | — |
+| V-24 | BTreeSet visited set in HNSW search — O(log n) vs HashSet O(1) | **MEDIUM** | `vector/hnsw.rs` | FAISS/Qdrant use flat bitsets or hash sets |
+| V-26 | Active buffer uses O(n) brute-force scan (seal threshold 50K) | **MEDIUM** | `vector/segmented.rs` | Qdrant builds small HNSW even for mutable segment |
+| V-28 | No sparse, multi-vector, or binary vector support | **MEDIUM** | entire subsystem | Qdrant/Weaviate/Milvus support sparse + multi-vector |
+| V-14 | Silent failure on `create_dir_all` and `flush_heap_to_disk_if_needed` | **LOW** | `vector/store.rs:1119-1121` | — |
+| V-29 | No per-collection namespace or tenant isolation | **LOW** | entire subsystem | Pinecone supports namespaces within an index |
+| V-30 | No index build progress reporting | **LOW** | `vector/segmented.rs` | Milvus reports index build progress |
+
+**Strengths:** Deterministic results by design — BTreeMap iteration, fixed RNG seeds, and facade-level tie-breaking produce byte-identical output across runs (rare among vector DBs). Temporal search (time-travel queries) is a unique feature not offered by Pinecone/Qdrant/Milvus. Graceful mmap degradation — corrupt or missing `.vec`/`.hgr` files fall back to full KV rebuild with zero data loss. KV-first insert pattern ensures durability before visibility. Slot reuse without ID reuse avoids phantom result bugs. Compile-time endianness guard in `mmap_graph.rs`. Data zeroing on delete prevents information leakage. Comprehensive `VectorError` enum with 15+ contextual variants.
+
+> **Key comparison:** The most urgent issue is V-1 — a `debug_assert!` guarding an `unsafe` pointer cast at `hnsw.rs:958` disappears in release builds. This is the same class of bug as C-1 (JSON transmute) but in a hotter code path (every mmap-backed HNSW search). Beyond safety, the lack of SIMD (V-23) and quantization (V-25) means Strata's vector search is 4-8x slower and uses 4-32x more memory than Qdrant or FAISS at equivalent scale.
+
+---
+
 ## 3. Cross-Cutting Comparison
 
 ### Feature Matrix
@@ -275,28 +349,36 @@ The most important gaps fall into five cross-cutting themes:
 | 3 | **Fix Standard mode fsync** — health-check the background flush thread, or sync inline | durability | Users who receive `Ok(())` from `commit()` expect durability. An unhealthy flush thread silently violates this contract. |
 | 4 | **Replace version counter `expect()` with error return** | concurrency | `expect()` on `checked_add` at `manager.rs:146` panics the entire host application. Return `Err(VersionOverflow)` instead. |
 | 5 | **Add compile-time layout assertion for JSON transmute** | core | The `unsafe` block at `json.rs:1028` relies on `#[repr(transparent)]` but has no `static_assert` verifying layout. UB is unacceptable in a database. |
-| 6 | **Document isolation level** — "Snapshot Isolation; write-skew is possible" | concurrency | Users must know what guarantees they get. Every production database documents its isolation levels. |
-| 7 | **Fix model load permanent failure** — replace `OnceCell` with retry + backoff | intelligence | A transient network error during model download permanently breaks inference for the process lifetime. |
+| 6 | **Promote HNSW mmap alignment check to runtime assertion** | engine/vector | `debug_assert!` at `hnsw.rs:958` guards an `unsafe` pointer cast but disappears in release builds. Same class as #5 — UB on misaligned data. |
+| 7 | **Replace `panic!()` calls in VectorHeap with error returns** | engine/vector | `heap.rs:268, 520-521` panic on mmap/tiered variant mismatch. Process crash on a data-plane operation is unacceptable. |
+| 8 | **Document isolation level** — "Snapshot Isolation; write-skew is possible" | concurrency | Users must know what guarantees they get. Every production database documents its isolation levels. |
+| 9 | **Fix model load permanent failure** — replace `OnceCell` with retry + backoff | intelligence | A transient network error during model download permanently breaks inference for the process lifetime. |
 
 ### Phase 2: Should-Fix Before GA (Weeks 5-8)
 
 | # | Item | Crate | Rationale |
 |---|------|-------|-----------|
-| 8 | **Implement automatic maintenance** (GC, compaction, TTL enforcement) | engine | Version chains, WAL segments, tombstones, and expired keys grow without bound. Design doc exists (`maintenance.md`). |
-| 9 | **Add transaction timeout and abandoned transaction detection** | concurrency | Leaked transactions pin the GC safe point forever. `is_expired()` helper exists at `transaction.rs:1038` but is never enforced. |
-| 10 | **Fix stale WAL lock detection** — validate PID, add timeout | durability | A crashed process leaves an orphaned lock file that blocks all other processes from opening the database. |
-| 11 | **Add encryption at rest** (AES-256 via the existing codec seam) | security | The `IdentityCodec` seam at `durability/src/codec/mod.rs` reserves a slot for `AesGcmCodec`. Required for mobile/edge use cases. |
-| 12 | **Add health check API** (`db.health()` returning subsystem status) | engine | Host applications need a liveness probe. No mechanism exists to detect a stuck WAL flush thread or hung recovery. |
-| 13 | **Document batch operation semantics** (non-atomic, partial success) | executor | `KvBatchPut` at `handlers/kv.rs:235` is non-atomic across branches. Users from SQL backgrounds assume atomicity unless told otherwise. |
-| 14 | **Fix shutdown coordination** — drain in-flight transactions before final flush | engine | The 30-second timeout at `database/mod.rs:1954` ignores in-flight transactions. Uncommitted work may be flushed in undefined state. |
-| 15 | **Add per-subsystem memory metrics** (`Command::MemoryStatus`) | engine | Can't manage what you can't measure. Version chain sizes, shard counts, and vector heap usage should be queryable. |
+| 10 | **Implement automatic maintenance** (GC, compaction, TTL enforcement) | engine | Version chains, WAL segments, tombstones, and expired keys grow without bound. Design doc exists (`maintenance.md`). |
+| 11 | **Add transaction timeout and abandoned transaction detection** | concurrency | Leaked transactions pin the GC safe point forever. `is_expired()` helper exists at `transaction.rs:1038` but is never enforced. |
+| 12 | **Fix stale WAL lock detection** — validate PID, add timeout | durability | A crashed process leaves an orphaned lock file that blocks all other processes from opening the database. |
+| 13 | **Add encryption at rest** (AES-256 via the existing codec seam) | security | The `IdentityCodec` seam at `durability/src/codec/mod.rs` reserves a slot for `AesGcmCodec`. Required for mobile/edge use cases. |
+| 14 | **Add health check API** (`db.health()` returning subsystem status) | engine | Host applications need a liveness probe. No mechanism exists to detect a stuck WAL flush thread or hung recovery. |
+| 15 | **Document batch operation semantics** (non-atomic, partial success) | executor | `KvBatchPut` at `handlers/kv.rs:235` is non-atomic across branches. Users from SQL backgrounds assume atomicity unless told otherwise. |
+| 16 | **Fix shutdown coordination** — drain in-flight transactions before final flush | engine | The 30-second timeout at `database/mod.rs:1954` ignores in-flight transactions. Uncommitted work may be flushed in undefined state. |
+| 17 | **Fix vector delete ordering and add lock** — delete KV first (like insert), hold lock | engine/vector | `store.rs:697` deletes backend before KV (opposite of insert). `delete()` also lacks the TOCTOU lock that insert has. |
+| 18 | **Add fsync before mmap file rename** | engine/vector | `mmap.rs:334` and `mmap_graph.rs:152` call `flush()` but not `sync_all()` before rename. Crash can leave zero-length files. |
+| 19 | **Add per-subsystem memory metrics** (`Command::MemoryStatus`) | engine | Can't manage what you can't measure. Version chain sizes, shard counts, and vector heap usage should be queryable. |
 
 ### Phase 3: Scale Readiness (Weeks 9-12)
 
 | # | Item | Crate | Rationale |
 |---|------|-------|-----------|
-| 16 | **Replace `ClonedSnapshotView` with lazy/COW snapshots** | concurrency | O(n) snapshot cost at `snapshot.rs:69` limits concurrency. 100 MB branch with 100 concurrent transactions = 10 GB. `ShardedSnapshot` at `sharded.rs:892` is already O(1) — make it the default. |
-| 17 | **Implement KV page cache** (tiered storage Phase 2) | storage | Unbounded memory is the #1 scaling blocker. Design doc exists (`tiered-storage.md`). |
-| 18 | **Add constraint validation at all write boundaries** | core | `validate_value()` and `validate_key_length()` at `limits.rs` are separate checks not enforced at the storage layer. Defense in depth against data corruption. |
-| 19 | **Make vector Tiered mode the default** (spill embeddings to mmap) | engine | Easy win for memory reduction. Tiered mode already exists but InMemory is the default. |
-| 20 | **Auto-persist sealed HNSW graphs to `.shgr` files** | engine | Sealed HNSW segments are in-memory only. A crash after sealing loses the graph, requiring expensive rebuild from vectors. |
+| 20 | **Replace `ClonedSnapshotView` with lazy/COW snapshots** | concurrency | O(n) snapshot cost at `snapshot.rs:69` limits concurrency. 100 MB branch with 100 concurrent transactions = 10 GB. `ShardedSnapshot` at `sharded.rs:892` is already O(1) — make it the default. |
+| 21 | **Implement KV page cache** (tiered storage Phase 2) | storage | Unbounded memory is the #1 scaling blocker. Design doc exists (`tiered-storage.md`). |
+| 22 | **Add constraint validation at all write boundaries** | core | `validate_value()` and `validate_key_length()` at `limits.rs` are separate checks not enforced at the storage layer. Defense in depth against data corruption. |
+| 23 | **Make vector Tiered mode the default** (spill embeddings to mmap) | engine | Easy win for memory reduction. Tiered mode already exists but InMemory is the default. |
+| 24 | **Auto-persist sealed HNSW graphs to `.shgr` files** | engine | Sealed HNSW segments are in-memory only. A crash after sealing loses the graph, requiring expensive rebuild from vectors. |
+| 25 | **Add SIMD distance computation** | engine/vector | Scalar f32 loops are 4-8x slower than AVX2/NEON. At >100K vectors this dominates search latency. Every production vector DB uses SIMD. |
+| 26 | **Add scalar/product quantization** | engine/vector | Full f32 storage uses 4-32x more memory than quantized representations. Required for >500K vectors in embedded contexts. |
+| 27 | **Replace graph full-scans with per-node adjacency lookups** | engine/graph | `subgraph()`, `count_edges_by_type()`, `delete_graph()`, and `snapshot()` all scan O(E_total). At >100K edges, graph queries become a bottleneck. |
+| 28 | **Add default BFS depth/node limits and graph pagination** | engine/graph | Default `max_depth: usize::MAX` and unbounded `list_nodes()` can OOM on large connected graphs. |
