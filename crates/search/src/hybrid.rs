@@ -28,6 +28,9 @@ use strata_engine::search::{
 use strata_engine::Database;
 use strata_engine::{BranchIndex, EventLog, JsonStore, KVStore, StateCell, VectorStore};
 
+/// Result type for BM25 search across primitives: (results, total_candidates, any_truncated)
+type Bm25SearchResult = (Vec<(PrimitiveType, SearchResponse)>, usize, bool);
+
 // ============================================================================
 // HybridSearch
 // ============================================================================
@@ -166,7 +169,7 @@ impl HybridSearch {
         // Compute the query embedding in parallel with BM25 searches (Hybrid only).
         let (bm25_result, query_embedding) = if is_hybrid {
             rayon::join(
-                || -> StrataResult<(Vec<(PrimitiveType, SearchResponse)>, usize, bool)> {
+                || -> StrataResult<Bm25SearchResult> {
                     let mut primitive_results = Vec::new();
                     let mut total_candidates = 0;
                     let mut any_truncated = false;
@@ -198,7 +201,7 @@ impl HybridSearch {
             )
         } else {
             // Keyword mode: no embedding needed
-            let bm25 = (|| -> StrataResult<(Vec<(PrimitiveType, SearchResponse)>, usize, bool)> {
+            let bm25 = (|| -> StrataResult<Bm25SearchResult> {
                 let mut primitive_results = Vec::new();
                 let mut total_candidates = 0;
                 let mut any_truncated = false;

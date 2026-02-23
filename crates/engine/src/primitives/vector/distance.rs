@@ -73,6 +73,7 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// L2 norm (Euclidean length)
+#[allow(dead_code)]
 fn l2_norm(v: &[f32]) -> f32 {
     v.iter().map(|x| x * x).sum::<f32>().sqrt()
 }
