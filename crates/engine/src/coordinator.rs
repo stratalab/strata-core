@@ -215,6 +215,45 @@ impl TransactionCoordinator {
         self.manager.remove_branch_lock(branch_id);
     }
 
+    /// Advance the version counter to at least `v`.
+    ///
+    /// Used during multi-process refresh to catch up with other processes.
+    pub fn catch_up_version(&self, v: u64) {
+        self.manager.catch_up_version(v);
+    }
+
+    /// Advance the txn_id counter to at least `id + 1`.
+    ///
+    /// Used during multi-process refresh to avoid ID collisions.
+    pub fn catch_up_txn_id(&self, id: u64) {
+        self.manager.catch_up_txn_id(id);
+    }
+
+    /// Commit a transaction with an externally-allocated version.
+    ///
+    /// Used by the coordinated commit path where versions are allocated
+    /// from the shared counter file under the WAL file lock.
+    pub fn commit_with_version<S: Storage>(
+        &self,
+        txn: &mut TransactionContext,
+        store: &S,
+        wal: Option<&mut WalWriter>,
+        version: u64,
+    ) -> StrataResult<u64> {
+        match self.manager.commit_with_version(txn, store, wal, version) {
+            Ok(v) => {
+                self.record_commit();
+                info!(target: "strata::txn", version = v, "Coordinated commit succeeded");
+                Ok(v)
+            }
+            Err(e) => {
+                self.record_abort();
+                warn!(target: "strata::txn", error = %e, "Coordinated commit aborted");
+                Err(StrataError::from(e))
+            }
+        }
+    }
+
     /// Get transaction metrics
     ///
     /// Returns current snapshot of transaction statistics.

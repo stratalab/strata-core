@@ -445,6 +445,17 @@ impl WalSegment {
         self.file.seek(SeekFrom::Start(position))
     }
 
+    /// Flush any buffered data and seek to the end of the file.
+    ///
+    /// Used in multi-process mode: after another process has appended to the
+    /// same segment, this re-positions the write cursor at the true end of file.
+    pub fn seek_to_end(&mut self) -> std::io::Result<()> {
+        self.file.flush()?;
+        let end = self.file.seek(SeekFrom::End(0))?;
+        self.write_position = end;
+        Ok(())
+    }
+
     /// Truncate segment at the given position.
     ///
     /// Used during recovery to remove partial records.

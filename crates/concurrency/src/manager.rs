@@ -313,6 +313,126 @@ impl TransactionManager {
     pub fn remove_branch_lock(&self, branch_id: &BranchId) {
         self.commit_locks.remove(branch_id);
     }
+
+    /// Advance the version counter to at least `v`.
+    ///
+    /// Used during multi-process refresh to ensure the local version counter
+    /// reflects writes applied from other processes' WAL entries.
+    /// Uses `fetch_max` so the counter never goes backward.
+    pub fn catch_up_version(&self, v: u64) {
+        self.version.fetch_max(v, Ordering::SeqCst);
+    }
+
+    /// Advance the next_txn_id counter to at least `id + 1`.
+    ///
+    /// Used during multi-process refresh to ensure locally-allocated transaction
+    /// IDs never collide with IDs already used by other processes.
+    pub fn catch_up_txn_id(&self, id: u64) {
+        self.next_txn_id.fetch_max(id + 1, Ordering::SeqCst);
+    }
+
+    /// Commit a transaction with an externally-allocated version.
+    ///
+    /// Similar to `commit()` but does NOT allocate a version from the local
+    /// counter — instead, uses the provided `version`. This is used by the
+    /// coordinated commit path where version allocation happens under the
+    /// WAL file lock via the shared counter file.
+    ///
+    /// The per-branch commit lock is still acquired for thread safety.
+    pub fn commit_with_version<S: Storage>(
+        &self,
+        txn: &mut TransactionContext,
+        store: &S,
+        mut wal: Option<&mut WalWriter>,
+        version: u64,
+    ) -> std::result::Result<u64, CommitError> {
+        // Fast path: read-only transactions
+        if txn.is_read_only() && txn.json_writes().is_empty() {
+            if !txn.is_active() {
+                return Err(CommitError::InvalidState(format!(
+                    "Cannot commit transaction {} from {:?} state - must be Active",
+                    txn.txn_id, txn.status
+                )));
+            }
+            txn.status = TransactionStatus::Committed;
+            return Ok(version);
+        }
+
+        // Acquire per-branch commit lock
+        let branch_lock = self
+            .commit_locks
+            .entry(txn.branch_id)
+            .or_insert_with(|| Mutex::new(()));
+        let _commit_guard = branch_lock.lock();
+
+        // Validate
+        let can_skip_validation = txn.read_set.is_empty()
+            && txn.cas_set.is_empty()
+            && txn.json_snapshot_versions().map_or(true, |v| v.is_empty())
+            && txn.json_writes().is_empty();
+
+        if can_skip_validation {
+            if !txn.is_active() {
+                return Err(CommitError::InvalidState(format!(
+                    "Cannot commit transaction {} from {:?} state - must be Active",
+                    txn.txn_id, txn.status
+                )));
+            }
+            txn.status = TransactionStatus::Committed;
+        } else {
+            txn.commit(store)?;
+        }
+
+        // Use the externally-provided version (do NOT allocate from local counter)
+        let commit_version = version;
+
+        // Advance local counter so it stays in sync
+        self.version.fetch_max(commit_version, Ordering::SeqCst);
+
+        // Write to WAL
+        let has_mutations = !txn.is_read_only() || !txn.json_writes().is_empty();
+        if has_mutations {
+            if let Some(wal) = wal.as_mut() {
+                let payload = TransactionPayload::from_transaction(txn, commit_version);
+                let record = WalRecord::new(
+                    txn.txn_id,
+                    *txn.branch_id.as_bytes(),
+                    now_micros(),
+                    payload.to_bytes(),
+                );
+
+                if let Err(e) = wal.append(&record) {
+                    txn.status = TransactionStatus::Aborted {
+                        reason: format!("WAL write failed: {}", e),
+                    };
+                    return Err(CommitError::WALError(e.to_string()));
+                }
+            }
+        }
+
+        // Apply to storage
+        if let Err(e) = txn.apply_writes(store, commit_version) {
+            if wal.is_some() {
+                tracing::error!(
+                    target: "strata::txn",
+                    txn_id = txn.txn_id,
+                    commit_version = commit_version,
+                    error = %e,
+                    "Storage application failed after WAL commit - will be recovered on restart"
+                );
+            } else {
+                txn.status = TransactionStatus::Aborted {
+                    reason: format!("Storage application failed: {}", e),
+                };
+                return Err(CommitError::WALError(format!(
+                    "Storage application failed (no WAL): {}",
+                    e
+                )));
+            }
+        }
+
+        Ok(commit_version)
+    }
 }
 
 impl Default for TransactionManager {

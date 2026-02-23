@@ -444,6 +444,102 @@ impl WalWriter {
         Ok(segments)
     }
 
+    /// Re-sync with the WAL directory in case another process has written.
+    ///
+    /// Call this under the WAL file lock before appending in multi-process mode.
+    /// If another process rotated the segment or appended to the current one,
+    /// this method updates the local writer state accordingly.
+    pub fn reopen_if_needed(&mut self) -> std::io::Result<()> {
+        if !self.durability.requires_wal() {
+            return Ok(());
+        }
+
+        let latest = Self::find_latest_segment(&self.wal_dir);
+        match latest {
+            Some(num) if num > self.current_segment_number => {
+                // Another process rotated — write .meta for our old segment, then
+                // open the new one for appending.
+                if let Some(ref meta) = self.current_segment_meta {
+                    if !meta.is_empty() {
+                        let _ = meta.write_to_file(&self.wal_dir);
+                    }
+                }
+                match WalSegment::open_append(&self.wal_dir, num) {
+                    Ok(seg) => {
+                        self.segment = Some(seg);
+                        self.current_segment_number = num;
+                        self.current_segment_meta =
+                            Self::rebuild_meta_for_segment(&self.wal_dir, num);
+                    }
+                    Err(_) => {
+                        // If we can't open it, create a new one after it
+                        let new_num = num + 1;
+                        let seg = WalSegment::create(
+                            &self.wal_dir,
+                            new_num,
+                            self.database_uuid,
+                        )?;
+                        self.segment = Some(seg);
+                        self.current_segment_number = new_num;
+                        self.current_segment_meta =
+                            Some(SegmentMeta::new_empty(new_num));
+                    }
+                }
+            }
+            _ => {
+                // Same segment — seek to end to pick up writes from other processes.
+                if let Some(ref mut seg) = self.segment {
+                    seg.seek_to_end()?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Append a record and immediately flush for multi-process safety.
+    ///
+    /// This method:
+    /// 1. Calls `reopen_if_needed()` to pick up other processes' writes
+    /// 2. Serializes and writes the record
+    /// 3. Forces a flush + fsync so the record is visible to other processes
+    ///
+    /// Should be called while holding the WAL file lock.
+    pub fn append_and_flush(&mut self, record: &WalRecord) -> std::io::Result<()> {
+        if !self.durability.requires_wal() {
+            return Ok(());
+        }
+
+        self.reopen_if_needed()?;
+
+        let segment = self
+            .segment
+            .as_mut()
+            .expect("Segment should exist for non-Cache mode");
+
+        let record_bytes = record.to_bytes();
+        let encoded = self.codec.encode(&record_bytes);
+
+        // Check if rotation is needed
+        if segment.size() + encoded.len() as u64 > self.config.segment_size {
+            self.rotate_segment()?;
+        }
+
+        let segment = self.segment.as_mut().unwrap();
+        segment.write(&encoded)?;
+
+        if let Some(ref mut meta) = self.current_segment_meta {
+            meta.track_record(record.txn_id, record.timestamp);
+        }
+
+        self.total_wal_appends += 1;
+        self.total_bytes_written += encoded.len() as u64;
+
+        // Immediately flush for cross-process visibility
+        self.flush()?;
+
+        Ok(())
+    }
+
     /// Close the writer, ensuring all data is flushed.
     pub fn close(mut self) -> std::io::Result<()> {
         self.flush()?;
@@ -610,6 +706,153 @@ mod tests {
         // Should have appended to existing or created new
         let writer = make_writer(&wal_dir, DurabilityMode::Always);
         assert!(writer.current_segment() >= 1);
+    }
+
+    // ========================================================================
+    // Phase 2: Multi-process writer tests
+    // ========================================================================
+
+    #[test]
+    fn test_two_writers_same_wal_dir_no_corruption() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        // Writer A writes records 1..5
+        {
+            let mut writer_a = make_writer(&wal_dir, DurabilityMode::Always);
+            for i in 1..=5 {
+                writer_a.append_and_flush(&make_record(i)).unwrap();
+            }
+        }
+
+        // Writer B opens the same dir and writes records 6..10
+        {
+            let mut writer_b = make_writer(&wal_dir, DurabilityMode::Always);
+            for i in 6..=10 {
+                writer_b.append_and_flush(&make_record(i)).unwrap();
+            }
+        }
+
+        // Read all records — should see all 10 in order
+        let reader = crate::wal::WalReader::new(Box::new(IdentityCodec));
+        let result = reader.read_all(&wal_dir).unwrap();
+        let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id).collect();
+        assert_eq!(ids, (1..=10).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_writer_sees_other_writers_records_after_reopen() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        // Writer A writes record 1
+        let mut writer_a = make_writer(&wal_dir, DurabilityMode::Always);
+        writer_a.append_and_flush(&make_record(1)).unwrap();
+
+        // Writer B writes record 2 (opens same dir)
+        {
+            let mut writer_b = make_writer(&wal_dir, DurabilityMode::Always);
+            writer_b.append_and_flush(&make_record(2)).unwrap();
+        }
+
+        // Writer A calls reopen_if_needed then writes record 3
+        writer_a.reopen_if_needed().unwrap();
+        writer_a.append_and_flush(&make_record(3)).unwrap();
+
+        // All 3 records should be readable
+        let reader = crate::wal::WalReader::new(Box::new(IdentityCodec));
+        let result = reader.read_all(&wal_dir).unwrap();
+        let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_writer_handles_segment_rotation_by_other() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        // Use small segments to force rotation
+        let config = WalConfig::new()
+            .with_segment_size(100)
+            .with_buffered_sync_bytes(50);
+
+        let mut writer_a = WalWriter::new(
+            wal_dir.clone(),
+            [1u8; 16],
+            DurabilityMode::Always,
+            config.clone(),
+            Box::new(IdentityCodec),
+        )
+        .unwrap();
+
+        // Writer A writes one record
+        writer_a
+            .append_and_flush(&WalRecord::new(1, [1u8; 16], 0, vec![0; 50]))
+            .unwrap();
+        let seg_a = writer_a.current_segment();
+
+        // Writer B opens same dir and writes enough to rotate segments
+        {
+            let mut writer_b = WalWriter::new(
+                wal_dir.clone(),
+                [1u8; 16],
+                DurabilityMode::Always,
+                config,
+                Box::new(IdentityCodec),
+            )
+            .unwrap();
+            for i in 2..=5 {
+                writer_b
+                    .append_and_flush(&WalRecord::new(i, [1u8; 16], 0, vec![0; 50]))
+                    .unwrap();
+            }
+            assert!(
+                writer_b.current_segment() > seg_a,
+                "Writer B should have rotated"
+            );
+        }
+
+        // Writer A should detect the new segment after reopen
+        writer_a.reopen_if_needed().unwrap();
+        writer_a
+            .append_and_flush(&WalRecord::new(99, [1u8; 16], 0, vec![0; 10]))
+            .unwrap();
+
+        // All records should be readable
+        let reader = crate::wal::WalReader::new(Box::new(IdentityCodec));
+        let result = reader.read_all(&wal_dir).unwrap();
+        assert!(
+            result.records.len() >= 6,
+            "Should have at least 6 records, got {}",
+            result.records.len()
+        );
+        // Record 99 should be last
+        assert_eq!(result.records.last().unwrap().txn_id, 99);
+    }
+
+    #[test]
+    fn test_reader_reads_interleaved_records_in_order() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        // Create alternating writes from two writers
+        let mut writer_a = make_writer(&wal_dir, DurabilityMode::Always);
+        writer_a.append_and_flush(&make_record(1)).unwrap();
+
+        // Writer B opens, writes, closes
+        {
+            let mut writer_b = make_writer(&wal_dir, DurabilityMode::Always);
+            writer_b.append_and_flush(&make_record(2)).unwrap();
+        }
+
+        // Writer A reopens and writes again
+        writer_a.reopen_if_needed().unwrap();
+        writer_a.append_and_flush(&make_record(3)).unwrap();
+
+        let reader = crate::wal::WalReader::new(Box::new(IdentityCodec));
+        let result = reader.read_all(&wal_dir).unwrap();
+        let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
     }
 
     #[test]
