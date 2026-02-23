@@ -1208,12 +1208,7 @@ impl Executor {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
                 })?;
-                crate::handlers::graph::graph_get_object_type(
-                    &self.primitives,
-                    branch,
-                    graph,
-                    name,
-                )
+                crate::handlers::graph::graph_get_object_type(&self.primitives, branch, graph, name)
             }
             Command::GraphListObjectTypes { branch, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
@@ -1259,12 +1254,7 @@ impl Executor {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
                 })?;
-                crate::handlers::graph::graph_get_link_type(
-                    &self.primitives,
-                    branch,
-                    graph,
-                    name,
-                )
+                crate::handlers::graph::graph_get_link_type(&self.primitives, branch, graph, name)
             }
             Command::GraphListLinkTypes { branch, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {

@@ -4,8 +4,7 @@ use std::sync::Arc;
 
 use strata_core::Value;
 use strata_engine::graph::types::{
-    BfsOptions, CascadePolicy, Direction, EdgeData, GraphMeta, LinkTypeDef, NodeData,
-    ObjectTypeDef,
+    BfsOptions, CascadePolicy, Direction, EdgeData, GraphMeta, LinkTypeDef, NodeData, ObjectTypeDef,
 };
 
 use crate::bridge::{to_core_branch_id, Primitives};
@@ -342,10 +341,9 @@ pub fn graph_define_object_type(
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
     let json = crate::bridge::value_to_serde_json_public(definition)?;
-    let def: ObjectTypeDef =
-        serde_json::from_value(json).map_err(|e| Error::InvalidInput {
-            reason: format!("Invalid object type definition: {}", e),
-        })?;
+    let def: ObjectTypeDef = serde_json::from_value(json).map_err(|e| Error::InvalidInput {
+        reason: format!("Invalid object type definition: {}", e),
+    })?;
     convert_result(p.graph.define_object_type(core_branch, &graph, def))?;
     Ok(Output::Unit)
 }
@@ -402,10 +400,9 @@ pub fn graph_define_link_type(
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
     let json = crate::bridge::value_to_serde_json_public(definition)?;
-    let def: LinkTypeDef =
-        serde_json::from_value(json).map_err(|e| Error::InvalidInput {
-            reason: format!("Invalid link type definition: {}", e),
-        })?;
+    let def: LinkTypeDef = serde_json::from_value(json).map_err(|e| Error::InvalidInput {
+        reason: format!("Invalid link type definition: {}", e),
+    })?;
     convert_result(p.graph.define_link_type(core_branch, &graph, def))?;
     Ok(Output::Unit)
 }
@@ -513,7 +510,6 @@ pub fn graph_nodes_by_type(
     let node_ids = convert_result(p.graph.nodes_by_type(core_branch, &graph, &object_type))?;
     Ok(Output::Keys(node_ids))
 }
-
 
 /// Convert serde_json::Value to strata_core::Value.
 fn serde_json_to_value(json: serde_json::Value) -> Result<Value> {

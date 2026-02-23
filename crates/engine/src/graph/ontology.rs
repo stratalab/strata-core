@@ -33,8 +33,8 @@ impl GraphStore {
         self.ensure_not_frozen(branch_id, graph, "Cannot modify ontology: graph is frozen")?;
         self.ensure_draft_status(branch_id, graph)?;
 
-        let type_json = serde_json::to_string(&def)
-            .map_err(|e| StrataError::serialization(e.to_string()))?;
+        let type_json =
+            serde_json::to_string(&def).map_err(|e| StrataError::serialization(e.to_string()))?;
         let user_key = keys::object_type_key(graph, &def.name);
         let storage_key = keys::storage_key(branch_id, &user_key);
 
@@ -70,11 +70,7 @@ impl GraphStore {
     }
 
     /// List all object type names in the graph's ontology.
-    pub fn list_object_types(
-        &self,
-        branch_id: BranchId,
-        graph: &str,
-    ) -> StrataResult<Vec<String>> {
+    pub fn list_object_types(&self, branch_id: BranchId, graph: &str) -> StrataResult<Vec<String>> {
         let prefix = keys::all_object_types_prefix(graph);
         let prefix_key = keys::storage_key(branch_id, &prefix);
 
@@ -127,8 +123,8 @@ impl GraphStore {
         self.ensure_not_frozen(branch_id, graph, "Cannot modify ontology: graph is frozen")?;
         self.ensure_draft_status(branch_id, graph)?;
 
-        let type_json = serde_json::to_string(&def)
-            .map_err(|e| StrataError::serialization(e.to_string()))?;
+        let type_json =
+            serde_json::to_string(&def).map_err(|e| StrataError::serialization(e.to_string()))?;
         let user_key = keys::link_type_key(graph, &def.name);
         let storage_key = keys::storage_key(branch_id, &user_key);
 
@@ -164,11 +160,7 @@ impl GraphStore {
     }
 
     /// List all link type names in the graph's ontology.
-    pub fn list_link_types(
-        &self,
-        branch_id: BranchId,
-        graph: &str,
-    ) -> StrataResult<Vec<String>> {
+    pub fn list_link_types(&self, branch_id: BranchId, graph: &str) -> StrataResult<Vec<String>> {
         let prefix = keys::all_link_types_prefix(graph);
         let prefix_key = keys::storage_key(branch_id, &prefix);
 
@@ -431,14 +423,12 @@ impl GraphStore {
         let mut link_types = HashMap::new();
         let link_names = self.list_link_types(branch_id, graph)?;
         for name in &link_names {
-            let def = self
-                .get_link_type(branch_id, graph, name)?
-                .ok_or_else(|| {
-                    StrataError::serialization(format!(
-                        "Link type '{}' listed but definition not found",
-                        name
-                    ))
-                })?;
+            let def = self.get_link_type(branch_id, graph, name)?.ok_or_else(|| {
+                StrataError::serialization(format!(
+                    "Link type '{}' listed but definition not found",
+                    name
+                ))
+            })?;
 
             // Count edges by scanning forward edges filtered by edge_type
             let edge_count = self.count_edges_by_type(branch_id, graph, name)?;
@@ -467,12 +457,7 @@ impl GraphStore {
     // =========================================================================
 
     /// Ensure the ontology is not frozen. Returns an error with the given message if frozen.
-    fn ensure_not_frozen(
-        &self,
-        branch_id: BranchId,
-        graph: &str,
-        msg: &str,
-    ) -> StrataResult<()> {
+    fn ensure_not_frozen(&self, branch_id: BranchId, graph: &str, msg: &str) -> StrataResult<()> {
         if let Some(meta) = self.get_graph_meta(branch_id, graph)? {
             if meta.ontology_status == Some(OntologyStatus::Frozen) {
                 return Err(StrataError::invalid_input(msg));
@@ -656,7 +641,10 @@ mod tests {
         let b = default_branch();
         gs.create_graph(b, "g", None).unwrap();
 
-        assert!(gs.get_object_type(b, "g", "DoesNotExist").unwrap().is_none());
+        assert!(gs
+            .get_object_type(b, "g", "DoesNotExist")
+            .unwrap()
+            .is_none());
     }
 
     // =========================================================================
@@ -766,7 +754,11 @@ mod tests {
         let result = gs.define_object_type(b, "g", lab_result_type());
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("frozen"), "Error should mention frozen: {}", err);
+        assert!(
+            err.contains("frozen"),
+            "Error should mention frozen: {}",
+            err
+        );
     }
 
     #[test]
@@ -781,7 +773,11 @@ mod tests {
         let result = gs.delete_object_type(b, "g", "Patient");
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("frozen"), "Error should mention frozen: {}", err);
+        assert!(
+            err.contains("frozen"),
+            "Error should mention frozen: {}",
+            err
+        );
     }
 
     #[test]
@@ -868,7 +864,11 @@ mod tests {
         let result = gs.add_node(b, "g", "p1", data);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("name"), "Error should mention missing prop: {}", err);
+        assert!(
+            err.contains("name"),
+            "Error should mention missing prop: {}",
+            err
+        );
     }
 
     #[test]
@@ -1558,7 +1558,11 @@ mod tests {
         let result = gs.delete_link_type(b, "g", "HAS_RESULT");
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("frozen"), "Error should mention frozen: {}", err);
+        assert!(
+            err.contains("frozen"),
+            "Error should mention frozen: {}",
+            err
+        );
     }
 
     #[test]
@@ -1573,7 +1577,11 @@ mod tests {
         let result = gs.define_link_type(b, "g", has_result_link());
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("frozen"), "Error should mention frozen: {}", err);
+        assert!(
+            err.contains("frozen"),
+            "Error should mention frozen: {}",
+            err
+        );
     }
 
     #[test]

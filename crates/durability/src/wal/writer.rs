@@ -474,15 +474,10 @@ impl WalWriter {
                     Err(_) => {
                         // If we can't open it, create a new one after it
                         let new_num = num + 1;
-                        let seg = WalSegment::create(
-                            &self.wal_dir,
-                            new_num,
-                            self.database_uuid,
-                        )?;
+                        let seg = WalSegment::create(&self.wal_dir, new_num, self.database_uuid)?;
                         self.segment = Some(seg);
                         self.current_segment_number = new_num;
-                        self.current_segment_meta =
-                            Some(SegmentMeta::new_empty(new_num));
+                        self.current_segment_meta = Some(SegmentMeta::new_empty(new_num));
                     }
                 }
             }

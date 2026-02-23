@@ -22,7 +22,6 @@ fn ensure_recovery_registered() {
     });
 }
 
-
 fn create_test_namespace(branch_id: BranchId) -> Namespace {
     Namespace::new(
         "tenant".to_string(),
@@ -35,8 +34,7 @@ fn create_test_namespace(branch_id: BranchId) -> Namespace {
 
 /// Read a key value through a read-only transaction.
 fn read_key(db: &Database, branch_id: BranchId, key: &Key) -> Option<Value> {
-    db.transaction(branch_id, |txn| Ok(txn.get(key)?))
-        .unwrap()
+    db.transaction(branch_id, |txn| Ok(txn.get(key)?)).unwrap()
 }
 
 // ============================================================================
@@ -590,8 +588,16 @@ fn test_stale_counter_file_recovery() {
 
     // The counter file should have been reseeded from recovery
     let (cf_ver, cf_txn) = counter_file.read().unwrap();
-    assert!(cf_ver >= 5, "Counter file version should be >= 5, got {}", cf_ver);
-    assert!(cf_txn >= 5, "Counter file txn_id should be >= 5, got {}", cf_txn);
+    assert!(
+        cf_ver >= 5,
+        "Counter file version should be >= 5, got {}",
+        cf_ver
+    );
+    assert!(
+        cf_txn >= 5,
+        "Counter file txn_id should be >= 5, got {}",
+        cf_txn
+    );
 
     // A new commit should get a version higher than anything before
     let key_new = Key::new_kv(ns.clone(), "after_recovery");
@@ -798,7 +804,10 @@ fn test_crash_recovery_counter_file_consistency() {
     .unwrap();
 
     let new_version = db.current_version();
-    assert!(new_version > ver_before, "New version must exceed pre-crash version");
+    assert!(
+        new_version > ver_before,
+        "New version must exceed pre-crash version"
+    );
 
     // All data readable
     assert_eq!(
