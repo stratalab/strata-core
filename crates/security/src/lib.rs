@@ -50,6 +50,9 @@ pub struct OpenOptions {
     /// Override embedding batch size for auto-embed.
     /// `None` means "use the config file value, or 512 if unset".
     pub embed_batch_size: Option<usize>,
+    /// Override embedding model name (e.g. "miniLM", "nomic-embed", "bge-m3", "gemma-embed").
+    /// `None` means "use the config file default (miniLM)".
+    pub embed_model: Option<String>,
     /// Enable multi-process coordination mode.
     ///
     /// When `true`, multiple processes can open the same database directory
@@ -109,6 +112,12 @@ impl OpenOptions {
         self
     }
 
+    /// Set the embedding model name.
+    pub fn embed_model(mut self, name: &str) -> Self {
+        self.embed_model = Some(name.to_string());
+        self
+    }
+
     /// Enable multi-process coordination mode.
     ///
     /// When enabled, multiple processes can open the same database directory
@@ -130,6 +139,7 @@ impl Default for OpenOptions {
             model_api_key: None,
             model_timeout_ms: None,
             embed_batch_size: None,
+            embed_model: None,
             multi_process: false,
         }
     }

@@ -168,6 +168,15 @@ impl VectorConfig {
         }
     }
 
+    /// Config for an embedding model with the given dimension.
+    pub fn for_embedding(dimension: usize) -> Self {
+        VectorConfig {
+            dimension,
+            metric: DistanceMetric::Cosine,
+            storage_dtype: StorageDtype::F32,
+        }
+    }
+
     /// Config for sentence-transformers/all-mpnet-base-v2 (768 dims)
     pub fn for_mpnet() -> Self {
         VectorConfig {
