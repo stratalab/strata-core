@@ -1,0 +1,147 @@
+name: Build libllama
+
+on:
+  push:
+    branches: [main]
+    paths: [LLAMA_CPP_VERSION]
+  workflow_dispatch:
+    inputs:
+      version_override:
+        description: "llama.cpp tag to build (overrides LLAMA_CPP_VERSION)"
+        required: false
+        type: string
+
+jobs:
+  read-version:
+    name: Read llama.cpp version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read LLAMA_CPP_VERSION
+        id: ver
+        run: |
+          if [ -n "${{ inputs.version_override }}" ]; then
+            echo "version=${{ inputs.version_override }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$(cat LLAMA_CPP_VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: read-version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            cmake_flags: -DGGML_NATIVE=OFF -DGGML_AVX2=ON
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            cmake_flags: -DGGML_NATIVE=OFF -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            cmake_flags: -DGGML_NATIVE=OFF -DGGML_METAL=OFF
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            cmake_flags: -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            cmake_flags: -DGGML_NATIVE=OFF -DGGML_AVX2=ON
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone llama.cpp
+        run: git clone --depth 1 --branch ${{ needs.read-version.outputs.version }} https://github.com/ggerganov/llama.cpp.git llama.cpp
+
+      - name: Install cross-compilation tools (aarch64-linux)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Configure CMake
+        run: >
+          cmake -S llama.cpp -B llama.cpp/build
+          -DBUILD_SHARED_LIBS=ON
+          -DCMAKE_BUILD_TYPE=Release
+          ${{ matrix.cmake_flags }}
+
+      - name: Build libllama
+        run: cmake --build llama.cpp/build --config Release --target llama
+
+      - name: Collect shared libraries
+        shell: bash
+        run: |
+          mkdir -p libllama-out
+          # Collect all shared libraries: .so, .so.* (versioned), .dylib, .dll
+          # Include both regular files (-type f) and symlinks (-type l).
+          # cp without -P dereferences symlinks, so libllama.so (symlink to
+          # libllama.so.1) becomes a regular file — this is intentional so the
+          # artifact directory has no broken symlinks.
+          find llama.cpp/build \
+            \( -name "*.so" -o -name "*.so.*" -o -name "*.dylib" -o -name "*.dll" \) \
+            \( -type f -o -type l \) \
+            -exec cp {} libllama-out/ \;
+          echo "Collected libraries:"
+          ls -la libllama-out/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libllama-${{ matrix.target }}
+          path: libllama-out/
+
+  smoke-test:
+    name: Smoke test (${{ matrix.target }})
+    if: github.event_name == 'workflow_dispatch'
+    needs: [read-version, build]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            lib_name: libllama.so
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            lib_name: libllama.dylib
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            lib_name: libllama.dylib
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            lib_name: llama.dll
+          # aarch64-linux excluded: can't run cross-compiled binary on x86 runner
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Download libllama
+        uses: actions/download-artifact@v4
+        with:
+          name: libllama-${{ matrix.target }}
+          path: lib
+
+      - name: Run smoke test (unix)
+        if: runner.os != 'Windows'
+        env:
+          LLAMA_LIB_PATH: ${{ github.workspace }}/lib/${{ matrix.lib_name }}
+          LD_LIBRARY_PATH: ${{ github.workspace }}/lib
+          DYLD_LIBRARY_PATH: ${{ github.workspace }}/lib
+        run: cargo test -p strata-inference --features local -- smoke_test_load_api --ignored
+
+      - name: Run smoke test (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          LLAMA_LIB_PATH: ${{ github.workspace }}/lib/${{ matrix.lib_name }}
+        run: |
+          export PATH="${{ github.workspace }}/lib:$PATH"
+          cargo test -p strata-inference --features local -- smoke_test_load_api --ignored

@@ -701,10 +701,33 @@ fn test_output_config() {
         durability: "standard".to_string(),
         auto_embed: false,
         model: None,
-        embed_batch_size: None,
-        bm25_k1: None,
-        bm25_b: None,
+        ..strata_engine::StrataConfig::default()
     }));
+}
+
+#[test]
+fn test_output_config_value_some() {
+    test_output_round_trip(Output::ConfigValue(Some("anthropic".to_string())));
+}
+
+#[test]
+fn test_output_config_value_none() {
+    test_output_round_trip(Output::ConfigValue(None));
+}
+
+#[test]
+fn test_command_configure_set() {
+    test_command_round_trip(Command::ConfigureSet {
+        key: "provider".to_string(),
+        value: "anthropic".to_string(),
+    });
+}
+
+#[test]
+fn test_command_configure_get_key() {
+    test_command_round_trip(Command::ConfigureGetKey {
+        key: "provider".to_string(),
+    });
 }
 
 #[test]

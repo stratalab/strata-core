@@ -117,6 +117,10 @@ pub enum Output {
     /// Database configuration snapshot
     Config(StrataConfig),
 
+    /// Single configuration value (for ConfigureGetKey).
+    /// None if the key is not set.
+    ConfigValue(Option<String>),
+
     /// WAL durability counters
     DurabilityCounters(WalCounters),
 

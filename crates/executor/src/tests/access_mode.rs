@@ -308,6 +308,9 @@ fn test_read_only_allows_all_reads() {
         Command::ConfigGet,
         Command::AutoEmbedStatus,
         Command::DurabilityCounters,
+        Command::ConfigureGetKey {
+            key: "provider".into(),
+        },
     ];
 
     for cmd in read_commands {
@@ -497,6 +500,10 @@ fn test_is_write_classification() {
             strategy: strata_engine::MergeStrategy::LastWriterWins,
         },
         Command::ConfigSetAutoEmbed { enabled: false },
+        Command::ConfigureSet {
+            key: "provider".into(),
+            value: "openai".into(),
+        },
     ];
 
     for cmd in &writes {
@@ -646,6 +653,9 @@ fn test_is_write_classification() {
         Command::ConfigGet,
         Command::AutoEmbedStatus,
         Command::DurabilityCounters,
+        Command::ConfigureGetKey {
+            key: "provider".into(),
+        },
     ];
 
     for cmd in &reads {

@@ -16,6 +16,10 @@ embed-cuda = ["strata-intelligence/embed-cuda", "strata-engine/embed"]
 embed-metal = ["strata-intelligence/embed-metal", "strata-engine/embed"]
 expand = ["strata-search/expand"]
 rerank = ["strata-search/rerank"]
+# Cloud generation providers — forwarded through intelligence to inference
+anthropic = ["embed", "strata-intelligence/anthropic"]
+openai = ["embed", "strata-intelligence/openai"]
+google = ["embed", "strata-intelligence/google"]
 
 [dependencies]
 # Internal crates

@@ -85,10 +85,31 @@ pub struct StrataConfig {
     /// Default: 0.4 (Anserini/Pyserini BEIR standard).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bm25_b: Option<f32>,
+
+    // -- Generation provider configuration --
+    /// Default generation provider: "local", "anthropic", "openai", or "google".
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    /// Default model name for generation (e.g., "gpt2", "claude-sonnet-4-20250514").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    /// Anthropic (Claude) API key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_api_key: Option<String>,
+    /// OpenAI (GPT) API key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_api_key: Option<String>,
+    /// Google (Gemini) API key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub google_api_key: Option<String>,
 }
 
 fn default_durability_str() -> String {
     "standard".to_string()
+}
+
+fn default_provider() -> String {
+    "local".to_string()
 }
 
 impl Default for StrataConfig {
@@ -100,6 +121,11 @@ impl Default for StrataConfig {
             embed_batch_size: None,
             bm25_k1: None,
             bm25_b: None,
+            provider: default_provider(),
+            default_model: None,
+            anthropic_api_key: None,
+            openai_api_key: None,
+            google_api_key: None,
         }
     }
 }
@@ -163,6 +189,13 @@ auto_embed = false
 # model = "qwen3:1.7b"
 # api_key = "your-api-key"      # optional
 # timeout_ms = 5000              # optional, default 5000
+
+# Generation provider: "local" (default), "anthropic", "openai", or "google".
+# provider = "local"
+# default_model = "gpt2"
+# anthropic_api_key = "sk-ant-..."
+# openai_api_key = "sk-..."
+# google_api_key = "AIza..."
 "#
     }
 
@@ -312,9 +345,7 @@ mod tests {
                 api_key: Some("sk-test".to_string()),
                 timeout_ms: 3000,
             }),
-            embed_batch_size: None,
-            bm25_k1: None,
-            bm25_b: None,
+            ..StrataConfig::default()
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -335,9 +366,7 @@ mod tests {
             durability: "standard".to_string(),
             auto_embed: false,
             model: None,
-            embed_batch_size: None,
-            bm25_k1: None,
-            bm25_b: None,
+            ..StrataConfig::default()
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -390,9 +419,7 @@ model = "qwen3:1.7b"
                 api_key: None,
                 timeout_ms: 5000,
             }),
-            embed_batch_size: None,
-            bm25_k1: None,
-            bm25_b: None,
+            ..StrataConfig::default()
         };
 
         config.write_to_file(&path).unwrap();
@@ -450,5 +477,102 @@ auto_embed = false
         let parsed: StrataConfig = toml::from_str(&toml_str).unwrap();
         assert!((parsed.bm25_k1.unwrap() - 1.5).abs() < 0.001);
         assert!((parsed.bm25_b.unwrap() - 0.6).abs() < 0.001);
+    }
+
+    // -----------------------------------------------------------------------
+    // Generation provider config
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn default_provider_is_local() {
+        let config = StrataConfig::default();
+        assert_eq!(config.provider, "local");
+        assert!(config.default_model.is_none());
+        assert!(config.anthropic_api_key.is_none());
+        assert!(config.openai_api_key.is_none());
+        assert!(config.google_api_key.is_none());
+    }
+
+    #[test]
+    fn provider_config_round_trip() {
+        let config = StrataConfig {
+            provider: "anthropic".to_string(),
+            default_model: Some("claude-sonnet-4-20250514".to_string()),
+            anthropic_api_key: Some("sk-ant-test-key".to_string()),
+            ..StrataConfig::default()
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: StrataConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.provider, "anthropic");
+        assert_eq!(
+            parsed.default_model.as_deref(),
+            Some("claude-sonnet-4-20250514")
+        );
+        assert_eq!(parsed.anthropic_api_key.as_deref(), Some("sk-ant-test-key"));
+        assert!(parsed.openai_api_key.is_none());
+        assert!(parsed.google_api_key.is_none());
+    }
+
+    #[test]
+    fn provider_config_all_keys_round_trip() {
+        let config = StrataConfig {
+            provider: "openai".to_string(),
+            default_model: Some("gpt-4".to_string()),
+            anthropic_api_key: Some("sk-ant-key".to_string()),
+            openai_api_key: Some("sk-openai-key".to_string()),
+            google_api_key: Some("AIza-key".to_string()),
+            ..StrataConfig::default()
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: StrataConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.provider, "openai");
+        assert_eq!(parsed.default_model.as_deref(), Some("gpt-4"));
+        assert_eq!(parsed.anthropic_api_key.as_deref(), Some("sk-ant-key"));
+        assert_eq!(parsed.openai_api_key.as_deref(), Some("sk-openai-key"));
+        assert_eq!(parsed.google_api_key.as_deref(), Some("AIza-key"));
+    }
+
+    #[test]
+    fn provider_config_backward_compat() {
+        // Old config files without provider fields should parse fine
+        let old_toml = r#"
+durability = "standard"
+auto_embed = false
+"#;
+        let config: StrataConfig = toml::from_str(old_toml).unwrap();
+        assert_eq!(config.provider, "local");
+        assert!(config.default_model.is_none());
+        assert!(config.anthropic_api_key.is_none());
+    }
+
+    #[test]
+    fn provider_config_omits_none_keys_in_serialization() {
+        let config = StrataConfig::default();
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        assert!(!toml_str.contains("default_model"));
+        assert!(!toml_str.contains("anthropic_api_key"));
+        assert!(!toml_str.contains("openai_api_key"));
+        assert!(!toml_str.contains("google_api_key"));
+        // provider should always be present (not Option)
+        assert!(toml_str.contains("provider"));
+    }
+
+    #[test]
+    fn provider_config_persists_to_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+
+        let config = StrataConfig {
+            provider: "google".to_string(),
+            default_model: Some("gemini-pro".to_string()),
+            google_api_key: Some("AIza-test".to_string()),
+            ..StrataConfig::default()
+        };
+        config.write_to_file(&path).unwrap();
+
+        let loaded = StrataConfig::from_file(&path).unwrap();
+        assert_eq!(loaded.provider, "google");
+        assert_eq!(loaded.default_model.as_deref(), Some("gemini-pro"));
+        assert_eq!(loaded.google_api_key.as_deref(), Some("AIza-test"));
     }
 }

@@ -34,31 +34,89 @@ pub fn generate(
                 reason: format!("Failed to get generate model state: {}", e),
             })?;
 
-    let entry = state
-        .get_or_load(&model)
-        .map_err(|e| Error::Internal { reason: e })?;
+    // Read provider config from the database
+    let cfg = p.db.config();
+    let provider_name = cfg.provider.trim().to_ascii_lowercase();
 
-    let gen_config = strata_intelligence::GenerationConfig {
+    let entry = if provider_name == "local" {
+        // Local inference: load from the model registry
+        state
+            .get_or_load(&model)
+            .map_err(|e| Error::Internal { reason: e })?
+    } else {
+        // Cloud provider: parse provider kind, look up API key, dispatch
+        let provider_kind: strata_intelligence::ProviderKind =
+            provider_name.parse().map_err(|_| Error::InvalidInput {
+                reason: format!(
+                    "Unknown provider: {:?}. Valid providers: local, anthropic, openai, google",
+                    cfg.provider
+                ),
+            })?;
+
+        // Resolve model name: use the command-supplied model, or fall back to default_model
+        let resolved_model = if model.is_empty() {
+            cfg.default_model.clone().unwrap_or_default()
+        } else {
+            model.clone()
+        };
+
+        if resolved_model.is_empty() {
+            return Err(Error::InvalidInput {
+                reason: "No model specified and no default_model configured. \
+                     Use: CONFIGURE SET default_model \"model-name\""
+                    .to_string(),
+            });
+        }
+
+        // Look up the API key for this provider
+        let api_key = match provider_kind {
+            strata_intelligence::ProviderKind::Anthropic => cfg.anthropic_api_key.clone(),
+            strata_intelligence::ProviderKind::OpenAI => cfg.openai_api_key.clone(),
+            strata_intelligence::ProviderKind::Google => cfg.google_api_key.clone(),
+            strata_intelligence::ProviderKind::Local => unreachable!(),
+        };
+
+        let api_key = api_key.filter(|k| !k.is_empty()).ok_or_else(|| {
+            let key_name = format!("{}_api_key", provider_kind);
+            Error::InvalidInput {
+                reason: format!(
+                    "No API key configured for {} provider. \
+                     Use: CONFIGURE SET {} \"your-api-key\"",
+                    provider_kind, key_name
+                ),
+            }
+        })?;
+
+        GenerateModelState::create_cloud_engine(provider_kind, api_key, &resolved_model)
+            .map_err(|e| Error::Internal { reason: e })?
+    };
+
+    let request = strata_intelligence::GenerateRequest {
+        prompt,
         max_tokens: max_tokens.unwrap_or(256),
+        temperature: temperature.unwrap_or(0.0),
+        top_k: top_k.unwrap_or(0),
+        top_p: top_p.unwrap_or(1.0),
+        seed,
+        stop_sequences: vec![], // TODO(#1244): Wire from Command::Generate when added
         stop_tokens: stop_tokens.unwrap_or_default(),
-        sampling: strata_intelligence::SamplingConfig {
-            temperature: temperature.unwrap_or(0.0),
-            top_k: top_k.unwrap_or(0),
-            top_p: top_p.unwrap_or(1.0),
-            seed,
-        },
+    };
+
+    // Use the resolved model name in the output (may differ from input for cloud)
+    let output_model = if provider_name != "local" && model.is_empty() {
+        cfg.default_model.unwrap_or(model)
+    } else {
+        model
     };
 
     let (text, stop_reason, prompt_tokens, completion_tokens) =
         strata_intelligence::generate::with_engine(&entry, |engine| {
-            let output = engine.generate_full(&prompt, &gen_config)?;
-            let text = engine.decode(&output.token_ids);
-            let completion_tokens = output.token_ids.len();
+            let response = engine.generate(&request)?;
             Ok::<_, strata_intelligence::InferenceError>((
-                text,
-                output.stop_reason.to_string(),
-                output.prompt_tokens,
-                completion_tokens,
+                response.text,
+                response.stop_reason.to_string(),
+                response.prompt_tokens,
+                response.completion_tokens,
             ))
         })
         .map_err(|e| Error::Internal { reason: e })?
@@ -71,7 +129,7 @@ pub fn generate(
         stop_reason,
         prompt_tokens,
         completion_tokens,
-        model,
+        model: output_model,
     }))
 }
 
@@ -101,7 +159,10 @@ pub fn tokenize(
     let ids = strata_intelligence::generate::with_engine(&entry, |engine| {
         engine.encode(&text, add_special)
     })
-    .map_err(|e| Error::Internal { reason: e })?;
+    .map_err(|e| Error::Internal { reason: e })?
+    .map_err(|e| Error::Internal {
+        reason: format!("Tokenization failed: {}", e),
+    })?;
 
     let count = ids.len();
     Ok(Output::TokenIds(TokenizeResult { ids, count, model }))
@@ -123,7 +184,10 @@ pub fn detokenize(p: &Arc<Primitives>, model: String, ids: Vec<u32>) -> Result<O
         .map_err(|e| Error::Internal { reason: e })?;
 
     let text = strata_intelligence::generate::with_engine(&entry, |engine| engine.decode(&ids))
-        .map_err(|e| Error::Internal { reason: e })?;
+        .map_err(|e| Error::Internal { reason: e })?
+        .map_err(|e| Error::Internal {
+            reason: format!("Detokenization failed: {}", e),
+        })?;
 
     Ok(Output::Text(text))
 }

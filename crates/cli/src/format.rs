@@ -381,6 +381,8 @@ fn format_raw(output: &Output) -> String {
                 nodes_inserted, edges_inserted
             )
         }
+        Output::ConfigValue(None) => String::new(),
+        Output::ConfigValue(Some(v)) => v.clone(),
     }
 }
 
@@ -820,6 +822,8 @@ fn format_human(output: &Output) -> String {
                 nodes_inserted, edges_inserted
             )
         }
+        Output::ConfigValue(None) => "(nil)".to_string(),
+        Output::ConfigValue(Some(v)) => format!("\"{}\"", v),
     }
 }
 

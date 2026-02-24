@@ -1,0 +1,28 @@
+[package]
+name = "strata-inference"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "BUSL-1.1"
+repository.workspace = true
+publish = false
+description = "Inference engine for Strata — local (llama.cpp) and cloud providers"
+
+[features]
+default = ["local"]
+local = []              # Enable local llama.cpp inference
+download = ["dep:ureq"]  # Enable model download from HuggingFace
+anthropic = ["dep:ureq", "dep:serde", "dep:serde_json"]   # Enable Anthropic (Claude) cloud provider
+openai = ["dep:ureq", "dep:serde", "dep:serde_json"]      # Enable OpenAI (GPT) cloud provider
+google = ["dep:ureq", "dep:serde", "dep:serde_json"]       # Enable Google (Gemini) cloud provider
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+ureq = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

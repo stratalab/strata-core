@@ -924,6 +924,25 @@ pub enum Command {
     /// Returns: `Output::Config`
     ConfigGet,
 
+    /// Set a configuration key to a value.
+    /// Returns: `Output::Unit`
+    ///
+    /// Supported keys: `provider`, `default_model`, `anthropic_api_key`,
+    /// `openai_api_key`, `google_api_key`.
+    ConfigureSet {
+        /// Configuration key name.
+        key: String,
+        /// Configuration value.
+        value: String,
+    },
+
+    /// Get the value of a configuration key.
+    /// Returns: `Output::ConfigValue`
+    ConfigureGetKey {
+        /// Configuration key name.
+        key: String,
+    },
+
     /// Enable or disable auto-embedding.
     /// Returns: `Output::Unit`
     ConfigSetAutoEmbed {
@@ -1333,6 +1352,7 @@ impl Command {
                 | Command::BranchExport { .. }
                 | Command::BranchImport { .. }
                 | Command::ConfigureModel { .. }
+                | Command::ConfigureSet { .. }
                 | Command::ModelsPull { .. }
                 | Command::GraphCreate { .. }
                 | Command::GraphDelete { .. }
@@ -1417,6 +1437,8 @@ impl Command {
             Command::Search { .. } => "Search",
             Command::EmbedStatus => "EmbedStatus",
             Command::ConfigGet => "ConfigGet",
+            Command::ConfigureSet { .. } => "ConfigureSet",
+            Command::ConfigureGetKey { .. } => "ConfigureGetKey",
             Command::ConfigSetAutoEmbed { .. } => "ConfigSetAutoEmbed",
             Command::AutoEmbedStatus => "AutoEmbedStatus",
             Command::DurabilityCounters => "DurabilityCounters",
@@ -1608,7 +1630,9 @@ impl Command {
             | Command::BranchExport { .. }
             | Command::BranchImport { .. }
             | Command::BranchBundleValidate { .. }
-            | Command::ConfigureModel { .. } => {}
+            | Command::ConfigureModel { .. }
+            | Command::ConfigureSet { .. }
+            | Command::ConfigureGetKey { .. } => {}
         }
     }
 

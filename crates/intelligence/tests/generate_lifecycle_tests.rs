@@ -13,14 +13,18 @@ mod tests {
         let state = GenerateModelState::default();
         let entry = state.get_or_load("tinyllama").expect("should return entry");
         let result = with_engine(&entry, |engine| {
-            let config = strata_intelligence::GenerationConfig {
+            let request = strata_intelligence::GenerateRequest {
+                prompt: "Hello".into(),
                 max_tokens: 10,
                 ..Default::default()
             };
-            engine.generate("Hello", &config)
+            engine.generate(&request)
         });
-        let text = result.expect("engine access").expect("generation");
-        assert!(!text.is_empty(), "generated text should not be empty");
+        let response = result.expect("engine access").expect("generation");
+        assert!(
+            !response.text.is_empty(),
+            "generated text should not be empty"
+        );
     }
 
     #[test]
@@ -29,30 +33,26 @@ mod tests {
         let state = GenerateModelState::default();
         let entry = state.get_or_load("tinyllama").expect("should return entry");
 
-        let config = strata_intelligence::GenerationConfig {
+        let request = strata_intelligence::GenerateRequest {
+            prompt: "Once upon a time".into(),
             max_tokens: 20,
-            sampling: strata_intelligence::SamplingConfig {
-                temperature: 0.8,
-                seed: Some(42),
-                ..Default::default()
-            },
+            temperature: 0.8,
+            seed: Some(42),
             ..Default::default()
         };
 
-        let text1 = with_engine(&entry, |engine| {
-            engine.generate("Once upon a time", &config)
-        })
-        .unwrap()
-        .unwrap();
+        let text1 = with_engine(&entry, |engine| engine.generate(&request))
+            .unwrap()
+            .unwrap()
+            .text;
 
         // Reload to get fresh KV cache
         state.unload("tinyllama");
         let entry2 = state.get_or_load("tinyllama").expect("should return entry");
-        let text2 = with_engine(&entry2, |engine| {
-            engine.generate("Once upon a time", &config)
-        })
-        .unwrap()
-        .unwrap();
+        let text2 = with_engine(&entry2, |engine| engine.generate(&request))
+            .unwrap()
+            .unwrap()
+            .text;
 
         assert_eq!(text1, text2, "same seed should produce same output");
     }
@@ -64,9 +64,12 @@ mod tests {
         let entry = state.get_or_load("tinyllama").expect("should return entry");
 
         let original = "Hello world";
-        let ids =
-            with_engine(&entry, |engine| engine.encode(original, false)).expect("engine access");
-        let decoded = with_engine(&entry, |engine| engine.decode(&ids)).expect("engine access");
+        let ids = with_engine(&entry, |engine| engine.encode(original, false))
+            .expect("engine access")
+            .expect("encode");
+        let decoded = with_engine(&entry, |engine| engine.decode(&ids))
+            .expect("engine access")
+            .expect("decode");
 
         // Roundtrip may not be exact (whitespace normalization), but should contain the words
         assert!(
