@@ -492,16 +492,16 @@ impl VectorStore {
             // Update existing: keep the same VectorId
             let mut updated = existing_record;
             match source_ref {
-                Some(sr) => updated.update_lite_with_source(metadata, Some(sr)),
-                None => updated.update_lite(metadata),
+                Some(sr) => updated.update_with_source(embedding.to_vec(), metadata, Some(sr)),
+                None => updated.update(embedding.to_vec(), metadata),
             }
             (VectorId(updated.vector_id), updated)
         } else {
             // New vector: allocate VectorId from backend's per-collection counter
             let vector_id = backend.allocate_id();
             let record = match source_ref {
-                Some(sr) => VectorRecord::new_lite_with_source(vector_id, metadata, sr),
-                None => VectorRecord::new_lite(vector_id, metadata),
+                Some(sr) => VectorRecord::new_with_source(vector_id, embedding.to_vec(), metadata, sr),
+                None => VectorRecord::new(vector_id, embedding.to_vec(), metadata),
             };
             (vector_id, record)
         };
@@ -784,11 +784,11 @@ impl VectorStore {
 
             let (vector_id, record) = if let Some(existing_record) = existing {
                 let mut updated = existing_record;
-                updated.update_lite(metadata);
+                updated.update(embedding.clone(), metadata);
                 (VectorId(updated.vector_id), updated)
             } else {
                 let vector_id = backend.allocate_id();
-                let record = VectorRecord::new_lite(vector_id, metadata);
+                let record = VectorRecord::new(vector_id, embedding.clone(), metadata);
                 (vector_id, record)
             };
 
@@ -2906,6 +2906,64 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(entry.metadata, Some(metadata));
+    }
+
+    /// Regression test: verify embeddings are stored in KV records so they
+    /// survive recovery. Previously, `new_lite()` stored empty embeddings in KV
+    /// which caused vectors to be silently dropped during recovery.
+    #[test]
+    fn test_embedding_persisted_in_kv_record() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        // Insert a vector
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "doc1",
+                &[1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+
+        // Read the raw KV record and verify the embedding is present
+        let kv_key = Key::new_vector(
+            store.namespace_for(branch_id, "default"),
+            "test",
+            "doc1",
+        );
+        let record = store.get_vector_record_by_key(&kv_key).unwrap().unwrap();
+        assert_eq!(
+            record.embedding,
+            vec![1.0, 0.0, 0.0],
+            "Embedding must be stored in KV record for recovery"
+        );
+
+        // Upsert with new embedding and verify KV record is updated
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "doc1",
+                &[0.0, 1.0, 0.0],
+                None,
+            )
+            .unwrap();
+
+        let record = store.get_vector_record_by_key(&kv_key).unwrap().unwrap();
+        assert_eq!(
+            record.embedding,
+            vec![0.0, 1.0, 0.0],
+            "Updated embedding must be stored in KV record for recovery"
+        );
     }
 
     #[test]
