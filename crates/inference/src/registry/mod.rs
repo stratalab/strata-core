@@ -845,7 +845,12 @@ mod tests {
         let (dir, registry) = test_registry();
 
         let entry = catalog::find_entry("gpt2").unwrap();
-        let variant = &entry.variants[0];
+        // Use the default variant (what list_available checks)
+        let variant = entry
+            .variants
+            .iter()
+            .find(|v| v.name == entry.default_quant)
+            .unwrap_or(&entry.variants[0]);
 
         // Before file exists
         let available = registry.list_available();
@@ -981,7 +986,12 @@ mod tests {
         let (dir, registry) = test_registry();
 
         let entry = catalog::find_entry("gpt2").unwrap();
-        let variant = &entry.variants[0];
+        // Use the default variant (what list_available checks)
+        let variant = entry
+            .variants
+            .iter()
+            .find(|v| v.name == entry.default_quant)
+            .unwrap_or(&entry.variants[0]);
         let file_path = dir.path().join(variant.hf_file);
         std::fs::write(&file_path, b"fake").unwrap();
 

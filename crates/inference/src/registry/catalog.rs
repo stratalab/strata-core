@@ -66,13 +66,20 @@ pub static CATALOG: &[CatalogEntry] = &[
         name: "gpt2",
         aliases: &[],
         task: ModelTask::Generate,
-        hf_repo: "ggml-org/models",
+        hf_repo: "QuantFactory/gpt2-GGUF",
         default_quant: "q8_0",
-        variants: &[QuantVariant {
-            name: "q8_0",
-            hf_file: "gpt-2-q8_0.gguf",
-            size_bytes: 170_000_000,
-        }],
+        variants: &[
+            QuantVariant {
+                name: "q4_k_m",
+                hf_file: "gpt2.Q4_K_M.gguf",
+                size_bytes: 113_000_000,
+            },
+            QuantVariant {
+                name: "q8_0",
+                hf_file: "gpt2.Q8_0.gguf",
+                size_bytes: 178_000_000,
+            },
+        ],
         architecture: "gpt2",
         embedding_dim: 0,
     },
