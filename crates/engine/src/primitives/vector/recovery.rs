@@ -150,13 +150,21 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                 if vec_path.exists() {
                     match VectorHeap::from_mmap(&vec_path, config.clone()) {
                         Ok(heap) => {
-                            backend.replace_heap(heap);
-                            loaded_from_mmap = true;
-                            tracing::debug!(
-                                target: "strata::vector",
-                                collection = %collection_name,
-                                "Loaded heap from mmap cache"
-                            );
+                            if heap.is_empty() {
+                                tracing::debug!(
+                                    target: "strata::vector",
+                                    collection = %collection_name,
+                                    "Mmap cache is empty, falling back to KV"
+                                );
+                            } else {
+                                backend.replace_heap(heap);
+                                loaded_from_mmap = true;
+                                tracing::debug!(
+                                    target: "strata::vector",
+                                    collection = %collection_name,
+                                    "Loaded heap from mmap cache"
+                                );
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -216,10 +224,18 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
 
                 let vid = VectorId::new(vec_record.vector_id);
 
-                if loaded_from_mmap {
+                if loaded_from_mmap && backend.get(vid).is_some() {
                     // Heap already has the embedding — just register ID + timestamp
                     backend.register_mmap_vector(vid, vec_record.created_at);
                     stats.vectors_mmap_registered += 1;
+                } else if loaded_from_mmap && !vec_record.embedding.is_empty() {
+                    // Vector in KV but not in mmap (added after last freeze) — insert from KV
+                    let _ = backend.insert_with_id_and_timestamp(
+                        vid,
+                        &vec_record.embedding,
+                        vec_record.created_at,
+                    );
+                    stats.vectors_upserted += 1;
                 } else if vec_record.embedding.is_empty() {
                     // Lite record (embedding stripped from KV): skip during full
                     // KV-based recovery. The embedding only exists in the mmap
