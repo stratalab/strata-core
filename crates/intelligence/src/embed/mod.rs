@@ -180,7 +180,10 @@ mod tests {
         // Trigger a load attempt (may fail if model not installed).
         let _ = state.get_or_load(Path::new("/nonexistent"), DEFAULT_MODEL);
         // If load failed, dim should still be None.
-        if state.get_or_load(Path::new("/unused"), DEFAULT_MODEL).is_err() {
+        if state
+            .get_or_load(Path::new("/unused"), DEFAULT_MODEL)
+            .is_err()
+        {
             assert!(
                 state.embedding_dim().is_none(),
                 "dim should be None after a failed load"

@@ -117,7 +117,9 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
         "openai_api_key" => cfg.openai_api_key = Some(value.clone()),
         "google_api_key" => cfg.google_api_key = Some(value.clone()),
         "embed_model" => {
-            cfg.embed_model = canonical_embed_model.clone().unwrap_or_else(|| value.clone())
+            cfg.embed_model = canonical_embed_model
+                .clone()
+                .unwrap_or_else(|| value.clone())
         }
         _ => unreachable!(),
     })

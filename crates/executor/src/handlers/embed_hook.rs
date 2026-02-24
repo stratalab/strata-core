@@ -857,12 +857,11 @@ fn ensure_shadow_collection(
     }
 
     // Use dynamic dimension from the loaded embedding engine, falling back to 384 (miniLM).
-    let dim = p
-        .db
-        .extension::<strata_intelligence::embed::EmbedModelState>()
-        .ok()
-        .and_then(|s| s.embedding_dim())
-        .unwrap_or(384);
+    let dim =
+        p.db.extension::<strata_intelligence::embed::EmbedModelState>()
+            .ok()
+            .and_then(|s| s.embedding_dim())
+            .unwrap_or(384);
     let config = VectorConfig::for_embedding(dim);
 
     match p.vector.create_system_collection(branch_id, name, config) {
