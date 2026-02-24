@@ -132,10 +132,10 @@ impl ModelRegistry {
             .iter()
             .filter_map(|entry| {
                 // Find the first locally-present variant
-                let local_variant = entry
-                    .variants
-                    .iter()
-                    .find(|v| self.models_dir.join(v.hf_file).exists());
+                let local_variant = entry.variants.iter().find(|v| {
+                    let p = self.models_dir.join(v.hf_file);
+                    p.exists() && p.metadata().map(|m| m.len() > 0).unwrap_or(false)
+                });
                 local_variant.map(|v| self.entry_to_info(entry, v.name))
             })
             .collect()
@@ -167,7 +167,12 @@ impl ModelRegistry {
         let path = self.models_dir.join(variant.hf_file);
 
         if path.exists() {
-            return Ok(path);
+            // Reject zero-length files (e.g. from interrupted downloads)
+            let is_valid = path.metadata().map(|m| m.len() > 0).unwrap_or(false);
+            if is_valid {
+                return Ok(path);
+            }
+            // Fall through to the "not found" error — the zero-length file is not usable
         }
 
         let size_display = format_size(variant.size_bytes);
@@ -218,7 +223,13 @@ impl ModelRegistry {
                 ))
             })?;
 
-        download::download_hf_file(entry.hf_repo, variant.hf_file, &self.models_dir, &cb)?;
+        download::download_hf_file_with_size(
+            entry.hf_repo,
+            variant.hf_file,
+            &self.models_dir,
+            &cb,
+            variant.size_bytes,
+        )?;
 
         Ok(self.models_dir.join(variant.hf_file))
     }
@@ -610,6 +621,40 @@ mod tests {
     }
 
     #[test]
+    fn list_local_ignores_zero_length_files() {
+        let (dir, registry) = test_registry();
+
+        let entry = catalog::find_entry("miniLM").unwrap();
+        let variant = &entry.variants[0];
+        // Create a zero-length file (simulating interrupted download)
+        std::fs::write(dir.path().join(variant.hf_file), b"").unwrap();
+
+        let local = registry.list_local();
+        assert!(
+            local.is_empty(),
+            "Zero-length file should not count as locally available"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_zero_length_file() {
+        let (dir, registry) = test_registry();
+
+        let entry = catalog::find_entry("miniLM").unwrap();
+        let variant = &entry.variants[0];
+        // Create a zero-length file
+        std::fs::write(dir.path().join(variant.hf_file), b"").unwrap();
+
+        let err = registry.resolve("miniLM").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found locally"),
+            "Zero-length file should not resolve: {}",
+            msg
+        );
+    }
+
+    #[test]
     fn list_local_ignores_unrelated_files() {
         let (dir, registry) = test_registry();
 
@@ -902,11 +947,7 @@ mod tests {
         let entry = catalog::find_entry("tinyllama").unwrap();
         assert_eq!(entry.default_quant, "q4_k_m");
         let q8_variant = entry.variants.iter().find(|v| v.name == "q8_0").unwrap();
-        let q4_variant = entry
-            .variants
-            .iter()
-            .find(|v| v.name == "q4_k_m")
-            .unwrap();
+        let q4_variant = entry.variants.iter().find(|v| v.name == "q4_k_m").unwrap();
         std::fs::write(dir.path().join(q8_variant.hf_file), b"fake").unwrap();
 
         let local = registry.list_local();

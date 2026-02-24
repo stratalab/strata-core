@@ -24,7 +24,7 @@ mod provider;
 mod generate;
 
 pub use error::InferenceError;
-pub use registry::{ModelRegistry, ModelInfo, ModelTask};
+pub use registry::{ModelInfo, ModelRegistry, ModelTask};
 
 #[cfg(feature = "local")]
 pub use embed::EmbeddingEngine;
@@ -363,9 +363,15 @@ mod tests {
         let err = "unknown".parse::<ProviderKind>().unwrap_err();
         let msg = err.to_string();
         // Error should contain the bad input
-        assert!(msg.contains("unknown"), "error should contain bad input: {msg}");
+        assert!(
+            msg.contains("unknown"),
+            "error should contain bad input: {msg}"
+        );
         // Error should list valid options
-        assert!(msg.contains("local"), "error should list valid options: {msg}");
+        assert!(
+            msg.contains("local"),
+            "error should list valid options: {msg}"
+        );
         assert!(
             msg.contains("anthropic"),
             "error should list valid options: {msg}"

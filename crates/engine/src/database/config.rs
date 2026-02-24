@@ -87,7 +87,6 @@ pub struct StrataConfig {
     pub bm25_b: Option<f32>,
 
     // -- Generation provider configuration --
-
     /// Default generation provider: "local", "anthropic", "openai", or "google".
     #[serde(default = "default_provider")]
     pub provider: String,
@@ -505,7 +504,10 @@ auto_embed = false
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: StrataConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.provider, "anthropic");
-        assert_eq!(parsed.default_model.as_deref(), Some("claude-sonnet-4-20250514"));
+        assert_eq!(
+            parsed.default_model.as_deref(),
+            Some("claude-sonnet-4-20250514")
+        );
         assert_eq!(parsed.anthropic_api_key.as_deref(), Some("sk-ant-test-key"));
         assert!(parsed.openai_api_key.is_none());
         assert!(parsed.google_api_key.is_none());

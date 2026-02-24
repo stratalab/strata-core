@@ -7,6 +7,9 @@
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
 
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+
 /// Handle to a dynamically loaded shared library.
 pub struct DynLib {
     handle: *mut c_void,
@@ -29,7 +32,7 @@ impl DynLib {
     /// Open a shared library by name or path.
     ///
     /// On Unix, wraps `dlopen` with `RTLD_NOW | RTLD_LOCAL`.
-    /// On Windows, wraps `LoadLibraryA`.
+    /// On Windows, wraps `LoadLibraryW` (Unicode-aware).
     pub fn open(name: &CStr) -> Result<Self, String> {
         #[cfg(unix)]
         {
@@ -52,9 +55,17 @@ impl DynLib {
 
         #[cfg(windows)]
         {
-            let handle = unsafe { LoadLibraryA(name.as_ptr()) };
+            // Use LoadLibraryW for Unicode path support
+            let name_str = name
+                .to_str()
+                .map_err(|e| format!("Invalid library name: {e}"))?;
+            let wide: Vec<u16> = std::ffi::OsStr::new(name_str)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let handle = unsafe { LoadLibraryW(wide.as_ptr()) };
             if handle.is_null() {
-                return Err(format!("LoadLibraryA failed for {:?}", name));
+                return Err(format!("LoadLibraryW failed for {:?}", name));
             }
             Ok(Self {
                 handle: handle as *mut c_void,
@@ -180,7 +191,7 @@ extern "C" {
 
 #[cfg(windows)]
 extern "system" {
-    fn LoadLibraryA(name: *const c_char) -> *mut c_void;
+    fn LoadLibraryW(name: *const u16) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
     fn FreeLibrary(module: *mut c_void) -> i32;
 }
@@ -248,7 +259,10 @@ mod tests {
             // `strlen` exists in every libc
             let result = unsafe { lib.sym(c"strlen") };
             assert!(result.is_ok(), "strlen should resolve: {:?}", result);
-            assert!(!result.unwrap().is_null(), "strlen pointer should be non-null");
+            assert!(
+                !result.unwrap().is_null(),
+                "strlen pointer should be non-null"
+            );
         }
     }
 
@@ -325,8 +339,14 @@ mod tests {
             handle: std::ptr::null_mut(),
         };
         let dbg = format!("{:?}", lib);
-        assert!(dbg.contains("DynLib"), "Debug output should contain struct name: {dbg}");
-        assert!(dbg.contains("handle"), "Debug output should contain field name: {dbg}");
+        assert!(
+            dbg.contains("DynLib"),
+            "Debug output should contain struct name: {dbg}"
+        );
+        assert!(
+            dbg.contains("handle"),
+            "Debug output should contain field name: {dbg}"
+        );
         // Don't drop this normally — null handle is safe due to our guard
     }
 

@@ -20,11 +20,30 @@ pub fn download_hf_file(
     models_dir: &Path,
     progress: &dyn Fn(u64, u64),
 ) -> Result<(), InferenceError> {
+    download_hf_file_with_size(hf_repo, hf_file, models_dir, progress, 0)
+}
+
+/// Download a file from a HuggingFace repository with an expected size for validation.
+///
+/// If `expected_size` is non-zero and the server reports a content-length that
+/// differs by more than 2x, the download is aborted as a safety check.
+pub fn download_hf_file_with_size(
+    hf_repo: &str,
+    hf_file: &str,
+    models_dir: &Path,
+    progress: &dyn Fn(u64, u64),
+    expected_size: u64,
+) -> Result<(), InferenceError> {
     let dest = models_dir.join(hf_file);
 
-    // Already downloaded
+    // Already downloaded — verify it's not a zero-length leftover from a failed download
     if dest.exists() {
-        return Ok(());
+        let file_len = dest.metadata().map(|m| m.len()).unwrap_or(0);
+        if file_len > 0 {
+            return Ok(());
+        }
+        // Zero-length file: remove and re-download
+        let _ = std::fs::remove_file(&dest);
     }
 
     // Ensure directories exist
@@ -76,7 +95,7 @@ pub fn download_hf_file(
     // Re-check after acquiring lock — another process may have finished
     // downloading while we were waiting for the lock or between our initial
     // check and lock acquisition (TOCTOU race).
-    if dest.exists() {
+    if dest.exists() && dest.metadata().map(|m| m.len() > 0).unwrap_or(false) {
         return Ok(());
     }
 
@@ -105,6 +124,17 @@ pub fn download_hf_file(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
+
+    // Validate content-length against expected size from catalog (if both known)
+    if total_bytes > 0 && expected_size > 0 {
+        let ratio = total_bytes as f64 / expected_size as f64;
+        if ratio < 0.5 || ratio > 2.0 {
+            return Err(InferenceError::Registry(format!(
+                "Unexpected file size: server reports {} bytes, catalog expects {} bytes",
+                total_bytes, expected_size
+            )));
+        }
+    }
 
     let mut reader = response.into_body().into_reader();
     let mut file = fs::File::create(&temp_path)

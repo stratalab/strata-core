@@ -56,12 +56,25 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
         });
     }
 
-    // Validate that required keys are not set to empty strings.
-    if key_lower == "provider" && value.trim().is_empty() {
-        return Err(Error::InvalidInput {
-            reason: "Provider cannot be empty. Valid values: local, anthropic, openai, google"
-                .to_string(),
-        });
+    // Validate provider name
+    if key_lower == "provider" {
+        let v = value.trim().to_ascii_lowercase();
+        if v.is_empty() {
+            return Err(Error::InvalidInput {
+                reason: "Provider cannot be empty. Valid values: local, anthropic, openai, google"
+                    .to_string(),
+            });
+        }
+        let valid_providers = ["local", "anthropic", "openai", "google"];
+        if !valid_providers.contains(&v.as_str()) {
+            return Err(Error::InvalidInput {
+                reason: format!(
+                    "Unknown provider: {:?}. Valid providers: {}",
+                    value.trim(),
+                    valid_providers.join(", ")
+                ),
+            });
+        }
     }
 
     p.db.update_config(|cfg| match key_lower.as_str() {

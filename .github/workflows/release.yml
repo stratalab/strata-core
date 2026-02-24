@@ -300,7 +300,7 @@ jobs:
           SHA_X86_64: ${{ steps.sha.outputs.x86_64 }}
           SHA_LINUX_X86_64: ${{ steps.sha.outputs.linux_x86_64 }}
         run: |
-          cat > homebrew-tap/Formula/strata.rb << 'FORMULA'
+          cat > homebrew-tap/Formula/strata.rb <<'FORMULA'
           class Strata < Formula
             desc "Production-grade embedded database for AI agents"
             homepage "https://stratadb.org"
@@ -335,6 +335,9 @@ jobs:
             end
           end
           FORMULA
+
+          # Strip YAML indentation from the generated formula
+          sed -i'' -e 's/^          //' homebrew-tap/Formula/strata.rb
 
           # Replace placeholders with actual values
           sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" homebrew-tap/Formula/strata.rb

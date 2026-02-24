@@ -39,19 +39,30 @@ impl AnthropicProvider {
     }
 
     pub fn generate(&self, request: &GenerateRequest) -> Result<GenerateResponse, InferenceError> {
+        if request.max_tokens == 0 {
+            return Err(InferenceError::Provider(
+                "max_tokens must be greater than 0".to_string(),
+            ));
+        }
+
         let body = build_request_json(&self.model, request);
 
-        let mut response = ureq::post(API_URL)
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(std::time::Duration::from_secs(30)))
+                .build(),
+        );
+        let mut response = agent
+            .post(API_URL)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", API_VERSION)
             .header("content-type", "application/json")
             .send(&body)
             .map_err(|e| map_http_error("Anthropic", e))?;
 
-        let response_body = response
-            .body_mut()
-            .read_to_string()
-            .map_err(|e| InferenceError::Provider(format!("Anthropic: failed to read response: {e}")))?;
+        let response_body = response.body_mut().read_to_string().map_err(|e| {
+            InferenceError::Provider(format!("Anthropic: failed to read response: {e}"))
+        })?;
 
         parse_response_json(&response_body)
     }
@@ -111,7 +122,9 @@ pub(crate) fn parse_response_json(body: &str) -> Result<GenerateResponse, Infere
                 .and_then(|e| e.get("message"))
                 .and_then(|m| m.as_str())
                 .unwrap_or("unknown error");
-            return Err(InferenceError::Provider(format!("Anthropic API error: {msg}")));
+            return Err(InferenceError::Provider(format!(
+                "Anthropic API error: {msg}"
+            )));
         }
     }
 
@@ -146,7 +159,11 @@ pub(crate) fn parse_response_json(body: &str) -> Result<GenerateResponse, Infere
         Some("end_turn") => StopReason::StopToken,
         Some("max_tokens") => StopReason::MaxTokens,
         Some("stop_sequence") => StopReason::StopToken,
-        _ => StopReason::StopToken, // default fallback
+        Some(other) => {
+            tracing::warn!(reason = ?other, "Unknown stop reason from Anthropic, defaulting to StopToken");
+            StopReason::StopToken
+        }
+        None => StopReason::StopToken,
     };
 
     // Extract usage
@@ -182,9 +199,7 @@ fn map_http_error(provider: &str, err: ureq::Error) -> InferenceError {
                 503 => "service unavailable",
                 _ => "HTTP error",
             };
-            InferenceError::Provider(format!(
-                "{provider}: {description} (HTTP {code})"
-            ))
+            InferenceError::Provider(format!("{provider}: {description} (HTTP {code})"))
         }
         _ => InferenceError::Provider(format!("{provider}: {err}")),
     }
@@ -361,6 +376,22 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         assert!(json.get("stop_sequences").is_none());
+    }
+
+    #[test]
+    fn generate_max_tokens_zero_returns_error() {
+        let provider =
+            AnthropicProvider::new("sk-key".into(), "claude-sonnet-4-20250514".into()).unwrap();
+        let request = GenerateRequest {
+            prompt: "test".into(),
+            max_tokens: 0,
+            ..Default::default()
+        };
+        let err = provider.generate(&request).unwrap_err();
+        assert!(
+            err.to_string().contains("max_tokens"),
+            "Error should mention max_tokens: {err}"
+        );
     }
 
     #[test]
@@ -591,10 +622,23 @@ mod tests {
 
     #[test]
     fn debug_redacts_api_key() {
-        let p = AnthropicProvider::new("sk-ant-secret-key-123".into(), "claude-sonnet-4-20250514".into()).unwrap();
+        let p = AnthropicProvider::new(
+            "sk-ant-secret-key-123".into(),
+            "claude-sonnet-4-20250514".into(),
+        )
+        .unwrap();
         let dbg = format!("{:?}", p);
-        assert!(!dbg.contains("sk-ant-secret-key-123"), "API key leaked in Debug output: {dbg}");
-        assert!(dbg.contains("[REDACTED]"), "Debug should show [REDACTED]: {dbg}");
-        assert!(dbg.contains("claude-sonnet-4-20250514"), "Debug should show model name: {dbg}");
+        assert!(
+            !dbg.contains("sk-ant-secret-key-123"),
+            "API key leaked in Debug output: {dbg}"
+        );
+        assert!(
+            dbg.contains("[REDACTED]"),
+            "Debug should show [REDACTED]: {dbg}"
+        );
+        assert!(
+            dbg.contains("claude-sonnet-4-20250514"),
+            "Debug should show model name: {dbg}"
+        );
     }
 }

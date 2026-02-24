@@ -102,7 +102,7 @@ pub static CATALOG: &[CatalogEntry] = &[
         aliases: &["qwen3-1.7b"],
         task: ModelTask::Generate,
         hf_repo: "Qwen/Qwen3-1.7B-GGUF",
-        default_quant: "q8_0",
+        default_quant: "q4_k_m",
         variants: &[
             QuantVariant {
                 name: "q4_k_m",
@@ -401,7 +401,8 @@ mod tests {
                 assert!(
                     seen.insert(lower_alias.clone()),
                     "Duplicate alias '{}' in entry '{}'",
-                    alias, entry.name
+                    alias,
+                    entry.name
                 );
             }
         }
@@ -425,7 +426,9 @@ mod tests {
                 assert!(
                     variant.hf_file.ends_with(".gguf"),
                     "Variant '{}' of '{}' doesn't end with .gguf: {}",
-                    variant.name, entry.name, variant.hf_file
+                    variant.name,
+                    entry.name,
+                    variant.hf_file
                 );
             }
         }
@@ -493,7 +496,8 @@ mod tests {
                 assert!(
                     variant.size_bytes > 0,
                     "Variant '{}' of '{}' has zero size_bytes",
-                    variant.name, entry.name
+                    variant.name,
+                    entry.name
                 );
             }
         }
@@ -521,7 +525,8 @@ mod tests {
                 assert!(
                     seen.insert(variant.name),
                     "Duplicate variant name '{}' in entry '{}'",
-                    variant.name, entry.name
+                    variant.name,
+                    entry.name
                 );
             }
         }

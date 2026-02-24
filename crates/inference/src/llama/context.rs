@@ -33,9 +33,7 @@ unsafe impl Send for LlamaCppContext {}
 impl LlamaCppContext {
     /// Load a model configured for embedding (pooling enabled).
     pub fn load_for_embedding(path: &Path) -> Result<Self, InferenceError> {
-        let api = Arc::new(
-            LlamaCppApi::load().map_err(InferenceError::LlamaCpp)?,
-        );
+        let api = Arc::new(LlamaCppApi::load().map_err(InferenceError::LlamaCpp)?);
 
         let c_path = path_to_cstring(path)?;
 
@@ -77,7 +75,11 @@ impl LlamaCppContext {
         })?;
 
         let n_ctx_raw = api.model_n_ctx_train(model);
-        let n_ctx = if n_ctx_raw > 0 { n_ctx_raw as usize } else { 512 };
+        let n_ctx = if n_ctx_raw > 0 {
+            n_ctx_raw as usize
+        } else {
+            512
+        };
 
         info!(
             n_embd = n_embd,
@@ -106,9 +108,7 @@ impl LlamaCppContext {
         path: &Path,
         ctx_override: Option<usize>,
     ) -> Result<Self, InferenceError> {
-        let api = Arc::new(
-            LlamaCppApi::load().map_err(InferenceError::LlamaCpp)?,
-        );
+        let api = Arc::new(LlamaCppApi::load().map_err(InferenceError::LlamaCpp)?);
 
         let c_path = path_to_cstring(path)?;
 
@@ -137,7 +137,11 @@ impl LlamaCppContext {
         }
         let n_embd = n_embd_raw as usize;
         let vocab_size = vocab_size_raw as usize;
-        let train_ctx = if train_ctx_raw > 0 { train_ctx_raw as usize } else { 2048 };
+        let train_ctx = if train_ctx_raw > 0 {
+            train_ctx_raw as usize
+        } else {
+            2048
+        };
 
         // Context params
         let mut cparams = api.context_default_params();
@@ -182,13 +186,9 @@ impl LlamaCppContext {
         let text_bytes = text.as_bytes();
 
         // First call: get required buffer size
-        let n_needed = self.api.tokenize(
-            self.vocab,
-            text_bytes,
-            &mut [],
-            add_special,
-            false,
-        );
+        let n_needed = self
+            .api
+            .tokenize(self.vocab, text_bytes, &mut [], add_special, false);
 
         // n_needed is negative (= -required_size) when buffer is too small
         let buf_size = if n_needed < 0 {
@@ -203,13 +203,9 @@ impl LlamaCppContext {
         }
 
         let mut tokens = vec![0i32; buf_size + 1]; // +1 for safety
-        let n = self.api.tokenize(
-            self.vocab,
-            text_bytes,
-            &mut tokens,
-            add_special,
-            false,
-        );
+        let n = self
+            .api
+            .tokenize(self.vocab, text_bytes, &mut tokens, add_special, false);
 
         if n < 0 {
             // Should not happen since we allocated enough
@@ -246,12 +242,7 @@ impl LlamaCppContext {
         }
 
         let mut buf = vec![0u8; buf_size + 1];
-        let n = self.api.detokenize(
-            self.vocab,
-            tokens,
-            &mut buf,
-            true,
-        );
+        let n = self.api.detokenize(self.vocab, tokens, &mut buf, true);
 
         if n > 0 {
             buf.truncate(n as usize);
@@ -262,9 +253,10 @@ impl LlamaCppContext {
             let mut piece_buf = [0u8; 256];
             for &token in tokens {
                 let len = self.api.token_to_piece(self.vocab, token, &mut piece_buf);
-                if len > 0 {
+                if len > 0 && (len as usize) <= piece_buf.len() {
                     result.push_str(&String::from_utf8_lossy(&piece_buf[..len as usize]));
                 }
+                // If len > 256 or negative, skip this token (shouldn't happen with well-formed vocab)
             }
             result
         }
@@ -290,9 +282,8 @@ fn path_to_cstring(path: &Path) -> Result<std::ffi::CString, InferenceError> {
     let path_str = path.to_str().ok_or_else(|| {
         InferenceError::LlamaCpp(format!("path contains invalid UTF-8: {:?}", path))
     })?;
-    std::ffi::CString::new(path_str).map_err(|_| {
-        InferenceError::LlamaCpp(format!("path contains null byte: {:?}", path))
-    })
+    std::ffi::CString::new(path_str)
+        .map_err(|_| InferenceError::LlamaCpp(format!("path contains null byte: {:?}", path)))
 }
 
 #[cfg(test)]
@@ -372,9 +363,7 @@ mod tests {
         assert!(result.is_ok());
         // Path::new normalizes some things, but the CString should match
         // what Path gives us
-        let expected = Path::new("/tmp/../tmp/./model.gguf")
-            .to_str()
-            .unwrap();
+        let expected = Path::new("/tmp/../tmp/./model.gguf").to_str().unwrap();
         let cstr = result.unwrap();
         assert_eq!(cstr.to_str().unwrap(), expected);
     }

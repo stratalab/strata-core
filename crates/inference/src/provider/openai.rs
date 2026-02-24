@@ -38,18 +38,29 @@ impl OpenAIProvider {
     }
 
     pub fn generate(&self, request: &GenerateRequest) -> Result<GenerateResponse, InferenceError> {
+        if request.max_tokens == 0 {
+            return Err(InferenceError::Provider(
+                "max_tokens must be greater than 0".to_string(),
+            ));
+        }
+
         let body = build_request_json(&self.model, request);
 
-        let mut response = ureq::post(API_URL)
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(std::time::Duration::from_secs(30)))
+                .build(),
+        );
+        let mut response = agent
+            .post(API_URL)
             .header("Authorization", &format!("Bearer {}", self.api_key))
             .header("content-type", "application/json")
             .send(&body)
             .map_err(|e| map_http_error("OpenAI", e))?;
 
-        let response_body = response
-            .body_mut()
-            .read_to_string()
-            .map_err(|e| InferenceError::Provider(format!("OpenAI: failed to read response: {e}")))?;
+        let response_body = response.body_mut().read_to_string().map_err(|e| {
+            InferenceError::Provider(format!("OpenAI: failed to read response: {e}"))
+        })?;
 
         parse_response_json(&response_body)
     }
@@ -134,7 +145,9 @@ pub(crate) fn parse_response_json(body: &str) -> Result<GenerateResponse, Infere
         .get("message")
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_str())
-        .unwrap_or("")
+        .ok_or_else(|| {
+            InferenceError::Provider("OpenAI: response missing message content".to_string())
+        })?
         .to_string();
 
     // Map finish_reason
@@ -142,7 +155,11 @@ pub(crate) fn parse_response_json(body: &str) -> Result<GenerateResponse, Infere
         Some("stop") => StopReason::StopToken,
         Some("length") => StopReason::MaxTokens,
         Some("content_filter") => StopReason::Cancelled,
-        _ => StopReason::StopToken, // default fallback
+        Some(other) => {
+            tracing::warn!(reason = ?other, "Unknown stop reason from OpenAI, defaulting to StopToken");
+            StopReason::StopToken
+        }
+        None => StopReason::StopToken,
     };
 
     // Extract usage
@@ -178,9 +195,7 @@ fn map_http_error(provider: &str, err: ureq::Error) -> InferenceError {
                 503 => "service unavailable",
                 _ => "HTTP error",
             };
-            InferenceError::Provider(format!(
-                "{provider}: {description} (HTTP {code})"
-            ))
+            InferenceError::Provider(format!("{provider}: {description} (HTTP {code})"))
         }
         _ => InferenceError::Provider(format!("{provider}: {err}")),
     }
@@ -424,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_null_content_returns_empty_string() {
+    fn parse_null_content_returns_error() {
         let body = r#"{
             "choices": [{
                 "message": {"content": null},
@@ -432,8 +447,8 @@ mod tests {
             }],
             "usage": {"prompt_tokens": 1, "completion_tokens": 0}
         }"#;
-        let resp = parse_response_json(body).unwrap();
-        assert_eq!(resp.text, "");
+        let err = parse_response_json(body).unwrap_err();
+        assert!(err.to_string().contains("missing message content"));
     }
 
     #[test]
@@ -521,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_missing_message_content_returns_empty_string() {
+    fn parse_missing_message_content_returns_error() {
         let body = r#"{
             "choices": [{
                 "message": {},
@@ -529,16 +544,22 @@ mod tests {
             }],
             "usage": {"prompt_tokens": 1, "completion_tokens": 0}
         }"#;
-        let resp = parse_response_json(body).unwrap();
-        assert_eq!(resp.text, "");
+        let err = parse_response_json(body).unwrap_err();
+        assert!(err.to_string().contains("missing message content"));
     }
 
     #[test]
     fn debug_redacts_api_key() {
         let p = OpenAIProvider::new("sk-secret-key-123".into(), "gpt-4".into()).unwrap();
         let dbg = format!("{:?}", p);
-        assert!(!dbg.contains("sk-secret-key-123"), "API key leaked in Debug output: {dbg}");
-        assert!(dbg.contains("[REDACTED]"), "Debug should show [REDACTED]: {dbg}");
+        assert!(
+            !dbg.contains("sk-secret-key-123"),
+            "API key leaked in Debug output: {dbg}"
+        );
+        assert!(
+            dbg.contains("[REDACTED]"),
+            "Debug should show [REDACTED]: {dbg}"
+        );
         assert!(dbg.contains("gpt-4"), "Debug should show model name: {dbg}");
     }
 
@@ -554,6 +575,21 @@ mod tests {
         assert_eq!(
             json["messages"][0]["content"],
             "Hello \"world\" \n\ttab & <html>"
+        );
+    }
+
+    #[test]
+    fn generate_max_tokens_zero_returns_error() {
+        let provider = OpenAIProvider::new("sk-key".into(), "gpt-4".into()).unwrap();
+        let request = GenerateRequest {
+            prompt: "test".into(),
+            max_tokens: 0,
+            ..Default::default()
+        };
+        let err = provider.generate(&request).unwrap_err();
+        assert!(
+            err.to_string().contains("max_tokens"),
+            "Error should mention max_tokens: {err}"
         );
     }
 

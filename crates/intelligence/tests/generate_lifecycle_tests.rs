@@ -21,7 +21,10 @@ mod tests {
             engine.generate(&request)
         });
         let response = result.expect("engine access").expect("generation");
-        assert!(!response.text.is_empty(), "generated text should not be empty");
+        assert!(
+            !response.text.is_empty(),
+            "generated text should not be empty"
+        );
     }
 
     #[test]

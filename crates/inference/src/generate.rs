@@ -166,7 +166,11 @@ impl GenerationEngine {
                 #[cfg(feature = "anthropic")]
                 {
                     let p = crate::provider::anthropic::AnthropicProvider::new(api_key, model)?;
-                    info!(provider = "anthropic", model = p.model(), "Cloud generation engine ready");
+                    info!(
+                        provider = "anthropic",
+                        model = p.model(),
+                        "Cloud generation engine ready"
+                    );
                     Ok(Self {
                         provider: Provider::Anthropic(p),
                     })
@@ -175,7 +179,8 @@ impl GenerationEngine {
                 {
                     let _ = (api_key, model);
                     Err(InferenceError::NotSupported(
-                        "Anthropic provider not enabled (compile with --features anthropic)".to_string(),
+                        "Anthropic provider not enabled (compile with --features anthropic)"
+                            .to_string(),
                     ))
                 }
             }
@@ -184,7 +189,11 @@ impl GenerationEngine {
                 #[cfg(feature = "openai")]
                 {
                     let p = crate::provider::openai::OpenAIProvider::new(api_key, model)?;
-                    info!(provider = "openai", model = p.model(), "Cloud generation engine ready");
+                    info!(
+                        provider = "openai",
+                        model = p.model(),
+                        "Cloud generation engine ready"
+                    );
                     Ok(Self {
                         provider: Provider::OpenAI(p),
                     })
@@ -202,7 +211,11 @@ impl GenerationEngine {
                 #[cfg(feature = "google")]
                 {
                     let p = crate::provider::google::GoogleProvider::new(api_key, model)?;
-                    info!(provider = "google", model = p.model(), "Cloud generation engine ready");
+                    info!(
+                        provider = "google",
+                        model = p.model(),
+                        "Cloud generation engine ready"
+                    );
                     Ok(Self {
                         provider: Provider::Google(p),
                     })
@@ -370,7 +383,10 @@ mod tests {
         let err = result.unwrap_err();
         let msg = err.to_string();
         assert!(
-            matches!(err, InferenceError::Registry(_) | InferenceError::LlamaCpp(_)),
+            matches!(
+                err,
+                InferenceError::Registry(_) | InferenceError::LlamaCpp(_)
+            ),
             "should be Registry or LlamaCpp error, got: {msg}"
         );
     }
@@ -396,10 +412,7 @@ mod tests {
     fn from_registry_empty_name_returns_error() {
         let result = GenerationEngine::from_registry("");
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            InferenceError::Registry(_)
-        ));
+        assert!(matches!(result.unwrap_err(), InferenceError::Registry(_)));
     }
 
     #[cfg(feature = "local")]
@@ -419,8 +432,7 @@ mod tests {
     #[cfg(feature = "local")]
     #[test]
     fn from_gguf_with_ctx_nonexistent_returns_descriptive_error() {
-        let result =
-            GenerationEngine::from_gguf_with_ctx("/nonexistent/model.gguf", Some(2048));
+        let result = GenerationEngine::from_gguf_with_ctx("/nonexistent/model.gguf", Some(2048));
         assert!(result.is_err());
         let err = result.unwrap_err();
         let msg = err.to_string();
@@ -445,8 +457,7 @@ mod tests {
     #[cfg(feature = "local")]
     #[test]
     fn from_gguf_with_ctx_zero_returns_error() {
-        let result =
-            GenerationEngine::from_gguf_with_ctx("/nonexistent/model.gguf", Some(0));
+        let result = GenerationEngine::from_gguf_with_ctx("/nonexistent/model.gguf", Some(0));
         assert!(result.is_err());
     }
 
@@ -519,11 +530,8 @@ mod tests {
 
     #[test]
     fn cloud_local_provider_returns_provider_error() {
-        let result = GenerationEngine::cloud(
-            ProviderKind::Local,
-            "key".to_string(),
-            "model".to_string(),
-        );
+        let result =
+            GenerationEngine::cloud(ProviderKind::Local, "key".to_string(), "model".to_string());
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -539,15 +547,8 @@ mod tests {
     #[test]
     fn cloud_local_provider_with_empty_key_still_rejects_local() {
         // The Local check happens before key validation
-        let result = GenerationEngine::cloud(
-            ProviderKind::Local,
-            String::new(),
-            String::new(),
-        );
-        assert!(matches!(
-            result.unwrap_err(),
-            InferenceError::Provider(_)
-        ));
+        let result = GenerationEngine::cloud(ProviderKind::Local, String::new(), String::new());
+        assert!(matches!(result.unwrap_err(), InferenceError::Provider(_)));
     }
 
     #[cfg(feature = "anthropic")]
@@ -651,11 +652,8 @@ mod tests {
     #[cfg(feature = "openai")]
     #[test]
     fn cloud_openai_empty_key_returns_error() {
-        let result = GenerationEngine::cloud(
-            ProviderKind::OpenAI,
-            String::new(),
-            "gpt-4".to_string(),
-        );
+        let result =
+            GenerationEngine::cloud(ProviderKind::OpenAI, String::new(), "gpt-4".to_string());
         assert!(result.is_err());
     }
 
@@ -765,11 +763,8 @@ mod tests {
     #[cfg(not(feature = "openai"))]
     #[test]
     fn cloud_openai_disabled_returns_not_supported() {
-        let result = GenerationEngine::cloud(
-            ProviderKind::OpenAI,
-            "key".to_string(),
-            "model".to_string(),
-        );
+        let result =
+            GenerationEngine::cloud(ProviderKind::OpenAI, "key".to_string(), "model".to_string());
         assert!(matches!(
             result.unwrap_err(),
             InferenceError::NotSupported(_)
@@ -779,11 +774,8 @@ mod tests {
     #[cfg(not(feature = "google"))]
     #[test]
     fn cloud_google_disabled_returns_not_supported() {
-        let result = GenerationEngine::cloud(
-            ProviderKind::Google,
-            "key".to_string(),
-            "model".to_string(),
-        );
+        let result =
+            GenerationEngine::cloud(ProviderKind::Google, "key".to_string(), "model".to_string());
         assert!(matches!(
             result.unwrap_err(),
             InferenceError::NotSupported(_)
@@ -806,7 +798,10 @@ mod tests {
         let dbg = format!("{:?}", engine);
         assert!(dbg.contains("openai"), "debug: {dbg}");
         assert!(dbg.contains("gpt-4-turbo"), "debug: {dbg}");
-        assert!(!dbg.contains("sk-secret-key-do-not-leak"), "API key leaked in Debug: {dbg}");
+        assert!(
+            !dbg.contains("sk-secret-key-do-not-leak"),
+            "API key leaked in Debug: {dbg}"
+        );
     }
 
     #[cfg(feature = "google")]
@@ -821,7 +816,10 @@ mod tests {
         let dbg = format!("{:?}", engine);
         assert!(dbg.contains("google"), "debug: {dbg}");
         assert!(dbg.contains("gemini-1.5-pro"), "debug: {dbg}");
-        assert!(!dbg.contains("AIza-secret-key-do-not-leak"), "API key leaked in Debug: {dbg}");
+        assert!(
+            !dbg.contains("AIza-secret-key-do-not-leak"),
+            "API key leaked in Debug: {dbg}"
+        );
     }
 
     #[cfg(feature = "anthropic")]
@@ -834,6 +832,9 @@ mod tests {
         )
         .unwrap();
         let dbg = format!("{:?}", engine);
-        assert!(!dbg.contains("sk-ant-secret-key-do-not-leak"), "API key leaked in Debug: {dbg}");
+        assert!(
+            !dbg.contains("sk-ant-secret-key-do-not-leak"),
+            "API key leaked in Debug: {dbg}"
+        );
     }
 }

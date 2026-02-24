@@ -73,9 +73,7 @@ fn configure_set_and_get_api_keys() {
             .unwrap();
 
         let result = executor
-            .execute(Command::ConfigureGetKey {
-                key: key.into(),
-            })
+            .execute(Command::ConfigureGetKey { key: key.into() })
             .unwrap();
         assert_eq!(result, Output::ConfigValue(Some(value.into())));
     }
@@ -101,11 +99,14 @@ fn configure_get_provider_default_is_local() {
 fn configure_get_unset_optional_key_returns_none() {
     let executor = create_test_executor();
 
-    for key in ["default_model", "anthropic_api_key", "openai_api_key", "google_api_key"] {
+    for key in [
+        "default_model",
+        "anthropic_api_key",
+        "openai_api_key",
+        "google_api_key",
+    ] {
         let result = executor
-            .execute(Command::ConfigureGetKey {
-                key: key.into(),
-            })
+            .execute(Command::ConfigureGetKey { key: key.into() })
             .unwrap();
         assert_eq!(
             result,
@@ -225,11 +226,7 @@ fn configure_set_empty_provider_returns_error() {
     });
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
-    assert!(
-        msg.contains("Provider cannot be empty"),
-        "Error: {}",
-        msg
-    );
+    assert!(msg.contains("Provider cannot be empty"), "Error: {}", msg);
 }
 
 #[test]
@@ -242,11 +239,7 @@ fn configure_set_whitespace_only_provider_returns_error() {
     });
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
-    assert!(
-        msg.contains("Provider cannot be empty"),
-        "Error: {}",
-        msg
-    );
+    assert!(msg.contains("Provider cannot be empty"), "Error: {}", msg);
 }
 
 #[test]
@@ -260,6 +253,70 @@ fn configure_set_empty_api_key_is_allowed() {
         value: "".into(),
     });
     assert!(matches!(result, Ok(Output::Unit)));
+}
+
+// =============================================================================
+// Provider validation
+// =============================================================================
+
+#[test]
+fn configure_set_invalid_provider_returns_error() {
+    let executor = create_test_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "provider".into(),
+        value: "azure".into(),
+    });
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("Unknown provider"),
+        "Error should mention unknown provider: {}",
+        msg
+    );
+    assert!(
+        msg.contains("azure"),
+        "Error should mention the attempted value: {}",
+        msg
+    );
+    assert!(
+        msg.contains("local")
+            && msg.contains("anthropic")
+            && msg.contains("openai")
+            && msg.contains("google"),
+        "Error should list valid providers: {}",
+        msg
+    );
+}
+
+#[test]
+fn configure_set_valid_providers_all_accepted() {
+    let executor = create_test_executor();
+
+    for provider in ["local", "anthropic", "openai", "google"] {
+        let result = executor.execute(Command::ConfigureSet {
+            key: "provider".into(),
+            value: provider.into(),
+        });
+        assert!(
+            result.is_ok(),
+            "Provider {:?} should be accepted, got: {:?}",
+            provider,
+            result
+        );
+    }
+}
+
+#[test]
+fn configure_set_provider_case_insensitive() {
+    let executor = create_test_executor();
+
+    // "Anthropic" (mixed case) should be accepted
+    let result = executor.execute(Command::ConfigureSet {
+        key: "provider".into(),
+        value: "Anthropic".into(),
+    });
+    assert!(result.is_ok(), "Mixed-case provider should be accepted");
 }
 
 // =============================================================================
@@ -278,7 +335,11 @@ fn configure_set_unknown_key_returns_error() {
     let err = result.unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("Unknown configuration key"), "Error: {}", msg);
-    assert!(msg.contains("unknown_key"), "Error should mention the key: {}", msg);
+    assert!(
+        msg.contains("unknown_key"),
+        "Error should mention the key: {}",
+        msg
+    );
 }
 
 #[test]
@@ -311,11 +372,14 @@ fn configure_set_does_not_affect_other_keys() {
         .unwrap();
 
     // API keys should remain None
-    for key in ["anthropic_api_key", "openai_api_key", "google_api_key", "default_model"] {
+    for key in [
+        "anthropic_api_key",
+        "openai_api_key",
+        "google_api_key",
+        "default_model",
+    ] {
         let result = executor
-            .execute(Command::ConfigureGetKey {
-                key: key.into(),
-            })
+            .execute(Command::ConfigureGetKey { key: key.into() })
             .unwrap();
         assert_eq!(
             result,
@@ -388,7 +452,10 @@ fn configure_get_key_allowed_in_read_only_mode() {
         key: "provider".into(),
     });
     // Should succeed (not AccessDenied)
-    assert!(result.is_ok(), "ConfigureGetKey should work in read-only mode");
+    assert!(
+        result.is_ok(),
+        "ConfigureGetKey should work in read-only mode"
+    );
     assert_eq!(result.unwrap(), Output::ConfigValue(Some("local".into())));
 }
 
@@ -407,7 +474,13 @@ fn configure_set_unknown_key_error_lists_valid_keys() {
     let msg = result.unwrap_err().to_string();
 
     // Error should list all valid keys to help the user
-    for expected in ["provider", "default_model", "anthropic_api_key", "openai_api_key", "google_api_key"] {
+    for expected in [
+        "provider",
+        "default_model",
+        "anthropic_api_key",
+        "openai_api_key",
+        "google_api_key",
+    ] {
         assert!(
             msg.contains(expected),
             "Error should list valid key {:?}: {}",
@@ -426,7 +499,13 @@ fn configure_get_unknown_key_error_lists_valid_keys() {
     });
     let msg = result.unwrap_err().to_string();
 
-    for expected in ["provider", "default_model", "anthropic_api_key", "openai_api_key", "google_api_key"] {
+    for expected in [
+        "provider",
+        "default_model",
+        "anthropic_api_key",
+        "openai_api_key",
+        "google_api_key",
+    ] {
         assert!(
             msg.contains(expected),
             "Error should list valid key {:?}: {}",

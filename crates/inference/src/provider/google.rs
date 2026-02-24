@@ -4,7 +4,8 @@
 //! `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`
 //! and maps the response to [`GenerateResponse`].
 //!
-//! Note: The API key is passed as a URL query parameter (`?key=`), not as a header.
+//! The API key is passed via the `x-goog-api-key` header for security
+//! (avoids leaking credentials in URL logs).
 
 use crate::{GenerateRequest, GenerateResponse, InferenceError, StopReason};
 
@@ -41,18 +42,30 @@ impl GoogleProvider {
     }
 
     pub fn generate(&self, request: &GenerateRequest) -> Result<GenerateResponse, InferenceError> {
-        let url = build_url(&self.model, &self.api_key);
+        if request.max_tokens == 0 {
+            return Err(InferenceError::Provider(
+                "max_tokens must be greater than 0".to_string(),
+            ));
+        }
+
+        let url = build_url(&self.model);
         let body = build_request_json(request);
 
-        let mut response = ureq::post(&url)
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(std::time::Duration::from_secs(30)))
+                .build(),
+        );
+        let mut response = agent
+            .post(&url)
+            .header("x-goog-api-key", &self.api_key)
             .header("content-type", "application/json")
             .send(&body)
             .map_err(|e| map_http_error("Google", e))?;
 
-        let response_body = response
-            .body_mut()
-            .read_to_string()
-            .map_err(|e| InferenceError::Provider(format!("Google: failed to read response: {e}")))?;
+        let response_body = response.body_mut().read_to_string().map_err(|e| {
+            InferenceError::Provider(format!("Google: failed to read response: {e}"))
+        })?;
 
         parse_response_json(&response_body)
     }
@@ -62,9 +75,9 @@ impl GoogleProvider {
     }
 }
 
-/// Build the full URL with the model name and API key as a query parameter.
-pub(crate) fn build_url(model: &str, api_key: &str) -> String {
-    format!("{API_BASE}/{model}:generateContent?key={api_key}")
+/// Build the full URL with the model name (API key sent via header).
+pub(crate) fn build_url(model: &str) -> String {
+    format!("{API_BASE}/{model}:generateContent")
 }
 
 /// Build the Google Gemini API request JSON.
@@ -163,9 +176,7 @@ pub(crate) fn parse_response_json(body: &str) -> Result<GenerateResponse, Infere
                 .join("")
         })
         .ok_or_else(|| {
-            InferenceError::Provider(
-                "Google: candidate missing content.parts".to_string(),
-            )
+            InferenceError::Provider("Google: candidate missing content.parts".to_string())
         })?;
 
     // Map finishReason
@@ -174,7 +185,11 @@ pub(crate) fn parse_response_json(body: &str) -> Result<GenerateResponse, Infere
         Some("MAX_TOKENS") => StopReason::MaxTokens,
         Some("SAFETY") => StopReason::Cancelled,
         Some("RECITATION") => StopReason::Cancelled,
-        _ => StopReason::StopToken, // default fallback
+        Some(other) => {
+            tracing::warn!(reason = ?other, "Unknown stop reason from Google, defaulting to StopToken");
+            StopReason::StopToken
+        }
+        None => StopReason::StopToken,
     };
 
     // Extract usage metadata
@@ -209,9 +224,7 @@ fn map_http_error(provider: &str, err: ureq::Error) -> InferenceError {
                 503 => "service unavailable",
                 _ => "HTTP error",
             };
-            InferenceError::Provider(format!(
-                "{provider}: {description} (HTTP {code})"
-            ))
+            InferenceError::Provider(format!("{provider}: {description} (HTTP {code})"))
         }
         _ => InferenceError::Provider(format!("{provider}: {err}")),
     }
@@ -257,17 +270,17 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn url_contains_model_and_key() {
-        let url = build_url("gemini-pro", "my-key");
+    fn url_contains_model_not_key() {
+        let url = build_url("gemini-pro");
         assert!(url.contains("gemini-pro"));
-        assert!(url.contains("key=my-key"));
+        assert!(!url.contains("key="), "API key should not appear in URL");
         assert!(url.contains("generateContent"));
     }
 
     #[test]
-    fn url_key_in_query_param_not_header() {
-        let url = build_url("model", "secret");
-        assert!(url.contains("?key=secret"));
+    fn url_has_no_query_params() {
+        let url = build_url("model");
+        assert!(!url.contains('?'), "URL should have no query parameters");
     }
 
     // -----------------------------------------------------------------------
@@ -660,9 +673,18 @@ mod tests {
     fn debug_redacts_api_key() {
         let p = GoogleProvider::new("AIza-secret-key-123".into(), "gemini-pro".into()).unwrap();
         let dbg = format!("{:?}", p);
-        assert!(!dbg.contains("AIza-secret-key-123"), "API key leaked in Debug output: {dbg}");
-        assert!(dbg.contains("[REDACTED]"), "Debug should show [REDACTED]: {dbg}");
-        assert!(dbg.contains("gemini-pro"), "Debug should show model name: {dbg}");
+        assert!(
+            !dbg.contains("AIza-secret-key-123"),
+            "API key leaked in Debug output: {dbg}"
+        );
+        assert!(
+            dbg.contains("[REDACTED]"),
+            "Debug should show [REDACTED]: {dbg}"
+        );
+        assert!(
+            dbg.contains("gemini-pro"),
+            "Debug should show model name: {dbg}"
+        );
     }
 
     #[test]
@@ -677,6 +699,21 @@ mod tests {
         assert_eq!(
             json["contents"][0]["parts"][0]["text"],
             "Hello \"world\" \n\ttab & <html>"
+        );
+    }
+
+    #[test]
+    fn generate_max_tokens_zero_returns_error() {
+        let provider = GoogleProvider::new("key".into(), "gemini-pro".into()).unwrap();
+        let request = GenerateRequest {
+            prompt: "test".into(),
+            max_tokens: 0,
+            ..Default::default()
+        };
+        let err = provider.generate(&request).unwrap_err();
+        assert!(
+            err.to_string().contains("max_tokens"),
+            "Error should mention max_tokens: {err}"
         );
     }
 

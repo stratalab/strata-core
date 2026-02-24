@@ -45,9 +45,8 @@ pub fn generate(
             .map_err(|e| Error::Internal { reason: e })?
     } else {
         // Cloud provider: parse provider kind, look up API key, dispatch
-        let provider_kind: strata_intelligence::ProviderKind = provider_name
-            .parse()
-            .map_err(|_| Error::InvalidInput {
+        let provider_kind: strata_intelligence::ProviderKind =
+            provider_name.parse().map_err(|_| Error::InvalidInput {
                 reason: format!(
                     "Unknown provider: {:?}. Valid providers: local, anthropic, openai, google",
                     cfg.provider
@@ -99,7 +98,7 @@ pub fn generate(
         top_k: top_k.unwrap_or(0),
         top_p: top_p.unwrap_or(1.0),
         seed,
-        stop_sequences: vec![],
+        stop_sequences: vec![], // TODO(#1244): Wire from Command::Generate when added
         stop_tokens: stop_tokens.unwrap_or_default(),
     };
 

@@ -81,8 +81,12 @@ impl GenerateModelState {
         api_key: String,
         model: &str,
     ) -> Result<Arc<Mutex<CachedEngine>>, String> {
-        let result = GenerationEngine::cloud(provider, api_key, model.to_string())
-            .map_err(|e| format!("Failed to create {} engine for '{}': {}", provider, model, e));
+        let result = GenerationEngine::cloud(provider, api_key, model.to_string()).map_err(|e| {
+            format!(
+                "Failed to create {} engine for '{}': {}",
+                provider, model, e
+            )
+        });
 
         Ok(Arc::new(Mutex::new(CachedEngine { inner: result })))
     }
@@ -218,7 +222,10 @@ mod tests {
             });
 
         // Outer Result should be Err (engine failed to load)
-        assert!(result.is_err(), "outer Result should be Err for failed engine");
+        assert!(
+            result.is_err(),
+            "outer Result should be Err for failed engine"
+        );
         let err = result.unwrap_err();
         assert!(
             err.contains("nonexistent-double-result"),
@@ -252,12 +259,11 @@ mod tests {
         let state = GenerateModelState::default();
         let entry = state.get_or_load("nonexistent-flatten").unwrap();
 
-        let result: Result<String, String> = with_engine(&entry, |engine| {
-            engine.encode("hello", false)
-        })
-        .map_err(|e| format!("outer: {}", e))
-        .and_then(|inner| inner.map_err(|e| format!("inner: {}", e)))
-        .map(|ids| format!("{} tokens", ids.len()));
+        let result: Result<String, String> =
+            with_engine(&entry, |engine| engine.encode("hello", false))
+                .map_err(|e| format!("outer: {}", e))
+                .and_then(|inner| inner.map_err(|e| format!("inner: {}", e)))
+                .map(|ids| format!("{} tokens", ids.len()));
 
         // Should fail at the outer layer (engine not loaded)
         assert!(result.is_err());
@@ -339,12 +345,9 @@ mod tests {
         let state = GenerateModelState::default();
 
         // Create a cloud engine via the static method
-        let _entry = GenerateModelState::create_cloud_engine(
-            ProviderKind::OpenAI,
-            "key".into(),
-            "gpt-4",
-        )
-        .unwrap();
+        let _entry =
+            GenerateModelState::create_cloud_engine(ProviderKind::OpenAI, "key".into(), "gpt-4")
+                .unwrap();
 
         // It should NOT appear in loaded_models (not cached)
         assert!(
@@ -379,12 +382,9 @@ mod tests {
     fn create_cloud_engine_local_provider_wraps_error() {
         // ProviderKind::Local should fail inside GenerationEngine::cloud()
         // but the outer Result is still Ok — the error is inside CachedEngine
-        let entry = GenerateModelState::create_cloud_engine(
-            ProviderKind::Local,
-            "key".into(),
-            "model",
-        )
-        .unwrap();
+        let entry =
+            GenerateModelState::create_cloud_engine(ProviderKind::Local, "key".into(), "model")
+                .unwrap();
 
         let result = with_engine(&entry, |_| ());
         assert!(result.is_err(), "Local via cloud should fail");
@@ -414,16 +414,19 @@ mod tests {
 
     #[test]
     fn create_cloud_engine_error_message_contains_provider_and_model() {
-        let entry = GenerateModelState::create_cloud_engine(
-            ProviderKind::Local,
-            "key".into(),
-            "my-model",
-        )
-        .unwrap();
+        let entry =
+            GenerateModelState::create_cloud_engine(ProviderKind::Local, "key".into(), "my-model")
+                .unwrap();
 
         let err = with_engine(&entry, |_| ()).unwrap_err();
-        assert!(err.contains("local"), "error should contain provider: {err}");
-        assert!(err.contains("my-model"), "error should contain model: {err}");
+        assert!(
+            err.contains("local"),
+            "error should contain provider: {err}"
+        );
+        assert!(
+            err.contains("my-model"),
+            "error should contain model: {err}"
+        );
     }
 
     #[test]

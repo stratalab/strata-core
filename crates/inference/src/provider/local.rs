@@ -19,10 +19,7 @@ pub(crate) struct LocalProvider {
 
 impl LocalProvider {
     /// Load from a GGUF file with an optional context size override.
-    pub fn from_gguf(
-        path: &Path,
-        ctx_size: Option<usize>,
-    ) -> Result<Self, InferenceError> {
+    pub fn from_gguf(path: &Path, ctx_size: Option<usize>) -> Result<Self, InferenceError> {
         let ctx = LlamaCppContext::load_for_generation(path, ctx_size)?;
         Ok(Self { ctx })
     }
@@ -86,8 +83,7 @@ impl LocalProvider {
         }
 
         // Sample first token
-        let mut next_token =
-            self.ctx.api.sampler_sample(sampler, self.ctx.ctx, -1);
+        let mut next_token = self.ctx.api.sampler_sample(sampler, self.ctx.ctx, -1);
 
         // 6. Decode loop
         let mut generated_ids: Vec<u32> = Vec::new();
@@ -170,20 +166,17 @@ impl LocalProvider {
                 );
             }
             if request.top_p < 1.0 {
-                self.ctx.api.sampler_chain_add(
-                    chain,
-                    self.ctx.api.sampler_init_top_p(request.top_p, 1),
-                );
+                self.ctx
+                    .api
+                    .sampler_chain_add(chain, self.ctx.api.sampler_init_top_p(request.top_p, 1));
             }
-            self.ctx.api.sampler_chain_add(
-                chain,
-                self.ctx.api.sampler_init_temp(request.temperature),
-            );
+            self.ctx
+                .api
+                .sampler_chain_add(chain, self.ctx.api.sampler_init_temp(request.temperature));
             let seed = request.seed.unwrap_or(0xFFFFFFFF) as u32;
-            self.ctx.api.sampler_chain_add(
-                chain,
-                self.ctx.api.sampler_init_dist(seed),
-            );
+            self.ctx
+                .api
+                .sampler_chain_add(chain, self.ctx.api.sampler_init_dist(seed));
         }
 
         chain
@@ -264,33 +257,24 @@ mod tests {
 
     #[test]
     fn stop_sequences_match_truncates_text() {
-        let (text, reason) = check_stop_sequences(
-            "Hello STOP world",
-            &["STOP".into()],
-            StopReason::MaxTokens,
-        );
+        let (text, reason) =
+            check_stop_sequences("Hello STOP world", &["STOP".into()], StopReason::MaxTokens);
         assert_eq!(text, "Hello ");
         assert_eq!(reason, StopReason::StopToken);
     }
 
     #[test]
     fn stop_sequences_match_at_start_returns_empty() {
-        let (text, reason) = check_stop_sequences(
-            "STOP world",
-            &["STOP".into()],
-            StopReason::MaxTokens,
-        );
+        let (text, reason) =
+            check_stop_sequences("STOP world", &["STOP".into()], StopReason::MaxTokens);
         assert_eq!(text, "");
         assert_eq!(reason, StopReason::StopToken);
     }
 
     #[test]
     fn stop_sequences_match_at_end() {
-        let (text, reason) = check_stop_sequences(
-            "Hello world\n\n",
-            &["\n\n".into()],
-            StopReason::MaxTokens,
-        );
+        let (text, reason) =
+            check_stop_sequences("Hello world\n\n", &["\n\n".into()], StopReason::MaxTokens);
         assert_eq!(text, "Hello world");
         assert_eq!(reason, StopReason::StopToken);
     }
@@ -311,8 +295,7 @@ mod tests {
 
     #[test]
     fn stop_sequences_empty_list_returns_original() {
-        let (text, reason) =
-            check_stop_sequences("Hello world", &[], StopReason::ContextLength);
+        let (text, reason) = check_stop_sequences("Hello world", &[], StopReason::ContextLength);
         assert_eq!(text, "Hello world");
         assert_eq!(reason, StopReason::ContextLength);
     }
@@ -330,8 +313,7 @@ mod tests {
 
     #[test]
     fn stop_sequences_on_empty_text() {
-        let (text, reason) =
-            check_stop_sequences("", &["STOP".into()], StopReason::MaxTokens);
+        let (text, reason) = check_stop_sequences("", &["STOP".into()], StopReason::MaxTokens);
         assert_eq!(text, "");
         assert_eq!(reason, StopReason::MaxTokens);
     }
@@ -348,11 +330,8 @@ mod tests {
     fn stop_sequences_overrides_reason_on_match() {
         // Even if original reason was ContextLength, finding a stop sequence
         // changes it to StopToken
-        let (text, reason) = check_stop_sequences(
-            "Hello STOP",
-            &["STOP".into()],
-            StopReason::ContextLength,
-        );
+        let (text, reason) =
+            check_stop_sequences("Hello STOP", &["STOP".into()], StopReason::ContextLength);
         assert_eq!(text, "Hello ");
         assert_eq!(reason, StopReason::StopToken);
     }
@@ -370,11 +349,8 @@ mod tests {
 
     #[test]
     fn stop_sequences_unicode() {
-        let (text, reason) = check_stop_sequences(
-            "Hello 世界 end",
-            &["世界".into()],
-            StopReason::MaxTokens,
-        );
+        let (text, reason) =
+            check_stop_sequences("Hello 世界 end", &["世界".into()], StopReason::MaxTokens);
         assert_eq!(text, "Hello ");
         assert_eq!(reason, StopReason::StopToken);
     }
@@ -396,11 +372,7 @@ mod tests {
 
     #[test]
     fn stop_sequences_text_equals_sequence() {
-        let (text, reason) = check_stop_sequences(
-            "STOP",
-            &["STOP".into()],
-            StopReason::MaxTokens,
-        );
+        let (text, reason) = check_stop_sequences("STOP", &["STOP".into()], StopReason::MaxTokens);
         assert_eq!(text, "");
         assert_eq!(reason, StopReason::StopToken);
     }
@@ -408,11 +380,7 @@ mod tests {
     #[test]
     fn stop_sequences_repeated_occurrences() {
         // Same sequence appears twice; should truncate at the first occurrence.
-        let (text, reason) = check_stop_sequences(
-            "aXbXc",
-            &["X".into()],
-            StopReason::MaxTokens,
-        );
+        let (text, reason) = check_stop_sequences("aXbXc", &["X".into()], StopReason::MaxTokens);
         assert_eq!(text, "a");
         assert_eq!(reason, StopReason::StopToken);
     }

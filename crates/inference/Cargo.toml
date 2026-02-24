@@ -10,7 +10,7 @@ publish = false
 description = "Inference engine for Strata — local (llama.cpp) and cloud providers"
 
 [features]
-default = []
+default = ["local"]
 local = []              # Enable local llama.cpp inference
 download = ["dep:ureq"]  # Enable model download from HuggingFace
 anthropic = ["dep:ureq", "dep:serde", "dep:serde_json"]   # Enable Anthropic (Claude) cloud provider

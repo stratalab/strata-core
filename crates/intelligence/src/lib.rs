@@ -13,8 +13,6 @@ pub mod generate;
 // Re-export key strata-inference types so that the executor depends only on
 // strata-intelligence, not directly on strata-inference.
 #[cfg(feature = "embed")]
-pub use strata_inference::{GenerateRequest, GenerateResponse, StopReason};
-#[cfg(feature = "embed")]
 pub use strata_inference::EmbeddingEngine;
 #[cfg(feature = "embed")]
 pub use strata_inference::GenerationEngine;
@@ -24,6 +22,8 @@ pub use strata_inference::InferenceError;
 pub use strata_inference::ModelRegistry;
 #[cfg(feature = "embed")]
 pub use strata_inference::ProviderKind;
+#[cfg(feature = "embed")]
+pub use strata_inference::{GenerateRequest, GenerateResponse, StopReason};
 
 // ---------------------------------------------------------------------------
 // Re-export validation tests — ensure the wiring from strata-intelligence
@@ -157,8 +157,14 @@ mod reexport_tests {
 
     #[test]
     fn provider_kind_from_str_via_reexport() {
-        assert_eq!("local".parse::<ProviderKind>().unwrap(), ProviderKind::Local);
-        assert_eq!("anthropic".parse::<ProviderKind>().unwrap(), ProviderKind::Anthropic);
+        assert_eq!(
+            "local".parse::<ProviderKind>().unwrap(),
+            ProviderKind::Local
+        );
+        assert_eq!(
+            "anthropic".parse::<ProviderKind>().unwrap(),
+            ProviderKind::Anthropic
+        );
         assert!("bad".parse::<ProviderKind>().is_err());
     }
 }

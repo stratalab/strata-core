@@ -6,6 +6,6 @@
 //!
 //! Requires the `local` feature flag. No build-time dependency on llama.cpp.
 
+pub(crate) mod context;
 pub mod dl;
 pub mod ffi;
-pub(crate) mod context;

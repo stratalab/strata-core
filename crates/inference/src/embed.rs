@@ -87,9 +87,10 @@ impl EmbeddingEngine {
     /// 5. L2-normalize the result
     /// 6. Clear KV cache for next call
     pub fn embed(&self, text: &str) -> Result<Vec<f32>, InferenceError> {
-        let ctx = self.ctx.lock().map_err(|e| {
-            InferenceError::LlamaCpp(format!("mutex poisoned: {}", e))
-        })?;
+        let ctx = self
+            .ctx
+            .lock()
+            .map_err(|e| InferenceError::LlamaCpp(format!("mutex poisoned: {}", e)))?;
 
         // 1. Tokenize
         let mut tokens = ctx.tokenize(text, true);
@@ -128,15 +129,13 @@ impl EmbeddingEngine {
         if emb_ptr.is_null() {
             ctx.clear_memory();
             return Err(InferenceError::LlamaCpp(
-                "llama_get_embeddings returned null — model may not support embeddings"
-                    .to_string(),
+                "llama_get_embeddings returned null — model may not support embeddings".to_string(),
             ));
         }
 
         // SAFETY: emb_ptr is non-null and points to n_embd floats owned by
         // llama.cpp's context, which we hold via the Mutex lock.
-        let embedding =
-            unsafe { std::slice::from_raw_parts(emb_ptr, ctx.n_embd) }.to_vec();
+        let embedding = unsafe { std::slice::from_raw_parts(emb_ptr, ctx.n_embd) }.to_vec();
 
         // 5. L2 normalize
         let normalized = l2_normalize(&embedding);
@@ -336,7 +335,11 @@ mod tests {
         for len in [0, 1, 2, 3, 10, 100, 384, 768] {
             let v: Vec<f32> = (0..len).map(|i| i as f32).collect();
             let n = l2_normalize(&v);
-            assert_eq!(n.len(), len, "output length should match input for len={len}");
+            assert_eq!(
+                n.len(),
+                len,
+                "output length should match input for len={len}"
+            );
         }
     }
 
@@ -368,7 +371,10 @@ mod tests {
         let msg = err.to_string();
         // Could be Registry (model not found locally) or LlamaCpp (libllama not found)
         assert!(
-            matches!(err, InferenceError::Registry(_) | InferenceError::LlamaCpp(_)),
+            matches!(
+                err,
+                InferenceError::Registry(_) | InferenceError::LlamaCpp(_)
+            ),
             "should be Registry or LlamaCpp error, got: {msg}"
         );
     }
@@ -392,10 +398,7 @@ mod tests {
     fn from_registry_empty_name_returns_error() {
         let result = EmbeddingEngine::from_registry("");
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            InferenceError::Registry(_)
-        ));
+        assert!(matches!(result.unwrap_err(), InferenceError::Registry(_)));
     }
 
     #[test]
@@ -515,9 +518,7 @@ mod tests {
         );
 
         // Embed the same string again — should produce identical results (deterministic)
-        let embedding_repeat = engine
-            .embed("test")
-            .expect("repeat embed should succeed");
+        let embedding_repeat = engine.embed("test").expect("repeat embed should succeed");
         for (i, (a, b)) in embedding.iter().zip(embedding_repeat.iter()).enumerate() {
             assert!(
                 (a - b).abs() < 1e-6,
