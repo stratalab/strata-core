@@ -11,8 +11,26 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: Build (${{ matrix.target }})
+  # --------------------------------------------------------------------------
+  # 1. Read pinned llama.cpp version
+  # --------------------------------------------------------------------------
+  read-version:
+    name: Read llama.cpp version
+    runs-on: ubuntu-latest
+    outputs:
+      llama_version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read LLAMA_CPP_VERSION
+        id: ver
+        run: echo "version=$(cat LLAMA_CPP_VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+  # --------------------------------------------------------------------------
+  # 2. Build libllama for all platforms
+  # --------------------------------------------------------------------------
+  build-libllama:
+    name: Build libllama (${{ matrix.target }})
+    needs: read-version
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -20,25 +38,85 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
-            archive: tar.gz
+            cmake_flags: -DGGML_NATIVE=OFF -DGGML_AVX2=ON
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-latest
-            archive: tar.gz
+            cmake_flags: -DGGML_NATIVE=OFF -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64
           - target: x86_64-apple-darwin
-            runner: macos-latest
-            archive: tar.gz
+            runner: macos-13
+            cmake_flags: -DGGML_NATIVE=OFF -DGGML_METAL=OFF
           - target: aarch64-apple-darwin
-            runner: macos-latest
-            archive: tar.gz
+            runner: macos-14
+            cmake_flags: -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
-            archive: zip
+            cmake_flags: -DGGML_NATIVE=OFF -DGGML_AVX2=ON
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout strata-inference (sibling path dependency)
-        run: git clone --depth 1 https://github.com/strata-ai-labs/strata-inference.git ../strata-inference
+      - name: Clone llama.cpp
+        run: git clone --depth 1 --branch ${{ needs.read-version.outputs.llama_version }} https://github.com/ggerganov/llama.cpp.git llama.cpp
+
+      - name: Install cross-compilation tools (aarch64-linux)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Configure CMake
+        run: >
+          cmake -S llama.cpp -B llama.cpp/build
+          -DBUILD_SHARED_LIBS=ON
+          -DCMAKE_BUILD_TYPE=Release
+          ${{ matrix.cmake_flags }}
+
+      - name: Build libllama
+        run: cmake --build llama.cpp/build --config Release --target llama
+
+      - name: Collect shared libraries
+        shell: bash
+        run: |
+          mkdir -p libllama-out
+          # Collect all shared libraries: .so, .so.* (versioned), .dylib, .dll
+          # Include both regular files and symlinks; cp dereferences symlinks
+          # so the artifact directory contains only regular files.
+          find llama.cpp/build \
+            \( -name "*.so" -o -name "*.so.*" -o -name "*.dylib" -o -name "*.dll" \) \
+            \( -type f -o -type l \) \
+            -exec cp {} libllama-out/ \;
+          echo "Collected libraries:"
+          ls -la libllama-out/
+
+      - name: Upload libllama artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libllama-${{ matrix.target }}
+          path: libllama-out/
+
+  # --------------------------------------------------------------------------
+  # 3. Build strata binary for all platforms
+  # --------------------------------------------------------------------------
+  build:
+    name: Build strata (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: x86_64-apple-darwin
+            runner: macos-13
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -56,48 +134,110 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-gcc' || '' }}
         run: cargo build --release --package strata-cli --target ${{ matrix.target }}
 
+      - name: Upload strata binary (unix)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: strata-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/strata
+
+      - name: Upload strata binary (windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: strata-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/strata.exe
+
+  # --------------------------------------------------------------------------
+  # 4. Package archives (bin/lib layout for unix, flat for windows)
+  # --------------------------------------------------------------------------
+  package:
+    name: Package (${{ matrix.target }})
+    needs: [build, build-libllama]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: README.md
+          sparse-checkout-cone-mode: false
+
       - name: Determine version
         id: version
-        shell: bash
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download strata binary
+        uses: actions/download-artifact@v4
+        with:
+          name: strata-${{ matrix.target }}
+          path: staging/bin
+
+      - name: Download libllama
+        uses: actions/download-artifact@v4
+        with:
+          name: libllama-${{ matrix.target }}
+          path: staging/lib
 
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
-        shell: bash
         run: |
+          chmod +x staging/bin/strata
+          cp README.md staging/
           ARCHIVE_NAME="strata-v${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz"
-          cd target/${{ matrix.target }}/release
-          tar czf "../../../${ARCHIVE_NAME}" strata
-          cd ../../..
+          tar czf "${ARCHIVE_NAME}" -C staging bin lib README.md
           echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> "$GITHUB_ENV"
 
       - name: Package (windows)
         if: matrix.archive == 'zip'
         shell: bash
         run: |
+          # Windows uses flat layout: strata.exe + DLLs + README.md
+          mkdir -p staging-flat
+          cp staging/bin/strata.exe staging-flat/
+          cp staging/lib/*.dll staging-flat/
+          cp README.md staging-flat/
           ARCHIVE_NAME="strata-v${{ steps.version.outputs.version }}-${{ matrix.target }}.zip"
-          cd target/${{ matrix.target }}/release
-          7z a "../../../${ARCHIVE_NAME}" strata.exe
-          cd ../../..
+          cd staging-flat
+          7z a "../${ARCHIVE_NAME}" ./*
+          cd ..
           echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> "$GITHUB_ENV"
 
-      - name: Upload artifact
+      - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          name: package-${{ matrix.target }}
           path: ${{ env.ARCHIVE_NAME }}
 
+  # --------------------------------------------------------------------------
+  # 5. Create GitHub Release
+  # --------------------------------------------------------------------------
   release:
     name: Create Release
-    needs: build
+    needs: package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      - name: Download all packaged artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: package-*
           path: artifacts
+          merge-multiple: true
 
       - name: Determine version
         id: version
@@ -106,7 +246,6 @@ jobs:
       - name: Generate checksums
         run: |
           cd artifacts
-          find . -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec mv {} . \;
           sha256sum strata-v* > checksums-sha256.txt
           cat checksums-sha256.txt
 
@@ -120,25 +259,29 @@ jobs:
             --generate-notes \
             strata-v*.tar.gz strata-v*.zip checksums-sha256.txt
 
+  # --------------------------------------------------------------------------
+  # 6. Update Homebrew Tap
+  # --------------------------------------------------------------------------
   update-homebrew:
     name: Update Homebrew Tap
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - name: Download macOS artifacts
+      - name: Download macOS and Linux artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: package-*
           path: artifacts
+          merge-multiple: true
 
       - name: Determine version
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Compute SHA256 for macOS archives
+      - name: Compute SHA256 for archives
         id: sha
         run: |
           cd artifacts
-          find . -type f -name '*.tar.gz' -exec mv {} . \;
           echo "arm64=$(sha256sum strata-v${{ steps.version.outputs.version }}-aarch64-apple-darwin.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
           echo "x86_64=$(sha256sum strata-v${{ steps.version.outputs.version }}-x86_64-apple-darwin.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
           echo "linux_x86_64=$(sha256sum strata-v${{ steps.version.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
@@ -183,7 +326,8 @@ jobs:
             end
 
             def install
-              bin.install "strata"
+              bin.install "bin/strata"
+              lib.install Dir["lib/*"]
             end
 
             test do

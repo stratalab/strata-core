@@ -1022,4 +1022,65 @@ mod tests {
         assert!(batch.pos.is_null());
         assert!(batch.logits.is_null());
     }
+
+    // --- Smoke test: load libllama and verify symbol resolution ---
+
+    #[test]
+    #[ignore]
+    fn smoke_test_load_api() {
+        let has_env = std::env::var("LLAMA_LIB_PATH").is_ok();
+        match LlamaCppApi::load() {
+            Ok(api) => {
+                // Verify model default params are sane
+                let mparams = api.model_default_params();
+                assert!(
+                    mparams.use_mmap,
+                    "model_default_params().use_mmap should be true"
+                );
+                assert_eq!(
+                    mparams.n_gpu_layers, 0,
+                    "default n_gpu_layers should be 0 (CPU-only default)"
+                );
+                assert!(
+                    !mparams.vocab_only,
+                    "default vocab_only should be false"
+                );
+
+                // Verify context default params are sane
+                let cparams = api.context_default_params();
+                assert!(
+                    cparams.n_ctx > 0,
+                    "default n_ctx should be > 0, got {}",
+                    cparams.n_ctx
+                );
+                assert!(
+                    cparams.n_batch > 0,
+                    "default n_batch should be > 0, got {}",
+                    cparams.n_batch
+                );
+
+                // Verify sampler chain default params
+                let sparams = api.sampler_chain_default_params();
+                // no_perf defaults to false in llama.cpp
+                assert!(
+                    !sparams.no_perf,
+                    "sampler_chain_default_params().no_perf should be false"
+                );
+
+                // Verify Debug impl works on a live instance
+                let dbg = format!("{:?}", api);
+                assert!(
+                    dbg.contains("LlamaCppApi"),
+                    "Debug output should contain struct name: {dbg}"
+                );
+            }
+            Err(e) => {
+                if has_env {
+                    panic!("LLAMA_LIB_PATH is set but load failed: {e}");
+                }
+                // No LLAMA_LIB_PATH → expected in CI without libllama
+                eprintln!("skipping smoke_test_load_api: {e}");
+            }
+        }
+    }
 }

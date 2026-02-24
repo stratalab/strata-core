@@ -448,4 +448,81 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<EmbeddingEngine>();
     }
+
+    // --- Smoke test: load miniLM and produce an embedding ---
+
+    #[test]
+    #[ignore]
+    fn smoke_embed_minilm() {
+        let engine = match EmbeddingEngine::from_registry("miniLM") {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("skipping smoke_embed_minilm: {e}");
+                return;
+            }
+        };
+
+        // Verify engine metadata
+        assert_eq!(engine.embedding_dim(), 384, "MiniLM should have 384 dims");
+        assert!(engine.vocab_size() > 0, "vocab_size should be > 0");
+
+        // Embed a simple string
+        let embedding = engine
+            .embed("test")
+            .expect("embed should succeed for a simple string");
+
+        // MiniLM produces 384-dimensional embeddings
+        assert_eq!(
+            embedding.len(),
+            384,
+            "expected 384 dimensions, got {}",
+            embedding.len()
+        );
+
+        // Verify L2 norm is approximately 1.0 (we normalize in embed())
+        let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-4,
+            "L2 norm should be ~1.0, got {norm}"
+        );
+
+        // Verify embedding is not all zeros (actual content was encoded)
+        assert!(
+            embedding.iter().any(|&x| x.abs() > 1e-6),
+            "embedding should not be all zeros"
+        );
+
+        // Embed a second string and verify it differs from the first
+        let embedding2 = engine
+            .embed("completely different sentence about cats")
+            .expect("second embed should succeed");
+        assert_eq!(embedding2.len(), 384);
+        let norm2: f32 = embedding2.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm2 - 1.0).abs() < 1e-4,
+            "second embedding L2 norm should be ~1.0, got {norm2}"
+        );
+
+        // Cosine similarity between different texts should be < 1.0
+        let cosine_sim: f32 = embedding
+            .iter()
+            .zip(embedding2.iter())
+            .map(|(a, b)| a * b)
+            .sum();
+        assert!(
+            cosine_sim < 0.99,
+            "different texts should produce different embeddings, cosine_sim={cosine_sim}"
+        );
+
+        // Embed the same string again — should produce identical results (deterministic)
+        let embedding_repeat = engine
+            .embed("test")
+            .expect("repeat embed should succeed");
+        for (i, (a, b)) in embedding.iter().zip(embedding_repeat.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "embedding should be deterministic, dim {i}: {a} vs {b}"
+            );
+        }
+    }
 }
