@@ -8,4 +8,6 @@
 
 pub(crate) mod context;
 pub mod dl;
+// Safe wrappers intentionally accept raw pointers (opaque FFI handles).
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub mod ffi;

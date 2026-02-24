@@ -500,7 +500,9 @@ impl VectorStore {
             // New vector: allocate VectorId from backend's per-collection counter
             let vector_id = backend.allocate_id();
             let record = match source_ref {
-                Some(sr) => VectorRecord::new_with_source(vector_id, embedding.to_vec(), metadata, sr),
+                Some(sr) => {
+                    VectorRecord::new_with_source(vector_id, embedding.to_vec(), metadata, sr)
+                }
                 None => VectorRecord::new(vector_id, embedding.to_vec(), metadata),
             };
             (vector_id, record)
@@ -2923,22 +2925,11 @@ mod tests {
 
         // Insert a vector
         store
-            .insert(
-                branch_id,
-                "default",
-                "test",
-                "doc1",
-                &[1.0, 0.0, 0.0],
-                None,
-            )
+            .insert(branch_id, "default", "test", "doc1", &[1.0, 0.0, 0.0], None)
             .unwrap();
 
         // Read the raw KV record and verify the embedding is present
-        let kv_key = Key::new_vector(
-            store.namespace_for(branch_id, "default"),
-            "test",
-            "doc1",
-        );
+        let kv_key = Key::new_vector(store.namespace_for(branch_id, "default"), "test", "doc1");
         let record = store.get_vector_record_by_key(&kv_key).unwrap().unwrap();
         assert_eq!(
             record.embedding,
@@ -2948,14 +2939,7 @@ mod tests {
 
         // Upsert with new embedding and verify KV record is updated
         store
-            .insert(
-                branch_id,
-                "default",
-                "test",
-                "doc1",
-                &[0.0, 1.0, 0.0],
-                None,
-            )
+            .insert(branch_id, "default", "test", "doc1", &[0.0, 1.0, 0.0], None)
             .unwrap();
 
         let record = store.get_vector_record_by_key(&kv_key).unwrap().unwrap();
