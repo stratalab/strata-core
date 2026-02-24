@@ -181,6 +181,9 @@ impl Strata {
             opts.embed_batch_size
                 .unwrap_or(cfg.embed_batch_size.unwrap_or(512)),
         );
+        if let Some(ref model) = opts.embed_model {
+            cfg.embed_model = model.clone();
+        }
 
         let db = if opts.multi_process {
             let mode = cfg.durability_mode().map_err(|e| Error::Internal {

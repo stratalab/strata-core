@@ -847,6 +847,11 @@ impl Database {
         self.config.read().embed_batch_size.unwrap_or(64)
     }
 
+    /// Get the configured embedding model name (reads config).
+    pub fn embed_model(&self) -> String {
+        self.config.read().embed_model.clone()
+    }
+
     /// Path to the model directory for MiniLM-L6-v2.
     ///
     /// Checks in order:

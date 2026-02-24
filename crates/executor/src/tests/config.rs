@@ -480,6 +480,7 @@ fn configure_set_unknown_key_error_lists_valid_keys() {
         "anthropic_api_key",
         "openai_api_key",
         "google_api_key",
+        "embed_model",
     ] {
         assert!(
             msg.contains(expected),
@@ -505,6 +506,7 @@ fn configure_get_unknown_key_error_lists_valid_keys() {
         "anthropic_api_key",
         "openai_api_key",
         "google_api_key",
+        "embed_model",
     ] {
         assert!(
             msg.contains(expected),
@@ -513,4 +515,236 @@ fn configure_get_unknown_key_error_lists_valid_keys() {
             msg
         );
     }
+}
+
+// =============================================================================
+// Embed model configuration
+// =============================================================================
+
+#[test]
+fn configure_get_embed_model_default_is_minilm() {
+    let executor = create_test_executor();
+
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "embed_model".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(Some("miniLM".into())));
+}
+
+#[test]
+fn configure_set_and_get_embed_model() {
+    let executor = create_test_executor();
+
+    executor
+        .execute(Command::ConfigureSet {
+            key: "embed_model".into(),
+            value: "nomic-embed".into(),
+        })
+        .unwrap();
+
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "embed_model".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(Some("nomic-embed".into())));
+}
+
+#[test]
+fn configure_set_embed_model_all_valid_models() {
+    let executor = create_test_executor();
+
+    for model in ["miniLM", "nomic-embed", "bge-m3", "gemma-embed"] {
+        let result = executor.execute(Command::ConfigureSet {
+            key: "embed_model".into(),
+            value: model.into(),
+        });
+        assert!(
+            result.is_ok(),
+            "Embed model {:?} should be accepted, got: {:?}",
+            model,
+            result
+        );
+    }
+}
+
+#[test]
+fn configure_set_embed_model_normalizes_case() {
+    let executor = create_test_executor();
+
+    // "MINILM" → stored as canonical "miniLM"
+    executor
+        .execute(Command::ConfigureSet {
+            key: "embed_model".into(),
+            value: "MINILM".into(),
+        })
+        .unwrap();
+
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "embed_model".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        result,
+        Output::ConfigValue(Some("miniLM".into())),
+        "Should normalize to canonical casing"
+    );
+}
+
+#[test]
+fn configure_set_embed_model_mixed_case_accepted() {
+    let executor = create_test_executor();
+
+    // Mixed case should be accepted and normalized
+    for (input, expected) in [
+        ("MiniLM", "miniLM"),
+        ("Nomic-Embed", "nomic-embed"),
+        ("BGE-M3", "bge-m3"),
+        ("Gemma-Embed", "gemma-embed"),
+    ] {
+        executor
+            .execute(Command::ConfigureSet {
+                key: "embed_model".into(),
+                value: input.into(),
+            })
+            .unwrap();
+
+        let result = executor
+            .execute(Command::ConfigureGetKey {
+                key: "embed_model".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            result,
+            Output::ConfigValue(Some(expected.into())),
+            "Input {:?} should normalize to {:?}",
+            input,
+            expected
+        );
+    }
+}
+
+#[test]
+fn configure_set_embed_model_invalid_returns_error() {
+    let executor = create_test_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "embed_model".into(),
+        value: "unknown-model".into(),
+    });
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("Unknown embed_model"),
+        "Error should mention unknown embed_model: {}",
+        msg
+    );
+    assert!(
+        msg.contains("unknown-model"),
+        "Error should mention the attempted value: {}",
+        msg
+    );
+}
+
+#[test]
+fn configure_set_embed_model_empty_returns_error() {
+    let executor = create_test_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "embed_model".into(),
+        value: "".into(),
+    });
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("embed_model cannot be empty"),
+        "Error: {}",
+        msg
+    );
+}
+
+#[test]
+fn configure_set_embed_model_whitespace_only_returns_error() {
+    let executor = create_test_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "embed_model".into(),
+        value: "   ".into(),
+    });
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("embed_model cannot be empty"),
+        "Error: {}",
+        msg
+    );
+}
+
+#[test]
+fn configure_set_embed_model_does_not_affect_other_keys() {
+    let executor = create_test_executor();
+
+    executor
+        .execute(Command::ConfigureSet {
+            key: "embed_model".into(),
+            value: "bge-m3".into(),
+        })
+        .unwrap();
+
+    // Provider should remain "local" (default)
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "provider".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(Some("local".into())));
+}
+
+#[test]
+fn configure_set_embed_model_visible_in_full_config() {
+    let executor = create_test_executor();
+
+    executor
+        .execute(Command::ConfigureSet {
+            key: "embed_model".into(),
+            value: "nomic-embed".into(),
+        })
+        .unwrap();
+
+    let result = executor.execute(Command::ConfigGet).unwrap();
+    match result {
+        Output::Config(cfg) => {
+            assert_eq!(cfg.embed_model, "nomic-embed");
+        }
+        _ => panic!("Expected Config output"),
+    }
+}
+
+#[test]
+fn configure_set_embed_model_overwrite() {
+    let executor = create_test_executor();
+
+    executor
+        .execute(Command::ConfigureSet {
+            key: "embed_model".into(),
+            value: "nomic-embed".into(),
+        })
+        .unwrap();
+
+    executor
+        .execute(Command::ConfigureSet {
+            key: "embed_model".into(),
+            value: "bge-m3".into(),
+        })
+        .unwrap();
+
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "embed_model".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(Some("bge-m3".into())));
 }

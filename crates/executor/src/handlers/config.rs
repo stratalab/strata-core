@@ -40,6 +40,7 @@ const KNOWN_KEYS: &[&str] = &[
     "anthropic_api_key",
     "openai_api_key",
     "google_api_key",
+    "embed_model",
 ];
 
 /// Handle ConfigureSet command: set a named configuration key.
@@ -77,12 +78,49 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
         }
     }
 
+    // Validate embed_model name and normalize to canonical casing.
+    let mut canonical_embed_model = None;
+    if key_lower == "embed_model" {
+        let v = value.trim().to_ascii_lowercase();
+        if v.is_empty() {
+            return Err(Error::InvalidInput {
+                reason: "embed_model cannot be empty. Valid models: miniLM, nomic-embed, bge-m3, gemma-embed".to_string(),
+            });
+        }
+        // Map to canonical name (matching the inference registry catalog).
+        let canonical = match v.as_str() {
+            "minilm" => "miniLM",
+            "nomic-embed" => "nomic-embed",
+            "bge-m3" => "bge-m3",
+            "gemma-embed" => "gemma-embed",
+            _ => {
+                return Err(Error::InvalidInput {
+                    reason: format!(
+                        "Unknown embed_model: {:?}. Valid models: miniLM, nomic-embed, bge-m3, gemma-embed",
+                        value.trim()
+                    ),
+                });
+            }
+        };
+        canonical_embed_model = Some(canonical.to_string());
+        tracing::warn!(
+            target: "strata::config",
+            new_model = %canonical,
+            "embed_model changed; takes effect on next database open. Existing data must be re-indexed."
+        );
+    }
+
     p.db.update_config(|cfg| match key_lower.as_str() {
         "provider" => cfg.provider = value.clone(),
         "default_model" => cfg.default_model = Some(value.clone()),
         "anthropic_api_key" => cfg.anthropic_api_key = Some(value.clone()),
         "openai_api_key" => cfg.openai_api_key = Some(value.clone()),
         "google_api_key" => cfg.google_api_key = Some(value.clone()),
+        "embed_model" => {
+            cfg.embed_model = canonical_embed_model
+                .clone()
+                .unwrap_or_else(|| value.clone())
+        }
         _ => unreachable!(),
     })
     .map_err(crate::Error::from)?;
@@ -111,6 +149,7 @@ pub fn configure_get_key(p: &Arc<Primitives>, key: String) -> Result<Output> {
         "anthropic_api_key" => cfg.anthropic_api_key.clone(),
         "openai_api_key" => cfg.openai_api_key.clone(),
         "google_api_key" => cfg.google_api_key.clone(),
+        "embed_model" => Some(cfg.embed_model.clone()),
         _ => unreachable!(),
     };
 

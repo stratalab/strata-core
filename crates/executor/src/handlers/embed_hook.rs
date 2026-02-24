@@ -231,7 +231,8 @@ pub fn flush_embed_buffer(p: &Arc<Primitives>) {
         }
     };
 
-    let engine = match embed_state.get_or_load(&model_dir) {
+    let model_name = p.db.embed_model();
+    let engine = match embed_state.get_or_load(&model_dir, &model_name) {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!(target: "strata::embed", error = %e, "Failed to load embedding model");
@@ -855,7 +856,13 @@ fn ensure_shadow_collection(
         return;
     }
 
-    let config = VectorConfig::for_minilm();
+    // Use dynamic dimension from the loaded embedding engine, falling back to 384 (miniLM).
+    let dim =
+        p.db.extension::<strata_intelligence::embed::EmbedModelState>()
+            .ok()
+            .and_then(|s| s.embedding_dim())
+            .unwrap_or(384);
+    let config = VectorConfig::for_embedding(dim);
 
     match p.vector.create_system_collection(branch_id, name, config) {
         Ok(_) => {

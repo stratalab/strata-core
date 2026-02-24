@@ -86,6 +86,11 @@ pub struct StrataConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bm25_b: Option<f32>,
 
+    /// Embedding model name. Default: "miniLM".
+    /// Changing after data is indexed requires re-indexing.
+    #[serde(default = "default_embed_model")]
+    pub embed_model: String,
+
     // -- Generation provider configuration --
     /// Default generation provider: "local", "anthropic", "openai", or "google".
     #[serde(default = "default_provider")]
@@ -108,6 +113,10 @@ fn default_durability_str() -> String {
     "standard".to_string()
 }
 
+fn default_embed_model() -> String {
+    "miniLM".to_string()
+}
+
 fn default_provider() -> String {
     "local".to_string()
 }
@@ -121,6 +130,7 @@ impl Default for StrataConfig {
             embed_batch_size: None,
             bm25_k1: None,
             bm25_b: None,
+            embed_model: default_embed_model(),
             provider: default_provider(),
             default_model: None,
             anthropic_api_key: None,
@@ -181,6 +191,11 @@ auto_embed = false
 # length normalization. Lucene defaults are k1=1.2, b=0.75.
 # bm25_k1 = 0.9
 # bm25_b = 0.4
+
+# Embedding model: "miniLM" (384d, default), "nomic-embed" (768d),
+# "bge-m3" (1024d), or "gemma-embed" (768d).
+# Changing after data is indexed requires re-indexing.
+# embed_model = "miniLM"
 
 # Model configuration for query expansion and re-ranking.
 # Uncomment and configure to enable intelligent search features.
@@ -555,6 +570,66 @@ auto_embed = false
         assert!(!toml_str.contains("google_api_key"));
         // provider should always be present (not Option)
         assert!(toml_str.contains("provider"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Embed model config
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn default_embed_model_is_minilm() {
+        let config = StrataConfig::default();
+        assert_eq!(config.embed_model, "miniLM");
+    }
+
+    #[test]
+    fn embed_model_backward_compat() {
+        // Old config files without embed_model should parse and default to "miniLM"
+        let old_toml = r#"
+durability = "standard"
+auto_embed = true
+"#;
+        let config: StrataConfig = toml::from_str(old_toml).unwrap();
+        assert_eq!(config.embed_model, "miniLM");
+    }
+
+    #[test]
+    fn embed_model_round_trip() {
+        let config = StrataConfig {
+            embed_model: "nomic-embed".to_string(),
+            ..StrataConfig::default()
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: StrataConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.embed_model, "nomic-embed");
+    }
+
+    #[test]
+    fn embed_model_persists_to_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+
+        let config = StrataConfig {
+            embed_model: "bge-m3".to_string(),
+            ..StrataConfig::default()
+        };
+        config.write_to_file(&path).unwrap();
+
+        let loaded = StrataConfig::from_file(&path).unwrap();
+        assert_eq!(loaded.embed_model, "bge-m3");
+    }
+
+    #[test]
+    fn embed_model_always_serialized() {
+        // embed_model is a String (not Option), so it's always in TOML output
+        let config = StrataConfig::default();
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        assert!(
+            toml_str.contains("embed_model"),
+            "embed_model should always be serialized: {}",
+            toml_str
+        );
+        assert!(toml_str.contains("miniLM"));
     }
 
     #[test]
