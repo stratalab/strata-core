@@ -128,7 +128,7 @@ pub fn download_hf_file_with_size(
     // Validate content-length against expected size from catalog (if both known)
     if total_bytes > 0 && expected_size > 0 {
         let ratio = total_bytes as f64 / expected_size as f64;
-        if ratio < 0.5 || ratio > 2.0 {
+        if !(0.5..=2.0).contains(&ratio) {
             return Err(InferenceError::Registry(format!(
                 "Unexpected file size: server reports {} bytes, catalog expects {} bytes",
                 total_bytes, expected_size
