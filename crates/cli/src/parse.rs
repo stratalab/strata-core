@@ -1028,6 +1028,9 @@ fn parse_generate(matches: &ArgMatches) -> Result<CliAction, String> {
         .map(|s| s.parse::<u64>())
         .transpose()
         .map_err(|e| format!("Invalid seed: {}", e))?;
+    let stop_sequences: Option<Vec<String>> = matches
+        .get_many::<String>("stop")
+        .map(|vals| vals.cloned().collect());
     Ok(CliAction::Execute(Command::Generate {
         model,
         prompt,
@@ -1037,6 +1040,7 @@ fn parse_generate(matches: &ArgMatches) -> Result<CliAction, String> {
         top_p,
         seed,
         stop_tokens: None,
+        stop_sequences,
     }))
 }
 

@@ -922,6 +922,7 @@ impl Executor {
                 top_p,
                 seed,
                 stop_tokens,
+                stop_sequences,
             } => crate::handlers::generate::generate(
                 &self.primitives,
                 model,
@@ -932,6 +933,7 @@ impl Executor {
                 top_p,
                 seed,
                 stop_tokens,
+                stop_sequences,
             ),
             Command::Tokenize {
                 model,

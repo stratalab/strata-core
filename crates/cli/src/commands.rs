@@ -843,6 +843,12 @@ fn build_generate() -> Command {
                 .long("seed")
                 .help("Random seed for reproducibility"),
         )
+        .arg(
+            Arg::new("stop")
+                .long("stop")
+                .num_args(1..)
+                .help("Stop sequences (text strings that stop generation)"),
+        )
 }
 
 // =========================================================================
