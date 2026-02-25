@@ -93,8 +93,44 @@ impl Strata {
     }
 
     // =========================================================================
-    // Configuration (4)
+    // Configuration (6)
     // =========================================================================
+
+    /// Set a configuration key.
+    ///
+    /// All 15 keys are supported: `provider`, `default_model`,
+    /// `anthropic_api_key`, `openai_api_key`, `google_api_key`, `embed_model`,
+    /// `durability`, `auto_embed`, `bm25_k1`, `bm25_b`, `embed_batch_size`,
+    /// `model_endpoint`, `model_name`, `model_api_key`, `model_timeout_ms`.
+    ///
+    /// Values are validated at the handler level.  Changes are persisted to
+    /// `strata.toml` for disk-backed databases.
+    pub fn config_set(&self, key: &str, value: &str) -> Result<()> {
+        match self.executor.execute(Command::ConfigureSet {
+            key: key.to_string(),
+            value: value.to_string(),
+        })? {
+            Output::Unit => Ok(()),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for ConfigureSet".into(),
+            }),
+        }
+    }
+
+    /// Get a configuration value by key.
+    ///
+    /// Returns `Some(value)` for keys that are set, or `None` for optional
+    /// keys that have no value (e.g. `default_model` when unset).
+    pub fn config_get(&self, key: &str) -> Result<Option<String>> {
+        match self.executor.execute(Command::ConfigureGetKey {
+            key: key.to_string(),
+        })? {
+            Output::ConfigValue(v) => Ok(v),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for ConfigureGetKey".into(),
+            }),
+        }
+    }
 
     /// Get the current database configuration.
     ///
