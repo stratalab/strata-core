@@ -863,6 +863,9 @@ pub enum Command {
         /// Stop generation when any of these token IDs are produced.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_tokens: Option<Vec<u32>>,
+        /// Stop generation when any of these text sequences are produced.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_sequences: Option<Vec<String>>,
     },
 
     /// Tokenize text into token IDs using a model's tokenizer.

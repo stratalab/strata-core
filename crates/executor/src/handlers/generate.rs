@@ -18,6 +18,7 @@ pub fn generate(
     top_p: Option<f32>,
     seed: Option<u64>,
     stop_tokens: Option<Vec<u32>>,
+    stop_sequences: Option<Vec<String>>,
 ) -> Result<Output> {
     use crate::types::GenerationResult;
     use strata_intelligence::generate::GenerateModelState;
@@ -98,7 +99,7 @@ pub fn generate(
         top_k: top_k.unwrap_or(0),
         top_p: top_p.unwrap_or(1.0),
         seed,
-        stop_sequences: vec![], // TODO(#1244): Wire from Command::Generate when added
+        stop_sequences: stop_sequences.unwrap_or_default(),
         stop_tokens: stop_tokens.unwrap_or_default(),
     };
 
@@ -223,6 +224,7 @@ pub fn generate(
     _top_p: Option<f32>,
     _seed: Option<u64>,
     _stop_tokens: Option<Vec<u32>>,
+    _stop_sequences: Option<Vec<String>>,
 ) -> Result<Output> {
     Err(Error::Internal {
         reason: "Generation not available: compile with --features embed".to_string(),
