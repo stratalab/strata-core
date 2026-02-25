@@ -1077,9 +1077,7 @@ mod tests {
         let branch_id = BranchId::new();
 
         // Database::open enables the index
-        let index = db
-            .extension::<crate::search::InvertedIndex>()
-            .unwrap();
+        let index = db.extension::<crate::search::InvertedIndex>().unwrap();
         assert!(index.is_enabled());
 
         // set() indexes "{name} {json_value}" into the inverted index.
