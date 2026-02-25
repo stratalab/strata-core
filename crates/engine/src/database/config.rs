@@ -74,7 +74,10 @@ pub struct StrataConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelConfig>,
     /// Embedding batch size for auto-embed. Default: 512.
-    #[serde(default = "default_embed_batch_size", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default = "default_embed_batch_size",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub embed_batch_size: Option<usize>,
     /// BM25 k1 parameter (term frequency saturation).
     /// Default: 0.9 (Anserini/Pyserini BEIR standard).

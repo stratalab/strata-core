@@ -137,10 +137,11 @@ impl Strata {
             .map_err(|e| Error::Internal {
                 reason: format!("Failed to write default config: {}", e),
             })?;
-        let cfg = strata_engine::database::config::StrataConfig::from_file(&config_path)
-            .map_err(|e| Error::Internal {
+        let cfg = strata_engine::database::config::StrataConfig::from_file(&config_path).map_err(
+            |e| Error::Internal {
                 reason: format!("Failed to read config: {}", e),
-            })?;
+            },
+        )?;
 
         let db = if opts.multi_process {
             let mode = cfg.durability_mode().map_err(|e| Error::Internal {

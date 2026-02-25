@@ -813,7 +813,11 @@ fn configure_set_auto_embed_invalid_value_rejected() {
     });
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("true") && msg.contains("false"), "Error: {}", msg);
+    assert!(
+        msg.contains("true") && msg.contains("false"),
+        "Error: {}",
+        msg
+    );
 }
 
 // =============================================================================
@@ -1230,7 +1234,12 @@ fn configure_set_model_timeout_ms_not_a_number_rejected() {
 fn configure_get_model_fields_none_when_no_model() {
     let executor = create_test_executor();
 
-    for key in ["model_endpoint", "model_name", "model_api_key", "model_timeout_ms"] {
+    for key in [
+        "model_endpoint",
+        "model_name",
+        "model_api_key",
+        "model_timeout_ms",
+    ] {
         let result = executor
             .execute(Command::ConfigureGetKey { key: key.into() })
             .unwrap();

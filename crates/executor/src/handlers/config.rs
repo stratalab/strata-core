@@ -148,7 +148,10 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
     // Validate bm25_k1 (f32, finite, > 0)
     if key_lower == "bm25_k1" {
         let v: f32 = value.trim().parse().map_err(|_| Error::InvalidInput {
-            reason: format!("Invalid bm25_k1 value: {:?}. Expected a positive number", value.trim()),
+            reason: format!(
+                "Invalid bm25_k1 value: {:?}. Expected a positive number",
+                value.trim()
+            ),
         })?;
         if !v.is_finite() || v <= 0.0 {
             return Err(Error::InvalidInput {
@@ -160,7 +163,10 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
     // Validate bm25_b (f32, finite, 0..=1)
     if key_lower == "bm25_b" {
         let v: f32 = value.trim().parse().map_err(|_| Error::InvalidInput {
-            reason: format!("Invalid bm25_b value: {:?}. Expected a number between 0 and 1", value.trim()),
+            reason: format!(
+                "Invalid bm25_b value: {:?}. Expected a number between 0 and 1",
+                value.trim()
+            ),
         })?;
         if !v.is_finite() || !(0.0..=1.0).contains(&v) {
             return Err(Error::InvalidInput {
@@ -172,7 +178,10 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
     // Validate embed_batch_size (usize, > 0)
     if key_lower == "embed_batch_size" {
         let v: usize = value.trim().parse().map_err(|_| Error::InvalidInput {
-            reason: format!("Invalid embed_batch_size value: {:?}. Expected a positive integer", value.trim()),
+            reason: format!(
+                "Invalid embed_batch_size value: {:?}. Expected a positive integer",
+                value.trim()
+            ),
         })?;
         if v == 0 {
             return Err(Error::InvalidInput {
@@ -184,7 +193,10 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
     // Validate model_timeout_ms (u64)
     if key_lower == "model_timeout_ms" {
         let _: u64 = value.trim().parse().map_err(|_| Error::InvalidInput {
-            reason: format!("Invalid model_timeout_ms value: {:?}. Expected a positive integer", value.trim()),
+            reason: format!(
+                "Invalid model_timeout_ms value: {:?}. Expected a positive integer",
+                value.trim()
+            ),
         })?;
     }
 
@@ -210,14 +222,14 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
 
     if use_model_config {
         p.db.update_config(|cfg| {
-            let model = cfg.model.get_or_insert_with(|| {
-                strata_engine::database::config::ModelConfig {
-                    endpoint: String::new(),
-                    model: String::new(),
-                    api_key: None,
-                    timeout_ms: 5000,
-                }
-            });
+            let model =
+                cfg.model
+                    .get_or_insert_with(|| strata_engine::database::config::ModelConfig {
+                        endpoint: String::new(),
+                        model: String::new(),
+                        api_key: None,
+                        timeout_ms: 5000,
+                    });
             match key_lower.as_str() {
                 "model_endpoint" => model.endpoint = value.clone(),
                 "model_name" => model.model = value.clone(),

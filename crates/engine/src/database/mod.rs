@@ -922,10 +922,7 @@ impl Database {
     /// Unlike [`update_config`](Self::update_config), this method allows the
     /// durability field to be changed. The new value is persisted to
     /// `strata.toml` but only takes effect on the next database open.
-    pub fn persist_config_deferred<F: FnOnce(&mut StrataConfig)>(
-        &self,
-        f: F,
-    ) -> StrataResult<()> {
+    pub fn persist_config_deferred<F: FnOnce(&mut StrataConfig)>(&self, f: F) -> StrataResult<()> {
         let mut guard = self.config.write();
         f(&mut guard);
         if self.persistence_mode == PersistenceMode::Disk && !self.data_dir.as_os_str().is_empty() {
