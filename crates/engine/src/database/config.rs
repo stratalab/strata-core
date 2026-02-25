@@ -64,7 +64,7 @@ fn default_timeout_ms() -> u64 {
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StrataConfig {
-    /// Durability mode: `"standard"` or `"always"`.
+    /// Durability mode: `"standard"`, `"always"`, or `"cache"`.
     #[serde(default = "default_durability_str")]
     pub durability: String,
     /// Enable automatic text embedding for semantic search.
@@ -73,9 +73,8 @@ pub struct StrataConfig {
     /// Optional model configuration for query expansion and re-ranking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelConfig>,
-    /// Embedding batch size for auto-embed.
-    /// When opened via `OpenOptions`, defaults to 512.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Embedding batch size for auto-embed. Default: 512.
+    #[serde(default = "default_embed_batch_size", skip_serializing_if = "Option::is_none")]
     pub embed_batch_size: Option<usize>,
     /// BM25 k1 parameter (term frequency saturation).
     /// Default: 0.9 (Anserini/Pyserini BEIR standard).
@@ -113,6 +112,10 @@ fn default_durability_str() -> String {
     "standard".to_string()
 }
 
+fn default_embed_batch_size() -> Option<usize> {
+    Some(512)
+}
+
 fn default_embed_model() -> String {
     "miniLM".to_string()
 }
@@ -127,7 +130,7 @@ impl Default for StrataConfig {
             durability: default_durability_str(),
             auto_embed: false,
             model: None,
-            embed_batch_size: None,
+            embed_batch_size: Some(512),
             bm25_k1: None,
             bm25_b: None,
             embed_model: default_embed_model(),
@@ -157,13 +160,14 @@ impl StrataConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if the string is not `"standard"` or `"always"`.
+    /// Returns an error if the string is not `"standard"`, `"always"`, or `"cache"`.
     pub fn durability_mode(&self) -> StrataResult<DurabilityMode> {
         match self.durability.as_str() {
             "standard" => Ok(DurabilityMode::standard_default()),
             "always" => Ok(DurabilityMode::Always),
+            "cache" => Ok(DurabilityMode::Cache),
             other => Err(StrataError::invalid_input(format!(
-                "Invalid durability mode '{}' in strata.toml. Expected \"standard\" or \"always\".",
+                "Invalid durability mode '{}' in strata.toml. Expected \"standard\", \"always\", or \"cache\".",
                 other
             ))),
         }
@@ -173,16 +177,17 @@ impl StrataConfig {
     pub fn default_toml() -> &'static str {
         r#"# Strata database configuration
 #
-# Durability mode: "standard" (default) or "always"
+# Durability mode: "standard" (default), "always", or "cache"
 #   "standard" = periodic fsync (~100ms), may lose last interval on crash
 #   "always"   = fsync every commit, zero data loss
+#   "cache"    = no fsync, all data lost on crash (fastest)
 durability = "standard"
 
 # Auto-embed: automatically generate embeddings for text data (default: false)
 # Requires the "embed" feature to be compiled in.
 auto_embed = false
 
-# Embedding batch size for auto-embed (default: 512 via OpenOptions).
+# Embedding batch size for auto-embed (default: 512).
 # Increase for bulk ingestion, decrease for interactive use.
 # embed_batch_size = 512
 
@@ -649,5 +654,70 @@ auto_embed = true
         assert_eq!(loaded.provider, "google");
         assert_eq!(loaded.default_model.as_deref(), Some("gemini-pro"));
         assert_eq!(loaded.google_api_key.as_deref(), Some("AIza-test"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Cache durability mode
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_cache_durability() {
+        let config: StrataConfig = toml::from_str("durability = \"cache\"").unwrap();
+        assert_eq!(config.durability_mode().unwrap(), DurabilityMode::Cache);
+    }
+
+    #[test]
+    fn cache_durability_round_trip() {
+        let config = StrataConfig {
+            durability: "cache".to_string(),
+            ..StrataConfig::default()
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: StrataConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.durability, "cache");
+        assert_eq!(parsed.durability_mode().unwrap(), DurabilityMode::Cache);
+    }
+
+    // -----------------------------------------------------------------------
+    // embed_batch_size default
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn default_embed_batch_size_is_512() {
+        let config = StrataConfig::default();
+        assert_eq!(config.embed_batch_size, Some(512));
+    }
+
+    #[test]
+    fn embed_batch_size_backward_compat_missing_field() {
+        // Old config files without embed_batch_size should default to Some(512)
+        let old_toml = r#"
+durability = "standard"
+auto_embed = false
+"#;
+        let config: StrataConfig = toml::from_str(old_toml).unwrap();
+        assert_eq!(config.embed_batch_size, Some(512));
+    }
+
+    #[test]
+    fn embed_batch_size_explicit_override() {
+        let toml_str = "embed_batch_size = 256\n";
+        let config: StrataConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.embed_batch_size, Some(256));
+    }
+
+    #[test]
+    fn embed_batch_size_persists_to_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+
+        let config = StrataConfig {
+            embed_batch_size: Some(1024),
+            ..StrataConfig::default()
+        };
+        config.write_to_file(&path).unwrap();
+
+        let loaded = StrataConfig::from_file(&path).unwrap();
+        assert_eq!(loaded.embed_batch_size, Some(1024));
     }
 }

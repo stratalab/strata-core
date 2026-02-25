@@ -55,7 +55,7 @@ pub use strata_engine::branch_ops::{
 use std::path::Path;
 use std::sync::Arc;
 
-use strata_engine::{Database, ModelConfig};
+use strata_engine::Database;
 use strata_security::{AccessMode, OpenOptions};
 
 use std::sync::Once;
@@ -137,64 +137,15 @@ impl Strata {
             .map_err(|e| Error::Internal {
                 reason: format!("Failed to write default config: {}", e),
             })?;
-        let mut cfg = strata_engine::database::config::StrataConfig::from_file(&config_path)
+        let cfg = strata_engine::database::config::StrataConfig::from_file(&config_path)
             .map_err(|e| Error::Internal {
                 reason: format!("Failed to read config: {}", e),
             })?;
-
-        // Merge OpenOptions overrides into config
-        if let Some(ref dur) = opts.durability {
-            cfg.durability = dur.clone();
-        }
-        if let Some(enabled) = opts.auto_embed {
-            cfg.auto_embed = enabled;
-        }
-        if let Some(ref endpoint) = opts.model_endpoint {
-            let model = cfg.model.get_or_insert_with(|| ModelConfig {
-                endpoint: String::new(),
-                model: String::new(),
-                api_key: None,
-                timeout_ms: 5000,
-            });
-            model.endpoint = endpoint.clone();
-        }
-        if let Some(ref name) = opts.model_name {
-            let model = cfg.model.get_or_insert_with(|| ModelConfig {
-                endpoint: String::new(),
-                model: String::new(),
-                api_key: None,
-                timeout_ms: 5000,
-            });
-            model.model = name.clone();
-        }
-        if let Some(ref key) = opts.model_api_key {
-            if let Some(ref mut model) = cfg.model {
-                model.api_key = Some(key.clone());
-            }
-        }
-        if let Some(ms) = opts.model_timeout_ms {
-            if let Some(ref mut model) = cfg.model {
-                model.timeout_ms = ms;
-            }
-        }
-        cfg.embed_batch_size = Some(
-            opts.embed_batch_size
-                .unwrap_or(cfg.embed_batch_size.unwrap_or(512)),
-        );
-        if let Some(ref model) = opts.embed_model {
-            cfg.embed_model = model.clone();
-        }
 
         let db = if opts.multi_process {
             let mode = cfg.durability_mode().map_err(|e| Error::Internal {
                 reason: format!("Failed to parse durability mode: {}", e),
             })?;
-            // Write config to strata.toml so restarts pick it up
-            let config_path = data_dir.join(strata_engine::database::config::CONFIG_FILE_NAME);
-            cfg.write_to_file(&config_path)
-                .map_err(|e| Error::Internal {
-                    reason: format!("Failed to write config: {}", e),
-                })?;
             Database::open_multi_process(&data_dir, mode, cfg).map_err(|e| Error::Internal {
                 reason: format!("Failed to open database (multi-process): {}", e),
             })?
