@@ -664,6 +664,100 @@ impl Database {
         &self.storage
     }
 
+    /// Direct single-key read bypassing the full transaction machinery.
+    ///
+    /// Returns the latest committed value without snapshot creation,
+    /// pool acquire/release, or coordinator bookkeeping.
+    /// Safe for single-key reads where multi-key consistency isn't needed.
+    pub(crate) fn get_direct(&self, key: &Key) -> Option<VersionedValue> {
+        self.storage.get_direct(key)
+    }
+
+    /// Direct single-key blind write bypassing the full transaction machinery.
+    ///
+    /// Allocates a version, optionally writes to WAL, and applies directly
+    /// to storage. No snapshot, no validation, no pool acquire/release.
+    ///
+    /// Safe for single-key puts where snapshot isolation isn't needed
+    /// (blind writes with no read-before-write).
+    ///
+    /// Falls back to the full transaction path in multi-process mode,
+    /// which requires coordinated version allocation via the WAL file lock.
+    pub(crate) fn put_direct(
+        &self,
+        key: Key,
+        value: strata_core::value::Value,
+    ) -> StrataResult<u64> {
+        self.check_accepting()?;
+
+        // Multi-process mode requires coordinated version allocation;
+        // fall back to the full transaction path.
+        if self.multi_process {
+            use strata_core::value::Value;
+            let branch_id = key.namespace.branch_id;
+            let val: Value = value;
+            let ((), version) =
+                self.transaction_with_version(branch_id, |txn| txn.put(key, val))?;
+            return Ok(version);
+        }
+
+        self.coordinator.record_start();
+
+        let commit_version = self.coordinator.allocate_commit_version();
+
+        // WAL write (if needed for durability)
+        if self.durability_mode.requires_wal() {
+            match self.wal_writer.as_ref() {
+                Some(wal_arc) => {
+                    use strata_concurrency::TransactionPayload;
+                    use strata_durability::format::WalRecord;
+                    use strata_durability::now_micros;
+
+                    let txn_id = self.coordinator.next_txn_id();
+                    let payload = TransactionPayload {
+                        version: commit_version,
+                        puts: vec![(key.clone(), value.clone())],
+                        deletes: vec![],
+                    };
+                    let record = WalRecord::new(
+                        txn_id,
+                        *key.namespace.branch_id.as_bytes(),
+                        now_micros(),
+                        payload.to_bytes(),
+                    );
+
+                    let mut wal = wal_arc.lock();
+                    if let Err(e) = wal.append(&record) {
+                        self.coordinator.record_abort();
+                        return Err(StrataError::storage(format!(
+                            "WAL write failed in put_direct: {}",
+                            e
+                        )));
+                    }
+                }
+                None => {
+                    self.coordinator.record_abort();
+                    return Err(StrataError::storage(
+                        "WAL required by durability mode but writer is unavailable".to_string(),
+                    ));
+                }
+            }
+        }
+
+        // Apply directly to storage
+        use strata_core::traits::Storage;
+        if let Err(e) = self
+            .storage
+            .put_with_version(key, value, commit_version, None)
+        {
+            self.coordinator.record_abort();
+            return Err(e);
+        }
+
+        self.coordinator.record_commit();
+        Ok(commit_version)
+    }
+
     /// Get version history for a key directly from storage.
     ///
     /// History reads bypass the transaction layer because they are
