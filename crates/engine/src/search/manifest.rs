@@ -42,6 +42,10 @@ pub(crate) struct ManifestData {
     /// for re-index detection and accurate total_doc_len on removal.
     #[serde(default)]
     pub doc_lengths: Vec<Option<u32>>,
+    /// Forward index: doc_id → terms indexed for that document.
+    /// Enables O(terms_in_doc) removal instead of O(vocabulary).
+    #[serde(default)]
+    pub doc_terms: Vec<Option<Vec<String>>>,
 }
 
 /// Manifest entry for a single sealed segment.
@@ -165,6 +169,11 @@ mod tests {
                 },
             ],
             doc_lengths: vec![Some(10), Some(20), Some(15)],
+            doc_terms: vec![
+                Some(vec!["key1".to_string(), "value1".to_string()]),
+                Some(vec!["key2".to_string()]),
+                Some(vec!["state1".to_string(), "data".to_string()]),
+            ],
         }
     }
 
@@ -186,6 +195,11 @@ mod tests {
         assert!(loaded.segments[1].tombstones.contains(&42));
         assert_eq!(loaded.doc_id_map.len(), 3);
         assert_eq!(loaded.doc_lengths, vec![Some(10), Some(20), Some(15)]);
+        assert_eq!(loaded.doc_terms.len(), 3);
+        assert_eq!(
+            loaded.doc_terms[0],
+            Some(vec!["key1".to_string(), "value1".to_string()])
+        );
     }
 
     #[test]
@@ -201,6 +215,7 @@ mod tests {
             segments: vec![],
             doc_id_map: vec![],
             doc_lengths: vec![],
+            doc_terms: vec![],
         };
         write_manifest(&path, &data).unwrap();
 

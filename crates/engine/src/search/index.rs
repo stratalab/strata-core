@@ -240,6 +240,8 @@ pub struct InvertedIndex {
     doc_freqs: DashMap<String, usize>,
     /// doc_id -> document length (indexed by u32 doc_id, active segment)
     doc_lengths: RwLock<Vec<Option<u32>>>,
+    /// doc_id -> terms indexed for that document (forward index for O(terms) removal)
+    doc_terms: RwLock<Vec<Option<Vec<String>>>>,
 
     // --- Sealed segments (immutable, mmap-backed) ---
     /// Sealed segments ordered by segment_id
@@ -290,6 +292,7 @@ impl InvertedIndex {
             version: AtomicU64::new(0),
             total_doc_len: AtomicUsize::new(0),
             doc_lengths: RwLock::new(Vec::new()),
+            doc_terms: RwLock::new(Vec::new()),
             doc_id_map: DocIdMap::new(),
             sealed: RwLock::new(Vec::new()),
             next_segment_id: AtomicU64::new(0),
@@ -327,6 +330,7 @@ impl InvertedIndex {
         self.postings.clear();
         self.doc_freqs.clear();
         self.doc_lengths.write().unwrap().clear();
+        self.doc_terms.write().unwrap().clear();
         self.doc_id_map.clear();
         self.sealed.write().unwrap().clear();
         self.total_docs.store(0, Ordering::Relaxed);
@@ -679,6 +683,9 @@ impl InvertedIndex {
             *tf_map.entry(token).or_insert(0) += 1;
         }
 
+        // Collect term names for the forward index before consuming tf_map
+        let term_names: Vec<String> = tf_map.keys().cloned().collect();
+
         // Update posting lists
         for (term, tf) in tf_map {
             let entry = PostingEntry::new(doc_id, tf, doc_len);
@@ -689,6 +696,16 @@ impl InvertedIndex {
                 .entry(term)
                 .and_modify(|c| *c += 1)
                 .or_insert(1);
+        }
+
+        // Store forward index (doc_id → terms) for O(terms) removal
+        {
+            let mut terms = self.doc_terms.write().unwrap();
+            let idx = doc_id as usize;
+            if idx >= terms.len() {
+                terms.resize(idx + 1, None);
+            }
+            terms[idx] = Some(term_names);
         }
 
         // Track document length for proper removal (fixes #608)
@@ -744,16 +761,30 @@ impl InvertedIndex {
             }
         };
 
-        // Try removing from active segment (no-op if doc not in active)
+        // Retrieve and clear forward index entry for this doc
+        let terms = {
+            let mut dt = self.doc_terms.write().unwrap();
+            let idx = doc_id as usize;
+            if idx < dt.len() {
+                dt[idx].take()
+            } else {
+                None
+            }
+        };
+
+        // Remove from active segment using forward index — O(terms_in_doc) not O(vocabulary)
         let mut active_removed = false;
-        for mut entry in self.postings.iter_mut() {
-            let count = entry.remove_by_id(doc_id);
-            if count > 0 {
-                active_removed = true;
-                let term = entry.key().clone();
-                self.doc_freqs
-                    .entry(term)
-                    .and_modify(|c| *c = c.saturating_sub(count));
+        if let Some(ref term_list) = terms {
+            for term in term_list {
+                if let Some(mut posting) = self.postings.get_mut(term) {
+                    let count = posting.remove_by_id(doc_id);
+                    if count > 0 {
+                        active_removed = true;
+                        self.doc_freqs
+                            .entry(term.clone())
+                            .and_modify(|c| *c = c.saturating_sub(count));
+                    }
+                }
             }
         }
 
@@ -910,6 +941,7 @@ impl InvertedIndex {
 
         let doc_id_map_vec = self.doc_id_map.id_to_ref.read().unwrap().clone();
         let doc_lengths_vec = self.doc_lengths.read().unwrap().clone();
+        let doc_terms_vec = self.doc_terms.read().unwrap().clone();
 
         let manifest_data = ManifestData {
             version: 1,
@@ -919,6 +951,7 @@ impl InvertedIndex {
             segments: segment_entries,
             doc_id_map: doc_id_map_vec,
             doc_lengths: doc_lengths_vec,
+            doc_terms: doc_terms_vec,
         };
 
         let manifest_path = search_dir.join("search.manifest");
@@ -992,6 +1025,9 @@ impl InvertedIndex {
         // Restore global doc_lengths from manifest (persists across seals
         // for re-index detection and accurate total_doc_len on removal)
         *self.doc_lengths.write().unwrap() = data.doc_lengths;
+
+        // Restore forward index (doc_id → terms) for O(terms) removal
+        *self.doc_terms.write().unwrap() = data.doc_terms;
 
         // Rebuild branch_ids from restored DocIdMap
         {
@@ -2445,5 +2481,361 @@ mod tests {
             doc3_score,
             doc2_score
         );
+    }
+
+    // ====================================================================
+    // Forward index (doc_terms) tests
+    // ====================================================================
+
+    #[test]
+    fn test_forward_index_populated_on_index() {
+        let index = InvertedIndex::new();
+        index.enable();
+
+        let doc_ref = test_doc_ref("fwd_test");
+        index.index_document(&doc_ref, "hello world", None);
+
+        let doc_id = index.doc_id_map.get(&doc_ref).unwrap();
+        let terms = index.doc_terms.read().unwrap();
+        let doc_terms = terms[doc_id as usize].as_ref().unwrap();
+        assert!(doc_terms.contains(&"hello".to_string()));
+        assert!(doc_terms.contains(&"world".to_string()));
+        assert_eq!(doc_terms.len(), 2);
+    }
+
+    #[test]
+    fn test_remove_uses_forward_index() {
+        // Index two docs with distinct terms, remove one, verify the other's
+        // posting lists are untouched.
+        let index = InvertedIndex::new();
+        index.enable();
+        let branch_id = BranchId::new();
+
+        let doc1 = kv_ref(branch_id, "only_alpha");
+        let doc2 = kv_ref(branch_id, "only_beta");
+        index.index_document(&doc1, "alpha unique1", None);
+        index.index_document(&doc2, "beta unique2", None);
+
+        assert_eq!(index.doc_freq("alpha"), 1);
+        assert_eq!(index.doc_freq("beta"), 1);
+
+        // Remove doc1 — only "alpha" and "unique1" posting lists should be touched
+        index.remove_document(&doc1);
+
+        assert_eq!(index.doc_freq("alpha"), 0);
+        assert_eq!(index.doc_freq("unique1"), 0);
+        // doc2's terms must be completely untouched
+        assert_eq!(index.doc_freq("beta"), 1);
+        assert_eq!(index.doc_freq("unique2"), 1);
+        assert_eq!(index.total_docs(), 1);
+    }
+
+    #[test]
+    fn test_forward_index_cleared_on_remove() {
+        let index = InvertedIndex::new();
+        index.enable();
+
+        let doc_ref = test_doc_ref("clear_test");
+        index.index_document(&doc_ref, "hello world", None);
+
+        let doc_id = index.doc_id_map.get(&doc_ref).unwrap();
+        assert!(index.doc_terms.read().unwrap()[doc_id as usize].is_some());
+
+        index.remove_document(&doc_ref);
+
+        assert!(index.doc_terms.read().unwrap()[doc_id as usize].is_none());
+    }
+
+    #[test]
+    fn test_forward_index_survives_seal() {
+        let index = InvertedIndex::new();
+        index.enable();
+        let branch_id = BranchId::new();
+
+        let doc = kv_ref(branch_id, "seal_fwd");
+        index.index_document(&doc, "alpha beta gamma", None);
+
+        let doc_id = index.doc_id_map.get(&doc).unwrap();
+
+        // Seal the active segment
+        index.seal_active();
+
+        // doc_terms should still be populated (it's a global map like doc_lengths)
+        let terms = index.doc_terms.read().unwrap();
+        let doc_terms = terms[doc_id as usize].as_ref().unwrap();
+        assert!(doc_terms.contains(&"alpha".to_string()));
+        assert!(doc_terms.contains(&"beta".to_string()));
+        assert!(doc_terms.contains(&"gamma".to_string()));
+    }
+
+    #[test]
+    fn test_forward_index_persistence_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let branch_id = BranchId::new();
+
+        let doc1 = kv_ref(branch_id, "persist_fwd1");
+        let doc2 = kv_ref(branch_id, "persist_fwd2");
+        let doc3 = kv_ref(branch_id, "persist_fwd3");
+        let doc1_id;
+        let doc2_id;
+        let doc3_id;
+
+        // Create index, add docs, remove one, freeze
+        {
+            let index = InvertedIndex::new();
+            index.enable();
+            index.set_data_dir(tmp.path().to_path_buf());
+
+            index.index_document(&doc1, "delta epsilon", None);
+            index.index_document(&doc2, "gamma zeta", None);
+            index.index_document(&doc3, "theta iota", None);
+            doc1_id = index.doc_id_map.get(&doc1).unwrap();
+            doc2_id = index.doc_id_map.get(&doc2).unwrap();
+            doc3_id = index.doc_id_map.get(&doc3).unwrap();
+
+            // Remove doc2 before freezing — its doc_terms slot should be None
+            index.remove_document(&doc2);
+
+            index.freeze_to_disk().unwrap();
+        }
+
+        // Load and verify doc_terms survived correctly
+        {
+            let index = InvertedIndex::new();
+            index.set_data_dir(tmp.path().to_path_buf());
+            index.load_from_disk().unwrap();
+            index.enable();
+
+            let terms = index.doc_terms.read().unwrap();
+
+            // doc1 should still have its terms
+            let dt1 = terms[doc1_id as usize].as_ref().unwrap();
+            assert!(dt1.contains(&"delta".to_string()));
+            assert!(dt1.contains(&"epsilon".to_string()));
+
+            // doc2 was removed — its slot should be None
+            assert!(terms[doc2_id as usize].is_none());
+
+            // doc3 should still have its terms
+            let dt3 = terms[doc3_id as usize].as_ref().unwrap();
+            assert!(dt3.contains(&"theta".to_string()));
+            assert!(dt3.contains(&"iota".to_string()));
+
+            // After loading, we should be able to remove doc3 using forward index
+            drop(terms);
+            index.remove_document(&doc3);
+            assert_eq!(index.total_docs(), 1);
+
+            // Verify doc3's forward index was cleared
+            assert!(index.doc_terms.read().unwrap()[doc3_id as usize].is_none());
+        }
+    }
+
+    #[test]
+    fn test_reindex_uses_forward_index() {
+        // Update a doc (same EntityRef, new text), verify old terms removed
+        // and new terms indexed correctly via forward index.
+        let index = InvertedIndex::new();
+        index.enable();
+        let branch_id = BranchId::new();
+
+        let doc = kv_ref(branch_id, "reindex_fwd");
+        index.index_document(&doc, "old content here", None);
+        assert_eq!(index.doc_freq("old"), 1);
+        assert_eq!(index.doc_freq("content"), 1);
+
+        // Re-index with completely different text
+        index.index_document(&doc, "brand new text", None);
+
+        // Old terms should be gone
+        assert_eq!(index.doc_freq("old"), 0);
+        assert_eq!(index.doc_freq("content"), 0);
+        assert_eq!(index.doc_freq("here"), 0);
+
+        // New terms should be present
+        assert_eq!(index.doc_freq("brand"), 1);
+        assert_eq!(index.doc_freq("new"), 1);
+        assert_eq!(index.doc_freq("text"), 1);
+
+        // Forward index should reflect the new terms
+        let doc_id = index.doc_id_map.get(&doc).unwrap();
+        let terms = index.doc_terms.read().unwrap();
+        let doc_terms = terms[doc_id as usize].as_ref().unwrap();
+        assert!(doc_terms.contains(&"brand".to_string()));
+        assert!(doc_terms.contains(&"new".to_string()));
+        assert!(doc_terms.contains(&"text".to_string()));
+        assert!(!doc_terms.contains(&"old".to_string()));
+
+        assert_eq!(index.total_docs(), 1);
+    }
+
+    #[test]
+    fn test_forward_index_overlapping_terms() {
+        // Two docs share a term; removing one must leave the shared term's
+        // posting intact for the surviving doc.
+        let index = InvertedIndex::new();
+        index.enable();
+        let branch_id = BranchId::new();
+
+        let doc1 = kv_ref(branch_id, "overlap1");
+        let doc2 = kv_ref(branch_id, "overlap2");
+        // Use stemming-stable words ("hello", "world", "planet")
+        index.index_document(&doc1, "hello world", None);
+        index.index_document(&doc2, "hello planet", None);
+
+        assert_eq!(index.doc_freq("hello"), 2);
+
+        index.remove_document(&doc1);
+
+        // "hello" should still have df=1 from doc2
+        assert_eq!(index.doc_freq("hello"), 1);
+        assert_eq!(index.doc_freq("world"), 0);
+        assert_eq!(index.doc_freq("planet"), 1);
+
+        // Verify the surviving posting is actually doc2's
+        let posting = index.lookup("hello").unwrap();
+        assert_eq!(posting.len(), 1);
+        let doc2_id = index.doc_id_map.get(&doc2).unwrap();
+        assert_eq!(posting.entries[0].doc_id, doc2_id);
+
+        // Search should find only doc2
+        let terms = vec!["hello".to_string()];
+        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4);
+        assert_eq!(result.len(), 1);
+        let resolved = index.resolve_doc_id(result[0].doc_id).unwrap();
+        assert_eq!(resolved, doc2);
+    }
+
+    #[test]
+    fn test_remove_sealed_doc_with_forward_index() {
+        // After sealing, forward index should still enable removal.
+        // The active postings are drained so the forward index loop finds
+        // nothing in active (no error/panic), and tombstones handle sealed.
+        let index = InvertedIndex::new();
+        index.enable();
+        let branch_id = BranchId::new();
+
+        let doc1 = kv_ref(branch_id, "sealed_fwd1");
+        let doc2 = kv_ref(branch_id, "sealed_fwd2");
+        index.index_document(&doc1, "alpha beta", None);
+        index.index_document(&doc2, "alpha gamma", None);
+
+        let doc1_id = index.doc_id_map.get(&doc1).unwrap();
+
+        // Seal — all postings move to sealed segment
+        index.seal_active();
+        assert!(index.postings.is_empty());
+
+        // Forward index should still be populated
+        assert!(index.doc_terms.read().unwrap()[doc1_id as usize].is_some());
+
+        // Remove doc1 from sealed segment
+        index.remove_document(&doc1);
+
+        // Forward index should be cleared for doc1
+        assert!(index.doc_terms.read().unwrap()[doc1_id as usize].is_none());
+
+        // Stats should be correct
+        assert_eq!(index.total_docs(), 1);
+
+        // Only doc2 should appear in search
+        let terms = vec!["alpha".to_string()];
+        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4);
+        assert_eq!(result.len(), 1);
+        let resolved = index.resolve_doc_id(result[0].doc_id).unwrap();
+        assert_eq!(resolved, doc2);
+    }
+
+    #[test]
+    fn test_backward_compat_empty_doc_terms() {
+        // Simulate loading from an old manifest that has no doc_terms field.
+        // The #[serde(default)] gives us an empty vec. Removal of sealed
+        // docs should still work via tombstones even without forward index.
+        let tmp = tempfile::tempdir().unwrap();
+        let branch_id = BranchId::new();
+
+        let doc1 = kv_ref(branch_id, "compat1");
+        let doc2 = kv_ref(branch_id, "compat2");
+
+        // Phase 1: Create index, freeze with doc_terms populated
+        {
+            let index = InvertedIndex::new();
+            index.enable();
+            index.set_data_dir(tmp.path().to_path_buf());
+
+            index.index_document(&doc1, "hello world", None);
+            index.index_document(&doc2, "hello planet", None);
+
+            index.freeze_to_disk().unwrap();
+        }
+
+        // Phase 2: Load, then wipe doc_terms to simulate old manifest,
+        // verify removal still works
+        {
+            let index = InvertedIndex::new();
+            index.set_data_dir(tmp.path().to_path_buf());
+            index.load_from_disk().unwrap();
+            index.enable();
+
+            // Simulate old manifest: clear doc_terms as if it wasn't persisted
+            index.doc_terms.write().unwrap().clear();
+
+            assert_eq!(index.total_docs(), 2);
+
+            // Remove doc1 — should work via tombstone even without forward index
+            index.remove_document(&doc1);
+            assert_eq!(index.total_docs(), 1);
+
+            // doc_lengths was used for stat update
+            // Search should only find doc2
+            let terms = vec!["hello".to_string()];
+            let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4);
+            assert_eq!(result.len(), 1);
+            let resolved = index.resolve_doc_id(result[0].doc_id).unwrap();
+            assert_eq!(resolved, doc2);
+        }
+    }
+
+    #[test]
+    fn test_reindex_after_seal_forward_index() {
+        // Re-index a doc that was sealed. The forward index should enable
+        // removal of old active postings (none here since sealed), tombstone
+        // the sealed version, then create new forward index for the re-indexed doc.
+        let index = InvertedIndex::new();
+        index.enable();
+        let branch_id = BranchId::new();
+
+        let doc = kv_ref(branch_id, "reindex_seal");
+        // Use stemming-stable words (confirmed by existing test_reindex_after_seal)
+        index.index_document(&doc, "hello world", None);
+
+        let doc_id = index.doc_id_map.get(&doc).unwrap();
+
+        // Seal
+        index.seal_active();
+
+        // Re-index same doc with different content
+        index.index_document(&doc, "alpha planet", None);
+
+        assert_eq!(index.total_docs(), 1);
+
+        // Forward index should reflect the NEW terms
+        let terms = index.doc_terms.read().unwrap();
+        let doc_terms = terms[doc_id as usize].as_ref().unwrap();
+        assert!(doc_terms.contains(&"alpha".to_string()));
+        assert!(doc_terms.contains(&"planet".to_string()));
+        assert!(!doc_terms.contains(&"hello".to_string()));
+        assert!(!doc_terms.contains(&"world".to_string()));
+        drop(terms);
+
+        // Old terms should not match (tombstoned in sealed)
+        let query = vec!["hello".to_string()];
+        let result = index.score_top_k(&query, &branch_id, 10, 0.9, 0.4);
+        assert!(result.is_empty());
+
+        // New terms should match (in active)
+        let query = vec!["alpha".to_string()];
+        let result = index.score_top_k(&query, &branch_id, 10, 0.9, 0.4);
+        assert_eq!(result.len(), 1);
     }
 }
