@@ -1249,7 +1249,7 @@ impl TransactionContext {
     /// - StrataError::invalid_input if transaction is not in Committed state
     /// - Error from storage operations if they fail
     pub fn apply_writes<S: Storage>(
-        &self,
+        &mut self,
         store: &S,
         commit_version: u64,
     ) -> StrataResult<ApplyResult> {
@@ -1267,27 +1267,22 @@ impl TransactionContext {
             cas_applied: 0,
         };
 
-        // Apply puts from write_set
-        for (key, value) in &self.write_set {
-            store.put_with_version(key.clone(), value.clone(), commit_version, None)?;
+        // Apply puts from write_set — drain to avoid cloning keys and values
+        for (key, value) in self.write_set.drain() {
+            store.put_with_version(key, value, commit_version, None)?;
             result.puts_applied += 1;
         }
 
-        // Apply deletes from delete_set
-        for key in &self.delete_set {
-            store.delete_with_version(key, commit_version)?;
+        // Apply deletes from delete_set — drain to avoid cloning keys
+        for key in self.delete_set.drain() {
+            store.delete_with_version(&key, commit_version)?;
             result.deletes_applied += 1;
         }
 
-        // Apply CAS operations from cas_set
+        // Apply CAS operations from cas_set — drain to avoid cloning
         // Note: CAS validation already passed in commit(), so we just apply the new values
-        for cas_op in &self.cas_set {
-            store.put_with_version(
-                cas_op.key.clone(),
-                cas_op.new_value.clone(),
-                commit_version,
-                None,
-            )?;
+        for cas_op in self.cas_set.drain(..) {
+            store.put_with_version(cas_op.key, cas_op.new_value, commit_version, None)?;
             result.cas_applied += 1;
         }
 

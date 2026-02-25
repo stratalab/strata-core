@@ -83,10 +83,9 @@ impl KVStore {
     /// }
     /// ```
     pub fn get(&self, branch_id: &BranchId, space: &str, key: &str) -> StrataResult<Option<Value>> {
-        self.db.transaction(*branch_id, |txn| {
-            let storage_key = self.key_for(branch_id, space, key);
-            txn.get(&storage_key)
-        })
+        let storage_key = self.key_for(branch_id, space, key);
+        // Direct read from storage — no transaction needed for single-key lookup
+        Ok(self.db.get_direct(&storage_key).map(|vv| vv.value))
     }
 
     /// Get a value with its version metadata.
@@ -138,19 +137,18 @@ impl KVStore {
         key: &str,
         value: Value,
     ) -> StrataResult<Version> {
-        // Extract text for indexing before the value is consumed by the transaction
+        // Extract text for indexing before the value is consumed
         let text_for_index = match &value {
             Value::String(s) => Some(s.clone()),
             Value::Null | Value::Bool(_) | Value::Bytes(_) => None,
             other => serde_json::to_string(other).ok(),
         };
 
-        let ((), commit_version) = self.db.transaction_with_version(*branch_id, |txn| {
-            let storage_key = self.key_for(branch_id, space, key);
-            txn.put(storage_key, value)
-        })?;
+        let storage_key = self.key_for(branch_id, space, key);
+        // Direct blind write — no transaction needed for single-key put
+        let commit_version = self.db.put_direct(storage_key, value)?;
 
-        // Update inverted index for BM25 search (zero overhead when disabled)
+        // Post-commit: update inverted index for BM25 search (zero overhead when disabled)
         if let Some(text) = text_for_index {
             let index = self.db.extension::<crate::search::InvertedIndex>()?;
             if index.is_enabled() {
@@ -1201,5 +1199,182 @@ mod tests {
             response.is_empty(),
             "Deleted doc's unique terms should not match"
         );
+    }
+
+    // ========== Direct-path performance tests ==========
+
+    #[test]
+    fn test_direct_get_returns_none_after_delete() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+
+        kv.put(&branch_id, "default", "k", Value::Int(1)).unwrap();
+        assert_eq!(
+            kv.get(&branch_id, "default", "k").unwrap(),
+            Some(Value::Int(1))
+        );
+
+        kv.delete(&branch_id, "default", "k").unwrap();
+        assert_eq!(
+            kv.get(&branch_id, "default", "k").unwrap(),
+            None,
+            "Direct get must filter tombstones"
+        );
+    }
+
+    #[test]
+    fn test_direct_put_returns_monotonic_versions() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+
+        let v1 = kv.put(&branch_id, "default", "a", Value::Int(1)).unwrap();
+        let v2 = kv.put(&branch_id, "default", "b", Value::Int(2)).unwrap();
+        let v3 = kv.put(&branch_id, "default", "a", Value::Int(3)).unwrap();
+
+        // Versions must be strictly increasing
+        assert!(v2 > v1, "v2 ({v2:?}) must be > v1 ({v1:?})");
+        assert!(v3 > v2, "v3 ({v3:?}) must be > v2 ({v2:?})");
+    }
+
+    #[test]
+    fn test_direct_put_then_list_rebuilds_ordered_index() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+
+        // Insert keys in reverse order (stresses lazy BTreeSet rebuild)
+        for i in (0..20).rev() {
+            kv.put(
+                &branch_id,
+                "default",
+                &format!("key_{:03}", i),
+                Value::Int(i),
+            )
+            .unwrap();
+        }
+
+        // list() triggers a prefix scan which rebuilds the BTreeSet
+        let keys = kv.list(&branch_id, "default", None).unwrap();
+        assert_eq!(keys.len(), 20, "All 20 keys should be listed");
+
+        // Verify sorted order
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(keys, sorted, "Keys must be returned in sorted order");
+    }
+
+    #[test]
+    fn test_direct_put_interleaved_with_scan() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+
+        // Insert some keys, scan, insert more, scan again
+        kv.put(&branch_id, "default", "a:1", Value::Int(1)).unwrap();
+        kv.put(&branch_id, "default", "a:2", Value::Int(2)).unwrap();
+
+        let first_scan = kv.list(&branch_id, "default", Some("a:")).unwrap();
+        assert_eq!(first_scan.len(), 2);
+
+        // Add more keys (invalidates the lazy BTreeSet)
+        kv.put(&branch_id, "default", "a:3", Value::Int(3)).unwrap();
+        kv.put(&branch_id, "default", "b:1", Value::Int(4)).unwrap();
+
+        let second_scan = kv.list(&branch_id, "default", Some("a:")).unwrap();
+        assert_eq!(
+            second_scan.len(),
+            3,
+            "Second scan must see newly inserted 'a:3'"
+        );
+
+        let b_scan = kv.list(&branch_id, "default", Some("b:")).unwrap();
+        assert_eq!(b_scan.len(), 1, "b: prefix scan must find 'b:1'");
+    }
+
+    #[test]
+    fn test_direct_put_concurrent_threads() {
+        use std::thread;
+
+        let (_temp, db, _kv) = setup();
+        let n_threads = 4;
+        let n_ops = 100;
+
+        let mut handles = Vec::new();
+        for t in 0..n_threads {
+            let db = db.clone();
+            handles.push(thread::spawn(move || {
+                let kv = KVStore::new(db);
+                let branch_id = BranchId::new();
+                for i in 0..n_ops {
+                    let key = format!("t{}-k{}", t, i);
+                    kv.put(&branch_id, "default", &key, Value::Int(i as i64))
+                        .unwrap();
+                    let val = kv.get(&branch_id, "default", &key).unwrap();
+                    assert!(val.is_some(), "Key {key} must exist after put");
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("Thread panicked");
+        }
+    }
+
+    #[test]
+    fn test_direct_put_wal_recovery() {
+        let temp_dir = TempDir::new().unwrap();
+        let branch_id = BranchId::new();
+
+        // Phase 1: Write data, then drop the database (simulates crash)
+        {
+            let db = Database::open(temp_dir.path()).unwrap();
+            let kv = KVStore::new(db.clone());
+
+            kv.put(
+                &branch_id,
+                "default",
+                "survive",
+                Value::String("hello".into()),
+            )
+            .unwrap();
+            kv.put(&branch_id, "default", "survive2", Value::Int(42))
+                .unwrap();
+
+            // Explicit shutdown to flush WAL
+            let _ = db.shutdown();
+        }
+
+        // Phase 2: Reopen and verify data survived via WAL recovery
+        {
+            let db = Database::open(temp_dir.path()).unwrap();
+            let kv = KVStore::new(db);
+
+            let v1 = kv.get(&branch_id, "default", "survive").unwrap();
+            assert_eq!(
+                v1,
+                Some(Value::String("hello".into())),
+                "Value must survive WAL recovery"
+            );
+
+            let v2 = kv.get(&branch_id, "default", "survive2").unwrap();
+            assert_eq!(
+                v2,
+                Some(Value::Int(42)),
+                "Second value must survive WAL recovery"
+            );
+        }
+    }
+
+    #[test]
+    fn test_get_versioned_still_uses_transaction() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+
+        kv.put(&branch_id, "default", "vk", Value::Int(99)).unwrap();
+
+        // get_versioned still goes through transactions (snapshot isolation)
+        let vv = kv.get_versioned(&branch_id, "default", "vk").unwrap();
+        assert!(vv.is_some());
+        let vv = vv.unwrap();
+        assert_eq!(vv.value, Value::Int(99));
+        assert!(vv.version.as_u64() > 0, "Version must be non-zero");
     }
 }

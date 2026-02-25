@@ -186,8 +186,9 @@ impl VersionChain {
 pub struct Shard {
     /// HashMap with FxHash for O(1) lookups, storing version chains
     pub(crate) data: FxHashMap<Key, VersionChain>,
-    /// Sorted index of all keys for O(log n + k) prefix scans
-    pub(crate) ordered_keys: BTreeSet<Key>,
+    /// Sorted index of all keys for O(log n + k) prefix scans.
+    /// Built lazily on first scan request, invalidated on new-key insertions.
+    pub(crate) ordered_keys: Option<BTreeSet<Key>>,
 }
 
 impl Shard {
@@ -195,7 +196,7 @@ impl Shard {
     pub fn new() -> Self {
         Self {
             data: FxHashMap::default(),
-            ordered_keys: BTreeSet::new(),
+            ordered_keys: None,
         }
     }
 
@@ -203,17 +204,15 @@ impl Shard {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             data: FxHashMap::with_capacity_and_hasher(capacity, Default::default()),
-            ordered_keys: BTreeSet::new(),
+            ordered_keys: None,
         }
     }
 
-    /// Iterate keys matching a prefix using BTreeSet range scan.
-    ///
-    /// O(log n) seek + O(k) iteration where k = number of matching keys.
-    fn keys_with_prefix<'a>(&'a self, prefix: &'a Key) -> impl Iterator<Item = &'a Key> {
-        self.ordered_keys
-            .range::<Key, _>(prefix..)
-            .take_while(move |k| k.starts_with(prefix))
+    /// Rebuild `ordered_keys` from `data.keys()` if invalidated (None).
+    pub(crate) fn ensure_ordered_keys(&mut self) {
+        if self.ordered_keys.is_none() {
+            self.ordered_keys = Some(self.data.keys().cloned().collect());
+        }
     }
 
     /// Get number of keys in this shard
@@ -354,8 +353,8 @@ impl ShardedStore {
             // Add new version to existing chain
             chain.push(value);
         } else {
-            // Create new chain — also add to BTreeSet index
-            shard.ordered_keys.insert(key.clone());
+            // Create new chain — invalidate ordered index (rebuilt lazily on scan)
+            shard.ordered_keys = None;
             shard.data.insert(key, VersionChain::new(value));
         }
     }
@@ -432,6 +431,31 @@ impl ShardedStore {
             .unwrap_or(false)
     }
 
+    /// Direct single-key read without transaction overhead.
+    ///
+    /// Returns the latest committed value, skipping snapshot creation,
+    /// pool acquire/release, and coordinator bookkeeping.
+    ///
+    /// # Safety
+    ///
+    /// Returns the latest committed value (no snapshot isolation).
+    /// Safe for single-key reads where multi-key consistency isn't needed.
+    #[inline]
+    pub fn get_direct(&self, key: &Key) -> Option<VersionedValue> {
+        let branch_id = key.namespace.branch_id;
+        self.shards.get(&branch_id).and_then(|shard| {
+            shard.data.get(key).and_then(|chain| {
+                chain.latest().and_then(|sv| {
+                    if !sv.is_expired() && !sv.is_tombstone() {
+                        Some(sv.versioned().clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+        })
+    }
+
     /// Apply a batch of writes and deletes atomically
     ///
     /// All operations in the batch are applied with the given version.
@@ -489,13 +513,14 @@ impl ShardedStore {
         // Apply atomically per branch (hold shard lock for entire branch batch)
         for (branch_id, (branch_writes, branch_deletes)) in branch_ops {
             let mut shard = self.shards.entry(branch_id).or_default();
+            let mut has_new_keys = false;
 
             for (key, stored) in branch_writes {
                 if let Some(chain) = shard.data.get_mut(&key) {
                     chain.push(stored);
                 } else {
-                    shard.ordered_keys.insert(key.clone());
                     shard.data.insert(key, VersionChain::new(stored));
+                    has_new_keys = true;
                 }
             }
 
@@ -504,9 +529,14 @@ impl ShardedStore {
                 if let Some(chain) = shard.data.get_mut(&key) {
                     chain.push(tombstone);
                 } else {
-                    shard.ordered_keys.insert(key.clone());
                     shard.data.insert(key, VersionChain::new(tombstone));
+                    has_new_keys = true;
                 }
+            }
+
+            // Invalidate ordered index if new keys were added
+            if has_new_keys {
+                shard.ordered_keys = None;
             }
         }
 
@@ -555,10 +585,15 @@ impl ShardedStore {
         let branch_id = prefix.namespace.branch_id;
         Ok(self
             .shards
-            .get(&branch_id)
-            .map(|shard| {
+            .get_mut(&branch_id)
+            .map(|mut shard| {
+                shard.ensure_ordered_keys();
                 shard
-                    .keys_with_prefix(prefix)
+                    .ordered_keys
+                    .as_ref()
+                    .unwrap()
+                    .range::<Key, _>(prefix..)
+                    .take_while(|k| k.starts_with(prefix))
                     .filter_map(|k| {
                         shard.data.get(k).and_then(|chain| {
                             chain.get_at_timestamp(max_timestamp).and_then(|sv| {
@@ -638,10 +673,13 @@ impl ShardedStore {
     /// Vector of (Key, VersionedValue) pairs, sorted by key
     pub fn list_branch(&self, branch_id: &BranchId) -> Vec<(Key, VersionedValue)> {
         self.shards
-            .get(branch_id)
-            .map(|shard| {
+            .get_mut(branch_id)
+            .map(|mut shard| {
+                shard.ensure_ordered_keys();
                 shard
                     .ordered_keys
+                    .as_ref()
+                    .unwrap()
                     .iter()
                     .filter_map(|k| {
                         shard.data.get(k).and_then(|chain| {
@@ -678,10 +716,15 @@ impl ShardedStore {
         let branch_id = prefix.namespace.branch_id;
 
         self.shards
-            .get(&branch_id)
-            .map(|shard| {
+            .get_mut(&branch_id)
+            .map(|mut shard| {
+                shard.ensure_ordered_keys();
                 shard
-                    .keys_with_prefix(prefix)
+                    .ordered_keys
+                    .as_ref()
+                    .unwrap()
+                    .range::<Key, _>(prefix..)
+                    .take_while(|k| k.starts_with(prefix))
                     .filter_map(|k| {
                         shard.data.get(k).and_then(|chain| {
                             chain.latest().and_then(|sv| {
@@ -716,10 +759,13 @@ impl ShardedStore {
         type_tag: strata_core::types::TypeTag,
     ) -> Vec<(Key, VersionedValue)> {
         self.shards
-            .get(branch_id)
-            .map(|shard| {
+            .get_mut(branch_id)
+            .map(|mut shard| {
+                shard.ensure_ordered_keys();
                 shard
                     .ordered_keys
+                    .as_ref()
+                    .unwrap()
                     .iter()
                     .filter(|k| k.type_tag == type_tag)
                     .filter_map(|k| {
@@ -745,10 +791,13 @@ impl ShardedStore {
         type_tag: strata_core::types::TypeTag,
     ) -> usize {
         self.shards
-            .get(branch_id)
-            .map(|shard| {
+            .get_mut(branch_id)
+            .map(|mut shard| {
+                shard.ensure_ordered_keys();
                 shard
                     .ordered_keys
+                    .as_ref()
+                    .unwrap()
                     .iter()
                     .filter(|k| {
                         k.type_tag == type_tag
@@ -925,10 +974,13 @@ impl ShardedSnapshot {
     pub fn list_branch(&self, branch_id: &BranchId) -> Vec<(Key, VersionedValue)> {
         self.store
             .shards
-            .get(branch_id)
-            .map(|shard| {
+            .get_mut(branch_id)
+            .map(|mut shard| {
+                shard.ensure_ordered_keys();
                 shard
                     .ordered_keys
+                    .as_ref()
+                    .unwrap()
                     .iter()
                     .filter_map(|k| {
                         shard.data.get(k).and_then(|chain| {
@@ -955,10 +1007,15 @@ impl ShardedSnapshot {
         let branch_id = prefix.namespace.branch_id;
         self.store
             .shards
-            .get(&branch_id)
-            .map(|shard| {
+            .get_mut(&branch_id)
+            .map(|mut shard| {
+                shard.ensure_ordered_keys();
                 shard
-                    .keys_with_prefix(prefix)
+                    .ordered_keys
+                    .as_ref()
+                    .unwrap()
+                    .range::<Key, _>(prefix..)
+                    .take_while(|k| k.starts_with(prefix))
                     .filter_map(|k| {
                         shard.data.get(k).and_then(|chain| {
                             chain.get_at_version(self.version).and_then(|sv| {
@@ -987,10 +1044,13 @@ impl ShardedSnapshot {
     ) -> Vec<(Key, VersionedValue)> {
         self.store
             .shards
-            .get(branch_id)
-            .map(|shard| {
+            .get_mut(branch_id)
+            .map(|mut shard| {
+                shard.ensure_ordered_keys();
                 shard
                     .ordered_keys
+                    .as_ref()
+                    .unwrap()
                     .iter()
                     .filter(|k| k.type_tag == type_tag)
                     .filter_map(|k| {
@@ -1178,10 +1238,15 @@ impl Storage for ShardedStore {
         let branch_id = prefix.namespace.branch_id;
         Ok(self
             .shards
-            .get(&branch_id)
-            .map(|shard| {
+            .get_mut(&branch_id)
+            .map(|mut shard| {
+                shard.ensure_ordered_keys();
                 shard
-                    .keys_with_prefix(prefix)
+                    .ordered_keys
+                    .as_ref()
+                    .unwrap()
+                    .range::<Key, _>(prefix..)
+                    .take_while(|k| k.starts_with(prefix))
                     .filter_map(|k| {
                         shard.data.get(k).and_then(|chain| {
                             chain.get_at_version(max_version).and_then(|sv| {
@@ -1295,10 +1360,15 @@ impl SnapshotView for ShardedSnapshot {
         Ok(self
             .store
             .shards
-            .get(&branch_id)
-            .map(|shard| {
+            .get_mut(&branch_id)
+            .map(|mut shard| {
+                shard.ensure_ordered_keys();
                 shard
-                    .keys_with_prefix(prefix)
+                    .ordered_keys
+                    .as_ref()
+                    .unwrap()
+                    .range::<Key, _>(prefix..)
+                    .take_while(|k| k.starts_with(prefix))
                     .filter_map(|k| {
                         shard.data.get(k).and_then(|chain| {
                             chain.get_at_version(self.version).and_then(|sv| {
@@ -3201,15 +3271,18 @@ mod tests {
             Storage::delete(&store, &key).unwrap();
         }
 
-        let shard = store.shards.get(&branch_id).unwrap();
+        // Ensure ordered_keys is rebuilt lazily, then verify consistency
+        let mut shard = store.shards.get_mut(&branch_id).unwrap();
+        shard.ensure_ordered_keys();
+        let ordered = shard.ordered_keys.as_ref().unwrap();
         assert_eq!(
-            shard.ordered_keys.len(),
+            ordered.len(),
             shard.data.len(),
             "ordered_keys and data must have the same number of keys"
         );
 
         // Every key in ordered_keys must exist in data
-        for k in shard.ordered_keys.iter() {
+        for k in ordered.iter() {
             assert!(
                 shard.data.contains_key(k),
                 "ordered_keys has key not in data"
@@ -3217,10 +3290,7 @@ mod tests {
         }
         // Every key in data must exist in ordered_keys
         for k in shard.data.keys() {
-            assert!(
-                shard.ordered_keys.contains(k),
-                "data has key not in ordered_keys"
-            );
+            assert!(ordered.contains(k), "data has key not in ordered_keys");
         }
     }
 
@@ -3370,5 +3440,195 @@ mod tests {
         let prefix_none = Key::new_kv(ns.clone(), "gamma:");
         let results_none = Storage::scan_prefix(&store, &prefix_none, u64::MAX).unwrap();
         assert_eq!(results_none.len(), 0, "gamma: prefix should match 0 keys");
+    }
+
+    // ========================================================================
+    // Direct-path and Lazy BTreeSet Tests
+    // ========================================================================
+
+    #[test]
+    fn test_get_direct_basic() {
+        use strata_core::traits::Storage;
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let key = create_test_key(branch_id, "direct_key");
+
+        // Should return None for missing keys
+        assert!(store.get_direct(&key).is_none());
+
+        // Insert a value
+        Storage::put(&store, key.clone(), Value::Int(42), None).unwrap();
+
+        // Should return the latest value
+        let result = store.get_direct(&key);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().value, Value::Int(42));
+    }
+
+    #[test]
+    fn test_get_direct_filters_tombstones() {
+        use strata_core::traits::Storage;
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let key = create_test_key(branch_id, "tombstone_key");
+
+        Storage::put(&store, key.clone(), Value::Int(1), None).unwrap();
+        assert!(store.get_direct(&key).is_some());
+
+        // Delete creates a tombstone
+        Storage::delete(&store, &key).unwrap();
+        assert!(
+            store.get_direct(&key).is_none(),
+            "get_direct must filter tombstones"
+        );
+    }
+
+    #[test]
+    fn test_get_direct_filters_expired_ttl() {
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let key = create_test_key(branch_id, "ttl_key");
+
+        // Insert with TTL that's already expired
+        let expired_value = StoredValue::with_timestamp(
+            Value::Int(99),
+            Version::txn(1),
+            Timestamp::from_micros(1),               // ancient timestamp
+            Some(std::time::Duration::from_secs(1)), // expired long ago
+        );
+        store.put(key.clone(), expired_value);
+
+        assert!(
+            store.get_direct(&key).is_none(),
+            "get_direct must filter expired values"
+        );
+    }
+
+    #[test]
+    fn test_get_direct_returns_latest_version() {
+        use strata_core::traits::Storage;
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let key = create_test_key(branch_id, "multi_version");
+
+        // Insert multiple versions
+        Storage::put(&store, key.clone(), Value::Int(1), None).unwrap();
+        Storage::put(&store, key.clone(), Value::Int(2), None).unwrap();
+        Storage::put(&store, key.clone(), Value::Int(3), None).unwrap();
+
+        let result = store.get_direct(&key).unwrap();
+        assert_eq!(
+            result.value,
+            Value::Int(3),
+            "get_direct must return the latest version"
+        );
+    }
+
+    #[test]
+    fn test_lazy_ordered_keys_invalidation_and_rebuild() {
+        use strata_core::traits::Storage;
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = strata_core::types::Namespace::for_branch(branch_id);
+
+        // Insert keys — ordered_keys starts as None, gets invalidated on each new key
+        Storage::put(&store, Key::new_kv(ns.clone(), "c"), Value::Int(3), None).unwrap();
+        Storage::put(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), None).unwrap();
+        Storage::put(&store, Key::new_kv(ns.clone(), "b"), Value::Int(2), None).unwrap();
+
+        // ordered_keys should be None (invalidated by put)
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert!(
+                shard.ordered_keys.is_none(),
+                "ordered_keys should be None after insertions"
+            );
+        }
+
+        // scan_prefix forces a rebuild via ensure_ordered_keys
+        let prefix = Key::new_kv(ns.clone(), "");
+        let results = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
+        assert_eq!(results.len(), 3);
+
+        // Verify sorted order after lazy rebuild
+        let keys: Vec<String> = results
+            .iter()
+            .filter_map(|(k, _)| k.user_key_string())
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["a", "b", "c"],
+            "Keys must be sorted after lazy rebuild"
+        );
+
+        // ordered_keys should now be Some (rebuilt by the scan)
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert!(
+                shard.ordered_keys.is_some(),
+                "ordered_keys should be Some after scan triggered rebuild"
+            );
+        }
+
+        // Insert a NEW key — should invalidate again
+        Storage::put(&store, Key::new_kv(ns.clone(), "aa"), Value::Int(4), None).unwrap();
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert!(
+                shard.ordered_keys.is_none(),
+                "ordered_keys should be None again after new key insertion"
+            );
+        }
+
+        // Scan again — should see all 4 keys in order
+        let results2 = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
+        let keys2: Vec<String> = results2
+            .iter()
+            .filter_map(|(k, _)| k.user_key_string())
+            .collect();
+        assert_eq!(keys2, vec!["a", "aa", "b", "c"]);
+    }
+
+    #[test]
+    fn test_lazy_ordered_keys_update_existing_no_invalidation() {
+        use strata_core::traits::Storage;
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = strata_core::types::Namespace::for_branch(branch_id);
+
+        // Insert initial key
+        Storage::put(&store, Key::new_kv(ns.clone(), "k"), Value::Int(1), None).unwrap();
+
+        // Force a rebuild by scanning
+        let prefix = Key::new_kv(ns.clone(), "");
+        let _ = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
+
+        // ordered_keys should now be Some
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert!(shard.ordered_keys.is_some());
+        }
+
+        // Update EXISTING key — should NOT invalidate ordered_keys
+        Storage::put(&store, Key::new_kv(ns.clone(), "k"), Value::Int(2), None).unwrap();
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert!(
+                shard.ordered_keys.is_some(),
+                "Updating an existing key must not invalidate the ordered index"
+            );
+        }
     }
 }
