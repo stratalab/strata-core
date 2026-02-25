@@ -396,14 +396,29 @@ impl StateCell {
     ///
     /// Returns `true` if the cell existed and was deleted, `false` if it didn't exist.
     pub fn delete(&self, branch_id: &BranchId, space: &str, name: &str) -> StrataResult<bool> {
-        self.db.transaction(*branch_id, |txn| {
+        let existed = self.db.transaction(*branch_id, |txn| {
             let key = self.key_for(branch_id, space, name);
             let exists = txn.get(&key)?.is_some();
             if exists {
                 txn.delete(key)?;
             }
             Ok(exists)
-        })
+        })?;
+
+        // Remove from inverted index to prevent stale postings
+        if existed {
+            if let Ok(index) = self.db.extension::<crate::search::InvertedIndex>() {
+                if index.is_enabled() {
+                    let entity_ref = crate::search::EntityRef::State {
+                        branch_id: *branch_id,
+                        name: name.to_string(),
+                    };
+                    index.remove_document(&entity_ref);
+                }
+            }
+        }
+
+        Ok(existed)
     }
 
     /// List state cell names with optional prefix filter.
@@ -1053,6 +1068,66 @@ mod tests {
         assert_eq!(
             sc.get(&branch_id, "default", "cell").unwrap(),
             Some(Value::Int(42))
+        );
+    }
+
+    #[test]
+    fn test_state_delete_removes_from_index() {
+        let (_temp, db, sc) = setup();
+        let branch_id = BranchId::new();
+
+        // Database::open enables the index
+        let index = db.extension::<crate::search::InvertedIndex>().unwrap();
+        assert!(index.is_enabled());
+
+        // set() indexes "{name} {json_value}" into the inverted index.
+        // Use stemming-stable words: "alpha", "beta", "gamma", "delta".
+        sc.set(
+            &branch_id,
+            "default",
+            "cell1",
+            Value::String("alpha beta gamma".into()),
+        )
+        .unwrap();
+        sc.set(
+            &branch_id,
+            "default",
+            "cell2",
+            Value::String("alpha delta epsilon".into()),
+        )
+        .unwrap();
+
+        // Both should be indexed
+        assert_eq!(index.total_docs(), 2);
+
+        // Use tokenizer to get correct stemmed terms for score_top_k
+        let alpha_terms = crate::search::tokenize("alpha");
+        let results = index.score_top_k(&alpha_terms, &branch_id, 10, 0.9, 0.4);
+        assert_eq!(results.len(), 2, "Both cells should match 'alpha'");
+
+        // Delete cell1 — should remove from index
+        let deleted = sc.delete(&branch_id, "default", "cell1").unwrap();
+        assert!(deleted);
+
+        // Only 1 doc should remain in the index
+        assert_eq!(index.total_docs(), 1);
+
+        // Search for "alpha" should only find cell2
+        let entity_ref_cell2 = crate::search::EntityRef::State {
+            branch_id,
+            name: "cell2".to_string(),
+        };
+        let results = index.score_top_k(&alpha_terms, &branch_id, 10, 0.9, 0.4);
+        assert_eq!(results.len(), 1);
+        let resolved = index.resolve_doc_id(results[0].doc_id).unwrap();
+        assert_eq!(resolved, entity_ref_cell2);
+
+        // Term unique to deleted cell should yield no results
+        let beta_terms = crate::search::tokenize("beta");
+        let results = index.score_top_k(&beta_terms, &branch_id, 10, 0.9, 0.4);
+        assert!(
+            results.is_empty(),
+            "Deleted cell's unique terms should not match"
         );
     }
 }

@@ -175,14 +175,29 @@ impl KVStore {
     /// let was_deleted = kv.delete(&branch_id, "default", "user:123")?;
     /// ```
     pub fn delete(&self, branch_id: &BranchId, space: &str, key: &str) -> StrataResult<bool> {
-        self.db.transaction(*branch_id, |txn| {
+        let existed = self.db.transaction(*branch_id, |txn| {
             let storage_key = self.key_for(branch_id, space, key);
             let exists = txn.get(&storage_key)?.is_some();
             if exists {
                 txn.delete(storage_key)?;
             }
             Ok(exists)
-        })
+        })?;
+
+        // Remove from inverted index to prevent stale postings
+        if existed {
+            if let Ok(index) = self.db.extension::<crate::search::InvertedIndex>() {
+                if index.is_enabled() {
+                    let entity_ref = crate::search::EntityRef::Kv {
+                        branch_id: *branch_id,
+                        key: key.to_string(),
+                    };
+                    index.remove_document(&entity_ref);
+                }
+            }
+        }
+
+        Ok(existed)
     }
 
     /// List keys with optional prefix filter
@@ -1130,5 +1145,61 @@ mod tests {
         let response = kv.search(&req).unwrap();
         // Int value gets serialized to "42" which should be indexed
         assert!(response.len() <= 1, "At most 1 result for '42'");
+    }
+
+    #[test]
+    fn test_kv_delete_removes_from_index() {
+        use crate::search::Searchable;
+
+        let (_temp, _db, kv) = setup_with_index();
+        let branch_id = BranchId::new();
+
+        kv.put(
+            &branch_id,
+            "default",
+            "ephemeral",
+            Value::String("fleeting butterfly garden".into()),
+        )
+        .unwrap();
+        kv.put(
+            &branch_id,
+            "default",
+            "permanent",
+            Value::String("enduring butterfly monument".into()),
+        )
+        .unwrap();
+
+        // Both should be searchable
+        let req = crate::SearchRequest::new(branch_id, "butterfly");
+        let response = kv.search(&req).unwrap();
+        assert_eq!(response.len(), 2, "Both docs should match 'butterfly'");
+
+        // Delete "ephemeral"
+        let deleted = kv.delete(&branch_id, "default", "ephemeral").unwrap();
+        assert!(deleted);
+
+        // Now only "permanent" should appear in search
+        let req = crate::SearchRequest::new(branch_id, "butterfly");
+        let response = kv.search(&req).unwrap();
+        assert_eq!(
+            response.len(),
+            1,
+            "Only 'permanent' should match after delete"
+        );
+        assert_eq!(
+            response.hits[0].doc_ref,
+            crate::search::EntityRef::Kv {
+                branch_id,
+                key: "permanent".to_string(),
+            }
+        );
+
+        // Term unique to deleted doc should return no results
+        let req = crate::SearchRequest::new(branch_id, "fleeting");
+        let response = kv.search(&req).unwrap();
+        assert!(
+            response.is_empty(),
+            "Deleted doc's unique terms should not match"
+        );
     }
 }
