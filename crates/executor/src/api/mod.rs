@@ -1054,6 +1054,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_config_set_and_get() {
+        let db = create_strata();
+        db.config_set("auto_embed", "true").unwrap();
+        assert_eq!(db.config_get("auto_embed").unwrap(), Some("true".into()));
+        assert!(db.auto_embed_enabled().unwrap());
+    }
+
+    #[test]
+    fn test_config_set_bm25() {
+        let db = create_strata();
+        db.config_set("bm25_k1", "1.5").unwrap();
+        db.config_set("bm25_b", "0.8").unwrap();
+        assert_eq!(db.config_get("bm25_k1").unwrap(), Some("1.5".into()));
+        assert_eq!(db.config_get("bm25_b").unwrap(), Some("0.8".into()));
+    }
+
+    #[test]
+    fn test_config_set_invalid_key() {
+        let db = create_strata();
+        let err = db.config_set("nonexistent_key", "value").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Unknown configuration key"), "Error: {msg}");
+    }
+
+    #[test]
+    fn test_config_get_optional_key_returns_none() {
+        let db = create_strata();
+        // default_model is optional and unset by default
+        assert_eq!(db.config_get("default_model").unwrap(), None);
+    }
+
+    #[test]
+    fn test_config_set_persists_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let db = Strata::open(dir.path()).unwrap();
+            db.config_set("bm25_k1", "2.0").unwrap();
+            db.config_set("embed_batch_size", "256").unwrap();
+        }
+        {
+            let db = Strata::open(dir.path()).unwrap();
+            assert_eq!(db.config_get("bm25_k1").unwrap(), Some("2".into()));
+            assert_eq!(
+                db.config_get("embed_batch_size").unwrap(),
+                Some("256".into())
+            );
+        }
+    }
+
     // =========================================================================
     // Graph API Tests
     // =========================================================================
