@@ -19,40 +19,20 @@ pub enum AccessMode {
 
 /// Options for opening a database.
 ///
-/// Use the builder pattern to configure options. Any field set to `Some`
-/// overrides the corresponding value in `strata.toml`.
+/// Configuration settings (durability, auto_embed, model, etc.) are managed
+/// via `CONFIG SET`/`CONFIG GET` and persisted in `strata.toml`. `OpenOptions`
+/// only controls access mode and multi-process coordination.
 ///
 /// ```ignore
 /// use strata_security::{OpenOptions, AccessMode};
 ///
 /// let opts = OpenOptions::new()
-///     .access_mode(AccessMode::ReadOnly)
-///     .durability("always");
+///     .access_mode(AccessMode::ReadOnly);
 /// ```
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
     /// The access mode for the database.
     pub access_mode: AccessMode,
-    /// Enable automatic text embedding for semantic search.
-    /// `None` means "use the config file default".
-    pub auto_embed: Option<bool>,
-    /// Override durability mode: `"standard"` or `"always"`.
-    /// `None` means "use the config file default".
-    pub durability: Option<String>,
-    /// Override model endpoint (OpenAI-compatible URL).
-    pub model_endpoint: Option<String>,
-    /// Override model name.
-    pub model_name: Option<String>,
-    /// Override model API key.
-    pub model_api_key: Option<String>,
-    /// Override model request timeout in milliseconds.
-    pub model_timeout_ms: Option<u64>,
-    /// Override embedding batch size for auto-embed.
-    /// `None` means "use the config file value, or 512 if unset".
-    pub embed_batch_size: Option<usize>,
-    /// Override embedding model name (e.g. "miniLM", "nomic-embed", "bge-m3", "gemma-embed").
-    /// `None` means "use the config file default (miniLM)".
-    pub embed_model: Option<String>,
     /// Enable multi-process coordination mode.
     ///
     /// When `true`, multiple processes can open the same database directory
@@ -75,49 +55,6 @@ impl OpenOptions {
         self
     }
 
-    /// Enable or disable automatic text embedding.
-    pub fn auto_embed(mut self, enabled: bool) -> Self {
-        self.auto_embed = Some(enabled);
-        self
-    }
-
-    /// Set the durability mode (`"standard"` or `"always"`).
-    pub fn durability(mut self, mode: &str) -> Self {
-        self.durability = Some(mode.to_string());
-        self
-    }
-
-    /// Set the model endpoint and name for query expansion / re-ranking.
-    pub fn model(mut self, endpoint: &str, name: &str) -> Self {
-        self.model_endpoint = Some(endpoint.to_string());
-        self.model_name = Some(name.to_string());
-        self
-    }
-
-    /// Set the model API key.
-    pub fn model_api_key(mut self, key: &str) -> Self {
-        self.model_api_key = Some(key.to_string());
-        self
-    }
-
-    /// Set the model request timeout in milliseconds.
-    pub fn model_timeout_ms(mut self, ms: u64) -> Self {
-        self.model_timeout_ms = Some(ms);
-        self
-    }
-
-    /// Set the embedding batch size for auto-embed.
-    pub fn embed_batch_size(mut self, size: usize) -> Self {
-        self.embed_batch_size = Some(size);
-        self
-    }
-
-    /// Set the embedding model name.
-    pub fn embed_model(mut self, name: &str) -> Self {
-        self.embed_model = Some(name.to_string());
-        self
-    }
-
     /// Enable multi-process coordination mode.
     ///
     /// When enabled, multiple processes can open the same database directory
@@ -132,14 +69,6 @@ impl Default for OpenOptions {
     fn default() -> Self {
         Self {
             access_mode: AccessMode::ReadWrite,
-            auto_embed: None,
-            durability: None,
-            model_endpoint: None,
-            model_name: None,
-            model_api_key: None,
-            model_timeout_ms: None,
-            embed_batch_size: None,
-            embed_model: None,
             multi_process: false,
         }
     }

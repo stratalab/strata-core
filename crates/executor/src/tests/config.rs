@@ -748,3 +748,569 @@ fn configure_set_embed_model_overwrite() {
         .unwrap();
     assert_eq!(result, Output::ConfigValue(Some("bge-m3".into())));
 }
+
+// =============================================================================
+// auto_embed configuration
+// =============================================================================
+
+#[test]
+fn configure_set_and_get_auto_embed() {
+    let executor = create_test_executor();
+
+    executor
+        .execute(Command::ConfigureSet {
+            key: "auto_embed".into(),
+            value: "true".into(),
+        })
+        .unwrap();
+
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "auto_embed".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(Some("true".into())));
+}
+
+#[test]
+fn configure_get_auto_embed_default_is_false() {
+    let executor = create_test_executor();
+
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "auto_embed".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(Some("false".into())));
+}
+
+#[test]
+fn configure_set_auto_embed_case_insensitive() {
+    let executor = create_test_executor();
+
+    executor
+        .execute(Command::ConfigureSet {
+            key: "auto_embed".into(),
+            value: "TRUE".into(),
+        })
+        .unwrap();
+
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "auto_embed".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(Some("true".into())));
+}
+
+#[test]
+fn configure_set_auto_embed_invalid_value_rejected() {
+    let executor = create_test_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "auto_embed".into(),
+        value: "yes".into(),
+    });
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("true") && msg.contains("false"),
+        "Error: {}",
+        msg
+    );
+}
+
+// =============================================================================
+// durability configuration
+// =============================================================================
+
+#[test]
+fn configure_get_durability_default_is_standard() {
+    let executor = create_test_executor();
+
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "durability".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(Some("standard".into())));
+}
+
+#[test]
+fn configure_set_durability_valid_modes() {
+    let executor = create_test_executor();
+
+    for mode in ["standard", "always", "cache"] {
+        let result = executor.execute(Command::ConfigureSet {
+            key: "durability".into(),
+            value: mode.into(),
+        });
+        assert!(
+            result.is_ok(),
+            "Durability mode {:?} should be accepted, got: {:?}",
+            mode,
+            result
+        );
+
+        let get_result = executor
+            .execute(Command::ConfigureGetKey {
+                key: "durability".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            get_result,
+            Output::ConfigValue(Some(mode.into())),
+            "Durability should round-trip for {:?}",
+            mode
+        );
+    }
+}
+
+#[test]
+fn configure_set_durability_invalid_rejected() {
+    let executor = create_test_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "durability".into(),
+        value: "turbo".into(),
+    });
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("Invalid durability mode"), "Error: {}", msg);
+}
+
+#[test]
+fn configure_set_durability_case_insensitive() {
+    let executor = create_test_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "durability".into(),
+        value: "Always".into(),
+    });
+    assert!(result.is_ok());
+
+    let get_result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "durability".into(),
+        })
+        .unwrap();
+    assert_eq!(get_result, Output::ConfigValue(Some("always".into())));
+}
+
+// =============================================================================
+// BM25 configuration
+// =============================================================================
+
+#[test]
+fn configure_set_and_get_bm25_k1() {
+    let executor = create_test_executor();
+
+    executor
+        .execute(Command::ConfigureSet {
+            key: "bm25_k1".into(),
+            value: "1.5".into(),
+        })
+        .unwrap();
+
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "bm25_k1".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(Some("1.5".into())));
+}
+
+#[test]
+fn configure_get_bm25_k1_default_is_none() {
+    let executor = create_test_executor();
+
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "bm25_k1".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(None));
+}
+
+#[test]
+fn configure_set_bm25_k1_zero_rejected() {
+    let executor = create_test_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "bm25_k1".into(),
+        value: "0".into(),
+    });
+    assert!(result.is_err());
+}
+
+#[test]
+fn configure_set_bm25_k1_negative_rejected() {
+    let executor = create_test_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "bm25_k1".into(),
+        value: "-1.0".into(),
+    });
+    assert!(result.is_err());
+}
+
+#[test]
+fn configure_set_bm25_k1_infinity_rejected() {
+    let executor = create_test_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "bm25_k1".into(),
+        value: "inf".into(),
+    });
+    assert!(result.is_err());
+}
+
+#[test]
+fn configure_set_bm25_k1_nan_rejected() {
+    let executor = create_test_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "bm25_k1".into(),
+        value: "NaN".into(),
+    });
+    assert!(result.is_err());
+}
+
+#[test]
+fn configure_set_bm25_k1_not_a_number_rejected() {
+    let executor = create_test_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "bm25_k1".into(),
+        value: "abc".into(),
+    });
+    assert!(result.is_err());
+}
+
+#[test]
+fn configure_set_and_get_bm25_b() {
+    let executor = create_test_executor();
+
+    executor
+        .execute(Command::ConfigureSet {
+            key: "bm25_b".into(),
+            value: "0.75".into(),
+        })
+        .unwrap();
+
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "bm25_b".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(Some("0.75".into())));
+}
+
+#[test]
+fn configure_set_bm25_b_boundary_values() {
+    let executor = create_test_executor();
+
+    // 0.0 is valid
+    assert!(executor
+        .execute(Command::ConfigureSet {
+            key: "bm25_b".into(),
+            value: "0".into(),
+        })
+        .is_ok());
+
+    // 1.0 is valid
+    assert!(executor
+        .execute(Command::ConfigureSet {
+            key: "bm25_b".into(),
+            value: "1.0".into(),
+        })
+        .is_ok());
+
+    // > 1.0 is rejected
+    assert!(executor
+        .execute(Command::ConfigureSet {
+            key: "bm25_b".into(),
+            value: "1.1".into(),
+        })
+        .is_err());
+
+    // negative is rejected
+    assert!(executor
+        .execute(Command::ConfigureSet {
+            key: "bm25_b".into(),
+            value: "-0.1".into(),
+        })
+        .is_err());
+}
+
+#[test]
+fn configure_set_bm25_b_infinity_rejected() {
+    let executor = create_test_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "bm25_b".into(),
+        value: "inf".into(),
+    });
+    assert!(result.is_err());
+}
+
+// =============================================================================
+// embed_batch_size configuration
+// =============================================================================
+
+#[test]
+fn configure_set_and_get_embed_batch_size() {
+    let executor = create_test_executor();
+
+    executor
+        .execute(Command::ConfigureSet {
+            key: "embed_batch_size".into(),
+            value: "1024".into(),
+        })
+        .unwrap();
+
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "embed_batch_size".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(Some("1024".into())));
+}
+
+#[test]
+fn configure_get_embed_batch_size_default_is_512() {
+    let executor = create_test_executor();
+
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "embed_batch_size".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(Some("512".into())));
+}
+
+#[test]
+fn configure_set_embed_batch_size_zero_rejected() {
+    let executor = create_test_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "embed_batch_size".into(),
+        value: "0".into(),
+    });
+    assert!(result.is_err());
+}
+
+#[test]
+fn configure_set_embed_batch_size_not_a_number_rejected() {
+    let executor = create_test_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "embed_batch_size".into(),
+        value: "abc".into(),
+    });
+    assert!(result.is_err());
+}
+
+// =============================================================================
+// Model endpoint configuration (model_endpoint, model_name, etc.)
+// =============================================================================
+
+#[test]
+fn configure_set_and_get_model_endpoint() {
+    let executor = create_test_executor();
+
+    executor
+        .execute(Command::ConfigureSet {
+            key: "model_endpoint".into(),
+            value: "http://localhost:11434/v1".into(),
+        })
+        .unwrap();
+
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "model_endpoint".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        result,
+        Output::ConfigValue(Some("http://localhost:11434/v1".into()))
+    );
+}
+
+#[test]
+fn configure_set_model_name_creates_model_section() {
+    let executor = create_test_executor();
+
+    // model_name should be None initially (no model section)
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "model_name".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(None));
+
+    // Setting model_name should create the model section
+    executor
+        .execute(Command::ConfigureSet {
+            key: "model_name".into(),
+            value: "qwen3:1.7b".into(),
+        })
+        .unwrap();
+
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "model_name".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(Some("qwen3:1.7b".into())));
+}
+
+#[test]
+fn configure_set_model_api_key() {
+    let executor = create_test_executor();
+
+    // First create the model section
+    executor
+        .execute(Command::ConfigureSet {
+            key: "model_endpoint".into(),
+            value: "http://localhost:11434/v1".into(),
+        })
+        .unwrap();
+
+    executor
+        .execute(Command::ConfigureSet {
+            key: "model_api_key".into(),
+            value: "sk-test-key".into(),
+        })
+        .unwrap();
+
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "model_api_key".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(Some("sk-test-key".into())));
+}
+
+#[test]
+fn configure_set_model_timeout_ms() {
+    let executor = create_test_executor();
+
+    // Create model section first
+    executor
+        .execute(Command::ConfigureSet {
+            key: "model_endpoint".into(),
+            value: "http://localhost:11434/v1".into(),
+        })
+        .unwrap();
+
+    executor
+        .execute(Command::ConfigureSet {
+            key: "model_timeout_ms".into(),
+            value: "10000".into(),
+        })
+        .unwrap();
+
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "model_timeout_ms".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(Some("10000".into())));
+}
+
+#[test]
+fn configure_set_model_timeout_ms_not_a_number_rejected() {
+    let executor = create_test_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "model_timeout_ms".into(),
+        value: "abc".into(),
+    });
+    assert!(result.is_err());
+}
+
+#[test]
+fn configure_get_model_fields_none_when_no_model() {
+    let executor = create_test_executor();
+
+    for key in [
+        "model_endpoint",
+        "model_name",
+        "model_api_key",
+        "model_timeout_ms",
+    ] {
+        let result = executor
+            .execute(Command::ConfigureGetKey { key: key.into() })
+            .unwrap();
+        assert_eq!(
+            result,
+            Output::ConfigValue(None),
+            "Model field {:?} should be None when no model section",
+            key
+        );
+    }
+}
+
+#[test]
+fn configure_set_model_fields_visible_in_full_config() {
+    let executor = create_test_executor();
+
+    executor
+        .execute(Command::ConfigureSet {
+            key: "model_endpoint".into(),
+            value: "http://localhost:11434/v1".into(),
+        })
+        .unwrap();
+
+    executor
+        .execute(Command::ConfigureSet {
+            key: "model_name".into(),
+            value: "qwen3:1.7b".into(),
+        })
+        .unwrap();
+
+    let result = executor.execute(Command::ConfigGet).unwrap();
+    match result {
+        Output::Config(cfg) => {
+            let model = cfg.model.expect("model section should exist");
+            assert_eq!(model.endpoint, "http://localhost:11434/v1");
+            assert_eq!(model.model, "qwen3:1.7b");
+        }
+        _ => panic!("Expected Config output"),
+    }
+}
+
+// =============================================================================
+// All new keys visible in unknown-key error messages
+// =============================================================================
+
+#[test]
+fn unknown_key_error_lists_all_new_keys() {
+    let executor = create_test_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "nonexistent".into(),
+        value: "anything".into(),
+    });
+    let msg = result.unwrap_err().to_string();
+
+    for expected in [
+        "durability",
+        "auto_embed",
+        "bm25_k1",
+        "bm25_b",
+        "embed_batch_size",
+        "model_endpoint",
+        "model_name",
+        "model_api_key",
+        "model_timeout_ms",
+    ] {
+        assert!(
+            msg.contains(expected),
+            "Error should list new key {:?}: {}",
+            expected,
+            msg
+        );
+    }
+}

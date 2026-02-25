@@ -41,6 +41,15 @@ const KNOWN_KEYS: &[&str] = &[
     "openai_api_key",
     "google_api_key",
     "embed_model",
+    "durability",
+    "auto_embed",
+    "bm25_k1",
+    "bm25_b",
+    "embed_batch_size",
+    "model_endpoint",
+    "model_name",
+    "model_api_key",
+    "model_timeout_ms",
 ];
 
 /// Handle ConfigureSet command: set a named configuration key.
@@ -87,7 +96,6 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
                 reason: "embed_model cannot be empty. Valid models: miniLM, nomic-embed, bge-m3, gemma-embed".to_string(),
             });
         }
-        // Map to canonical name (matching the inference registry catalog).
         let canonical = match v.as_str() {
             "minilm" => "miniLM",
             "nomic-embed" => "nomic-embed",
@@ -110,6 +118,132 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
         );
     }
 
+    // Validate durability
+    if key_lower == "durability" {
+        let v = value.trim().to_ascii_lowercase();
+        let valid = ["standard", "always", "cache"];
+        if !valid.contains(&v.as_str()) {
+            return Err(Error::InvalidInput {
+                reason: format!(
+                    "Invalid durability mode: {:?}. Valid values: standard, always, cache",
+                    value.trim()
+                ),
+            });
+        }
+    }
+
+    // Validate auto_embed (bool)
+    if key_lower == "auto_embed" {
+        let v = value.trim().to_ascii_lowercase();
+        if v != "true" && v != "false" {
+            return Err(Error::InvalidInput {
+                reason: format!(
+                    "Invalid auto_embed value: {:?}. Expected \"true\" or \"false\"",
+                    value.trim()
+                ),
+            });
+        }
+    }
+
+    // Validate bm25_k1 (f32, finite, > 0)
+    if key_lower == "bm25_k1" {
+        let v: f32 = value.trim().parse().map_err(|_| Error::InvalidInput {
+            reason: format!(
+                "Invalid bm25_k1 value: {:?}. Expected a positive number",
+                value.trim()
+            ),
+        })?;
+        if !v.is_finite() || v <= 0.0 {
+            return Err(Error::InvalidInput {
+                reason: "bm25_k1 must be a finite number greater than 0".to_string(),
+            });
+        }
+    }
+
+    // Validate bm25_b (f32, finite, 0..=1)
+    if key_lower == "bm25_b" {
+        let v: f32 = value.trim().parse().map_err(|_| Error::InvalidInput {
+            reason: format!(
+                "Invalid bm25_b value: {:?}. Expected a number between 0 and 1",
+                value.trim()
+            ),
+        })?;
+        if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+            return Err(Error::InvalidInput {
+                reason: "bm25_b must be a finite number between 0 and 1 (inclusive)".to_string(),
+            });
+        }
+    }
+
+    // Validate embed_batch_size (usize, > 0)
+    if key_lower == "embed_batch_size" {
+        let v: usize = value.trim().parse().map_err(|_| Error::InvalidInput {
+            reason: format!(
+                "Invalid embed_batch_size value: {:?}. Expected a positive integer",
+                value.trim()
+            ),
+        })?;
+        if v == 0 {
+            return Err(Error::InvalidInput {
+                reason: "embed_batch_size must be greater than 0".to_string(),
+            });
+        }
+    }
+
+    // Validate model_timeout_ms (u64)
+    if key_lower == "model_timeout_ms" {
+        let _: u64 = value.trim().parse().map_err(|_| Error::InvalidInput {
+            reason: format!(
+                "Invalid model_timeout_ms value: {:?}. Expected a positive integer",
+                value.trim()
+            ),
+        })?;
+    }
+
+    // Durability uses persist_config_deferred (allows changing durability)
+    if key_lower == "durability" {
+        let v = value.trim().to_ascii_lowercase();
+        p.db.persist_config_deferred(|cfg| {
+            cfg.durability = v;
+        })
+        .map_err(crate::Error::from)?;
+        tracing::info!(
+            target: "strata::config",
+            "durability changed; takes effect on next restart"
+        );
+        return Ok(Output::Unit);
+    }
+
+    // Model-related keys may need to create the model section
+    let use_model_config = matches!(
+        key_lower.as_str(),
+        "model_endpoint" | "model_name" | "model_api_key" | "model_timeout_ms"
+    );
+
+    if use_model_config {
+        p.db.update_config(|cfg| {
+            let model =
+                cfg.model
+                    .get_or_insert_with(|| strata_engine::database::config::ModelConfig {
+                        endpoint: String::new(),
+                        model: String::new(),
+                        api_key: None,
+                        timeout_ms: 5000,
+                    });
+            match key_lower.as_str() {
+                "model_endpoint" => model.endpoint = value.clone(),
+                "model_name" => model.model = value.clone(),
+                "model_api_key" => model.api_key = Some(value.clone()),
+                "model_timeout_ms" => {
+                    model.timeout_ms = value.trim().parse().unwrap_or(5000);
+                }
+                _ => unreachable!(),
+            }
+        })
+        .map_err(crate::Error::from)?;
+        return Ok(Output::Unit);
+    }
+
     p.db.update_config(|cfg| match key_lower.as_str() {
         "provider" => cfg.provider = value.clone(),
         "default_model" => cfg.default_model = Some(value.clone()),
@@ -120,6 +254,18 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
             cfg.embed_model = canonical_embed_model
                 .clone()
                 .unwrap_or_else(|| value.clone())
+        }
+        "auto_embed" => {
+            cfg.auto_embed = value.trim().eq_ignore_ascii_case("true");
+        }
+        "bm25_k1" => {
+            cfg.bm25_k1 = value.trim().parse().ok();
+        }
+        "bm25_b" => {
+            cfg.bm25_b = value.trim().parse().ok();
+        }
+        "embed_batch_size" => {
+            cfg.embed_batch_size = value.trim().parse().ok();
         }
         _ => unreachable!(),
     })
@@ -150,6 +296,15 @@ pub fn configure_get_key(p: &Arc<Primitives>, key: String) -> Result<Output> {
         "openai_api_key" => cfg.openai_api_key.clone(),
         "google_api_key" => cfg.google_api_key.clone(),
         "embed_model" => Some(cfg.embed_model.clone()),
+        "durability" => Some(cfg.durability.clone()),
+        "auto_embed" => Some(cfg.auto_embed.to_string()),
+        "bm25_k1" => cfg.bm25_k1.map(|v| v.to_string()),
+        "bm25_b" => cfg.bm25_b.map(|v| v.to_string()),
+        "embed_batch_size" => cfg.embed_batch_size.map(|v| v.to_string()),
+        "model_endpoint" => cfg.model.as_ref().map(|m| m.endpoint.clone()),
+        "model_name" => cfg.model.as_ref().map(|m| m.model.clone()),
+        "model_api_key" => cfg.model.as_ref().and_then(|m| m.api_key.clone()),
+        "model_timeout_ms" => cfg.model.as_ref().map(|m| m.timeout_ms.to_string()),
         _ => unreachable!(),
     };
 

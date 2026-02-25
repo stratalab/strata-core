@@ -44,19 +44,6 @@ fn main() {
         OutputMode::Human
     };
 
-    // Auto-download model files when --auto-embed is set (best-effort).
-    #[cfg(feature = "embed")]
-    if matches.get_flag("auto-embed") {
-        match strata_intelligence::embed::download::ensure_model() {
-            Ok(path) => {
-                eprintln!("Model files ready at {}", path.display());
-            }
-            Err(e) => {
-                eprintln!("Warning: failed to download model files: {}", e);
-            }
-        }
-    }
-
     // Open database
     let db = match open_database(&matches) {
         Ok(db) => db,
@@ -96,7 +83,6 @@ fn main() {
 fn open_database(matches: &clap::ArgMatches) -> Result<Strata, String> {
     let read_only = matches.get_flag("read-only");
     let use_cache = matches.get_flag("cache");
-    let auto_embed = matches.get_flag("auto-embed");
 
     if use_cache {
         Strata::cache().map_err(|e| format!("Failed to open cache database: {}", e))
@@ -110,9 +96,6 @@ fn open_database(matches: &clap::ArgMatches) -> Result<Strata, String> {
 
         if read_only {
             opts = opts.access_mode(AccessMode::ReadOnly);
-        }
-        if auto_embed {
-            opts = opts.auto_embed(true);
         }
 
         Strata::open_with(path, opts).map_err(|e| format!("Failed to open database: {}", e))

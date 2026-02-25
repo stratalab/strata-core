@@ -143,6 +143,7 @@ pub fn matches_to_action(matches: &ArgMatches, state: &SessionState) -> Result<C
         "flush" => Ok(CliAction::Execute(Command::Flush)),
         "compact" => Ok(CliAction::Execute(Command::Compact)),
         "search" => parse_search(sub_matches, state),
+        "config" => parse_config(sub_matches),
         "configure-model" => parse_configure_model(sub_matches),
         "embed" => parse_embed(sub_matches),
         "models" => parse_models(sub_matches),
@@ -935,6 +936,23 @@ fn parse_txn(matches: &ArgMatches) -> Result<CliAction, String> {
 // =========================================================================
 // Configure Model
 // =========================================================================
+
+fn parse_config(matches: &ArgMatches) -> Result<CliAction, String> {
+    let (sub, m) = matches.subcommand().ok_or("No config subcommand")?;
+    match sub {
+        "set" => {
+            let key = m.get_one::<String>("key").unwrap().clone();
+            let value = m.get_one::<String>("value").unwrap().clone();
+            Ok(CliAction::Execute(Command::ConfigureSet { key, value }))
+        }
+        "get" => {
+            let key = m.get_one::<String>("key").unwrap().clone();
+            Ok(CliAction::Execute(Command::ConfigureGetKey { key }))
+        }
+        "list" => Ok(CliAction::Execute(Command::ConfigGet)),
+        other => Err(format!("Unknown config subcommand: {}", other)),
+    }
+}
 
 fn parse_configure_model(matches: &ArgMatches) -> Result<CliAction, String> {
     let endpoint = matches.get_one::<String>("endpoint").unwrap().clone();

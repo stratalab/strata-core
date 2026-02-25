@@ -60,13 +60,6 @@ pub fn build_cli() -> Command {
                 .action(clap::ArgAction::SetTrue)
                 .global(true),
         )
-        .arg(
-            Arg::new("auto-embed")
-                .long("auto-embed")
-                .help("Enable automatic text embedding for semantic search")
-                .action(clap::ArgAction::SetTrue)
-                .global(true),
-        )
         .subcommand(build_kv())
         .subcommand(build_json())
         .subcommand(build_event())
@@ -90,6 +83,7 @@ pub fn build_cli() -> Command {
         .subcommand(build_generate())
         .subcommand(build_tokenize())
         .subcommand(build_detokenize())
+        .subcommand(build_config())
 }
 
 /// Build a command tree for REPL mode (no global flags).
@@ -119,6 +113,7 @@ pub fn build_repl_cmd() -> Command {
         .subcommand(build_generate())
         .subcommand(build_tokenize())
         .subcommand(build_detokenize())
+        .subcommand(build_config())
 }
 
 // =========================================================================
@@ -881,4 +876,26 @@ fn build_detokenize() -> Command {
                 .num_args(1..)
                 .help("Token IDs to decode"),
         )
+}
+
+// =========================================================================
+// Config
+// =========================================================================
+
+fn build_config() -> Command {
+    Command::new("config")
+        .about("Configuration operations")
+        .subcommand_required(true)
+        .subcommand(
+            Command::new("set")
+                .about("Set a configuration value")
+                .arg(Arg::new("key").required(true).help("Configuration key"))
+                .arg(Arg::new("value").required(true).help("Configuration value")),
+        )
+        .subcommand(
+            Command::new("get")
+                .about("Get a configuration value")
+                .arg(Arg::new("key").required(true).help("Configuration key")),
+        )
+        .subcommand(Command::new("list").about("Show all configuration values"))
 }

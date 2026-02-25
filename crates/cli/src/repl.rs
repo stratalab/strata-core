@@ -435,6 +435,7 @@ fn print_help(command: Option<&str>) {
         println!("  flush       Flush writes to disk");
         println!("  compact     Trigger compaction");
         println!("  search      Search across primitives");
+        println!("  config      Configuration operations (set, get, list)");
         println!();
         println!("Meta-commands:");
         println!("  use <branch> [space]   Switch branch/space context");
@@ -451,7 +452,8 @@ fn print_help(command: Option<&str>) {
 /// Known top-level commands for TAB completion.
 const TOP_LEVEL_COMMANDS: &[&str] = &[
     "kv", "json", "event", "state", "vector", "branch", "space", "begin", "commit", "rollback",
-    "txn", "ping", "info", "flush", "compact", "search", "use", "help", "quit", "exit", "clear",
+    "txn", "ping", "info", "flush", "compact", "search", "config", "use", "help", "quit", "exit",
+    "clear",
 ];
 
 /// Known subcommands for each top-level command.
@@ -479,6 +481,7 @@ fn subcommands_for(cmd: &str) -> &'static [&'static str] {
         ],
         "space" => &["list", "create", "del", "exists"],
         "txn" => &["info", "active"],
+        "config" => &["set", "get", "list"],
         _ => &[],
     }
 }
