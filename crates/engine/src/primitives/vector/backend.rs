@@ -94,12 +94,7 @@ pub trait VectorIndexBackend: Send + Sync {
     ///
     /// Higher ef_search = higher recall but slower search.
     /// Default: delegates to `search()` (ignoring ef_search).
-    fn search_with_ef(
-        &self,
-        query: &[f32],
-        k: usize,
-        _ef_search: usize,
-    ) -> Vec<(VectorId, f32)> {
+    fn search_with_ef(&self, query: &[f32], k: usize, _ef_search: usize) -> Vec<(VectorId, f32)> {
         self.search(query, k)
     }
 

@@ -237,8 +237,7 @@ impl MmapVectorData {
             return None;
         }
         let slice = &self.mmap[byte_start..byte_end];
-        let floats =
-            unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const f32, dim) };
+        let floats = unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const f32, dim) };
         Some(floats)
     }
 

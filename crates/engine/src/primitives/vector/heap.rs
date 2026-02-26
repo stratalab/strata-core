@@ -559,7 +559,12 @@ impl VectorHeap {
                 }
             }
             VectorData::Mmap(mmap) => mmap.get_by_offset(offset, dim),
-            VectorData::Tiered { base, overlay, overlay_id_to_offset, .. } => {
+            VectorData::Tiered {
+                base,
+                overlay,
+                overlay_id_to_offset,
+                ..
+            } => {
                 // Slot-based access doesn't know which layer, try InMemory-like path
                 // This is a fallback; callers on Tiered heaps should use get_fast()
                 let _ = (base, overlay, overlay_id_to_offset);

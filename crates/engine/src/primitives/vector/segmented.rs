@@ -976,12 +976,7 @@ impl VectorIndexBackend for SegmentedHnswBackend {
         });
     }
 
-    fn search_with_ef(
-        &self,
-        query: &[f32],
-        k: usize,
-        ef_search: usize,
-    ) -> Vec<(VectorId, f32)> {
+    fn search_with_ef(&self, query: &[f32], k: usize, ef_search: usize) -> Vec<(VectorId, f32)> {
         if k == 0 || self.heap.is_empty() {
             return Vec::new();
         }
@@ -1003,7 +998,10 @@ impl VectorIndexBackend for SegmentedHnswBackend {
                 self.sealed
                     .par_iter()
                     .filter(|seg| seg.live_count > 0)
-                    .map(|seg| seg.graph.search_with_heap_ef(query, k, ef_search, &self.heap))
+                    .map(|seg| {
+                        seg.graph
+                            .search_with_heap_ef(query, k, ef_search, &self.heap)
+                    })
                     .filter(|r| !r.is_empty())
                     .collect()
             });
@@ -1011,9 +1009,9 @@ impl VectorIndexBackend for SegmentedHnswBackend {
         } else {
             for seg in &self.sealed {
                 if seg.live_count > 0 {
-                    let seg_results =
-                        seg.graph
-                            .search_with_heap_ef(query, k, ef_search, &self.heap);
+                    let seg_results = seg
+                        .graph
+                        .search_with_heap_ef(query, k, ef_search, &self.heap);
                     if !seg_results.is_empty() {
                         result_sets.push(seg_results);
                     }
@@ -2335,9 +2333,18 @@ mod tests {
         // Temporal search at ts=250: should find id=1 and id=2 (created at 100 and 200)
         let results = backend.search_at(&[1.0, 0.0, 0.0], 10, 250);
         let ids: Vec<u64> = results.iter().map(|(id, _)| id.as_u64()).collect();
-        assert!(ids.contains(&1), "id=1 (created_at=100) should be visible at ts=250");
-        assert!(ids.contains(&2), "id=2 (created_at=200) should be visible at ts=250");
-        assert!(!ids.contains(&4), "id=4 (created_at=400) should NOT be visible at ts=250");
+        assert!(
+            ids.contains(&1),
+            "id=1 (created_at=100) should be visible at ts=250"
+        );
+        assert!(
+            ids.contains(&2),
+            "id=2 (created_at=200) should be visible at ts=250"
+        );
+        assert!(
+            !ids.contains(&4),
+            "id=4 (created_at=400) should NOT be visible at ts=250"
+        );
     }
 
     #[test]
@@ -2372,7 +2379,9 @@ mod tests {
 
         // Insert enough vectors to have sealed segments
         for i in 1..=100 {
-            let emb: Vec<f32> = (0..32).map(|j| ((i * 32 + j) as f32 / 1000.0).sin()).collect();
+            let emb: Vec<f32> = (0..32)
+                .map(|j| ((i * 32 + j) as f32 / 1000.0).sin())
+                .collect();
             backend.insert(VectorId::new(i as u64), &emb).unwrap();
         }
 

@@ -33,20 +33,14 @@ fn build_index(n: usize, dim: usize) -> SegmentedHnswBackend {
 
     for i in 1..=n {
         let emb = make_embedding(dim, i);
-        backend
-            .insert(VectorId::new(i as u64), &emb)
-            .unwrap();
+        backend.insert(VectorId::new(i as u64), &emb).unwrap();
     }
 
     backend
 }
 
 /// Compute recall@k between two result sets
-fn recall_at_k(
-    approx: &[(VectorId, f32)],
-    exact: &[(VectorId, f32)],
-    k: usize,
-) -> f64 {
+fn recall_at_k(approx: &[(VectorId, f32)], exact: &[(VectorId, f32)], k: usize) -> f64 {
     let exact_ids: HashSet<VectorId> = exact.iter().take(k).map(|(id, _)| *id).collect();
     let approx_ids: HashSet<VectorId> = approx.iter().take(k).map(|(id, _)| *id).collect();
     let overlap = exact_ids.intersection(&approx_ids).count();
@@ -111,9 +105,7 @@ fn bench_search(c: &mut Criterion) {
                 total_recall += recall_at_k(&approx, &exact, k);
             }
             let avg_recall = total_recall / 5.0;
-            eprintln!(
-                "[{n} vectors, {dim}d] Average recall@{k}: {avg_recall:.3}"
-            );
+            eprintln!("[{n} vectors, {dim}d] Average recall@{k}: {avg_recall:.3}");
         }
 
         group.finish();

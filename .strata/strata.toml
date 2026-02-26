@@ -1,0 +1,4 @@
+durability = "standard"
+auto_embed = false
+embed_batch_size = 512
+provider = "local"

@@ -467,9 +467,24 @@ mod tests {
         let (dot, na, nb) = dot_norms_scalar(&a, &b);
         let (dot2, na2, nb2) = dot_norms(&a, &b);
 
-        assert!((dot - dot2).abs() < 1e-4, "dot mismatch: {} vs {}", dot, dot2);
-        assert!((na - na2).abs() < 1e-4, "norm_a mismatch: {} vs {}", na, na2);
-        assert!((nb - nb2).abs() < 1e-4, "norm_b mismatch: {} vs {}", nb, nb2);
+        assert!(
+            (dot - dot2).abs() < 1e-4,
+            "dot mismatch: {} vs {}",
+            dot,
+            dot2
+        );
+        assert!(
+            (na - na2).abs() < 1e-4,
+            "norm_a mismatch: {} vs {}",
+            na,
+            na2
+        );
+        assert!(
+            (nb - nb2).abs() < 1e-4,
+            "norm_b mismatch: {} vs {}",
+            nb,
+            nb2
+        );
 
         let ed_scalar = euclidean_distance_scalar(&a, &b);
         let ed_simd = euclidean_distance(&a, &b);
