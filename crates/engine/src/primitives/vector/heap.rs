@@ -501,27 +501,6 @@ impl VectorHeap {
     // Dense Acceleration (O(1) lookups for hot paths)
     // ========================================================================
 
-    /// O(1) embedding lookup via dense offset array.
-    ///
-    /// Only works for InMemory heaps. Falls back to `get()` for Mmap/Tiered.
-    #[inline]
-    pub fn get_fast(&self, id: VectorId) -> Option<&[f32]> {
-        let idx = id.0 as usize;
-        if idx < self.dense_offsets.len() {
-            let slot = self.dense_offsets[idx];
-            if slot != DENSE_ABSENT {
-                let dim = self.config.dimension;
-                let offset = slot as usize * dim;
-                return match &self.data {
-                    VectorData::InMemory(vec) => Some(&vec[offset..offset + dim]),
-                    _ => self.get(id),
-                };
-            }
-        }
-        // Fallback: try BTreeMap path (handles Mmap/Tiered)
-        self.get(id)
-    }
-
     /// Get the raw f32 offset for a VectorId (for CompactHnswGraph pre-resolution).
     ///
     /// Returns the slot number (offset / dim) if present, None otherwise.
@@ -566,7 +545,7 @@ impl VectorHeap {
                 ..
             } => {
                 // Slot-based access doesn't know which layer, try InMemory-like path
-                // This is a fallback; callers on Tiered heaps should use get_fast()
+                // This is a fallback; callers on Tiered heaps should use get()
                 let _ = (base, overlay, overlay_id_to_offset);
                 None
             }
@@ -637,7 +616,7 @@ impl VectorHeap {
                 ..
             } => {
                 // For Tiered heaps, id_to_offset stores dummy values (0).
-                // dense_offsets are not usable (get_fast falls back to get() anyway).
+                // dense_offsets are not usable (get() falls back to get_btree() anyway).
                 // We only need to compute correct norms by resolving embeddings
                 // through the overlay (precedence) or base mmap.
                 for (idx, _offset) in entries {
@@ -665,8 +644,30 @@ impl VectorHeap {
     /// Get embedding by VectorId
     ///
     /// Returns None if the vector doesn't exist.
-    /// Works for both InMemory and Mmap backing.
+    /// Uses O(1) dense offset lookup for InMemory heaps, falls back to
+    /// BTreeMap for Mmap/Tiered.
+    #[inline]
     pub fn get(&self, id: VectorId) -> Option<&[f32]> {
+        let idx = id.0 as usize;
+        if idx < self.dense_offsets.len() {
+            let slot = self.dense_offsets[idx];
+            if slot != DENSE_ABSENT {
+                let dim = self.config.dimension;
+                let offset = slot as usize * dim;
+                return match &self.data {
+                    VectorData::InMemory(vec) => Some(&vec[offset..offset + dim]),
+                    _ => self.get_btree(id),
+                };
+            }
+        }
+        // Fallback: try BTreeMap path (handles Mmap/Tiered)
+        self.get_btree(id)
+    }
+
+    /// BTreeMap-only embedding lookup (slow path).
+    ///
+    /// Used as fallback when the dense offset array doesn't cover this ID.
+    fn get_btree(&self, id: VectorId) -> Option<&[f32]> {
         match &self.data {
             VectorData::InMemory(vec) => {
                 let offset = *self.id_to_offset.get(&id)?;
@@ -1685,22 +1686,31 @@ mod tests {
     // ====================================================================
 
     #[test]
-    fn test_get_fast_matches_get() {
+    fn test_get_uses_dense_path() {
         let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
         let mut heap = VectorHeap::new(config);
 
+        // Insert non-contiguous IDs to exercise dense_offsets with gaps
         heap.upsert(VectorId::new(1), &[1.0, 0.0, 0.0]).unwrap();
         heap.upsert(VectorId::new(5), &[0.0, 1.0, 0.0]).unwrap();
         heap.upsert(VectorId::new(10), &[0.0, 0.0, 1.0]).unwrap();
 
-        // get_fast should return same results as get
-        for &id in &[1u64, 5, 10] {
-            let vid = VectorId::new(id);
-            assert_eq!(heap.get_fast(vid), heap.get(vid));
-        }
+        // Verify get() returns correct embeddings (not just self-consistent)
+        assert_eq!(heap.get(VectorId::new(1)).unwrap(), &[1.0, 0.0, 0.0]);
+        assert_eq!(heap.get(VectorId::new(5)).unwrap(), &[0.0, 1.0, 0.0]);
+        assert_eq!(heap.get(VectorId::new(10)).unwrap(), &[0.0, 0.0, 1.0]);
 
-        // Non-existent ID
-        assert!(heap.get_fast(VectorId::new(99)).is_none());
+        // Both paths (dense and btree) must agree
+        assert_eq!(heap.get(VectorId::new(1)), heap.get_btree(VectorId::new(1)),);
+        assert_eq!(heap.get(VectorId::new(5)), heap.get_btree(VectorId::new(5)),);
+
+        // Gap IDs should return None
+        assert!(heap.get(VectorId::new(3)).is_none());
+        assert!(heap.get(VectorId::new(7)).is_none());
+        // Non-existent ID beyond range
+        assert!(heap.get(VectorId::new(99)).is_none());
+        // ID 0 (before any inserts)
+        assert!(heap.get(VectorId::new(0)).is_none());
     }
 
     #[test]
@@ -1711,11 +1721,11 @@ mod tests {
         heap.upsert(VectorId::new(1), &[1.0, 0.0, 0.0]).unwrap();
         heap.upsert(VectorId::new(2), &[0.0, 1.0, 0.0]).unwrap();
 
-        assert!(heap.get_fast(VectorId::new(1)).is_some());
+        assert!(heap.get(VectorId::new(1)).is_some());
         heap.delete(VectorId::new(1));
-        assert!(heap.get_fast(VectorId::new(1)).is_none());
+        assert!(heap.get(VectorId::new(1)).is_none());
         // Other entries unaffected
-        assert!(heap.get_fast(VectorId::new(2)).is_some());
+        assert!(heap.get(VectorId::new(2)).is_some());
     }
 
     #[test]
@@ -1825,5 +1835,79 @@ mod tests {
 
         // Out of range should return None
         assert!(heap.get_by_slot(999).is_none());
+    }
+}
+
+#[cfg(test)]
+mod profiling_tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn make_embedding(dim: usize, seed: usize) -> Vec<f32> {
+        (0..dim)
+            .map(|j| ((seed * dim + j) as f32 / 1000.0).sin())
+            .collect()
+    }
+
+    /// Test 7: VectorHeap get() vs get_btree() (100K vectors, 1M lookups)
+    ///
+    /// Benchmarks the O(1) dense-offset path (get) against the
+    /// BTreeMap-only path (get_btree) to quantify the acceleration ratio.
+    #[test]
+    fn profile_heap_get_vs_get_btree() {
+        let dim = 128;
+        let n = 100_000;
+        let num_lookups = 1_000_000;
+
+        let config = VectorConfig::new(dim, DistanceMetric::Cosine).unwrap();
+        let mut heap = VectorHeap::new(config);
+
+        // Insert n vectors (IDs 1..=n)
+        for i in 1..=n {
+            let emb = make_embedding(dim, i);
+            heap.upsert(VectorId::new(i as u64), &emb).unwrap();
+        }
+
+        // Pre-generate random lookup IDs (deterministic via sin-based hash)
+        let lookup_ids: Vec<VectorId> = (0..num_lookups)
+            .map(|i| {
+                let idx = ((i as f64 * 0.618033988749895).fract() * n as f64) as u64 + 1;
+                VectorId::new(idx)
+            })
+            .collect();
+
+        // --- get() (dense fast path) ---
+        let start = Instant::now();
+        let mut checksum_fast = 0.0f64;
+        for &id in &lookup_ids {
+            if let Some(emb) = heap.get(id) {
+                checksum_fast += emb[0] as f64;
+            }
+        }
+        let fast_elapsed = start.elapsed();
+        let fast_ns = fast_elapsed.as_nanos() as f64 / num_lookups as f64;
+
+        // --- get_btree() (BTreeMap-only path) ---
+        let start = Instant::now();
+        let mut checksum_get = 0.0f64;
+        for &id in &lookup_ids {
+            if let Some(emb) = heap.get_btree(id) {
+                checksum_get += emb[0] as f64;
+            }
+        }
+        let get_elapsed = start.elapsed();
+        let get_ns = get_elapsed.as_nanos() as f64 / num_lookups as f64;
+
+        let speedup = get_ns / fast_ns;
+
+        println!("\n=== VectorHeap: get() vs get_btree() ({n} vectors, {num_lookups} lookups, dim={dim}) ===");
+        println!("  get():          {fast_ns:.1} ns/call ({fast_elapsed:?} total)");
+        println!("  get_btree():    {get_ns:.1} ns/call ({get_elapsed:?} total)");
+        println!("  speedup: {speedup:.2}x");
+        println!("  checksums: get={checksum_fast:.4}, get_btree={checksum_get:.4}");
+        assert!(
+            (checksum_fast - checksum_get).abs() < 1e-2,
+            "Checksums diverged: get={checksum_fast}, get_btree={checksum_get}"
+        );
     }
 }

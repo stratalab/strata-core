@@ -14,6 +14,26 @@
 
 use crate::primitives::vector::DistanceMetric;
 
+/// Compute similarity using pre-cached norms when available.
+///
+/// For Cosine metric with both norms present, avoids recomputing them
+/// (saves ~13% per call). Falls back to `compute_similarity` otherwise.
+#[inline]
+pub fn compute_similarity_cached(
+    a: &[f32],
+    b: &[f32],
+    metric: DistanceMetric,
+    norm_a: Option<f32>,
+    norm_b: Option<f32>,
+) -> f32 {
+    if metric == DistanceMetric::Cosine {
+        if let (Some(na), Some(nb)) = (norm_a, norm_b) {
+            return cosine_similarity_with_norms(a, b, na, nb);
+        }
+    }
+    compute_similarity(a, b, metric)
+}
+
 /// Compute similarity score between two vectors
 ///
 /// All scores are normalized to "higher = more similar" (Invariant R2).
@@ -539,5 +559,160 @@ mod tests {
         let sim1 = cosine_similarity(&a, &b);
         let sim2 = cosine_similarity_with_norms(&a, &b, norm_a, norm_b);
         assert!((sim1 - sim2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_compute_similarity_cached_cosine_matches() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![4.0, 5.0, 6.0];
+        let norm_a = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let norm_b = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+        // With both norms: should use cached path
+        let cached =
+            compute_similarity_cached(&a, &b, DistanceMetric::Cosine, Some(norm_a), Some(norm_b));
+        let direct = compute_similarity(&a, &b, DistanceMetric::Cosine);
+        assert!((cached - direct).abs() < 1e-6);
+
+        // With one norm missing: should fall back to compute_similarity
+        let partial = compute_similarity_cached(&a, &b, DistanceMetric::Cosine, Some(norm_a), None);
+        assert!((partial - direct).abs() < 1e-6);
+        let partial2 =
+            compute_similarity_cached(&a, &b, DistanceMetric::Cosine, None, Some(norm_b));
+        assert!((partial2 - direct).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_compute_similarity_cached_non_cosine_ignores_norms() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![4.0, 5.0, 6.0];
+
+        // Euclidean: norms should be ignored
+        let euclidean_cached =
+            compute_similarity_cached(&a, &b, DistanceMetric::Euclidean, Some(999.0), Some(999.0));
+        let euclidean_direct = compute_similarity(&a, &b, DistanceMetric::Euclidean);
+        assert!((euclidean_cached - euclidean_direct).abs() < 1e-6);
+
+        // DotProduct: norms should be ignored
+        let dot_cached =
+            compute_similarity_cached(&a, &b, DistanceMetric::DotProduct, Some(999.0), Some(999.0));
+        let dot_direct = compute_similarity(&a, &b, DistanceMetric::DotProduct);
+        assert!((dot_cached - dot_direct).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_compute_similarity_cached_zero_norms() {
+        let zero = vec![0.0, 0.0, 0.0];
+        let nonzero = vec![1.0, 2.0, 3.0];
+
+        // Zero norm with cached path should return 0.0 (same as uncached)
+        let cached = compute_similarity_cached(
+            &zero,
+            &nonzero,
+            DistanceMetric::Cosine,
+            Some(0.0),
+            Some(3.742),
+        );
+        assert_eq!(cached, 0.0);
+
+        let direct = compute_similarity(&zero, &nonzero, DistanceMetric::Cosine);
+        assert_eq!(direct, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod profiling_tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn make_embedding(dim: usize, seed: usize) -> Vec<f32> {
+        (0..dim)
+            .map(|j| ((seed * dim + j) as f32 / 1000.0).sin())
+            .collect()
+    }
+
+    /// Test 4: SIMD Activation Verification
+    ///
+    /// Times 100K distance computations via scalar vs SIMD-dispatched paths
+    /// to confirm SIMD is actually activating and providing speedup.
+    #[test]
+    fn profile_simd_vs_scalar() {
+        let dim = 128;
+        let num_pairs = 100_000;
+
+        // Pre-generate vector pairs
+        let pairs: Vec<(Vec<f32>, Vec<f32>)> = (0..num_pairs)
+            .map(|i| (make_embedding(dim, i), make_embedding(dim, i + num_pairs)))
+            .collect();
+
+        // --- dot_norms: scalar ---
+        let start = Instant::now();
+        let mut checksum_scalar = 0.0f64;
+        for (a, b) in &pairs {
+            let (dot, na, nb) = dot_norms_scalar(a, b);
+            checksum_scalar += dot as f64 + na as f64 + nb as f64;
+        }
+        let scalar_dot_ns = start.elapsed().as_nanos() as f64 / num_pairs as f64;
+
+        // --- dot_norms: SIMD-dispatched ---
+        let start = Instant::now();
+        let mut checksum_simd = 0.0f64;
+        for (a, b) in &pairs {
+            let (dot, na, nb) = dot_norms(a, b);
+            checksum_simd += dot as f64 + na as f64 + nb as f64;
+        }
+        let simd_dot_ns = start.elapsed().as_nanos() as f64 / num_pairs as f64;
+
+        // --- euclidean_distance: scalar ---
+        let start = Instant::now();
+        let mut checksum_eu_scalar = 0.0f64;
+        for (a, b) in &pairs {
+            checksum_eu_scalar += euclidean_distance_scalar(a, b) as f64;
+        }
+        let scalar_eu_ns = start.elapsed().as_nanos() as f64 / num_pairs as f64;
+
+        // --- euclidean_distance: SIMD-dispatched ---
+        let start = Instant::now();
+        let mut checksum_eu_simd = 0.0f64;
+        for (a, b) in &pairs {
+            checksum_eu_simd += euclidean_distance(a, b) as f64;
+        }
+        let simd_eu_ns = start.elapsed().as_nanos() as f64 / num_pairs as f64;
+
+        // Detect platform
+        let platform = if cfg!(target_arch = "aarch64") {
+            "aarch64/NEON"
+        } else if cfg!(target_arch = "x86_64") {
+            "x86_64 (AVX2 detection at runtime)"
+        } else {
+            "scalar"
+        };
+
+        let dot_speedup = scalar_dot_ns / simd_dot_ns;
+        let eu_speedup = scalar_eu_ns / simd_eu_ns;
+
+        println!("\n=== SIMD vs Scalar Throughput ({num_pairs} pairs, dim={dim}) ===");
+        println!("  Platform: {platform}");
+        println!("  dot_norms_scalar:            {scalar_dot_ns:.1} ns/pair");
+        println!("  dot_norms (SIMD-dispatched):  {simd_dot_ns:.1} ns/pair");
+        println!("  dot_norms speedup: {dot_speedup:.2}x");
+        println!();
+        println!("  euclidean_distance_scalar:            {scalar_eu_ns:.1} ns/pair");
+        println!("  euclidean_distance (SIMD-dispatched):  {simd_eu_ns:.1} ns/pair");
+        println!("  euclidean_distance speedup: {eu_speedup:.2}x");
+        println!();
+        println!("  checksums (dot): scalar={checksum_scalar:.2}, simd={checksum_simd:.2}");
+        println!("  checksums (eu):  scalar={checksum_eu_scalar:.2}, simd={checksum_eu_simd:.2}");
+
+        if platform != "scalar" && platform != "x86_64/scalar-fallback" && dot_speedup < 1.5 {
+            println!(
+                "  WARNING: SIMD dot_norms speedup < 1.5x — SIMD may not be activating properly"
+            );
+        }
+        if platform != "scalar" && platform != "x86_64/scalar-fallback" && eu_speedup < 1.5 {
+            println!(
+                "  WARNING: SIMD euclidean speedup < 1.5x — SIMD may not be activating properly"
+            );
+        }
     }
 }
