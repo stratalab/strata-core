@@ -1674,4 +1674,151 @@ mod tests {
         assert_eq!(overlay_size_after_insert, overlay_size_after_reuse);
         assert_eq!(heap.get(VectorId::new(20)).unwrap(), &[20.0, 20.0, 20.0]);
     }
+
+    // ====================================================================
+    // Dense offsets + norms acceleration tests
+    // ====================================================================
+
+    #[test]
+    fn test_get_fast_matches_get() {
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        let mut heap = VectorHeap::new(config);
+
+        heap.upsert(VectorId::new(1), &[1.0, 0.0, 0.0]).unwrap();
+        heap.upsert(VectorId::new(5), &[0.0, 1.0, 0.0]).unwrap();
+        heap.upsert(VectorId::new(10), &[0.0, 0.0, 1.0]).unwrap();
+
+        // get_fast should return same results as get
+        for &id in &[1u64, 5, 10] {
+            let vid = VectorId::new(id);
+            assert_eq!(heap.get_fast(vid), heap.get(vid));
+        }
+
+        // Non-existent ID
+        assert!(heap.get_fast(VectorId::new(99)).is_none());
+    }
+
+    #[test]
+    fn test_dense_offsets_after_delete() {
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        let mut heap = VectorHeap::new(config);
+
+        heap.upsert(VectorId::new(1), &[1.0, 0.0, 0.0]).unwrap();
+        heap.upsert(VectorId::new(2), &[0.0, 1.0, 0.0]).unwrap();
+
+        assert!(heap.get_fast(VectorId::new(1)).is_some());
+        heap.delete(VectorId::new(1));
+        assert!(heap.get_fast(VectorId::new(1)).is_none());
+        // Other entries unaffected
+        assert!(heap.get_fast(VectorId::new(2)).is_some());
+    }
+
+    #[test]
+    fn test_norms_correctness() {
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        let mut heap = VectorHeap::new(config);
+
+        let emb = [3.0, 4.0, 0.0]; // norm = 5.0
+        heap.upsert(VectorId::new(1), &emb).unwrap();
+
+        let norm = heap.get_norm(VectorId::new(1)).unwrap();
+        assert!((norm - 5.0).abs() < 1e-6, "Expected norm 5.0, got {}", norm);
+
+        // After delete, norm should be gone
+        heap.delete(VectorId::new(1));
+        assert!(heap.get_norm(VectorId::new(1)).is_none());
+    }
+
+    #[test]
+    fn test_norms_updated_on_upsert() {
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        let mut heap = VectorHeap::new(config);
+
+        heap.upsert(VectorId::new(1), &[3.0, 4.0, 0.0]).unwrap(); // norm = 5.0
+        assert!((heap.get_norm(VectorId::new(1)).unwrap() - 5.0).abs() < 1e-6);
+
+        // Update to different embedding
+        heap.upsert(VectorId::new(1), &[1.0, 0.0, 0.0]).unwrap(); // norm = 1.0
+        assert!((heap.get_norm(VectorId::new(1)).unwrap() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_norms_survive_snapshot_restore() {
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        let mut heap = VectorHeap::new(config.clone());
+
+        heap.upsert(VectorId::new(1), &[3.0, 4.0, 0.0]).unwrap();
+        heap.upsert(VectorId::new(2), &[1.0, 0.0, 0.0]).unwrap();
+
+        let data = heap.raw_data().to_vec();
+        let id_to_offset = heap.id_to_offset_map().clone();
+        let free_slots = heap.free_slots().to_vec();
+        let next_id = heap.next_id_value();
+
+        let restored = VectorHeap::from_snapshot(config, data, id_to_offset, free_slots, next_id);
+
+        assert!((restored.get_norm(VectorId::new(1)).unwrap() - 5.0).abs() < 1e-6);
+        assert!((restored.get_norm(VectorId::new(2)).unwrap() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_tiered_norms_maintained() {
+        let (mut heap, _dir) = make_tiered_heap(3);
+
+        // Base vectors should have norms from rebuild_dense_index
+        let norm1 = heap.get_norm(VectorId::new(1)).unwrap();
+        let expected = compute_l2_norm(&[1.0, 1.0, 1.0]);
+        assert!((norm1 - expected).abs() < 1e-6);
+
+        // New upsert into overlay should update norms
+        heap.upsert(VectorId::new(10), &[3.0, 4.0, 0.0]).unwrap();
+        assert!((heap.get_norm(VectorId::new(10)).unwrap() - 5.0).abs() < 1e-6);
+
+        // Delete should clear norms
+        heap.delete(VectorId::new(10));
+        assert!(heap.get_norm(VectorId::new(10)).is_none());
+    }
+
+    #[test]
+    fn test_mmap_delete_clears_dense_offsets() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let vec_path = temp_dir.path().join("test.vec");
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        let mut heap = VectorHeap::new(config.clone());
+        heap.upsert(VectorId::new(1), &[1.0, 0.0, 0.0]).unwrap();
+        heap.upsert(VectorId::new(2), &[0.0, 1.0, 0.0]).unwrap();
+        heap.freeze_to_disk(&vec_path).unwrap();
+
+        let mut mmap_heap = VectorHeap::from_mmap(&vec_path, config).unwrap();
+        assert!(mmap_heap.get_norm(VectorId::new(1)).is_some());
+
+        mmap_heap.delete(VectorId::new(1));
+        assert!(mmap_heap.get_norm(VectorId::new(1)).is_none());
+        // Other entry unaffected
+        assert!(mmap_heap.get_norm(VectorId::new(2)).is_some());
+    }
+
+    #[test]
+    fn test_get_by_slot_correctness() {
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        let mut heap = VectorHeap::new(config);
+
+        heap.upsert(VectorId::new(1), &[1.0, 2.0, 3.0]).unwrap();
+        heap.upsert(VectorId::new(2), &[4.0, 5.0, 6.0]).unwrap();
+
+        // Slot 0 should be VectorId(1)
+        let emb = heap.get_by_slot(0).unwrap();
+        assert_eq!(emb, &[1.0, 2.0, 3.0]);
+
+        // Slot 1 should be VectorId(2)
+        let emb = heap.get_by_slot(1).unwrap();
+        assert_eq!(emb, &[4.0, 5.0, 6.0]);
+
+        // DENSE_ABSENT should return None
+        assert!(heap.get_by_slot(DENSE_ABSENT).is_none());
+
+        // Out of range should return None
+        assert!(heap.get_by_slot(999).is_none());
+    }
 }

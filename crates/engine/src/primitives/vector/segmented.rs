@@ -933,6 +933,17 @@ impl VectorIndexBackend for SegmentedHnswBackend {
             return;
         }
 
+        // Collect created_at timestamps from existing sealed segments
+        // so temporal queries still work after compaction.
+        let mut timestamps: BTreeMap<VectorId, u64> = BTreeMap::new();
+        for seg in &self.sealed {
+            for (&id, node) in &seg.graph.nodes {
+                if node.deleted_at.is_none() && node.created_at != 0 {
+                    timestamps.insert(id, node.created_at);
+                }
+            }
+        }
+
         // Build a single monolithic HNSW graph from all live vectors
         let mut graph = HnswGraph::new(&self.vector_config, self.config.hnsw.clone());
         let mut live_count = 0;
@@ -941,9 +952,17 @@ impl VectorIndexBackend for SegmentedHnswBackend {
         for id in self.heap.ids() {
             if let Some(emb) = self.heap.get(id) {
                 let emb = emb.to_vec();
-                graph.insert_into_graph(id, &emb, 0, &self.heap);
+                let created_at = timestamps.get(&id).copied().unwrap_or(0);
+                graph.insert_into_graph(id, &emb, created_at, &self.heap);
                 live_count += 1;
             }
+        }
+
+        if live_count == 0 {
+            // No live vectors — just clear segments, don't push an empty one
+            self.sealed.clear();
+            self.next_segment_id = 0;
+            return;
         }
 
         // Replace all sealed segments with a single compacted segment
@@ -2216,5 +2235,161 @@ mod tests {
         assert_eq!(backend.len(), 2);
         assert!(backend.get(VectorId::new(1)).is_some());
         assert!(backend.get(VectorId::new(2)).is_some());
+    }
+
+    // ====================================================================
+    // compact() tests
+    // ====================================================================
+
+    #[test]
+    fn test_compact_merges_segments() {
+        let mut backend = make_backend_with_threshold(3, DistanceMetric::DotProduct, 3);
+
+        // Create 3 sealed segments (use DotProduct so higher magnitude = higher score)
+        for i in 1..=9 {
+            backend
+                .insert(VectorId::new(i), &[i as f32, 0.0, 0.0])
+                .unwrap();
+        }
+        assert_eq!(backend.segment_count(), 3);
+
+        // Compact into a single segment
+        backend.compact();
+        assert_eq!(backend.segment_count(), 1);
+        assert_eq!(backend.len(), 9);
+
+        // Search should still work correctly
+        let results = backend.search(&[1.0, 0.0, 0.0], 3);
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].0, VectorId::new(9)); // highest dot product
+    }
+
+    #[test]
+    fn test_compact_with_active_buffer() {
+        let mut backend = make_backend_with_threshold(3, DistanceMetric::Cosine, 3);
+
+        // Create 1 sealed segment + active buffer
+        for i in 1..=5 {
+            backend
+                .insert(VectorId::new(i), &[i as f32, 0.0, 0.0])
+                .unwrap();
+        }
+        assert_eq!(backend.segment_count(), 1);
+        assert_eq!(backend.active_buffer_len(), 2);
+
+        // Compact should seal active first, then merge all
+        backend.compact();
+        assert_eq!(backend.segment_count(), 1);
+        assert!(backend.active.is_empty());
+        assert_eq!(backend.len(), 5);
+    }
+
+    #[test]
+    fn test_compact_single_segment_noop() {
+        let mut backend = make_backend_with_threshold(3, DistanceMetric::Cosine, 10);
+
+        for i in 1..=10 {
+            backend
+                .insert(VectorId::new(i), &[i as f32, 0.0, 0.0])
+                .unwrap();
+        }
+        assert_eq!(backend.segment_count(), 1);
+
+        // Compact with single segment is a no-op
+        backend.compact();
+        assert_eq!(backend.segment_count(), 1);
+    }
+
+    #[test]
+    fn test_compact_preserves_timestamps() {
+        let mut backend = make_backend_with_threshold(3, DistanceMetric::Cosine, 3);
+
+        // Insert with timestamps
+        backend
+            .insert_with_timestamp(VectorId::new(1), &[1.0, 0.0, 0.0], 100)
+            .unwrap();
+        backend
+            .insert_with_timestamp(VectorId::new(2), &[0.0, 1.0, 0.0], 200)
+            .unwrap();
+        backend
+            .insert_with_timestamp(VectorId::new(3), &[0.0, 0.0, 1.0], 300)
+            .unwrap();
+        assert_eq!(backend.segment_count(), 1);
+
+        // Create second segment
+        backend
+            .insert_with_timestamp(VectorId::new(4), &[1.0, 1.0, 0.0], 400)
+            .unwrap();
+        backend
+            .insert_with_timestamp(VectorId::new(5), &[0.0, 1.0, 1.0], 500)
+            .unwrap();
+        backend
+            .insert_with_timestamp(VectorId::new(6), &[1.0, 0.0, 1.0], 600)
+            .unwrap();
+        assert_eq!(backend.segment_count(), 2);
+
+        // Compact
+        backend.compact();
+        assert_eq!(backend.segment_count(), 1);
+
+        // Temporal search at ts=250: should find id=1 and id=2 (created at 100 and 200)
+        let results = backend.search_at(&[1.0, 0.0, 0.0], 10, 250);
+        let ids: Vec<u64> = results.iter().map(|(id, _)| id.as_u64()).collect();
+        assert!(ids.contains(&1), "id=1 (created_at=100) should be visible at ts=250");
+        assert!(ids.contains(&2), "id=2 (created_at=200) should be visible at ts=250");
+        assert!(!ids.contains(&4), "id=4 (created_at=400) should NOT be visible at ts=250");
+    }
+
+    #[test]
+    fn test_compact_empty_after_deletes() {
+        let mut backend = make_backend_with_threshold(3, DistanceMetric::Cosine, 3);
+
+        for i in 1..=6 {
+            backend
+                .insert(VectorId::new(i), &[i as f32, 0.0, 0.0])
+                .unwrap();
+        }
+        assert_eq!(backend.segment_count(), 2);
+
+        // Delete all vectors
+        for i in 1..=6 {
+            backend.delete(VectorId::new(i)).unwrap();
+        }
+
+        // Compact with no live vectors should not push an empty segment
+        backend.compact();
+        assert_eq!(backend.segment_count(), 0);
+        assert_eq!(backend.len(), 0);
+    }
+
+    // ====================================================================
+    // search_with_ef() tests
+    // ====================================================================
+
+    #[test]
+    fn test_search_with_ef_returns_results() {
+        let mut backend = make_backend_with_threshold(32, DistanceMetric::Cosine, 50);
+
+        // Insert enough vectors to have sealed segments
+        for i in 1..=100 {
+            let emb: Vec<f32> = (0..32).map(|j| ((i * 32 + j) as f32 / 1000.0).sin()).collect();
+            backend.insert(VectorId::new(i as u64), &emb).unwrap();
+        }
+
+        let query: Vec<f32> = (0..32).map(|i| (i as f32 / 100.0).cos()).collect();
+
+        // Higher ef should give at least as good results
+        let results_low = backend.search_with_ef(&query, 10, 50);
+        let results_high = backend.search_with_ef(&query, 10, 200);
+
+        assert_eq!(results_low.len(), 10);
+        assert_eq!(results_high.len(), 10);
+
+        // High ef result should have score >= low ef (or very close)
+        // The best result from high ef should be at least as good
+        assert!(
+            results_high[0].1 >= results_low[0].1 - 1e-6,
+            "Higher ef should find at least as good results"
+        );
     }
 }

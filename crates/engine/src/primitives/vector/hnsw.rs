@@ -826,11 +826,15 @@ impl HnswGraph {
             node.deleted_at = Some(deleted_at);
         }
         if was_alive && self.entry_point == Some(id) {
+            // Find the minimum alive VectorId for deterministic fallback
+            // (HashMap iteration order is arbitrary, so we must explicitly pick
+            // the smallest alive ID to preserve determinism).
             self.entry_point = self
                 .nodes
                 .iter()
-                .find(|(_, n)| !n.is_deleted())
-                .map(|(id, _)| *id);
+                .filter(|(_, n)| !n.is_deleted())
+                .map(|(id, _)| *id)
+                .min();
             if let Some(ep) = self.entry_point {
                 self.max_level = self.nodes[&ep].max_layer;
             } else {
@@ -853,9 +857,9 @@ impl HnswGraph {
                     }
                 }
             }
-            // Update entry point if needed
+            // Update entry point if needed (use min for determinism with HashMap)
             if self.entry_point == Some(id) {
-                self.entry_point = self.nodes.keys().next().copied();
+                self.entry_point = self.nodes.keys().copied().min();
                 self.max_level = self.nodes.values().map(|n| n.max_layer).max().unwrap_or(0);
             }
         }
