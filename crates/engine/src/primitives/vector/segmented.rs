@@ -526,7 +526,7 @@ impl SegmentedHnswBackend {
         });
 
         // Deduplicate by VectorId (keep the first/highest-scoring occurrence)
-        let mut seen = std::collections::BTreeSet::new();
+        let mut seen = std::collections::HashSet::new();
         let mut merged = Vec::with_capacity(k);
         for (id, score) in all {
             if seen.insert(id) {
@@ -922,6 +922,87 @@ impl VectorIndexBackend for SegmentedHnswBackend {
             live_count,
             source_branch: None,
         });
+    }
+
+    fn compact(&mut self) {
+        // Seal any remaining active buffer first
+        if !self.active.is_empty() {
+            self.seal_active_buffer();
+        }
+        if self.sealed.len() <= 1 {
+            return;
+        }
+
+        // Build a single monolithic HNSW graph from all live vectors
+        let mut graph = HnswGraph::new(&self.vector_config, self.config.hnsw.clone());
+        let mut live_count = 0;
+
+        // Insert all live vectors from the global heap (sorted by VectorId for determinism)
+        for id in self.heap.ids() {
+            if let Some(emb) = self.heap.get(id) {
+                let emb = emb.to_vec();
+                graph.insert_into_graph(id, &emb, 0, &self.heap);
+                live_count += 1;
+            }
+        }
+
+        // Replace all sealed segments with a single compacted segment
+        self.sealed.clear();
+        self.next_segment_id = 1;
+        self.sealed.push(SealedSegment {
+            segment_id: 0,
+            graph: CompactHnswGraph::from_graph(&graph),
+            live_count,
+            source_branch: None,
+        });
+    }
+
+    fn search_with_ef(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef_search: usize,
+    ) -> Vec<(VectorId, f32)> {
+        if k == 0 || self.heap.is_empty() {
+            return Vec::new();
+        }
+        if query.len() != self.heap.dimension() {
+            return Vec::new();
+        }
+
+        let mut result_sets = Vec::with_capacity(1 + self.sealed.len());
+
+        // Search active buffer (brute-force — ef_search doesn't apply)
+        let active_results = self.search_active(query, k);
+        if !active_results.is_empty() {
+            result_sets.push(active_results);
+        }
+
+        // Search sealed segments with custom ef_search
+        if self.sealed.len() >= PARALLEL_SEARCH_THRESHOLD {
+            let sealed_results: Vec<Vec<(VectorId, f32)>> = SEARCH_POOL.install(|| {
+                self.sealed
+                    .par_iter()
+                    .filter(|seg| seg.live_count > 0)
+                    .map(|seg| seg.graph.search_with_heap_ef(query, k, ef_search, &self.heap))
+                    .filter(|r| !r.is_empty())
+                    .collect()
+            });
+            result_sets.extend(sealed_results);
+        } else {
+            for seg in &self.sealed {
+                if seg.live_count > 0 {
+                    let seg_results =
+                        seg.graph
+                            .search_with_heap_ef(query, k, ef_search, &self.heap);
+                    if !seg_results.is_empty() {
+                        result_sets.push(seg_results);
+                    }
+                }
+            }
+        }
+
+        Self::merge_results(result_sets, k)
     }
 
     fn vector_ids(&self) -> Vec<VectorId> {

@@ -90,6 +90,19 @@ pub trait VectorIndexBackend: Send + Sync {
     /// Results are sorted by (score desc, VectorId asc) for determinism (Invariant R4).
     fn search(&self, query: &[f32], k: usize) -> Vec<(VectorId, f32)>;
 
+    /// Search with a custom ef_search override (for recall tuning).
+    ///
+    /// Higher ef_search = higher recall but slower search.
+    /// Default: delegates to `search()` (ignoring ef_search).
+    fn search_with_ef(
+        &self,
+        query: &[f32],
+        k: usize,
+        _ef_search: usize,
+    ) -> Vec<(VectorId, f32)> {
+        self.search(query, k)
+    }
+
     /// Search for k nearest neighbors as of a given timestamp.
     ///
     /// Backends that support temporal tracking override this. Default: delegates to
@@ -149,6 +162,14 @@ pub trait VectorIndexBackend: Send + Sync {
     /// For HNSW backend, this rebuilds the graph from the heap.
     fn rebuild_index(&mut self) {
         // Default: no-op (BruteForce has no derived structures)
+    }
+
+    /// Compact all segments into a single monolithic HNSW graph.
+    ///
+    /// This produces better recall (single graph vs fragmented segments) and
+    /// faster search (no fan-out overhead). Default: no-op.
+    fn compact(&mut self) {
+        // Default: no-op (backends without segments ignore this)
     }
 
     /// Seal any remaining active buffer entries into HNSW segments.

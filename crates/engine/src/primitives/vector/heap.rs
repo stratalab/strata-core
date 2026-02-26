@@ -41,6 +41,9 @@ pub(crate) enum VectorData {
     },
 }
 
+/// Sentinel value indicating absent entry in dense_offsets.
+const DENSE_ABSENT: u32 = u32::MAX;
+
 /// Per-collection vector heap
 ///
 /// Stores embeddings in a contiguous Vec<f32> for cache-friendly
@@ -71,6 +74,15 @@ pub struct VectorHeap {
     ///
     /// For the Mmap variant this mirrors the mmap's id_to_offset.
     id_to_offset: BTreeMap<VectorId, usize>,
+
+    /// Dense acceleration index: VectorId.0 → slot number (offset / dimension).
+    /// DENSE_ABSENT means the ID is not present. Only valid for InMemory heaps.
+    /// Memory: 1M vectors × 4 bytes = 4 MB (negligible vs embedding data).
+    dense_offsets: Vec<u32>,
+
+    /// Pre-computed L2 norms for each VectorId (indexed by VectorId.0).
+    /// Used to accelerate cosine similarity: cos(a,b) = dot(a,b) / (norm_a * norm_b).
+    norms: Vec<f32>,
 
     /// Free list for deleted storage slots (enables slot reuse)
     ///
@@ -113,6 +125,8 @@ impl VectorHeap {
             config,
             data: VectorData::InMemory(Vec::new()),
             id_to_offset: BTreeMap::new(),
+            dense_offsets: Vec::new(),
+            norms: Vec::new(),
             free_slots: Vec::new(),
             next_id: AtomicU64::new(1),
             version: AtomicU64::new(0),
@@ -131,15 +145,19 @@ impl VectorHeap {
         free_slots: Vec<usize>,
         next_id: u64,
     ) -> Self {
-        VectorHeap {
+        let mut heap = VectorHeap {
             config,
             data: VectorData::InMemory(data),
             id_to_offset,
+            dense_offsets: Vec::new(),
+            norms: Vec::new(),
             free_slots,
             next_id: AtomicU64::new(next_id),
             version: AtomicU64::new(0),
             inline_meta: BTreeMap::new(),
-        }
+        };
+        heap.rebuild_dense_index();
+        heap
     }
 
     /// Open from an existing mmap file.
@@ -151,15 +169,19 @@ impl VectorHeap {
         let id_to_offset = mmap_data.id_to_offset(); // returns owned BTreeMap
         let free_slots = mmap_data.free_slots().to_vec();
         let next_id = mmap_data.next_id();
-        Ok(VectorHeap {
+        let mut heap = VectorHeap {
             config,
             data: VectorData::Mmap(mmap_data),
             id_to_offset,
+            dense_offsets: Vec::new(),
+            norms: Vec::new(),
             free_slots,
             next_id: AtomicU64::new(next_id),
             version: AtomicU64::new(0),
             inline_meta: BTreeMap::new(),
-        })
+        };
+        heap.rebuild_dense_index();
+        Ok(heap)
     }
 
     /// Get the dimension of vectors in this heap
@@ -218,6 +240,7 @@ impl VectorHeap {
     pub fn restore_snapshot_state(&mut self, next_id: u64, free_slots: Vec<usize>) {
         self.next_id.store(next_id, Ordering::Relaxed);
         self.free_slots = free_slots;
+        self.rebuild_dense_index();
     }
 
     /// Allocate a new VectorId (monotonically increasing)
@@ -253,6 +276,11 @@ impl VectorHeap {
             VectorData::InMemory(vec) => {
                 if let Some(&offset) = self.id_to_offset.get(&id) {
                     vec[offset..offset + dim].copy_from_slice(embedding);
+                    // Update norm for the modified embedding
+                    let idx = id.0 as usize;
+                    if idx < self.norms.len() {
+                        self.norms[idx] = compute_l2_norm(embedding);
+                    }
                 } else {
                     let offset = if let Some(slot) = self.free_slots.pop() {
                         vec[slot..slot + dim].copy_from_slice(embedding);
@@ -263,6 +291,18 @@ impl VectorHeap {
                         offset
                     };
                     self.id_to_offset.insert(id, offset);
+                    // Maintain dense_offsets
+                    let idx = id.0 as usize;
+                    let slot_number = (offset / dim) as u32;
+                    if idx >= self.dense_offsets.len() {
+                        self.dense_offsets.resize(idx + 1, DENSE_ABSENT);
+                    }
+                    self.dense_offsets[idx] = slot_number;
+                    // Maintain norms
+                    if idx >= self.norms.len() {
+                        self.norms.resize(idx + 1, 0.0);
+                    }
+                    self.norms[idx] = compute_l2_norm(embedding);
                 }
             }
             VectorData::Mmap(_) => panic!("cannot mutate mmap-backed VectorHeap"),
@@ -293,6 +333,14 @@ impl VectorHeap {
                 // resolve embeddings via overlay_id_to_offset or base mmap.
                 // freeze_to_disk() builds merged_offsets independently.
                 self.id_to_offset.insert(id, 0);
+
+                // Maintain norms (dense_offsets are not used for non-InMemory heaps,
+                // but norms are needed for cosine similarity acceleration).
+                let idx = id.0 as usize;
+                if idx >= self.norms.len() {
+                    self.norms.resize(idx + 1, 0.0);
+                }
+                self.norms[idx] = compute_l2_norm(embedding);
             }
         }
 
@@ -350,6 +398,14 @@ impl VectorHeap {
                     self.free_slots.push(offset);
                     let dim = self.config.dimension;
                     v[offset..offset + dim].fill(0.0);
+                    // Clear dense_offsets entry
+                    let idx = id.0 as usize;
+                    if idx < self.dense_offsets.len() {
+                        self.dense_offsets[idx] = DENSE_ABSENT;
+                    }
+                    if idx < self.norms.len() {
+                        self.norms[idx] = 0.0;
+                    }
                     self.version.fetch_add(1, Ordering::Release);
                     true
                 } else {
@@ -360,6 +416,13 @@ impl VectorHeap {
                 if self.id_to_offset.remove(&id).is_some() {
                     // mmap pages are read-only; skip zeroing.
                     // The mmap file will be re-frozen without the deleted vector.
+                    let idx = id.0 as usize;
+                    if idx < self.dense_offsets.len() {
+                        self.dense_offsets[idx] = DENSE_ABSENT;
+                    }
+                    if idx < self.norms.len() {
+                        self.norms[idx] = 0.0;
+                    }
                     self.version.fetch_add(1, Ordering::Release);
                     true
                 } else {
@@ -383,6 +446,13 @@ impl VectorHeap {
                 }
                 // If in base mmap only: nothing to zero (read-only pages).
                 // The next flush will exclude it.
+                let idx = id.0 as usize;
+                if idx < self.dense_offsets.len() {
+                    self.dense_offsets[idx] = DENSE_ABSENT;
+                }
+                if idx < self.norms.len() {
+                    self.norms[idx] = 0.0;
+                }
                 self.version.fetch_add(1, Ordering::Release);
                 true
             }
@@ -400,6 +470,8 @@ impl VectorHeap {
     pub fn clear(&mut self) {
         self.data = VectorData::InMemory(Vec::new());
         self.id_to_offset.clear();
+        self.dense_offsets.clear();
+        self.norms.clear();
         self.free_slots.clear();
         self.inline_meta.clear();
         // Note: next_id is NOT reset — IDs are never reused
@@ -423,6 +495,162 @@ impl VectorHeap {
     /// Remove inline metadata for a VectorId.
     pub(crate) fn remove_inline_meta(&mut self, id: VectorId) {
         self.inline_meta.remove(&id);
+    }
+
+    // ========================================================================
+    // Dense Acceleration (O(1) lookups for hot paths)
+    // ========================================================================
+
+    /// O(1) embedding lookup via dense offset array.
+    ///
+    /// Only works for InMemory heaps. Falls back to `get()` for Mmap/Tiered.
+    #[inline]
+    pub fn get_fast(&self, id: VectorId) -> Option<&[f32]> {
+        let idx = id.0 as usize;
+        if idx < self.dense_offsets.len() {
+            let slot = self.dense_offsets[idx];
+            if slot != DENSE_ABSENT {
+                let dim = self.config.dimension;
+                let offset = slot as usize * dim;
+                return match &self.data {
+                    VectorData::InMemory(vec) => Some(&vec[offset..offset + dim]),
+                    _ => self.get(id),
+                };
+            }
+        }
+        // Fallback: try BTreeMap path (handles Mmap/Tiered)
+        self.get(id)
+    }
+
+    /// Get the raw f32 offset for a VectorId (for CompactHnswGraph pre-resolution).
+    ///
+    /// Returns the slot number (offset / dim) if present, None otherwise.
+    #[inline]
+    pub fn get_offset(&self, id: VectorId) -> Option<u32> {
+        let idx = id.0 as usize;
+        if idx < self.dense_offsets.len() {
+            let slot = self.dense_offsets[idx];
+            if slot != DENSE_ABSENT {
+                return Some(slot);
+            }
+        }
+        // Fallback for Mmap/Tiered: derive from id_to_offset BTreeMap
+        self.id_to_offset
+            .get(&id)
+            .map(|&off| (off / self.config.dimension) as u32)
+    }
+
+    /// O(1) embedding lookup by pre-resolved slot number.
+    ///
+    /// Used by CompactHnswGraph where embedding offsets are pre-resolved at seal time.
+    #[inline]
+    pub fn get_by_slot(&self, slot: u32) -> Option<&[f32]> {
+        if slot == DENSE_ABSENT {
+            return None;
+        }
+        let dim = self.config.dimension;
+        let offset = slot as usize * dim;
+        match &self.data {
+            VectorData::InMemory(vec) => {
+                if offset + dim <= vec.len() {
+                    Some(&vec[offset..offset + dim])
+                } else {
+                    None
+                }
+            }
+            VectorData::Mmap(mmap) => mmap.get_by_offset(offset, dim),
+            VectorData::Tiered { base, overlay, overlay_id_to_offset, .. } => {
+                // Slot-based access doesn't know which layer, try InMemory-like path
+                // This is a fallback; callers on Tiered heaps should use get_fast()
+                let _ = (base, overlay, overlay_id_to_offset);
+                None
+            }
+        }
+    }
+
+    /// Get the pre-computed L2 norm for a VectorId.
+    #[inline]
+    pub fn get_norm(&self, id: VectorId) -> Option<f32> {
+        let idx = id.0 as usize;
+        if idx < self.norms.len() {
+            let n = self.norms[idx];
+            if n > 0.0 {
+                return Some(n);
+            }
+        }
+        None
+    }
+
+    /// Rebuild the dense offset index and norms from `id_to_offset`.
+    ///
+    /// Called from `from_snapshot()`, `from_mmap()`, `restore_snapshot_state()`,
+    /// `flush_overlay_to_disk()`, and `promote_to_tiered()`.
+    pub fn rebuild_dense_index(&mut self) {
+        self.dense_offsets.clear();
+        self.norms.clear();
+        let dim = self.config.dimension;
+
+        // Collect (VectorId_idx, offset) first to avoid borrow conflicts
+        let entries: Vec<(usize, usize)> = self
+            .id_to_offset
+            .iter()
+            .map(|(&id, &offset)| (id.0 as usize, offset))
+            .collect();
+
+        if entries.is_empty() {
+            return;
+        }
+
+        // Find max index to pre-allocate
+        let max_idx = entries.iter().map(|e| e.0).max().unwrap();
+        self.dense_offsets.resize(max_idx + 1, DENSE_ABSENT);
+        self.norms.resize(max_idx + 1, 0.0);
+
+        match &self.data {
+            VectorData::InMemory(vec) => {
+                for (idx, offset) in entries {
+                    let slot = (offset / dim) as u32;
+                    self.dense_offsets[idx] = slot;
+                    if offset + dim <= vec.len() {
+                        self.norms[idx] = compute_l2_norm(&vec[offset..offset + dim]);
+                    }
+                }
+            }
+            VectorData::Mmap(mmap) => {
+                for (idx, offset) in entries {
+                    let slot = (offset / dim) as u32;
+                    self.dense_offsets[idx] = slot;
+                    if let Some(emb) = mmap.get_by_offset(offset, dim) {
+                        self.norms[idx] = compute_l2_norm(emb);
+                    }
+                }
+            }
+            VectorData::Tiered {
+                base,
+                overlay,
+                overlay_id_to_offset,
+                ..
+            } => {
+                // For Tiered heaps, id_to_offset stores dummy values (0).
+                // dense_offsets are not usable (get_fast falls back to get() anyway).
+                // We only need to compute correct norms by resolving embeddings
+                // through the overlay (precedence) or base mmap.
+                for (idx, _offset) in entries {
+                    let vid = VectorId::new(idx as u64);
+                    let norm = if let Some(&ov_off) = overlay_id_to_offset.get(&vid) {
+                        if ov_off + dim <= overlay.len() {
+                            compute_l2_norm(&overlay[ov_off..ov_off + dim])
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        base.get(vid).map(compute_l2_norm).unwrap_or(0.0)
+                    };
+                    self.norms[idx] = norm;
+                    // dense_offsets stay DENSE_ABSENT for Tiered (not used)
+                }
+            }
+        }
     }
 
     // ========================================================================
@@ -646,6 +874,8 @@ impl VectorHeap {
             overlay_free_slots: Vec::new(),
         };
 
+        self.rebuild_dense_index();
+
         Ok(count)
     }
 
@@ -688,6 +918,9 @@ impl VectorHeap {
                     overlay_id_to_offset: BTreeMap::new(),
                     overlay_free_slots: Vec::new(),
                 };
+                // Rebuild norms for the new Tiered layout (dense_offsets are
+                // invalidated since the data is no longer InMemory).
+                self.rebuild_dense_index();
             }
             other => {
                 // Put it back — InMemory and Tiered stay as-is
@@ -695,6 +928,16 @@ impl VectorHeap {
             }
         }
     }
+}
+
+/// Compute L2 norm of a vector.
+#[inline]
+fn compute_l2_norm(v: &[f32]) -> f32 {
+    let mut sum = 0.0f32;
+    for &x in v {
+        sum += x * x;
+    }
+    sum.sqrt()
 }
 
 #[cfg(test)]
