@@ -23,6 +23,7 @@
 //! - BTreeSet for neighbor lists (sorted)
 //! - Tie-breaking: (score desc, VectorId asc)
 
+use std::cell::RefCell;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
@@ -51,7 +52,7 @@ impl Default for HnswConfig {
         Self {
             m,
             ef_construction: 200,
-            ef_search: 100,
+            ef_search: 50,
             ml: 1.0 / (m as f64).ln(),
         }
     }
@@ -180,12 +181,21 @@ impl VisitedSet {
     }
 
     #[inline]
-    #[allow(dead_code)]
     fn reset(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         if self.generation == 0 {
             self.marks.fill(0);
             self.generation = 1;
+        }
+    }
+
+    /// Ensure the marks array can hold at least `max_id` entries.
+    /// Only grows (never shrinks) — called once per search to avoid
+    /// repeated resizes inside `mark()`.
+    #[inline]
+    fn ensure_capacity(&mut self, max_id: usize) {
+        if max_id >= self.marks.len() {
+            self.marks.resize(max_id + 1, 0);
         }
     }
 
@@ -201,6 +211,19 @@ impl VisitedSet {
         }
         self.marks[id] = self.generation;
     }
+}
+
+// Thread-local VisitedSet pool for CompactHnswGraph search.
+//
+// Each rayon search thread gets its own persistent VisitedSet. After the first
+// query, subsequent queries just call `reset()` (a single `generation += 1`
+// instead of re-allocating and zeroing the entire marks array).
+//
+// Only used by CompactHnswGraph (immutable sealed segments, read-only search).
+// HnswGraph (mutable, build-time) keeps allocating fresh VisitedSets to avoid
+// any interaction with the pool.
+thread_local! {
+    static VISITED_POOL: RefCell<VisitedSet> = RefCell::new(VisitedSet::new());
 }
 
 // ============================================================================
@@ -1299,7 +1322,10 @@ impl CompactHnswGraph {
     // Search (mirrors HnswGraph methods but uses flat neighbor array)
     // ====================================================================
 
-    /// Beam search at a single layer (same algorithm as HnswGraph::search_layer)
+    /// Beam search at a single layer. Borrows a VisitedSet from the thread-local
+    /// pool to avoid per-query allocation.
+    ///
+    /// `q_norm` is the pre-computed query L2 norm (for cosine similarity caching).
     fn search_layer(
         &self,
         query: &[f32],
@@ -1307,14 +1333,31 @@ impl CompactHnswGraph {
         ef: usize,
         layer: usize,
         heap: &VectorHeap,
+        q_norm: Option<f32>,
+    ) -> Vec<ScoredId> {
+        VISITED_POOL.with(|cell| {
+            let mut visited = cell.borrow_mut();
+            visited.reset();
+            // Pre-size to cover all possible node IDs in this graph
+            visited.ensure_capacity(self.id_offset as usize + self.dense_nodes.len());
+            self.search_layer_inner(query, entry_id, ef, layer, heap, q_norm, &mut visited)
+        })
+    }
+
+    /// Inner beam search (same algorithm as HnswGraph::search_layer).
+    /// Takes an externally-managed VisitedSet for pooling.
+    #[allow(clippy::too_many_arguments)]
+    fn search_layer_inner(
+        &self,
+        query: &[f32],
+        entry_id: VectorId,
+        ef: usize,
+        layer: usize,
+        heap: &VectorHeap,
+        q_norm: Option<f32>,
+        visited: &mut VisitedSet,
     ) -> Vec<ScoredId> {
         let metric = self.vector_config.metric;
-        // Pre-compute query norm once for cosine similarity caching
-        let q_norm = if metric == DistanceMetric::Cosine {
-            Some(query.iter().map(|x| x * x).sum::<f32>().sqrt())
-        } else {
-            None
-        };
 
         let entry_embedding = match heap.get(entry_id) {
             Some(e) => e,
@@ -1328,16 +1371,15 @@ impl CompactHnswGraph {
             heap.get_norm(entry_id),
         );
 
-        let mut visited = VisitedSet::new();
         visited.mark(entry_id.0 as usize);
 
-        let mut candidates = BinaryHeap::new();
+        let mut candidates = BinaryHeap::with_capacity(ef);
         candidates.push(ScoredId {
             score: entry_score,
             id: entry_id,
         });
 
-        let mut results: BinaryHeap<Reverse<ScoredId>> = BinaryHeap::new();
+        let mut results: BinaryHeap<Reverse<ScoredId>> = BinaryHeap::with_capacity(ef + 1);
         if !self.is_deleted(entry_id) {
             results.push(Reverse(ScoredId {
                 score: entry_score,
@@ -1354,7 +1396,13 @@ impl CompactHnswGraph {
                 break;
             }
 
-            for &neighbor_u64 in self.neighbors_at(nearest.id, layer) {
+            let neighbors = self.neighbors_at(nearest.id, layer);
+            for (i, &neighbor_u64) in neighbors.iter().enumerate() {
+                // Prefetch next neighbor's embedding while processing current one
+                if i + 1 < neighbors.len() {
+                    heap.prefetch_embedding(VectorId::new(neighbors[i + 1]));
+                }
+
                 let neighbor_id = VectorId::new(neighbor_u64);
                 if visited.is_visited(neighbor_id.0 as usize) {
                     continue;
@@ -1403,7 +1451,9 @@ impl CompactHnswGraph {
         result_vec
     }
 
-    /// Greedy search from top layer to target layer
+    /// Greedy search from top layer to target layer.
+    ///
+    /// `q_norm` is the pre-computed query L2 norm (for cosine similarity caching).
     fn greedy_search_to_layer(
         &self,
         query: &[f32],
@@ -1411,13 +1461,9 @@ impl CompactHnswGraph {
         from_layer: usize,
         to_layer: usize,
         heap: &VectorHeap,
+        q_norm: Option<f32>,
     ) -> VectorId {
         let metric = self.vector_config.metric;
-        let q_norm = if metric == DistanceMetric::Cosine {
-            Some(query.iter().map(|x| x * x).sum::<f32>().sqrt())
-        } else {
-            None
-        };
         let mut current = entry_id;
 
         for layer in (to_layer..=from_layer).rev() {
@@ -1497,26 +1543,25 @@ impl CompactHnswGraph {
             None => return Vec::new(),
         };
 
-        if self
-            .dense_nodes
-            .iter()
-            .flatten()
-            .all(|n| n.deleted_at.is_some())
-        {
-            return Vec::new();
-        }
+        // Compute query norm once for all search phases
+        let metric = self.vector_config.metric;
+        let q_norm = if metric == DistanceMetric::Cosine {
+            Some(query.iter().map(|x| x * x).sum::<f32>().sqrt())
+        } else {
+            None
+        };
 
         let mut current_entry = entry_id;
         if self.max_level > 0 {
-            current_entry = self.greedy_search_to_layer(query, entry_id, self.max_level, 1, heap);
+            current_entry =
+                self.greedy_search_to_layer(query, entry_id, self.max_level, 1, heap, q_norm);
         }
 
         let ef = ef_search.max(k);
-        let candidates = self.search_layer(query, current_entry, ef, 0, heap);
+        let candidates = self.search_layer(query, current_entry, ef, 0, heap, q_norm);
 
         candidates
             .into_iter()
-            .filter(|s| !self.is_deleted(s.id))
             .take(k)
             .map(|s| (s.id, s.score))
             .collect()
@@ -1534,14 +1579,6 @@ impl CompactHnswGraph {
             return Vec::new();
         }
         if query.len() != heap.dimension() {
-            return Vec::new();
-        }
-
-        let has_alive = self.dense_nodes.iter().flatten().any(|n| {
-            (n.created_at == 0 || n.created_at <= as_of_ts)
-                && n.deleted_at.map_or(true, |d| d > as_of_ts)
-        });
-        if !has_alive {
             return Vec::new();
         }
 
@@ -2489,6 +2526,161 @@ mod tests {
         assert!(dense[0].is_some());
         assert_eq!(dense[0].as_ref().unwrap().created_at, 100);
     }
+
+    // ================================================================
+    // CompactHnswGraph: search + deletion edge cases
+    // ================================================================
+
+    /// Helper: build a CompactHnswGraph + VectorHeap with 5 vectors at IDs 10..14.
+    fn build_compact_with_timestamps() -> (CompactHnswGraph, VectorHeap) {
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        let mut graph = HnswGraph::new(&config, HnswConfig::default());
+        let mut heap = VectorHeap::new(config.clone());
+
+        let embeddings: &[(u64, [f32; 3], u64)] = &[
+            (10, [1.0, 0.0, 0.0], 100),
+            (11, [0.0, 1.0, 0.0], 200),
+            (12, [0.0, 0.0, 1.0], 300),
+            (13, [1.0, 1.0, 0.0], 400),
+            (14, [0.0, 1.0, 1.0], 500),
+        ];
+        for &(id, ref emb, ts) in embeddings {
+            heap.insert_with_id(VectorId::new(id), emb).unwrap();
+            graph.insert_into_graph(VectorId::new(id), emb, ts, &heap);
+        }
+        (CompactHnswGraph::from_graph(&graph), heap)
+    }
+
+    #[test]
+    fn test_compact_search_excludes_deleted_nodes() {
+        let (mut compact, heap) = build_compact_with_timestamps();
+
+        // Before deletion: search should find VectorId(10)
+        let results = compact.search_with_heap(&[1.0, 0.0, 0.0], 5, &heap);
+        assert!(results.iter().any(|(id, _)| *id == VectorId::new(10)));
+
+        // Delete VectorId(10)
+        compact.delete_with_timestamp(VectorId::new(10), 600);
+
+        // After deletion: search must NOT include VectorId(10)
+        let results = compact.search_with_heap(&[1.0, 0.0, 0.0], 5, &heap);
+        assert!(
+            results.iter().all(|(id, _)| *id != VectorId::new(10)),
+            "Deleted VectorId(10) should not appear in search results"
+        );
+        // Other nodes should still be findable
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_compact_search_all_deleted_returns_empty() {
+        let (mut compact, heap) = build_compact_with_timestamps();
+
+        // Delete all nodes
+        for id in 10..=14 {
+            compact.delete_with_timestamp(VectorId::new(id), 600);
+        }
+
+        // Search must return empty (entry_point should be None)
+        assert!(compact.entry_point.is_none());
+        let results = compact.search_with_heap(&[1.0, 0.0, 0.0], 5, &heap);
+        assert!(
+            results.is_empty(),
+            "Search on all-deleted CompactHnswGraph must return empty"
+        );
+    }
+
+    #[test]
+    fn test_compact_entry_point_reassigned_on_delete() {
+        let (mut compact, heap) = build_compact_with_timestamps();
+        let original_ep = compact.entry_point.unwrap();
+
+        // Delete the entry point
+        compact.delete_with_timestamp(original_ep, 600);
+
+        // Entry point should be reassigned to another alive node
+        assert!(compact.entry_point.is_some());
+        assert_ne!(compact.entry_point.unwrap(), original_ep);
+
+        // Search should still work from the new entry point
+        let results = compact.search_with_heap(&[0.0, 1.0, 0.0], 3, &heap);
+        assert!(!results.is_empty());
+        assert!(
+            results.iter().all(|(id, _)| *id != original_ep),
+            "Deleted entry point must not appear in results"
+        );
+    }
+
+    #[test]
+    fn test_compact_temporal_search_respects_creation_timestamp() {
+        let (compact, heap) = build_compact_with_timestamps();
+        // No deletions. Verify temporal search respects created_at timestamps.
+
+        // VectorId(10) created at ts=100, VectorId(11) at ts=200, etc.
+        // Search at ts=150: only VectorId(10) should be alive
+        let results = compact.search_at_with_heap(&[1.0, 0.0, 0.0], 5, 150, &heap);
+        assert!(
+            results.iter().all(|(id, _)| id.as_u64() == 10),
+            "At ts=150, only VectorId(10) (created_at=100) should be alive, got: {:?}",
+            results.iter().map(|(id, _)| id.as_u64()).collect::<Vec<_>>()
+        );
+
+        // Search at ts=350: IDs 10, 11, 12 should be alive (created at 100, 200, 300)
+        let results = compact.search_at_with_heap(&[0.0, 1.0, 0.0], 5, 350, &heap);
+        assert!(results
+            .iter()
+            .all(|(id, _)| id.as_u64() >= 10 && id.as_u64() <= 12));
+    }
+
+    #[test]
+    fn test_compact_temporal_search_after_deletion_excludes_node() {
+        let (mut compact, heap) = build_compact_with_timestamps();
+
+        // Delete VectorId(11) at ts=350.
+        // Note: CompactHnswGraph's search_with_heap uses is_deleted() (not temporal),
+        // so a soft-deleted node is excluded from ALL searches — including temporal
+        // queries at timestamps before the deletion. This is by design: the active
+        // buffer handles temporal queries for recently-deleted nodes.
+        compact.delete_with_timestamp(VectorId::new(11), 350);
+
+        // After deletion, VectorId(11) should not appear in any search
+        let results = compact.search_at_with_heap(&[0.0, 1.0, 0.0], 5, 250, &heap);
+        assert!(
+            results.iter().all(|(id, _)| *id != VectorId::new(11)),
+            "Soft-deleted VectorId(11) excluded from temporal search"
+        );
+
+        // Non-deleted nodes should still be findable
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_compact_search_all_deleted_temporal_returns_empty() {
+        let (mut compact, heap) = build_compact_with_timestamps();
+
+        // Delete all nodes at ts=600
+        for id in 10..=14 {
+            compact.delete_with_timestamp(VectorId::new(id), 600);
+        }
+
+        // Temporal search at ts=700 (after all deletions)
+        let results = compact.search_at_with_heap(&[1.0, 0.0, 0.0], 5, 700, &heap);
+        assert!(
+            results.is_empty(),
+            "Temporal search after all deletions must return empty"
+        );
+
+        // Temporal search at ts=150 (before first creation at ts=200 for id=11+)
+        // Only VectorId(10) created at ts=100 is alive, but deleted at ts=600
+        // At ts=150: VectorId(10) alive (created=100, deleted=600 > 150)
+        let results_early = compact.search_at_with_heap(&[1.0, 0.0, 0.0], 5, 150, &heap);
+        assert!(
+            results_early
+                .iter()
+                .all(|(id, _)| id.as_u64() == 10),
+            "At ts=150 only VectorId(10) should be alive"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2559,7 +2751,7 @@ mod profiling_tests {
         let mut layer0_entries = Vec::with_capacity(num_queries);
         for q in &queries {
             let entry = if max_level > 0 {
-                compact.greedy_search_to_layer(q, entry_id, max_level, 1, &heap)
+                compact.greedy_search_to_layer(q, entry_id, max_level, 1, &heap, None)
             } else {
                 entry_id
             };
@@ -2571,7 +2763,7 @@ mod profiling_tests {
         let start = Instant::now();
         let mut search_results = Vec::with_capacity(num_queries);
         for (i, q) in queries.iter().enumerate() {
-            let results = compact.search_layer(q, layer0_entries[i], ef, 0, &heap);
+            let results = compact.search_layer(q, layer0_entries[i], ef, 0, &heap, None);
             search_results.push(results);
         }
         let search_layer_us = start.elapsed().as_micros() as f64 / num_queries as f64;
@@ -2789,7 +2981,7 @@ mod profiling_tests {
         for query in &queries {
             // Greedy descent to layer 0
             let current_entry = if max_level > 0 {
-                compact.greedy_search_to_layer(query, entry_id, max_level, 1, &heap)
+                compact.greedy_search_to_layer(query, entry_id, max_level, 1, &heap, None)
             } else {
                 entry_id
             };

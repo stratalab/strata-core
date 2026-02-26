@@ -14,6 +14,41 @@
 
 use crate::primitives::vector::DistanceMetric;
 
+// ============================================================================
+// Prefetch hint (hides DRAM latency for embedding fetches)
+// ============================================================================
+
+/// Software prefetch hint: bring the cache line containing `ptr` into L1.
+///
+/// Used in the HNSW inner loop to prefetch the *next* neighbor's embedding
+/// while the CPU is computing distance for the current neighbor (hnswlib pattern).
+/// On unsupported architectures this is a no-op.
+#[inline(always)]
+pub(crate) fn prefetch_read(ptr: *const u8) {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        // PRFM PLDL1KEEP: prefetch for read, L1 cache, keep in cache
+        core::arch::asm!(
+            "prfm pldl1keep, [{x}]",
+            x = in(reg) ptr,
+            options(nostack, preserves_flags)
+        );
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        // PREFETCHT0: prefetch into all cache levels
+        core::arch::asm!(
+            "prefetcht0 ({})",
+            in(reg) ptr,
+            options(nostack, preserves_flags)
+        );
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        let _ = ptr; // no-op on other architectures
+    }
+}
+
 /// Compute similarity using pre-cached norms when available.
 ///
 /// For Cosine metric with both norms present, avoids recomputing them

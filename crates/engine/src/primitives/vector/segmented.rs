@@ -76,7 +76,7 @@ impl Default for SegmentedHnswConfig {
     fn default() -> Self {
         Self {
             hnsw: HnswConfig::default(),
-            seal_threshold: 50_000,
+            seal_threshold: 100_000,
             heap_flush_threshold: 500_000,
         }
     }
@@ -693,10 +693,12 @@ impl VectorIndexBackend for SegmentedHnswBackend {
         }
 
         // Sealed segments: delegate temporal search (parallel when enough segments)
+        // Skip fully-deleted segments (live_count == 0) to avoid unnecessary work.
         if self.sealed.len() >= PARALLEL_SEARCH_THRESHOLD {
             let sealed_results: Vec<Vec<(VectorId, f32)>> = SEARCH_POOL.install(|| {
                 self.sealed
                     .par_iter()
+                    .filter(|seg| seg.live_count > 0)
                     .map(|seg| {
                         seg.graph
                             .search_at_with_heap(query, k, as_of_ts, &self.heap)
@@ -707,11 +709,13 @@ impl VectorIndexBackend for SegmentedHnswBackend {
             result_sets.extend(sealed_results);
         } else {
             for seg in &self.sealed {
-                let seg_results = seg
-                    .graph
-                    .search_at_with_heap(query, k, as_of_ts, &self.heap);
-                if !seg_results.is_empty() {
-                    result_sets.push(seg_results);
+                if seg.live_count > 0 {
+                    let seg_results = seg
+                        .graph
+                        .search_at_with_heap(query, k, as_of_ts, &self.heap);
+                    if !seg_results.is_empty() {
+                        result_sets.push(seg_results);
+                    }
                 }
             }
         }
@@ -741,10 +745,12 @@ impl VectorIndexBackend for SegmentedHnswBackend {
         }
 
         // Sealed segments: delegate range search (parallel when enough segments)
+        // Skip fully-deleted segments (live_count == 0) to avoid unnecessary work.
         if self.sealed.len() >= PARALLEL_SEARCH_THRESHOLD {
             let sealed_results: Vec<Vec<(VectorId, f32)>> = SEARCH_POOL.install(|| {
                 self.sealed
                     .par_iter()
+                    .filter(|seg| seg.live_count > 0)
                     .map(|seg| {
                         seg.graph
                             .search_in_range_with_heap(query, k, start_ts, end_ts, &self.heap)
@@ -755,11 +761,13 @@ impl VectorIndexBackend for SegmentedHnswBackend {
             result_sets.extend(sealed_results);
         } else {
             for seg in &self.sealed {
-                let seg_results = seg
-                    .graph
-                    .search_in_range_with_heap(query, k, start_ts, end_ts, &self.heap);
-                if !seg_results.is_empty() {
-                    result_sets.push(seg_results);
+                if seg.live_count > 0 {
+                    let seg_results = seg
+                        .graph
+                        .search_in_range_with_heap(query, k, start_ts, end_ts, &self.heap);
+                    if !seg_results.is_empty() {
+                        result_sets.push(seg_results);
+                    }
                 }
             }
         }
