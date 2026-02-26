@@ -24,7 +24,7 @@
 //! - Tie-breaking: (score desc, VectorId asc)
 
 use std::cmp::{Ordering, Reverse};
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
 use crate::primitives::vector::backend::VectorIndexBackend;
 use crate::primitives::vector::distance::compute_similarity;
@@ -51,7 +51,7 @@ impl Default for HnswConfig {
         Self {
             m,
             ef_construction: 200,
-            ef_search: 50,
+            ef_search: 100,
             ml: 1.0 / (m as f64).ln(),
         }
     }
@@ -72,9 +72,9 @@ impl HnswConfig {
 /// A node in the HNSW graph
 #[derive(Debug, Clone)]
 struct HnswNode {
-    /// Neighbors per layer: neighbors[layer] = set of neighbor VectorIds
-    /// BTreeSet for deterministic iteration order
-    neighbors: Vec<BTreeSet<VectorId>>,
+    /// Neighbors per layer: neighbors[layer] = sorted Vec of neighbor VectorIds.
+    /// Kept sorted for deterministic iteration and O(log M) binary_search.
+    neighbors: Vec<Vec<VectorId>>,
     /// Max layer this node appears in
     max_layer: usize,
     /// Creation timestamp (microseconds since epoch; 0 = legacy/unknown)
@@ -85,7 +85,7 @@ struct HnswNode {
 
 impl HnswNode {
     fn new(max_layer: usize, created_at: u64) -> Self {
-        let neighbors = (0..=max_layer).map(|_| BTreeSet::new()).collect();
+        let neighbors = (0..=max_layer).map(|_| Vec::new()).collect();
         Self {
             neighbors,
             max_layer,
@@ -117,12 +117,14 @@ struct ScoredId {
 impl Eq for ScoredId {}
 
 impl PartialOrd for ScoredId {
+    #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for ScoredId {
+    #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
         // Natural ordering: higher score = Greater
         // BinaryHeap<ScoredId> = max-heap (pops highest score first → nearest candidate)
@@ -132,6 +134,72 @@ impl Ord for ScoredId {
             .unwrap_or(Ordering::Equal)
             // Tie-break: lower VectorId = Greater (deterministic, lower ID preferred)
             .then_with(|| other.id.cmp(&self.id))
+    }
+}
+
+// ============================================================================
+// Sorted Vec helpers (replace BTreeSet for neighbor lists)
+// ============================================================================
+
+/// Insert into a sorted Vec, maintaining sorted order. No-op if already present.
+#[inline]
+fn sorted_vec_insert(vec: &mut Vec<VectorId>, id: VectorId) {
+    match vec.binary_search(&id) {
+        Ok(_) => {} // already present
+        Err(pos) => vec.insert(pos, id),
+    }
+}
+
+/// Remove from a sorted Vec. No-op if not present.
+#[inline]
+fn sorted_vec_remove(vec: &mut Vec<VectorId>, id: VectorId) {
+    if let Ok(pos) = vec.binary_search(&id) {
+        vec.remove(pos);
+    }
+}
+
+// ============================================================================
+// VisitedSet: Generation-counter visited tracking (O(1) check/mark/reset)
+// ============================================================================
+
+/// Fast visited-set using a generation counter.
+///
+/// `marks[i] == generation` means node i has been visited in the current query.
+/// `reset()` just increments the generation — O(1) instead of clearing the whole Vec.
+struct VisitedSet {
+    marks: Vec<u32>,
+    generation: u32,
+}
+
+impl VisitedSet {
+    fn new() -> Self {
+        Self {
+            marks: Vec::new(),
+            generation: 1,
+        }
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    fn reset(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.marks.fill(0);
+            self.generation = 1;
+        }
+    }
+
+    #[inline]
+    fn is_visited(&self, id: usize) -> bool {
+        id < self.marks.len() && self.marks[id] == self.generation
+    }
+
+    #[inline]
+    fn mark(&mut self, id: usize) {
+        if id >= self.marks.len() {
+            self.marks.resize(id + 1, 0);
+        }
+        self.marks[id] = self.generation;
     }
 }
 
@@ -148,8 +216,9 @@ pub(crate) struct HnswGraph {
     config: HnswConfig,
     vector_config: VectorConfig,
     /// Graph structure: VectorId -> HnswNode
-    /// BTreeMap for deterministic iteration (Invariant R3)
-    nodes: BTreeMap<VectorId, HnswNode>,
+    /// HashMap for O(1) lookups on hot paths; deterministic iteration
+    /// is achieved by collecting + sorting keys when needed (serialization).
+    nodes: HashMap<VectorId, HnswNode>,
     /// Entry point (top-level node)
     entry_point: Option<VectorId>,
     /// Current max level in graph
@@ -166,7 +235,7 @@ impl HnswGraph {
         Self {
             config: hnsw_config,
             vector_config: vector_config.clone(),
-            nodes: BTreeMap::new(),
+            nodes: HashMap::new(),
             entry_point: None,
             max_level: 0,
             rng_seed: 42,
@@ -229,8 +298,8 @@ impl HnswGraph {
         };
         let entry_score = compute_similarity(query, entry_embedding, metric);
 
-        let mut visited = BTreeSet::new();
-        visited.insert(entry_id);
+        let mut visited = VisitedSet::new();
+        visited.mark(entry_id.0 as usize);
 
         // C: candidates — max-heap (highest score popped first = nearest to query)
         let mut candidates = BinaryHeap::new();
@@ -267,10 +336,10 @@ impl HnswGraph {
             if let Some(node) = self.nodes.get(&nearest.id) {
                 if layer < node.neighbors.len() {
                     for &neighbor_id in &node.neighbors[layer] {
-                        if visited.contains(&neighbor_id) {
+                        if visited.is_visited(neighbor_id.0 as usize) {
                             continue;
                         }
-                        visited.insert(neighbor_id);
+                        visited.mark(neighbor_id.0 as usize);
 
                         if let Some(neighbor_embedding) = heap.get(neighbor_id) {
                             let score = compute_similarity(query, neighbor_embedding, metric);
@@ -378,14 +447,65 @@ impl HnswGraph {
         current
     }
 
-    /// Select neighbors using the simple heuristic (select closest)
-    fn select_neighbors(&self, candidates: &[ScoredId], max_connections: usize) -> Vec<VectorId> {
-        // Already sorted by score desc, just take top max_connections
-        candidates
-            .iter()
-            .take(max_connections)
-            .map(|s| s.id)
-            .collect()
+    /// Select neighbors using diversity-aware heuristic (HNSW paper Algorithm 4).
+    ///
+    /// For each candidate (in score order): add it only if it is closer to the
+    /// query than to any already-selected neighbor. This produces diverse graph
+    /// connectivity and higher recall at the same ef_search. Remaining slots
+    /// are filled with closest unselected candidates.
+    fn select_neighbors(
+        &self,
+        candidates: &[ScoredId],
+        max_connections: usize,
+        heap: &VectorHeap,
+    ) -> Vec<VectorId> {
+        if candidates.len() <= max_connections {
+            return candidates.iter().map(|s| s.id).collect();
+        }
+
+        let metric = self.vector_config.metric;
+        let mut selected: Vec<VectorId> = Vec::with_capacity(max_connections);
+        let mut rejected: Vec<VectorId> = Vec::new();
+
+        for cand in candidates {
+            if selected.len() >= max_connections {
+                break;
+            }
+
+            let cand_emb = match heap.get(cand.id) {
+                Some(e) => e,
+                None => continue,
+            };
+
+            // Check if candidate is closer to query than to any already-selected neighbor
+            let mut is_diverse = true;
+            for &sel_id in &selected {
+                if let Some(sel_emb) = heap.get(sel_id) {
+                    let dist_to_selected = compute_similarity(cand_emb, sel_emb, metric);
+                    if dist_to_selected > cand.score {
+                        // Candidate is more similar to an existing neighbor than to the query
+                        is_diverse = false;
+                        break;
+                    }
+                }
+            }
+
+            if is_diverse {
+                selected.push(cand.id);
+            } else {
+                rejected.push(cand.id);
+            }
+        }
+
+        // Fill remaining slots with closest rejected candidates
+        for id in rejected {
+            if selected.len() >= max_connections {
+                break;
+            }
+            selected.push(id);
+        }
+
+        selected
     }
 
     /// Prune a node's neighbors at a given layer to max_connections
@@ -405,7 +525,7 @@ impl HnswGraph {
 
         let neighbors: Vec<VectorId> = if let Some(node) = self.nodes.get(&id) {
             if layer < node.neighbors.len() {
-                node.neighbors[layer].iter().copied().collect()
+                node.neighbors[layer].clone()
             } else {
                 return;
             }
@@ -432,8 +552,9 @@ impl HnswGraph {
                 .then_with(|| a.id.cmp(&b.id))
         });
 
-        // Keep top max_connections
-        let keep: BTreeSet<VectorId> = scored.iter().take(max_connections).map(|s| s.id).collect();
+        // Keep top max_connections as sorted Vec
+        let mut keep: Vec<VectorId> = scored.iter().take(max_connections).map(|s| s.id).collect();
+        keep.sort();
 
         if let Some(node) = self.nodes.get_mut(&id) {
             if layer < node.neighbors.len() {
@@ -526,14 +647,14 @@ impl HnswGraph {
             );
 
             // Paper line 9: SELECT-NEIGHBORS(q, W, M) — use M, not Mmax
-            let selected = self.select_neighbors(&candidates, self.config.m);
+            let selected = self.select_neighbors(&candidates, self.config.m, heap);
 
             // Paper line 10: add bidirectional connections
             // First, set the new node's neighbors at this layer
             if let Some(new_node) = self.nodes.get_mut(&id) {
                 if layer < new_node.neighbors.len() {
                     for &neighbor_id in &selected {
-                        new_node.neighbors[layer].insert(neighbor_id);
+                        sorted_vec_insert(&mut new_node.neighbors[layer], neighbor_id);
                     }
                 }
             }
@@ -549,7 +670,7 @@ impl HnswGraph {
             for &neighbor_id in &selected {
                 let needs_prune = if let Some(neighbor_node) = self.nodes.get_mut(&neighbor_id) {
                     if layer < neighbor_node.neighbors.len() {
-                        neighbor_node.neighbors[layer].insert(id);
+                        sorted_vec_insert(&mut neighbor_node.neighbors[layer], id);
                         neighbor_node.neighbors[layer].len() > max_conn
                     } else {
                         false
@@ -705,11 +826,15 @@ impl HnswGraph {
             node.deleted_at = Some(deleted_at);
         }
         if was_alive && self.entry_point == Some(id) {
+            // Find the minimum alive VectorId for deterministic fallback
+            // (HashMap iteration order is arbitrary, so we must explicitly pick
+            // the smallest alive ID to preserve determinism).
             self.entry_point = self
                 .nodes
                 .iter()
-                .find(|(_, n)| !n.is_deleted())
-                .map(|(id, _)| *id);
+                .filter(|(_, n)| !n.is_deleted())
+                .map(|(id, _)| *id)
+                .min();
             if let Some(ep) = self.entry_point {
                 self.max_level = self.nodes[&ep].max_layer;
             } else {
@@ -727,14 +852,14 @@ impl HnswGraph {
                 for &neighbor_id in neighbors {
                     if let Some(n) = self.nodes.get_mut(&neighbor_id) {
                         if layer < n.neighbors.len() {
-                            n.neighbors[layer].remove(&id);
+                            sorted_vec_remove(&mut n.neighbors[layer], id);
                         }
                     }
                 }
             }
-            // Update entry point if needed
+            // Update entry point if needed (use min for determinism with HashMap)
             if self.entry_point == Some(id) {
-                self.entry_point = self.nodes.keys().next().copied();
+                self.entry_point = self.nodes.keys().copied().min();
                 self.max_level = self.nodes.values().map(|n| n.max_layer).max().unwrap_or(0);
             }
         }
@@ -751,10 +876,10 @@ impl HnswGraph {
         self.nodes
             .values()
             .map(|node| {
-                // BTreeSet overhead per neighbor
+                // Vec<VectorId> overhead per layer
                 node.neighbors
                     .iter()
-                    .map(|ns| ns.len() * 16 + 64)
+                    .map(|ns| ns.capacity() * std::mem::size_of::<VectorId>() + 24)
                     .sum::<usize>()
                     + 64 // node overhead
             })
@@ -790,8 +915,11 @@ impl HnswGraph {
         // Node count
         data.extend_from_slice(&(self.nodes.len() as u64).to_le_bytes());
 
-        // Nodes (in BTreeMap order for determinism)
-        for (&id, node) in &self.nodes {
+        // Nodes (sorted by VectorId for determinism — HashMap has no order)
+        let mut sorted_ids: Vec<VectorId> = self.nodes.keys().copied().collect();
+        sorted_ids.sort();
+        for id in &sorted_ids {
+            let node = &self.nodes[id];
             // VectorId
             data.extend_from_slice(&id.as_u64().to_le_bytes());
             // max_layer
@@ -881,11 +1009,13 @@ impl HnswGraph {
             let mut neighbors = Vec::with_capacity(layer_count);
             for _ in 0..layer_count {
                 let neighbor_count = read_u64(&mut pos, data)? as usize;
-                let mut layer_neighbors = BTreeSet::new();
+                let mut layer_neighbors = Vec::with_capacity(neighbor_count);
                 for _ in 0..neighbor_count {
                     let neighbor_id = VectorId::new(read_u64(&mut pos, data)?);
-                    layer_neighbors.insert(neighbor_id);
+                    layer_neighbors.push(neighbor_id);
                 }
+                layer_neighbors.sort();
+                layer_neighbors.dedup();
                 neighbors.push(layer_neighbors);
             }
 
@@ -1002,18 +1132,23 @@ pub(crate) struct CompactHnswGraph {
 impl CompactHnswGraph {
     /// Build from an existing `HnswGraph` (consumes graph state).
     ///
-    /// `BTreeSet` iterates in sorted order so the resulting flat array
+    /// Neighbor Vecs are already sorted, so the resulting flat array
     /// preserves deterministic neighbor ordering.
     pub(crate) fn from_graph(graph: &HnswGraph) -> Self {
         let mut neighbor_data: Vec<u64> = Vec::new();
         let mut compact_nodes: BTreeMap<VectorId, CompactHnswNode> = BTreeMap::new();
 
-        for (&id, node) in &graph.nodes {
+        // Sort keys for deterministic order (HashMap has no inherent order)
+        let mut sorted_ids: Vec<VectorId> = graph.nodes.keys().copied().collect();
+        sorted_ids.sort();
+
+        for &id in &sorted_ids {
+            let node = &graph.nodes[&id];
             let mut layer_ranges = Vec::with_capacity(node.neighbors.len());
-            for layer_set in &node.neighbors {
+            for layer_vec in &node.neighbors {
                 let start = neighbor_data.len() as u32;
-                let count = layer_set.len() as u16;
-                for &neighbor_id in layer_set {
+                let count = layer_vec.len() as u16;
+                for &neighbor_id in layer_vec {
                     neighbor_data.push(neighbor_id.as_u64());
                 }
                 layer_ranges.push((start, count));
@@ -1078,14 +1213,14 @@ impl CompactHnswGraph {
     ) -> Vec<ScoredId> {
         let metric = self.vector_config.metric;
 
-        let entry_embedding = match heap.get(entry_id) {
+        let entry_embedding = match heap.get_fast(entry_id) {
             Some(e) => e,
             None => return Vec::new(),
         };
         let entry_score = compute_similarity(query, entry_embedding, metric);
 
-        let mut visited = BTreeSet::new();
-        visited.insert(entry_id);
+        let mut visited = VisitedSet::new();
+        visited.mark(entry_id.0 as usize);
 
         let mut candidates = BinaryHeap::new();
         candidates.push(ScoredId {
@@ -1112,12 +1247,12 @@ impl CompactHnswGraph {
 
             for &neighbor_u64 in self.neighbors_at(nearest.id, layer) {
                 let neighbor_id = VectorId::new(neighbor_u64);
-                if visited.contains(&neighbor_id) {
+                if visited.is_visited(neighbor_id.0 as usize) {
                     continue;
                 }
-                visited.insert(neighbor_id);
+                visited.mark(neighbor_id.0 as usize);
 
-                if let Some(neighbor_embedding) = heap.get(neighbor_id) {
+                if let Some(neighbor_embedding) = heap.get_fast(neighbor_id) {
                     let score = compute_similarity(query, neighbor_embedding, metric);
 
                     let worst_result_score = results
@@ -1169,7 +1304,7 @@ impl CompactHnswGraph {
             let mut improved = true;
             while improved {
                 improved = false;
-                let current_embedding = match heap.get(current) {
+                let current_embedding = match heap.get_fast(current) {
                     Some(e) => e,
                     None => break,
                 };
@@ -1180,7 +1315,7 @@ impl CompactHnswGraph {
 
                 for &neighbor_u64 in self.neighbors_at(current, layer) {
                     let neighbor_id = VectorId::new(neighbor_u64);
-                    if let Some(neighbor_embedding) = heap.get(neighbor_id) {
+                    if let Some(neighbor_embedding) = heap.get_fast(neighbor_id) {
                         let score = compute_similarity(query, neighbor_embedding, metric);
                         if score > best_score || (score == best_score && neighbor_id < best_id) {
                             best_score = score;
@@ -1206,6 +1341,17 @@ impl CompactHnswGraph {
         k: usize,
         heap: &VectorHeap,
     ) -> Vec<(VectorId, f32)> {
+        self.search_with_heap_ef(query, k, self.config.ef_search, heap)
+    }
+
+    /// Search with a custom ef_search override.
+    pub(crate) fn search_with_heap_ef(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef_search: usize,
+        heap: &VectorHeap,
+    ) -> Vec<(VectorId, f32)> {
         if k == 0 || self.nodes.is_empty() {
             return Vec::new();
         }
@@ -1228,7 +1374,7 @@ impl CompactHnswGraph {
             current_entry = self.greedy_search_to_layer(query, entry_id, self.max_level, 1, heap);
         }
 
-        let ef = self.config.ef_search.max(k);
+        let ef = ef_search.max(k);
         let candidates = self.search_layer(query, current_entry, ef, 0, heap);
 
         candidates
@@ -1592,6 +1738,7 @@ impl VectorIndexBackend for HnswBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn make_backend(dim: usize, metric: DistanceMetric) -> HnswBackend {
         let config = VectorConfig::new(dim, metric).unwrap();

@@ -229,6 +229,18 @@ impl MmapVectorData {
         Some(floats)
     }
 
+    /// Get embedding by raw f32 offset (for dense acceleration).
+    pub(crate) fn get_by_offset(&self, offset: usize, dim: usize) -> Option<&[f32]> {
+        let byte_start = self.embeddings_offset + offset * 4;
+        let byte_end = byte_start + dim * 4;
+        if byte_end > self.mmap.len() {
+            return None;
+        }
+        let slice = &self.mmap[byte_start..byte_end];
+        let floats = unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const f32, dim) };
+        Some(floats)
+    }
+
     /// Check if a vector exists
     #[allow(dead_code)]
     pub(crate) fn contains(&self, id: VectorId) -> bool {
