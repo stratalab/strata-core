@@ -565,6 +565,29 @@ impl VectorHeap {
         None
     }
 
+    /// Software prefetch the embedding data for a VectorId into L1 cache.
+    ///
+    /// Used in the HNSW inner loop to hide DRAM latency: prefetch the *next*
+    /// neighbor's embedding while computing distance for the current one.
+    /// Uses the O(1) dense_offsets path (same as `get()`).
+    #[inline]
+    pub fn prefetch_embedding(&self, id: VectorId) {
+        let idx = id.0 as usize;
+        if idx < self.dense_offsets.len() {
+            let slot = self.dense_offsets[idx];
+            if slot != DENSE_ABSENT {
+                let offset = slot as usize * self.config.dimension;
+                if let VectorData::InMemory(vec) = &self.data {
+                    if offset < vec.len() {
+                        crate::primitives::vector::distance::prefetch_read(
+                            vec[offset..].as_ptr() as *const u8,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Rebuild the dense offset index and norms from `id_to_offset`.
     ///
     /// Called from `from_snapshot()`, `from_mmap()`, `restore_snapshot_state()`,
