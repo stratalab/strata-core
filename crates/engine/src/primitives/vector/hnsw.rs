@@ -2622,7 +2622,10 @@ mod tests {
         assert!(
             results.iter().all(|(id, _)| id.as_u64() == 10),
             "At ts=150, only VectorId(10) (created_at=100) should be alive, got: {:?}",
-            results.iter().map(|(id, _)| id.as_u64()).collect::<Vec<_>>()
+            results
+                .iter()
+                .map(|(id, _)| id.as_u64())
+                .collect::<Vec<_>>()
         );
 
         // Search at ts=350: IDs 10, 11, 12 should be alive (created at 100, 200, 300)
@@ -2675,9 +2678,7 @@ mod tests {
         // At ts=150: VectorId(10) alive (created=100, deleted=600 > 150)
         let results_early = compact.search_at_with_heap(&[1.0, 0.0, 0.0], 5, 150, &heap);
         assert!(
-            results_early
-                .iter()
-                .all(|(id, _)| id.as_u64() == 10),
+            results_early.iter().all(|(id, _)| id.as_u64() == 10),
             "At ts=150 only VectorId(10) should be alive"
         );
     }
