@@ -37,11 +37,7 @@ pub(crate) fn prefetch_read(ptr: *const u8) {
     #[cfg(target_arch = "x86_64")]
     unsafe {
         // PREFETCHT0: prefetch into all cache levels
-        core::arch::asm!(
-            "prefetcht0 ({})",
-            in(reg) ptr,
-            options(nostack, preserves_flags)
-        );
+        core::arch::x86_64::_mm_prefetch(ptr as *const i8, core::arch::x86_64::_MM_HINT_T0);
     }
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
