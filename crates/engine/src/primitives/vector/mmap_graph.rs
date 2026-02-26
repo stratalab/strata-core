@@ -41,7 +41,6 @@
 compile_error!("mmap graph requires little-endian architecture");
 
 use memmap2::Mmap;
-use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
@@ -77,7 +76,7 @@ pub(crate) fn write_graph_file(path: &Path, graph: &CompactHnswGraph) -> Result<
 
     // Compute node section size
     let mut node_section_size: usize = 0;
-    for node in graph.nodes.values() {
+    for (_, node) in graph.iter_nodes() {
         // VectorId(8) + created_at(8) + deleted_at(8) + num_layers(4) + pad(4)
         // + num_layers * (start(4) + count(4))
         node_section_size += 32 + node.layer_ranges.len() * 8;
@@ -104,7 +103,7 @@ pub(crate) fn write_graph_file(path: &Path, graph: &CompactHnswGraph) -> Result<
     .map_err(|e| VectorError::Io(e.to_string()))?;
     file.write_all(&(graph.max_level as u32).to_le_bytes())
         .map_err(|e| VectorError::Io(e.to_string()))?;
-    file.write_all(&(graph.nodes.len() as u32).to_le_bytes())
+    file.write_all(&(graph.len() as u32).to_le_bytes())
         .map_err(|e| VectorError::Io(e.to_string()))?;
     file.write_all(&(neighbor_data_len as u64).to_le_bytes())
         .map_err(|e| VectorError::Io(e.to_string()))?;
@@ -113,8 +112,8 @@ pub(crate) fn write_graph_file(path: &Path, graph: &CompactHnswGraph) -> Result<
     file.write_all(&0u64.to_le_bytes()) // reserved
         .map_err(|e| VectorError::Io(e.to_string()))?;
 
-    // Node entries (sorted by VectorId — BTreeMap guarantees this)
-    for (&id, node) in &graph.nodes {
+    // Node entries (sorted by VectorId — iter_nodes guarantees this)
+    for (id, node) in graph.iter_nodes() {
         file.write_all(&id.as_u64().to_le_bytes())
             .map_err(|e| VectorError::Io(e.to_string()))?;
         file.write_all(&node.created_at.to_le_bytes())
@@ -160,7 +159,7 @@ pub(crate) fn write_graph_file(path: &Path, graph: &CompactHnswGraph) -> Result<
 
 /// Open a `CompactHnswGraph` from an mmap file.
 ///
-/// Node metadata is loaded into memory (BTreeMap — small).
+/// Node metadata is loaded into memory (dense array — small).
 /// Neighbor data remains mmap-backed and is only paged in on access.
 ///
 /// The caller provides `hnsw_config` and `vector_config` since the file
@@ -236,8 +235,8 @@ pub(crate) fn open_graph_file(
         )));
     }
 
-    // Read node entries
-    let mut nodes = BTreeMap::new();
+    // Read node entries into a sorted Vec for dense array construction
+    let mut entries: Vec<(VectorId, CompactHnswNode)> = Vec::with_capacity(node_count);
     let mut pos = HEADER_SIZE;
     for _ in 0..node_count {
         if pos + 32 > HEADER_SIZE + node_section_size {
@@ -278,15 +277,18 @@ pub(crate) fn open_graph_file(
             pos += 8;
         }
 
-        nodes.insert(
+        entries.push((
             VectorId::new(vid),
             CompactHnswNode {
                 layer_ranges,
                 created_at,
                 deleted_at,
             },
-        );
+        ));
     }
+
+    // Build dense array (entries are already sorted by VectorId from the file format)
+    let (dense_nodes, id_offset, actual_node_count) = CompactHnswGraph::build_dense(entries);
 
     // Neighbor data stays mmap-backed
     let neighbor_data = NeighborData::Mmap {
@@ -299,7 +301,9 @@ pub(crate) fn open_graph_file(
         config: hnsw_config,
         vector_config,
         neighbor_data,
-        nodes,
+        dense_nodes,
+        id_offset,
+        node_count: actual_node_count,
         entry_point,
         max_level,
     })
@@ -347,7 +351,7 @@ mod tests {
         let loaded = open_graph_file(&path, HnswConfig::default(), config.clone()).unwrap();
 
         // Verify structure matches
-        assert_eq!(original.nodes.len(), loaded.nodes.len());
+        assert_eq!(original.len(), loaded.len());
         assert_eq!(original.entry_point, loaded.entry_point);
         assert_eq!(original.max_level, loaded.max_level);
         assert_eq!(original.neighbor_data.len(), loaded.neighbor_data.len());
@@ -358,8 +362,8 @@ mod tests {
         assert_eq!(orig_data, loaded_data);
 
         // Verify node metadata matches
-        for (&id, orig_node) in &original.nodes {
-            let loaded_node = loaded.nodes.get(&id).expect("node missing");
+        for (id, orig_node) in original.iter_nodes() {
+            let loaded_node = loaded.get_node(id).expect("node missing");
             assert_eq!(orig_node.created_at, loaded_node.created_at);
             assert_eq!(orig_node.deleted_at, loaded_node.deleted_at);
             assert_eq!(orig_node.layer_ranges, loaded_node.layer_ranges);
@@ -417,7 +421,9 @@ mod tests {
             config: HnswConfig::default(),
             vector_config: config.clone(),
             neighbor_data: NeighborData::Owned(Vec::new()),
-            nodes: BTreeMap::new(),
+            dense_nodes: Vec::new(),
+            id_offset: 0,
+            node_count: 0,
             entry_point: None,
             max_level: 0,
         };
@@ -425,7 +431,7 @@ mod tests {
         write_graph_file(&path, &graph).unwrap();
         let loaded = open_graph_file(&path, HnswConfig::default(), config).unwrap();
 
-        assert_eq!(loaded.nodes.len(), 0);
+        assert_eq!(loaded.len(), 0);
         assert!(loaded.entry_point.is_none());
         assert_eq!(loaded.neighbor_data.len(), 0);
     }
@@ -551,21 +557,23 @@ mod tests {
 
         let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
 
-        let mut nodes = BTreeMap::new();
-        nodes.insert(
+        let entries = vec![(
             VectorId::new(42),
             CompactHnswNode {
                 layer_ranges: vec![(0, 0)], // layer 0, zero neighbors
                 created_at: 100,
                 deleted_at: None,
             },
-        );
+        )];
+        let (dense_nodes, id_offset, node_count) = CompactHnswGraph::build_dense(entries);
 
         let graph = CompactHnswGraph {
             config: HnswConfig::default(),
             vector_config: config.clone(),
             neighbor_data: NeighborData::Owned(Vec::new()),
-            nodes,
+            dense_nodes,
+            id_offset,
+            node_count,
             entry_point: Some(VectorId::new(42)),
             max_level: 0,
         };
@@ -573,7 +581,7 @@ mod tests {
         write_graph_file(&path, &graph).unwrap();
         let loaded = open_graph_file(&path, HnswConfig::default(), config.clone()).unwrap();
 
-        assert_eq!(loaded.nodes.len(), 1);
+        assert_eq!(loaded.len(), 1);
         assert_eq!(loaded.entry_point, Some(VectorId::new(42)));
         assert!(loaded.is_neighbor_data_mmap());
 

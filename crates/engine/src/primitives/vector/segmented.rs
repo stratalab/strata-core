@@ -937,7 +937,7 @@ impl VectorIndexBackend for SegmentedHnswBackend {
         // so temporal queries still work after compaction.
         let mut timestamps: BTreeMap<VectorId, u64> = BTreeMap::new();
         for seg in &self.sealed {
-            for (&id, node) in &seg.graph.nodes {
+            for (id, node) in seg.graph.iter_nodes() {
                 if node.deleted_at.is_none() && node.created_at != 0 {
                     timestamps.insert(id, node.created_at);
                 }
@@ -1214,7 +1214,7 @@ impl VectorIndexBackend for SegmentedHnswBackend {
         let sealed_ids: std::collections::BTreeSet<VectorId> = self
             .sealed
             .iter()
-            .flat_map(|seg| seg.graph.nodes.keys().copied())
+            .flat_map(|seg| seg.graph.node_ids())
             .collect();
         self.active.ids.retain(|id| !sealed_ids.contains(id));
         self.active
@@ -2400,5 +2400,116 @@ mod tests {
             results_high[0].1 >= results_low[0].1 - 1e-6,
             "Higher ef should find at least as good results"
         );
+    }
+}
+
+#[cfg(test)]
+mod profiling_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::time::Instant;
+
+    fn make_embedding(dim: usize, seed: usize) -> Vec<f32> {
+        (0..dim)
+            .map(|j| ((seed * dim + j) as f32 / 1000.0).sin())
+            .collect()
+    }
+
+    /// Test 5: Segment Fan-Out vs Compact
+    ///
+    /// Builds a SegmentedHnswBackend with 100K vectors (seal_threshold=50K → 2 segments).
+    /// Times 100 queries. Then compact() into 1 segment, times same queries.
+    /// Reports QPS and recall@10 for both configurations.
+    #[test]
+    fn profile_segment_fanout_vs_compact() {
+        use crate::primitives::vector::brute_force::BruteForceBackend;
+
+        let n = 100_000;
+        let dim = 128;
+        let num_queries = 100;
+        let k = 10;
+        let seal_threshold = 50_000;
+
+        let config = VectorConfig::new(dim, DistanceMetric::Cosine).unwrap();
+        let seg_config = SegmentedHnswConfig {
+            hnsw: HnswConfig::default(),
+            seal_threshold,
+            heap_flush_threshold: 0, // Disable mmap flushing in tests
+        };
+        let mut backend = SegmentedHnswBackend::new(&config, seg_config);
+
+        // Also build brute-force for recall measurement
+        let mut brute = BruteForceBackend::new(&config);
+
+        // Insert all vectors
+        for i in 1..=n {
+            let emb = make_embedding(dim, i);
+            let id = VectorId::new(i as u64);
+            backend.insert(id, &emb).unwrap();
+            brute.insert(id, &emb).unwrap();
+        }
+
+        let num_segments_before = backend.sealed.len();
+
+        // Pre-generate queries
+        let queries: Vec<Vec<f32>> = (0..num_queries)
+            .map(|i| make_embedding(dim, n + 1 + i))
+            .collect();
+
+        // --- Time multi-segment search ---
+        let start = Instant::now();
+        let mut multi_results: Vec<Vec<(VectorId, f32)>> = Vec::with_capacity(num_queries);
+        for q in &queries {
+            multi_results.push(backend.search(q, k));
+        }
+        let multi_elapsed = start.elapsed();
+        let multi_qps = num_queries as f64 / multi_elapsed.as_secs_f64();
+
+        // Compute recall@k for multi-segment
+        let mut multi_recall_sum = 0.0;
+        for (i, q) in queries.iter().enumerate() {
+            let brute_results = brute.search(q, k);
+            let brute_ids: BTreeSet<VectorId> = brute_results.iter().map(|(id, _)| *id).collect();
+            let hnsw_ids: BTreeSet<VectorId> = multi_results[i].iter().map(|(id, _)| *id).collect();
+            let overlap = brute_ids.intersection(&hnsw_ids).count();
+            multi_recall_sum += overlap as f64 / k as f64;
+        }
+        let multi_recall = multi_recall_sum / num_queries as f64;
+
+        // --- Compact ---
+        backend.compact();
+        let num_segments_after = backend.sealed.len();
+
+        // --- Time single-segment search ---
+        let start = Instant::now();
+        let mut compact_results: Vec<Vec<(VectorId, f32)>> = Vec::with_capacity(num_queries);
+        for q in &queries {
+            compact_results.push(backend.search(q, k));
+        }
+        let compact_elapsed = start.elapsed();
+        let compact_qps = num_queries as f64 / compact_elapsed.as_secs_f64();
+
+        // Compute recall@k for compacted
+        let mut compact_recall_sum = 0.0;
+        for (i, q) in queries.iter().enumerate() {
+            let brute_results = brute.search(q, k);
+            let brute_ids: BTreeSet<VectorId> = brute_results.iter().map(|(id, _)| *id).collect();
+            let hnsw_ids: BTreeSet<VectorId> =
+                compact_results[i].iter().map(|(id, _)| *id).collect();
+            let overlap = brute_ids.intersection(&hnsw_ids).count();
+            compact_recall_sum += overlap as f64 / k as f64;
+        }
+        let compact_recall = compact_recall_sum / num_queries as f64;
+
+        let speedup = compact_qps / multi_qps;
+
+        println!("\n=== Segment Fan-Out: {num_segments_before} Segments vs {num_segments_after} Compact ({n} vectors, dim={dim}) ===");
+        println!(
+            "  {num_segments_before} segments: {multi_qps:.0} QPS, recall@{k} = {multi_recall:.3} ({multi_elapsed:?})"
+        );
+        println!(
+            "  {num_segments_after} segment:  {compact_qps:.0} QPS, recall@{k} = {compact_recall:.3} ({compact_elapsed:?})"
+        );
+        println!("  compact speedup: {speedup:.2}x");
     }
 }

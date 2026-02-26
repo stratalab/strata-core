@@ -19,7 +19,7 @@
 //! ## Determinism
 //!
 //! - Fixed RNG seed + monotonic counter for level assignment
-//! - BTreeMap for node storage (deterministic iteration)
+//! - Dense array for CompactHnswGraph node storage (O(1) lookup)
 //! - BTreeSet for neighbor lists (sorted)
 //! - Tie-breaking: (score desc, VectorId asc)
 
@@ -27,7 +27,7 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
 use crate::primitives::vector::backend::VectorIndexBackend;
-use crate::primitives::vector::distance::compute_similarity;
+use crate::primitives::vector::distance::{compute_similarity, compute_similarity_cached};
 use crate::primitives::vector::heap::VectorHeap;
 use crate::primitives::vector::types::InlineMeta;
 use crate::primitives::vector::{DistanceMetric, VectorConfig, VectorError, VectorId};
@@ -1118,25 +1118,115 @@ impl NeighborData {
 /// Neighbors are stored in a contiguous sorted `Vec<u64>` (or mmap-backed
 /// slice) instead of one `BTreeSet<VectorId>` per layer per node.  This
 /// reduces per-element overhead from ~48 bytes (BTreeSet) to 8 bytes (u64).
+///
+/// Nodes are stored in a dense `Vec<Option<CompactHnswNode>>` indexed by
+/// `id.0 - id_offset` for O(1) lookup instead of BTreeMap's O(log n).
+/// This is the #1 performance optimization for ANN search — the search loop
+/// does ~1000 `neighbors_at()` + `is_deleted()` calls per query.
 pub(crate) struct CompactHnswGraph {
     pub(crate) config: HnswConfig,
     pub(crate) vector_config: VectorConfig,
     /// Flat array of all neighbor IDs (u64 for VectorId)
     pub(crate) neighbor_data: NeighborData,
-    /// Per-node metadata indexed by VectorId
-    pub(crate) nodes: BTreeMap<VectorId, CompactHnswNode>,
+    /// Dense node storage: index = id.0 - id_offset
+    pub(crate) dense_nodes: Vec<Option<CompactHnswNode>>,
+    /// VectorId.0 of the first entry (minimum ID in the graph)
+    pub(crate) id_offset: u64,
+    /// Number of occupied (Some) slots
+    pub(crate) node_count: usize,
     pub(crate) entry_point: Option<VectorId>,
     pub(crate) max_level: usize,
 }
 
 impl CompactHnswGraph {
+    // ====================================================================
+    // Dense node helpers (O(1) lookup)
+    // ====================================================================
+
+    #[inline]
+    pub(crate) fn get_node(&self, id: VectorId) -> Option<&CompactHnswNode> {
+        let raw = id.0;
+        if raw < self.id_offset {
+            return None;
+        }
+        let idx = (raw - self.id_offset) as usize;
+        self.dense_nodes.get(idx).and_then(|opt| opt.as_ref())
+    }
+
+    #[inline]
+    fn get_node_mut(&mut self, id: VectorId) -> Option<&mut CompactHnswNode> {
+        let raw = id.0;
+        if raw < self.id_offset {
+            return None;
+        }
+        let idx = (raw - self.id_offset) as usize;
+        self.dense_nodes.get_mut(idx).and_then(|opt| opt.as_mut())
+    }
+
+    /// Iterate over all present (id, node) pairs in VectorId order.
+    pub(crate) fn iter_nodes(&self) -> impl Iterator<Item = (VectorId, &CompactHnswNode)> {
+        let offset = self.id_offset;
+        self.dense_nodes
+            .iter()
+            .enumerate()
+            .filter_map(move |(i, opt)| {
+                opt.as_ref()
+                    .map(|node| (VectorId::new(offset + i as u64), node))
+            })
+    }
+
+    /// Iterate over all present VectorIds in order.
+    pub(crate) fn node_ids(&self) -> impl Iterator<Item = VectorId> + '_ {
+        let offset = self.id_offset;
+        self.dense_nodes
+            .iter()
+            .enumerate()
+            .filter_map(move |(i, opt)| {
+                if opt.is_some() {
+                    Some(VectorId::new(offset + i as u64))
+                } else {
+                    None
+                }
+            })
+    }
+
+    /// Build dense_nodes from a list of (VectorId, CompactHnswNode) pairs.
+    ///
+    /// `entries` must be sorted by VectorId with no duplicates.
+    pub(crate) fn build_dense(
+        entries: Vec<(VectorId, CompactHnswNode)>,
+    ) -> (Vec<Option<CompactHnswNode>>, u64, usize) {
+        if entries.is_empty() {
+            return (Vec::new(), 0, 0);
+        }
+        debug_assert!(
+            entries.windows(2).all(|w| w[0].0 < w[1].0),
+            "build_dense: entries must be sorted by VectorId with no duplicates"
+        );
+        let id_offset = entries.first().unwrap().0 .0;
+        let id_max = entries.last().unwrap().0 .0;
+        let len = (id_max - id_offset + 1) as usize;
+        let node_count = entries.len();
+        let mut dense = Vec::with_capacity(len);
+        dense.resize_with(len, || None);
+        for (id, node) in entries {
+            let idx = (id.0 - id_offset) as usize;
+            dense[idx] = Some(node);
+        }
+        (dense, id_offset, node_count)
+    }
+
+    // ====================================================================
+    // Construction
+    // ====================================================================
+
     /// Build from an existing `HnswGraph` (consumes graph state).
     ///
     /// Neighbor Vecs are already sorted, so the resulting flat array
     /// preserves deterministic neighbor ordering.
     pub(crate) fn from_graph(graph: &HnswGraph) -> Self {
         let mut neighbor_data: Vec<u64> = Vec::new();
-        let mut compact_nodes: BTreeMap<VectorId, CompactHnswNode> = BTreeMap::new();
+        let mut entries: Vec<(VectorId, CompactHnswNode)> = Vec::new();
 
         // Sort keys for deterministic order (HashMap has no inherent order)
         let mut sorted_ids: Vec<VectorId> = graph.nodes.keys().copied().collect();
@@ -1153,29 +1243,34 @@ impl CompactHnswGraph {
                 }
                 layer_ranges.push((start, count));
             }
-            compact_nodes.insert(
+            entries.push((
                 id,
                 CompactHnswNode {
                     layer_ranges,
                     created_at: node.created_at,
                     deleted_at: node.deleted_at,
                 },
-            );
+            ));
         }
+
+        let (dense_nodes, id_offset, node_count) = Self::build_dense(entries);
 
         CompactHnswGraph {
             config: graph.config.clone(),
             vector_config: graph.vector_config.clone(),
             neighbor_data: NeighborData::Owned(neighbor_data),
-            nodes: compact_nodes,
+            dense_nodes,
+            id_offset,
+            node_count,
             entry_point: graph.entry_point,
             max_level: graph.max_level,
         }
     }
 
     /// Get neighbor IDs for a node at a given layer.
+    #[inline]
     fn neighbors_at(&self, id: VectorId, layer: usize) -> &[u64] {
-        match self.nodes.get(&id) {
+        match self.get_node(id) {
             Some(node) if layer < node.layer_ranges.len() => {
                 let (start, count) = node.layer_ranges[layer];
                 let data = self.neighbor_data.as_slice();
@@ -1186,13 +1281,15 @@ impl CompactHnswGraph {
     }
 
     /// Check if node is deleted
+    #[inline]
     fn is_deleted(&self, id: VectorId) -> bool {
-        self.nodes.get(&id).is_some_and(|n| n.deleted_at.is_some())
+        self.get_node(id).is_some_and(|n| n.deleted_at.is_some())
     }
 
     /// Check if node was alive at `as_of_ts`
+    #[inline]
     fn is_alive_at(&self, id: VectorId, as_of_ts: u64) -> bool {
-        self.nodes.get(&id).is_some_and(|n| {
+        self.get_node(id).is_some_and(|n| {
             (n.created_at == 0 || n.created_at <= as_of_ts)
                 && n.deleted_at.map_or(true, |d| d > as_of_ts)
         })
@@ -1212,12 +1309,24 @@ impl CompactHnswGraph {
         heap: &VectorHeap,
     ) -> Vec<ScoredId> {
         let metric = self.vector_config.metric;
+        // Pre-compute query norm once for cosine similarity caching
+        let q_norm = if metric == DistanceMetric::Cosine {
+            Some(query.iter().map(|x| x * x).sum::<f32>().sqrt())
+        } else {
+            None
+        };
 
-        let entry_embedding = match heap.get_fast(entry_id) {
+        let entry_embedding = match heap.get(entry_id) {
             Some(e) => e,
             None => return Vec::new(),
         };
-        let entry_score = compute_similarity(query, entry_embedding, metric);
+        let entry_score = compute_similarity_cached(
+            query,
+            entry_embedding,
+            metric,
+            q_norm,
+            heap.get_norm(entry_id),
+        );
 
         let mut visited = VisitedSet::new();
         visited.mark(entry_id.0 as usize);
@@ -1252,8 +1361,14 @@ impl CompactHnswGraph {
                 }
                 visited.mark(neighbor_id.0 as usize);
 
-                if let Some(neighbor_embedding) = heap.get_fast(neighbor_id) {
-                    let score = compute_similarity(query, neighbor_embedding, metric);
+                if let Some(neighbor_embedding) = heap.get(neighbor_id) {
+                    let score = compute_similarity_cached(
+                        query,
+                        neighbor_embedding,
+                        metric,
+                        q_norm,
+                        heap.get_norm(neighbor_id),
+                    );
 
                     let worst_result_score = results
                         .peek()
@@ -1298,25 +1413,42 @@ impl CompactHnswGraph {
         heap: &VectorHeap,
     ) -> VectorId {
         let metric = self.vector_config.metric;
+        let q_norm = if metric == DistanceMetric::Cosine {
+            Some(query.iter().map(|x| x * x).sum::<f32>().sqrt())
+        } else {
+            None
+        };
         let mut current = entry_id;
 
         for layer in (to_layer..=from_layer).rev() {
             let mut improved = true;
             while improved {
                 improved = false;
-                let current_embedding = match heap.get_fast(current) {
+                let current_embedding = match heap.get(current) {
                     Some(e) => e,
                     None => break,
                 };
-                let current_score = compute_similarity(query, current_embedding, metric);
+                let current_score = compute_similarity_cached(
+                    query,
+                    current_embedding,
+                    metric,
+                    q_norm,
+                    heap.get_norm(current),
+                );
 
                 let mut best_score = current_score;
                 let mut best_id = current;
 
                 for &neighbor_u64 in self.neighbors_at(current, layer) {
                     let neighbor_id = VectorId::new(neighbor_u64);
-                    if let Some(neighbor_embedding) = heap.get_fast(neighbor_id) {
-                        let score = compute_similarity(query, neighbor_embedding, metric);
+                    if let Some(neighbor_embedding) = heap.get(neighbor_id) {
+                        let score = compute_similarity_cached(
+                            query,
+                            neighbor_embedding,
+                            metric,
+                            q_norm,
+                            heap.get_norm(neighbor_id),
+                        );
                         if score > best_score || (score == best_score && neighbor_id < best_id) {
                             best_score = score;
                             best_id = neighbor_id;
@@ -1352,7 +1484,7 @@ impl CompactHnswGraph {
         ef_search: usize,
         heap: &VectorHeap,
     ) -> Vec<(VectorId, f32)> {
-        if k == 0 || self.nodes.is_empty() {
+        if k == 0 || self.node_count == 0 {
             return Vec::new();
         }
 
@@ -1365,7 +1497,12 @@ impl CompactHnswGraph {
             None => return Vec::new(),
         };
 
-        if self.nodes.values().all(|n| n.deleted_at.is_some()) {
+        if self
+            .dense_nodes
+            .iter()
+            .flatten()
+            .all(|n| n.deleted_at.is_some())
+        {
             return Vec::new();
         }
 
@@ -1393,14 +1530,17 @@ impl CompactHnswGraph {
         as_of_ts: u64,
         heap: &VectorHeap,
     ) -> Vec<(VectorId, f32)> {
-        if self.nodes.is_empty() || k == 0 {
+        if self.node_count == 0 || k == 0 {
             return Vec::new();
         }
         if query.len() != heap.dimension() {
             return Vec::new();
         }
 
-        let has_alive = self.nodes.keys().any(|&id| self.is_alive_at(id, as_of_ts));
+        let has_alive = self.dense_nodes.iter().flatten().any(|n| {
+            (n.created_at == 0 || n.created_at <= as_of_ts)
+                && n.deleted_at.map_or(true, |d| d > as_of_ts)
+        });
         if !has_alive {
             return Vec::new();
         }
@@ -1420,7 +1560,7 @@ impl CompactHnswGraph {
         end_ts: u64,
         heap: &VectorHeap,
     ) -> Vec<(VectorId, f32)> {
-        if self.nodes.is_empty() || k == 0 {
+        if self.node_count == 0 || k == 0 {
             return Vec::new();
         }
         if query.len() != heap.dimension() {
@@ -1429,7 +1569,7 @@ impl CompactHnswGraph {
 
         let mut results = self.search_with_heap(query, k * 2, heap);
         results.retain(|(id, _)| {
-            self.nodes.get(id).is_some_and(|n| {
+            self.get_node(*id).is_some_and(|n| {
                 n.created_at >= start_ts && n.created_at <= end_ts && n.deleted_at.is_none()
             })
         });
@@ -1443,23 +1583,32 @@ impl CompactHnswGraph {
 
     /// Check if a vector exists and is alive
     pub(crate) fn contains(&self, id: VectorId) -> bool {
-        self.nodes.get(&id).is_some_and(|n| n.deleted_at.is_none())
+        self.get_node(id).is_some_and(|n| n.deleted_at.is_none())
     }
 
     /// Soft-delete a vector. Returns true if it was alive.
     pub(crate) fn delete_with_timestamp(&mut self, id: VectorId, deleted_at: u64) -> bool {
-        let was_alive = self.nodes.get(&id).is_some_and(|n| n.deleted_at.is_none());
-        if let Some(node) = self.nodes.get_mut(&id) {
+        let was_alive = self.get_node(id).is_some_and(|n| n.deleted_at.is_none());
+        if let Some(node) = self.get_node_mut(id) {
             node.deleted_at = Some(deleted_at);
         }
         if was_alive && self.entry_point == Some(id) {
-            self.entry_point = self
-                .nodes
+            let new_ep = self
+                .dense_nodes
                 .iter()
-                .find(|(_, n)| n.deleted_at.is_none())
-                .map(|(id, _)| *id);
-            if let Some(ep) = self.entry_point {
-                self.max_level = self.nodes[&ep].layer_ranges.len().saturating_sub(1);
+                .enumerate()
+                .filter_map(|(i, opt)| {
+                    opt.as_ref()
+                        .filter(|n| n.deleted_at.is_none())
+                        .map(|_| VectorId::new(self.id_offset + i as u64))
+                })
+                .next();
+            self.entry_point = new_ep;
+            if let Some(ep) = new_ep {
+                self.max_level = self
+                    .get_node(ep)
+                    .map(|n| n.layer_ranges.len().saturating_sub(1))
+                    .unwrap_or(0);
             } else {
                 self.max_level = 0;
             }
@@ -1470,7 +1619,7 @@ impl CompactHnswGraph {
     /// Number of nodes in the graph (including soft-deleted)
     #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
-        self.nodes.len()
+        self.node_count
     }
 
     /// Whether the neighbor data is backed by a memory-mapped file.
@@ -1487,15 +1636,17 @@ impl CompactHnswGraph {
         } else {
             self.neighbor_data.len() * std::mem::size_of::<u64>()
         };
-        let node_bytes: usize = self
-            .nodes
-            .values()
-            .map(|n| {
-                std::mem::size_of::<CompactHnswNode>()
-                    + n.layer_ranges.capacity() * std::mem::size_of::<(u32, u16)>()
-                    + 64 // BTreeMap node overhead
-            })
+        // dense_nodes Vec backing array (all slots including None)
+        let dense_vec_bytes =
+            self.dense_nodes.len() * std::mem::size_of::<Option<CompactHnswNode>>();
+        // Per-node heap allocations (layer_ranges Vec data on the heap)
+        let layer_heap_bytes: usize = self
+            .dense_nodes
+            .iter()
+            .flatten()
+            .map(|n| n.layer_ranges.capacity() * std::mem::size_of::<(u32, u16)>())
             .sum();
+        let node_bytes = dense_vec_bytes + layer_heap_bytes;
         neighbor_bytes + node_bytes
     }
 }
@@ -2118,5 +2269,623 @@ mod tests {
             avg_recall,
             num_queries
         );
+    }
+
+    // ====================================================================
+    // Dense array edge case tests
+    // ====================================================================
+
+    #[test]
+    fn test_build_dense_non_contiguous_ids() {
+        // IDs with large gaps: 1, 50, 100
+        let entries = vec![
+            (
+                VectorId::new(1),
+                CompactHnswNode {
+                    layer_ranges: vec![(0, 0)],
+                    created_at: 10,
+                    deleted_at: None,
+                },
+            ),
+            (
+                VectorId::new(50),
+                CompactHnswNode {
+                    layer_ranges: vec![(0, 0)],
+                    created_at: 20,
+                    deleted_at: None,
+                },
+            ),
+            (
+                VectorId::new(100),
+                CompactHnswNode {
+                    layer_ranges: vec![(0, 0)],
+                    created_at: 30,
+                    deleted_at: None,
+                },
+            ),
+        ];
+
+        let (dense, id_offset, node_count) = CompactHnswGraph::build_dense(entries);
+
+        assert_eq!(id_offset, 1);
+        assert_eq!(node_count, 3);
+        assert_eq!(dense.len(), 100); // 100 - 1 + 1
+
+        // Verify occupied slots
+        assert!(dense[0].is_some()); // id=1, idx=0
+        assert!(dense[49].is_some()); // id=50, idx=49
+        assert!(dense[99].is_some()); // id=100, idx=99
+
+        // Verify gaps are None
+        assert!(dense[1].is_none()); // id=2
+        assert!(dense[48].is_none()); // id=49
+        assert!(dense[50].is_none()); // id=51
+
+        // Verify created_at preserved
+        assert_eq!(dense[0].as_ref().unwrap().created_at, 10);
+        assert_eq!(dense[49].as_ref().unwrap().created_at, 20);
+        assert_eq!(dense[99].as_ref().unwrap().created_at, 30);
+    }
+
+    #[test]
+    fn test_build_dense_high_offset_ids() {
+        // IDs starting at a high number: 1000, 1001, 1002
+        let entries = vec![
+            (
+                VectorId::new(1000),
+                CompactHnswNode {
+                    layer_ranges: vec![(0, 1)],
+                    created_at: 1,
+                    deleted_at: None,
+                },
+            ),
+            (
+                VectorId::new(1001),
+                CompactHnswNode {
+                    layer_ranges: vec![(1, 1)],
+                    created_at: 2,
+                    deleted_at: None,
+                },
+            ),
+            (
+                VectorId::new(1002),
+                CompactHnswNode {
+                    layer_ranges: vec![(2, 1)],
+                    created_at: 3,
+                    deleted_at: None,
+                },
+            ),
+        ];
+
+        let (dense, id_offset, node_count) = CompactHnswGraph::build_dense(entries);
+
+        assert_eq!(id_offset, 1000);
+        assert_eq!(node_count, 3);
+        assert_eq!(dense.len(), 3); // tightly packed: 1002 - 1000 + 1
+
+        // All slots should be occupied
+        for slot in &dense {
+            assert!(slot.is_some());
+        }
+    }
+
+    #[test]
+    fn test_compact_graph_get_node_with_offset() {
+        // Build a CompactHnswGraph with IDs starting at 100
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        let entries = vec![
+            (
+                VectorId::new(100),
+                CompactHnswNode {
+                    layer_ranges: vec![(0, 0)],
+                    created_at: 10,
+                    deleted_at: None,
+                },
+            ),
+            (
+                VectorId::new(103),
+                CompactHnswNode {
+                    layer_ranges: vec![(0, 0)],
+                    created_at: 20,
+                    deleted_at: Some(50),
+                },
+            ),
+        ];
+        let (dense_nodes, id_offset, node_count) = CompactHnswGraph::build_dense(entries);
+        let graph = CompactHnswGraph {
+            config: HnswConfig::default(),
+            vector_config: config,
+            neighbor_data: NeighborData::Owned(Vec::new()),
+            dense_nodes,
+            id_offset,
+            node_count,
+            entry_point: Some(VectorId::new(100)),
+            max_level: 0,
+        };
+
+        // get_node should work with offset
+        assert!(graph.get_node(VectorId::new(100)).is_some());
+        assert!(graph.get_node(VectorId::new(103)).is_some());
+
+        // Gap ID returns None
+        assert!(graph.get_node(VectorId::new(101)).is_none());
+        assert!(graph.get_node(VectorId::new(102)).is_none());
+
+        // ID below offset returns None
+        assert!(graph.get_node(VectorId::new(99)).is_none());
+
+        // ID above range returns None
+        assert!(graph.get_node(VectorId::new(200)).is_none());
+
+        // is_deleted respects offset
+        assert!(!graph.is_deleted(VectorId::new(100)));
+        assert!(graph.is_deleted(VectorId::new(103)));
+
+        // contains respects deletion
+        assert!(graph.contains(VectorId::new(100)));
+        assert!(!graph.contains(VectorId::new(103))); // deleted
+
+        // iter_nodes returns both
+        let ids: Vec<u64> = graph.iter_nodes().map(|(id, _)| id.as_u64()).collect();
+        assert_eq!(ids, vec![100, 103]);
+
+        // node_ids returns both
+        let ids2: Vec<u64> = graph.node_ids().map(|id| id.as_u64()).collect();
+        assert_eq!(ids2, vec![100, 103]);
+    }
+
+    #[test]
+    fn test_compact_graph_search_with_offset_ids() {
+        // End-to-end search test with IDs that don't start at 1
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        let mut graph = HnswGraph::new(&config, HnswConfig::default());
+
+        let mut heap = VectorHeap::new(config.clone());
+        // Start IDs at 50
+        heap.insert_with_id(VectorId::new(50), &[1.0, 0.0, 0.0])
+            .unwrap();
+        heap.insert_with_id(VectorId::new(51), &[0.0, 1.0, 0.0])
+            .unwrap();
+        heap.insert_with_id(VectorId::new(52), &[0.0, 0.0, 1.0])
+            .unwrap();
+
+        graph.insert_into_graph(VectorId::new(50), &[1.0, 0.0, 0.0], 10, &heap);
+        graph.insert_into_graph(VectorId::new(51), &[0.0, 1.0, 0.0], 20, &heap);
+        graph.insert_into_graph(VectorId::new(52), &[0.0, 0.0, 1.0], 30, &heap);
+
+        let compact = CompactHnswGraph::from_graph(&graph);
+
+        assert_eq!(compact.id_offset, 50);
+        assert_eq!(compact.node_count, 3);
+
+        // Search should find the nearest vector
+        let results = compact.search_with_heap(&[1.0, 0.0, 0.0], 3, &heap);
+        assert!(!results.is_empty());
+        assert_eq!(results[0].0, VectorId::new(50));
+
+        // Temporal search
+        let results_at = compact.search_at_with_heap(&[1.0, 0.0, 0.0], 3, 15, &heap);
+        // Only VectorId(50) was created at ts=10, which is <= 15
+        assert!(!results_at.is_empty());
+        assert!(results_at.iter().all(|(id, _)| id.as_u64() == 50));
+    }
+
+    #[test]
+    fn test_build_dense_single_entry() {
+        let entries = vec![(
+            VectorId::new(42),
+            CompactHnswNode {
+                layer_ranges: vec![(0, 0)],
+                created_at: 100,
+                deleted_at: None,
+            },
+        )];
+
+        let (dense, id_offset, node_count) = CompactHnswGraph::build_dense(entries);
+
+        assert_eq!(id_offset, 42);
+        assert_eq!(node_count, 1);
+        assert_eq!(dense.len(), 1);
+        assert!(dense[0].is_some());
+        assert_eq!(dense[0].as_ref().unwrap().created_at, 100);
+    }
+}
+
+#[cfg(test)]
+mod profiling_tests {
+    use super::*;
+    use std::collections::HashMap as StdHashMap;
+    use std::time::Instant;
+
+    fn make_embedding(dim: usize, seed: usize) -> Vec<f32> {
+        (0..dim)
+            .map(|j| ((seed * dim + j) as f32 / 1000.0).sin())
+            .collect()
+    }
+
+    /// Build a CompactHnswGraph + VectorHeap with `n` vectors of dimension `dim`.
+    fn build_compact_graph(n: usize, dim: usize) -> (CompactHnswGraph, VectorHeap) {
+        let config = VectorConfig::new(dim, DistanceMetric::Cosine).unwrap();
+        let hnsw_config = HnswConfig::default();
+        let mut graph = HnswGraph::new(&config, hnsw_config);
+        let mut heap = VectorHeap::new(config.clone());
+
+        for i in 1..=n {
+            let emb = make_embedding(dim, i);
+            heap.upsert(VectorId::new(i as u64), &emb).unwrap();
+        }
+        // Build graph: insert in ID order for determinism
+        for i in 1..=n {
+            let emb = make_embedding(dim, i);
+            graph.insert_into_graph(VectorId::new(i as u64), &emb, 0, &heap);
+        }
+
+        let compact = CompactHnswGraph::from_graph(&graph);
+        (compact, heap)
+    }
+
+    // ====================================================================
+    // Test 1: Full Search Path Breakdown
+    // ====================================================================
+
+    /// Test 1: HNSW Search Path Breakdown
+    ///
+    /// Builds CompactHnswGraph with 10K vectors (128d, cosine).
+    /// For 100 queries, separately times:
+    /// - greedy_search_to_layer (upper layers)
+    /// - search_layer (layer 0 beam search)
+    /// - Full search_with_heap_ef (end-to-end)
+    /// - Post-processing overhead (difference)
+    #[test]
+    fn profile_search_path_breakdown() {
+        let n = 10_000;
+        let dim = 128;
+        let num_queries = 100;
+        let k = 10;
+
+        let (compact, heap) = build_compact_graph(n, dim);
+        let ef = compact.config.ef_search.max(k);
+
+        // Pre-generate queries
+        let queries: Vec<Vec<f32>> = (0..num_queries)
+            .map(|i| make_embedding(dim, n + 1 + i))
+            .collect();
+
+        let entry_id = compact.entry_point.unwrap();
+        let max_level = compact.max_level;
+
+        // --- Time greedy_search_to_layer ---
+        let start = Instant::now();
+        let mut layer0_entries = Vec::with_capacity(num_queries);
+        for q in &queries {
+            let entry = if max_level > 0 {
+                compact.greedy_search_to_layer(q, entry_id, max_level, 1, &heap)
+            } else {
+                entry_id
+            };
+            layer0_entries.push(entry);
+        }
+        let greedy_us = start.elapsed().as_micros() as f64 / num_queries as f64;
+
+        // --- Time search_layer (layer 0) ---
+        let start = Instant::now();
+        let mut search_results = Vec::with_capacity(num_queries);
+        for (i, q) in queries.iter().enumerate() {
+            let results = compact.search_layer(q, layer0_entries[i], ef, 0, &heap);
+            search_results.push(results);
+        }
+        let search_layer_us = start.elapsed().as_micros() as f64 / num_queries as f64;
+
+        // --- Time full search_with_heap_ef ---
+        let start = Instant::now();
+        for q in &queries {
+            let _ = compact.search_with_heap_ef(q, k, ef, &heap);
+        }
+        let total_us = start.elapsed().as_micros() as f64 / num_queries as f64;
+
+        let postprocess_us = total_us - greedy_us - search_layer_us;
+        let postprocess_us = postprocess_us.max(0.0);
+
+        println!("\n=== HNSW Search Path Breakdown ({n} vectors, dim={dim}, cosine) ===");
+        println!(
+            "  greedy_search_to_layer:  {:7.1} us/query ({:5.1}%)",
+            greedy_us,
+            greedy_us / total_us * 100.0
+        );
+        println!(
+            "  search_layer (layer 0):  {:7.1} us/query ({:5.1}%)",
+            search_layer_us,
+            search_layer_us / total_us * 100.0
+        );
+        println!(
+            "  result_postprocess:      {:7.1} us/query ({:5.1}%)",
+            postprocess_us,
+            postprocess_us / total_us * 100.0
+        );
+        println!("  total:                   {:7.1} us/query", total_us);
+        println!("  implied QPS:             {:.0}", 1_000_000.0 / total_us);
+    }
+
+    // ====================================================================
+    // Test 2: BTreeMap vs Dense Lookup Cost
+    // ====================================================================
+
+    /// Test 2: CompactHnswGraph Node Lookup — Dense get_node() vs HashMap
+    ///
+    /// Builds CompactHnswGraph with 50K vectors.
+    /// Benchmarks 1M random lookups via:
+    /// (a) Dense get_node() (current path — O(1) array index)
+    /// (b) HashMap (rebuilt from iter_nodes for comparison)
+    #[test]
+    fn profile_dense_vs_hashmap_lookup() {
+        let n = 50_000;
+        let dim = 128;
+        let num_lookups = 1_000_000;
+
+        let (compact, _heap) = build_compact_graph(n, dim);
+
+        // Build a HashMap mirror for comparison
+        let hashmap_nodes: StdHashMap<VectorId, &CompactHnswNode> =
+            compact.iter_nodes().map(|(k, v)| (k, v)).collect();
+
+        // Pre-generate random lookup IDs
+        let lookup_ids: Vec<VectorId> = (0..num_lookups)
+            .map(|i| {
+                let idx = ((i as f64 * 0.618033988749895).fract() * n as f64) as u64 + 1;
+                VectorId::new(idx)
+            })
+            .collect();
+
+        // --- Dense get_node() ---
+        let start = Instant::now();
+        let mut checksum_dense: u64 = 0;
+        for &id in &lookup_ids {
+            if let Some(node) = compact.get_node(id) {
+                checksum_dense += node.layer_ranges.len() as u64;
+            }
+        }
+        let dense_ns = start.elapsed().as_nanos() as f64 / num_lookups as f64;
+
+        // --- HashMap.get() ---
+        let start = Instant::now();
+        let mut checksum_hm: u64 = 0;
+        for &id in &lookup_ids {
+            if let Some(node) = hashmap_nodes.get(&id) {
+                checksum_hm += node.layer_ranges.len() as u64;
+            }
+        }
+        let hashmap_ns = start.elapsed().as_nanos() as f64 / num_lookups as f64;
+
+        let speedup = hashmap_ns / dense_ns;
+
+        println!("\n=== CompactHnswGraph Node Lookup: Dense vs HashMap ({n} nodes) ===");
+        println!("  Dense get_node(): {dense_ns:.1} ns/lookup");
+        println!("  HashMap.get():    {hashmap_ns:.1} ns/lookup");
+        println!("  Dense speedup vs HashMap: {speedup:.1}x");
+        println!("  checksums: dense={checksum_dense}, hm={checksum_hm}");
+        assert_eq!(
+            checksum_dense, checksum_hm,
+            "Dense and HashMap checksums must match"
+        );
+    }
+
+    // ====================================================================
+    // Test 3: Norm Cache vs Recompute
+    // ====================================================================
+
+    /// Test 3: Cosine Norm Cache vs Recompute
+    ///
+    /// Generates 10K stored vectors (128d) + 100 queries.
+    /// Computes cosine similarity for all 10K × 100 pairs:
+    /// - Method A: compute_similarity(q, v, Cosine) — recomputes norms
+    /// - Method B: cosine_similarity_with_norms(q, v, q_norm, v_norm) — cached
+    #[test]
+    fn profile_norm_cache_vs_recompute() {
+        use crate::primitives::vector::distance::cosine_similarity_with_norms;
+
+        let n = 10_000;
+        let dim = 128;
+        let num_queries = 100;
+
+        // Generate stored vectors and queries
+        let vectors: Vec<Vec<f32>> = (0..n).map(|i| make_embedding(dim, i)).collect();
+        let queries: Vec<Vec<f32>> = (0..num_queries)
+            .map(|i| make_embedding(dim, n + i))
+            .collect();
+
+        // Pre-compute norms
+        let vector_norms: Vec<f32> = vectors
+            .iter()
+            .map(|v| v.iter().map(|x| x * x).sum::<f32>().sqrt())
+            .collect();
+        let query_norms: Vec<f32> = queries
+            .iter()
+            .map(|q| q.iter().map(|x| x * x).sum::<f32>().sqrt())
+            .collect();
+
+        let total_pairs = n * num_queries;
+
+        // --- Method A: compute_similarity (recomputes norms each time) ---
+        let start = Instant::now();
+        let mut checksum_a = 0.0f64;
+        for q in &queries {
+            for v in &vectors {
+                checksum_a += compute_similarity(q, v, DistanceMetric::Cosine) as f64;
+            }
+        }
+        let recompute_ms = start.elapsed().as_millis() as f64;
+
+        // --- Method B: cosine_similarity_with_norms (pre-cached norms) ---
+        let start = Instant::now();
+        let mut checksum_b = 0.0f64;
+        for (qi, q) in queries.iter().enumerate() {
+            let q_norm = query_norms[qi];
+            for (vi, v) in vectors.iter().enumerate() {
+                let v_norm = vector_norms[vi];
+                checksum_b += cosine_similarity_with_norms(q, v, q_norm, v_norm) as f64;
+            }
+        }
+        let cached_ms = start.elapsed().as_millis() as f64;
+
+        let speedup = recompute_ms / cached_ms;
+
+        println!(
+            "\n=== Cosine: Norm Cache vs Recompute ({total_pairs} distance calls, dim={dim}) ==="
+        );
+        println!("  compute_similarity():               {recompute_ms:.1} ms");
+        println!("  cosine_similarity_with_norms():      {cached_ms:.1} ms");
+        println!("  speedup: {speedup:.2}x");
+        println!(
+            "  checksums: recompute={checksum_a:.4}, cached={checksum_b:.4}, diff={:.6}",
+            (checksum_a - checksum_b).abs()
+        );
+
+        // Checksums should be very close (floating point differences only)
+        assert!(
+            (checksum_a - checksum_b).abs() < total_pairs as f64 * 1e-5,
+            "Checksums diverged too much: {} vs {}",
+            checksum_a,
+            checksum_b
+        );
+    }
+
+    // ====================================================================
+    // Test 6: Per-Query Operation Counting
+    // ====================================================================
+
+    /// Test 6: Per-Query Operation Counting
+    ///
+    /// Builds CompactHnswGraph with 10K vectors.
+    /// Reimplements search_layer with counters to measure:
+    /// - distance_computations
+    /// - node_lookups (neighbors_at calls)
+    /// - visited_checks / visited_marks
+    /// - candidate_pushes / result_pushes
+    #[test]
+    fn profile_operation_counts() {
+        let n = 10_000;
+        let dim = 128;
+        let num_queries = 100;
+        let k = 10;
+
+        let (compact, heap) = build_compact_graph(n, dim);
+        let ef = compact.config.ef_search.max(k);
+        let metric = compact.vector_config.metric;
+        let entry_id = compact.entry_point.unwrap();
+        let max_level = compact.max_level;
+
+        let queries: Vec<Vec<f32>> = (0..num_queries)
+            .map(|i| make_embedding(dim, n + 1 + i))
+            .collect();
+
+        // Counters
+        let mut total_distance_computations: u64 = 0;
+        let mut total_node_lookups: u64 = 0;
+        let mut total_visited_checks: u64 = 0;
+        let mut total_visited_marks: u64 = 0;
+        let mut total_candidate_pushes: u64 = 0;
+        let mut total_result_pushes: u64 = 0;
+
+        for query in &queries {
+            // Greedy descent to layer 0
+            let current_entry = if max_level > 0 {
+                compact.greedy_search_to_layer(query, entry_id, max_level, 1, &heap)
+            } else {
+                entry_id
+            };
+
+            // Instrumented search_layer at layer 0
+            let entry_embedding = heap.get(current_entry).unwrap();
+            let entry_score = compute_similarity(query, entry_embedding, metric);
+            total_distance_computations += 1;
+
+            let mut visited = VisitedSet::new();
+            visited.mark(current_entry.0 as usize);
+            total_visited_marks += 1;
+
+            let mut candidates = BinaryHeap::new();
+            candidates.push(ScoredId {
+                score: entry_score,
+                id: current_entry,
+            });
+            total_candidate_pushes += 1;
+
+            let mut results: BinaryHeap<Reverse<ScoredId>> = BinaryHeap::new();
+            if !compact.is_deleted(current_entry) {
+                results.push(Reverse(ScoredId {
+                    score: entry_score,
+                    id: current_entry,
+                }));
+                total_result_pushes += 1;
+            }
+
+            while let Some(nearest) = candidates.pop() {
+                let worst_result_score = results
+                    .peek()
+                    .map(|r| r.0.score)
+                    .unwrap_or(f32::NEG_INFINITY);
+                if nearest.score < worst_result_score && results.len() >= ef {
+                    break;
+                }
+
+                total_node_lookups += 1;
+                for &neighbor_u64 in compact.neighbors_at(nearest.id, 0) {
+                    let neighbor_id = VectorId::new(neighbor_u64);
+
+                    total_visited_checks += 1;
+                    if visited.is_visited(neighbor_id.0 as usize) {
+                        continue;
+                    }
+                    visited.mark(neighbor_id.0 as usize);
+                    total_visited_marks += 1;
+
+                    if let Some(neighbor_embedding) = heap.get(neighbor_id) {
+                        let score = compute_similarity(query, neighbor_embedding, metric);
+                        total_distance_computations += 1;
+
+                        let worst_result_score = results
+                            .peek()
+                            .map(|r| r.0.score)
+                            .unwrap_or(f32::NEG_INFINITY);
+                        if score > worst_result_score || results.len() < ef {
+                            candidates.push(ScoredId {
+                                score,
+                                id: neighbor_id,
+                            });
+                            total_candidate_pushes += 1;
+
+                            if !compact.is_deleted(neighbor_id) {
+                                results.push(Reverse(ScoredId {
+                                    score,
+                                    id: neighbor_id,
+                                }));
+                                total_result_pushes += 1;
+                                if results.len() > ef {
+                                    results.pop();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let nq = num_queries as f64;
+        let avg_dist = total_distance_computations as f64 / nq;
+        let avg_lookups = total_node_lookups as f64 / nq;
+        let avg_visited_checks = total_visited_checks as f64 / nq;
+        let avg_visited_marks = total_visited_marks as f64 / nq;
+        let avg_cand_push = total_candidate_pushes as f64 / nq;
+        let avg_result_push = total_result_pushes as f64 / nq;
+        let selectivity = avg_dist / n as f64 * 100.0;
+
+        println!("\n=== Operation Counts Per Query ({n} vectors, k={k}, ef={ef}) ===");
+        println!("  distance_computations: {avg_dist:.1} avg");
+        println!("  node_lookups:          {avg_lookups:.1} avg");
+        println!("  visited_checks:        {avg_visited_checks:.1} avg");
+        println!("  visited_marks:         {avg_visited_marks:.1} avg");
+        println!("  candidate_pushes:      {avg_cand_push:.1} avg");
+        println!("  result_pushes:         {avg_result_push:.1} avg");
+        println!("  selectivity:           {selectivity:.1}% of total vectors");
     }
 }
