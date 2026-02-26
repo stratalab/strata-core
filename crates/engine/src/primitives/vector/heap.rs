@@ -580,7 +580,7 @@ impl VectorHeap {
                 if let VectorData::InMemory(vec) = &self.data {
                     if offset < vec.len() {
                         crate::primitives::vector::distance::prefetch_read(
-                            vec[offset..].as_ptr() as *const u8,
+                            vec[offset..].as_ptr() as *const u8
                         );
                     }
                 }
