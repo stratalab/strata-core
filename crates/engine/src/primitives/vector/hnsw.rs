@@ -52,7 +52,7 @@ impl Default for HnswConfig {
         Self {
             m,
             ef_construction: 200,
-            ef_search: 50,
+            ef_search: 100,
             ml: 1.0 / (m as f64).ln(),
         }
     }
