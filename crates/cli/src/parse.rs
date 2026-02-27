@@ -11,8 +11,8 @@ use std::io::Read;
 
 use clap::ArgMatches;
 use strata_executor::{
-    BatchVectorEntry, BranchId, Command, DistanceMetric, MergeStrategy, MetadataFilter,
-    SearchQuery, TimeRangeInput, TxnOptions, Value,
+    BatchVectorEntry, BranchId, BulkGraphEdge, BulkGraphNode, Command, DistanceMetric,
+    MergeStrategy, MetadataFilter, SearchQuery, TimeRangeInput, TxnOptions, Value,
 };
 
 use crate::state::SessionState;
@@ -132,6 +132,7 @@ pub fn matches_to_action(matches: &ArgMatches, state: &SessionState) -> Result<C
         "event" => parse_event(sub_matches, state),
         "state" => parse_state(sub_matches, state),
         "vector" => parse_vector_cmd(sub_matches, state),
+        "graph" => parse_graph(sub_matches, state),
         "branch" => parse_branch(sub_matches, state),
         "space" => parse_space(sub_matches, state),
         "begin" => parse_begin(sub_matches, state),
@@ -791,6 +792,328 @@ fn parse_vector_cmd(matches: &ArgMatches, state: &SessionState) -> Result<CliAct
 }
 
 // =========================================================================
+// Graph
+// =========================================================================
+
+fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
+    let (sub, m) = matches.subcommand().ok_or("No graph subcommand")?;
+    match sub {
+        // Lifecycle
+        "create" => {
+            let graph = m.get_one::<String>("name").unwrap().clone();
+            let cascade_policy = m.get_one::<String>("cascade-policy").cloned();
+            Ok(CliAction::Execute(Command::GraphCreate {
+                branch: branch(state),
+                graph,
+                cascade_policy,
+            }))
+        }
+        "delete" => {
+            let graph = m.get_one::<String>("name").unwrap().clone();
+            Ok(CliAction::Execute(Command::GraphDelete {
+                branch: branch(state),
+                graph,
+            }))
+        }
+        "list" => Ok(CliAction::Execute(Command::GraphList {
+            branch: branch(state),
+        })),
+        "info" => {
+            let graph = m.get_one::<String>("name").unwrap().clone();
+            Ok(CliAction::Execute(Command::GraphGetMeta {
+                branch: branch(state),
+                graph,
+            }))
+        }
+        // Nodes
+        "add-node" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            let node_id = m.get_one::<String>("node-id").unwrap().clone();
+            let entity_ref = m.get_one::<String>("entity-ref").cloned();
+            let properties = m
+                .get_one::<String>("properties")
+                .map(|s| parse_json_value(s))
+                .transpose()?;
+            let object_type = m.get_one::<String>("type").cloned();
+            Ok(CliAction::Execute(Command::GraphAddNode {
+                branch: branch(state),
+                graph,
+                node_id,
+                entity_ref,
+                properties,
+                object_type,
+            }))
+        }
+        "get-node" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            let node_id = m.get_one::<String>("node-id").unwrap().clone();
+            Ok(CliAction::Execute(Command::GraphGetNode {
+                branch: branch(state),
+                graph,
+                node_id,
+            }))
+        }
+        "remove-node" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            let node_id = m.get_one::<String>("node-id").unwrap().clone();
+            Ok(CliAction::Execute(Command::GraphRemoveNode {
+                branch: branch(state),
+                graph,
+                node_id,
+            }))
+        }
+        "list-nodes" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            Ok(CliAction::Execute(Command::GraphListNodes {
+                branch: branch(state),
+                graph,
+            }))
+        }
+        // Edges
+        "add-edge" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            let src = m.get_one::<String>("src").unwrap().clone();
+            let dst = m.get_one::<String>("dst").unwrap().clone();
+            let edge_type = m.get_one::<String>("edge-type").unwrap().clone();
+            let weight = m
+                .get_one::<String>("weight")
+                .map(|s| s.parse::<f64>())
+                .transpose()
+                .map_err(|e| format!("Invalid weight: {}", e))?;
+            let properties = m
+                .get_one::<String>("properties")
+                .map(|s| parse_json_value(s))
+                .transpose()?;
+            Ok(CliAction::Execute(Command::GraphAddEdge {
+                branch: branch(state),
+                graph,
+                src,
+                dst,
+                edge_type,
+                weight,
+                properties,
+            }))
+        }
+        "remove-edge" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            let src = m.get_one::<String>("src").unwrap().clone();
+            let dst = m.get_one::<String>("dst").unwrap().clone();
+            let edge_type = m.get_one::<String>("edge-type").unwrap().clone();
+            Ok(CliAction::Execute(Command::GraphRemoveEdge {
+                branch: branch(state),
+                graph,
+                src,
+                dst,
+                edge_type,
+            }))
+        }
+        "neighbors" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            let node_id = m.get_one::<String>("node-id").unwrap().clone();
+            let direction = m.get_one::<String>("direction").cloned();
+            let edge_type = m.get_one::<String>("edge-type").cloned();
+            Ok(CliAction::Execute(Command::GraphNeighbors {
+                branch: branch(state),
+                graph,
+                node_id,
+                direction,
+                edge_type,
+            }))
+        }
+        // Bulk & Traversal
+        "bulk-insert" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+
+            let raw_json = if let Some(file_path) = m.get_one::<String>("file") {
+                let content = if file_path == "-" {
+                    let mut buf = String::new();
+                    std::io::stdin()
+                        .read_to_string(&mut buf)
+                        .map_err(|e| format!("Failed to read stdin: {}", e))?;
+                    buf
+                } else {
+                    std::fs::read_to_string(file_path)
+                        .map_err(|e| format!("Failed to read '{}': {}", file_path, e))?
+                };
+                content
+            } else {
+                m.get_one::<String>("json").unwrap().clone()
+            };
+
+            let parsed: serde_json::Value = serde_json::from_str(&raw_json)
+                .map_err(|e| format!("Invalid JSON: {}", e))?;
+
+            let nodes: Vec<BulkGraphNode> = parsed
+                .get("nodes")
+                .map(|v| serde_json::from_value(v.clone()))
+                .transpose()
+                .map_err(|e| format!("Invalid nodes: {}", e))?
+                .unwrap_or_default();
+
+            let edges: Vec<BulkGraphEdge> = parsed
+                .get("edges")
+                .map(|v| serde_json::from_value(v.clone()))
+                .transpose()
+                .map_err(|e| format!("Invalid edges: {}", e))?
+                .unwrap_or_default();
+
+            let chunk_size = m
+                .get_one::<String>("chunk-size")
+                .map(|s| s.parse::<usize>())
+                .transpose()
+                .map_err(|e| format!("Invalid chunk-size: {}", e))?;
+
+            Ok(CliAction::Execute(Command::GraphBulkInsert {
+                branch: branch(state),
+                graph,
+                nodes,
+                edges,
+                chunk_size,
+            }))
+        }
+        "bfs" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            let start = m.get_one::<String>("start").unwrap().clone();
+            let max_depth = m
+                .get_one::<String>("max-depth")
+                .unwrap()
+                .parse::<usize>()
+                .map_err(|e| format!("Invalid max-depth: {}", e))?;
+            let max_nodes = m
+                .get_one::<String>("max-nodes")
+                .map(|s| s.parse::<usize>())
+                .transpose()
+                .map_err(|e| format!("Invalid max-nodes: {}", e))?;
+            let edge_types = m
+                .get_one::<String>("edge-types")
+                .map(|s| s.split(',').map(|t| t.trim().to_string()).collect());
+            let direction = m.get_one::<String>("direction").cloned();
+            Ok(CliAction::Execute(Command::GraphBfs {
+                branch: branch(state),
+                graph,
+                start,
+                max_depth,
+                max_nodes,
+                edge_types,
+                direction,
+            }))
+        }
+        // Ontology — Object Types
+        "define-object-type" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            let definition = if let Some(file_path) = m.get_one::<String>("file") {
+                read_json_from_source(file_path)?
+            } else {
+                let raw = m.get_one::<String>("json").unwrap();
+                parse_json_value(raw)?
+            };
+            Ok(CliAction::Execute(Command::GraphDefineObjectType {
+                branch: branch(state),
+                graph,
+                definition,
+            }))
+        }
+        "get-object-type" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            let name = m.get_one::<String>("name").unwrap().clone();
+            Ok(CliAction::Execute(Command::GraphGetObjectType {
+                branch: branch(state),
+                graph,
+                name,
+            }))
+        }
+        "list-object-types" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            Ok(CliAction::Execute(Command::GraphListObjectTypes {
+                branch: branch(state),
+                graph,
+            }))
+        }
+        "delete-object-type" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            let name = m.get_one::<String>("name").unwrap().clone();
+            Ok(CliAction::Execute(Command::GraphDeleteObjectType {
+                branch: branch(state),
+                graph,
+                name,
+            }))
+        }
+        // Ontology — Link Types
+        "define-link-type" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            let definition = if let Some(file_path) = m.get_one::<String>("file") {
+                read_json_from_source(file_path)?
+            } else {
+                let raw = m.get_one::<String>("json").unwrap();
+                parse_json_value(raw)?
+            };
+            Ok(CliAction::Execute(Command::GraphDefineLinkType {
+                branch: branch(state),
+                graph,
+                definition,
+            }))
+        }
+        "get-link-type" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            let name = m.get_one::<String>("name").unwrap().clone();
+            Ok(CliAction::Execute(Command::GraphGetLinkType {
+                branch: branch(state),
+                graph,
+                name,
+            }))
+        }
+        "list-link-types" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            Ok(CliAction::Execute(Command::GraphListLinkTypes {
+                branch: branch(state),
+                graph,
+            }))
+        }
+        "delete-link-type" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            let name = m.get_one::<String>("name").unwrap().clone();
+            Ok(CliAction::Execute(Command::GraphDeleteLinkType {
+                branch: branch(state),
+                graph,
+                name,
+            }))
+        }
+        // Ontology — Management
+        "freeze-ontology" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            Ok(CliAction::Execute(Command::GraphFreezeOntology {
+                branch: branch(state),
+                graph,
+            }))
+        }
+        "ontology-status" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            Ok(CliAction::Execute(Command::GraphOntologyStatus {
+                branch: branch(state),
+                graph,
+            }))
+        }
+        "ontology-summary" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            Ok(CliAction::Execute(Command::GraphOntologySummary {
+                branch: branch(state),
+                graph,
+            }))
+        }
+        "nodes-by-type" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            let object_type = m.get_one::<String>("object-type").unwrap().clone();
+            Ok(CliAction::Execute(Command::GraphNodesByType {
+                branch: branch(state),
+                graph,
+                object_type,
+            }))
+        }
+        other => Err(format!("Unknown graph subcommand: {}", other)),
+    }
+}
+
+// =========================================================================
 // Branch
 // =========================================================================
 
@@ -1110,4 +1433,704 @@ fn parse_search(matches: &ArgMatches, state: &SessionState) -> Result<CliAction,
             precomputed_embedding: None,
         },
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::build_repl_cmd;
+
+    fn test_state() -> SessionState {
+        let db = strata_executor::Strata::cache().unwrap();
+        SessionState::new(db, "default".to_string(), "default".to_string())
+    }
+
+    fn parse(args: &[&str]) -> Result<CliAction, String> {
+        let state = test_state();
+        let cmd = build_repl_cmd();
+        let matches = cmd
+            .try_get_matches_from(args)
+            .map_err(|e| e.to_string())?;
+        matches_to_action(&matches, &state)
+    }
+
+    fn parse_cmd(args: &[&str]) -> Command {
+        match parse(args) {
+            Ok(CliAction::Execute(cmd)) => cmd,
+            Ok(_) => panic!("Expected CliAction::Execute"),
+            Err(e) => panic!("Parse failed: {}", e),
+        }
+    }
+
+    fn parse_err(args: &[&str]) -> String {
+        match parse(args) {
+            Err(e) => e,
+            Ok(_) => panic!("Expected parse error"),
+        }
+    }
+
+    // =========================================================================
+    // Graph lifecycle
+    // =========================================================================
+
+    #[test]
+    fn graph_create_minimal() {
+        let cmd = parse_cmd(&["graph", "create", "social"]);
+        assert_eq!(
+            cmd,
+            Command::GraphCreate {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                cascade_policy: None,
+            }
+        );
+    }
+
+    #[test]
+    fn graph_create_with_cascade_policy() {
+        let cmd = parse_cmd(&["graph", "create", "social", "--cascade-policy", "cascade"]);
+        assert_eq!(
+            cmd,
+            Command::GraphCreate {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                cascade_policy: Some("cascade".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn graph_delete() {
+        let cmd = parse_cmd(&["graph", "delete", "social"]);
+        assert_eq!(
+            cmd,
+            Command::GraphDelete {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn graph_list() {
+        let cmd = parse_cmd(&["graph", "list"]);
+        assert_eq!(
+            cmd,
+            Command::GraphList {
+                branch: Some(BranchId::from("default")),
+            }
+        );
+    }
+
+    #[test]
+    fn graph_info() {
+        let cmd = parse_cmd(&["graph", "info", "social"]);
+        assert_eq!(
+            cmd,
+            Command::GraphGetMeta {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+            }
+        );
+    }
+
+    // =========================================================================
+    // Nodes
+    // =========================================================================
+
+    #[test]
+    fn graph_add_node_minimal() {
+        let cmd = parse_cmd(&["graph", "add-node", "social", "alice"]);
+        assert_eq!(
+            cmd,
+            Command::GraphAddNode {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                node_id: "alice".into(),
+                entity_ref: None,
+                properties: None,
+                object_type: None,
+            }
+        );
+    }
+
+    #[test]
+    fn graph_add_node_all_options() {
+        let cmd = parse_cmd(&[
+            "graph",
+            "add-node",
+            "social",
+            "alice",
+            "--entity-ref",
+            "kv://main/alice",
+            "--properties",
+            r#"{"age": 30}"#,
+            "--type",
+            "Person",
+        ]);
+        assert_eq!(
+            cmd,
+            Command::GraphAddNode {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                node_id: "alice".into(),
+                entity_ref: Some("kv://main/alice".into()),
+                properties: Some(Value::from(
+                    serde_json::json!({"age": 30})
+                )),
+                object_type: Some("Person".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn graph_get_node() {
+        let cmd = parse_cmd(&["graph", "get-node", "social", "alice"]);
+        assert_eq!(
+            cmd,
+            Command::GraphGetNode {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                node_id: "alice".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn graph_remove_node() {
+        let cmd = parse_cmd(&["graph", "remove-node", "social", "alice"]);
+        assert_eq!(
+            cmd,
+            Command::GraphRemoveNode {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                node_id: "alice".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn graph_list_nodes() {
+        let cmd = parse_cmd(&["graph", "list-nodes", "social"]);
+        assert_eq!(
+            cmd,
+            Command::GraphListNodes {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+            }
+        );
+    }
+
+    // =========================================================================
+    // Edges
+    // =========================================================================
+
+    #[test]
+    fn graph_add_edge_minimal() {
+        let cmd = parse_cmd(&["graph", "add-edge", "social", "alice", "bob", "FOLLOWS"]);
+        assert_eq!(
+            cmd,
+            Command::GraphAddEdge {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                src: "alice".into(),
+                dst: "bob".into(),
+                edge_type: "FOLLOWS".into(),
+                weight: None,
+                properties: None,
+            }
+        );
+    }
+
+    #[test]
+    fn graph_add_edge_with_weight_and_properties() {
+        let cmd = parse_cmd(&[
+            "graph",
+            "add-edge",
+            "social",
+            "alice",
+            "bob",
+            "FOLLOWS",
+            "--weight",
+            "0.85",
+            "--properties",
+            r#"{"since": "2024"}"#,
+        ]);
+        assert_eq!(
+            cmd,
+            Command::GraphAddEdge {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                src: "alice".into(),
+                dst: "bob".into(),
+                edge_type: "FOLLOWS".into(),
+                weight: Some(0.85),
+                properties: Some(Value::from(serde_json::json!({"since": "2024"}))),
+            }
+        );
+    }
+
+    #[test]
+    fn graph_remove_edge() {
+        let cmd = parse_cmd(&["graph", "remove-edge", "social", "alice", "bob", "FOLLOWS"]);
+        assert_eq!(
+            cmd,
+            Command::GraphRemoveEdge {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                src: "alice".into(),
+                dst: "bob".into(),
+                edge_type: "FOLLOWS".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn graph_neighbors_minimal() {
+        let cmd = parse_cmd(&["graph", "neighbors", "social", "alice"]);
+        assert_eq!(
+            cmd,
+            Command::GraphNeighbors {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                node_id: "alice".into(),
+                direction: None,
+                edge_type: None,
+            }
+        );
+    }
+
+    #[test]
+    fn graph_neighbors_with_filters() {
+        let cmd = parse_cmd(&[
+            "graph",
+            "neighbors",
+            "social",
+            "alice",
+            "--direction",
+            "incoming",
+            "--edge-type",
+            "FOLLOWS",
+        ]);
+        assert_eq!(
+            cmd,
+            Command::GraphNeighbors {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                node_id: "alice".into(),
+                direction: Some("incoming".into()),
+                edge_type: Some("FOLLOWS".into()),
+            }
+        );
+    }
+
+    // =========================================================================
+    // BFS
+    // =========================================================================
+
+    #[test]
+    fn graph_bfs_minimal() {
+        let cmd = parse_cmd(&["graph", "bfs", "social", "alice", "3"]);
+        assert_eq!(
+            cmd,
+            Command::GraphBfs {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                start: "alice".into(),
+                max_depth: 3,
+                max_nodes: None,
+                edge_types: None,
+                direction: None,
+            }
+        );
+    }
+
+    #[test]
+    fn graph_bfs_all_options() {
+        let cmd = parse_cmd(&[
+            "graph",
+            "bfs",
+            "social",
+            "alice",
+            "5",
+            "--max-nodes",
+            "100",
+            "--edge-types",
+            "FOLLOWS,LIKES",
+            "--direction",
+            "outgoing",
+        ]);
+        assert_eq!(
+            cmd,
+            Command::GraphBfs {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                start: "alice".into(),
+                max_depth: 5,
+                max_nodes: Some(100),
+                edge_types: Some(vec!["FOLLOWS".into(), "LIKES".into()]),
+                direction: Some("outgoing".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn graph_bfs_invalid_depth() {
+        let err = parse_err(&["graph", "bfs", "social", "alice", "not_a_number"]);
+        assert!(err.contains("Invalid max-depth"), "got: {}", err);
+    }
+
+    // =========================================================================
+    // Bulk insert
+    // =========================================================================
+
+    #[test]
+    fn graph_bulk_insert_inline() {
+        let json = r#"{"nodes":[{"node_id":"a"},{"node_id":"b"}],"edges":[{"src":"a","dst":"b","edge_type":"LINK"}]}"#;
+        let cmd = parse_cmd(&["graph", "bulk-insert", "social", json]);
+        assert_eq!(
+            cmd,
+            Command::GraphBulkInsert {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                nodes: vec![
+                    BulkGraphNode {
+                        node_id: "a".into(),
+                        entity_ref: None,
+                        properties: None,
+                        object_type: None,
+                    },
+                    BulkGraphNode {
+                        node_id: "b".into(),
+                        entity_ref: None,
+                        properties: None,
+                        object_type: None,
+                    },
+                ],
+                edges: vec![BulkGraphEdge {
+                    src: "a".into(),
+                    dst: "b".into(),
+                    edge_type: "LINK".into(),
+                    weight: None,
+                    properties: None,
+                }],
+                chunk_size: None,
+            }
+        );
+    }
+
+    #[test]
+    fn graph_bulk_insert_nodes_only() {
+        let json = r#"{"nodes":[{"node_id":"x"}]}"#;
+        let cmd = parse_cmd(&["graph", "bulk-insert", "g", json]);
+        match cmd {
+            Command::GraphBulkInsert { nodes, edges, .. } => {
+                assert_eq!(nodes.len(), 1);
+                assert!(edges.is_empty());
+            }
+            _ => panic!("Expected GraphBulkInsert"),
+        }
+    }
+
+    #[test]
+    fn graph_bulk_insert_edges_only() {
+        let json = r#"{"edges":[{"src":"a","dst":"b","edge_type":"E"}]}"#;
+        let cmd = parse_cmd(&["graph", "bulk-insert", "g", json]);
+        match cmd {
+            Command::GraphBulkInsert { nodes, edges, .. } => {
+                assert!(nodes.is_empty());
+                assert_eq!(edges.len(), 1);
+            }
+            _ => panic!("Expected GraphBulkInsert"),
+        }
+    }
+
+    #[test]
+    fn graph_bulk_insert_with_chunk_size() {
+        let json = r#"{"nodes":[],"edges":[]}"#;
+        let cmd = parse_cmd(&["graph", "bulk-insert", "g", json, "--chunk-size", "500"]);
+        match cmd {
+            Command::GraphBulkInsert { chunk_size, .. } => {
+                assert_eq!(chunk_size, Some(500));
+            }
+            _ => panic!("Expected GraphBulkInsert"),
+        }
+    }
+
+    #[test]
+    fn graph_bulk_insert_invalid_json() {
+        let err = parse_err(&["graph", "bulk-insert", "g", "not json"]);
+        assert!(err.contains("Invalid JSON"), "got: {}", err);
+    }
+
+    #[test]
+    fn graph_bulk_insert_invalid_node_schema() {
+        let json = r#"{"nodes":[{"bad_field":"x"}]}"#;
+        let err = parse_err(&["graph", "bulk-insert", "g", json]);
+        assert!(err.contains("Invalid nodes"), "got: {}", err);
+    }
+
+    // =========================================================================
+    // Ontology — Object Types
+    // =========================================================================
+
+    #[test]
+    fn graph_define_object_type_inline() {
+        let json = r#"{"name":"Person","properties":{"age":"int"}}"#;
+        let cmd = parse_cmd(&["graph", "define-object-type", "social", json]);
+        assert_eq!(
+            cmd,
+            Command::GraphDefineObjectType {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                definition: Value::from(
+                    serde_json::json!({"name": "Person", "properties": {"age": "int"}})
+                ),
+            }
+        );
+    }
+
+    #[test]
+    fn graph_get_object_type() {
+        let cmd = parse_cmd(&["graph", "get-object-type", "social", "Person"]);
+        assert_eq!(
+            cmd,
+            Command::GraphGetObjectType {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                name: "Person".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn graph_list_object_types() {
+        let cmd = parse_cmd(&["graph", "list-object-types", "social"]);
+        assert_eq!(
+            cmd,
+            Command::GraphListObjectTypes {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn graph_delete_object_type() {
+        let cmd = parse_cmd(&["graph", "delete-object-type", "social", "Person"]);
+        assert_eq!(
+            cmd,
+            Command::GraphDeleteObjectType {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                name: "Person".into(),
+            }
+        );
+    }
+
+    // =========================================================================
+    // Ontology — Link Types
+    // =========================================================================
+
+    #[test]
+    fn graph_define_link_type_inline() {
+        let json = r#"{"name":"FOLLOWS","source":"Person","target":"Person"}"#;
+        let cmd = parse_cmd(&["graph", "define-link-type", "social", json]);
+        assert_eq!(
+            cmd,
+            Command::GraphDefineLinkType {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                definition: Value::from(
+                    serde_json::json!({"name": "FOLLOWS", "source": "Person", "target": "Person"})
+                ),
+            }
+        );
+    }
+
+    #[test]
+    fn graph_get_link_type() {
+        let cmd = parse_cmd(&["graph", "get-link-type", "social", "FOLLOWS"]);
+        assert_eq!(
+            cmd,
+            Command::GraphGetLinkType {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                name: "FOLLOWS".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn graph_list_link_types() {
+        let cmd = parse_cmd(&["graph", "list-link-types", "social"]);
+        assert_eq!(
+            cmd,
+            Command::GraphListLinkTypes {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn graph_delete_link_type() {
+        let cmd = parse_cmd(&["graph", "delete-link-type", "social", "FOLLOWS"]);
+        assert_eq!(
+            cmd,
+            Command::GraphDeleteLinkType {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                name: "FOLLOWS".into(),
+            }
+        );
+    }
+
+    // =========================================================================
+    // Ontology — Management
+    // =========================================================================
+
+    #[test]
+    fn graph_freeze_ontology() {
+        let cmd = parse_cmd(&["graph", "freeze-ontology", "social"]);
+        assert_eq!(
+            cmd,
+            Command::GraphFreezeOntology {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn graph_ontology_status() {
+        let cmd = parse_cmd(&["graph", "ontology-status", "social"]);
+        assert_eq!(
+            cmd,
+            Command::GraphOntologyStatus {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn graph_ontology_summary() {
+        let cmd = parse_cmd(&["graph", "ontology-summary", "social"]);
+        assert_eq!(
+            cmd,
+            Command::GraphOntologySummary {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn graph_nodes_by_type() {
+        let cmd = parse_cmd(&["graph", "nodes-by-type", "social", "Person"]);
+        assert_eq!(
+            cmd,
+            Command::GraphNodesByType {
+                branch: Some(BranchId::from("default")),
+                graph: "social".into(),
+                object_type: "Person".into(),
+            }
+        );
+    }
+
+    // =========================================================================
+    // Error cases
+    // =========================================================================
+
+    #[test]
+    fn graph_add_edge_invalid_weight() {
+        let err = parse_err(&[
+            "graph", "add-edge", "g", "a", "b", "E", "--weight", "not_a_float",
+        ]);
+        assert!(err.contains("Invalid weight"), "got: {}", err);
+    }
+
+    #[test]
+    fn graph_add_node_invalid_properties_json() {
+        let err = parse_err(&[
+            "graph",
+            "add-node",
+            "g",
+            "n",
+            "--properties",
+            "not json",
+        ]);
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn graph_bfs_invalid_max_nodes() {
+        let err = parse_err(&[
+            "graph",
+            "bfs",
+            "g",
+            "start",
+            "3",
+            "--max-nodes",
+            "xyz",
+        ]);
+        assert!(err.contains("Invalid max-nodes"), "got: {}", err);
+    }
+
+    #[test]
+    fn graph_bulk_insert_invalid_chunk_size() {
+        let json = r#"{"nodes":[]}"#;
+        let err = parse_err(&[
+            "graph",
+            "bulk-insert",
+            "g",
+            json,
+            "--chunk-size",
+            "abc",
+        ]);
+        assert!(err.contains("Invalid chunk-size"), "got: {}", err);
+    }
+
+    #[test]
+    fn graph_missing_required_arg() {
+        // graph create without name should fail at clap level
+        assert!(parse(&["graph", "create"]).is_err());
+    }
+
+    #[test]
+    fn graph_add_edge_missing_edge_type() {
+        // only 2 positional args instead of 4
+        assert!(parse(&["graph", "add-edge", "g", "a"]).is_err());
+    }
+
+    // =========================================================================
+    // Edge-type comma splitting
+    // =========================================================================
+
+    #[test]
+    fn graph_bfs_edge_types_with_spaces() {
+        let cmd = parse_cmd(&[
+            "graph",
+            "bfs",
+            "social",
+            "alice",
+            "2",
+            "--edge-types",
+            "FOLLOWS, LIKES, BLOCKS",
+        ]);
+        match cmd {
+            Command::GraphBfs { edge_types, .. } => {
+                assert_eq!(
+                    edge_types,
+                    Some(vec![
+                        "FOLLOWS".to_string(),
+                        "LIKES".to_string(),
+                        "BLOCKS".to_string(),
+                    ])
+                );
+            }
+            _ => panic!("Expected GraphBfs"),
+        }
+    }
 }

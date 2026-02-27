@@ -83,6 +83,7 @@ pub fn build_cli() -> Command {
         .subcommand(build_generate())
         .subcommand(build_tokenize())
         .subcommand(build_detokenize())
+        .subcommand(build_graph())
         .subcommand(build_config())
 }
 
@@ -113,6 +114,7 @@ pub fn build_repl_cmd() -> Command {
         .subcommand(build_generate())
         .subcommand(build_tokenize())
         .subcommand(build_detokenize())
+        .subcommand(build_graph())
         .subcommand(build_config())
 }
 
@@ -881,6 +883,257 @@ fn build_detokenize() -> Command {
                 .required(true)
                 .num_args(1..)
                 .help("Token IDs to decode"),
+        )
+}
+
+// =========================================================================
+// Graph
+// =========================================================================
+
+fn build_graph() -> Command {
+    Command::new("graph")
+        .about("Graph operations")
+        .subcommand_required(true)
+        // Lifecycle
+        .subcommand(
+            Command::new("create")
+                .about("Create a graph")
+                .arg(Arg::new("name").required(true).help("Graph name"))
+                .arg(
+                    Arg::new("cascade-policy")
+                        .long("cascade-policy")
+                        .help("Cascade policy: cascade, detach, ignore (default: ignore)"),
+                ),
+        )
+        .subcommand(
+            Command::new("delete")
+                .about("Delete a graph")
+                .arg(Arg::new("name").required(true).help("Graph name")),
+        )
+        .subcommand(Command::new("list").about("List all graphs"))
+        .subcommand(
+            Command::new("info")
+                .about("Get graph metadata")
+                .arg(Arg::new("name").required(true).help("Graph name")),
+        )
+        // Nodes
+        .subcommand(
+            Command::new("add-node")
+                .about("Add a node to a graph")
+                .arg(Arg::new("graph").required(true).help("Graph name"))
+                .arg(Arg::new("node-id").required(true).help("Node ID"))
+                .arg(
+                    Arg::new("entity-ref")
+                        .long("entity-ref")
+                        .help("Entity reference URI"),
+                )
+                .arg(
+                    Arg::new("properties")
+                        .long("properties")
+                        .help("Node properties as JSON"),
+                )
+                .arg(Arg::new("type").long("type").help("Object type name")),
+        )
+        .subcommand(
+            Command::new("get-node")
+                .about("Get a node from a graph")
+                .arg(Arg::new("graph").required(true).help("Graph name"))
+                .arg(Arg::new("node-id").required(true).help("Node ID")),
+        )
+        .subcommand(
+            Command::new("remove-node")
+                .about("Remove a node from a graph")
+                .arg(Arg::new("graph").required(true).help("Graph name"))
+                .arg(Arg::new("node-id").required(true).help("Node ID")),
+        )
+        .subcommand(
+            Command::new("list-nodes")
+                .about("List all nodes in a graph")
+                .arg(Arg::new("graph").required(true).help("Graph name")),
+        )
+        // Edges
+        .subcommand(
+            Command::new("add-edge")
+                .about("Add an edge to a graph")
+                .arg(Arg::new("graph").required(true).help("Graph name"))
+                .arg(Arg::new("src").required(true).help("Source node ID"))
+                .arg(Arg::new("dst").required(true).help("Destination node ID"))
+                .arg(Arg::new("edge-type").required(true).help("Edge type"))
+                .arg(
+                    Arg::new("weight")
+                        .long("weight")
+                        .help("Edge weight (f64)"),
+                )
+                .arg(
+                    Arg::new("properties")
+                        .long("properties")
+                        .help("Edge properties as JSON"),
+                ),
+        )
+        .subcommand(
+            Command::new("remove-edge")
+                .about("Remove an edge from a graph")
+                .arg(Arg::new("graph").required(true).help("Graph name"))
+                .arg(Arg::new("src").required(true).help("Source node ID"))
+                .arg(Arg::new("dst").required(true).help("Destination node ID"))
+                .arg(Arg::new("edge-type").required(true).help("Edge type")),
+        )
+        .subcommand(
+            Command::new("neighbors")
+                .about("Get neighbors of a node")
+                .arg(Arg::new("graph").required(true).help("Graph name"))
+                .arg(Arg::new("node-id").required(true).help("Node ID"))
+                .arg(
+                    Arg::new("direction")
+                        .long("direction")
+                        .help("Direction: outgoing, incoming, both"),
+                )
+                .arg(
+                    Arg::new("edge-type")
+                        .long("edge-type")
+                        .help("Filter by edge type"),
+                ),
+        )
+        // Bulk & Traversal
+        .subcommand(
+            Command::new("bulk-insert")
+                .about("Bulk insert nodes and edges")
+                .arg(Arg::new("graph").required(true).help("Graph name"))
+                .arg(
+                    Arg::new("json")
+                        .required_unless_present("file")
+                        .help("JSON with {nodes: [...], edges: [...]}"),
+                )
+                .arg(
+                    Arg::new("file")
+                        .long("file")
+                        .short('f')
+                        .value_name("PATH")
+                        .help("Read JSON from file ('-' for stdin)"),
+                )
+                .arg(
+                    Arg::new("chunk-size")
+                        .long("chunk-size")
+                        .help("Chunk size for batching"),
+                ),
+        )
+        .subcommand(
+            Command::new("bfs")
+                .about("Breadth-first search traversal")
+                .arg(Arg::new("graph").required(true).help("Graph name"))
+                .arg(Arg::new("start").required(true).help("Start node ID"))
+                .arg(Arg::new("max-depth").required(true).help("Maximum depth"))
+                .arg(
+                    Arg::new("max-nodes")
+                        .long("max-nodes")
+                        .help("Maximum nodes to visit"),
+                )
+                .arg(
+                    Arg::new("edge-types")
+                        .long("edge-types")
+                        .help("Comma-separated edge types to follow"),
+                )
+                .arg(
+                    Arg::new("direction")
+                        .long("direction")
+                        .help("Direction: outgoing, incoming, both"),
+                ),
+        )
+        // Ontology — Object Types
+        .subcommand(
+            Command::new("define-object-type")
+                .about("Define an object type in the ontology")
+                .arg(Arg::new("graph").required(true).help("Graph name"))
+                .arg(
+                    Arg::new("json")
+                        .required_unless_present("file")
+                        .help("Object type definition as JSON"),
+                )
+                .arg(
+                    Arg::new("file")
+                        .long("file")
+                        .short('f')
+                        .value_name("PATH")
+                        .help("Read JSON from file ('-' for stdin)"),
+                ),
+        )
+        .subcommand(
+            Command::new("get-object-type")
+                .about("Get an object type definition")
+                .arg(Arg::new("graph").required(true).help("Graph name"))
+                .arg(Arg::new("name").required(true).help("Object type name")),
+        )
+        .subcommand(
+            Command::new("list-object-types")
+                .about("List all object types")
+                .arg(Arg::new("graph").required(true).help("Graph name")),
+        )
+        .subcommand(
+            Command::new("delete-object-type")
+                .about("Delete an object type")
+                .arg(Arg::new("graph").required(true).help("Graph name"))
+                .arg(Arg::new("name").required(true).help("Object type name")),
+        )
+        // Ontology — Link Types
+        .subcommand(
+            Command::new("define-link-type")
+                .about("Define a link type in the ontology")
+                .arg(Arg::new("graph").required(true).help("Graph name"))
+                .arg(
+                    Arg::new("json")
+                        .required_unless_present("file")
+                        .help("Link type definition as JSON"),
+                )
+                .arg(
+                    Arg::new("file")
+                        .long("file")
+                        .short('f')
+                        .value_name("PATH")
+                        .help("Read JSON from file ('-' for stdin)"),
+                ),
+        )
+        .subcommand(
+            Command::new("get-link-type")
+                .about("Get a link type definition")
+                .arg(Arg::new("graph").required(true).help("Graph name"))
+                .arg(Arg::new("name").required(true).help("Link type name")),
+        )
+        .subcommand(
+            Command::new("list-link-types")
+                .about("List all link types")
+                .arg(Arg::new("graph").required(true).help("Graph name")),
+        )
+        .subcommand(
+            Command::new("delete-link-type")
+                .about("Delete a link type")
+                .arg(Arg::new("graph").required(true).help("Graph name"))
+                .arg(Arg::new("name").required(true).help("Link type name")),
+        )
+        // Ontology — Management
+        .subcommand(
+            Command::new("freeze-ontology")
+                .about("Freeze the graph ontology")
+                .arg(Arg::new("graph").required(true).help("Graph name")),
+        )
+        .subcommand(
+            Command::new("ontology-status")
+                .about("Get ontology status")
+                .arg(Arg::new("graph").required(true).help("Graph name")),
+        )
+        .subcommand(
+            Command::new("ontology-summary")
+                .about("Get ontology summary")
+                .arg(Arg::new("graph").required(true).help("Graph name")),
+        )
+        .subcommand(
+            Command::new("nodes-by-type")
+                .about("List nodes by object type")
+                .arg(Arg::new("graph").required(true).help("Graph name"))
+                .arg(
+                    Arg::new("object-type")
+                        .required(true)
+                        .help("Object type name"),
+                ),
         )
 }
 
