@@ -424,6 +424,9 @@ fn print_help(command: Option<&str>) {
         println!("  event       Event log operations (append, get, list, len)");
         println!("  state       State cell operations (set, get, del, init, cas, list, history)");
         println!("  vector      Vector store operations (upsert, get, del, search, create, ...)");
+        println!(
+            "  graph       Graph operations (add-node, add-edge, neighbors, bfs, ontology, ...)"
+        );
         println!("  branch      Branch operations (create, info, list, fork, diff, merge, ...)");
         println!("  space       Space operations (list, create, del, exists)");
         println!("  begin       Begin a transaction");
@@ -451,9 +454,9 @@ fn print_help(command: Option<&str>) {
 
 /// Known top-level commands for TAB completion.
 const TOP_LEVEL_COMMANDS: &[&str] = &[
-    "kv", "json", "event", "state", "vector", "branch", "space", "begin", "commit", "rollback",
-    "txn", "ping", "info", "flush", "compact", "search", "config", "use", "help", "quit", "exit",
-    "clear",
+    "kv", "json", "event", "state", "vector", "graph", "branch", "space", "begin", "commit",
+    "rollback", "txn", "ping", "info", "flush", "compact", "search", "config", "use", "help",
+    "quit", "exit", "clear",
 ];
 
 /// Known subcommands for each top-level command.
@@ -474,6 +477,33 @@ fn subcommands_for(cmd: &str) -> &'static [&'static str] {
             "collections",
             "stats",
             "batch-upsert",
+        ],
+        "graph" => &[
+            "create",
+            "delete",
+            "list",
+            "info",
+            "add-node",
+            "get-node",
+            "remove-node",
+            "list-nodes",
+            "add-edge",
+            "remove-edge",
+            "neighbors",
+            "bulk-insert",
+            "bfs",
+            "define-object-type",
+            "get-object-type",
+            "list-object-types",
+            "delete-object-type",
+            "define-link-type",
+            "get-link-type",
+            "list-link-types",
+            "delete-link-type",
+            "freeze-ontology",
+            "ontology-status",
+            "ontology-summary",
+            "nodes-by-type",
         ],
         "branch" => &[
             "create", "info", "get", "list", "exists", "del", "fork", "diff", "merge", "export",
