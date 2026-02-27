@@ -3130,12 +3130,7 @@ mod profiling_tests {
 
             // Warmup: run all warmup queries through search_with_heap_ef
             for i in 0..warmup_queries {
-                std::hint::black_box(compact.search_with_heap_ef(
-                    &all_queries[i],
-                    k,
-                    ef,
-                    &heap,
-                ));
+                std::hint::black_box(compact.search_with_heap_ef(&all_queries[i], k, ef, &heap));
             }
 
             // =============================================================
@@ -3150,8 +3145,7 @@ mod profiling_tests {
                 std::hint::black_box(compact.search_with_heap_ef(q, k, ef, &heap));
             }
             let phase0_full_elapsed = start.elapsed();
-            let phase0_full_us =
-                phase0_full_elapsed.as_micros() as f64 / num_queries as f64;
+            let phase0_full_us = phase0_full_elapsed.as_micros() as f64 / num_queries as f64;
             let phase0_qps = num_queries as f64 / phase0_full_elapsed.as_secs_f64();
 
             // Phase 0b: Greedy descent only
@@ -3183,8 +3177,7 @@ mod profiling_tests {
                 ));
             }
             let phase0_beam_elapsed = start.elapsed();
-            let phase0_beam_us =
-                phase0_beam_elapsed.as_micros() as f64 / num_queries as f64;
+            let phase0_beam_us = phase0_beam_elapsed.as_micros() as f64 / num_queries as f64;
 
             // =============================================================
             // Phase 1: Coarse per-outer-loop timing
@@ -3223,8 +3216,7 @@ mod profiling_tests {
                     id: current_entry,
                 });
 
-                let mut results: BinaryHeap<Reverse<ScoredId>> =
-                    BinaryHeap::with_capacity(ef + 1);
+                let mut results: BinaryHeap<Reverse<ScoredId>> = BinaryHeap::with_capacity(ef + 1);
                 if !compact.is_deleted(current_entry) {
                     results.push(Reverse(ScoredId {
                         score: entry_score,
@@ -3301,8 +3293,7 @@ mod profiling_tests {
             let p1_neighbor_ns = total_neighbor_lookup_ns as f64 / num_queries as f64;
             let p1_inner_ns = total_inner_loop_ns as f64 / num_queries as f64;
             let p1_total_ns = p1_heap_ns + p1_neighbor_ns + p1_inner_ns;
-            let p1_overhead_pct =
-                (p1_total_ns / 1000.0 - phase0_beam_us) / phase0_beam_us * 100.0;
+            let p1_overhead_pct = (p1_total_ns / 1000.0 - phase0_beam_us) / phase0_beam_us * 100.0;
 
             // =============================================================
             // Phase 2: Per-neighbor inner-loop breakdown
@@ -3343,8 +3334,7 @@ mod profiling_tests {
                     id: current_entry,
                 });
 
-                let mut results: BinaryHeap<Reverse<ScoredId>> =
-                    BinaryHeap::with_capacity(ef + 1);
+                let mut results: BinaryHeap<Reverse<ScoredId>> = BinaryHeap::with_capacity(ef + 1);
                 if !compact.is_deleted(current_entry) {
                     results.push(Reverse(ScoredId {
                         score: entry_score,
@@ -3445,7 +3435,8 @@ mod profiling_tests {
             let avg_heap_pushes = count_heap_pushes as f64 / nq;
 
             // Compute percentages relative to Phase 2 measured total
-            let p2_total_for_pct = p2_dist_ns + p2_emb_ns + p2_visited_ns + p2_heap_ns + p2_inner_overhead_ns;
+            let p2_total_for_pct =
+                p2_dist_ns + p2_emb_ns + p2_visited_ns + p2_heap_ns + p2_inner_overhead_ns;
 
             println!("\n=== search_layer_inner Breakdown ({n}, dim={dim}, cosine) ===");
             println!(

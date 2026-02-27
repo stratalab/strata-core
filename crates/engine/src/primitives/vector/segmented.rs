@@ -2594,8 +2594,7 @@ mod profiling_tests {
                 let hnsw_results = backend.search(q, k);
                 let brute_ids: BTreeSet<VectorId> =
                     brute_results.iter().map(|(id, _)| *id).collect();
-                let hnsw_ids: BTreeSet<VectorId> =
-                    hnsw_results.iter().map(|(id, _)| *id).collect();
+                let hnsw_ids: BTreeSet<VectorId> = hnsw_results.iter().map(|(id, _)| *id).collect();
                 let overlap = brute_ids.intersection(&hnsw_ids).count();
                 multi_recall_sum += overlap as f64 / k as f64;
             }
@@ -2620,25 +2619,24 @@ mod profiling_tests {
                 let hnsw_results = backend.search(q, k);
                 let brute_ids: BTreeSet<VectorId> =
                     brute_results.iter().map(|(id, _)| *id).collect();
-                let hnsw_ids: BTreeSet<VectorId> =
-                    hnsw_results.iter().map(|(id, _)| *id).collect();
+                let hnsw_ids: BTreeSet<VectorId> = hnsw_results.iter().map(|(id, _)| *id).collect();
                 let overlap = brute_ids.intersection(&hnsw_ids).count();
                 compact_recall_sum += overlap as f64 / k as f64;
             }
             let compact_recall = compact_recall_sum / num_recall_queries as f64;
 
             let speedup = compact_qps / multi_qps;
-            let scale_label = if n >= 1000 { format!("{}K", n / 1000) } else { format!("{n}") };
+            let scale_label = if n >= 1000 {
+                format!("{}K", n / 1000)
+            } else {
+                format!("{n}")
+            };
 
             println!(
                 "\n--- {scale_label} vectors ({num_segments_before} segments → {num_segments_after}) ---"
             );
-            println!(
-                "  Before: {multi_qps:.0} QPS, recall@{k} = {multi_recall:.3}"
-            );
-            println!(
-                "  After:  {compact_qps:.0} QPS, recall@{k} = {compact_recall:.3}"
-            );
+            println!("  Before: {multi_qps:.0} QPS, recall@{k} = {multi_recall:.3}");
+            println!("  After:  {compact_qps:.0} QPS, recall@{k} = {compact_recall:.3}");
             println!("  Speedup: {speedup:.2}x");
         }
     }
