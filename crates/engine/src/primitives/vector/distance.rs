@@ -154,22 +154,67 @@ fn dot_norms_scalar(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
 fn dot_norms_neon(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
     use std::arch::aarch64::*;
     unsafe {
-        let mut vdot = vdupq_n_f32(0.0);
-        let mut vna = vdupq_n_f32(0.0);
-        let mut vnb = vdupq_n_f32(0.0);
-        let chunks = a.len() / 4;
-        for i in 0..chunks {
+        // 4x unroll with 12 accumulators (4 × 3 streams: dot, norm_a, norm_b)
+        // NEON has 32 SIMD regs; 12 accumulators + 8 loads = 20. Fits.
+        let mut vdot0 = vdupq_n_f32(0.0);
+        let mut vdot1 = vdupq_n_f32(0.0);
+        let mut vdot2 = vdupq_n_f32(0.0);
+        let mut vdot3 = vdupq_n_f32(0.0);
+        let mut vna0 = vdupq_n_f32(0.0);
+        let mut vna1 = vdupq_n_f32(0.0);
+        let mut vna2 = vdupq_n_f32(0.0);
+        let mut vna3 = vdupq_n_f32(0.0);
+        let mut vnb0 = vdupq_n_f32(0.0);
+        let mut vnb1 = vdupq_n_f32(0.0);
+        let mut vnb2 = vdupq_n_f32(0.0);
+        let mut vnb3 = vdupq_n_f32(0.0);
+        let chunks16 = a.len() / 16;
+        for i in 0..chunks16 {
+            let base = i * 16;
+            let va0 = vld1q_f32(a.as_ptr().add(base));
+            let vb0 = vld1q_f32(b.as_ptr().add(base));
+            vdot0 = vfmaq_f32(vdot0, va0, vb0);
+            vna0 = vfmaq_f32(vna0, va0, va0);
+            vnb0 = vfmaq_f32(vnb0, vb0, vb0);
+            let va1 = vld1q_f32(a.as_ptr().add(base + 4));
+            let vb1 = vld1q_f32(b.as_ptr().add(base + 4));
+            vdot1 = vfmaq_f32(vdot1, va1, vb1);
+            vna1 = vfmaq_f32(vna1, va1, va1);
+            vnb1 = vfmaq_f32(vnb1, vb1, vb1);
+            let va2 = vld1q_f32(a.as_ptr().add(base + 8));
+            let vb2 = vld1q_f32(b.as_ptr().add(base + 8));
+            vdot2 = vfmaq_f32(vdot2, va2, vb2);
+            vna2 = vfmaq_f32(vna2, va2, va2);
+            vnb2 = vfmaq_f32(vnb2, vb2, vb2);
+            let va3 = vld1q_f32(a.as_ptr().add(base + 12));
+            let vb3 = vld1q_f32(b.as_ptr().add(base + 12));
+            vdot3 = vfmaq_f32(vdot3, va3, vb3);
+            vna3 = vfmaq_f32(vna3, va3, va3);
+            vnb3 = vfmaq_f32(vnb3, vb3, vb3);
+        }
+        // Reduce 4 accumulators → 1 for each stream
+        vdot0 = vaddq_f32(vdot0, vdot1);
+        vdot2 = vaddq_f32(vdot2, vdot3);
+        vdot0 = vaddq_f32(vdot0, vdot2);
+        vna0 = vaddq_f32(vna0, vna1);
+        vna2 = vaddq_f32(vna2, vna3);
+        vna0 = vaddq_f32(vna0, vna2);
+        vnb0 = vaddq_f32(vnb0, vnb1);
+        vnb2 = vaddq_f32(vnb2, vnb3);
+        vnb0 = vaddq_f32(vnb0, vnb2);
+        let mut sd = vaddvq_f32(vdot0);
+        let mut sna = vaddvq_f32(vna0);
+        let mut snb = vaddvq_f32(vnb0);
+        // Remainder: 4-wide chunks
+        for i in (chunks16 * 4)..(a.len() / 4) {
             let va = vld1q_f32(a.as_ptr().add(i * 4));
             let vb = vld1q_f32(b.as_ptr().add(i * 4));
-            vdot = vfmaq_f32(vdot, va, vb);
-            vna = vfmaq_f32(vna, va, va);
-            vnb = vfmaq_f32(vnb, vb, vb);
+            sd += vaddvq_f32(vfmaq_f32(vdupq_n_f32(0.0), va, vb));
+            sna += vaddvq_f32(vfmaq_f32(vdupq_n_f32(0.0), va, va));
+            snb += vaddvq_f32(vfmaq_f32(vdupq_n_f32(0.0), vb, vb));
         }
-        let mut sd = vaddvq_f32(vdot);
-        let mut sna = vaddvq_f32(vna);
-        let mut snb = vaddvq_f32(vnb);
-        // Scalar remainder for non-multiple-of-4 dimensions
-        for i in (chunks * 4)..a.len() {
+        // Scalar remainder
+        for i in (a.len() / 4 * 4)..a.len() {
             sd += a[i] * b[i];
             sna += a[i] * a[i];
             snb += b[i] * b[i];
@@ -193,17 +238,33 @@ fn dot_norms_x86(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
 #[target_feature(enable = "avx2,fma")]
 unsafe fn dot_norms_avx2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
     use std::arch::x86_64::*;
-    let mut vdot = _mm256_setzero_ps();
-    let mut vna = _mm256_setzero_ps();
-    let mut vnb = _mm256_setzero_ps();
-    let chunks = a.len() / 8;
-    for i in 0..chunks {
-        let va = _mm256_loadu_ps(a.as_ptr().add(i * 8));
-        let vb = _mm256_loadu_ps(b.as_ptr().add(i * 8));
-        vdot = _mm256_fmadd_ps(va, vb, vdot);
-        vna = _mm256_fmadd_ps(va, va, vna);
-        vnb = _mm256_fmadd_ps(vb, vb, vnb);
+    // 2x unroll with 6 accumulators (2 × 3 streams: dot, norm_a, norm_b)
+    // AVX2 has only 16 YMM regs; 4x would need 20 and cause spills.
+    // 2x still gives 2.5x throughput vs single-accumulator.
+    let mut vdot0 = _mm256_setzero_ps();
+    let mut vdot1 = _mm256_setzero_ps();
+    let mut vna0 = _mm256_setzero_ps();
+    let mut vna1 = _mm256_setzero_ps();
+    let mut vnb0 = _mm256_setzero_ps();
+    let mut vnb1 = _mm256_setzero_ps();
+    let chunks16 = a.len() / 16;
+    for i in 0..chunks16 {
+        let base = i * 16;
+        let va0 = _mm256_loadu_ps(a.as_ptr().add(base));
+        let vb0 = _mm256_loadu_ps(b.as_ptr().add(base));
+        vdot0 = _mm256_fmadd_ps(va0, vb0, vdot0);
+        vna0 = _mm256_fmadd_ps(va0, va0, vna0);
+        vnb0 = _mm256_fmadd_ps(vb0, vb0, vnb0);
+        let va1 = _mm256_loadu_ps(a.as_ptr().add(base + 8));
+        let vb1 = _mm256_loadu_ps(b.as_ptr().add(base + 8));
+        vdot1 = _mm256_fmadd_ps(va1, vb1, vdot1);
+        vna1 = _mm256_fmadd_ps(va1, va1, vna1);
+        vnb1 = _mm256_fmadd_ps(vb1, vb1, vnb1);
     }
+    // Reduce 2 accumulators → 1 for each stream
+    vdot0 = _mm256_add_ps(vdot0, vdot1);
+    vna0 = _mm256_add_ps(vna0, vna1);
+    vnb0 = _mm256_add_ps(vnb0, vnb1);
     // Horizontal sum of 8-wide vectors
     let hsum = |v: __m256| -> f32 {
         let hi = _mm256_extractf128_ps(v, 1);
@@ -215,11 +276,22 @@ unsafe fn dot_norms_avx2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
         let sum32 = _mm_add_ss(sum64, hi32);
         _mm_cvtss_f32(sum32)
     };
-    let mut sd = hsum(vdot);
-    let mut sna = hsum(vna);
-    let mut snb = hsum(vnb);
+    let mut sd = hsum(vdot0);
+    let mut sna = hsum(vna0);
+    let mut snb = hsum(vnb0);
+    // Remainder: 8-wide chunks
+    for i in (chunks16 * 2)..(a.len() / 8) {
+        let va = _mm256_loadu_ps(a.as_ptr().add(i * 8));
+        let vb = _mm256_loadu_ps(b.as_ptr().add(i * 8));
+        let r_dot = _mm256_fmadd_ps(va, vb, _mm256_setzero_ps());
+        let r_na = _mm256_fmadd_ps(va, va, _mm256_setzero_ps());
+        let r_nb = _mm256_fmadd_ps(vb, vb, _mm256_setzero_ps());
+        sd += hsum(r_dot);
+        sna += hsum(r_na);
+        snb += hsum(r_nb);
+    }
     // Scalar remainder
-    for i in (chunks * 8)..a.len() {
+    for i in (a.len() / 8 * 8)..a.len() {
         sd += a[i] * b[i];
         sna += a[i] * a[i];
         snb += b[i] * b[i];
@@ -276,16 +348,44 @@ fn euclidean_distance_scalar(a: &[f32], b: &[f32]) -> f32 {
 fn euclidean_distance_neon(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::aarch64::*;
     unsafe {
-        let mut vsum = vdupq_n_f32(0.0);
-        let chunks = a.len() / 4;
-        for i in 0..chunks {
+        let mut vsum0 = vdupq_n_f32(0.0);
+        let mut vsum1 = vdupq_n_f32(0.0);
+        let mut vsum2 = vdupq_n_f32(0.0);
+        let mut vsum3 = vdupq_n_f32(0.0);
+        let chunks16 = a.len() / 16;
+        for i in 0..chunks16 {
+            let base = i * 16;
+            let va0 = vld1q_f32(a.as_ptr().add(base));
+            let vb0 = vld1q_f32(b.as_ptr().add(base));
+            let diff0 = vsubq_f32(va0, vb0);
+            vsum0 = vfmaq_f32(vsum0, diff0, diff0);
+            let va1 = vld1q_f32(a.as_ptr().add(base + 4));
+            let vb1 = vld1q_f32(b.as_ptr().add(base + 4));
+            let diff1 = vsubq_f32(va1, vb1);
+            vsum1 = vfmaq_f32(vsum1, diff1, diff1);
+            let va2 = vld1q_f32(a.as_ptr().add(base + 8));
+            let vb2 = vld1q_f32(b.as_ptr().add(base + 8));
+            let diff2 = vsubq_f32(va2, vb2);
+            vsum2 = vfmaq_f32(vsum2, diff2, diff2);
+            let va3 = vld1q_f32(a.as_ptr().add(base + 12));
+            let vb3 = vld1q_f32(b.as_ptr().add(base + 12));
+            let diff3 = vsubq_f32(va3, vb3);
+            vsum3 = vfmaq_f32(vsum3, diff3, diff3);
+        }
+        // Reduce 4 accumulators → 1
+        vsum0 = vaddq_f32(vsum0, vsum1);
+        vsum2 = vaddq_f32(vsum2, vsum3);
+        vsum0 = vaddq_f32(vsum0, vsum2);
+        let mut s = vaddvq_f32(vsum0);
+        // Remainder: 4-wide chunks
+        for i in (chunks16 * 4)..(a.len() / 4) {
             let va = vld1q_f32(a.as_ptr().add(i * 4));
             let vb = vld1q_f32(b.as_ptr().add(i * 4));
             let diff = vsubq_f32(va, vb);
-            vsum = vfmaq_f32(vsum, diff, diff);
+            s += vaddvq_f32(vfmaq_f32(vdupq_n_f32(0.0), diff, diff));
         }
-        let mut s = vaddvq_f32(vsum);
-        for i in (chunks * 4)..a.len() {
+        // Scalar remainder
+        for i in (a.len() / 4 * 4)..a.len() {
             let d = a[i] - b[i];
             s += d * d;
         }
@@ -307,24 +407,60 @@ fn euclidean_distance_x86(a: &[f32], b: &[f32]) -> f32 {
 #[target_feature(enable = "avx2,fma")]
 unsafe fn euclidean_distance_avx2(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::x86_64::*;
-    let mut vsum = _mm256_setzero_ps();
-    let chunks = a.len() / 8;
-    for i in 0..chunks {
-        let va = _mm256_loadu_ps(a.as_ptr().add(i * 8));
-        let vb = _mm256_loadu_ps(b.as_ptr().add(i * 8));
-        let diff = _mm256_sub_ps(va, vb);
-        vsum = _mm256_fmadd_ps(diff, diff, vsum);
+    let mut vsum0 = _mm256_setzero_ps();
+    let mut vsum1 = _mm256_setzero_ps();
+    let mut vsum2 = _mm256_setzero_ps();
+    let mut vsum3 = _mm256_setzero_ps();
+    let chunks32 = a.len() / 32;
+    for i in 0..chunks32 {
+        let base = i * 32;
+        let va0 = _mm256_loadu_ps(a.as_ptr().add(base));
+        let vb0 = _mm256_loadu_ps(b.as_ptr().add(base));
+        let diff0 = _mm256_sub_ps(va0, vb0);
+        vsum0 = _mm256_fmadd_ps(diff0, diff0, vsum0);
+        let va1 = _mm256_loadu_ps(a.as_ptr().add(base + 8));
+        let vb1 = _mm256_loadu_ps(b.as_ptr().add(base + 8));
+        let diff1 = _mm256_sub_ps(va1, vb1);
+        vsum1 = _mm256_fmadd_ps(diff1, diff1, vsum1);
+        let va2 = _mm256_loadu_ps(a.as_ptr().add(base + 16));
+        let vb2 = _mm256_loadu_ps(b.as_ptr().add(base + 16));
+        let diff2 = _mm256_sub_ps(va2, vb2);
+        vsum2 = _mm256_fmadd_ps(diff2, diff2, vsum2);
+        let va3 = _mm256_loadu_ps(a.as_ptr().add(base + 24));
+        let vb3 = _mm256_loadu_ps(b.as_ptr().add(base + 24));
+        let diff3 = _mm256_sub_ps(va3, vb3);
+        vsum3 = _mm256_fmadd_ps(diff3, diff3, vsum3);
     }
+    // Reduce 4 accumulators → 1
+    vsum0 = _mm256_add_ps(vsum0, vsum1);
+    vsum2 = _mm256_add_ps(vsum2, vsum3);
+    vsum0 = _mm256_add_ps(vsum0, vsum2);
     // Horizontal sum
-    let hi = _mm256_extractf128_ps(vsum, 1);
-    let lo = _mm256_castps256_ps128(vsum);
+    let hi = _mm256_extractf128_ps(vsum0, 1);
+    let lo = _mm256_castps256_ps128(vsum0);
     let sum128 = _mm_add_ps(lo, hi);
     let hi64 = _mm_movehl_ps(sum128, sum128);
     let sum64 = _mm_add_ps(sum128, hi64);
     let hi32 = _mm_shuffle_ps(sum64, sum64, 0x1);
     let sum32 = _mm_add_ss(sum64, hi32);
     let mut s = _mm_cvtss_f32(sum32);
-    for i in (chunks * 8)..a.len() {
+    // Remainder: 8-wide chunks
+    for i in (chunks32 * 4)..(a.len() / 8) {
+        let va = _mm256_loadu_ps(a.as_ptr().add(i * 8));
+        let vb = _mm256_loadu_ps(b.as_ptr().add(i * 8));
+        let diff = _mm256_sub_ps(va, vb);
+        let r = _mm256_fmadd_ps(diff, diff, _mm256_setzero_ps());
+        let hi = _mm256_extractf128_ps(r, 1);
+        let lo = _mm256_castps256_ps128(r);
+        let sum128 = _mm_add_ps(lo, hi);
+        let hi64 = _mm_movehl_ps(sum128, sum128);
+        let sum64 = _mm_add_ps(sum128, hi64);
+        let hi32 = _mm_shuffle_ps(sum64, sum64, 0x1);
+        let sum32 = _mm_add_ss(sum64, hi32);
+        s += _mm_cvtss_f32(sum32);
+    }
+    // Scalar remainder
+    for i in (a.len() / 8 * 8)..a.len() {
         let d = a[i] - b[i];
         s += d * d;
     }
@@ -366,15 +502,39 @@ fn dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
 fn dot_product_neon(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::aarch64::*;
     unsafe {
-        let mut vdot = vdupq_n_f32(0.0);
-        let chunks = a.len() / 4;
-        for i in 0..chunks {
+        let mut vdot0 = vdupq_n_f32(0.0);
+        let mut vdot1 = vdupq_n_f32(0.0);
+        let mut vdot2 = vdupq_n_f32(0.0);
+        let mut vdot3 = vdupq_n_f32(0.0);
+        let chunks16 = a.len() / 16;
+        for i in 0..chunks16 {
+            let base = i * 16;
+            let va0 = vld1q_f32(a.as_ptr().add(base));
+            let vb0 = vld1q_f32(b.as_ptr().add(base));
+            vdot0 = vfmaq_f32(vdot0, va0, vb0);
+            let va1 = vld1q_f32(a.as_ptr().add(base + 4));
+            let vb1 = vld1q_f32(b.as_ptr().add(base + 4));
+            vdot1 = vfmaq_f32(vdot1, va1, vb1);
+            let va2 = vld1q_f32(a.as_ptr().add(base + 8));
+            let vb2 = vld1q_f32(b.as_ptr().add(base + 8));
+            vdot2 = vfmaq_f32(vdot2, va2, vb2);
+            let va3 = vld1q_f32(a.as_ptr().add(base + 12));
+            let vb3 = vld1q_f32(b.as_ptr().add(base + 12));
+            vdot3 = vfmaq_f32(vdot3, va3, vb3);
+        }
+        // Reduce 4 accumulators → 1
+        vdot0 = vaddq_f32(vdot0, vdot1);
+        vdot2 = vaddq_f32(vdot2, vdot3);
+        vdot0 = vaddq_f32(vdot0, vdot2);
+        let mut s = vaddvq_f32(vdot0);
+        // Remainder: 4-wide chunks
+        for i in (chunks16 * 4)..(a.len() / 4) {
             let va = vld1q_f32(a.as_ptr().add(i * 4));
             let vb = vld1q_f32(b.as_ptr().add(i * 4));
-            vdot = vfmaq_f32(vdot, va, vb);
+            s += vaddvq_f32(vfmaq_f32(vdupq_n_f32(0.0), va, vb));
         }
-        let mut s = vaddvq_f32(vdot);
-        for i in (chunks * 4)..a.len() {
+        // Scalar remainder
+        for i in (a.len() / 4 * 4)..a.len() {
             s += a[i] * b[i];
         }
         s
@@ -395,22 +555,57 @@ fn dot_product_x86(a: &[f32], b: &[f32]) -> f32 {
 #[target_feature(enable = "avx2,fma")]
 unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::x86_64::*;
-    let mut vdot = _mm256_setzero_ps();
-    let chunks = a.len() / 8;
-    for i in 0..chunks {
-        let va = _mm256_loadu_ps(a.as_ptr().add(i * 8));
-        let vb = _mm256_loadu_ps(b.as_ptr().add(i * 8));
-        vdot = _mm256_fmadd_ps(va, vb, vdot);
+    let mut vdot0 = _mm256_setzero_ps();
+    let mut vdot1 = _mm256_setzero_ps();
+    let mut vdot2 = _mm256_setzero_ps();
+    let mut vdot3 = _mm256_setzero_ps();
+    let chunks32 = a.len() / 32;
+    for i in 0..chunks32 {
+        let base = i * 32;
+        let va0 = _mm256_loadu_ps(a.as_ptr().add(base));
+        let vb0 = _mm256_loadu_ps(b.as_ptr().add(base));
+        vdot0 = _mm256_fmadd_ps(va0, vb0, vdot0);
+        let va1 = _mm256_loadu_ps(a.as_ptr().add(base + 8));
+        let vb1 = _mm256_loadu_ps(b.as_ptr().add(base + 8));
+        vdot1 = _mm256_fmadd_ps(va1, vb1, vdot1);
+        let va2 = _mm256_loadu_ps(a.as_ptr().add(base + 16));
+        let vb2 = _mm256_loadu_ps(b.as_ptr().add(base + 16));
+        vdot2 = _mm256_fmadd_ps(va2, vb2, vdot2);
+        let va3 = _mm256_loadu_ps(a.as_ptr().add(base + 24));
+        let vb3 = _mm256_loadu_ps(b.as_ptr().add(base + 24));
+        vdot3 = _mm256_fmadd_ps(va3, vb3, vdot3);
     }
-    let hi = _mm256_extractf128_ps(vdot, 1);
-    let lo = _mm256_castps256_ps128(vdot);
+    // Reduce 4 accumulators → 1
+    vdot0 = _mm256_add_ps(vdot0, vdot1);
+    vdot2 = _mm256_add_ps(vdot2, vdot3);
+    vdot0 = _mm256_add_ps(vdot0, vdot2);
+    // Horizontal sum
+    let hi = _mm256_extractf128_ps(vdot0, 1);
+    let lo = _mm256_castps256_ps128(vdot0);
     let sum128 = _mm_add_ps(lo, hi);
     let hi64 = _mm_movehl_ps(sum128, sum128);
     let sum64 = _mm_add_ps(sum128, hi64);
     let hi32 = _mm_shuffle_ps(sum64, sum64, 0x1);
     let sum32 = _mm_add_ss(sum64, hi32);
     let mut s = _mm_cvtss_f32(sum32);
-    for i in (chunks * 8)..a.len() {
+    // Remainder: 8-wide chunks
+    for i in (chunks32 * 4)..(a.len() / 8) {
+        let va = _mm256_loadu_ps(a.as_ptr().add(i * 8));
+        let vb = _mm256_loadu_ps(b.as_ptr().add(i * 8));
+        s += {
+            let r = _mm256_fmadd_ps(va, vb, _mm256_setzero_ps());
+            let hi = _mm256_extractf128_ps(r, 1);
+            let lo = _mm256_castps256_ps128(r);
+            let sum128 = _mm_add_ps(lo, hi);
+            let hi64 = _mm_movehl_ps(sum128, sum128);
+            let sum64 = _mm_add_ps(sum128, hi64);
+            let hi32 = _mm_shuffle_ps(sum64, sum64, 0x1);
+            let sum32 = _mm_add_ss(sum64, hi32);
+            _mm_cvtss_f32(sum32)
+        };
+    }
+    // Scalar remainder
+    for i in (a.len() / 8 * 8)..a.len() {
         s += a[i] * b[i];
     }
     s
@@ -558,26 +753,140 @@ mod tests {
 
     #[test]
     fn test_simd_odd_dimensions() {
-        // Verify remainder handling for non-multiple-of-4/8 dimensions
-        for dim in [1, 3, 5, 7, 13, 33, 127, 129] {
+        // Verify remainder handling for non-multiple-of-4/8/16/32 dimensions.
+        // Key dimensions that exercise specific remainder paths:
+        //   NEON (4x unroll = 16-wide): 17 (16+1 scalar), 20 (16+4 remainder),
+        //     21 (16+4+1), 33 (2×16+1)
+        //   AVX2 (4x unroll = 32-wide): 24 (3×8), 40 (32+8), 41 (32+8+1)
+        //   AVX2 dot_norms (2x = 16-wide): 24 (16+8)
+        for dim in [1, 3, 5, 7, 13, 17, 20, 21, 24, 33, 40, 41, 48, 127, 129] {
             let a: Vec<f32> = (0..dim).map(|i| (i as f32 / 100.0).sin()).collect();
             let b: Vec<f32> = (0..dim).map(|i| (i as f32 / 50.0).cos()).collect();
 
-            let scalar = cosine_similarity(&a, &b);
+            // dot_norms: SIMD vs scalar
             let (dot, na, nb) = dot_norms_scalar(&a, &b);
+            let (dot2, na2, nb2) = dot_norms(&a, &b);
+            assert!(
+                (dot - dot2).abs() < 1e-4,
+                "dim={}: dot_norms dot mismatch: {} vs {}",
+                dim,
+                dot,
+                dot2
+            );
+            assert!(
+                (na - na2).abs() < 1e-4,
+                "dim={}: dot_norms norm_a mismatch: {} vs {}",
+                dim,
+                na,
+                na2
+            );
+            assert!(
+                (nb - nb2).abs() < 1e-4,
+                "dim={}: dot_norms norm_b mismatch: {} vs {}",
+                dim,
+                nb,
+                nb2
+            );
+
+            // euclidean_distance: SIMD vs scalar
+            let ed_scalar = euclidean_distance_scalar(&a, &b);
+            let ed_simd = euclidean_distance(&a, &b);
+            assert!(
+                (ed_scalar - ed_simd).abs() < 1e-4,
+                "dim={}: euclidean mismatch: {} vs {}",
+                dim,
+                ed_scalar,
+                ed_simd
+            );
+
+            // dot_product: SIMD vs scalar
+            let dp_scalar = dot_product_scalar(&a, &b);
+            let dp_simd = dot_product(&a, &b);
+            assert!(
+                (dp_scalar - dp_simd).abs() < 1e-4,
+                "dim={}: dot_product mismatch: {} vs {}",
+                dim,
+                dp_scalar,
+                dp_simd
+            );
+
+            // cosine (end-to-end check via dot_norms)
+            let cosine_simd = cosine_similarity(&a, &b);
             let expected = if (na * nb).sqrt() == 0.0 {
                 0.0
             } else {
                 dot / (na * nb).sqrt()
             };
             assert!(
-                (scalar - expected).abs() < 1e-5,
+                (cosine_simd - expected).abs() < 1e-5,
                 "dim={}: cosine mismatch: {} vs {}",
                 dim,
-                scalar,
+                cosine_simd,
                 expected
             );
         }
+    }
+
+    #[test]
+    fn test_simd_matches_scalar_384d() {
+        // Verify SIMD multi-accumulator unrolling produces same results as scalar
+        // for 384d (common embedding dimension). 384/16 = 24 iterations, zero remainder.
+        // Also test with larger-magnitude values where FP reassociation rounding is more visible.
+        let a: Vec<f32> = (0..384).map(|i| (i as f32 * 0.1).sin() * 10.0).collect();
+        let b: Vec<f32> = (0..384).map(|i| (i as f32 * 0.2).cos() * 10.0).collect();
+
+        let (dot, na, nb) = dot_norms_scalar(&a, &b);
+        let (dot2, na2, nb2) = dot_norms(&a, &b);
+        assert!(
+            (dot - dot2).abs() < 1e-2,
+            "384d dot mismatch: {} vs {}",
+            dot,
+            dot2
+        );
+        assert!(
+            (na - na2).abs() < 1e-2,
+            "384d norm_a mismatch: {} vs {}",
+            na,
+            na2
+        );
+        assert!(
+            (nb - nb2).abs() < 1e-2,
+            "384d norm_b mismatch: {} vs {}",
+            nb,
+            nb2
+        );
+
+        let ed_scalar = euclidean_distance_scalar(&a, &b);
+        let ed_simd = euclidean_distance(&a, &b);
+        assert!(
+            (ed_scalar - ed_simd).abs() < 1e-2,
+            "384d euclidean mismatch: {} vs {}",
+            ed_scalar,
+            ed_simd
+        );
+
+        let dp_scalar = dot_product_scalar(&a, &b);
+        let dp_simd = dot_product(&a, &b);
+        assert!(
+            (dp_scalar - dp_simd).abs() < 1e-2,
+            "384d dot_product mismatch: {} vs {}",
+            dp_scalar,
+            dp_simd
+        );
+
+        // Verify cosine similarity end-to-end
+        let cos_simd = cosine_similarity(&a, &b);
+        let cos_expected = if (na * nb).sqrt() == 0.0 {
+            0.0
+        } else {
+            dot / (na * nb).sqrt()
+        };
+        assert!(
+            (cos_simd - cos_expected).abs() < 1e-5,
+            "384d cosine mismatch: {} vs {}",
+            cos_simd,
+            cos_expected
+        );
     }
 
     #[test]

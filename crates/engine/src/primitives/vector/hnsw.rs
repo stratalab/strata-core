@@ -446,7 +446,12 @@ impl HnswGraph {
 
                 if let Some(node) = self.nodes.get(&current) {
                     if layer < node.neighbors.len() {
-                        for &neighbor_id in &node.neighbors[layer] {
+                        let neighbors = &node.neighbors[layer];
+                        for (i, &neighbor_id) in neighbors.iter().enumerate() {
+                            // Prefetch next neighbor's embedding while processing current one
+                            if i + 1 < neighbors.len() {
+                                heap.prefetch_embedding(neighbors[i + 1]);
+                            }
                             if let Some(neighbor_embedding) = heap.get(neighbor_id) {
                                 let score = compute_similarity(query, neighbor_embedding, metric);
                                 if score > best_score
@@ -1485,7 +1490,12 @@ impl CompactHnswGraph {
                 let mut best_score = current_score;
                 let mut best_id = current;
 
-                for &neighbor_u64 in self.neighbors_at(current, layer) {
+                let neighbors = self.neighbors_at(current, layer);
+                for (i, &neighbor_u64) in neighbors.iter().enumerate() {
+                    // Prefetch next neighbor's embedding while processing current one
+                    if i + 1 < neighbors.len() {
+                        heap.prefetch_embedding(VectorId::new(neighbors[i + 1]));
+                    }
                     let neighbor_id = VectorId::new(neighbor_u64);
                     if let Some(neighbor_embedding) = heap.get(neighbor_id) {
                         let score = compute_similarity_cached(
