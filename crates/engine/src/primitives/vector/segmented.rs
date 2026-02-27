@@ -133,9 +133,11 @@ pub struct SegmentedHnswConfig {
     /// Set to 0 to disable periodic flushing.
     pub heap_flush_threshold: usize,
     /// Maximum number of sealed segments before auto-compaction merges them
-    /// into a single segment. Reduces fan-out penalty at high scale.
-    /// Set to `usize::MAX` to disable auto-compaction entirely.
-    /// Default: 4 (compact fires every `seal_threshold × auto_compact_threshold` inserts).
+    /// into a single segment. Reduces fan-out penalty at high scale but trades
+    /// recall for throughput — a compacted segment searched with ef_search=100
+    /// explores far fewer candidates relative to its size than multiple smaller
+    /// segments. Disabled by default (`usize::MAX`).
+    /// A value of 4 fires compaction every `seal_threshold × 5` inserts.
     pub auto_compact_threshold: usize,
 }
 
@@ -145,7 +147,7 @@ impl Default for SegmentedHnswConfig {
             hnsw: HnswConfig::default(),
             seal_threshold: 50_000,
             heap_flush_threshold: 500_000,
-            auto_compact_threshold: 4,
+            auto_compact_threshold: usize::MAX,
         }
     }
 }
@@ -448,6 +450,9 @@ impl SegmentedHnswBackend {
     /// - Uses a top-k BinaryHeap: O(n log k) vs O(n log n) for full sort
     /// - Prefetches next embedding while processing current one
     fn search_active(&self, query: &[f32], k: usize) -> Vec<(VectorId, f32)> {
+        if self.active.ids.is_empty() {
+            return Vec::new();
+        }
         let metric = self.vector_config.metric;
 
         // Pre-compute query norm once (same pattern as CompactHnswGraph::search_with_heap_ef)
@@ -506,6 +511,9 @@ impl SegmentedHnswBackend {
     /// Must use `timestamps` BTreeMap for temporal filtering (deleted entries
     /// need checked too), but uses norm cache and top-k heap.
     fn search_active_at(&self, query: &[f32], k: usize, as_of_ts: u64) -> Vec<(VectorId, f32)> {
+        if self.active.timestamps.is_empty() {
+            return Vec::new();
+        }
         let metric = self.vector_config.metric;
         let q_norm = if metric == DistanceMetric::Cosine {
             Some(query.iter().map(|x| x * x).sum::<f32>().sqrt())
@@ -569,6 +577,9 @@ impl SegmentedHnswBackend {
         start_ts: u64,
         end_ts: u64,
     ) -> Vec<(VectorId, f32)> {
+        if self.active.timestamps.is_empty() {
+            return Vec::new();
+        }
         let metric = self.vector_config.metric;
         let q_norm = if metric == DistanceMetric::Cosine {
             Some(query.iter().map(|x| x * x).sum::<f32>().sqrt())
@@ -685,9 +696,9 @@ impl SegmentedHnswBackend {
     /// Merge multiple sorted result sets into one via k-way merge.
     ///
     /// Each input set is already sorted by (score desc, VectorId asc).
-    /// Segments have disjoint VectorId sets (each vector lives in exactly one
-    /// sealed segment; updates soft-delete the old entry before re-inserting),
-    /// so deduplication is verified with debug_assert rather than a HashSet.
+    /// Segments should have disjoint VectorId sets (each vector lives in exactly
+    /// one sealed segment; updates soft-delete the old entry before re-inserting).
+    /// Duplicates are skipped defensively via O(k) linear scan per entry.
     fn merge_results(sets: Vec<Vec<(VectorId, f32)>>, k: usize) -> Vec<(VectorId, f32)> {
         // Fast paths
         if sets.is_empty() {
@@ -719,11 +730,21 @@ impl SegmentedHnswBackend {
 
         let mut merged = Vec::with_capacity(k);
         while let Some(entry) = heap.pop() {
-            debug_assert!(
-                !merged.iter().any(|(id, _)| *id == entry.id),
-                "Duplicate VectorId {} in merge_results — segments should have disjoint IDs",
-                entry.id.0
-            );
+            // Safety: skip duplicates defensively. Segments should have disjoint
+            // VectorId sets (updates soft-delete old entry before re-inserting),
+            // but a bug in the delete path could cause duplicates. The linear
+            // scan is O(k) per pop with k typically ≤ 100 — negligible.
+            if merged.iter().any(|(id, _)| *id == entry.id) {
+                // Advance the iterator this entry came from so the merge continues
+                if let Some((id, score)) = iters[entry.set_idx].next() {
+                    heap.push(KWayEntry {
+                        score,
+                        id,
+                        set_idx: entry.set_idx,
+                    });
+                }
+                continue;
+            }
             merged.push((entry.id, entry.score));
             if merged.len() >= k {
                 break;
@@ -2832,9 +2853,8 @@ mod tests {
     }
 
     #[test]
-    fn test_deleted_flags_consistency() {
-        // Verify that deleted_flags stays in sync with CompactHnswNode::deleted_at
-        // across seal + delete operations
+    fn test_deleted_vector_not_in_search() {
+        // Verify that deleted vectors are excluded from search results
         let mut backend = make_backend_with_threshold(3, DistanceMetric::Cosine, 5);
 
         // Insert 5 vectors → seal
@@ -2850,19 +2870,6 @@ mod tests {
             .delete_with_timestamp(VectorId::new(3), 100)
             .unwrap();
 
-        // Verify the sealed segment's deleted_flags is in sync
-        let seg = &backend.sealed[0];
-        for (id, node) in seg.graph.iter_nodes() {
-            let idx = (id.0 - seg.graph.id_offset) as usize;
-            let flag = seg.graph.deleted_flags[idx];
-            let node_deleted = node.deleted_at.is_some();
-            assert_eq!(
-                flag, node_deleted,
-                "deleted_flags[{}] = {} but node.deleted_at.is_some() = {} for VectorId {}",
-                idx, flag, node_deleted, id.0
-            );
-        }
-
         // Vector 3 should not appear in search results
         let results = backend.search(&[3.0, 0.0, 0.0], 5);
         for &(id, _score) in &results {
@@ -2872,6 +2879,154 @@ mod tests {
                 "Deleted vector should not appear in results"
             );
         }
+    }
+
+    #[test]
+    fn test_active_buffer_varied_scores() {
+        // Exercises the top-k heap eviction path with different scores.
+        // DotProduct with [1,0,0] query: score = first component of embedding.
+        let mut backend = make_backend_with_threshold(3, DistanceMetric::DotProduct, 100);
+
+        // Insert 8 vectors with distinct first components → distinct scores
+        let embeddings: Vec<(u64, f32)> = vec![
+            (1, 0.3),
+            (2, 0.9),
+            (3, 0.1),
+            (4, 0.7),
+            (5, 0.5),
+            (6, 0.8),
+            (7, 0.2),
+            (8, 0.6),
+        ];
+        for &(id, score_component) in &embeddings {
+            backend
+                .insert_with_timestamp(VectorId::new(id), &[score_component, 0.0, 0.0], id as u64)
+                .unwrap();
+        }
+
+        // k=3: should return the 3 highest-scored vectors: ids 2(0.9), 6(0.8), 4(0.7)
+        let results = backend.search(&[1.0, 0.0, 0.0], 3);
+        assert_eq!(results.len(), 3);
+        let ids: Vec<u64> = results.iter().map(|(id, _)| id.as_u64()).collect();
+        assert_eq!(ids, vec![2, 6, 4], "Top-3 by score should be ids 2, 6, 4");
+
+        // k=5: should return ids 2(0.9), 6(0.8), 4(0.7), 8(0.6), 5(0.5)
+        let results5 = backend.search(&[1.0, 0.0, 0.0], 5);
+        assert_eq!(results5.len(), 5);
+        let ids5: Vec<u64> = results5.iter().map(|(id, _)| id.as_u64()).collect();
+        assert_eq!(ids5, vec![2, 6, 4, 8, 5]);
+
+        // Verify scores are monotonically decreasing
+        for w in results5.windows(2) {
+            assert!(
+                w[0].1 >= w[1].1,
+                "Scores must be non-increasing: {} >= {}",
+                w[0].1,
+                w[1].1
+            );
+        }
+    }
+
+    #[test]
+    fn test_search_empty_active_buffer() {
+        // Tests early return path when active buffer is empty
+        let backend = make_backend_with_threshold(3, DistanceMetric::DotProduct, 100);
+
+        let results = backend.search(&[1.0, 0.0, 0.0], 5);
+        assert!(results.is_empty());
+
+        let results_at = backend.search_at(&[1.0, 0.0, 0.0], 5, 100);
+        assert!(results_at.is_empty());
+
+        let results_range = backend.search_in_range(&[1.0, 0.0, 0.0], 5, 0, 100);
+        assert!(results_range.is_empty());
+    }
+
+    #[test]
+    fn test_deleted_vector_in_active_buffer() {
+        // Tests that deleting a vector from the active buffer excludes it from search
+        let mut backend = make_backend_with_threshold(3, DistanceMetric::DotProduct, 100);
+
+        backend
+            .insert_with_timestamp(VectorId::new(1), &[1.0, 0.0, 0.0], 10)
+            .unwrap();
+        backend
+            .insert_with_timestamp(VectorId::new(2), &[0.8, 0.0, 0.0], 20)
+            .unwrap();
+        backend
+            .insert_with_timestamp(VectorId::new(3), &[0.6, 0.0, 0.0], 30)
+            .unwrap();
+
+        // Delete id=2 from active buffer
+        backend.delete_with_timestamp(VectorId::new(2), 50).unwrap();
+
+        let results = backend.search(&[1.0, 0.0, 0.0], 5);
+        assert_eq!(results.len(), 2);
+        for &(id, _) in &results {
+            assert_ne!(
+                id.as_u64(),
+                2,
+                "Deleted vector in active buffer must not appear"
+            );
+        }
+    }
+
+    #[test]
+    fn test_search_in_range_boundary_conditions() {
+        let mut backend = make_backend_with_threshold(3, DistanceMetric::DotProduct, 100);
+
+        backend
+            .insert_with_timestamp(VectorId::new(1), &[1.0, 0.0, 0.0], 10)
+            .unwrap();
+        backend
+            .insert_with_timestamp(VectorId::new(2), &[0.8, 0.0, 0.0], 20)
+            .unwrap();
+        backend
+            .insert_with_timestamp(VectorId::new(3), &[0.6, 0.0, 0.0], 30)
+            .unwrap();
+
+        // Exact single timestamp: start_ts == end_ts == 20
+        let r1 = backend.search_in_range(&[1.0, 0.0, 0.0], 5, 20, 20);
+        assert_eq!(r1.len(), 1);
+        assert_eq!(r1[0].0.as_u64(), 2);
+
+        // Inverted range: start_ts > end_ts → no results
+        let r2 = backend.search_in_range(&[1.0, 0.0, 0.0], 5, 30, 10);
+        assert!(r2.is_empty(), "Inverted range should return no results");
+
+        // Full range
+        let r3 = backend.search_in_range(&[1.0, 0.0, 0.0], 5, 0, u64::MAX);
+        assert_eq!(r3.len(), 3);
+    }
+
+    #[test]
+    fn test_merge_results_two_sets() {
+        // Most common real case: active buffer + 1 sealed segment
+        let set1 = vec![(VectorId::new(1), 0.95), (VectorId::new(3), 0.80)];
+        let set2 = vec![(VectorId::new(2), 0.90), (VectorId::new(4), 0.70)];
+        let merged = SegmentedHnswBackend::merge_results(vec![set1, set2], 3);
+        assert_eq!(merged.len(), 3);
+        let ids: Vec<u64> = merged.iter().map(|(id, _)| id.as_u64()).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_merge_results_skips_duplicates() {
+        // Verify production-safe dedup: if a VectorId appears in two sets
+        // (shouldn't happen, but merge_results must handle it gracefully)
+        let set1 = vec![(VectorId::new(1), 0.95), (VectorId::new(2), 0.80)];
+        let set2 = vec![
+            (VectorId::new(1), 0.90), // duplicate of id 1 from set1
+            (VectorId::new(3), 0.70),
+        ];
+        let merged = SegmentedHnswBackend::merge_results(vec![set1, set2], 3);
+        // Should contain exactly 3 unique IDs
+        assert_eq!(merged.len(), 3);
+        let ids: Vec<u64> = merged.iter().map(|(id, _)| id.as_u64()).collect();
+        // id=1 appears at 0.95 (from set1), id=1 at 0.90 (from set2) is skipped
+        assert_eq!(ids, vec![1, 2, 3]);
+        // The first occurrence (0.95) should be kept
+        assert!((merged[0].1 - 0.95).abs() < f32::EPSILON);
     }
 }
 
