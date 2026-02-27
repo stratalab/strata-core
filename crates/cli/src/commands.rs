@@ -959,11 +959,7 @@ fn build_graph() -> Command {
                 .arg(Arg::new("src").required(true).help("Source node ID"))
                 .arg(Arg::new("dst").required(true).help("Destination node ID"))
                 .arg(Arg::new("edge-type").required(true).help("Edge type"))
-                .arg(
-                    Arg::new("weight")
-                        .long("weight")
-                        .help("Edge weight (f64)"),
-                )
+                .arg(Arg::new("weight").long("weight").help("Edge weight (f64)"))
                 .arg(
                     Arg::new("properties")
                         .long("properties")

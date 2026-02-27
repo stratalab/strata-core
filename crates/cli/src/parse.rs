@@ -940,8 +940,8 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                 m.get_one::<String>("json").unwrap().clone()
             };
 
-            let parsed: serde_json::Value = serde_json::from_str(&raw_json)
-                .map_err(|e| format!("Invalid JSON: {}", e))?;
+            let parsed: serde_json::Value =
+                serde_json::from_str(&raw_json).map_err(|e| format!("Invalid JSON: {}", e))?;
 
             let nodes: Vec<BulkGraphNode> = parsed
                 .get("nodes")
@@ -1448,9 +1448,7 @@ mod tests {
     fn parse(args: &[&str]) -> Result<CliAction, String> {
         let state = test_state();
         let cmd = build_repl_cmd();
-        let matches = cmd
-            .try_get_matches_from(args)
-            .map_err(|e| e.to_string())?;
+        let matches = cmd.try_get_matches_from(args).map_err(|e| e.to_string())?;
         matches_to_action(&matches, &state)
     }
 
@@ -1575,9 +1573,7 @@ mod tests {
                 graph: "social".into(),
                 node_id: "alice".into(),
                 entity_ref: Some("kv://main/alice".into()),
-                properties: Some(Value::from(
-                    serde_json::json!({"age": 30})
-                )),
+                properties: Some(Value::from(serde_json::json!({"age": 30}))),
                 object_type: Some("Person".into()),
             }
         );
@@ -2046,49 +2042,34 @@ mod tests {
     #[test]
     fn graph_add_edge_invalid_weight() {
         let err = parse_err(&[
-            "graph", "add-edge", "g", "a", "b", "E", "--weight", "not_a_float",
+            "graph",
+            "add-edge",
+            "g",
+            "a",
+            "b",
+            "E",
+            "--weight",
+            "not_a_float",
         ]);
         assert!(err.contains("Invalid weight"), "got: {}", err);
     }
 
     #[test]
     fn graph_add_node_invalid_properties_json() {
-        let err = parse_err(&[
-            "graph",
-            "add-node",
-            "g",
-            "n",
-            "--properties",
-            "not json",
-        ]);
+        let err = parse_err(&["graph", "add-node", "g", "n", "--properties", "not json"]);
         assert!(!err.is_empty());
     }
 
     #[test]
     fn graph_bfs_invalid_max_nodes() {
-        let err = parse_err(&[
-            "graph",
-            "bfs",
-            "g",
-            "start",
-            "3",
-            "--max-nodes",
-            "xyz",
-        ]);
+        let err = parse_err(&["graph", "bfs", "g", "start", "3", "--max-nodes", "xyz"]);
         assert!(err.contains("Invalid max-nodes"), "got: {}", err);
     }
 
     #[test]
     fn graph_bulk_insert_invalid_chunk_size() {
         let json = r#"{"nodes":[]}"#;
-        let err = parse_err(&[
-            "graph",
-            "bulk-insert",
-            "g",
-            json,
-            "--chunk-size",
-            "abc",
-        ]);
+        let err = parse_err(&["graph", "bulk-insert", "g", json, "--chunk-size", "abc"]);
         assert!(err.contains("Invalid chunk-size"), "got: {}", err);
     }
 

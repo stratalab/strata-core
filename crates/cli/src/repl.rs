@@ -424,7 +424,9 @@ fn print_help(command: Option<&str>) {
         println!("  event       Event log operations (append, get, list, len)");
         println!("  state       State cell operations (set, get, del, init, cas, list, history)");
         println!("  vector      Vector store operations (upsert, get, del, search, create, ...)");
-        println!("  graph       Graph operations (add-node, add-edge, neighbors, bfs, ontology, ...)");
+        println!(
+            "  graph       Graph operations (add-node, add-edge, neighbors, bfs, ontology, ...)"
+        );
         println!("  branch      Branch operations (create, info, list, fork, diff, merge, ...)");
         println!("  space       Space operations (list, create, del, exists)");
         println!("  begin       Begin a transaction");
