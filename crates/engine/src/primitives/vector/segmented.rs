@@ -2520,4 +2520,126 @@ mod profiling_tests {
         );
         println!("  compact speedup: {speedup:.2}x");
     }
+
+    // ====================================================================
+    // Test 6: Compact Impact at 384d
+    // ====================================================================
+
+    /// Test 6: Compact Impact at Production Dimensions (384d)
+    ///
+    /// Measures QPS and recall before/after compact() at 384d.
+    /// Scales: 50K (2 segments with seal_threshold=25K) and
+    ///         100K (2 segments with seal_threshold=50K).
+    /// Uses 20 queries for brute-force recall to keep runtime reasonable.
+    #[test]
+    fn profile_compact_384d() {
+        use crate::primitives::vector::brute_force::BruteForceBackend;
+
+        let dim = 384;
+        let k = 10;
+        let num_search_queries = 100;
+        let num_recall_queries = 20; // Fewer for brute-force at 384d
+
+        let cases: &[(usize, usize)] = &[
+            (50_000, 25_000),  // 50K vectors, seal at 25K → 2 segments
+            (100_000, 50_000), // 100K vectors, seal at 50K → 2 segments
+        ];
+
+        println!("\n=== Compact Impact (dim={dim}, cosine) ===");
+
+        for &(n, seal_threshold) in cases {
+            let config = VectorConfig::new(dim, DistanceMetric::Cosine).unwrap();
+            let seg_config = SegmentedHnswConfig {
+                hnsw: HnswConfig::default(),
+                seal_threshold,
+                heap_flush_threshold: 0, // Disable mmap flushing in tests
+            };
+            let mut backend = SegmentedHnswBackend::new(&config, seg_config);
+
+            // Build brute-force for recall measurement
+            let mut brute = BruteForceBackend::new(&config);
+
+            // Insert all vectors
+            for i in 1..=n {
+                let emb = make_embedding(dim, i);
+                let id = VectorId::new(i as u64);
+                backend.insert(id, &emb).unwrap();
+                brute.insert(id, &emb).unwrap();
+            }
+
+            let num_segments_before = backend.sealed.len();
+
+            // Pre-generate queries for search timing
+            let search_queries: Vec<Vec<f32>> = (0..num_search_queries)
+                .map(|i| make_embedding(dim, n + 1 + i))
+                .collect();
+
+            // Pre-generate queries for recall (subset)
+            let recall_queries: Vec<Vec<f32>> = (0..num_recall_queries)
+                .map(|i| make_embedding(dim, n + 1 + i))
+                .collect();
+
+            // --- Time multi-segment search ---
+            let start = Instant::now();
+            for q in &search_queries {
+                std::hint::black_box(backend.search(q, k));
+            }
+            let multi_elapsed = start.elapsed();
+            let multi_qps = num_search_queries as f64 / multi_elapsed.as_secs_f64();
+
+            // Compute recall@k for multi-segment (using fewer queries)
+            let mut multi_recall_sum = 0.0;
+            for q in &recall_queries {
+                let brute_results = brute.search(q, k);
+                let hnsw_results = backend.search(q, k);
+                let brute_ids: BTreeSet<VectorId> =
+                    brute_results.iter().map(|(id, _)| *id).collect();
+                let hnsw_ids: BTreeSet<VectorId> =
+                    hnsw_results.iter().map(|(id, _)| *id).collect();
+                let overlap = brute_ids.intersection(&hnsw_ids).count();
+                multi_recall_sum += overlap as f64 / k as f64;
+            }
+            let multi_recall = multi_recall_sum / num_recall_queries as f64;
+
+            // --- Compact ---
+            backend.compact();
+            let num_segments_after = backend.sealed.len();
+
+            // --- Time single-segment search ---
+            let start = Instant::now();
+            for q in &search_queries {
+                std::hint::black_box(backend.search(q, k));
+            }
+            let compact_elapsed = start.elapsed();
+            let compact_qps = num_search_queries as f64 / compact_elapsed.as_secs_f64();
+
+            // Compute recall@k for compacted
+            let mut compact_recall_sum = 0.0;
+            for q in &recall_queries {
+                let brute_results = brute.search(q, k);
+                let hnsw_results = backend.search(q, k);
+                let brute_ids: BTreeSet<VectorId> =
+                    brute_results.iter().map(|(id, _)| *id).collect();
+                let hnsw_ids: BTreeSet<VectorId> =
+                    hnsw_results.iter().map(|(id, _)| *id).collect();
+                let overlap = brute_ids.intersection(&hnsw_ids).count();
+                compact_recall_sum += overlap as f64 / k as f64;
+            }
+            let compact_recall = compact_recall_sum / num_recall_queries as f64;
+
+            let speedup = compact_qps / multi_qps;
+            let scale_label = if n >= 1000 { format!("{}K", n / 1000) } else { format!("{n}") };
+
+            println!(
+                "\n--- {scale_label} vectors ({num_segments_before} segments → {num_segments_after}) ---"
+            );
+            println!(
+                "  Before: {multi_qps:.0} QPS, recall@{k} = {multi_recall:.3}"
+            );
+            println!(
+                "  After:  {compact_qps:.0} QPS, recall@{k} = {compact_recall:.3}"
+            );
+            println!("  Speedup: {speedup:.2}x");
+        }
+    }
 }

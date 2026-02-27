@@ -3081,4 +3081,551 @@ mod profiling_tests {
         println!("  result_pushes:         {avg_result_push:.1} avg");
         println!("  selectivity:           {selectivity:.1}% of total vectors");
     }
+
+    // ====================================================================
+    // Test 7: search_layer_inner Fine-Grained Breakdown
+    // ====================================================================
+
+    /// Test 7: Fine-grained timing breakdown of search_layer_inner.
+    ///
+    /// Three-phase approach to manage Instant::now() overhead (~25ns/call):
+    /// - Phase 0: Uninstrumented baseline (wall-clock QPS)
+    /// - Phase 1: Coarse per-outer-loop timing (3 buckets, ~4 Instant calls per iteration)
+    /// - Phase 2: Per-neighbor inner breakdown (4 categories per neighbor)
+    ///
+    /// Runs at both 128d and 384d, 50K scale, 100 queries, k=10, ef=100.
+    #[test]
+    fn profile_search_layer_inner_breakdown() {
+        for &dim in &[128, 384] {
+            let n = 50_000;
+            let num_queries = 100;
+            let warmup_queries = 10;
+            let k = 10;
+            let ef = 100;
+
+            let (compact, heap) = build_compact_graph(n, dim);
+            let metric = compact.vector_config.metric;
+            let entry_id = compact.entry_point.unwrap();
+            let max_level = compact.max_level;
+
+            // Pre-generate queries (warmup + measured)
+            let all_queries: Vec<Vec<f32>> = (0..(warmup_queries + num_queries))
+                .map(|i| make_embedding(dim, n + 1 + i))
+                .collect();
+
+            // Compute q_norms for cosine
+            let all_q_norms: Vec<Option<f32>> = all_queries
+                .iter()
+                .map(|q| {
+                    if metric == DistanceMetric::Cosine {
+                        Some(q.iter().map(|x| x * x).sum::<f32>().sqrt())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            let queries = &all_queries[warmup_queries..];
+            let q_norms = &all_q_norms[warmup_queries..];
+
+            // Warmup: run all warmup queries through search_with_heap_ef
+            for i in 0..warmup_queries {
+                std::hint::black_box(compact.search_with_heap_ef(
+                    &all_queries[i],
+                    k,
+                    ef,
+                    &heap,
+                ));
+            }
+
+            // =============================================================
+            // Phase 0: Uninstrumented baseline
+            // Time greedy descent and search_layer separately so we have
+            // a beam-search-only baseline to compare Phase 1/2 against.
+            // =============================================================
+
+            // Phase 0a: Full search_with_heap_ef (for overall QPS reference)
+            let start = Instant::now();
+            for q in queries {
+                std::hint::black_box(compact.search_with_heap_ef(q, k, ef, &heap));
+            }
+            let phase0_full_elapsed = start.elapsed();
+            let phase0_full_us =
+                phase0_full_elapsed.as_micros() as f64 / num_queries as f64;
+            let phase0_qps = num_queries as f64 / phase0_full_elapsed.as_secs_f64();
+
+            // Phase 0b: Greedy descent only
+            let start = Instant::now();
+            let mut layer0_entries: Vec<VectorId> = Vec::with_capacity(num_queries);
+            for (qi, q) in queries.iter().enumerate() {
+                let q_norm = q_norms[qi];
+                let entry = if max_level > 0 {
+                    compact.greedy_search_to_layer(q, entry_id, max_level, 1, &heap, q_norm)
+                } else {
+                    entry_id
+                };
+                layer0_entries.push(entry);
+            }
+            let greedy_elapsed = start.elapsed();
+            let greedy_us = greedy_elapsed.as_micros() as f64 / num_queries as f64;
+
+            // Phase 0c: search_layer only (beam search baseline for overhead comparison)
+            let start = Instant::now();
+            for (qi, q) in queries.iter().enumerate() {
+                let q_norm = q_norms[qi];
+                std::hint::black_box(compact.search_layer(
+                    q,
+                    layer0_entries[qi],
+                    ef,
+                    0,
+                    &heap,
+                    q_norm,
+                ));
+            }
+            let phase0_beam_elapsed = start.elapsed();
+            let phase0_beam_us =
+                phase0_beam_elapsed.as_micros() as f64 / num_queries as f64;
+
+            // =============================================================
+            // Phase 1: Coarse per-outer-loop timing
+            // =============================================================
+            let mut total_heap_pop_peek_ns: u64 = 0;
+            let mut total_neighbor_lookup_ns: u64 = 0;
+            let mut total_inner_loop_ns: u64 = 0;
+
+            for (qi, query) in queries.iter().enumerate() {
+                let q_norm = q_norms[qi];
+
+                // Greedy descent to layer 0
+                let current_entry = if max_level > 0 {
+                    compact.greedy_search_to_layer(query, entry_id, max_level, 1, &heap, q_norm)
+                } else {
+                    entry_id
+                };
+
+                // Setup: entry point
+                let entry_embedding = heap.get(current_entry).unwrap();
+                let entry_score = compute_similarity_cached(
+                    query,
+                    entry_embedding,
+                    metric,
+                    q_norm,
+                    heap.get_norm(current_entry),
+                );
+
+                let mut visited = VisitedSet::new();
+                visited.ensure_capacity(compact.id_offset as usize + compact.dense_nodes.len());
+                visited.mark(current_entry.0 as usize);
+
+                let mut candidates = BinaryHeap::with_capacity(ef);
+                candidates.push(ScoredId {
+                    score: entry_score,
+                    id: current_entry,
+                });
+
+                let mut results: BinaryHeap<Reverse<ScoredId>> =
+                    BinaryHeap::with_capacity(ef + 1);
+                if !compact.is_deleted(current_entry) {
+                    results.push(Reverse(ScoredId {
+                        score: entry_score,
+                        id: current_entry,
+                    }));
+                }
+
+                // Instrumented beam search — coarse timing
+                while let Some(nearest) = candidates.pop() {
+                    let t_pop = Instant::now();
+                    let worst_result_score = results
+                        .peek()
+                        .map(|r| r.0.score)
+                        .unwrap_or(f32::NEG_INFINITY);
+                    if nearest.score < worst_result_score && results.len() >= ef {
+                        total_heap_pop_peek_ns += t_pop.elapsed().as_nanos() as u64;
+                        break;
+                    }
+                    let t_after_peek = Instant::now();
+                    total_heap_pop_peek_ns += t_after_peek.duration_since(t_pop).as_nanos() as u64;
+
+                    let neighbors = compact.neighbors_at(nearest.id, 0);
+                    let t_after_neighbors = Instant::now();
+                    total_neighbor_lookup_ns +=
+                        t_after_neighbors.duration_since(t_after_peek).as_nanos() as u64;
+
+                    // Inner loop — timed as a block
+                    for (i, &neighbor_u64) in neighbors.iter().enumerate() {
+                        if i + 1 < neighbors.len() {
+                            heap.prefetch_embedding(VectorId::new(neighbors[i + 1]));
+                        }
+                        let neighbor_id = VectorId::new(neighbor_u64);
+                        if visited.is_visited(neighbor_id.0 as usize) {
+                            continue;
+                        }
+                        visited.mark(neighbor_id.0 as usize);
+
+                        if let Some(neighbor_embedding) = heap.get(neighbor_id) {
+                            let score = compute_similarity_cached(
+                                query,
+                                neighbor_embedding,
+                                metric,
+                                q_norm,
+                                heap.get_norm(neighbor_id),
+                            );
+                            let worst_result_score = results
+                                .peek()
+                                .map(|r| r.0.score)
+                                .unwrap_or(f32::NEG_INFINITY);
+                            if score > worst_result_score || results.len() < ef {
+                                candidates.push(ScoredId {
+                                    score,
+                                    id: neighbor_id,
+                                });
+                                if !compact.is_deleted(neighbor_id) {
+                                    results.push(Reverse(ScoredId {
+                                        score,
+                                        id: neighbor_id,
+                                    }));
+                                    if results.len() > ef {
+                                        results.pop();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let t_after_inner = Instant::now();
+                    total_inner_loop_ns +=
+                        t_after_inner.duration_since(t_after_neighbors).as_nanos() as u64;
+                }
+            }
+
+            let p1_heap_ns = total_heap_pop_peek_ns as f64 / num_queries as f64;
+            let p1_neighbor_ns = total_neighbor_lookup_ns as f64 / num_queries as f64;
+            let p1_inner_ns = total_inner_loop_ns as f64 / num_queries as f64;
+            let p1_total_ns = p1_heap_ns + p1_neighbor_ns + p1_inner_ns;
+            let p1_overhead_pct =
+                (p1_total_ns / 1000.0 - phase0_beam_us) / phase0_beam_us * 100.0;
+
+            // =============================================================
+            // Phase 2: Per-neighbor inner-loop breakdown
+            // =============================================================
+            let mut total_distance_ns: u64 = 0;
+            let mut total_embedding_lookup_ns: u64 = 0;
+            let mut total_visited_ns: u64 = 0;
+            let mut total_heap_push_ns: u64 = 0;
+            let mut count_distances: u64 = 0;
+            let mut count_visited: u64 = 0;
+            let mut count_heap_pushes: u64 = 0;
+
+            for (qi, query) in queries.iter().enumerate() {
+                let q_norm = q_norms[qi];
+
+                let current_entry = if max_level > 0 {
+                    compact.greedy_search_to_layer(query, entry_id, max_level, 1, &heap, q_norm)
+                } else {
+                    entry_id
+                };
+
+                let entry_embedding = heap.get(current_entry).unwrap();
+                let entry_score = compute_similarity_cached(
+                    query,
+                    entry_embedding,
+                    metric,
+                    q_norm,
+                    heap.get_norm(current_entry),
+                );
+
+                let mut visited = VisitedSet::new();
+                visited.ensure_capacity(compact.id_offset as usize + compact.dense_nodes.len());
+                visited.mark(current_entry.0 as usize);
+
+                let mut candidates = BinaryHeap::with_capacity(ef);
+                candidates.push(ScoredId {
+                    score: entry_score,
+                    id: current_entry,
+                });
+
+                let mut results: BinaryHeap<Reverse<ScoredId>> =
+                    BinaryHeap::with_capacity(ef + 1);
+                if !compact.is_deleted(current_entry) {
+                    results.push(Reverse(ScoredId {
+                        score: entry_score,
+                        id: current_entry,
+                    }));
+                }
+
+                while let Some(nearest) = candidates.pop() {
+                    let worst_result_score = results
+                        .peek()
+                        .map(|r| r.0.score)
+                        .unwrap_or(f32::NEG_INFINITY);
+                    if nearest.score < worst_result_score && results.len() >= ef {
+                        break;
+                    }
+
+                    let neighbors = compact.neighbors_at(nearest.id, 0);
+                    for (ni, &neighbor_u64) in neighbors.iter().enumerate() {
+                        // Match production prefetch behavior
+                        if ni + 1 < neighbors.len() {
+                            heap.prefetch_embedding(VectorId::new(neighbors[ni + 1]));
+                        }
+
+                        let neighbor_id = VectorId::new(neighbor_u64);
+
+                        // Visited ops
+                        let t0 = Instant::now();
+                        let was_visited = visited.is_visited(neighbor_id.0 as usize);
+                        count_visited += 1;
+                        if was_visited {
+                            total_visited_ns += t0.elapsed().as_nanos() as u64;
+                            continue;
+                        }
+                        visited.mark(neighbor_id.0 as usize);
+                        let t1 = Instant::now();
+                        total_visited_ns += t1.duration_since(t0).as_nanos() as u64;
+
+                        // Embedding lookup (includes get + get_norm)
+                        let emb_opt = heap.get(neighbor_id);
+                        let neighbor_norm = heap.get_norm(neighbor_id);
+                        let t2 = Instant::now();
+                        total_embedding_lookup_ns += t2.duration_since(t1).as_nanos() as u64;
+
+                        if let Some(neighbor_embedding) = emb_opt {
+                            // Distance computation (pure compute, no I/O)
+                            let score = compute_similarity_cached(
+                                query,
+                                neighbor_embedding,
+                                metric,
+                                q_norm,
+                                neighbor_norm,
+                            );
+                            let t3 = Instant::now();
+                            total_distance_ns += t3.duration_since(t2).as_nanos() as u64;
+                            count_distances += 1;
+
+                            // Heap operations
+                            let worst_result_score = results
+                                .peek()
+                                .map(|r| r.0.score)
+                                .unwrap_or(f32::NEG_INFINITY);
+                            if score > worst_result_score || results.len() < ef {
+                                candidates.push(ScoredId {
+                                    score,
+                                    id: neighbor_id,
+                                });
+                                count_heap_pushes += 1;
+                                if !compact.is_deleted(neighbor_id) {
+                                    results.push(Reverse(ScoredId {
+                                        score,
+                                        id: neighbor_id,
+                                    }));
+                                    if results.len() > ef {
+                                        results.pop();
+                                    }
+                                }
+                            }
+                            let t4 = Instant::now();
+                            total_heap_push_ns += t4.duration_since(t3).as_nanos() as u64;
+                        }
+                    }
+                }
+            }
+
+            let nq = num_queries as f64;
+            let p2_dist_ns = total_distance_ns as f64 / nq;
+            let p2_emb_ns = total_embedding_lookup_ns as f64 / nq;
+            let p2_visited_ns = total_visited_ns as f64 / nq;
+            let p2_heap_ns = total_heap_push_ns as f64 / nq;
+            let p2_measured_ns = p2_dist_ns + p2_emb_ns + p2_visited_ns + p2_heap_ns;
+            // Inner overhead = time from Instant::now() calls not attributable to any category
+            let p2_inner_overhead_ns = (p2_measured_ns - p1_inner_ns).max(0.0);
+            let p2_overhead_pct =
+                (p2_measured_ns / 1000.0 - phase0_beam_us) / phase0_beam_us * 100.0;
+
+            let avg_distances = count_distances as f64 / nq;
+            let avg_visited = count_visited as f64 / nq;
+            let avg_heap_pushes = count_heap_pushes as f64 / nq;
+
+            // Compute percentages relative to Phase 2 measured total
+            let p2_total_for_pct = p2_dist_ns + p2_emb_ns + p2_visited_ns + p2_heap_ns + p2_inner_overhead_ns;
+
+            println!("\n=== search_layer_inner Breakdown ({n}, dim={dim}, cosine) ===");
+            println!(
+                "Phase 0 (uninstrumented): {:.1} us/query, {:.0} QPS",
+                phase0_full_us, phase0_qps
+            );
+            println!(
+                "  greedy_descent:  {:.1} us/query ({:.1}%)",
+                greedy_us,
+                greedy_us / phase0_full_us * 100.0
+            );
+            println!(
+                "  beam_search:     {:.1} us/query ({:.1}%)",
+                phase0_beam_us,
+                phase0_beam_us / phase0_full_us * 100.0
+            );
+
+            println!("\nPhase 1 (coarse, per outer-loop phase):");
+            println!(
+                "  heap_pop+peek:       {:>7.0} ns/query ({:>5.1}%)",
+                p1_heap_ns,
+                p1_heap_ns / p1_total_ns * 100.0
+            );
+            println!(
+                "  neighbor_lookup:     {:>7.0} ns/query ({:>5.1}%)",
+                p1_neighbor_ns,
+                p1_neighbor_ns / p1_total_ns * 100.0
+            );
+            println!(
+                "  inner_loop (total):  {:>7.0} ns/query ({:>5.1}%)",
+                p1_inner_ns,
+                p1_inner_ns / p1_total_ns * 100.0
+            );
+            println!("  total:               {:>7.0} ns/query", p1_total_ns);
+            println!("  overhead vs Phase 0: {:.1}%", p1_overhead_pct);
+
+            println!("\nPhase 2 (inner-loop per-neighbor breakdown):");
+            println!(
+                "  distance_computation: {:>7.0} ns/query ({:>5.1}%)  [avg {:.0} calls, {:.0} ns/call]",
+                p2_dist_ns,
+                p2_dist_ns / p2_total_for_pct * 100.0,
+                avg_distances,
+                if avg_distances > 0.0 { p2_dist_ns / avg_distances } else { 0.0 }
+            );
+            println!(
+                "  embedding_lookup:     {:>7.0} ns/query ({:>5.1}%)  [avg {:.0} calls, {:.0} ns/call]",
+                p2_emb_ns,
+                p2_emb_ns / p2_total_for_pct * 100.0,
+                avg_distances,
+                if avg_distances > 0.0 { p2_emb_ns / avg_distances } else { 0.0 }
+            );
+            println!(
+                "  visited_ops:          {:>7.0} ns/query ({:>5.1}%)  [avg {:.0} calls, {:.0} ns/call]",
+                p2_visited_ns,
+                p2_visited_ns / p2_total_for_pct * 100.0,
+                avg_visited,
+                if avg_visited > 0.0 { p2_visited_ns / avg_visited } else { 0.0 }
+            );
+            println!(
+                "  heap_push:            {:>7.0} ns/query ({:>5.1}%)  [avg {:.0} calls, {:.0} ns/call]",
+                p2_heap_ns,
+                p2_heap_ns / p2_total_for_pct * 100.0,
+                avg_heap_pushes,
+                if avg_heap_pushes > 0.0 { p2_heap_ns / avg_heap_pushes } else { 0.0 }
+            );
+            println!(
+                "  inner_overhead:       {:>7.0} ns/query ({:>5.1}%)",
+                p2_inner_overhead_ns,
+                p2_inner_overhead_ns / p2_total_for_pct * 100.0
+            );
+            println!("  total:                {:>7.0} ns/query", p2_measured_ns);
+            println!("  overhead vs Phase 0: {:.1}%", p2_overhead_pct);
+
+            println!(
+                "\nOperation counts: {:.0} distances, {:.0} visited checks, {:.0} heap pushes avg/query",
+                avg_distances, avg_visited, avg_heap_pushes
+            );
+        }
+    }
+
+    // ====================================================================
+    // Test 8: Memory Bandwidth Bound
+    // ====================================================================
+
+    /// Test 8: Determine if hot path is memory-bandwidth-bound vs compute-bound.
+    ///
+    /// Compares raw embedding read throughput against distance computation throughput
+    /// at different working set sizes (1K, 10K, 50K, 100K vectors at 384d).
+    /// If distance_time / read_time ≈ 1.0, we're memory-bound.
+    #[test]
+    fn profile_memory_bandwidth_bound() {
+        let dim = 384;
+        let num_lookups = 100_000;
+        let scales: &[(usize, &str)] = &[
+            (1_000, "1K"),
+            (10_000, "10K"),
+            (50_000, "50K"),
+            (100_000, "100K"),
+        ];
+
+        println!("\n=== Memory Bandwidth Profile (dim={dim}) ===");
+        println!(
+            "{:<18} {:>10} {:>10} {:>8}   {}",
+            "Working set", "Read BW", "Dist BW", "Ratio", "Bottleneck"
+        );
+
+        for &(n, label) in scales {
+            let config = VectorConfig::new(dim, DistanceMetric::Cosine).unwrap();
+            let mut heap = VectorHeap::new(config);
+
+            for i in 1..=n {
+                let emb = make_embedding(dim, i);
+                heap.upsert(VectorId::new(i as u64), &emb).unwrap();
+            }
+
+            let working_set_bytes = n * dim * 4; // f32 = 4 bytes
+            let working_set_mb = working_set_bytes as f64 / (1024.0 * 1024.0);
+
+            // Pre-generate random lookup IDs using golden ratio hashing
+            let lookup_ids: Vec<VectorId> = (0..num_lookups)
+                .map(|i| {
+                    let idx = ((i as f64 * 0.618033988749895).fract() * n as f64) as u64 + 1;
+                    VectorId::new(idx)
+                })
+                .collect();
+
+            // Fixed query for distance computation
+            let query = make_embedding(dim, n + 1);
+            let q_norm = Some(query.iter().map(|x| x * x).sum::<f32>().sqrt());
+
+            // --- Raw read throughput ---
+            // Read full embeddings to measure memory bandwidth.
+            // We sum all elements to force the CPU to load every cache line,
+            // matching the access pattern of distance computation (dot product).
+            // The additions are ~4x cheaper than FMA so this still isolates
+            // memory bandwidth vs compute.
+            let mut read_checksum: f32 = 0.0;
+            let start = Instant::now();
+            for &id in &lookup_ids {
+                if let Some(emb) = heap.get(id) {
+                    read_checksum += emb.iter().sum::<f32>();
+                }
+            }
+            let read_elapsed = start.elapsed();
+            std::hint::black_box(read_checksum);
+
+            // --- Distance throughput ---
+            let mut dist_checksum: f32 = 0.0;
+            let start = Instant::now();
+            for &id in &lookup_ids {
+                if let Some(emb) = heap.get(id) {
+                    let score = compute_similarity_cached(
+                        &query,
+                        emb,
+                        DistanceMetric::Cosine,
+                        q_norm,
+                        heap.get_norm(id),
+                    );
+                    dist_checksum += score;
+                }
+            }
+            let dist_elapsed = start.elapsed();
+            std::hint::black_box(dist_checksum);
+
+            let bytes_accessed = num_lookups as f64 * dim as f64 * 4.0;
+            let read_bw_gbs = bytes_accessed / read_elapsed.as_secs_f64() / 1e9;
+            let dist_bw_gbs = bytes_accessed / dist_elapsed.as_secs_f64() / 1e9;
+            let ratio = dist_bw_gbs / read_bw_gbs;
+
+            let bottleneck = if ratio > 0.9 {
+                "memory"
+            } else if ratio > 0.7 {
+                "balanced"
+            } else {
+                "compute"
+            };
+
+            println!(
+                "{label:>4} ({working_set_mb:>5.0} MB):   {read_bw_gbs:>6.1} GB/s   {dist_bw_gbs:>6.1} GB/s   {ratio:>5.2}x   {bottleneck}"
+            );
+        }
+    }
 }
