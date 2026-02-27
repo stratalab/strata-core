@@ -297,18 +297,11 @@ pub(crate) fn open_graph_file(
         len: neighbor_data_len,
     };
 
-    // Build deleted_flags from dense_nodes
-    let deleted_flags: Vec<bool> = dense_nodes
-        .iter()
-        .map(|opt| opt.as_ref().is_some_and(|n| n.deleted_at.is_some()))
-        .collect();
-
     Ok(CompactHnswGraph {
         config: hnsw_config,
         vector_config,
         neighbor_data,
         dense_nodes,
-        deleted_flags,
         id_offset,
         node_count: actual_node_count,
         entry_point,
@@ -429,7 +422,6 @@ mod tests {
             vector_config: config.clone(),
             neighbor_data: NeighborData::Owned(Vec::new()),
             dense_nodes: Vec::new(),
-            deleted_flags: Vec::new(),
             id_offset: 0,
             node_count: 0,
             entry_point: None,
@@ -575,16 +567,11 @@ mod tests {
         )];
         let (dense_nodes, id_offset, node_count) = CompactHnswGraph::build_dense(entries);
 
-        let deleted_flags: Vec<bool> = dense_nodes
-            .iter()
-            .map(|opt| opt.as_ref().is_some_and(|n| n.deleted_at.is_some()))
-            .collect();
         let graph = CompactHnswGraph {
             config: HnswConfig::default(),
             vector_config: config.clone(),
             neighbor_data: NeighborData::Owned(Vec::new()),
             dense_nodes,
-            deleted_flags,
             id_offset,
             node_count,
             entry_point: Some(VectorId::new(42)),

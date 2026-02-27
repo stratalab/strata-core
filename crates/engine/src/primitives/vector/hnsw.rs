@@ -1158,10 +1158,6 @@ pub(crate) struct CompactHnswGraph {
     pub(crate) neighbor_data: NeighborData,
     /// Dense node storage: index = id.0 - id_offset
     pub(crate) dense_nodes: Vec<Option<CompactHnswNode>>,
-    /// Dense boolean flags: `deleted_flags[id.0 - id_offset] == true` means deleted.
-    /// At 50K nodes this is ~50 KB — fits in L1 cache, avoiding the cache-unfriendly
-    /// `dense_nodes` read (which pulls in the full CompactHnswNode with Vec pointer).
-    pub(crate) deleted_flags: Vec<bool>,
     /// VectorId.0 of the first entry (minimum ID in the graph)
     pub(crate) id_offset: u64,
     /// Number of occupied (Some) slots
@@ -1287,18 +1283,11 @@ impl CompactHnswGraph {
 
         let (dense_nodes, id_offset, node_count) = Self::build_dense(entries);
 
-        // Build deleted_flags from dense_nodes
-        let deleted_flags: Vec<bool> = dense_nodes
-            .iter()
-            .map(|opt| opt.as_ref().is_some_and(|n| n.deleted_at.is_some()))
-            .collect();
-
         CompactHnswGraph {
             config: graph.config.clone(),
             vector_config: graph.vector_config.clone(),
             neighbor_data: NeighborData::Owned(neighbor_data),
             dense_nodes,
-            deleted_flags,
             id_offset,
             node_count,
             entry_point: graph.entry_point,
@@ -1319,15 +1308,10 @@ impl CompactHnswGraph {
         }
     }
 
-    /// Check if node is deleted (uses dense flag cache for L1-friendly access).
+    /// Check if node is deleted
     #[inline]
     fn is_deleted(&self, id: VectorId) -> bool {
-        let raw = id.0;
-        if raw < self.id_offset {
-            return false;
-        }
-        let idx = (raw - self.id_offset) as usize;
-        self.deleted_flags.get(idx).copied().unwrap_or(false)
+        self.get_node(id).is_some_and(|n| n.deleted_at.is_some())
     }
 
     /// Check if node was alive at `as_of_ts`
@@ -1655,16 +1639,6 @@ impl CompactHnswGraph {
         if let Some(node) = self.get_node_mut(id) {
             node.deleted_at = Some(deleted_at);
         }
-        // Update deleted_flags cache
-        if was_alive {
-            let raw = id.0;
-            if raw >= self.id_offset {
-                let idx = (raw - self.id_offset) as usize;
-                if idx < self.deleted_flags.len() {
-                    self.deleted_flags[idx] = true;
-                }
-            }
-        }
         if was_alive && self.entry_point == Some(id) {
             let new_ep = self
                 .dense_nodes
@@ -1720,9 +1694,7 @@ impl CompactHnswGraph {
             .map(|n| n.layer_ranges.capacity() * std::mem::size_of::<(u32, u16)>())
             .sum();
         let node_bytes = dense_vec_bytes + layer_heap_bytes;
-        // deleted_flags cache
-        let flags_bytes = self.deleted_flags.len() * std::mem::size_of::<bool>();
-        neighbor_bytes + node_bytes + flags_bytes
+        neighbor_bytes + node_bytes
     }
 }
 
@@ -2467,16 +2439,11 @@ mod tests {
             ),
         ];
         let (dense_nodes, id_offset, node_count) = CompactHnswGraph::build_dense(entries);
-        let deleted_flags: Vec<bool> = dense_nodes
-            .iter()
-            .map(|opt| opt.as_ref().is_some_and(|n| n.deleted_at.is_some()))
-            .collect();
         let graph = CompactHnswGraph {
             config: HnswConfig::default(),
             vector_config: config,
             neighbor_data: NeighborData::Owned(Vec::new()),
             dense_nodes,
-            deleted_flags,
             id_offset,
             node_count,
             entry_point: Some(VectorId::new(100)),
