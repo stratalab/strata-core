@@ -579,9 +579,30 @@ impl VectorHeap {
                 let offset = slot as usize * self.config.dimension;
                 if let VectorData::InMemory(vec) = &self.data {
                     if offset < vec.len() {
-                        crate::primitives::vector::distance::prefetch_read(
-                            vec[offset..].as_ptr() as *const u8
-                        );
+                        let ptr = vec[offset..].as_ptr() as *const u8;
+                        let embedding_bytes = self.config.dimension * 4; // f32 = 4 bytes
+                        crate::primitives::vector::distance::prefetch_read(ptr);
+                        // Issue multiple cache line hints (64 bytes each) for large embeddings.
+                        // At 384d, each embedding is 1536 bytes (24 cache lines). Prefetching
+                        // the first 256 bytes gives the hardware prefetcher a head start.
+                        if embedding_bytes > 64 {
+                            // SAFETY: ptr points to an embedding of `embedding_bytes` size.
+                            // Each ptr.add(N) is guarded by `embedding_bytes > N`, ensuring
+                            // the target is within the embedding's allocation.
+                            unsafe {
+                                crate::primitives::vector::distance::prefetch_read(ptr.add(64));
+                                if embedding_bytes > 128 {
+                                    crate::primitives::vector::distance::prefetch_read(
+                                        ptr.add(128),
+                                    );
+                                }
+                                if embedding_bytes > 192 {
+                                    crate::primitives::vector::distance::prefetch_read(
+                                        ptr.add(192),
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }
