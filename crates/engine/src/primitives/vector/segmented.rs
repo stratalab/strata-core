@@ -20,18 +20,80 @@
 //! - All search merges use (score desc, VectorId asc) comparator
 //! - Each sealed segment's HnswGraph uses seed=42, vectors inserted in VectorId order
 
-use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BTreeMap, BinaryHeap};
 
 use once_cell::sync::Lazy;
 use rayon::prelude::*;
 
 use crate::primitives::vector::backend::VectorIndexBackend;
-use crate::primitives::vector::distance::compute_similarity;
+use crate::primitives::vector::distance::compute_similarity_cached;
 use crate::primitives::vector::heap::VectorHeap;
 use crate::primitives::vector::hnsw::{CompactHnswGraph, HnswConfig, HnswGraph};
 use crate::primitives::vector::types::InlineMeta;
 use crate::primitives::vector::{DistanceMetric, VectorConfig, VectorError, VectorId};
+
+/// Scored entry for top-k selection in active buffer search.
+///
+/// Ordering matches the output invariant (R4): higher score is Greater,
+/// lower VectorId is Greater for ties. Used in a min-heap
+/// (`BinaryHeap<Reverse<ActiveScored>>`) so that `peek()` returns the
+/// worst-quality result for O(1) eviction.
+#[derive(Clone, PartialEq)]
+struct ActiveScored {
+    score: f32,
+    id: VectorId,
+}
+
+impl Eq for ActiveScored {}
+
+impl PartialOrd for ActiveScored {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ActiveScored {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.score
+            .partial_cmp(&other.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| other.id.cmp(&self.id))
+    }
+}
+
+/// Entry for k-way merge heap. Ordered by (score desc, VectorId asc) to
+/// match the output ordering invariant (R4).
+struct KWayEntry {
+    score: f32,
+    id: VectorId,
+    set_idx: usize,
+}
+
+impl PartialEq for KWayEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.score == other.score && self.id == other.id
+    }
+}
+
+impl Eq for KWayEntry {}
+
+impl PartialOrd for KWayEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for KWayEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Higher score = Greater (max-heap pops highest first)
+        self.score
+            .partial_cmp(&other.score)
+            .unwrap_or(Ordering::Equal)
+            // Tie-break: lower VectorId = Greater (preferred)
+            .then_with(|| other.id.cmp(&self.id))
+    }
+}
 
 /// Dedicated thread pool for parallel vector search.
 ///
@@ -65,11 +127,16 @@ const MAX_SEARCH_THREADS: usize = 4;
 pub struct SegmentedHnswConfig {
     /// HNSW config used for each sealed segment
     pub hnsw: HnswConfig,
-    /// Number of vectors in the active buffer before sealing (default: 256)
+    /// Number of vectors in the active buffer before sealing (default: 50_000)
     pub seal_threshold: usize,
     /// Number of overlay vectors before flushing heap to mmap (default: 500_000).
     /// Set to 0 to disable periodic flushing.
     pub heap_flush_threshold: usize,
+    /// Maximum number of sealed segments before auto-compaction merges them
+    /// into a single segment. Reduces fan-out penalty at high scale.
+    /// Set to `usize::MAX` to disable auto-compaction entirely.
+    /// Default: 4 (compact fires every `seal_threshold × auto_compact_threshold` inserts).
+    pub auto_compact_threshold: usize,
 }
 
 impl Default for SegmentedHnswConfig {
@@ -78,6 +145,7 @@ impl Default for SegmentedHnswConfig {
             hnsw: HnswConfig::default(),
             seal_threshold: 50_000,
             heap_flush_threshold: 500_000,
+            auto_compact_threshold: 4,
         }
     }
 }
@@ -258,6 +326,19 @@ impl SegmentedHnswBackend {
             live_count,
             source_branch: None,
         });
+
+        // Auto-compact: if too many sealed segments have accumulated, merge them
+        // into one to reduce the fan-out penalty on search. At 1M vectors with
+        // seal_threshold=50K, this prevents 20-segment fan-out.
+        if self.sealed.len() > self.config.auto_compact_threshold {
+            tracing::info!(
+                target: "strata::vector",
+                segments = self.sealed.len(),
+                threshold = self.config.auto_compact_threshold,
+                "Auto-compacting sealed segments"
+            );
+            self.compact();
+        }
     }
 
     /// Flush the heap to mmap if it exceeds the configured threshold.
@@ -359,35 +440,78 @@ impl SegmentedHnswBackend {
     // Active Buffer Search (brute-force)
     // ========================================================================
 
-    /// Brute-force search the active buffer
+    /// Brute-force search the active buffer.
+    ///
+    /// Optimizations vs naive BTreeMap iteration + collect + sort:
+    /// - Iterates `self.active.ids` (dense Vec, excludes deleted entries) for cache locality
+    /// - Pre-computes query norm once for cosine similarity caching
+    /// - Uses a top-k BinaryHeap: O(n log k) vs O(n log n) for full sort
+    /// - Prefetches next embedding while processing current one
     fn search_active(&self, query: &[f32], k: usize) -> Vec<(VectorId, f32)> {
         let metric = self.vector_config.metric;
-        let mut results: Vec<(VectorId, f32)> = Vec::new();
 
-        for (&id, &(_, deleted_at)) in &self.active.timestamps {
-            if deleted_at.is_some() {
-                continue; // skip deleted
+        // Pre-compute query norm once (same pattern as CompactHnswGraph::search_with_heap_ef)
+        let q_norm = if metric == DistanceMetric::Cosine {
+            Some(query.iter().map(|x| x * x).sum::<f32>().sqrt())
+        } else {
+            None
+        };
+
+        // Top-k min-heap: worst-quality result on top for O(1) eviction.
+        // ActiveScored orders by (score desc, VectorId asc) — same as output invariant R4.
+        // Wrapping in Reverse makes BinaryHeap a min-heap by quality.
+        let mut top_k: BinaryHeap<Reverse<ActiveScored>> = BinaryHeap::with_capacity(k + 1);
+        let ids = &self.active.ids; // Dense Vec, excludes deleted entries
+
+        for (idx, &id) in ids.iter().enumerate() {
+            // Prefetch next embedding while processing current one
+            if idx + 1 < ids.len() {
+                self.heap.prefetch_embedding(ids[idx + 1]);
             }
             if let Some(embedding) = self.heap.get(id) {
-                let score = compute_similarity(query, embedding, metric);
-                results.push((id, score));
+                let score = compute_similarity_cached(
+                    query,
+                    embedding,
+                    metric,
+                    q_norm,
+                    self.heap.get_norm(id),
+                );
+                let entry = ActiveScored { score, id };
+                if top_k.len() < k {
+                    top_k.push(Reverse(entry));
+                } else if let Some(worst) = top_k.peek() {
+                    if entry > worst.0 {
+                        top_k.pop();
+                        top_k.push(Reverse(entry));
+                    }
+                }
             }
         }
 
+        let mut results: Vec<(VectorId, f32)> =
+            top_k.into_iter().map(|Reverse(e)| (e.id, e.score)).collect();
         // Sort: score desc, VectorId asc (Invariant R4)
         results.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(Ordering::Equal)
                 .then_with(|| a.0.cmp(&b.0))
         });
-        results.truncate(k);
         results
     }
 
-    /// Brute-force search the active buffer with temporal filter (as_of)
+    /// Brute-force search the active buffer with temporal filter (as_of).
+    ///
+    /// Must use `timestamps` BTreeMap for temporal filtering (deleted entries
+    /// need checked too), but uses norm cache and top-k heap.
     fn search_active_at(&self, query: &[f32], k: usize, as_of_ts: u64) -> Vec<(VectorId, f32)> {
         let metric = self.vector_config.metric;
-        let mut results: Vec<(VectorId, f32)> = Vec::new();
+        let q_norm = if metric == DistanceMetric::Cosine {
+            Some(query.iter().map(|x| x * x).sum::<f32>().sqrt())
+        } else {
+            None
+        };
+
+        let mut top_k: BinaryHeap<Reverse<ActiveScored>> = BinaryHeap::with_capacity(k + 1);
 
         for (&id, &(created_at, deleted_at)) in &self.active.timestamps {
             // Must have been created at or before as_of_ts
@@ -401,21 +525,39 @@ impl SegmentedHnswBackend {
                 }
             }
             if let Some(embedding) = self.heap.get(id) {
-                let score = compute_similarity(query, embedding, metric);
-                results.push((id, score));
+                let score = compute_similarity_cached(
+                    query,
+                    embedding,
+                    metric,
+                    q_norm,
+                    self.heap.get_norm(id),
+                );
+                let entry = ActiveScored { score, id };
+                if top_k.len() < k {
+                    top_k.push(Reverse(entry));
+                } else if let Some(worst) = top_k.peek() {
+                    if entry > worst.0 {
+                        top_k.pop();
+                        top_k.push(Reverse(entry));
+                    }
+                }
             }
         }
 
+        let mut results: Vec<(VectorId, f32)> =
+            top_k.into_iter().map(|Reverse(e)| (e.id, e.score)).collect();
         results.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(Ordering::Equal)
                 .then_with(|| a.0.cmp(&b.0))
         });
-        results.truncate(k);
         results
     }
 
-    /// Brute-force search the active buffer with time range filter
+    /// Brute-force search the active buffer with time range filter.
+    ///
+    /// Must use `timestamps` BTreeMap for temporal filtering, but uses
+    /// norm cache and top-k heap.
     fn search_active_in_range(
         &self,
         query: &[f32],
@@ -424,7 +566,13 @@ impl SegmentedHnswBackend {
         end_ts: u64,
     ) -> Vec<(VectorId, f32)> {
         let metric = self.vector_config.metric;
-        let mut results: Vec<(VectorId, f32)> = Vec::new();
+        let q_norm = if metric == DistanceMetric::Cosine {
+            Some(query.iter().map(|x| x * x).sum::<f32>().sqrt())
+        } else {
+            None
+        };
+
+        let mut top_k: BinaryHeap<Reverse<ActiveScored>> = BinaryHeap::with_capacity(k + 1);
 
         for (&id, &(created_at, deleted_at)) in &self.active.timestamps {
             if created_at < start_ts || created_at > end_ts {
@@ -434,17 +582,32 @@ impl SegmentedHnswBackend {
                 continue;
             }
             if let Some(embedding) = self.heap.get(id) {
-                let score = compute_similarity(query, embedding, metric);
-                results.push((id, score));
+                let score = compute_similarity_cached(
+                    query,
+                    embedding,
+                    metric,
+                    q_norm,
+                    self.heap.get_norm(id),
+                );
+                let entry = ActiveScored { score, id };
+                if top_k.len() < k {
+                    top_k.push(Reverse(entry));
+                } else if let Some(worst) = top_k.peek() {
+                    if entry > worst.0 {
+                        top_k.pop();
+                        top_k.push(Reverse(entry));
+                    }
+                }
             }
         }
 
+        let mut results: Vec<(VectorId, f32)> =
+            top_k.into_iter().map(|Reverse(e)| (e.id, e.score)).collect();
         results.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(Ordering::Equal)
                 .then_with(|| a.0.cmp(&b.0))
         });
-        results.truncate(k);
         results
     }
 
@@ -513,27 +676,59 @@ impl SegmentedHnswBackend {
     // Merge Results
     // ========================================================================
 
-    /// Merge multiple sorted result sets into one, deduplicating by VectorId
+    /// Merge multiple sorted result sets into one via k-way merge.
+    ///
+    /// Each input set is already sorted by (score desc, VectorId asc).
+    /// Segments have disjoint VectorId sets (each vector lives in exactly one
+    /// sealed segment; updates soft-delete the old entry before re-inserting),
+    /// so deduplication is verified with debug_assert rather than a HashSet.
     fn merge_results(sets: Vec<Vec<(VectorId, f32)>>, k: usize) -> Vec<(VectorId, f32)> {
-        // Collect all results
-        let mut all: Vec<(VectorId, f32)> = sets.into_iter().flatten().collect();
+        // Fast paths
+        if sets.is_empty() {
+            return Vec::new();
+        }
+        if sets.len() == 1 {
+            let mut single = sets.into_iter().next().unwrap();
+            single.truncate(k);
+            return single;
+        }
 
-        // Sort: score desc, VectorId asc (Invariant R4)
-        all.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
+        // K-way merge of pre-sorted inputs using a max-heap.
+        // Each entry tracks which iterator it came from so we can advance it.
+        let mut iters: Vec<std::vec::IntoIter<(VectorId, f32)>> =
+            sets.into_iter().map(|s| s.into_iter()).collect();
 
-        // Deduplicate by VectorId (keep the first/highest-scoring occurrence)
-        let mut seen = std::collections::HashSet::new();
+        let mut heap: BinaryHeap<KWayEntry> = BinaryHeap::with_capacity(iters.len());
+
+        // Seed heap with first element from each iterator
+        for (i, iter) in iters.iter_mut().enumerate() {
+            if let Some((id, score)) = iter.next() {
+                heap.push(KWayEntry {
+                    score,
+                    id,
+                    set_idx: i,
+                });
+            }
+        }
+
         let mut merged = Vec::with_capacity(k);
-        for (id, score) in all {
-            if seen.insert(id) {
-                merged.push((id, score));
-                if merged.len() >= k {
-                    break;
-                }
+        while let Some(entry) = heap.pop() {
+            debug_assert!(
+                !merged.iter().any(|(id, _)| *id == entry.id),
+                "Duplicate VectorId {} in merge_results — segments should have disjoint IDs",
+                entry.id.0
+            );
+            merged.push((entry.id, entry.score));
+            if merged.len() >= k {
+                break;
+            }
+            // Advance the iterator this entry came from
+            if let Some((id, score)) = iters[entry.set_idx].next() {
+                heap.push(KWayEntry {
+                    score,
+                    id,
+                    set_idx: entry.set_idx,
+                });
             }
         }
         merged
@@ -1252,6 +1447,7 @@ mod tests {
             hnsw: HnswConfig::default(),
             seal_threshold,
             heap_flush_threshold: 0, // Disable flushing in tests
+            auto_compact_threshold: usize::MAX, // Disable auto-compact in tests
         };
         SegmentedHnswBackend::new(&config, seg_config)
     }
@@ -2087,6 +2283,7 @@ mod tests {
             hnsw: HnswConfig::default(),
             seal_threshold: 100,     // high seal threshold to avoid sealing
             heap_flush_threshold: 5, // flush after 5 overlay vectors
+            auto_compact_threshold: usize::MAX,
         };
         let mut backend = SegmentedHnswBackend::new(&config, seg_config);
 
@@ -2137,6 +2334,7 @@ mod tests {
             hnsw: HnswConfig::default(),
             seal_threshold: 100,
             heap_flush_threshold: 0, // disabled
+            auto_compact_threshold: usize::MAX,
         };
         let mut backend = SegmentedHnswBackend::new(&config, seg_config);
         backend.flush_path = Some(std::path::PathBuf::from("/tmp/dummy.vec"));
@@ -2159,6 +2357,7 @@ mod tests {
             hnsw: HnswConfig::default(),
             seal_threshold: 100,
             heap_flush_threshold: 1,
+            auto_compact_threshold: usize::MAX,
         };
         let mut backend = SegmentedHnswBackend::new(&config, seg_config);
         // flush_path is None (in-memory database)
@@ -2181,6 +2380,7 @@ mod tests {
             hnsw: HnswConfig::default(),
             seal_threshold: 3,
             heap_flush_threshold: 5,
+            auto_compact_threshold: usize::MAX,
         };
         let mut backend = SegmentedHnswBackend::new(&config, seg_config);
 
@@ -2409,6 +2609,250 @@ mod tests {
             "Higher ef should find at least as good results"
         );
     }
+
+    // ========================================================================
+    // v7 optimization-specific tests
+    // ========================================================================
+
+    #[test]
+    fn test_active_buffer_tie_breaking() {
+        // Regression test: top-k heap must break ties by VectorId ascending.
+        // All vectors have the same embedding → identical similarity scores.
+        // The top-k selection must return the lowest VectorIds.
+        let mut backend = make_backend_with_threshold(3, DistanceMetric::DotProduct, 100);
+
+        let embedding = [1.0, 0.0, 0.0];
+        // Insert in non-sorted order
+        backend
+            .insert_with_timestamp(VectorId::new(5), &embedding, 1)
+            .unwrap();
+        backend
+            .insert_with_timestamp(VectorId::new(2), &embedding, 2)
+            .unwrap();
+        backend
+            .insert_with_timestamp(VectorId::new(8), &embedding, 3)
+            .unwrap();
+        backend
+            .insert_with_timestamp(VectorId::new(1), &embedding, 4)
+            .unwrap();
+        backend
+            .insert_with_timestamp(VectorId::new(7), &embedding, 5)
+            .unwrap();
+        backend
+            .insert_with_timestamp(VectorId::new(3), &embedding, 6)
+            .unwrap();
+
+        // All 6 vectors have the same score. Ask for k=3 → should get {1, 2, 3}.
+        let results = backend.search(&[1.0, 0.0, 0.0], 3);
+        assert_eq!(results.len(), 3);
+        let ids: Vec<u64> = results.iter().map(|(id, _)| id.as_u64()).collect();
+        assert_eq!(ids, vec![1, 2, 3], "Tie-breaking must prefer lowest VectorIds");
+
+        // Ask for all → should be sorted by VectorId ascending
+        let results_all = backend.search(&[1.0, 0.0, 0.0], 10);
+        let ids_all: Vec<u64> = results_all.iter().map(|(id, _)| id.as_u64()).collect();
+        assert_eq!(ids_all, vec![1, 2, 3, 5, 7, 8]);
+    }
+
+    #[test]
+    fn test_active_buffer_tie_breaking_temporal() {
+        // Same as above but via search_at (temporal path uses BTreeMap iteration)
+        let mut backend = make_backend_with_threshold(3, DistanceMetric::DotProduct, 100);
+
+        let embedding = [1.0, 0.0, 0.0];
+        backend
+            .insert_with_timestamp(VectorId::new(5), &embedding, 10)
+            .unwrap();
+        backend
+            .insert_with_timestamp(VectorId::new(2), &embedding, 20)
+            .unwrap();
+        backend
+            .insert_with_timestamp(VectorId::new(8), &embedding, 30)
+            .unwrap();
+        backend
+            .insert_with_timestamp(VectorId::new(1), &embedding, 40)
+            .unwrap();
+
+        // search_at: all 4 exist at ts=50, ask for k=2
+        let results = backend.search_at(&[1.0, 0.0, 0.0], 2, 50);
+        assert_eq!(results.len(), 2);
+        let ids: Vec<u64> = results.iter().map(|(id, _)| id.as_u64()).collect();
+        assert_eq!(ids, vec![1, 2], "Temporal tie-breaking must prefer lowest VectorIds");
+
+        // search_in_range: created_at in [10, 30], so ids 5, 2, 8. Ask for k=2.
+        let results_range = backend.search_in_range(&[1.0, 0.0, 0.0], 2, 10, 30);
+        assert_eq!(results_range.len(), 2);
+        let ids_range: Vec<u64> = results_range.iter().map(|(id, _)| id.as_u64()).collect();
+        assert_eq!(ids_range, vec![2, 5]);
+    }
+
+    #[test]
+    fn test_merge_results_kway() {
+        // Directly test merge_results with multiple pre-sorted input sets
+        let set1 = vec![
+            (VectorId::new(1), 0.95),
+            (VectorId::new(3), 0.80),
+            (VectorId::new(5), 0.60),
+        ];
+        let set2 = vec![
+            (VectorId::new(2), 0.90),
+            (VectorId::new(4), 0.70),
+            (VectorId::new(6), 0.50),
+        ];
+        let set3 = vec![(VectorId::new(7), 0.85), (VectorId::new(8), 0.40)];
+
+        let merged = SegmentedHnswBackend::merge_results(vec![set1, set2, set3], 5);
+        assert_eq!(merged.len(), 5);
+        // Expected order: (1, 0.95), (2, 0.90), (7, 0.85), (3, 0.80), (4, 0.70)
+        let ids: Vec<u64> = merged.iter().map(|(id, _)| id.as_u64()).collect();
+        assert_eq!(ids, vec![1, 2, 7, 3, 4]);
+    }
+
+    #[test]
+    fn test_merge_results_single_set_fast_path() {
+        let set = vec![
+            (VectorId::new(1), 0.95),
+            (VectorId::new(2), 0.90),
+            (VectorId::new(3), 0.80),
+        ];
+        let merged = SegmentedHnswBackend::merge_results(vec![set], 2);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].0, VectorId::new(1));
+        assert_eq!(merged[1].0, VectorId::new(2));
+    }
+
+    #[test]
+    fn test_merge_results_empty() {
+        let merged = SegmentedHnswBackend::merge_results(vec![], 10);
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn test_merge_results_tie_breaking() {
+        // Two sets with identical scores — merge must order by VectorId asc
+        let set1 = vec![(VectorId::new(3), 0.80), (VectorId::new(5), 0.80)];
+        let set2 = vec![(VectorId::new(1), 0.80), (VectorId::new(4), 0.80)];
+
+        let merged = SegmentedHnswBackend::merge_results(vec![set1, set2], 4);
+        let ids: Vec<u64> = merged.iter().map(|(id, _)| id.as_u64()).collect();
+        assert_eq!(ids, vec![1, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_auto_compact_reduces_segments() {
+        // Use a very small seal_threshold and auto_compact_threshold
+        // to verify that auto-compact fires and reduces segment count.
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        let seg_config = SegmentedHnswConfig {
+            hnsw: HnswConfig::default(),
+            seal_threshold: 3,
+            heap_flush_threshold: 0,
+            auto_compact_threshold: 2, // compact after 3rd segment
+        };
+        let mut backend = SegmentedHnswBackend::new(&config, seg_config);
+
+        // Insert 3 → seal to segment 1
+        for i in 1..=3 {
+            backend
+                .insert_with_timestamp(VectorId::new(i), &[i as f32, 0.0, 0.0], i as u64)
+                .unwrap();
+        }
+        assert_eq!(backend.segment_count(), 1);
+
+        // Insert 3 more → seal to segment 2
+        for i in 4..=6 {
+            backend
+                .insert_with_timestamp(VectorId::new(i), &[i as f32, 0.0, 0.0], i as u64)
+                .unwrap();
+        }
+        assert_eq!(backend.segment_count(), 2);
+
+        // Insert 3 more → seal to segment 3 → exceeds threshold of 2 → compact to 1
+        for i in 7..=9 {
+            backend
+                .insert_with_timestamp(VectorId::new(i), &[i as f32, 0.0, 0.0], i as u64)
+                .unwrap();
+        }
+        assert_eq!(
+            backend.segment_count(),
+            1,
+            "Auto-compact should have merged 3 segments into 1"
+        );
+
+        // All 9 vectors should still be searchable
+        let results = backend.search(&[5.0, 0.0, 0.0], 9);
+        assert_eq!(results.len(), 9);
+
+        // Verify temporal search still works after compaction
+        let results_at = backend.search_at(&[5.0, 0.0, 0.0], 5, 6);
+        // Only ids 1-6 existed at ts=6
+        assert!(results_at.len() <= 6);
+        for &(id, _score) in &results_at {
+            assert!(id.as_u64() <= 6);
+        }
+    }
+
+    #[test]
+    fn test_auto_compact_disabled() {
+        // Verify that usize::MAX threshold effectively disables auto-compact
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        let seg_config = SegmentedHnswConfig {
+            hnsw: HnswConfig::default(),
+            seal_threshold: 3,
+            heap_flush_threshold: 0,
+            auto_compact_threshold: usize::MAX,
+        };
+        let mut backend = SegmentedHnswBackend::new(&config, seg_config);
+
+        // Create 5 segments (15 vectors, seal every 3)
+        for i in 1..=15 {
+            backend
+                .insert_with_timestamp(VectorId::new(i), &[i as f32, 0.0, 0.0], i as u64)
+                .unwrap();
+        }
+        assert_eq!(
+            backend.segment_count(),
+            5,
+            "With auto-compact disabled, all 5 segments should remain"
+        );
+    }
+
+    #[test]
+    fn test_deleted_flags_consistency() {
+        // Verify that deleted_flags stays in sync with CompactHnswNode::deleted_at
+        // across seal + delete operations
+        let mut backend = make_backend_with_threshold(3, DistanceMetric::Cosine, 5);
+
+        // Insert 5 vectors → seal
+        for i in 1..=5 {
+            backend
+                .insert_with_timestamp(VectorId::new(i), &[i as f32, 0.0, 0.0], i as u64)
+                .unwrap();
+        }
+        assert_eq!(backend.segment_count(), 1);
+
+        // Delete vector 3 from the sealed segment
+        backend.delete_with_timestamp(VectorId::new(3), 100).unwrap();
+
+        // Verify the sealed segment's deleted_flags is in sync
+        let seg = &backend.sealed[0];
+        for (id, node) in seg.graph.iter_nodes() {
+            let idx = (id.0 - seg.graph.id_offset) as usize;
+            let flag = seg.graph.deleted_flags[idx];
+            let node_deleted = node.deleted_at.is_some();
+            assert_eq!(
+                flag, node_deleted,
+                "deleted_flags[{}] = {} but node.deleted_at.is_some() = {} for VectorId {}",
+                idx, flag, node_deleted, id.0
+            );
+        }
+
+        // Vector 3 should not appear in search results
+        let results = backend.search(&[3.0, 0.0, 0.0], 5);
+        for &(id, _score) in &results {
+            assert_ne!(id.as_u64(), 3, "Deleted vector should not appear in results");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2443,6 +2887,7 @@ mod profiling_tests {
             hnsw: HnswConfig::default(),
             seal_threshold,
             heap_flush_threshold: 0, // Disable mmap flushing in tests
+            auto_compact_threshold: usize::MAX, // Disable auto-compact in tests
         };
         let mut backend = SegmentedHnswBackend::new(&config, seg_config);
 
