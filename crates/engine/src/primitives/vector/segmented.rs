@@ -488,8 +488,10 @@ impl SegmentedHnswBackend {
             }
         }
 
-        let mut results: Vec<(VectorId, f32)> =
-            top_k.into_iter().map(|Reverse(e)| (e.id, e.score)).collect();
+        let mut results: Vec<(VectorId, f32)> = top_k
+            .into_iter()
+            .map(|Reverse(e)| (e.id, e.score))
+            .collect();
         // Sort: score desc, VectorId asc (Invariant R4)
         results.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
@@ -544,8 +546,10 @@ impl SegmentedHnswBackend {
             }
         }
 
-        let mut results: Vec<(VectorId, f32)> =
-            top_k.into_iter().map(|Reverse(e)| (e.id, e.score)).collect();
+        let mut results: Vec<(VectorId, f32)> = top_k
+            .into_iter()
+            .map(|Reverse(e)| (e.id, e.score))
+            .collect();
         results.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(Ordering::Equal)
@@ -601,8 +605,10 @@ impl SegmentedHnswBackend {
             }
         }
 
-        let mut results: Vec<(VectorId, f32)> =
-            top_k.into_iter().map(|Reverse(e)| (e.id, e.score)).collect();
+        let mut results: Vec<(VectorId, f32)> = top_k
+            .into_iter()
+            .map(|Reverse(e)| (e.id, e.score))
+            .collect();
         results.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(Ordering::Equal)
@@ -1446,7 +1452,7 @@ mod tests {
         let seg_config = SegmentedHnswConfig {
             hnsw: HnswConfig::default(),
             seal_threshold,
-            heap_flush_threshold: 0, // Disable flushing in tests
+            heap_flush_threshold: 0,            // Disable flushing in tests
             auto_compact_threshold: usize::MAX, // Disable auto-compact in tests
         };
         SegmentedHnswBackend::new(&config, seg_config)
@@ -2646,7 +2652,11 @@ mod tests {
         let results = backend.search(&[1.0, 0.0, 0.0], 3);
         assert_eq!(results.len(), 3);
         let ids: Vec<u64> = results.iter().map(|(id, _)| id.as_u64()).collect();
-        assert_eq!(ids, vec![1, 2, 3], "Tie-breaking must prefer lowest VectorIds");
+        assert_eq!(
+            ids,
+            vec![1, 2, 3],
+            "Tie-breaking must prefer lowest VectorIds"
+        );
 
         // Ask for all → should be sorted by VectorId ascending
         let results_all = backend.search(&[1.0, 0.0, 0.0], 10);
@@ -2677,7 +2687,11 @@ mod tests {
         let results = backend.search_at(&[1.0, 0.0, 0.0], 2, 50);
         assert_eq!(results.len(), 2);
         let ids: Vec<u64> = results.iter().map(|(id, _)| id.as_u64()).collect();
-        assert_eq!(ids, vec![1, 2], "Temporal tie-breaking must prefer lowest VectorIds");
+        assert_eq!(
+            ids,
+            vec![1, 2],
+            "Temporal tie-breaking must prefer lowest VectorIds"
+        );
 
         // search_in_range: created_at in [10, 30], so ids 5, 2, 8. Ask for k=2.
         let results_range = backend.search_in_range(&[1.0, 0.0, 0.0], 2, 10, 30);
@@ -2832,7 +2846,9 @@ mod tests {
         assert_eq!(backend.segment_count(), 1);
 
         // Delete vector 3 from the sealed segment
-        backend.delete_with_timestamp(VectorId::new(3), 100).unwrap();
+        backend
+            .delete_with_timestamp(VectorId::new(3), 100)
+            .unwrap();
 
         // Verify the sealed segment's deleted_flags is in sync
         let seg = &backend.sealed[0];
@@ -2850,7 +2866,11 @@ mod tests {
         // Vector 3 should not appear in search results
         let results = backend.search(&[3.0, 0.0, 0.0], 5);
         for &(id, _score) in &results {
-            assert_ne!(id.as_u64(), 3, "Deleted vector should not appear in results");
+            assert_ne!(
+                id.as_u64(),
+                3,
+                "Deleted vector should not appear in results"
+            );
         }
     }
 }
