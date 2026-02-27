@@ -28,6 +28,7 @@ fn build_index(n: usize, dim: usize) -> SegmentedHnswBackend {
         hnsw: HnswConfig::default(),
         seal_threshold: 50_000,
         heap_flush_threshold: 0, // disable mmap flushing in benchmarks
+        auto_compact_threshold: usize::MAX, // disable auto-compact in benchmarks
     };
     let mut backend = SegmentedHnswBackend::new(&config, seg_config);
 
