@@ -297,6 +297,101 @@ fn csv_escape(s: &str) -> String {
     }
 }
 
+// =============================================================================
+// Analytics Result & Options Types
+// =============================================================================
+
+/// Result of Weakly Connected Components (WCC).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WccResult {
+    /// Node → component ID (smallest node hash in each component).
+    pub components: HashMap<String, u64>,
+}
+
+/// Result of Community Detection via Label Propagation (CDLP).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CdlpResult {
+    /// Node → community label.
+    pub labels: HashMap<String, u64>,
+}
+
+/// Options for CDLP.
+#[derive(Debug, Clone)]
+pub struct CdlpOptions {
+    /// Maximum iterations before stopping.
+    pub max_iterations: usize,
+    /// Traversal direction for neighbor lookups.
+    pub direction: Direction,
+}
+
+impl Default for CdlpOptions {
+    fn default() -> Self {
+        Self {
+            max_iterations: 10,
+            direction: Direction::Both,
+        }
+    }
+}
+
+/// Result of PageRank.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageRankResult {
+    /// Node → rank score.
+    pub ranks: HashMap<String, f64>,
+    /// Number of iterations performed.
+    pub iterations: usize,
+}
+
+/// Options for PageRank.
+#[derive(Debug, Clone)]
+pub struct PageRankOptions {
+    /// Damping factor (default 0.85).
+    pub damping: f64,
+    /// Maximum iterations (default 20).
+    pub max_iterations: usize,
+    /// Convergence tolerance (default 1e-6).
+    pub tolerance: f64,
+}
+
+impl Default for PageRankOptions {
+    fn default() -> Self {
+        Self {
+            damping: 0.85,
+            max_iterations: 20,
+            tolerance: 1e-6,
+        }
+    }
+}
+
+/// Result of Local Clustering Coefficient (LCC).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LccResult {
+    /// Node → clustering coefficient (0.0 for degree < 2).
+    pub coefficients: HashMap<String, f64>,
+}
+
+/// Result of Single-Source Shortest Path (SSSP).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SsspResult {
+    /// Node → shortest distance from source (unreachable nodes omitted).
+    pub distances: HashMap<String, f64>,
+}
+
+/// Options for SSSP.
+#[derive(Debug, Clone)]
+pub struct SsspOptions {
+    /// Direction for edge traversal.
+    pub direction: Direction,
+}
+
+impl Default for SsspOptions {
+    fn default() -> Self {
+        Self {
+            direction: Direction::Outgoing,
+        }
+    }
+}
+
 /// Trait for graph algorithms that operate on a snapshot.
 pub trait GraphAlgorithm {
     /// The result type of this algorithm.

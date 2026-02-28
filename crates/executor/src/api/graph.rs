@@ -1,7 +1,9 @@
 //! Graph operations on the Strata API surface.
 
 use super::Strata;
-use crate::types::{GraphBfsResult, GraphNeighborHit};
+use crate::types::{
+    GraphAnalyticsF64Result, GraphAnalyticsU64Result, GraphBfsResult, GraphNeighborHit,
+};
 use crate::{Command, Error, Output, Result, Value};
 
 impl Strata {
@@ -487,6 +489,98 @@ impl Strata {
             Output::Keys(ids) => Ok(ids),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphNodesByType".into(),
+            }),
+        }
+    }
+
+    // =========================================================================
+    // Analytics
+    // =========================================================================
+
+    /// Compute Weakly Connected Components.
+    pub fn graph_wcc(&self, graph: &str) -> Result<GraphAnalyticsU64Result> {
+        match self.executor.execute(Command::GraphWcc {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+        })? {
+            Output::GraphAnalyticsU64(r) => Ok(r),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphWcc".into(),
+            }),
+        }
+    }
+
+    /// Compute Community Detection via Label Propagation.
+    pub fn graph_cdlp(
+        &self,
+        graph: &str,
+        max_iterations: usize,
+        direction: Option<&str>,
+    ) -> Result<GraphAnalyticsU64Result> {
+        match self.executor.execute(Command::GraphCdlp {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+            max_iterations,
+            direction: direction.map(|s| s.to_string()),
+        })? {
+            Output::GraphAnalyticsU64(r) => Ok(r),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphCdlp".into(),
+            }),
+        }
+    }
+
+    /// Compute PageRank importance scores.
+    pub fn graph_pagerank(
+        &self,
+        graph: &str,
+        damping: Option<f64>,
+        max_iterations: Option<usize>,
+        tolerance: Option<f64>,
+    ) -> Result<GraphAnalyticsF64Result> {
+        match self.executor.execute(Command::GraphPagerank {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+            damping,
+            max_iterations,
+            tolerance,
+        })? {
+            Output::GraphAnalyticsF64(r) => Ok(r),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphPagerank".into(),
+            }),
+        }
+    }
+
+    /// Compute Local Clustering Coefficients.
+    pub fn graph_lcc(&self, graph: &str) -> Result<GraphAnalyticsF64Result> {
+        match self.executor.execute(Command::GraphLcc {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+        })? {
+            Output::GraphAnalyticsF64(r) => Ok(r),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphLcc".into(),
+            }),
+        }
+    }
+
+    /// Compute Single-Source Shortest Path (Dijkstra).
+    pub fn graph_sssp(
+        &self,
+        graph: &str,
+        source: &str,
+        direction: Option<&str>,
+    ) -> Result<GraphAnalyticsF64Result> {
+        match self.executor.execute(Command::GraphSssp {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+            source: source.to_string(),
+            direction: direction.map(|s| s.to_string()),
+        })? {
+            Output::GraphAnalyticsF64(r) => Ok(r),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphSssp".into(),
             }),
         }
     }

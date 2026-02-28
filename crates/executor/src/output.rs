@@ -218,6 +218,12 @@ pub enum Output {
         /// Local file path where the model was saved.
         path: String,
     },
+
+    /// Graph analytics result with u64 values (WCC, CDLP).
+    GraphAnalyticsU64(GraphAnalyticsU64Result),
+
+    /// Graph analytics result with f64 values (PageRank, LCC, SSSP).
+    GraphAnalyticsF64(GraphAnalyticsF64Result),
 }
 
 /// Snapshot of the embedding pipeline status.

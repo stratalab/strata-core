@@ -494,6 +494,27 @@ pub struct SearchResultHit {
 // Graph Types
 // =============================================================================
 
+/// Graph analytics result with u64 per-node values (WCC components, CDLP labels).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GraphAnalyticsU64Result {
+    /// Algorithm name (e.g. "wcc", "cdlp").
+    pub algorithm: String,
+    /// Per-node result values.
+    pub result: std::collections::HashMap<String, u64>,
+}
+
+/// Graph analytics result with f64 per-node values (PageRank, LCC, SSSP).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GraphAnalyticsF64Result {
+    /// Algorithm name (e.g. "pagerank", "lcc", "sssp").
+    pub algorithm: String,
+    /// Per-node result values.
+    pub result: std::collections::HashMap<String, f64>,
+    /// Number of iterations (for iterative algorithms like PageRank).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iterations: Option<usize>,
+}
+
 /// A neighbor entry returned by graph neighbor queries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphNeighborHit {

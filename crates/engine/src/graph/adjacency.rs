@@ -141,6 +141,18 @@ impl AdjacencyIndex {
             })
     }
 
+    /// Iterate outgoing neighbors with weights, without allocating Neighbor structs.
+    ///
+    /// Returns `(dst, weight)` pairs as string references + f64, avoiding
+    /// the Vec<Neighbor> + EdgeData cloning overhead.
+    pub fn outgoing_weighted<'a>(&'a self, node_id: &str) -> impl Iterator<Item = (&'a str, f64)> {
+        self.outgoing.get(node_id).into_iter().flat_map(|edges| {
+            edges
+                .iter()
+                .map(|(dst, _, data)| (dst.as_str(), data.weight))
+        })
+    }
+
     /// Iterate incoming neighbors without allocating Neighbor structs.
     ///
     /// Returns `(src, edge_type)` pairs as string references, avoiding
