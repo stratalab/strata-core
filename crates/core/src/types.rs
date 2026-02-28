@@ -92,6 +92,10 @@ impl Namespace {
         branch_id: BranchId,
         space: String,
     ) -> Self {
+        debug_assert!(!tenant.is_empty(), "Namespace tenant must not be empty");
+        debug_assert!(!app.is_empty(), "Namespace app must not be empty");
+        debug_assert!(!agent.is_empty(), "Namespace agent must not be empty");
+        debug_assert!(!space.is_empty(), "Namespace space must not be empty");
         Self {
             tenant,
             app,
@@ -101,29 +105,70 @@ impl Namespace {
         }
     }
 
+    /// Create a new namespace with validation
+    ///
+    /// Returns an error if any string field is empty. Use this at API boundaries
+    /// where input validation is required. For internal use where inputs are
+    /// known-valid, prefer `new()` which uses `debug_assert!`.
+    pub fn try_new(
+        tenant: String,
+        app: String,
+        agent: String,
+        branch_id: BranchId,
+        space: String,
+    ) -> Result<Self, crate::error::StrataError> {
+        if tenant.is_empty() {
+            return Err(crate::error::StrataError::invalid_input(
+                "Namespace tenant must not be empty",
+            ));
+        }
+        if app.is_empty() {
+            return Err(crate::error::StrataError::invalid_input(
+                "Namespace app must not be empty",
+            ));
+        }
+        if agent.is_empty() {
+            return Err(crate::error::StrataError::invalid_input(
+                "Namespace agent must not be empty",
+            ));
+        }
+        if space.is_empty() {
+            return Err(crate::error::StrataError::invalid_input(
+                "Namespace space must not be empty",
+            ));
+        }
+        Ok(Self {
+            tenant,
+            app,
+            agent,
+            branch_id,
+            space,
+        })
+    }
+
     /// Create a namespace for a branch with default tenant/app/agent/space
     ///
     /// This is a convenience method for primitives that only need
     /// branch-level isolation. Uses "default" for tenant, app, agent, and space.
     pub fn for_branch(branch_id: BranchId) -> Self {
-        Self {
-            tenant: "default".to_string(),
-            app: "default".to_string(),
-            agent: "default".to_string(),
+        Self::new(
+            "default".to_string(),
+            "default".to_string(),
+            "default".to_string(),
             branch_id,
-            space: "default".to_string(),
-        }
+            "default".to_string(),
+        )
     }
 
     /// Create a namespace for a branch and space with default tenant/app/agent
     pub fn for_branch_space(branch_id: BranchId, space: &str) -> Self {
-        Self {
-            tenant: "default".to_string(),
-            app: "default".to_string(),
-            agent: "default".to_string(),
+        Self::new(
+            "default".to_string(),
+            "default".to_string(),
+            "default".to_string(),
             branch_id,
-            space: space.to_string(),
-        }
+            space.to_string(),
+        )
     }
 }
 
@@ -169,13 +214,14 @@ impl PartialOrd for Namespace {
 /// - Event = 0x02
 /// - State = 0x03
 /// - Branch = 0x05
+/// - Space = 0x06
 /// - Vector = 0x10 (vector metadata)
 /// - Json = 0x11 (JSON primitive)
 /// - VectorConfig = 0x12 (vector collection config)
 ///
 /// Note: 0x04 was formerly Trace (TraceStore was removed in 0.12.0)
 ///
-/// Ordering: KV < Event < State < Branch < Vector < Json < VectorConfig
+/// Ordering: KV < Event < State < Trace < Branch < Space < Vector < Json < VectorConfig
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum TypeTag {
@@ -185,7 +231,12 @@ pub enum TypeTag {
     Event = 0x02,
     /// State cell records (renamed from StateMachine )
     State = 0x03,
-    /// Reserved for backwards compatibility (TraceStore was removed)
+    /// Reserved for backwards compatibility (TraceStore was removed in 0.12.0).
+    ///
+    /// This variant is preserved **only** for legacy deserialization of on-disk data
+    /// that may contain `0x04` type tags. It must never be used for new writes.
+    /// The `from_byte(0x04)` arm returns `Some(TypeTag::Trace)` to avoid data loss
+    /// during recovery of databases created before 0.12.0.
     #[deprecated(since = "0.12.0", note = "TraceStore primitive was removed")]
     Trace = 0x04,
     /// Branch index entries
@@ -213,7 +264,7 @@ impl TypeTag {
             0x01 => Some(TypeTag::KV),
             0x02 => Some(TypeTag::Event),
             0x03 => Some(TypeTag::State),
-            0x04 => Some(TypeTag::Trace), // Deprecated but needed for backwards compatibility
+            0x04 => Some(TypeTag::Trace), // Legacy only: preserved for deserialization, never for new writes
             0x05 => Some(TypeTag::Branch),
             0x06 => Some(TypeTag::Space),
             0x10 => Some(TypeTag::Vector),
@@ -269,16 +320,22 @@ pub struct Key {
     /// Type discriminator (KV, Event, State, Trace, Branch, etc.)
     pub type_tag: TypeTag,
     /// User-defined key bytes (supports arbitrary binary keys)
-    pub user_key: Vec<u8>,
+    ///
+    /// Uses `Box<[u8]>` instead of `Vec<u8>` to save 8 bytes per key
+    /// (no capacity field). At 128M entries this saves ~1 GB of RAM.
+    pub user_key: Box<[u8]>,
 }
 
 impl Key {
     /// Create a new key with the given namespace, type tag, and user key
+    ///
+    /// Accepts `Vec<u8>` for ergonomic construction and converts internally
+    /// to `Box<[u8]>` for memory efficiency.
     pub fn new(namespace: Arc<Namespace>, type_tag: TypeTag, user_key: Vec<u8>) -> Self {
         Self {
             namespace,
             type_tag,
-            user_key,
+            user_key: user_key.into_boxed_slice(),
         }
     }
 
@@ -451,7 +508,9 @@ impl Key {
     ///
     /// Returns None if the user_key is not valid UTF-8
     pub fn user_key_string(&self) -> Option<String> {
-        String::from_utf8(self.user_key.clone()).ok()
+        std::str::from_utf8(&self.user_key)
+            .ok()
+            .map(|s| s.to_string())
     }
 
     /// Check if this key starts with the given prefix
@@ -805,23 +864,126 @@ mod tests {
         );
     }
 
+    // ========================================
+    // Namespace::try_new Tests
+    // ========================================
+
     #[test]
-    fn test_namespace_display_empty_components() {
+    fn test_namespace_try_new_valid() {
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let result = Namespace::try_new(
+            "acme".to_string(),
+            "myapp".to_string(),
+            "agent-1".to_string(),
+            branch_id,
+            "production".to_string(),
+        );
+        assert!(result.is_ok(), "All non-empty strings should succeed");
+        let ns = result.unwrap();
+        assert_eq!(ns.tenant, "acme");
+        assert_eq!(ns.app, "myapp");
+        assert_eq!(ns.agent, "agent-1");
+        assert_eq!(ns.branch_id, branch_id);
+        assert_eq!(ns.space, "production");
+    }
+
+    #[test]
+    fn test_namespace_try_new_empty_tenant() {
+        let branch_id = BranchId::new();
+        let result = Namespace::try_new(
             "".to_string(),
+            "myapp".to_string(),
+            "agent-1".to_string(),
+            branch_id,
+            "default".to_string(),
+        );
+        assert!(result.is_err(), "Empty tenant should fail");
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("tenant"),
+            "Error should mention 'tenant', got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_namespace_try_new_empty_app() {
+        let branch_id = BranchId::new();
+        let result = Namespace::try_new(
+            "acme".to_string(),
             "".to_string(),
+            "agent-1".to_string(),
+            branch_id,
+            "default".to_string(),
+        );
+        assert!(result.is_err(), "Empty app should fail");
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("app"),
+            "Error should mention 'app', got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_namespace_try_new_empty_agent() {
+        let branch_id = BranchId::new();
+        let result = Namespace::try_new(
+            "acme".to_string(),
+            "myapp".to_string(),
             "".to_string(),
             branch_id,
             "default".to_string(),
         );
-        let display = format!("{}", ns);
-        // Should produce "///branch_id/default" with empty components
+        assert!(result.is_err(), "Empty agent should fail");
+        let err = format!("{}", result.unwrap_err());
         assert!(
-            display.starts_with("///"),
-            "Empty components should produce leading slashes"
+            err.contains("agent"),
+            "Error should mention 'agent', got: {}",
+            err
         );
-        assert!(display.ends_with("/default"));
+    }
+
+    #[test]
+    fn test_namespace_try_new_empty_space() {
+        let branch_id = BranchId::new();
+        let result = Namespace::try_new(
+            "acme".to_string(),
+            "myapp".to_string(),
+            "agent-1".to_string(),
+            branch_id,
+            "".to_string(),
+        );
+        assert!(result.is_err(), "Empty space should fail");
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("space"),
+            "Error should mention 'space', got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_namespace_try_new_multiple_empty() {
+        let branch_id = BranchId::new();
+        let result = Namespace::try_new(
+            "".to_string(),
+            "".to_string(),
+            "".to_string(),
+            branch_id,
+            "".to_string(),
+        );
+        assert!(result.is_err(), "Multiple empty fields should fail");
+        let err = format!("{}", result.unwrap_err());
+        // At least one empty field should be reported
+        assert!(
+            err.contains("tenant")
+                || err.contains("app")
+                || err.contains("agent")
+                || err.contains("space"),
+            "Error should mention at least one empty field, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -852,6 +1014,27 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
+    fn test_namespace_with_empty_strings() {
+        let branch_id = BranchId::new();
+        // In debug mode, empty tenant triggers debug_assert panic
+        let result = std::panic::catch_unwind(|| {
+            Namespace::new(
+                "".to_string(),
+                "".to_string(),
+                "".to_string(),
+                branch_id,
+                "default".to_string(),
+            )
+        });
+        assert!(
+            result.is_err(),
+            "Empty namespace components should panic in debug mode"
+        );
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
     fn test_namespace_with_empty_strings() {
         let branch_id = BranchId::new();
         let ns = Namespace::new(
@@ -1191,7 +1374,7 @@ mod tests {
         let key = Key::new(ns.clone(), TypeTag::KV, b"mykey".to_vec());
         assert_eq!(key.namespace, ns);
         assert_eq!(key.type_tag, TypeTag::KV);
-        assert_eq!(key.user_key, b"mykey");
+        assert_eq!(&*key.user_key, b"mykey");
     }
 
     #[test]
@@ -1208,25 +1391,25 @@ mod tests {
         // Test KV helper
         let kv_key = Key::new_kv(ns.clone(), "mykey");
         assert_eq!(kv_key.type_tag, TypeTag::KV);
-        assert_eq!(kv_key.user_key, b"mykey");
+        assert_eq!(&*kv_key.user_key, b"mykey");
 
         // Test event helper
         let event_key = Key::new_event(ns.clone(), 42);
         assert_eq!(event_key.type_tag, TypeTag::Event);
         assert_eq!(
-            u64::from_be_bytes(event_key.user_key.as_slice().try_into().unwrap()),
+            u64::from_be_bytes((*event_key.user_key).try_into().unwrap()),
             42
         );
 
         // Test state cell helper
         let state_key = Key::new_state(ns.clone(), "state1");
         assert_eq!(state_key.type_tag, TypeTag::State);
-        assert_eq!(state_key.user_key, b"state1");
+        assert_eq!(&*state_key.user_key, b"state1");
 
         // Test branch index helper
         let branch_key = Key::new_branch(ns.clone(), branch_id);
         assert_eq!(branch_key.type_tag, TypeTag::Branch);
-        assert_eq!(branch_key.user_key, branch_id.as_bytes().to_vec());
+        assert_eq!(&*branch_key.user_key, branch_id.as_bytes());
     }
 
     #[test]
@@ -1242,7 +1425,7 @@ mod tests {
 
         let key = Key::new_event_meta(ns);
         assert_eq!(key.type_tag, TypeTag::Event);
-        assert_eq!(key.user_key, b"__meta__");
+        assert_eq!(&*key.user_key, b"__meta__");
     }
 
     #[test]
@@ -1608,8 +1791,8 @@ mod tests {
         assert!(key_zero < key_max);
 
         // Verify roundtrip of sequence numbers
-        let seq_zero = u64::from_be_bytes(key_zero.user_key.as_slice().try_into().unwrap());
-        let seq_max = u64::from_be_bytes(key_max.user_key.as_slice().try_into().unwrap());
+        let seq_zero = u64::from_be_bytes((*key_zero.user_key).try_into().unwrap());
+        let seq_max = u64::from_be_bytes((*key_max.user_key).try_into().unwrap());
         assert_eq!(seq_zero, 0);
         assert_eq!(seq_max, u64::MAX);
     }
@@ -1671,7 +1854,8 @@ mod tests {
         let key = Key::new(ns.clone(), TypeTag::KV, binary_data.clone());
 
         assert_eq!(
-            key.user_key, binary_data,
+            &*key.user_key,
+            binary_data.as_slice(),
             "Binary user_key should be preserved"
         );
     }
@@ -1689,7 +1873,7 @@ mod tests {
 
         assert_eq!(key.type_tag, TypeTag::Json);
         assert_eq!(key.namespace, namespace);
-        assert_eq!(key.user_key, doc_id.as_bytes().to_vec());
+        assert_eq!(&*key.user_key, doc_id.as_bytes());
     }
 
     #[test]

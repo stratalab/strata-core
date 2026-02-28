@@ -11,7 +11,7 @@ use strata_engine::KVStoreExt;
 
 /// Helper to create an event payload object
 fn event_payload(data: Value) -> Value {
-    Value::Object(HashMap::from([("data".to_string(), data)]))
+    Value::Object(Box::new(HashMap::from([("data".to_string(), data)])))
 }
 
 // ============================================================================

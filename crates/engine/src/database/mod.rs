@@ -1144,14 +1144,15 @@ impl Database {
                             }
                         }
                         TypeTag::Event => {
-                            if key.user_key == b"__meta__" || key.user_key.starts_with(b"__tidx__")
+                            if *key.user_key == *b"__meta__"
+                                || key.user_key.starts_with(b"__tidx__")
                             {
                                 continue;
                             }
                             if let Some(text) = crate::search::extract_indexable_text(value) {
                                 if key.user_key.len() == 8 {
                                     let sequence = u64::from_be_bytes(
-                                        key.user_key.as_slice().try_into().unwrap_or([0; 8]),
+                                        (*key.user_key).try_into().unwrap_or([0; 8]),
                                     );
                                     let entity_ref = strata_core::EntityRef::Event {
                                         branch_id,
@@ -1184,13 +1185,14 @@ impl Database {
                             }
                         }
                         TypeTag::Event => {
-                            if key.user_key == b"__meta__" || key.user_key.starts_with(b"__tidx__")
+                            if *key.user_key == *b"__meta__"
+                                || key.user_key.starts_with(b"__tidx__")
                             {
                                 continue;
                             }
                             if key.user_key.len() == 8 {
                                 let sequence = u64::from_be_bytes(
-                                    key.user_key.as_slice().try_into().unwrap_or([0; 8]),
+                                    (*key.user_key).try_into().unwrap_or([0; 8]),
                                 );
                                 let branch_id = key.namespace.branch_id;
                                 let entity_ref = strata_core::EntityRef::Event {
@@ -1465,11 +1467,11 @@ impl Database {
             // Event entries
             for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::Event) {
                 // Skip metadata keys
-                if key.user_key == b"__meta__" || key.user_key.starts_with(b"__tidx__") {
+                if *key.user_key == *b"__meta__" || key.user_key.starts_with(b"__tidx__") {
                     continue;
                 }
                 let sequence = if key.user_key.len() == 8 {
-                    u64::from_be_bytes(key.user_key.as_slice().try_into().unwrap_or([0; 8]))
+                    u64::from_be_bytes((*key.user_key).try_into().unwrap_or([0; 8]))
                 } else {
                     0
                 };
@@ -1499,7 +1501,7 @@ impl Database {
                     continue;
                 }
                 let branch_id_bytes: [u8; 16] = if key.user_key.len() == 16 {
-                    key.user_key.as_slice().try_into().unwrap_or([0; 16])
+                    (*key.user_key).try_into().unwrap_or([0; 16])
                 } else {
                     [0; 16]
                 };

@@ -260,7 +260,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                 }
 
                 // Populate inline metadata for O(1) search resolution
-                let vector_key = String::from_utf8(vec_key.user_key.clone())
+                let vector_key = String::from_utf8(vec_key.user_key.to_vec())
                     .ok()
                     .and_then(|uk| uk.strip_prefix(&collection_prefix).map(|s| s.to_string()))
                     .unwrap_or_default();

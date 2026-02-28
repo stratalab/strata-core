@@ -287,7 +287,7 @@ impl BranchIndex {
             Ok(results
                 .into_iter()
                 .filter_map(|(k, _)| {
-                    let key_str = String::from_utf8(k.user_key.clone()).ok()?;
+                    let key_str = String::from_utf8(k.user_key.to_vec()).ok()?;
                     // Filter out any index keys (legacy data)
                     if key_str.contains("__idx_") {
                         None

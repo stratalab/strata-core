@@ -95,7 +95,7 @@ fn test_read_only_blocks_all_writes() {
             branch: None,
             space: None,
             event_type: "t".into(),
-            payload: Value::Object(Default::default()),
+            payload: Value::Object(Box::new(Default::default())),
         },
         Command::StateSet {
             branch: None,

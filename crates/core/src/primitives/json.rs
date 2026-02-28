@@ -125,6 +125,13 @@ pub enum JsonLimitError {
 #[repr(transparent)]
 pub struct JsonValue(serde_json::Value);
 
+// Compile-time layout assertion: JsonValue must have identical layout to serde_json::Value.
+// This guards the two `unsafe` pointer casts in get_at_path() and get_at_path_mut().
+const _: () = {
+    assert!(std::mem::size_of::<JsonValue>() == std::mem::size_of::<serde_json::Value>());
+    assert!(std::mem::align_of::<JsonValue>() == std::mem::align_of::<serde_json::Value>());
+};
+
 impl JsonValue {
     /// Create a null JSON value
     pub fn null() -> Self {

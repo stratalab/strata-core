@@ -837,12 +837,12 @@ mod tests {
 
     /// Helper to create an empty object payload
     fn empty_payload() -> Value {
-        Value::Object(HashMap::new())
+        Value::Object(Box::new(HashMap::new()))
     }
 
     /// Helper to create an object payload with a single value
     fn payload_with(key: &str, value: Value) -> Value {
-        Value::Object(HashMap::from([(key.to_string(), value)]))
+        Value::Object(Box::new(HashMap::from([(key.to_string(), value)])))
     }
 
     /// Helper to create an object payload with an integer
@@ -938,7 +938,7 @@ mod tests {
             &branch_id,
             "default",
             "test",
-            Value::Array(vec![Value::Int(1)]),
+            Value::Array(Box::new(vec![Value::Int(1)])),
         );
         assert!(result.is_err());
     }
@@ -990,10 +990,10 @@ mod tests {
         let (_temp, _db, log) = setup();
         let branch_id = BranchId::new();
 
-        let payload = Value::Object(HashMap::from([
+        let payload = Value::Object(Box::new(HashMap::from([
             ("tool".to_string(), Value::String("search".into())),
             ("count".to_string(), Value::Int(42)),
-        ]));
+        ])));
 
         let result = log.append(&branch_id, "default", "test", payload);
         assert!(result.is_ok());
@@ -1053,10 +1053,10 @@ mod tests {
         let (_temp, _db, log) = setup();
         let branch_id = BranchId::new();
 
-        let payload = Value::Object(HashMap::from([
+        let payload = Value::Object(Box::new(HashMap::from([
             ("tool".to_string(), Value::String("search".into())),
             ("query".to_string(), Value::String("rust async".into())),
-        ]));
+        ])));
 
         let version = log
             .append(&branch_id, "default", "tool_call", payload.clone())

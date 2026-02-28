@@ -88,7 +88,7 @@ pub fn json_to_value(json: &JsonValue) -> Result<Value, String> {
         JsonValue::String(s) => Ok(Value::String(s.clone())),
         JsonValue::Array(arr) => {
             let items: Result<Vec<Value>, String> = arr.iter().map(json_to_value).collect();
-            Ok(Value::Array(items?))
+            Ok(Value::Array(Box::new(items?)))
         }
         JsonValue::Object(obj) => {
             // Check for special encodings
@@ -116,7 +116,7 @@ pub fn json_to_value(json: &JsonValue) -> Result<Value, String> {
                 .iter()
                 .map(|(k, v)| json_to_value(v).map(|val| (k.clone(), val)))
                 .collect();
-            Ok(Value::Object(map?))
+            Ok(Value::Object(Box::new(map?)))
         }
     }
 }
@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn test_complex_value_round_trip() {
-        let original = Value::Object(
+        let original = Value::Object(Box::new(
             [
                 ("name".to_string(), Value::String("test".to_string())),
                 ("count".to_string(), Value::Int(42)),
@@ -272,12 +272,15 @@ mod tests {
                 ("nan".to_string(), Value::Float(f64::NAN)),
                 (
                     "nested".to_string(),
-                    Value::Array(vec![Value::Float(f64::INFINITY), Value::Float(-0.0)]),
+                    Value::Array(Box::new(vec![
+                        Value::Float(f64::INFINITY),
+                        Value::Float(-0.0),
+                    ])),
                 ),
             ]
             .into_iter()
             .collect(),
-        );
+        ));
 
         let json = value_to_json(&original);
         let restored = json_to_value(&json).unwrap();

@@ -28,7 +28,7 @@ pub fn create_db() -> Arc<Database> {
 
 /// Helper to create an event payload (must be an Object)
 pub fn event_payload(key: &str, value: strata_core::Value) -> strata_core::Value {
-    strata_core::Value::Object([(key.to_string(), value)].into_iter().collect())
+    strata_core::Value::Object(Box::new([(key.to_string(), value)].into_iter().collect()))
 }
 
 /// Extract version from Output::Version

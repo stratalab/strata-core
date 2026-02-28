@@ -301,7 +301,7 @@ impl VectorStore {
 
         for (key, versioned_value) in entries {
             // Extract collection name from key
-            let name = String::from_utf8(key.user_key.clone())
+            let name = String::from_utf8(key.user_key.to_vec())
                 .map_err(|e| VectorError::Serialization(e.to_string()))?;
 
             // Deserialize the record from the stored bytes
@@ -1091,7 +1091,7 @@ impl VectorStore {
                 Err(_) => continue,
             };
             if VectorId(record.vector_id) == target_id {
-                let user_key = String::from_utf8(key.user_key.clone()).unwrap_or_default();
+                let user_key = String::from_utf8(key.user_key.to_vec()).unwrap_or_default();
                 // Strip the collection prefix to get just the vector key
                 let vector_key = user_key
                     .strip_prefix(&format!("{}/", collection))
@@ -1198,7 +1198,7 @@ impl VectorStore {
             if record.vector_id == target_id.0 {
                 // Extract vector key from the full key
                 // Key format: collection/key
-                let user_key = String::from_utf8(key.user_key.clone())
+                let user_key = String::from_utf8(key.user_key.to_vec())
                     .map_err(|e| VectorError::Serialization(e.to_string()))?;
 
                 // Remove collection prefix
@@ -1256,7 +1256,7 @@ impl VectorStore {
             };
 
             if record.vector_id == target_id.0 {
-                let user_key = String::from_utf8(key.user_key.clone())
+                let user_key = String::from_utf8(key.user_key.to_vec())
                     .map_err(|e| VectorError::Serialization(e.to_string()))?;
 
                 let vector_key = user_key
@@ -2066,7 +2066,7 @@ impl VectorStore {
                                     if let Value::Bytes(b) = &vv.value {
                                         VectorRecord::from_bytes(b)
                                             .ok()
-                                            .map(|r| (k.user_key.clone(), r.vector_id))
+                                            .map(|r| (k.user_key.to_vec(), r.vector_id))
                                     } else {
                                         None
                                     }
@@ -2130,7 +2130,7 @@ impl VectorStore {
                         // Determine provenance: did this key come from the source branch?
                         // Check by matching user_key + VectorId against source KV scan.
                         let is_from_source = source_key_to_vid
-                            .get(&vec_key.user_key)
+                            .get(&*vec_key.user_key)
                             .is_some_and(|&src_vid| src_vid == vec_record.vector_id);
 
                         if is_from_source {

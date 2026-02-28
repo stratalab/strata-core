@@ -364,7 +364,9 @@ fn test_event_get_by_type_determinism() {
                 branch: Some(BranchId::from("default")),
                 space: None,
                 event_type: "events".to_string(),
-                payload: Value::Object([("seq".to_string(), Value::Int(i))].into_iter().collect()),
+                payload: Value::Object(Box::new(
+                    [("seq".to_string(), Value::Int(i))].into_iter().collect(),
+                )),
             })
             .unwrap();
     }
@@ -409,14 +411,14 @@ fn test_json_get_determinism() {
             space: None,
             key: "doc".to_string(),
             path: "".to_string(),
-            value: Value::Object(
+            value: Value::Object(Box::new(
                 [
                     ("name".to_string(), Value::String("Alice".into())),
                     ("age".to_string(), Value::Int(30)),
                 ]
                 .into_iter()
                 .collect(),
-            ),
+            )),
         })
         .unwrap();
 

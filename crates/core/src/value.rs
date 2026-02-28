@@ -62,9 +62,14 @@ pub enum Value {
     /// MessagePack) for lossless `Bytes` roundtrips.
     Bytes(Vec<u8>),
     /// Array of values
-    Array(Vec<Value>),
+    ///
+    /// Boxed to shrink `Value` from ~56 to ~24 bytes. At 128M entries
+    /// this saves ~3.8 GB of RAM. The `Box` is transparent to serde.
+    Array(Box<Vec<Value>>),
     /// Object with string keys (JSON object)
-    Object(HashMap<String, Value>),
+    ///
+    /// Boxed to shrink `Value` from ~56 to ~24 bytes. See `Array` above.
+    Object(Box<HashMap<String, Value>>),
 }
 
 // Custom PartialEq implementation for IEEE-754 float semantics
@@ -89,6 +94,16 @@ impl PartialEq for Value {
 }
 
 impl Value {
+    /// Create an Array value (convenience constructor that handles boxing)
+    pub fn array(v: Vec<Value>) -> Self {
+        Value::Array(Box::new(v))
+    }
+
+    /// Create an Object value (convenience constructor that handles boxing)
+    pub fn object(m: HashMap<String, Value>) -> Self {
+        Value::Object(Box::new(m))
+    }
+
     /// Get the type name as a string
     pub fn type_name(&self) -> &'static str {
         match self {
@@ -260,13 +275,13 @@ impl From<&[u8]> for Value {
 
 impl From<Vec<Value>> for Value {
     fn from(a: Vec<Value>) -> Self {
-        Value::Array(a)
+        Value::Array(Box::new(a))
     }
 }
 
 impl From<HashMap<String, Value>> for Value {
     fn from(o: HashMap<String, Value>) -> Self {
-        Value::Object(o)
+        Value::Object(Box::new(o))
     }
 }
 
@@ -297,11 +312,11 @@ impl From<serde_json::Value> for Value {
             }
             serde_json::Value::String(s) => Value::String(s),
             serde_json::Value::Array(arr) => {
-                Value::Array(arr.into_iter().map(Value::from).collect())
+                Value::Array(Box::new(arr.into_iter().map(Value::from).collect()))
             }
-            serde_json::Value::Object(obj) => {
-                Value::Object(obj.into_iter().map(|(k, v)| (k, Value::from(v))).collect())
-            }
+            serde_json::Value::Object(obj) => Value::Object(Box::new(
+                obj.into_iter().map(|(k, v)| (k, Value::from(v))).collect(),
+            )),
         }
     }
 }
@@ -321,10 +336,11 @@ impl From<Value> for serde_json::Value {
                 serde_json::Value::String(base64_encode(&b))
             }
             Value::Array(arr) => {
-                serde_json::Value::Array(arr.into_iter().map(serde_json::Value::from).collect())
+                serde_json::Value::Array((*arr).into_iter().map(serde_json::Value::from).collect())
             }
             Value::Object(obj) => serde_json::Value::Object(
-                obj.into_iter()
+                (*obj)
+                    .into_iter()
                     .map(|(k, v)| (k, serde_json::Value::from(v)))
                     .collect(),
             ),
@@ -442,7 +458,7 @@ mod tests {
             Value::String("test".to_string()),
             Value::Bool(true),
         ];
-        let value = Value::Array(array.clone());
+        let value = Value::Array(Box::new(array.clone()));
 
         assert!(matches!(value, Value::Array(_)));
         assert!(value.is_array());
@@ -460,7 +476,7 @@ mod tests {
         map.insert("key1".to_string(), Value::Int(42));
         map.insert("key2".to_string(), Value::String("value".to_string()));
 
-        let value = Value::Object(map.clone());
+        let value = Value::Object(Box::new(map.clone()));
         assert!(matches!(value, Value::Object(_)));
         assert!(value.is_object());
 
@@ -480,7 +496,10 @@ mod tests {
             Value::Float(3.14),
             Value::String("test".to_string()),
             Value::Bytes(vec![1, 2, 3]),
-            Value::Array(vec![Value::Int(1), Value::String("a".to_string())]),
+            Value::Array(Box::new(vec![
+                Value::Int(1),
+                Value::String("a".to_string()),
+            ])),
         ];
 
         for value in test_values {
@@ -494,7 +513,7 @@ mod tests {
     fn test_value_object_serialization() {
         let mut map = HashMap::new();
         map.insert("test".to_string(), Value::Int(123));
-        let value = Value::Object(map);
+        let value = Value::Object(Box::new(map));
 
         let serialized = serde_json::to_string(&value).unwrap();
         let deserialized: Value = serde_json::from_str(&serialized).unwrap();
@@ -535,8 +554,11 @@ mod tests {
         assert_eq!(Value::Float(1.0).type_name(), "Float");
         assert_eq!(Value::String("".to_string()).type_name(), "String");
         assert_eq!(Value::Bytes(vec![]).type_name(), "Bytes");
-        assert_eq!(Value::Array(vec![]).type_name(), "Array");
-        assert_eq!(Value::Object(HashMap::new()).type_name(), "Object");
+        assert_eq!(Value::Array(Box::new(vec![])).type_name(), "Array");
+        assert_eq!(
+            Value::Object(Box::new(HashMap::new())).type_name(),
+            "Object"
+        );
     }
 
     // ====================================================================
@@ -694,14 +716,14 @@ mod tests {
 
     #[test]
     fn test_empty_array() {
-        let v = Value::Array(vec![]);
+        let v = Value::Array(Box::new(vec![]));
         assert!(v.is_array());
         assert_eq!(v.as_array().unwrap().len(), 0);
     }
 
     #[test]
     fn test_empty_object() {
-        let v = Value::Object(HashMap::new());
+        let v = Value::Object(Box::new(HashMap::new()));
         assert!(v.is_object());
         assert_eq!(v.as_object().unwrap().len(), 0);
     }
@@ -712,8 +734,8 @@ mod tests {
 
     #[test]
     fn test_nested_array() {
-        let inner = Value::Array(vec![Value::Int(1), Value::Int(2)]);
-        let outer = Value::Array(vec![inner.clone(), Value::Int(3)]);
+        let inner = Value::Array(Box::new(vec![Value::Int(1), Value::Int(2)]));
+        let outer = Value::Array(Box::new(vec![inner.clone(), Value::Int(3)]));
         assert!(outer.is_array());
         let arr = outer.as_array().unwrap();
         assert_eq!(arr.len(), 2);
@@ -725,8 +747,8 @@ mod tests {
         let mut inner = HashMap::new();
         inner.insert("x".to_string(), Value::Int(1));
         let mut outer = HashMap::new();
-        outer.insert("nested".to_string(), Value::Object(inner));
-        let v = Value::Object(outer);
+        outer.insert("nested".to_string(), Value::Object(Box::new(inner)));
+        let v = Value::Object(Box::new(outer));
         assert!(v.is_object());
         let obj = v.as_object().unwrap();
         assert!(obj.get("nested").unwrap().is_object());
@@ -782,7 +804,7 @@ mod tests {
         let mut m2 = HashMap::new();
         m2.insert("b".to_string(), Value::Int(2));
         m2.insert("a".to_string(), Value::Int(1));
-        assert_eq!(Value::Object(m1), Value::Object(m2));
+        assert_eq!(Value::Object(Box::new(m1)), Value::Object(Box::new(m2)));
     }
 
     #[test]
@@ -792,18 +814,18 @@ mod tests {
         let mut m2 = HashMap::new();
         m2.insert("a".to_string(), Value::Int(1));
         m2.insert("b".to_string(), Value::Int(2));
-        assert_ne!(Value::Object(m1), Value::Object(m2));
+        assert_ne!(Value::Object(Box::new(m1)), Value::Object(Box::new(m2)));
     }
 
     #[test]
     fn test_deeply_nested_equality() {
-        let inner = Value::Array(vec![Value::Object({
+        let inner = Value::Array(Box::new(vec![Value::Object(Box::new({
             let mut m = HashMap::new();
             m.insert("x".to_string(), Value::Int(1));
             m
-        })]);
-        let v1 = Value::Array(vec![inner.clone()]);
-        let v2 = Value::Array(vec![inner]);
+        }))]));
+        let v1 = Value::Array(Box::new(vec![inner.clone()]));
+        let v2 = Value::Array(Box::new(vec![inner]));
         assert_eq!(v1, v2);
     }
 

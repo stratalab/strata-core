@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 /// Helper to create an event payload object
 fn event_payload(data: Value) -> Value {
-    Value::Object(HashMap::from([("data".to_string(), data)]))
+    Value::Object(Box::new(HashMap::from([("data".to_string(), data)])))
 }
 
 /// Helper to create a simple event payload with an integer
@@ -437,7 +437,12 @@ fn payload_must_be_object() {
     );
     assert!(result.is_err());
 
-    let result = event.append(&test_db.branch_id, "default", "type", Value::Array(vec![]));
+    let result = event.append(
+        &test_db.branch_id,
+        "default",
+        "type",
+        Value::Array(Box::new(vec![])),
+    );
     assert!(result.is_err());
 
     // Object payload should work

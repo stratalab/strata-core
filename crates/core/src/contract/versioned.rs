@@ -474,13 +474,13 @@ mod tests {
         assert!(v_bytes.is_bytes());
         assert_eq!(v_bytes.as_bytes(), Some(&[1u8, 2, 3][..]));
 
-        let v_arr = Versioned::new(Value::Array(vec![Value::Int(1)]), Version::txn(1));
+        let v_arr = Versioned::new(Value::Array(Box::new(vec![Value::Int(1)])), Version::txn(1));
         assert!(v_arr.is_array());
         assert_eq!(v_arr.as_array().unwrap().len(), 1);
 
         let mut map = HashMap::new();
         map.insert("k".to_string(), Value::Int(1));
-        let v_obj = Versioned::new(Value::Object(map), Version::txn(1));
+        let v_obj = Versioned::new(Value::Object(Box::new(map)), Version::txn(1));
         assert!(v_obj.is_object());
         assert_eq!(v_obj.as_object().unwrap().len(), 1);
     }

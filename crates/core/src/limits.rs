@@ -148,7 +148,7 @@ impl Limits {
                         max: self.max_array_len,
                     });
                 }
-                for v in arr {
+                for v in arr.iter() {
                     self.validate_value_impl(v, depth + 1)?;
                 }
                 Ok(())
@@ -168,6 +168,72 @@ impl Limits {
                 Ok(())
             }
         }
+    }
+
+    /// Recursively reject non-finite floats (NaN, Infinity, -Infinity) anywhere
+    /// in the value tree. These cannot be faithfully represented in JSON;
+    /// `serde_json` silently converts them to `null` rather than returning an error.
+    fn reject_non_finite_floats(value: &Value) -> Result<(), LimitError> {
+        match value {
+            Value::Float(f) if !f.is_finite() => Err(LimitError::ValueTooLarge {
+                reason: "value_not_serializable".to_string(),
+                actual: 0,
+                max: 0,
+            }),
+            Value::Array(arr) => {
+                for v in arr.iter() {
+                    Self::reject_non_finite_floats(v)?;
+                }
+                Ok(())
+            }
+            Value::Object(obj) => {
+                for v in obj.values() {
+                    Self::reject_non_finite_floats(v)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Validate a value against all limits in a single pass
+    ///
+    /// This combines structural validation (string/bytes/array/object/nesting limits)
+    /// with an encoded size check. Use this at API boundaries where both checks
+    /// are needed. Existing `validate_value()` remains for callers that don't
+    /// need the encoded size check.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first limit violation encountered (structural checks first,
+    /// then encoded size).
+    pub fn validate_value_full(&self, value: &Value) -> Result<(), LimitError> {
+        // First, validate structural limits
+        self.validate_value(value)?;
+
+        // Reject non-finite floats (NaN, Infinity, -Infinity) which cannot be
+        // faithfully represented in JSON. serde_json silently converts them to null
+        // rather than returning an error, so we must check explicitly.
+        Self::reject_non_finite_floats(value)?;
+
+        // Then check encoded size
+        let encoded_size =
+            serde_json::to_vec(value)
+                .map(|v| v.len())
+                .map_err(|_| LimitError::ValueTooLarge {
+                    reason: "value_not_serializable".to_string(),
+                    actual: 0,
+                    max: self.max_value_bytes_encoded,
+                })?;
+        if encoded_size > self.max_value_bytes_encoded {
+            return Err(LimitError::ValueTooLarge {
+                reason: "encoded_value_too_large".to_string(),
+                actual: encoded_size,
+                max: self.max_value_bytes_encoded,
+            });
+        }
+
+        Ok(())
     }
 
     /// Validate a vector against dimension limits
@@ -365,7 +431,7 @@ mod tests {
     fn test_array_at_max_length() {
         let limits = Limits::with_small_limits();
         let arr = vec![Value::Null; limits.max_array_len];
-        let value = Value::Array(arr);
+        let value = Value::Array(Box::new(arr));
         assert!(limits.validate_value(&value).is_ok());
     }
 
@@ -373,7 +439,7 @@ mod tests {
     fn test_array_exceeds_max_length() {
         let limits = Limits::with_small_limits();
         let arr = vec![Value::Null; limits.max_array_len + 1];
-        let value = Value::Array(arr);
+        let value = Value::Array(Box::new(arr));
         let result = limits.validate_value(&value);
         assert!(matches!(result, Err(LimitError::ValueTooLarge { .. })));
     }
@@ -387,7 +453,7 @@ mod tests {
         for i in 0..limits.max_object_entries {
             map.insert(format!("key{}", i), Value::Null);
         }
-        let value = Value::Object(map);
+        let value = Value::Object(Box::new(map));
         assert!(limits.validate_value(&value).is_ok());
     }
 
@@ -398,7 +464,7 @@ mod tests {
         for i in 0..=limits.max_object_entries {
             map.insert(format!("key{}", i), Value::Null);
         }
-        let value = Value::Object(map);
+        let value = Value::Object(Box::new(map));
         let result = limits.validate_value(&value);
         assert!(matches!(result, Err(LimitError::ValueTooLarge { .. })));
     }
@@ -408,7 +474,7 @@ mod tests {
     fn create_nested_array(depth: usize) -> Value {
         let mut value = Value::Null;
         for _ in 0..depth {
-            value = Value::Array(vec![value]);
+            value = Value::Array(Box::new(vec![value]));
         }
         value
     }
@@ -561,5 +627,108 @@ mod tests {
         assert!(limits.validate_value(&Value::Float(f64::MAX)).is_ok());
         assert!(limits.validate_value(&Value::Float(f64::NAN)).is_ok());
         assert!(limits.validate_value(&Value::Float(f64::INFINITY)).is_ok());
+    }
+
+    // === Full Validation Tests ===
+
+    #[test]
+    fn test_validate_value_full_passes_valid() {
+        let limits = Limits::with_small_limits();
+        let value = Value::String("hello".to_string());
+        assert!(limits.validate_value_full(&value).is_ok());
+    }
+
+    #[test]
+    fn test_validate_value_full_rejects_structural_violation() {
+        let limits = Limits::with_small_limits();
+        let s = "x".repeat(limits.max_string_bytes + 1);
+        let value = Value::String(s);
+        let result = limits.validate_value_full(&value);
+        assert!(matches!(result, Err(LimitError::ValueTooLarge { .. })));
+    }
+
+    #[test]
+    fn test_validate_value_full_rejects_encoded_size() {
+        let limits = Limits {
+            max_value_bytes_encoded: 10, // very small
+            ..Limits::default()
+        };
+        // A valid value that's larger than 10 bytes when encoded
+        let value = Value::String("this is a long string".to_string());
+        let result = limits.validate_value_full(&value);
+        assert!(
+            matches!(result, Err(LimitError::ValueTooLarge { reason, .. }) if reason == "encoded_value_too_large")
+        );
+    }
+
+    #[test]
+    fn test_validate_value_full_nan_float() {
+        let limits = Limits::default();
+        let value = Value::Float(f64::NAN);
+        let result = limits.validate_value_full(&value);
+        assert!(
+            matches!(result, Err(LimitError::ValueTooLarge { reason, .. }) if reason == "value_not_serializable")
+        );
+    }
+
+    #[test]
+    fn test_validate_value_full_infinity_float() {
+        let limits = Limits::default();
+        let value = Value::Float(f64::INFINITY);
+        let result = limits.validate_value_full(&value);
+        assert!(
+            matches!(result, Err(LimitError::ValueTooLarge { reason, .. }) if reason == "value_not_serializable")
+        );
+    }
+
+    #[test]
+    fn test_validate_value_full_empty_array() {
+        let limits = Limits::default();
+        let value = Value::Array(Box::new(vec![]));
+        assert!(limits.validate_value_full(&value).is_ok());
+    }
+
+    #[test]
+    fn test_validate_value_full_empty_object() {
+        let limits = Limits::default();
+        let value = Value::Object(Box::new(HashMap::new()));
+        assert!(limits.validate_value_full(&value).is_ok());
+    }
+
+    #[test]
+    fn test_validate_value_full_primitives_pass() {
+        let limits = Limits::default();
+        assert!(limits.validate_value_full(&Value::Null).is_ok());
+        assert!(limits.validate_value_full(&Value::Bool(true)).is_ok());
+        assert!(limits.validate_value_full(&Value::Bool(false)).is_ok());
+        assert!(limits.validate_value_full(&Value::Int(42)).is_ok());
+        assert!(limits.validate_value_full(&Value::Int(i64::MIN)).is_ok());
+        assert!(limits.validate_value_full(&Value::Int(i64::MAX)).is_ok());
+        assert!(limits.validate_value_full(&Value::Float(3.14)).is_ok());
+        assert!(limits.validate_value_full(&Value::Float(0.0)).is_ok());
+        assert!(limits.validate_value_full(&Value::Float(-0.0)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_value_full_at_exact_boundary() {
+        // Use a custom limit where max_value_bytes_encoded equals the exact encoded size
+        let value = Value::Int(42);
+        let encoded_len = serde_json::to_vec(&value).unwrap().len();
+        let limits = Limits {
+            max_value_bytes_encoded: encoded_len,
+            ..Limits::default()
+        };
+        // Exactly at the boundary should pass
+        assert!(limits.validate_value_full(&value).is_ok());
+
+        // One byte smaller should fail
+        let limits_smaller = Limits {
+            max_value_bytes_encoded: encoded_len - 1,
+            ..Limits::default()
+        };
+        let result = limits_smaller.validate_value_full(&value);
+        assert!(
+            matches!(result, Err(LimitError::ValueTooLarge { reason, .. }) if reason == "encoded_value_too_large")
+        );
     }
 }

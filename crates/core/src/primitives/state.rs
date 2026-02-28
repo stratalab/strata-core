@@ -169,14 +169,14 @@ mod tests {
 
     #[test]
     fn test_state_with_complex_value() {
-        let complex = Value::Object({
+        let complex = Value::Object(Box::new({
             let mut m = std::collections::HashMap::new();
             m.insert(
                 "nested".to_string(),
-                Value::Array(vec![Value::Int(1), Value::Null]),
+                Value::Array(Box::new(vec![Value::Int(1), Value::Null])),
             );
             m
-        });
+        }));
         let state = State::new(complex.clone());
         assert_eq!(state.value, complex);
 

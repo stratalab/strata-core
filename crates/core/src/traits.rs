@@ -16,15 +16,41 @@ use crate::value::Value;
 /// with sharded, lock-free, or distributed storage without breaking
 /// upper layers (concurrency, primitives, engine).
 ///
-/// Thread safety: All methods must be safe to call concurrently from
-/// multiple threads (requires Send + Sync).
+/// ## Thread Safety
 ///
-/// # Examples
+/// All implementations **must** be `Send + Sync`. Methods may be called
+/// concurrently from multiple threads without external synchronization.
 ///
-/// ```
-/// use strata_core::traits::Storage;
-/// // Storage implementations will be added in Epic 2
-/// ```
+/// ## Visibility Semantics
+///
+/// A successful `put()` **happens-before** any subsequent `get()` on the same
+/// key within the same thread. Cross-thread visibility is guaranteed by the
+/// `Send + Sync` bounds — implementations must use internal synchronization
+/// (e.g., `RwLock`, atomics, or lock-free structures) to ensure that a `put()`
+/// on thread A is visible to a `get()` on thread B that starts after the `put()`
+/// returns.
+///
+/// ## Snapshot Consistency
+///
+/// `get_versioned()` and `scan_prefix()` accept a `max_version` parameter.
+/// They must return a view consistent with that version — i.e., only values
+/// written at or before `max_version` are visible. This is the foundation
+/// for snapshot isolation in the concurrency layer.
+///
+/// ## Error Conditions
+///
+/// All fallible methods return `StrataResult`. Implementations should return:
+/// - `StrataError::storage(...)` for I/O failures (disk, network)
+/// - `StrataError::internal(...)` for invariant violations (bugs)
+///
+/// Callers should **not** assume that errors are transient — a `StorageError`
+/// may indicate permanent media failure.
+///
+/// ## Implementors
+///
+/// Implementors **should** validate size limits in `put()` and `put_with_version()`
+/// using [`crate::limits::Limits`]. This enforcement is planned for the storage
+/// epic (#1306) but is not yet required by this trait.
 pub trait Storage: Send + Sync {
     /// Get current value for key (latest version)
     ///
@@ -72,11 +98,15 @@ pub trait Storage: Send + Sync {
     /// Put key-value pair with optional TTL
     ///
     /// Returns the version assigned to this write.
-    /// Version is monotonically increasing and assigned by storage layer.
+    /// Version is monotonically increasing and assigned by the storage layer.
+    ///
+    /// After a successful return, the written value is immediately visible
+    /// to `get()` calls on the same or any other thread.
     ///
     /// # Errors
     ///
-    /// Returns an error if the storage operation fails.
+    /// - `StorageError` — I/O or backend failure
+    /// - Future: `ConstraintViolation` when limit enforcement is added (#1306)
     fn put(&self, key: Key, value: Value, ttl: Option<Duration>) -> StrataResult<u64>;
 
     /// Delete key
@@ -167,18 +197,29 @@ pub trait Storage: Send + Sync {
 
 /// Snapshot view abstraction for snapshot isolation
 ///
-/// Provides version-bounded read view of storage.
-/// MVP: ClonedSnapshotView (deep clone at version)
-/// Future: LazySnapshotView (version-bounded reads from live storage)
+/// Provides a **frozen, read-only** view of storage at a specific version.
+/// All reads through a snapshot return data as it existed at `version()`,
+/// regardless of concurrent writes to the underlying storage.
 ///
-/// Thread safety: Must be safe to pass between threads (Send + Sync).
+/// ## Thread Safety
 ///
-/// # Examples
+/// All implementations **must** be `Send + Sync`. A snapshot may be created
+/// on one thread and read from another.
 ///
-/// ```
-/// use strata_core::traits::SnapshotView;
-/// // SnapshotView implementations will be added in Epic 2
-/// ```
+/// ## Consistency Guarantees
+///
+/// - `get()` returns the latest value written at or before `version()`.
+/// - `scan_prefix()` returns a consistent set of key-value pairs — all
+///   visible at `version()`, none written after.
+/// - The snapshot is **immutable**: repeated reads of the same key always
+///   return the same result (or `None` if the key didn't exist at that version).
+///
+/// ## Lifetime
+///
+/// Snapshots may hold references to shared state (e.g., an `Arc` to the
+/// underlying storage). Dropping a snapshot releases these references.
+/// Long-lived snapshots may prevent garbage collection of old versions
+/// in compacting storage implementations.
 pub trait SnapshotView: Send + Sync {
     /// Get value from snapshot
     ///

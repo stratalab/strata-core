@@ -509,6 +509,8 @@ pub enum StrataError {
         reason: String,
         /// Optional entity reference
         entity_ref: Option<EntityRef>,
+        /// Optional transaction ID that caused the conflict
+        transaction_id: Option<u64>,
     },
 
     /// Version conflict
@@ -1155,6 +1157,7 @@ impl StrataError {
         StrataError::Conflict {
             reason: reason.into(),
             entity_ref: None,
+            transaction_id: None,
         }
     }
 
@@ -1170,6 +1173,19 @@ impl StrataError {
         StrataError::Conflict {
             reason: reason.into(),
             entity_ref: Some(entity_ref),
+            transaction_id: None,
+        }
+    }
+
+    /// Create a Conflict error with transaction ID
+    ///
+    /// Use this when a conflict can be attributed to a specific transaction,
+    /// enabling clients to correlate conflicts with their transaction IDs.
+    pub fn conflict_with_txn(reason: impl Into<String>, transaction_id: u64) -> Self {
+        StrataError::Conflict {
+            reason: reason.into(),
+            entity_ref: None,
+            transaction_id: Some(transaction_id),
         }
     }
 
@@ -1242,10 +1258,17 @@ impl StrataError {
             StrataError::WrongType { expected, actual } => ErrorDetails::new()
                 .with_string("expected", expected)
                 .with_string("actual", actual),
-            StrataError::Conflict { reason, entity_ref } => {
+            StrataError::Conflict {
+                reason,
+                entity_ref,
+                transaction_id,
+            } => {
                 let mut details = ErrorDetails::new().with_string("reason", reason);
                 if let Some(ref e) = entity_ref {
                     details = details.with_string("entity", e.to_string());
+                }
+                if let Some(txn_id) = transaction_id {
+                    details = details.with_int("transaction_id", *txn_id as i64);
                 }
                 details
             }
@@ -1530,6 +1553,10 @@ impl StrataError {
     pub fn entity_ref(&self) -> Option<&EntityRef> {
         match self {
             StrataError::NotFound { entity_ref } => Some(entity_ref),
+            StrataError::Conflict {
+                entity_ref: Some(ref e),
+                ..
+            } => Some(e),
             StrataError::VersionConflict { entity_ref, .. } => Some(entity_ref),
             StrataError::WriteConflict { entity_ref } => Some(entity_ref),
             StrataError::InvalidOperation { entity_ref, .. } => Some(entity_ref),
@@ -2399,9 +2426,30 @@ mod adversarial_error_tests {
 
         assert_eq!(e.code(), ErrorCode::Conflict);
         assert!(e.is_retryable());
-        // conflict_on does NOT expose entity via entity_ref() accessor
-        // (it's stored inside the Conflict variant, not the entity_ref accessor match)
+        // conflict_on exposes entity via entity_ref() accessor
+        assert_eq!(e.entity_ref(), Some(&entity));
         assert!(e.to_string().contains("concurrent modification"));
+        // details() contains the "entity" key
+        let details = e.details();
+        assert!(
+            details.fields().contains_key("entity"),
+            "conflict_on details should contain 'entity' key"
+        );
+    }
+
+    #[test]
+    fn test_conflict_with_txn_constructor() {
+        let e = StrataError::conflict_with_txn("txn conflict", 42);
+
+        assert_eq!(e.code(), ErrorCode::Conflict);
+        assert!(e.is_retryable());
+        assert!(e.to_string().contains("txn conflict"));
+
+        let details = e.details();
+        assert!(
+            details.fields().contains_key("transaction_id"),
+            "conflict_with_txn details should contain 'transaction_id' key"
+        );
     }
 
     #[test]
@@ -2494,6 +2542,7 @@ mod adversarial_error_tests {
             StrataError::wrong_type("A", "B"),
             StrataError::conflict("reason"),
             StrataError::conflict_on(entity.clone(), "reason"),
+            StrataError::conflict_with_txn("txn conflict", 99),
             StrataError::version_conflict(entity.clone(), Version::Txn(1), Version::Txn(2)),
             StrataError::write_conflict(entity.clone()),
             StrataError::transaction_aborted("reason"),
@@ -2516,7 +2565,7 @@ mod adversarial_error_tests {
             let _ = e.message(); // Should not panic
             let _ = e.details(); // Should not panic
         }
-        assert_eq!(errors.len(), 21, "Should test all 21 error constructors");
+        assert_eq!(errors.len(), 22, "Should test all 22 error constructors");
     }
 
     #[test]

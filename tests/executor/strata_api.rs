@@ -241,14 +241,14 @@ fn branch_list() {
 fn json_set_and_get() {
     let db = create_strata();
 
-    let doc = Value::Object(
+    let doc = Value::Object(Box::new(
         [
             ("name".to_string(), Value::String("Alice".into())),
             ("age".to_string(), Value::Int(30)),
         ]
         .into_iter()
         .collect(),
-    );
+    ));
 
     db.json_set("user:1", "$", doc).unwrap();
 
@@ -268,7 +268,9 @@ fn json_set_and_get() {
 fn json_delete() {
     let db = create_strata();
 
-    let doc = Value::Object([("key".to_string(), Value::Int(1))].into_iter().collect());
+    let doc = Value::Object(Box::new(
+        [("key".to_string(), Value::Int(1))].into_iter().collect(),
+    ));
 
     db.json_set("doc1", "$", doc).unwrap();
 
@@ -313,11 +315,11 @@ fn use_all_primitives() {
         .unwrap();
 
     // JSON
-    let doc = Value::Object(
+    let doc = Value::Object(Box::new(
         [("type".to_string(), Value::String("test".into()))]
             .into_iter()
             .collect(),
-    );
+    ));
     db.json_set("doc1", "$", doc).unwrap();
 
     // Branch

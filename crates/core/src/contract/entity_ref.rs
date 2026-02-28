@@ -108,10 +108,9 @@ impl EntityRef {
 
     /// Create a KV entity reference
     pub fn kv(branch_id: BranchId, key: impl Into<String>) -> Self {
-        EntityRef::Kv {
-            branch_id,
-            key: key.into(),
-        }
+        let key = key.into();
+        debug_assert!(!key.is_empty(), "EntityRef::kv key must not be empty");
+        EntityRef::Kv { branch_id, key }
     }
 
     /// Create an event entity reference
@@ -124,10 +123,9 @@ impl EntityRef {
 
     /// Create a state cell entity reference
     pub fn state(branch_id: BranchId, name: impl Into<String>) -> Self {
-        EntityRef::State {
-            branch_id,
-            name: name.into(),
-        }
+        let name = name.into();
+        debug_assert!(!name.is_empty(), "EntityRef::state name must not be empty");
+        EntityRef::State { branch_id, name }
     }
 
     /// Create a branch entity reference
@@ -137,10 +135,12 @@ impl EntityRef {
 
     /// Create a JSON document entity reference
     pub fn json(branch_id: BranchId, doc_id: impl Into<String>) -> Self {
-        EntityRef::Json {
-            branch_id,
-            doc_id: doc_id.into(),
-        }
+        let doc_id = doc_id.into();
+        debug_assert!(
+            !doc_id.is_empty(),
+            "EntityRef::json doc_id must not be empty"
+        );
+        EntityRef::Json { branch_id, doc_id }
     }
 
     /// Create a vector entity reference
@@ -149,10 +149,17 @@ impl EntityRef {
         collection: impl Into<String>,
         key: impl Into<String>,
     ) -> Self {
+        let collection = collection.into();
+        let key = key.into();
+        debug_assert!(
+            !collection.is_empty(),
+            "EntityRef::vector collection must not be empty"
+        );
+        // Note: key may be empty for collection-level references (e.g., error reporting)
         EntityRef::Vector {
             branch_id,
-            collection: collection.into(),
-            key: key.into(),
+            collection,
+            key,
         }
     }
 
@@ -520,8 +527,10 @@ mod tests {
         assert_ne!(ref1, ref2);
     }
 
+    #[cfg(not(debug_assertions))]
     #[test]
-    fn test_entity_ref_empty_string_keys() {
+    fn test_entity_ref_empty_string_keys_release() {
+        // In release builds, empty keys are allowed (no debug_assert)
         let branch_id = BranchId::new();
         let kv = EntityRef::kv(branch_id, "");
         assert_eq!(kv.kv_key(), Some(""));
@@ -531,6 +540,38 @@ mod tests {
 
         let json = EntityRef::json(branch_id, "");
         assert_eq!(json.json_doc_id(), Some(""));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "must not be empty")]
+    fn test_entity_ref_empty_kv_key_debug_panics() {
+        let branch_id = BranchId::new();
+        let _kv = EntityRef::kv(branch_id, "");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "EntityRef::state name must not be empty")]
+    fn test_entity_ref_empty_state_name_debug_panics() {
+        let branch_id = BranchId::new();
+        let _state = EntityRef::state(branch_id, "");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "EntityRef::json doc_id must not be empty")]
+    fn test_entity_ref_empty_json_docid_debug_panics() {
+        let branch_id = BranchId::new();
+        let _json = EntityRef::json(branch_id, "");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "EntityRef::vector collection must not be empty")]
+    fn test_entity_ref_empty_vector_collection_debug_panics() {
+        let branch_id = BranchId::new();
+        let _vector = EntityRef::vector(branch_id, "", "key");
     }
 
     #[test]
