@@ -19,6 +19,7 @@ use strata_core::types::BranchId;
 use strata_core::{StrataError, StrataResult, Value};
 
 use crate::database::Database;
+use adjacency::AdjacencyIndex;
 use types::*;
 
 /// Graph store providing CRUD operations on nodes and edges.
@@ -578,6 +579,24 @@ impl GraphStore {
         let nodes = self.all_nodes(branch_id, graph)?;
         let edges = self.all_edges(branch_id, graph)?;
         Ok(GraphSnapshot { nodes, edges })
+    }
+
+    /// Build an in-memory adjacency index for a graph.
+    ///
+    /// Loads all edges in a single prefix scan and populates an AdjacencyIndex
+    /// for O(1) neighbor lookups during traversal. This replaces N per-node
+    /// scans with 1 bulk scan.
+    pub fn build_adjacency_index(
+        &self,
+        branch_id: BranchId,
+        graph: &str,
+    ) -> StrataResult<AdjacencyIndex> {
+        let edges = self.all_edges(branch_id, graph)?;
+        let mut index = AdjacencyIndex::new();
+        for edge in edges {
+            index.add_edge(&edge.src, &edge.dst, &edge.edge_type, edge.data);
+        }
+        Ok(index)
     }
 
     // =========================================================================

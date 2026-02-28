@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use strata_core::types::BranchId;
 use strata_core::StrataResult;
 
+use super::adjacency::AdjacencyIndex;
 use super::types::*;
 use super::GraphStore;
 
@@ -52,6 +53,9 @@ impl GraphStore {
     }
 
     /// Breadth-first search from a start node.
+    ///
+    /// Builds an in-memory adjacency index from all edges in a single bulk scan,
+    /// then runs BFS against it. This avoids per-node KV transactions during traversal.
     pub fn bfs(
         &self,
         branch_id: BranchId,
@@ -59,18 +63,30 @@ impl GraphStore {
         start: &str,
         opts: BfsOptions,
     ) -> StrataResult<BfsResult> {
+        let index = self.build_adjacency_index(branch_id, graph)?;
+        Ok(self.bfs_with_index(start, &opts, &index))
+    }
+
+    /// BFS using a pre-built adjacency index (no per-node KV lookups).
+    ///
+    /// Use this when you already have an `AdjacencyIndex` (e.g. for running
+    /// multiple traversals on the same graph without rebuilding the index).
+    pub fn bfs_with_index(
+        &self,
+        start: &str,
+        opts: &BfsOptions,
+        index: &AdjacencyIndex,
+    ) -> BfsResult {
         let mut visited: Vec<String> = Vec::new();
         let mut depths: HashMap<String, usize> = HashMap::new();
         let mut edges: Vec<(String, String, String)> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         let mut queue: VecDeque<(String, usize)> = VecDeque::new();
 
-        // Start node
         queue.push_back((start.to_string(), 0));
         seen.insert(start.to_string());
 
         while let Some((current, depth)) = queue.pop_front() {
-            // Check max_nodes
             if let Some(max) = opts.max_nodes {
                 if visited.len() >= max {
                     break;
@@ -80,47 +96,52 @@ impl GraphStore {
             visited.push(current.clone());
             depths.insert(current.clone(), depth);
 
-            // Don't explore further if at max depth
             if depth >= opts.max_depth {
                 continue;
             }
 
-            // Get neighbors in the specified direction
-            let neighbors = match opts.direction {
-                Direction::Outgoing => self.outgoing_neighbors(branch_id, graph, &current, None)?,
-                Direction::Incoming => self.incoming_neighbors(branch_id, graph, &current, None)?,
-                Direction::Both => {
-                    let mut out = self.outgoing_neighbors(branch_id, graph, &current, None)?;
-                    out.extend(self.incoming_neighbors(branch_id, graph, &current, None)?);
-                    out
-                }
-            };
-
-            for neighbor in neighbors {
-                // Apply edge type filter
-                if let Some(ref filter) = opts.edge_types {
-                    if !filter.contains(&neighbor.edge_type) {
-                        continue;
+            // Macro-like inline to process each (dst, edge_type) pair from the
+            // zero-alloc iterators, avoiding closure borrow conflicts.
+            macro_rules! process_neighbors {
+                ($iter:expr) => {
+                    for (neighbor_id, et) in $iter {
+                        if let Some(ref filter) = opts.edge_types {
+                            if !filter.iter().any(|f| f == et) {
+                                continue;
+                            }
+                        }
+                        if !seen.contains(neighbor_id) {
+                            seen.insert(neighbor_id.to_string());
+                            edges.push((
+                                current.clone(),
+                                neighbor_id.to_string(),
+                                et.to_string(),
+                            ));
+                            queue.push_back((neighbor_id.to_string(), depth + 1));
+                        }
                     }
-                }
+                };
+            }
 
-                if !seen.contains(&neighbor.node_id) {
-                    seen.insert(neighbor.node_id.clone());
-                    edges.push((
-                        current.clone(),
-                        neighbor.node_id.clone(),
-                        neighbor.edge_type.clone(),
-                    ));
-                    queue.push_back((neighbor.node_id, depth + 1));
+            match opts.direction {
+                Direction::Outgoing => {
+                    process_neighbors!(index.outgoing_neighbor_ids(&current, None));
+                }
+                Direction::Incoming => {
+                    process_neighbors!(index.incoming_neighbor_ids(&current, None));
+                }
+                Direction::Both => {
+                    process_neighbors!(index.outgoing_neighbor_ids(&current, None));
+                    process_neighbors!(index.incoming_neighbor_ids(&current, None));
                 }
             }
         }
 
-        Ok(BfsResult {
+        BfsResult {
             visited,
             depths,
             edges,
-        })
+        }
     }
 
     /// Extract a subgraph containing only the specified node IDs.
@@ -804,6 +825,242 @@ mod tests {
         assert_eq!(result.visited.len(), 3);
         assert!(result.visited.contains(&"B".to_string()));
         assert!(result.visited.contains(&"C".to_string()));
+    }
+
+    // =========================================================================
+    // build_adjacency_index
+    // =========================================================================
+
+    #[test]
+    fn build_adjacency_index_captures_all_edges() {
+        let (_db, gs) = setup();
+        let b = branch();
+        add_nodes(&gs, b, "g", &["A", "B", "C"]);
+        gs.add_edge(b, "g", "A", "B", "E1", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "B", "C", "E2", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "C", "A", "E3", EdgeData::default())
+            .unwrap();
+
+        let index = gs.build_adjacency_index(b, "g").unwrap();
+
+        // Forward edges
+        let a_out: Vec<_> = index.outgoing_neighbor_ids("A", None).collect();
+        assert_eq!(a_out.len(), 1);
+        assert_eq!(a_out[0], ("B", "E1"));
+
+        let b_out: Vec<_> = index.outgoing_neighbor_ids("B", None).collect();
+        assert_eq!(b_out.len(), 1);
+        assert_eq!(b_out[0], ("C", "E2"));
+
+        // Reverse edges
+        let a_in: Vec<_> = index.incoming_neighbor_ids("A", None).collect();
+        assert_eq!(a_in.len(), 1);
+        assert_eq!(a_in[0], ("C", "E3"));
+
+        let c_in: Vec<_> = index.incoming_neighbor_ids("C", None).collect();
+        assert_eq!(c_in.len(), 1);
+        assert_eq!(c_in[0], ("B", "E2"));
+    }
+
+    #[test]
+    fn build_adjacency_index_empty_graph() {
+        let (_db, gs) = setup();
+        let b = branch();
+        gs.create_graph(b, "g", None).unwrap();
+
+        let index = gs.build_adjacency_index(b, "g").unwrap();
+        assert!(index.outgoing_neighbor_ids("A", None).next().is_none());
+    }
+
+    // =========================================================================
+    // bfs_with_index (direct tests)
+    // =========================================================================
+
+    #[test]
+    fn bfs_with_index_matches_bfs() {
+        // Verify bfs_with_index produces identical results to bfs() on the
+        // same graph — this is the primary correctness contract.
+        let (_db, gs) = setup();
+        let b = branch();
+        add_nodes(&gs, b, "g", &["A", "B", "C", "D"]);
+        gs.add_edge(b, "g", "A", "B", "E", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "A", "C", "E", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "B", "D", "E", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "C", "D", "E", EdgeData::default())
+            .unwrap();
+
+        let opts = BfsOptions {
+            max_depth: 10,
+            ..Default::default()
+        };
+
+        let via_bfs = gs.bfs(b, "g", "A", opts.clone()).unwrap();
+
+        let index = gs.build_adjacency_index(b, "g").unwrap();
+        let via_index = gs.bfs_with_index("A", &opts, &index);
+
+        assert_eq!(via_bfs.visited, via_index.visited);
+        assert_eq!(via_bfs.depths, via_index.depths);
+        assert_eq!(via_bfs.edges, via_index.edges);
+    }
+
+    #[test]
+    fn bfs_with_index_reuse_different_starts() {
+        // The whole point of bfs_with_index: build once, traverse many times.
+        let (_db, gs) = setup();
+        let b = branch();
+        add_nodes(&gs, b, "g", &["A", "B", "C", "D"]);
+        gs.add_edge(b, "g", "A", "B", "E", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "B", "C", "E", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "C", "D", "E", EdgeData::default())
+            .unwrap();
+
+        let index = gs.build_adjacency_index(b, "g").unwrap();
+        let opts = BfsOptions::default();
+
+        let from_a = gs.bfs_with_index("A", &opts, &index);
+        assert_eq!(from_a.visited.len(), 4); // A → B → C → D
+
+        let from_b = gs.bfs_with_index("B", &opts, &index);
+        assert_eq!(from_b.visited.len(), 3); // B → C → D
+        assert_eq!(*from_b.depths.get("B").unwrap(), 0);
+        assert_eq!(*from_b.depths.get("C").unwrap(), 1);
+        assert_eq!(*from_b.depths.get("D").unwrap(), 2);
+
+        let from_d = gs.bfs_with_index("D", &opts, &index);
+        assert_eq!(from_d.visited.len(), 1); // D has no outgoing edges
+    }
+
+    // =========================================================================
+    // BFS edge cases
+    // =========================================================================
+
+    #[test]
+    fn bfs_self_loop_does_not_double_visit() {
+        let (_db, gs) = setup();
+        let b = branch();
+        add_nodes(&gs, b, "g", &["A", "B"]);
+        gs.add_edge(b, "g", "A", "B", "E", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "B", "B", "SELF", EdgeData::default())
+            .unwrap();
+
+        let result = gs.bfs(b, "g", "A", BfsOptions::default()).unwrap();
+        assert_eq!(result.visited.len(), 2);
+        assert_eq!(result.visited.iter().filter(|v| v.as_str() == "B").count(), 1);
+        // Self-loop edge should not appear in traversal edges (B already seen
+        // when we try to follow B→B).
+        assert!(!result.edges.iter().any(|(src, dst, _)| src == "B" && dst == "B"));
+    }
+
+    #[test]
+    fn bfs_self_loop_direction_both() {
+        let (_db, gs) = setup();
+        let b = branch();
+        add_nodes(&gs, b, "g", &["A"]);
+        gs.add_edge(b, "g", "A", "A", "SELF", EdgeData::default())
+            .unwrap();
+
+        let result = gs
+            .bfs(
+                b,
+                "g",
+                "A",
+                BfsOptions {
+                    max_depth: 10,
+                    direction: Direction::Both,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // A should appear exactly once even though the self-loop is visible
+        // from both outgoing and incoming directions.
+        assert_eq!(result.visited.len(), 1);
+        assert_eq!(result.visited[0], "A");
+        assert!(result.edges.is_empty());
+    }
+
+    #[test]
+    fn bfs_multi_type_edge_filter() {
+        let (_db, gs) = setup();
+        let b = branch();
+        add_nodes(&gs, b, "g", &["A", "B", "C", "D"]);
+        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "A", "C", "TRUSTS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "A", "D", "HATES", EdgeData::default())
+            .unwrap();
+
+        let result = gs
+            .bfs(
+                b,
+                "g",
+                "A",
+                BfsOptions {
+                    max_depth: 10,
+                    edge_types: Some(vec!["KNOWS".to_string(), "TRUSTS".to_string()]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // Should follow KNOWS and TRUSTS but not HATES
+        assert_eq!(result.visited.len(), 3);
+        assert!(result.visited.contains(&"B".to_string()));
+        assert!(result.visited.contains(&"C".to_string()));
+        assert!(!result.visited.contains(&"D".to_string()));
+    }
+
+    #[test]
+    fn bfs_edge_type_filter_multi_hop() {
+        // Verify edge_types filter applies at every hop, not just the first.
+        let (_db, gs) = setup();
+        let b = branch();
+        add_nodes(&gs, b, "g", &["A", "B", "C", "D"]);
+        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "B", "C", "HATES", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "B", "D", "KNOWS", EdgeData::default())
+            .unwrap();
+
+        let result = gs
+            .bfs(
+                b,
+                "g",
+                "A",
+                BfsOptions {
+                    max_depth: 10,
+                    edge_types: Some(vec!["KNOWS".to_string()]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // A → B (KNOWS, OK), B → C (HATES, blocked), B → D (KNOWS, OK)
+        assert_eq!(result.visited.len(), 3);
+        assert!(result.visited.contains(&"A".to_string()));
+        assert!(result.visited.contains(&"B".to_string()));
+        assert!(result.visited.contains(&"D".to_string()));
+        assert!(!result.visited.contains(&"C".to_string()));
+    }
+
+    #[test]
+    fn bfs_on_graph_with_only_nodes() {
+        let (_db, gs) = setup();
+        let b = branch();
+        add_nodes(&gs, b, "g", &["A", "B", "C"]);
+
+        let result = gs.bfs(b, "g", "A", BfsOptions::default()).unwrap();
+        assert_eq!(result.visited.len(), 1);
+        assert_eq!(result.visited[0], "A");
+        assert!(result.edges.is_empty());
     }
 
     // =========================================================================

@@ -120,6 +120,46 @@ impl AdjacencyIndex {
             })
             .unwrap_or_default()
     }
+
+    /// Iterate outgoing neighbors without allocating Neighbor structs.
+    ///
+    /// Returns `(dst, edge_type)` pairs as string references, avoiding
+    /// the Vec<Neighbor> + EdgeData cloning overhead of `outgoing_neighbors`.
+    pub fn outgoing_neighbor_ids<'a>(
+        &'a self,
+        node_id: &str,
+        edge_type_filter: Option<&'a str>,
+    ) -> impl Iterator<Item = (&'a str, &'a str)> {
+        self.outgoing
+            .get(node_id)
+            .into_iter()
+            .flat_map(move |edges| {
+                edges
+                    .iter()
+                    .filter(move |(_, et, _)| edge_type_filter.map_or(true, |f| et == f))
+                    .map(|(dst, et, _)| (dst.as_str(), et.as_str()))
+            })
+    }
+
+    /// Iterate incoming neighbors without allocating Neighbor structs.
+    ///
+    /// Returns `(src, edge_type)` pairs as string references, avoiding
+    /// the Vec<Neighbor> + EdgeData cloning overhead of `incoming_neighbors`.
+    pub fn incoming_neighbor_ids<'a>(
+        &'a self,
+        node_id: &str,
+        edge_type_filter: Option<&'a str>,
+    ) -> impl Iterator<Item = (&'a str, &'a str)> {
+        self.incoming
+            .get(node_id)
+            .into_iter()
+            .flat_map(move |edges| {
+                edges
+                    .iter()
+                    .filter(move |(_, et, _)| edge_type_filter.map_or(true, |f| et == f))
+                    .map(|(src, et, _)| (src.as_str(), et.as_str()))
+            })
+    }
 }
 
 #[cfg(test)]
@@ -267,5 +307,105 @@ mod tests {
     fn remove_nonexistent_edge_is_noop() {
         let mut idx = AdjacencyIndex::new();
         idx.remove_edge("A", "B", "E"); // Should not panic
+    }
+
+    // =========================================================================
+    // Zero-alloc iterator methods
+    // =========================================================================
+
+    #[test]
+    fn outgoing_neighbor_ids_basic() {
+        let mut idx = AdjacencyIndex::new();
+        idx.add_edge("A", "B", "KNOWS", EdgeData::default());
+        idx.add_edge("A", "C", "HATES", EdgeData::default());
+
+        let mut out: Vec<(&str, &str)> = idx.outgoing_neighbor_ids("A", None).collect();
+        out.sort();
+        assert_eq!(out, vec![("B", "KNOWS"), ("C", "HATES")]);
+    }
+
+    #[test]
+    fn outgoing_neighbor_ids_with_filter() {
+        let mut idx = AdjacencyIndex::new();
+        idx.add_edge("A", "B", "KNOWS", EdgeData::default());
+        idx.add_edge("A", "C", "HATES", EdgeData::default());
+        idx.add_edge("A", "D", "KNOWS", EdgeData::default());
+
+        let out: Vec<(&str, &str)> = idx.outgoing_neighbor_ids("A", Some("KNOWS")).collect();
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|(_, et)| *et == "KNOWS"));
+    }
+
+    #[test]
+    fn outgoing_neighbor_ids_empty_node() {
+        let idx = AdjacencyIndex::new();
+        let out: Vec<(&str, &str)> = idx.outgoing_neighbor_ids("ghost", None).collect();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn incoming_neighbor_ids_basic() {
+        let mut idx = AdjacencyIndex::new();
+        idx.add_edge("X", "A", "E1", EdgeData::default());
+        idx.add_edge("Y", "A", "E2", EdgeData::default());
+
+        let mut inc: Vec<(&str, &str)> = idx.incoming_neighbor_ids("A", None).collect();
+        inc.sort();
+        assert_eq!(inc, vec![("X", "E1"), ("Y", "E2")]);
+    }
+
+    #[test]
+    fn incoming_neighbor_ids_with_filter() {
+        let mut idx = AdjacencyIndex::new();
+        idx.add_edge("X", "A", "KNOWS", EdgeData::default());
+        idx.add_edge("Y", "A", "HATES", EdgeData::default());
+
+        let inc: Vec<(&str, &str)> = idx.incoming_neighbor_ids("A", Some("KNOWS")).collect();
+        assert_eq!(inc.len(), 1);
+        assert_eq!(inc[0], ("X", "KNOWS"));
+    }
+
+    #[test]
+    fn neighbor_ids_self_loop() {
+        let mut idx = AdjacencyIndex::new();
+        idx.add_edge("A", "A", "SELF", EdgeData::default());
+
+        let out: Vec<_> = idx.outgoing_neighbor_ids("A", None).collect();
+        assert_eq!(out, vec![("A", "SELF")]);
+
+        let inc: Vec<_> = idx.incoming_neighbor_ids("A", None).collect();
+        assert_eq!(inc, vec![("A", "SELF")]);
+    }
+
+    #[test]
+    fn neighbor_ids_matches_neighbor_structs() {
+        // Verify that the zero-alloc iterators return the same (node, type) pairs
+        // as the allocating Vec<Neighbor> methods.
+        let mut idx = AdjacencyIndex::new();
+        idx.add_edge("A", "B", "E1", EdgeData::default());
+        idx.add_edge("A", "C", "E2", EdgeData::default());
+        idx.add_edge("D", "A", "E3", EdgeData::default());
+
+        let alloc_out: Vec<(String, String)> = idx
+            .outgoing_neighbors("A", None)
+            .into_iter()
+            .map(|n| (n.node_id, n.edge_type))
+            .collect();
+        let iter_out: Vec<(String, String)> = idx
+            .outgoing_neighbor_ids("A", None)
+            .map(|(id, et)| (id.to_string(), et.to_string()))
+            .collect();
+        assert_eq!(alloc_out, iter_out);
+
+        let alloc_in: Vec<(String, String)> = idx
+            .incoming_neighbors("A", None)
+            .into_iter()
+            .map(|n| (n.node_id, n.edge_type))
+            .collect();
+        let iter_in: Vec<(String, String)> = idx
+            .incoming_neighbor_ids("A", None)
+            .map(|(id, et)| (id.to_string(), et.to_string()))
+            .collect();
+        assert_eq!(alloc_in, iter_in);
     }
 }
