@@ -2122,6 +2122,7 @@ impl Drop for Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use strata_concurrency::TransactionPayload;
     use strata_core::types::{Key, Namespace};
     use strata_core::value::Value;
@@ -2187,13 +2188,13 @@ mod tests {
         let db_path = temp_dir.path().join("db");
 
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         // Write directly to segmented WAL (simulating a crash recovery scenario)
         {
@@ -2232,13 +2233,13 @@ mod tests {
         let db_path = temp_dir.path().join("db");
 
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         // Open database, write via transaction, close
         {
@@ -2281,13 +2282,13 @@ mod tests {
         let db_path = temp_dir.path().join("db");
 
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         // Write one valid record, then append garbage to simulate crash
         {
@@ -2389,14 +2390,14 @@ mod tests {
     // Transaction API Tests
     // ========================================================================
 
-    fn create_test_namespace(branch_id: BranchId) -> Namespace {
-        Namespace::new(
+    fn create_test_namespace(branch_id: BranchId) -> Arc<Namespace> {
+        Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        )
+        ))
     }
 
     #[test]

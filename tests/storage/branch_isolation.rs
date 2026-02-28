@@ -11,7 +11,7 @@ use strata_core::BranchId;
 use strata_storage::sharded::ShardedStore;
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
-    let ns = Namespace::for_branch(branch_id);
+    let ns = Arc::new(Namespace::for_branch(branch_id));
     Key::new_kv(ns, name)
 }
 
@@ -225,7 +225,7 @@ fn branch_entry_count() {
 fn list_branch_keys() {
     let store = ShardedStore::new();
     let branch_id = BranchId::new();
-    let ns = Namespace::for_branch(branch_id);
+    let ns = Arc::new(Namespace::for_branch(branch_id));
 
     // Put 5 keys
     for i in 0..5 {

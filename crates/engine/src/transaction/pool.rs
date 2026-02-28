@@ -162,21 +162,22 @@ impl TransactionPool {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
     use strata_concurrency::snapshot::ClonedSnapshotView;
     use strata_core::types::{Namespace, TypeTag};
     use strata_core::value::Value;
 
-    fn create_test_namespace() -> Namespace {
-        Namespace::new(
+    fn create_test_namespace() -> Arc<Namespace> {
+        Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             BranchId::new(),
             "default".to_string(),
-        )
+        ))
     }
 
-    fn create_test_key(ns: &Namespace, user_key: &[u8]) -> strata_core::types::Key {
+    fn create_test_key(ns: &Arc<Namespace>, user_key: &[u8]) -> strata_core::types::Key {
         strata_core::types::Key::new(ns.clone(), TypeTag::KV, user_key.to_vec())
     }
 

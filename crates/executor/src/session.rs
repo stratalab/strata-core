@@ -305,7 +305,7 @@ impl Session {
             }
             _ => "default".to_string(),
         };
-        let ns = Namespace::for_branch_space(branch_id, &space);
+        let ns = Arc::new(Namespace::for_branch_space(branch_id, &space));
 
         // Temporarily take the context to create a Transaction
         let mut ctx = self.txn_ctx.take().unwrap();
@@ -318,7 +318,7 @@ impl Session {
     fn dispatch_in_txn(
         executor: &Executor,
         ctx: &mut TransactionContext,
-        ns: Namespace,
+        ns: Arc<Namespace>,
         cmd: Command,
     ) -> Result<Output> {
         // Read commands use ctx.get() / ctx.scan_prefix() directly so they

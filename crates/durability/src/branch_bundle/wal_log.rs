@@ -428,6 +428,7 @@ fn validate_single_entry<R: Read>(reader: &mut R, index: usize) -> BranchBundleR
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use strata_core::types::{BranchId, Key, Namespace, TypeTag};
     use strata_core::value::Value;
 
@@ -439,7 +440,7 @@ mod tests {
 
     fn make_test_payloads(branch_id_str: &str) -> Vec<BranchlogPayload> {
         let branch_id = BranchId::from_string(branch_id_str).unwrap_or_else(|| BranchId::new());
-        let ns = Namespace::for_branch(branch_id);
+        let ns = Arc::new(Namespace::for_branch(branch_id));
         vec![
             BranchlogPayload {
                 branch_id: branch_id_str.to_string(),
@@ -582,7 +583,7 @@ mod tests {
     fn test_large_entry() {
         let branch_id = BranchId::new();
         let branch_id_str = branch_id.to_string();
-        let ns = Namespace::for_branch(branch_id);
+        let ns = Arc::new(Namespace::for_branch(branch_id));
 
         // Create payload with large value
         let large_value = "x".repeat(1024 * 1024); // 1MB string
@@ -685,7 +686,7 @@ mod tests {
     fn test_checksum_changes_with_different_data() {
         let branch_id = BranchId::new();
         let branch_id_str = branch_id.to_string();
-        let ns = Namespace::for_branch(branch_id);
+        let ns = Arc::new(Namespace::for_branch(branch_id));
 
         let payloads1 = vec![BranchlogPayload {
             branch_id: branch_id_str.clone(),
@@ -720,7 +721,7 @@ mod tests {
     fn test_payload_with_deletes() {
         let branch_id = BranchId::new();
         let branch_id_str = branch_id.to_string();
-        let ns = Namespace::for_branch(branch_id);
+        let ns = Arc::new(Namespace::for_branch(branch_id));
 
         let payloads = vec![BranchlogPayload {
             branch_id: branch_id_str,

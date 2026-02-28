@@ -3,19 +3,20 @@
 //! Documents ClonedSnapshotView memory overhead
 //! and TransactionContext footprint.
 
+use std::sync::Arc;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
 use strata_engine::Database;
 use tempfile::TempDir;
 
-fn create_ns(branch_id: BranchId) -> Namespace {
-    Namespace::new(
+fn create_ns(branch_id: BranchId) -> Arc<Namespace> {
+    Arc::new(Namespace::new(
         "tenant".to_string(),
         "app".to_string(),
         "agent".to_string(),
         branch_id,
         "default".to_string(),
-    )
+    ))
 }
 
 /// Test: Memory grows with read-set size

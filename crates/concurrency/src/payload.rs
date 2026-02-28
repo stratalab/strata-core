@@ -79,18 +79,19 @@ pub enum PayloadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use strata_core::types::{BranchId, Key, Namespace};
     use strata_core::value::Value;
 
-    fn test_ns() -> Namespace {
+    fn test_ns() -> Arc<Namespace> {
         let branch_id = BranchId::new();
-        Namespace::new(
+        Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        )
+        ))
     }
 
     #[test]

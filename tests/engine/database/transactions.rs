@@ -216,8 +216,9 @@ fn commit_transaction_returns_version() {
     let mut ctx = test_db.db.begin_transaction(branch_id);
 
     // Add a write to the transaction
+    use std::sync::Arc;
     use strata_core::types::{Key, Namespace};
-    let key = Key::new_kv(Namespace::for_branch(branch_id), "manual_tx_key");
+    let key = Key::new_kv(Arc::new(Namespace::for_branch(branch_id)), "manual_tx_key");
     ctx.write_set.insert(key, Value::Int(42));
 
     // Commit

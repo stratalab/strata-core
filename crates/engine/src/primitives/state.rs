@@ -92,7 +92,7 @@ impl StateCell {
 
     /// Build key for state cell
     fn key_for(&self, branch_id: &BranchId, space: &str, name: &str) -> Key {
-        Key::new_state(self.namespace_for(branch_id, space), name)
+        Key::new_state(Arc::new(self.namespace_for(branch_id, space)), name)
     }
 
     // ========== Read/Init Operations ==========
@@ -431,7 +431,7 @@ impl StateCell {
         prefix: Option<&str>,
     ) -> StrataResult<Vec<String>> {
         self.db.transaction(*branch_id, |txn| {
-            let ns = self.namespace_for(branch_id, space);
+            let ns = Arc::new(self.namespace_for(branch_id, space));
             let scan_prefix = Key::new_state(ns, prefix.unwrap_or(""));
 
             let results = txn.scan_prefix(&scan_prefix)?;
@@ -475,7 +475,7 @@ impl StateCell {
         prefix: Option<&str>,
         as_of_ts: u64,
     ) -> StrataResult<Vec<String>> {
-        let ns = self.namespace_for(branch_id, space);
+        let ns = Arc::new(self.namespace_for(branch_id, space));
         let scan_prefix = Key::new_state(ns, prefix.unwrap_or(""));
         let results = self.db.scan_prefix_at_timestamp(&scan_prefix, as_of_ts)?;
         Ok(results
@@ -505,7 +505,7 @@ impl crate::search::Searchable for StateCell {
 
 impl StateCellExt for TransactionContext {
     fn state_get(&mut self, name: &str) -> StrataResult<Option<Value>> {
-        let ns = Namespace::for_branch(self.branch_id);
+        let ns = Arc::new(Namespace::for_branch(self.branch_id));
         let key = Key::new_state(ns, name);
 
         match self.get(&key)? {
@@ -524,7 +524,7 @@ impl StateCellExt for TransactionContext {
         expected_version: Version,
         new_value: Value,
     ) -> StrataResult<Version> {
-        let ns = Namespace::for_branch(self.branch_id);
+        let ns = Arc::new(Namespace::for_branch(self.branch_id));
         let key = Key::new_state(ns, name);
 
         let current: State = match self.get(&key)? {
@@ -557,7 +557,7 @@ impl StateCellExt for TransactionContext {
     }
 
     fn state_set(&mut self, name: &str, value: Value) -> StrataResult<Version> {
-        let ns = Namespace::for_branch(self.branch_id);
+        let ns = Arc::new(Namespace::for_branch(self.branch_id));
         let key = Key::new_state(ns, name);
 
         let new_version = match self.get(&key)? {

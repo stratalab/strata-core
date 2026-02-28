@@ -61,8 +61,8 @@ fn global_branch_id() -> BranchId {
 }
 
 /// Get the global namespace for BranchIndex operations
-fn global_namespace() -> Namespace {
-    Namespace::for_branch(global_branch_id())
+fn global_namespace() -> Arc<Namespace> {
+    Arc::new(Namespace::for_branch(global_branch_id()))
 }
 
 // ========== BranchStatus Enum ==========
@@ -347,7 +347,7 @@ impl BranchIndex {
         txn: &mut strata_concurrency::TransactionContext,
         branch_id: BranchId,
     ) -> StrataResult<()> {
-        let ns = Namespace::for_branch(branch_id);
+        let ns = Arc::new(Namespace::for_branch(branch_id));
 
         #[allow(deprecated)]
         for type_tag in [

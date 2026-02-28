@@ -248,8 +248,9 @@ impl JsonPatchEntry {
 /// # use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 /// # use strata_core::value::Value;
 /// # use strata_core::primitives::json::JsonPath;
+/// # use std::sync::Arc;
 /// # fn example(txn: &mut TransactionContext) -> strata_core::StrataResult<()> {
-/// # let ns = Namespace::for_branch(BranchId::default());
+/// # let ns = Arc::new(Namespace::for_branch(BranchId::default()));
 /// # let key = Key::new(ns.clone(), TypeTag::Json, b"doc".to_vec());
 /// # let path = JsonPath::root();
 /// # let other_key = Key::new_kv(ns, "other");
@@ -545,8 +546,9 @@ impl TransactionContext {
     /// ```no_run
     /// # use strata_concurrency::TransactionContext;
     /// # use strata_core::types::{BranchId, Key, Namespace};
+    /// # use std::sync::Arc;
     /// # fn example(txn: &mut TransactionContext) -> strata_core::StrataResult<()> {
-    /// # let key = Key::new_kv(Namespace::for_branch(BranchId::default()), "key");
+    /// # let key = Key::new_kv(Arc::new(Namespace::for_branch(BranchId::default())), "key");
     /// let value = txn.get(&key)?;
     /// if let Some(v) = value {
     ///     // Process value
@@ -674,8 +676,9 @@ impl TransactionContext {
     /// ```no_run
     /// # use strata_concurrency::TransactionContext;
     /// # use strata_core::types::{BranchId, Key, Namespace};
+    /// # use std::sync::Arc;
     /// # fn example(txn: &mut TransactionContext) -> strata_core::StrataResult<()> {
-    /// let namespace = Namespace::for_branch(BranchId::default());
+    /// let namespace = Arc::new(Namespace::for_branch(BranchId::default()));
     /// let prefix = Key::new_kv(namespace, "user:");
     /// let users = txn.scan_prefix(&prefix)?;
     /// for (key, value) in users {
@@ -752,8 +755,9 @@ impl TransactionContext {
     /// # use strata_concurrency::TransactionContext;
     /// # use strata_core::types::{BranchId, Key, Namespace};
     /// # use strata_core::value::Value;
+    /// # use std::sync::Arc;
     /// # fn example(txn: &mut TransactionContext) -> strata_core::StrataResult<()> {
-    /// # let key = Key::new_kv(Namespace::for_branch(BranchId::default()), "key");
+    /// # let key = Key::new_kv(Arc::new(Namespace::for_branch(BranchId::default())), "key");
     /// txn.put(key, Value::Bytes(b"value".to_vec()))?;
     /// // Value is NOT visible to other transactions yet
     /// // Will be visible after successful commit
@@ -789,8 +793,9 @@ impl TransactionContext {
     /// ```no_run
     /// # use strata_concurrency::TransactionContext;
     /// # use strata_core::types::{BranchId, Key, Namespace};
+    /// # use std::sync::Arc;
     /// # fn example(txn: &mut TransactionContext) -> strata_core::StrataResult<()> {
-    /// # let key = Key::new_kv(Namespace::for_branch(BranchId::default()), "key");
+    /// # let key = Key::new_kv(Arc::new(Namespace::for_branch(BranchId::default())), "key");
     /// txn.delete(key)?;
     /// // Key is NOT deleted from storage yet
     /// // Will be deleted after successful commit
@@ -830,8 +835,9 @@ impl TransactionContext {
     /// # use strata_concurrency::TransactionContext;
     /// # use strata_core::types::{BranchId, Key, Namespace};
     /// # use strata_core::value::Value;
+    /// # use std::sync::Arc;
     /// # fn example(txn: &mut TransactionContext) -> strata_core::StrataResult<()> {
-    /// # let ns = Namespace::for_branch(BranchId::default());
+    /// # let ns = Arc::new(Namespace::for_branch(BranchId::default()));
     /// # let key = Key::new_kv(ns.clone(), "key");
     /// # let other_key = Key::new_kv(ns, "other");
     /// // Create key only if it doesn't exist (expected_version = 0)
@@ -1604,20 +1610,21 @@ mod tests {
     use super::*;
     use crate::ClonedSnapshotView;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
     use strata_core::types::{BranchId, Namespace, TypeTag};
     use strata_core::value::Value;
 
-    fn test_namespace() -> Namespace {
-        Namespace::new(
+    fn test_namespace() -> Arc<Namespace> {
+        Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             BranchId::new(),
             "default".to_string(),
-        )
+        ))
     }
 
-    fn test_key(ns: &Namespace, name: &str) -> Key {
+    fn test_key(ns: &Arc<Namespace>, name: &str) -> Key {
         Key::new(ns.clone(), TypeTag::KV, name.as_bytes().to_vec())
     }
 

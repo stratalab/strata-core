@@ -281,7 +281,10 @@ impl VectorStore {
             // Use "default" space for snapshot deserialization (backwards compat)
             let collection_record = crate::primitives::vector::CollectionRecord::new(&config);
             let config_key = strata_core::types::Key::new_vector_config(
-                strata_core::types::Namespace::for_branch_space(header.branch_id, "default"),
+                std::sync::Arc::new(strata_core::types::Namespace::for_branch_space(
+                    header.branch_id,
+                    "default",
+                )),
                 &header.name,
             );
             let config_bytes = collection_record.to_bytes()?;

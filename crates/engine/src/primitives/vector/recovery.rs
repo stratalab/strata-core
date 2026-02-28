@@ -60,6 +60,7 @@ pub(crate) fn mmap_path(
 fn recover_from_db(db: &Database) -> StrataResult<()> {
     use super::{CollectionId, IndexBackendFactory, VectorBackendState, VectorConfig, VectorId};
     use crate::primitives::vector::heap::VectorHeap;
+    use std::sync::Arc;
     use strata_core::traits::SnapshotView;
     use strata_core::types::{Key, Namespace};
     use strata_core::value::Value;
@@ -80,7 +81,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
 
     // Iterate all branch_ids in storage
     for branch_id in db.storage().branch_ids() {
-        let ns = Namespace::for_branch_space(branch_id, "default");
+        let ns = Arc::new(Namespace::for_branch_space(branch_id, "default"));
 
         // Scan for vector config entries in this run
         let config_prefix = Key::new_vector_config_prefix(ns.clone());

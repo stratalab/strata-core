@@ -509,10 +509,11 @@ pub enum ReplayError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use strata_core::types::Namespace;
 
-    fn test_namespace() -> Namespace {
-        Namespace::for_branch(BranchId::new())
+    fn test_namespace() -> Arc<Namespace> {
+        Arc::new(Namespace::for_branch(BranchId::new()))
     }
 
     // ========== BranchIndex Tests ==========
@@ -890,7 +891,7 @@ mod tests {
         let ns = test_namespace();
 
         // Function to build a view from operations
-        fn build_view(branch_id: BranchId, ns: &Namespace) -> ReadOnlyView {
+        fn build_view(branch_id: BranchId, ns: &Arc<Namespace>) -> ReadOnlyView {
             let mut view = ReadOnlyView::new(branch_id);
             view.apply_kv_put(Key::new_kv(ns.clone(), "a"), Value::Int(1));
             view.apply_kv_put(Key::new_kv(ns.clone(), "b"), Value::Int(2));

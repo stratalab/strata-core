@@ -187,7 +187,7 @@ impl JsonStore {
 
     /// Build key for JSON document
     fn key_for(&self, branch_id: &BranchId, space: &str, doc_id: &str) -> Key {
-        Key::new_json(self.namespace_for(branch_id, space), doc_id)
+        Key::new_json(Arc::new(self.namespace_for(branch_id, space)), doc_id)
     }
 
     // ========================================================================
@@ -678,7 +678,7 @@ impl JsonStore {
     ) -> StrataResult<JsonListResult> {
         let ns = self.namespace_for(branch_id, space);
         // Narrow scan at storage level: if prefix is given, only scan matching keys
-        let scan_prefix = Key::new_json(ns, prefix.unwrap_or(""));
+        let scan_prefix = Key::new_json(Arc::new(ns), prefix.unwrap_or(""));
 
         self.db.transaction(*branch_id, |txn| {
             let mut doc_ids = Vec::with_capacity(limit + 1);
@@ -757,7 +757,7 @@ impl JsonStore {
         as_of_ts: u64,
     ) -> StrataResult<Vec<String>> {
         let ns = self.namespace_for(branch_id, space);
-        let scan_prefix = Key::new_json_prefix(ns);
+        let scan_prefix = Key::new_json_prefix(Arc::new(ns));
         let results = self.db.scan_prefix_at_timestamp(&scan_prefix, as_of_ts)?;
         let mut doc_ids = Vec::new();
         for (_, vv) in results {
@@ -803,7 +803,7 @@ impl JsonStoreExt for TransactionContext {
         // Validate path limits (Issue #440)
         path.validate().map_err(limit_error_to_error)?;
 
-        let key = Key::new_json(Namespace::for_branch(self.branch_id), doc_id);
+        let key = Key::new_json(Arc::new(Namespace::for_branch(self.branch_id)), doc_id);
 
         // Read from transaction context (respects read-your-writes)
         match self.get(&key)? {
@@ -825,7 +825,7 @@ impl JsonStoreExt for TransactionContext {
         path.validate().map_err(limit_error_to_error)?;
         value.validate().map_err(limit_error_to_error)?;
 
-        let key = Key::new_json(Namespace::for_branch(self.branch_id), doc_id);
+        let key = Key::new_json(Arc::new(Namespace::for_branch(self.branch_id)), doc_id);
 
         // Load existing document from transaction context
         let stored = self.get(&key)?.ok_or_else(|| {
@@ -849,7 +849,7 @@ impl JsonStoreExt for TransactionContext {
         // Validate document limits (Issue #440)
         value.validate().map_err(limit_error_to_error)?;
 
-        let key = Key::new_json(Namespace::for_branch(self.branch_id), doc_id);
+        let key = Key::new_json(Arc::new(Namespace::for_branch(self.branch_id)), doc_id);
         let doc = JsonDoc::new(doc_id, value);
 
         // Check if document already exists

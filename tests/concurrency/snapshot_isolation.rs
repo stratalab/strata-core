@@ -15,7 +15,7 @@ use strata_core::value::Value;
 use strata_core::{BranchId, Versioned};
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
-    let ns = Namespace::for_branch(branch_id);
+    let ns = Arc::new(Namespace::for_branch(branch_id));
     Key::new_kv(ns, name)
 }
 
@@ -172,7 +172,7 @@ fn write_then_delete_sees_delete() {
 #[test]
 fn snapshot_scan_prefix_returns_matching_keys() {
     let branch_id = BranchId::new();
-    let ns = Namespace::for_branch(branch_id);
+    let ns = Arc::new(Namespace::for_branch(branch_id));
 
     let mut data = BTreeMap::new();
     for i in 0..10 {
@@ -201,7 +201,7 @@ fn snapshot_scan_prefix_returns_matching_keys() {
 #[test]
 fn snapshot_scan_empty_prefix() {
     let branch_id = BranchId::new();
-    let ns = Namespace::for_branch(branch_id);
+    let ns = Arc::new(Namespace::for_branch(branch_id));
 
     let snapshot = ClonedSnapshotView::new(1, BTreeMap::new());
 
@@ -333,7 +333,7 @@ fn empty_snapshot_get_returns_none() {
 #[test]
 fn empty_snapshot_scan_returns_empty() {
     let branch_id = BranchId::new();
-    let ns = Namespace::for_branch(branch_id);
+    let ns = Arc::new(Namespace::for_branch(branch_id));
     let prefix = Key::new_kv(ns, "any");
 
     let snapshot = ClonedSnapshotView::empty(0);

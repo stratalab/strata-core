@@ -152,17 +152,17 @@ mod tests {
 
     // === Test Helpers ===
 
-    fn create_test_namespace() -> Namespace {
-        Namespace::new(
+    fn create_test_namespace() -> Arc<Namespace> {
+        Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             BranchId::new(),
             "default".to_string(),
-        )
+        ))
     }
 
-    fn create_test_key(ns: &Namespace, user_key: &[u8]) -> Key {
+    fn create_test_key(ns: &Arc<Namespace>, user_key: &[u8]) -> Key {
         Key::new(ns.clone(), TypeTag::KV, user_key.to_vec())
     }
 
@@ -170,7 +170,7 @@ mod tests {
         VersionedValue::new(Value::Bytes(data.to_vec()), Version::txn(version))
     }
 
-    fn create_populated_snapshot() -> (ClonedSnapshotView, Namespace) {
+    fn create_populated_snapshot() -> (ClonedSnapshotView, Arc<Namespace>) {
         let ns = create_test_namespace();
         let mut data = BTreeMap::new();
 
@@ -275,13 +275,13 @@ mod tests {
         let (snapshot, _) = create_populated_snapshot();
 
         // Create key with different namespace
-        let other_ns = Namespace::new(
+        let other_ns = Arc::new(Namespace::new(
             "other_tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             BranchId::new(),
             "default".to_string(),
-        );
+        ));
         let key = create_test_key(&other_ns, b"key1");
 
         let result = snapshot.get(&key).unwrap();
@@ -338,13 +338,13 @@ mod tests {
     fn test_scan_prefix_different_namespace() {
         let (snapshot, _) = create_populated_snapshot();
 
-        let other_ns = Namespace::new(
+        let other_ns = Arc::new(Namespace::new(
             "other_tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             BranchId::new(),
             "default".to_string(),
-        );
+        ));
         let prefix = create_test_key(&other_ns, b"key");
 
         let results = snapshot.scan_prefix(&prefix).unwrap();

@@ -228,6 +228,7 @@ impl RecoveryStats {
 mod tests {
     use super::*;
     use crate::payload::TransactionPayload;
+    use std::sync::Arc;
     use strata_core::types::{BranchId, Key, Namespace};
     use strata_core::value::Value;
     use strata_durability::codec::IdentityCodec;
@@ -236,14 +237,14 @@ mod tests {
     use strata_durability::wal::{DurabilityMode, WalConfig, WalWriter};
     use tempfile::TempDir;
 
-    fn create_test_namespace(branch_id: BranchId) -> Namespace {
-        Namespace::new(
+    fn create_test_namespace(branch_id: BranchId) -> Arc<Namespace> {
+        Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        )
+        ))
     }
 
     fn create_test_wal(dir: &std::path::Path) -> WalWriter {

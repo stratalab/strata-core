@@ -7,6 +7,7 @@
 //! - diff_branches() key-level comparison
 //! - Orphaned branch detection
 
+use std::sync::Arc;
 use strata_core::branch_types::{BranchMetadata, BranchStatus};
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
@@ -176,8 +177,8 @@ fn test_branch_index_multiple_branches() {
 // ReadOnlyView Tests
 // ============================================================================
 
-fn test_namespace() -> Namespace {
-    Namespace::for_branch(BranchId::new())
+fn test_namespace() -> Arc<Namespace> {
+    Arc::new(Namespace::for_branch(BranchId::new()))
 }
 
 #[test]
@@ -537,7 +538,7 @@ fn test_replay_invariant_p6_idempotent() {
     let ns = test_namespace();
 
     // Simulate replay by building the same view multiple times
-    fn build_view(branch_id: BranchId, ns: Namespace) -> ReadOnlyView {
+    fn build_view(branch_id: BranchId, ns: Arc<Namespace>) -> ReadOnlyView {
         let mut view = ReadOnlyView::new(branch_id);
         view.apply_kv_put(Key::new_kv(ns.clone(), "counter"), Value::Int(1));
         view.apply_kv_put(Key::new_kv(ns.clone(), "counter"), Value::Int(2));

@@ -16,7 +16,7 @@ use strata_core::BranchId;
 use strata_storage::sharded::ShardedStore;
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
-    let ns = Namespace::for_branch(branch_id);
+    let ns = Arc::new(Namespace::for_branch(branch_id));
     Key::new_kv(ns, name)
 }
 
@@ -326,7 +326,7 @@ fn snapshot_cache_provides_isolation() {
 fn snapshot_scan_sees_consistent_state() {
     let store = Arc::new(ShardedStore::new());
     let branch_id = BranchId::new();
-    let ns = Namespace::for_branch(branch_id);
+    let ns = Arc::new(Namespace::for_branch(branch_id));
 
     // Put values with common prefix
     for i in 0..10 {
@@ -358,7 +358,7 @@ fn snapshot_scan_sees_consistent_state() {
 fn snapshot_list_sees_all_keys() {
     let store = Arc::new(ShardedStore::new());
     let branch_id = BranchId::new();
-    let ns = Namespace::for_branch(branch_id);
+    let ns = Arc::new(Namespace::for_branch(branch_id));
 
     // Put 5 values
     for i in 0..5 {

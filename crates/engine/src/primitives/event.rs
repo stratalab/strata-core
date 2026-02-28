@@ -277,8 +277,8 @@ impl EventLog {
     }
 
     /// Build namespace for branch+space-scoped operations
-    fn namespace_for(&self, branch_id: &BranchId, space: &str) -> Namespace {
-        Namespace::for_branch_space(*branch_id, space)
+    fn namespace_for(&self, branch_id: &BranchId, space: &str) -> Arc<Namespace> {
+        Arc::new(Namespace::for_branch_space(*branch_id, space))
     }
 
     // ========== Append Operation ==========
@@ -762,7 +762,7 @@ impl EventLogExt for TransactionContext {
         validate_event_type(event_type).map_err(|e| StrataError::invalid_input(e.to_string()))?;
         validate_payload(&payload).map_err(|e| StrataError::invalid_input(e.to_string()))?;
 
-        let ns = Namespace::for_branch(self.branch_id);
+        let ns = Arc::new(Namespace::for_branch(self.branch_id));
 
         // Read current metadata (or default)
         let meta_key = Key::new_event_meta(ns.clone());
@@ -817,7 +817,7 @@ impl EventLogExt for TransactionContext {
     }
 
     fn event_get(&mut self, sequence: u64) -> StrataResult<Option<Value>> {
-        let ns = Namespace::for_branch(self.branch_id);
+        let ns = Arc::new(Namespace::for_branch(self.branch_id));
         let event_key = Key::new_event(ns, sequence);
         self.get(&event_key)
     }
