@@ -317,6 +317,7 @@ fn format_micros(micros: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use strata_core::types::Namespace;
     use tempfile::TempDir;
 
@@ -367,7 +368,7 @@ mod tests {
             .unwrap()
             .value;
         let core_branch_id = crate::primitives::branch::resolve_branch_name(&meta.name);
-        let ns = Namespace::for_branch(core_branch_id);
+        let ns = Arc::new(Namespace::for_branch(core_branch_id));
 
         db.transaction(core_branch_id, |txn| {
             txn.put(
@@ -423,7 +424,7 @@ mod tests {
             .unwrap()
             .value;
         let core_branch_id = crate::primitives::branch::resolve_branch_name(&meta.name);
-        let ns = Namespace::for_branch(core_branch_id);
+        let ns = Arc::new(Namespace::for_branch(core_branch_id));
 
         db.transaction(core_branch_id, |txn| {
             txn.put(

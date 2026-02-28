@@ -3,6 +3,7 @@
 //! All graph data is stored under the `_graph_` space using KV-type keys.
 //! Key format uses `/` as a separator between path segments.
 
+use std::sync::Arc;
 #[cfg(test)]
 use strata_core::types::TypeTag;
 use strata_core::types::{BranchId, Key, Namespace};
@@ -63,8 +64,8 @@ pub fn validate_edge_type(t: &str) -> StrataResult<()> {
 pub const GRAPH_SPACE: &str = "_graph_";
 
 /// Build a namespace for graph operations on a given branch.
-pub fn graph_namespace(branch_id: BranchId) -> Namespace {
-    Namespace::for_branch_space(branch_id, GRAPH_SPACE)
+pub fn graph_namespace(branch_id: BranchId) -> Arc<Namespace> {
+    Arc::new(Namespace::for_branch_space(branch_id, GRAPH_SPACE))
 }
 
 /// Build a full storage Key from a user_key string in the graph namespace.

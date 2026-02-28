@@ -339,6 +339,7 @@ mod tests {
     use crate::branch_bundle::types::ExportOptions;
     use crate::branch_bundle::wal_log::BranchlogPayload;
     use crate::branch_bundle::writer::BranchBundleWriter;
+    use std::sync::Arc;
     use strata_core::types::{BranchId, Key, Namespace, TypeTag};
     use strata_core::value::Value;
     use tempfile::tempdir;
@@ -357,7 +358,7 @@ mod tests {
 
     fn make_test_payloads() -> Vec<BranchlogPayload> {
         let branch_id = BranchId::new();
-        let ns = Namespace::for_branch(branch_id);
+        let ns = Arc::new(Namespace::for_branch(branch_id));
         vec![
             BranchlogPayload {
                 branch_id: branch_id.to_string(),

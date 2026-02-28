@@ -212,6 +212,7 @@ mod tests {
     use crate::error::StrataError;
     use crate::types::Namespace;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
     use std::sync::{
         atomic::{AtomicU64, Ordering},
         RwLock,
@@ -406,17 +407,17 @@ mod tests {
         }
     }
 
-    fn test_ns() -> Namespace {
-        Namespace::new(
+    fn test_ns() -> Arc<Namespace> {
+        Arc::new(Namespace::new(
             "test".into(),
             "app".into(),
             "agent".into(),
             BranchId::new(),
             "default".into(),
-        )
+        ))
     }
 
-    fn test_key(ns: &Namespace, name: &str) -> Key {
+    fn test_key(ns: &Arc<Namespace>, name: &str) -> Key {
         Key::new_kv(ns.clone(), name)
     }
 
@@ -639,20 +640,20 @@ mod tests {
         let store = MockStorage::new();
         let branch1 = BranchId::new();
         let branch2 = BranchId::new();
-        let ns1 = Namespace::new(
+        let ns1 = Arc::new(Namespace::new(
             "t".into(),
             "a".into(),
             "g".into(),
             branch1,
             "default".into(),
-        );
-        let ns2 = Namespace::new(
+        ));
+        let ns2 = Arc::new(Namespace::new(
             "t".into(),
             "a".into(),
             "g".into(),
             branch2,
             "default".into(),
-        );
+        ));
 
         store
             .put(Key::new_kv(ns1.clone(), "k1"), Value::Int(1), None)

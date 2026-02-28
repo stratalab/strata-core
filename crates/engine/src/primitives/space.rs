@@ -109,7 +109,7 @@ impl SpaceIndex {
     /// space's namespace to determine if any keys exist.
     pub fn is_empty(&self, branch_id: BranchId, space: &str) -> StrataResult<bool> {
         self.db.transaction(branch_id, |txn| {
-            let ns = Namespace::for_branch_space(branch_id, space);
+            let ns = Arc::new(Namespace::for_branch_space(branch_id, space));
 
             for type_tag in [
                 TypeTag::KV,

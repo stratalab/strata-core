@@ -144,8 +144,8 @@ impl VectorStore {
     }
 
     /// Build namespace for branch+space-scoped operations
-    fn namespace_for(&self, branch_id: BranchId, space: &str) -> Namespace {
-        Namespace::for_branch_space(branch_id, space)
+    fn namespace_for(&self, branch_id: BranchId, space: &str) -> Arc<Namespace> {
+        Arc::new(Namespace::for_branch_space(branch_id, space))
     }
 
     /// Get the backend factory (hardcoded currently, configurable in future versions)
@@ -1592,7 +1592,7 @@ impl VectorStore {
 
         let now = now_micros();
         let record = CollectionRecord::new(&config);
-        let config_key = Key::new_vector_config(Namespace::for_branch(branch_id), name);
+        let config_key = Key::new_vector_config(Arc::new(Namespace::for_branch(branch_id)), name);
         let config_bytes = record.to_bytes()?;
 
         self.db
@@ -2057,7 +2057,7 @@ impl VectorStore {
                 // to read from when VectorIds collide between source and target.
                 let source_key_to_vid: BTreeMap<Vec<u8>, u64> =
                     if let Some(src_bid) = source_branch_id {
-                        let src_ns = Namespace::for_branch_space(src_bid, space);
+                        let src_ns = Arc::new(Namespace::for_branch_space(src_bid, space));
                         let src_prefix = Key::new_vector(src_ns, &collection_name, "");
                         if let Ok(src_entries) = snapshot.scan_prefix(&src_prefix) {
                             src_entries

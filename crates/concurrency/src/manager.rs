@@ -454,17 +454,17 @@ mod tests {
     use strata_storage::ShardedStore;
     use tempfile::TempDir;
 
-    fn create_test_namespace(branch_id: BranchId) -> Namespace {
-        Namespace::new(
+    fn create_test_namespace(branch_id: BranchId) -> Arc<Namespace> {
+        Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        )
+        ))
     }
 
-    fn create_test_key(ns: &Namespace, name: &str) -> Key {
+    fn create_test_key(ns: &Arc<Namespace>, name: &str) -> Key {
         Key::new_kv(ns.clone(), name)
     }
 

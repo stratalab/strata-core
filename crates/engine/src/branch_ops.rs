@@ -263,7 +263,7 @@ pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> Strat
             .into_iter()
             .map(|(key, vv)| {
                 // Rewrite key with destination namespace (preserving space and user_key)
-                let new_ns = Namespace::for_branch_space(dest_id, &key.namespace.space);
+                let new_ns = Arc::new(Namespace::for_branch_space(dest_id, &key.namespace.space));
                 let new_key = Key::new(new_ns, key.type_tag, key.user_key.clone());
                 (new_key, vv.value)
             })
@@ -578,7 +578,7 @@ pub fn merge_branches(
                 if type_tag_to_primitive(type_tag) == diff_entry.primitive {
                     let user_key_bytes = diff_entry.raw_key.clone();
                     if let Some(value) = source_values.get(&(user_key_bytes.clone(), type_tag)) {
-                        let target_ns = Namespace::for_branch_space(target_id, space);
+                        let target_ns = Arc::new(Namespace::for_branch_space(target_id, space));
                         let target_key = Key::new(target_ns, type_tag, user_key_bytes);
                         batch.push((target_key, value.clone()));
                         break;
@@ -657,7 +657,7 @@ mod tests {
 
     fn write_kv(db: &Arc<Database>, branch: &str, space: &str, key: &str, value: Value) {
         let branch_id = resolve_branch_name(branch);
-        let ns = Namespace::for_branch_space(branch_id, space);
+        let ns = Arc::new(Namespace::for_branch_space(branch_id, space));
         db.transaction(branch_id, |txn| {
             txn.put(
                 Key::new(ns.clone(), TypeTag::KV, key.as_bytes().to_vec()),
@@ -670,7 +670,7 @@ mod tests {
 
     fn write_state(db: &Arc<Database>, branch: &str, space: &str, key: &str, value: Value) {
         let branch_id = resolve_branch_name(branch);
-        let ns = Namespace::for_branch_space(branch_id, space);
+        let ns = Arc::new(Namespace::for_branch_space(branch_id, space));
         db.transaction(branch_id, |txn| {
             txn.put(
                 Key::new(ns.clone(), TypeTag::State, key.as_bytes().to_vec()),
@@ -683,7 +683,7 @@ mod tests {
 
     fn write_json(db: &Arc<Database>, branch: &str, space: &str, key: &str, value: Value) {
         let branch_id = resolve_branch_name(branch);
-        let ns = Namespace::for_branch_space(branch_id, space);
+        let ns = Arc::new(Namespace::for_branch_space(branch_id, space));
         db.transaction(branch_id, |txn| {
             txn.put(
                 Key::new(ns.clone(), TypeTag::Json, key.as_bytes().to_vec()),
@@ -1075,7 +1075,7 @@ mod tests {
 
         // Check version history before merge
         let target_id = resolve_branch_name("target");
-        let ns = Namespace::for_branch_space(target_id, "default");
+        let ns = Arc::new(Namespace::for_branch_space(target_id, "default"));
         let history_key = Key::new(ns, TypeTag::KV, b"key".to_vec());
         let history_before = db.get_history(&history_key, None, None).unwrap();
         let versions_before = history_before.len();
@@ -1084,7 +1084,7 @@ mod tests {
         merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
 
         // Check version history after merge — should have one more version
-        let ns2 = Namespace::for_branch_space(target_id, "default");
+        let ns2 = Arc::new(Namespace::for_branch_space(target_id, "default"));
         let history_key2 = Key::new(ns2, TypeTag::KV, b"key".to_vec());
         let history_after = db.get_history(&history_key2, None, None).unwrap();
         assert!(
@@ -1112,7 +1112,7 @@ mod tests {
 
         // Write data with binary keys (simulating event sequence numbers)
         let binary_key: Vec<u8> = 1u64.to_be_bytes().to_vec();
-        let ns_source = Namespace::for_branch_space(source_id, "default");
+        let ns_source = Arc::new(Namespace::for_branch_space(source_id, "default"));
         db.transaction(source_id, |txn| {
             txn.put(
                 Key::new(ns_source.clone(), TypeTag::Event, binary_key.clone()),

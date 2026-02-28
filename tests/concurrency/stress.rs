@@ -17,7 +17,7 @@ use strata_core::BranchId;
 use strata_storage::sharded::ShardedStore;
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
-    let ns = Namespace::for_branch(branch_id);
+    let ns = Arc::new(Namespace::for_branch(branch_id));
     Key::new_kv(ns, name)
 }
 

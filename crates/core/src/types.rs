@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Unique identifier for an agent branch
@@ -242,10 +243,11 @@ impl TypeTag {
 ///
 /// ```
 /// use strata_core::{Key, Namespace, TypeTag, BranchId};
+/// use std::sync::Arc;
 ///
 /// let branch_id = BranchId::new();
-/// let ns = Namespace::new("tenant".to_string(), "app".to_string(),
-///                         "agent".to_string(), branch_id, "default".to_string());
+/// let ns = Arc::new(Namespace::new("tenant".to_string(), "app".to_string(),
+///                         "agent".to_string(), branch_id, "default".to_string()));
 ///
 /// // Create a KV key
 /// let key = Key::new_kv(ns.clone(), "session_state");
@@ -261,7 +263,9 @@ impl TypeTag {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Key {
     /// Namespace (tenant/app/agent/branch hierarchy)
-    pub namespace: Namespace,
+    /// Wrapped in Arc for memory-efficient sharing — all keys in the same
+    /// namespace (e.g., all graph edges on a branch) share a single allocation.
+    pub namespace: Arc<Namespace>,
     /// Type discriminator (KV, Event, State, Trace, Branch, etc.)
     pub type_tag: TypeTag,
     /// User-defined key bytes (supports arbitrary binary keys)
@@ -270,7 +274,7 @@ pub struct Key {
 
 impl Key {
     /// Create a new key with the given namespace, type tag, and user key
-    pub fn new(namespace: Namespace, type_tag: TypeTag, user_key: Vec<u8>) -> Self {
+    pub fn new(namespace: Arc<Namespace>, type_tag: TypeTag, user_key: Vec<u8>) -> Self {
         Self {
             namespace,
             type_tag,
@@ -281,7 +285,7 @@ impl Key {
     /// Create a KV key
     ///
     /// Helper that automatically sets type_tag to TypeTag::KV
-    pub fn new_kv(namespace: Namespace, key: impl AsRef<[u8]>) -> Self {
+    pub fn new_kv(namespace: Arc<Namespace>, key: impl AsRef<[u8]>) -> Self {
         Self::new(namespace, TypeTag::KV, key.as_ref().to_vec())
     }
 
@@ -289,14 +293,14 @@ impl Key {
     ///
     /// Helper that automatically sets type_tag to TypeTag::Event and
     /// encodes the sequence number as big-endian bytes
-    pub fn new_event(namespace: Namespace, seq: u64) -> Self {
+    pub fn new_event(namespace: Arc<Namespace>, seq: u64) -> Self {
         Self::new(namespace, TypeTag::Event, seq.to_be_bytes().to_vec())
     }
 
     /// Create an event log metadata key
     ///
     /// The metadata key stores: { next_sequence: u64, head_hash: [u8; 32] }
-    pub fn new_event_meta(namespace: Namespace) -> Self {
+    pub fn new_event_meta(namespace: Arc<Namespace>) -> Self {
         Self::new(namespace, TypeTag::Event, b"__meta__".to_vec())
     }
 
@@ -308,7 +312,7 @@ impl Key {
     /// The null byte separator ensures correct prefix scanning: scanning
     /// `__tidx__{event_type}\0` matches only that exact type. Big-endian
     /// sequence bytes ensure results are returned in sequence order.
-    pub fn new_event_type_idx(namespace: Namespace, event_type: &str, sequence: u64) -> Self {
+    pub fn new_event_type_idx(namespace: Arc<Namespace>, event_type: &str, sequence: u64) -> Self {
         let mut user_key = Vec::with_capacity(8 + event_type.len() + 1 + 8);
         user_key.extend_from_slice(b"__tidx__");
         user_key.extend_from_slice(event_type.as_bytes());
@@ -320,7 +324,7 @@ impl Key {
     /// Create a prefix key for scanning all type index entries of a given event type
     ///
     /// Used by `get_by_type` to find all sequence numbers for a specific event type.
-    pub fn new_event_type_idx_prefix(namespace: Namespace, event_type: &str) -> Self {
+    pub fn new_event_type_idx_prefix(namespace: Arc<Namespace>, event_type: &str) -> Self {
         let mut user_key = Vec::with_capacity(8 + event_type.len() + 1);
         user_key.extend_from_slice(b"__tidx__");
         user_key.extend_from_slice(event_type.as_bytes());
@@ -331,7 +335,7 @@ impl Key {
     /// Create a state cell key
     ///
     /// Helper that automatically sets type_tag to TypeTag::State
-    pub fn new_state(namespace: Namespace, key: impl AsRef<[u8]>) -> Self {
+    pub fn new_state(namespace: Arc<Namespace>, key: impl AsRef<[u8]>) -> Self {
         Self::new(namespace, TypeTag::State, key.as_ref().to_vec())
     }
 
@@ -339,14 +343,14 @@ impl Key {
     ///
     /// Helper that automatically sets type_tag to TypeTag::Branch and
     /// uses the branch_id as the key
-    pub fn new_branch(namespace: Namespace, branch_id: BranchId) -> Self {
+    pub fn new_branch(namespace: Arc<Namespace>, branch_id: BranchId) -> Self {
         Self::new(namespace, TypeTag::Branch, branch_id.as_bytes().to_vec())
     }
 
     /// Create a branch index key from string branch_id
     ///
     /// Alternative helper that accepts string branch_id for index keys
-    pub fn new_branch_with_id(namespace: Namespace, branch_id: &str) -> Self {
+    pub fn new_branch_with_id(namespace: Arc<Namespace>, branch_id: &str) -> Self {
         Self::new(namespace, TypeTag::Branch, branch_id.as_bytes().to_vec())
     }
 
@@ -360,7 +364,7 @@ impl Key {
     /// - by-tag: `__idx_tag__experiment__branch123`
     /// - by-parent: `__idx_parent__parent123__branch123`
     pub fn new_branch_index(
-        namespace: Namespace,
+        namespace: Arc<Namespace>,
         index_type: &str,
         index_value: &str,
         branch_id: &str,
@@ -378,13 +382,14 @@ impl Key {
     ///
     /// ```
     /// use strata_core::{Key, Namespace, TypeTag, BranchId};
+    /// use std::sync::Arc;
     ///
     /// let branch_id = BranchId::new();
-    /// let namespace = Namespace::for_branch(branch_id);
+    /// let namespace = Arc::new(Namespace::for_branch(branch_id));
     /// let key = Key::new_json(namespace, "my-document");
     /// assert_eq!(key.type_tag, TypeTag::Json);
     /// ```
-    pub fn new_json(namespace: Namespace, doc_id: &str) -> Self {
+    pub fn new_json(namespace: Arc<Namespace>, doc_id: &str) -> Self {
         Self::new(namespace, TypeTag::Json, doc_id.as_bytes().to_vec())
     }
 
@@ -392,14 +397,14 @@ impl Key {
     ///
     /// This key can be used with starts_with() to match all JSON
     /// documents in a namespace.
-    pub fn new_json_prefix(namespace: Namespace) -> Self {
+    pub fn new_json_prefix(namespace: Arc<Namespace>) -> Self {
         Self::new(namespace, TypeTag::Json, vec![])
     }
 
     /// Create key for vector metadata
     ///
     /// Format: namespace + TypeTag::Vector + collection_name + "/" + vector_key
-    pub fn new_vector(namespace: Namespace, collection: &str, key: &str) -> Self {
+    pub fn new_vector(namespace: Arc<Namespace>, collection: &str, key: &str) -> Self {
         let user_key = format!("{}/{}", collection, key);
         Self::new(namespace, TypeTag::Vector, user_key.into_bytes())
     }
@@ -407,7 +412,7 @@ impl Key {
     /// Create key for collection configuration
     ///
     /// Format: namespace + TypeTag::VectorConfig + collection_name
-    pub fn new_vector_config(namespace: Namespace, collection: &str) -> Self {
+    pub fn new_vector_config(namespace: Arc<Namespace>, collection: &str) -> Self {
         Self::new(
             namespace,
             TypeTag::VectorConfig,
@@ -416,13 +421,13 @@ impl Key {
     }
 
     /// Create prefix for scanning all vectors in a collection
-    pub fn vector_collection_prefix(namespace: Namespace, collection: &str) -> Self {
+    pub fn vector_collection_prefix(namespace: Arc<Namespace>, collection: &str) -> Self {
         let user_key = format!("{}/", collection);
         Self::new(namespace, TypeTag::Vector, user_key.into_bytes())
     }
 
     /// Create prefix for scanning all vector collections
-    pub fn new_vector_config_prefix(namespace: Namespace) -> Self {
+    pub fn new_vector_config_prefix(namespace: Arc<Namespace>) -> Self {
         Self::new(namespace, TypeTag::VectorConfig, vec![])
     }
 
@@ -432,13 +437,13 @@ impl Key {
     /// space metadata. This avoids circular dependency where space
     /// metadata would be stored in the space itself.
     pub fn new_space(branch_id: BranchId, space_name: &str) -> Self {
-        let namespace = Namespace::for_branch(branch_id);
+        let namespace = Arc::new(Namespace::for_branch(branch_id));
         Self::new(namespace, TypeTag::Space, space_name.as_bytes().to_vec())
     }
 
     /// Prefix for scanning all space metadata in a branch.
     pub fn new_space_prefix(branch_id: BranchId) -> Self {
-        let namespace = Namespace::for_branch(branch_id);
+        let namespace = Arc::new(Namespace::for_branch(branch_id));
         Self::new(namespace, TypeTag::Space, vec![])
     }
 
@@ -459,8 +464,9 @@ impl Key {
     /// This enables efficient prefix scans in BTreeMap:
     /// ```
     /// # use strata_core::{Key, Namespace, BranchId};
+    /// # use std::sync::Arc;
     /// # let branch_id = BranchId::new();
-    /// # let ns = Namespace::new("t".to_string(), "a".to_string(), "ag".to_string(), branch_id, "default".to_string());
+    /// # let ns = Arc::new(Namespace::new("t".to_string(), "a".to_string(), "ag".to_string(), branch_id, "default".to_string()));
     /// let prefix = Key::new_kv(ns.clone(), "user:");
     /// let key = Key::new_kv(ns.clone(), "user:alice");
     /// assert!(key.starts_with(&prefix));
@@ -1173,13 +1179,13 @@ mod tests {
     #[test]
     fn test_key_construction() {
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         // Test generic constructor
         let key = Key::new(ns.clone(), TypeTag::KV, b"mykey".to_vec());
@@ -1191,13 +1197,13 @@ mod tests {
     #[test]
     fn test_key_helpers() {
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         // Test KV helper
         let kv_key = Key::new_kv(ns.clone(), "mykey");
@@ -1226,13 +1232,13 @@ mod tests {
     #[test]
     fn test_new_event_meta() {
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         let key = Key::new_event_meta(ns);
         assert_eq!(key.type_tag, TypeTag::Event);
@@ -1242,13 +1248,13 @@ mod tests {
     #[test]
     fn test_new_branch_index() {
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         // Test by-status index
         let key = Key::new_branch_index(ns.clone(), "status", "Active", "branch-123");
@@ -1269,13 +1275,13 @@ mod tests {
     #[test]
     fn test_user_key_string() {
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         // Valid UTF-8
         let key = Key::new_kv(ns.clone(), "hello-world");
@@ -1289,13 +1295,13 @@ mod tests {
     #[test]
     fn test_event_keys_sort_by_sequence() {
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         let key1 = Key::new_event(ns.clone(), 1);
         let key2 = Key::new_event(ns.clone(), 10);
@@ -1309,20 +1315,20 @@ mod tests {
     #[test]
     fn test_keys_with_same_inputs_are_equal() {
         let branch_id = BranchId::new();
-        let ns1 = Namespace::new(
+        let ns1 = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
-        let ns2 = Namespace::new(
+        ));
+        let ns2 = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         let key1 = Key::new_kv(ns1, "same-key");
         let key2 = Key::new_kv(ns2, "same-key");
@@ -1335,20 +1341,20 @@ mod tests {
 
         let branch1 = BranchId::new();
 
-        let ns1 = Namespace::new(
+        let ns1 = Arc::new(Namespace::new(
             "tenant1".to_string(),
             "app1".to_string(),
             "agent1".to_string(),
             branch1,
             "default".to_string(),
-        );
-        let ns2 = Namespace::new(
+        ));
+        let ns2 = Arc::new(Namespace::new(
             "tenant2".to_string(),
             "app1".to_string(),
             "agent1".to_string(),
             branch1,
             "default".to_string(),
-        );
+        ));
 
         // Test ordering: namespace → type_tag → user_key
         let key1 = Key::new_kv(ns1.clone(), b"aaa");
@@ -1384,20 +1390,20 @@ mod tests {
     #[test]
     fn test_key_ordering_components() {
         let branch_id = BranchId::new();
-        let ns1 = Namespace::new(
+        let ns1 = Arc::new(Namespace::new(
             "a".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
-        let ns2 = Namespace::new(
+        ));
+        let ns2 = Arc::new(Namespace::new(
             "b".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         let key1 = Key::new(ns1.clone(), TypeTag::KV, b"key1".to_vec());
         let key2 = Key::new(ns1.clone(), TypeTag::Event, b"key1".to_vec());
@@ -1423,13 +1429,13 @@ mod tests {
     #[test]
     fn test_key_prefix_matching() {
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         let prefix = Key::new_kv(ns.clone(), b"user:");
         let key1 = Key::new_kv(ns.clone(), b"user:alice");
@@ -1463,13 +1469,13 @@ mod tests {
     #[test]
     fn test_key_prefix_matching_empty() {
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         // Empty prefix should match all keys of same namespace and type
         let prefix = Key::new_kv(ns.clone(), b"");
@@ -1489,13 +1495,13 @@ mod tests {
     #[test]
     fn test_key_serialization() {
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
         let key = Key::new_kv(ns, "testkey");
 
         // Test JSON roundtrip
@@ -1507,13 +1513,13 @@ mod tests {
     #[test]
     fn test_key_equality() {
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         let key1 = Key::new_kv(ns.clone(), "mykey");
         let key2 = Key::new_kv(ns.clone(), "mykey");
@@ -1525,14 +1531,14 @@ mod tests {
 
     #[test]
     fn test_key_user_key_string_empty() {
-        let ns = Namespace::for_branch(BranchId::new());
+        let ns = Arc::new(Namespace::for_branch(BranchId::new()));
         let key = Key::new_kv(ns, b"");
         assert_eq!(key.user_key_string(), Some(String::new()));
     }
 
     #[test]
     fn test_key_new_vector() {
-        let ns = Namespace::for_branch(BranchId::new());
+        let ns = Arc::new(Namespace::for_branch(BranchId::new()));
         let key = Key::new_vector(ns.clone(), "my_collection", "vec_001");
         assert_eq!(key.type_tag, TypeTag::Vector);
         assert_eq!(key.user_key_string().unwrap(), "my_collection/vec_001");
@@ -1540,7 +1546,7 @@ mod tests {
 
     #[test]
     fn test_key_new_vector_config() {
-        let ns = Namespace::for_branch(BranchId::new());
+        let ns = Arc::new(Namespace::for_branch(BranchId::new()));
         let key = Key::new_vector_config(ns.clone(), "my_collection");
         assert_eq!(key.type_tag, TypeTag::VectorConfig);
         assert_eq!(key.user_key_string().unwrap(), "my_collection");
@@ -1548,7 +1554,7 @@ mod tests {
 
     #[test]
     fn test_key_vector_collection_prefix_matches_vectors() {
-        let ns = Namespace::for_branch(BranchId::new());
+        let ns = Arc::new(Namespace::for_branch(BranchId::new()));
         let prefix = Key::vector_collection_prefix(ns.clone(), "coll");
         let vec_key = Key::new_vector(ns.clone(), "coll", "vec_1");
         let other_coll = Key::new_vector(ns.clone(), "other", "vec_1");
@@ -1565,7 +1571,7 @@ mod tests {
 
     #[test]
     fn test_key_vector_config_prefix_matches_configs() {
-        let ns = Namespace::for_branch(BranchId::new());
+        let ns = Arc::new(Namespace::for_branch(BranchId::new()));
         let prefix = Key::new_vector_config_prefix(ns.clone());
         let config_key = Key::new_vector_config(ns.clone(), "any_collection");
         let vector_key = Key::new_vector(ns.clone(), "any_collection", "v1");
@@ -1582,8 +1588,8 @@ mod tests {
 
     #[test]
     fn test_key_starts_with_different_namespace_never_matches() {
-        let ns1 = Namespace::for_branch(BranchId::new());
-        let ns2 = Namespace::for_branch(BranchId::new());
+        let ns1 = Arc::new(Namespace::for_branch(BranchId::new()));
+        let ns2 = Arc::new(Namespace::for_branch(BranchId::new()));
         let prefix = Key::new_kv(ns1, b"");
         let key = Key::new_kv(ns2, b"anything");
         assert!(
@@ -1594,7 +1600,7 @@ mod tests {
 
     #[test]
     fn test_key_event_sequence_zero_and_max() {
-        let ns = Namespace::for_branch(BranchId::new());
+        let ns = Arc::new(Namespace::for_branch(BranchId::new()));
         let key_zero = Key::new_event(ns.clone(), 0);
         let key_max = Key::new_event(ns.clone(), u64::MAX);
 
@@ -1610,7 +1616,7 @@ mod tests {
 
     #[test]
     fn test_key_new_branch_with_id_string_vs_branch_id() {
-        let ns = Namespace::for_branch(BranchId::new());
+        let ns = Arc::new(Namespace::for_branch(BranchId::new()));
         let branch_id = BranchId::new();
         let branch_str = format!("{}", branch_id);
 
@@ -1629,13 +1635,13 @@ mod tests {
         use std::collections::HashSet;
 
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         let key1 = Key::new_kv(ns.clone(), "key1");
         let key2 = Key::new_kv(ns.clone(), "key2");
@@ -1652,13 +1658,13 @@ mod tests {
     #[test]
     fn test_key_binary_user_key() {
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         // Test with binary data (not UTF-8)
         let binary_data = vec![0u8, 1, 2, 255, 254, 253];
@@ -1678,7 +1684,7 @@ mod tests {
     fn test_key_new_json() {
         let branch_id = BranchId::new();
         let doc_id = "test-doc";
-        let namespace = Namespace::for_branch(branch_id);
+        let namespace = Arc::new(Namespace::for_branch(branch_id));
         let key = Key::new_json(namespace.clone(), doc_id);
 
         assert_eq!(key.type_tag, TypeTag::Json);
@@ -1689,7 +1695,7 @@ mod tests {
     #[test]
     fn test_key_new_json_prefix() {
         let branch_id = BranchId::new();
-        let namespace = Namespace::for_branch(branch_id);
+        let namespace = Arc::new(Namespace::for_branch(branch_id));
         let prefix = Key::new_json_prefix(namespace.clone());
 
         assert_eq!(prefix.type_tag, TypeTag::Json);
@@ -1708,7 +1714,7 @@ mod tests {
     #[test]
     fn test_key_json_different_docs_different_keys() {
         let branch_id = BranchId::new();
-        let namespace = Namespace::for_branch(branch_id);
+        let namespace = Arc::new(Namespace::for_branch(branch_id));
         let doc_id1 = "doc-1";
         let doc_id2 = "doc-2";
 
@@ -1721,7 +1727,7 @@ mod tests {
     #[test]
     fn test_key_json_same_doc_same_key() {
         let branch_id = BranchId::new();
-        let namespace = Namespace::for_branch(branch_id);
+        let namespace = Arc::new(Namespace::for_branch(branch_id));
         let doc_id = "test-doc";
 
         let key1 = Key::new_json(namespace.clone(), doc_id);
@@ -1733,7 +1739,7 @@ mod tests {
     #[test]
     fn test_key_json_ordering_with_other_types() {
         let branch_id = BranchId::new();
-        let namespace = Namespace::for_branch(branch_id);
+        let namespace = Arc::new(Namespace::for_branch(branch_id));
         let doc_id = "test-doc";
 
         let kv_key = Key::new_kv(namespace.clone(), "test");
@@ -1748,7 +1754,7 @@ mod tests {
     #[test]
     fn test_key_json_does_not_match_other_type_prefix() {
         let branch_id = BranchId::new();
-        let namespace = Namespace::for_branch(branch_id);
+        let namespace = Arc::new(Namespace::for_branch(branch_id));
         let doc_id = "test-doc";
 
         let json_key = Key::new_json(namespace.clone(), doc_id);

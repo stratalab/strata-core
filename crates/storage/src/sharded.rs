@@ -41,6 +41,19 @@ use strata_core::{Timestamp, Version, VersionedValue};
 
 use crate::stored_value::StoredValue;
 
+/// Internal storage for version chains — optimized for the common single-version case.
+///
+/// Most keys (especially graph edges) only ever have one version. `Single` stores
+/// the value inline without any heap allocation for the container, saving ~270 bytes
+/// per entry compared to `VecDeque::with_capacity(4)`.
+#[derive(Debug, Clone)]
+enum VersionStorage {
+    /// Single version stored inline — no heap allocation for the container
+    Single(StoredValue),
+    /// Multiple versions stored newest-first in a VecDeque
+    Multi(VecDeque<StoredValue>),
+}
+
 /// Per-branch shard containing branch's data
 ///
 /// Version chain for MVCC - stores multiple versions of a value
@@ -48,33 +61,52 @@ use crate::stored_value::StoredValue;
 /// Versions are stored in descending order (newest first) for efficient
 /// snapshot reads - we typically want the most recent version <= snapshot_version.
 ///
-/// # Performance
+/// # Memory Optimization
 ///
-/// Uses VecDeque for O(1) push_front instead of SmallVec's O(n) insert(0, ...).
-/// This is critical for workloads that repeatedly update the same key (like CAS).
+/// Uses `VersionStorage` enum to avoid VecDeque allocation for the common
+/// single-version case. For keys with multiple versions, promotes to
+/// VecDeque with O(1) push_front.
 #[derive(Debug, Clone)]
 pub struct VersionChain {
     /// Versions stored newest-first for efficient MVCC reads
-    /// VecDeque provides O(1) push_front for new versions
-    /// Uses StoredValue to include TTL information
-    versions: VecDeque<StoredValue>,
+    /// Uses VersionStorage enum to inline single-version entries
+    versions: VersionStorage,
 }
 
 impl VersionChain {
     /// Create a new version chain with a single version
     pub fn new(value: StoredValue) -> Self {
-        let mut versions = VecDeque::with_capacity(4);
-        versions.push_front(value);
-        Self { versions }
+        Self {
+            versions: VersionStorage::Single(value),
+        }
     }
 
     /// Add a new version (must be newer than existing versions)
     ///
-    /// O(1) operation using VecDeque::push_front
+    /// Promotes Single → Multi on second version, then O(1) push_front.
     #[inline]
     pub fn push(&mut self, value: StoredValue) {
-        // O(1) insert at front (newest first)
-        self.versions.push_front(value);
+        match &mut self.versions {
+            VersionStorage::Single(_) => {
+                // Promote to Multi: take the existing single value, create VecDeque
+                let old =
+                    std::mem::replace(&mut self.versions, VersionStorage::Multi(VecDeque::new()));
+                match old {
+                    VersionStorage::Single(old_value) => {
+                        let mut deque = VecDeque::with_capacity(2);
+                        deque.push_back(old_value);
+                        deque.push_front(value);
+                        self.versions = VersionStorage::Multi(deque);
+                    }
+                    VersionStorage::Multi(_) => {
+                        unreachable!("matched Single but mem::replace returned Multi")
+                    }
+                }
+            }
+            VersionStorage::Multi(deque) => {
+                deque.push_front(value);
+            }
+        }
     }
 
     /// Get the version at or before the given max_version
@@ -82,15 +114,26 @@ impl VersionChain {
     /// Note: Uses raw u64 comparison since all storage versions are TxnId variants.
     /// Debug assertions verify this invariant.
     pub fn get_at_version(&self, max_version: u64) -> Option<&StoredValue> {
-        // Debug assertion: all versions should be Txn variants
-        debug_assert!(
-            self.versions.iter().all(|sv| sv.version().is_txn()),
-            "Storage layer should only contain Txn versions"
-        );
-        // Versions are newest-first, so we scan until we find one <= max_version
-        self.versions
-            .iter()
-            .find(|sv| sv.version().as_u64() <= max_version)
+        match &self.versions {
+            VersionStorage::Single(sv) => {
+                debug_assert!(
+                    sv.version().is_txn(),
+                    "Storage layer should only contain Txn versions"
+                );
+                if sv.version().as_u64() <= max_version {
+                    Some(sv)
+                } else {
+                    None
+                }
+            }
+            VersionStorage::Multi(deque) => {
+                debug_assert!(
+                    deque.iter().all(|sv| sv.version().is_txn()),
+                    "Storage layer should only contain Txn versions"
+                );
+                deque.iter().find(|sv| sv.version().as_u64() <= max_version)
+            }
+        }
     }
 
     /// Get the version at or before the given timestamp (microseconds since epoch).
@@ -98,45 +141,63 @@ impl VersionChain {
     /// Versions are stored newest-first, so we scan until we find one with timestamp <= max_timestamp.
     /// Returns None if no version exists at or before the given timestamp.
     pub fn get_at_timestamp(&self, max_timestamp: u64) -> Option<&StoredValue> {
-        self.versions
-            .iter()
-            .find(|sv| u64::from(sv.timestamp()) <= max_timestamp)
+        match &self.versions {
+            VersionStorage::Single(sv) => {
+                if u64::from(sv.timestamp()) <= max_timestamp {
+                    Some(sv)
+                } else {
+                    None
+                }
+            }
+            VersionStorage::Multi(deque) => deque
+                .iter()
+                .find(|sv| u64::from(sv.timestamp()) <= max_timestamp),
+        }
     }
 
     /// Get the latest version
     #[inline]
     pub fn latest(&self) -> Option<&StoredValue> {
-        self.versions.front()
+        match &self.versions {
+            VersionStorage::Single(sv) => Some(sv),
+            VersionStorage::Multi(deque) => deque.front(),
+        }
     }
 
     /// Remove versions older than min_version (garbage collection)
     /// Keeps at least one version.
     /// Returns the number of pruned versions.
     pub fn gc(&mut self, min_version: u64) -> usize {
-        if self.versions.len() <= 1 {
-            return 0;
-        }
-        let mut pruned = 0;
-        // Keep versions >= min_version, but always keep at least the latest
-        // Versions are newest-first, so pop from back (oldest)
-        while self.versions.len() > 1 {
-            if let Some(oldest) = self.versions.back() {
-                if oldest.version().as_u64() < min_version {
-                    self.versions.pop_back();
-                    pruned += 1;
-                } else {
-                    break;
+        match &mut self.versions {
+            VersionStorage::Single(_) => 0, // Only one version, always keep it
+            VersionStorage::Multi(deque) => {
+                if deque.len() <= 1 {
+                    return 0;
                 }
-            } else {
-                break;
+                let mut pruned = 0;
+                while deque.len() > 1 {
+                    if let Some(oldest) = deque.back() {
+                        if oldest.version().as_u64() < min_version {
+                            deque.pop_back();
+                            pruned += 1;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                pruned
             }
         }
-        pruned
     }
 
     /// Number of versions stored
     pub fn version_count(&self) -> usize {
-        self.versions.len()
+        match &self.versions {
+            VersionStorage::Single(_) => 1,
+            VersionStorage::Multi(deque) => deque.len(),
+        }
     }
 
     /// Get version history (newest first)
@@ -151,30 +212,51 @@ impl VersionChain {
     /// # Returns
     /// Vector of StoredValue references, newest first
     pub fn history(&self, limit: Option<usize>, before_version: Option<u64>) -> Vec<&StoredValue> {
-        // Debug assertion: all versions should be Txn variants
-        debug_assert!(
-            self.versions.iter().all(|sv| sv.version().is_txn()),
-            "Storage layer should only contain Txn versions"
-        );
+        match &self.versions {
+            VersionStorage::Single(sv) => {
+                debug_assert!(
+                    sv.version().is_txn(),
+                    "Storage layer should only contain Txn versions"
+                );
+                if limit == Some(0) {
+                    return vec![];
+                }
+                let passes_filter = match before_version {
+                    Some(before) => sv.version().as_u64() < before,
+                    None => true,
+                };
+                if passes_filter {
+                    vec![sv]
+                } else {
+                    vec![]
+                }
+            }
+            VersionStorage::Multi(deque) => {
+                debug_assert!(
+                    deque.iter().all(|sv| sv.version().is_txn()),
+                    "Storage layer should only contain Txn versions"
+                );
 
-        let iter = self.versions.iter();
+                let iter = deque.iter();
+                let filtered: Vec<&StoredValue> = match before_version {
+                    Some(before) => iter.filter(|sv| sv.version().as_u64() < before).collect(),
+                    None => iter.collect(),
+                };
 
-        // Filter by before_version if specified (only versions < before)
-        let filtered: Vec<&StoredValue> = match before_version {
-            Some(before) => iter.filter(|sv| sv.version().as_u64() < before).collect(),
-            None => iter.collect(),
-        };
-
-        // Apply limit if specified
-        match limit {
-            Some(n) => filtered.into_iter().take(n).collect(),
-            None => filtered,
+                match limit {
+                    Some(n) => filtered.into_iter().take(n).collect(),
+                    None => filtered,
+                }
+            }
         }
     }
 
     /// Check if the version chain is empty
     pub fn is_empty(&self) -> bool {
-        self.versions.is_empty()
+        match &self.versions {
+            VersionStorage::Single(_) => false, // Single always has one value
+            VersionStorage::Multi(deque) => deque.is_empty(),
+        }
     }
 }
 
@@ -182,13 +264,18 @@ impl VersionChain {
 /// This ensures different branches never contend with each other.
 ///
 /// Uses VersionChain for MVCC - multiple versions per key for snapshot isolation.
+///
+/// # Memory Optimization
+///
+/// Both `data` and `ordered_keys` store `Arc<Key>` so the BTreeSet shares
+/// Key allocations with the HashMap instead of deep-cloning every Key.
 #[derive(Debug)]
 pub struct Shard {
     /// HashMap with FxHash for O(1) lookups, storing version chains
-    pub(crate) data: FxHashMap<Key, VersionChain>,
+    pub(crate) data: FxHashMap<Arc<Key>, VersionChain>,
     /// Sorted index of all keys for O(log n + k) prefix scans.
     /// Built lazily on first scan request, then maintained incrementally.
-    pub(crate) ordered_keys: Option<BTreeSet<Key>>,
+    pub(crate) ordered_keys: Option<BTreeSet<Arc<Key>>>,
 }
 
 impl Shard {
@@ -355,11 +442,12 @@ impl ShardedStore {
             // Add new version to existing chain
             chain.push(value);
         } else {
-            // Create new chain — incrementally update ordered index
+            // Create new chain — share Arc<Key> between HashMap and BTreeSet
+            let arc_key = Arc::new(key);
             if let Some(ref mut btree) = shard.ordered_keys {
-                btree.insert(key.clone());
+                btree.insert(Arc::clone(&arc_key));
             }
-            shard.data.insert(key, VersionChain::new(value));
+            shard.data.insert(arc_key, VersionChain::new(value));
         }
     }
 
@@ -522,10 +610,11 @@ impl ShardedStore {
                 if let Some(chain) = shard.data.get_mut(&key) {
                     chain.push(stored);
                 } else {
+                    let arc_key = Arc::new(key);
                     if let Some(ref mut btree) = shard.ordered_keys {
-                        btree.insert(key.clone());
+                        btree.insert(Arc::clone(&arc_key));
                     }
-                    shard.data.insert(key, VersionChain::new(stored));
+                    shard.data.insert(arc_key, VersionChain::new(stored));
                 }
             }
 
@@ -534,10 +623,11 @@ impl ShardedStore {
                 if let Some(chain) = shard.data.get_mut(&key) {
                     chain.push(tombstone);
                 } else {
+                    let arc_key = Arc::new(key);
                     if let Some(ref mut btree) = shard.ordered_keys {
-                        btree.insert(key.clone());
+                        btree.insert(Arc::clone(&arc_key));
                     }
-                    shard.data.insert(key, VersionChain::new(tombstone));
+                    shard.data.insert(arc_key, VersionChain::new(tombstone));
                 }
             }
         }
@@ -600,7 +690,7 @@ impl ShardedStore {
                         shard.data.get(k).and_then(|chain| {
                             chain.get_at_timestamp(max_timestamp).and_then(|sv| {
                                 if !sv.is_expired() && !sv.is_tombstone() {
-                                    Some((k.clone(), sv.versioned().clone()))
+                                    Some(((**k).clone(), sv.versioned().clone()))
                                 } else {
                                     None
                                 }
@@ -687,7 +777,7 @@ impl ShardedStore {
                         shard.data.get(k).and_then(|chain| {
                             chain.latest().and_then(|sv| {
                                 if !sv.is_tombstone() {
-                                    Some((k.clone(), sv.versioned().clone()))
+                                    Some(((**k).clone(), sv.versioned().clone()))
                                 } else {
                                     None
                                 }
@@ -731,7 +821,7 @@ impl ShardedStore {
                         shard.data.get(k).and_then(|chain| {
                             chain.latest().and_then(|sv| {
                                 if !sv.is_tombstone() {
-                                    Some((k.clone(), sv.versioned().clone()))
+                                    Some(((**k).clone(), sv.versioned().clone()))
                                 } else {
                                     None
                                 }
@@ -774,7 +864,7 @@ impl ShardedStore {
                         shard.data.get(k).and_then(|chain| {
                             chain.latest().and_then(|sv| {
                                 if !sv.is_tombstone() {
-                                    Some((k.clone(), sv.versioned().clone()))
+                                    Some(((**k).clone(), sv.versioned().clone()))
                                 } else {
                                     None
                                 }
@@ -988,7 +1078,7 @@ impl ShardedSnapshot {
                         shard.data.get(k).and_then(|chain| {
                             chain.get_at_version(self.version).and_then(|sv| {
                                 if !sv.is_expired() && !sv.is_tombstone() {
-                                    Some((k.clone(), sv.versioned().clone()))
+                                    Some(((**k).clone(), sv.versioned().clone()))
                                 } else {
                                     None
                                 }
@@ -1022,7 +1112,7 @@ impl ShardedSnapshot {
                         shard.data.get(k).and_then(|chain| {
                             chain.get_at_version(self.version).and_then(|sv| {
                                 if !sv.is_expired() && !sv.is_tombstone() {
-                                    Some((k.clone(), sv.versioned().clone()))
+                                    Some(((**k).clone(), sv.versioned().clone()))
                                 } else {
                                     None
                                 }
@@ -1059,7 +1149,7 @@ impl ShardedSnapshot {
                         shard.data.get(k).and_then(|chain| {
                             chain.get_at_version(self.version).and_then(|sv| {
                                 if !sv.is_expired() && !sv.is_tombstone() {
-                                    Some((k.clone(), sv.versioned().clone()))
+                                    Some(((**k).clone(), sv.versioned().clone()))
                                 } else {
                                     None
                                 }
@@ -1253,7 +1343,7 @@ impl Storage for ShardedStore {
                         shard.data.get(k).and_then(|chain| {
                             chain.get_at_version(max_version).and_then(|sv| {
                                 if !sv.is_expired() && !sv.is_tombstone() {
-                                    Some((k.clone(), sv.versioned().clone()))
+                                    Some(((**k).clone(), sv.versioned().clone()))
                                 } else {
                                     None
                                 }
@@ -1284,7 +1374,7 @@ impl Storage for ShardedStore {
                         chain.get_at_version(max_version).and_then(|sv| {
                             // Filter out expired values and tombstones
                             if !sv.is_expired() && !sv.is_tombstone() {
-                                Some((k.clone(), sv.versioned().clone()))
+                                Some(((**k).clone(), sv.versioned().clone()))
                             } else {
                                 None
                             }
@@ -1375,7 +1465,7 @@ impl SnapshotView for ShardedSnapshot {
                         shard.data.get(k).and_then(|chain| {
                             chain.get_at_version(self.version).and_then(|sv| {
                                 if !sv.is_expired() && !sv.is_tombstone() {
-                                    Some((k.clone(), sv.versioned().clone()))
+                                    Some(((**k).clone(), sv.versioned().clone()))
                                 } else {
                                     None
                                 }
@@ -1397,6 +1487,293 @@ impl SnapshotView for ShardedSnapshot {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    // ========================================================================
+    // VersionChain / VersionStorage Tests
+    // ========================================================================
+
+    fn make_sv(version: u64) -> StoredValue {
+        StoredValue::new(
+            strata_core::value::Value::Int(version as i64),
+            Version::txn(version),
+            None,
+        )
+    }
+
+    fn make_sv_with_ts(version: u64, timestamp_micros: u64) -> StoredValue {
+        StoredValue::with_timestamp(
+            strata_core::value::Value::Int(version as i64),
+            Version::txn(version),
+            Timestamp::from_micros(timestamp_micros),
+            None,
+        )
+    }
+
+    #[test]
+    fn test_version_chain_single_latest() {
+        let chain = VersionChain::new(make_sv(1));
+        assert_eq!(chain.version_count(), 1);
+        assert!(!chain.is_empty());
+        let latest = chain.latest().unwrap();
+        assert_eq!(latest.version(), Version::txn(1));
+    }
+
+    #[test]
+    fn test_version_chain_single_to_multi_promotion() {
+        let mut chain = VersionChain::new(make_sv(1));
+        assert_eq!(chain.version_count(), 1);
+
+        // Push promotes Single → Multi
+        chain.push(make_sv(2));
+        assert_eq!(chain.version_count(), 2);
+
+        // Latest is the newest
+        assert_eq!(chain.latest().unwrap().version(), Version::txn(2));
+
+        // Push a third — stays Multi
+        chain.push(make_sv(3));
+        assert_eq!(chain.version_count(), 3);
+        assert_eq!(chain.latest().unwrap().version(), Version::txn(3));
+    }
+
+    #[test]
+    fn test_version_chain_get_at_version_single_boundary() {
+        let chain = VersionChain::new(make_sv(5));
+
+        // Version <= 5 finds it
+        assert!(chain.get_at_version(5).is_some());
+        assert!(chain.get_at_version(10).is_some());
+
+        // Version < 5 misses
+        assert!(chain.get_at_version(4).is_none());
+        assert!(chain.get_at_version(0).is_none());
+    }
+
+    #[test]
+    fn test_version_chain_get_at_version_multi_scan() {
+        let mut chain = VersionChain::new(make_sv(1));
+        chain.push(make_sv(5));
+        chain.push(make_sv(10));
+        // Stored newest-first: [10, 5, 1]
+
+        // At version 10 → gets version 10
+        assert_eq!(
+            chain.get_at_version(10).unwrap().version(),
+            Version::txn(10)
+        );
+        // At version 7 → gets version 5 (first <= 7)
+        assert_eq!(chain.get_at_version(7).unwrap().version(), Version::txn(5));
+        // At version 3 → gets version 1
+        assert_eq!(chain.get_at_version(3).unwrap().version(), Version::txn(1));
+        // At version 0 → nothing
+        assert!(chain.get_at_version(0).is_none());
+    }
+
+    #[test]
+    fn test_version_chain_get_at_timestamp_single() {
+        let chain = VersionChain::new(make_sv_with_ts(1, 1000));
+
+        // Timestamp >= 1000 finds it
+        assert!(chain.get_at_timestamp(1000).is_some());
+        assert!(chain.get_at_timestamp(2000).is_some());
+
+        // Timestamp < 1000 misses
+        assert!(chain.get_at_timestamp(999).is_none());
+    }
+
+    #[test]
+    fn test_version_chain_get_at_timestamp_multi() {
+        let mut chain = VersionChain::new(make_sv_with_ts(1, 100));
+        chain.push(make_sv_with_ts(2, 500));
+        chain.push(make_sv_with_ts(3, 1000));
+        // Stored newest-first: [ts=1000, ts=500, ts=100]
+
+        // At ts=1000 → newest
+        assert_eq!(
+            chain.get_at_timestamp(1000).unwrap().version(),
+            Version::txn(3)
+        );
+        // At ts=700 → middle
+        assert_eq!(
+            chain.get_at_timestamp(700).unwrap().version(),
+            Version::txn(2)
+        );
+        // At ts=200 → oldest
+        assert_eq!(
+            chain.get_at_timestamp(200).unwrap().version(),
+            Version::txn(1)
+        );
+        // At ts=50 → nothing
+        assert!(chain.get_at_timestamp(50).is_none());
+    }
+
+    #[test]
+    fn test_version_chain_gc_single_is_noop() {
+        let mut chain = VersionChain::new(make_sv(1));
+
+        // GC on Single should always return 0 — we never prune the last version
+        let pruned = chain.gc(100);
+        assert_eq!(pruned, 0);
+        assert_eq!(chain.version_count(), 1);
+        assert_eq!(chain.latest().unwrap().version(), Version::txn(1));
+    }
+
+    #[test]
+    fn test_version_chain_gc_multi_prunes_old() {
+        let mut chain = VersionChain::new(make_sv(1));
+        chain.push(make_sv(5));
+        chain.push(make_sv(10));
+        chain.push(make_sv(15));
+        // Stored newest-first: [15, 10, 5, 1]
+
+        // GC with min_version=6 → prunes versions < 6 (i.e., versions 1 and 5)
+        let pruned = chain.gc(6);
+        assert_eq!(pruned, 2);
+        assert_eq!(chain.version_count(), 2);
+
+        // Remaining: [15, 10]
+        assert_eq!(chain.latest().unwrap().version(), Version::txn(15));
+        assert!(chain.get_at_version(10).is_some());
+        assert!(chain.get_at_version(5).is_none()); // pruned
+    }
+
+    #[test]
+    fn test_version_chain_gc_multi_keeps_at_least_one() {
+        let mut chain = VersionChain::new(make_sv(1));
+        chain.push(make_sv(5));
+        // Stored: [5, 1]
+
+        // GC with min_version=100 → would prune both, but keeps at least one
+        let pruned = chain.gc(100);
+        assert_eq!(pruned, 1); // Only pruned version 1, kept version 5
+        assert_eq!(chain.version_count(), 1);
+        assert_eq!(chain.latest().unwrap().version(), Version::txn(5));
+    }
+
+    #[test]
+    fn test_version_chain_gc_multi_prunes_nothing_if_all_recent() {
+        let mut chain = VersionChain::new(make_sv(10));
+        chain.push(make_sv(20));
+        // Stored: [20, 10]
+
+        // GC with min_version=5 → nothing to prune (both >= 5)
+        let pruned = chain.gc(5);
+        assert_eq!(pruned, 0);
+        assert_eq!(chain.version_count(), 2);
+    }
+
+    #[test]
+    fn test_version_chain_history_limit_zero() {
+        let chain = VersionChain::new(make_sv(1));
+        // limit=0 should return empty even for Single
+        assert!(chain.history(Some(0), None).is_empty());
+
+        let mut multi_chain = VersionChain::new(make_sv(1));
+        multi_chain.push(make_sv(2));
+        // limit=0 on Multi too
+        assert!(multi_chain.history(Some(0), None).is_empty());
+    }
+
+    #[test]
+    fn test_version_chain_history_with_before_version() {
+        let mut chain = VersionChain::new(make_sv(1));
+        chain.push(make_sv(5));
+        chain.push(make_sv(10));
+        // Stored newest-first: [10, 5, 1]
+
+        // before_version=10 → only versions < 10 → [5, 1]
+        let h = chain.history(None, Some(10));
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].version(), Version::txn(5));
+        assert_eq!(h[1].version(), Version::txn(1));
+
+        // before_version=6, limit=1 → [5]
+        let h = chain.history(Some(1), Some(6));
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].version(), Version::txn(5));
+    }
+
+    #[test]
+    fn test_version_chain_history_single_before_version_filters() {
+        let chain = VersionChain::new(make_sv(5));
+
+        // before_version=10 → 5 < 10 → returns it
+        assert_eq!(chain.history(None, Some(10)).len(), 1);
+
+        // before_version=5 → 5 < 5 is false → empty
+        assert!(chain.history(None, Some(5)).is_empty());
+
+        // before_version=3 → 5 < 3 is false → empty
+        assert!(chain.history(None, Some(3)).is_empty());
+    }
+
+    // ========================================================================
+    // Arc<Key> Sharing Tests (Phase 3)
+    // ========================================================================
+
+    #[test]
+    fn test_arc_key_hash_consistency() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let branch_id = BranchId::new();
+        let key1 = create_test_key(branch_id, "same_key");
+        let key2 = create_test_key(branch_id, "same_key");
+
+        // Two Arc<Key>s wrapping equal Keys must produce identical hashes
+        let arc1 = Arc::new(key1);
+        let arc2 = Arc::new(key2);
+
+        let mut h1 = DefaultHasher::new();
+        let mut h2 = DefaultHasher::new();
+        arc1.hash(&mut h1);
+        arc2.hash(&mut h2);
+
+        assert_eq!(h1.finish(), h2.finish());
+        assert_eq!(arc1, arc2); // PartialEq through Deref
+    }
+
+    #[test]
+    fn test_arc_key_shared_between_hashmap_and_btreeset() {
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+
+        // Insert several keys
+        for i in 0..5 {
+            let key = create_test_key(branch_id, &format!("shared_{}", i));
+            store.put(key, create_stored_value(Value::Int(i), 1));
+        }
+
+        // Force BTreeSet creation by doing a list operation
+        let results = store.list_branch(&branch_id);
+        assert_eq!(results.len(), 5);
+
+        // Access the shard and verify Arc sharing
+        let shard_ref = store.shards.get(&branch_id).unwrap();
+        let shard = shard_ref.value();
+        let btree = shard
+            .ordered_keys
+            .as_ref()
+            .expect("BTreeSet should exist after list_branch");
+        // Every key in the BTreeSet should be the same Arc as in the HashMap
+        for arc_key in btree.iter() {
+            // Verify it exists in the HashMap
+            assert!(shard.data.contains_key(arc_key.as_ref()));
+            // The Arc in the BTreeSet should point to the same allocation
+            // as the one used as HashMap key (Arc::ptr_eq)
+            let hashmap_arc = shard.data.keys().find(|k| *k == arc_key).unwrap();
+            assert!(
+                Arc::ptr_eq(arc_key, hashmap_arc),
+                "BTreeSet and HashMap should share the same Arc<Key> allocation"
+            );
+        }
+    }
+
+    // ========================================================================
+    // ShardedStore Tests
+    // ========================================================================
 
     #[test]
     fn test_sharded_store_creation() {
@@ -1476,13 +1853,13 @@ mod tests {
 
     fn create_test_key(branch_id: BranchId, name: &str) -> Key {
         use strata_core::types::Namespace;
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
         Key::new_kv(ns, name)
     }
 
@@ -1713,13 +2090,13 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         // Insert keys with different prefixes
         store.put(
@@ -1752,13 +2129,13 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         store.put(
             Key::new_kv(ns.clone(), "data:foo"),
@@ -1779,13 +2156,13 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         // Insert KV entries
         store.put(
@@ -1827,13 +2204,13 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         // Insert mixed types
         for i in 0..5 {
@@ -1923,13 +2300,13 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
 
         // Insert in random order
         let keys = vec!["zebra", "apple", "mango", "banana"];
@@ -2179,7 +2556,7 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = Namespace::for_branch(branch_id);
+        let ns = Arc::new(Namespace::for_branch(branch_id));
         let key = Key::new_kv(ns, "test_key");
 
         // Put via Storage trait
@@ -2200,7 +2577,7 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = Namespace::for_branch(branch_id);
+        let ns = Arc::new(Namespace::for_branch(branch_id));
         let key = Key::new_kv(ns, "test_key");
 
         // Put with version 1
@@ -2223,7 +2600,7 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = Namespace::for_branch(branch_id);
+        let ns = Arc::new(Namespace::for_branch(branch_id));
         let key = Key::new_kv(ns, "test_key");
 
         Storage::put(&store, key.clone(), Value::Int(42), None).unwrap();
@@ -2243,7 +2620,7 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = Namespace::for_branch(branch_id);
+        let ns = Arc::new(Namespace::for_branch(branch_id));
 
         // Insert keys with different prefixes
         Storage::put(
@@ -2286,8 +2663,8 @@ mod tests {
         let branch2 = BranchId::new();
 
         // Insert data for two branches
-        let ns1 = Namespace::for_branch(branch1);
-        let ns2 = Namespace::for_branch(branch2);
+        let ns1 = Arc::new(Namespace::for_branch(branch1));
+        let ns2 = Arc::new(Namespace::for_branch(branch2));
 
         Storage::put(
             &store,
@@ -2328,7 +2705,7 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = Namespace::for_branch(branch_id);
+        let ns = Arc::new(Namespace::for_branch(branch_id));
         let key = Key::new_kv(ns, "test_key");
 
         // Put with specific version 42
@@ -2350,7 +2727,7 @@ mod tests {
 
         let store = Arc::new(ShardedStore::new());
         let branch_id = BranchId::new();
-        let ns = Namespace::for_branch(branch_id);
+        let ns = Arc::new(Namespace::for_branch(branch_id));
 
         // Put at version 1
         let key1 = Key::new_kv(ns.clone(), "key1");
@@ -2387,7 +2764,7 @@ mod tests {
 
         let store = Arc::new(ShardedStore::new());
         let branch_id = BranchId::new();
-        let ns = Namespace::for_branch(branch_id);
+        let ns = Arc::new(Namespace::for_branch(branch_id));
 
         // Put two keys at version 1
         Storage::put(
@@ -2653,7 +3030,7 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = Namespace::for_branch(branch_id);
+        let ns = Arc::new(Namespace::for_branch(branch_id));
         let key = Key::new_kv(ns.clone(), "test-key");
 
         // Put multiple versions of the same key
@@ -2677,7 +3054,7 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = Namespace::for_branch(branch_id);
+        let ns = Arc::new(Namespace::for_branch(branch_id));
         let key = Key::new_kv(ns.clone(), "paginated-key");
 
         // Put 5 versions
@@ -2710,7 +3087,7 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = Namespace::for_branch(branch_id);
+        let ns = Arc::new(Namespace::for_branch(branch_id));
         let key = Key::new_kv(ns.clone(), "nonexistent");
 
         let history = Storage::get_history(&store, &key, None, None).unwrap();
@@ -3212,7 +3589,7 @@ mod tests {
         let branch_id = BranchId::new();
 
         // Create a mix of expired and non-expired values
-        let ns = strata_core::types::Namespace::for_branch(branch_id);
+        let ns = Arc::new(strata_core::types::Namespace::for_branch(branch_id));
 
         // Non-expired key
         let key1 = Key::new_kv(ns.clone(), "fresh");
@@ -3304,7 +3681,7 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = Namespace::for_branch(branch_id);
+        let ns = Arc::new(Namespace::for_branch(branch_id));
 
         // Insert keys in reverse order
         let names = vec![
@@ -3341,7 +3718,7 @@ mod tests {
 
         let store = Arc::new(ShardedStore::new());
         let branch_id = BranchId::new();
-        let ns = Namespace::for_branch(branch_id);
+        let ns = Arc::new(Namespace::for_branch(branch_id));
 
         // Insert 3 keys at version 1, 2, 3
         Storage::put(
@@ -3404,7 +3781,7 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = Namespace::for_branch(branch_id);
+        let ns = Arc::new(Namespace::for_branch(branch_id));
 
         // Insert 5000 keys with prefix "alpha:" and 5000 with prefix "beta:"
         for i in 0..5000 {
@@ -3541,7 +3918,7 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = strata_core::types::Namespace::for_branch(branch_id);
+        let ns = Arc::new(strata_core::types::Namespace::for_branch(branch_id));
 
         // Insert keys — ordered_keys starts as None (never built yet)
         Storage::put(&store, Key::new_kv(ns.clone(), "c"), Value::Int(3), None).unwrap();
@@ -3608,7 +3985,7 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = strata_core::types::Namespace::for_branch(branch_id);
+        let ns = Arc::new(strata_core::types::Namespace::for_branch(branch_id));
 
         // Insert initial key
         Storage::put(&store, Key::new_kv(ns.clone(), "k"), Value::Int(1), None).unwrap();
@@ -3644,7 +4021,7 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = strata_core::types::Namespace::for_branch(branch_id);
+        let ns = Arc::new(strata_core::types::Namespace::for_branch(branch_id));
 
         // Seed with initial keys
         for i in 0..10 {
@@ -3715,7 +4092,7 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = strata_core::types::Namespace::for_branch(branch_id);
+        let ns = Arc::new(strata_core::types::Namespace::for_branch(branch_id));
 
         // Insert initial keys and build ordered_keys via scan
         Storage::put(&store, Key::new_kv(ns.clone(), "b"), Value::Int(1), None).unwrap();
@@ -3764,7 +4141,7 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = strata_core::types::Namespace::for_branch(branch_id);
+        let ns = Arc::new(strata_core::types::Namespace::for_branch(branch_id));
 
         // Insert initial keys and build ordered_keys via scan
         Storage::put(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), None).unwrap();
@@ -3815,7 +4192,7 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = strata_core::types::Namespace::for_branch(branch_id);
+        let ns = Arc::new(strata_core::types::Namespace::for_branch(branch_id));
 
         // Insert initial key and build ordered_keys via scan
         Storage::put(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), None).unwrap();
@@ -3855,7 +4232,7 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = strata_core::types::Namespace::for_branch(branch_id);
+        let ns = Arc::new(strata_core::types::Namespace::for_branch(branch_id));
 
         // Insert initial key and build ordered_keys via scan
         Storage::put(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), None).unwrap();
@@ -3895,7 +4272,7 @@ mod tests {
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
-        let ns = strata_core::types::Namespace::for_branch(branch_id);
+        let ns = Arc::new(strata_core::types::Namespace::for_branch(branch_id));
 
         // Insert initial keys and build ordered_keys
         Storage::put(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), None).unwrap();

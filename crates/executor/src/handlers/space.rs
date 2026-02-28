@@ -55,7 +55,7 @@ pub fn space_delete(
     }
 
     // Delete all data in the space by scanning+deleting all TypeTag prefixes
-    let ns = Namespace::for_branch_space(core_branch_id, &space);
+    let ns = std::sync::Arc::new(Namespace::for_branch_space(core_branch_id, &space));
     convert_result(p.db.transaction(core_branch_id, |txn| {
         #[allow(deprecated)]
         for type_tag in [

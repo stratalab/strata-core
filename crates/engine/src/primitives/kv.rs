@@ -59,8 +59,8 @@ impl KVStore {
     }
 
     /// Build namespace for branch+space-scoped operations
-    fn namespace_for(&self, branch_id: &BranchId, space: &str) -> Namespace {
-        Namespace::for_branch_space(*branch_id, space)
+    fn namespace_for(&self, branch_id: &BranchId, space: &str) -> Arc<Namespace> {
+        Arc::new(Namespace::for_branch_space(*branch_id, space))
     }
 
     /// Build key for KV operation
@@ -407,17 +407,20 @@ impl crate::search::Searchable for KVStore {
 
 impl KVStoreExt for TransactionContext {
     fn kv_get(&mut self, key: &str) -> StrataResult<Option<Value>> {
-        let storage_key = Key::new_kv(Namespace::for_branch(self.branch_id), key);
+        let ns = Arc::new(Namespace::for_branch(self.branch_id));
+        let storage_key = Key::new_kv(ns, key);
         self.get(&storage_key)
     }
 
     fn kv_put(&mut self, key: &str, value: Value) -> StrataResult<()> {
-        let storage_key = Key::new_kv(Namespace::for_branch(self.branch_id), key);
+        let ns = Arc::new(Namespace::for_branch(self.branch_id));
+        let storage_key = Key::new_kv(ns, key);
         self.put(storage_key, value)
     }
 
     fn kv_delete(&mut self, key: &str) -> StrataResult<()> {
-        let storage_key = Key::new_kv(Namespace::for_branch(self.branch_id), key);
+        let ns = Arc::new(Namespace::for_branch(self.branch_id));
+        let storage_key = Key::new_kv(ns, key);
         self.delete(storage_key)?;
         Ok(())
     }
@@ -782,8 +785,8 @@ mod tests {
         // Start a manual transaction, read, then check the versioned read
         // is consistent even if a concurrent write happens
         let mut txn = db.begin_transaction(branch_id);
-        let storage_key =
-            strata_core::types::Key::new_kv(Namespace::for_branch(branch_id), "iso_key");
+        let ns = Arc::new(Namespace::for_branch(branch_id));
+        let storage_key = strata_core::types::Key::new_kv(ns.clone(), "iso_key");
         let vv = txn.get_versioned(&storage_key).unwrap().unwrap();
         assert_eq!(vv.value, Value::Int(1));
 

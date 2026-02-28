@@ -99,18 +99,19 @@ impl TTLIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use strata_core::{BranchId, Namespace};
 
     /// Helper to create a test key
     fn test_key(suffix: &str) -> Key {
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
+        let ns = Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        );
+        ));
         Key::new_kv(ns, suffix)
     }
 

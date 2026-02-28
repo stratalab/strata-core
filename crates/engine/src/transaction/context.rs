@@ -19,6 +19,7 @@
 
 use crate::primitives::event::{EventLogMeta, HASH_VERSION_SHA256};
 use crate::transaction_ops::TransactionOps;
+use std::sync::Arc;
 use strata_concurrency::{JsonStoreExt, TransactionContext};
 use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 use strata_core::{
@@ -53,7 +54,7 @@ pub struct Transaction<'a> {
     /// The underlying transaction context
     ctx: &'a mut TransactionContext,
     /// Namespace for this transaction's run
-    namespace: Namespace,
+    namespace: Arc<Namespace>,
     /// Pending events buffered in this transaction
     pending_events: Vec<Event>,
     /// Base sequence number from snapshot (events start at base_sequence)
@@ -68,7 +69,7 @@ impl<'a> Transaction<'a> {
     /// Reads event state (sequence count, last hash) from TransactionContext
     /// to maintain continuity across multiple Transaction instances within
     /// the same session transaction.
-    pub fn new(ctx: &'a mut TransactionContext, namespace: Namespace) -> Self {
+    pub fn new(ctx: &'a mut TransactionContext, namespace: Arc<Namespace>) -> Self {
         let base_sequence = ctx.event_sequence_count();
         let last_hash = ctx.event_last_hash();
         Self {
@@ -85,7 +86,7 @@ impl<'a> Transaction<'a> {
     /// Use this when you know the current event count from snapshot.
     pub fn with_base_sequence(
         ctx: &'a mut TransactionContext,
-        namespace: Namespace,
+        namespace: Arc<Namespace>,
         base_sequence: u64,
         last_hash: [u8; 32],
     ) -> Self {
@@ -684,15 +685,15 @@ mod tests {
     use super::*;
     use strata_concurrency::snapshot::ClonedSnapshotView;
 
-    fn create_test_namespace() -> Namespace {
+    fn create_test_namespace() -> Arc<Namespace> {
         let branch_id = BranchId::new();
-        Namespace::new(
+        Arc::new(Namespace::new(
             "tenant".to_string(),
             "app".to_string(),
             "agent".to_string(),
             branch_id,
             "default".to_string(),
-        )
+        ))
     }
 
     fn create_test_context(ns: &Namespace) -> TransactionContext {
