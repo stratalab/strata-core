@@ -1311,6 +1311,76 @@ pub enum Command {
         /// Object type name.
         object_type: String,
     },
+
+    // ==================== Graph Analytics ====================
+    /// Weakly Connected Components (union-find).
+    /// Returns: `Output::GraphAnalyticsU64`
+    GraphWcc {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+    },
+
+    /// Community Detection via Label Propagation.
+    /// Returns: `Output::GraphAnalyticsU64`
+    GraphCdlp {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Maximum number of iterations.
+        max_iterations: usize,
+        /// Direction: `"outgoing"`, `"incoming"`, or `"both"`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        direction: Option<String>,
+    },
+
+    /// PageRank importance scoring.
+    /// Returns: `Output::GraphAnalyticsF64`
+    GraphPagerank {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Damping factor (default 0.85).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        damping: Option<f64>,
+        /// Maximum number of iterations (default 20).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_iterations: Option<usize>,
+        /// Convergence tolerance (default 1e-6).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tolerance: Option<f64>,
+    },
+
+    /// Local Clustering Coefficient.
+    /// Returns: `Output::GraphAnalyticsF64`
+    GraphLcc {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+    },
+
+    /// Single-Source Shortest Path (Dijkstra).
+    /// Returns: `Output::GraphAnalyticsF64`
+    GraphSssp {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Source node ID.
+        source: String,
+        /// Direction: `"outgoing"`, `"incoming"`, or `"both"`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        direction: Option<String>,
+    },
 }
 
 impl Command {
@@ -1483,6 +1553,11 @@ impl Command {
             Command::GraphOntologyStatus { .. } => "GraphOntologyStatus",
             Command::GraphOntologySummary { .. } => "GraphOntologySummary",
             Command::GraphNodesByType { .. } => "GraphNodesByType",
+            Command::GraphWcc { .. } => "GraphWcc",
+            Command::GraphCdlp { .. } => "GraphCdlp",
+            Command::GraphPagerank { .. } => "GraphPagerank",
+            Command::GraphLcc { .. } => "GraphLcc",
+            Command::GraphSssp { .. } => "GraphSssp",
         }
     }
 
@@ -1594,7 +1669,12 @@ impl Command {
             | Command::GraphFreezeOntology { branch, .. }
             | Command::GraphOntologyStatus { branch, .. }
             | Command::GraphOntologySummary { branch, .. }
-            | Command::GraphNodesByType { branch, .. } => {
+            | Command::GraphNodesByType { branch, .. }
+            | Command::GraphWcc { branch, .. }
+            | Command::GraphCdlp { branch, .. }
+            | Command::GraphPagerank { branch, .. }
+            | Command::GraphLcc { branch, .. }
+            | Command::GraphSssp { branch, .. } => {
                 resolve_branch!(branch);
             }
 

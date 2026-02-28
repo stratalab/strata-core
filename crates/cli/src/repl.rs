@@ -504,6 +504,11 @@ fn subcommands_for(cmd: &str) -> &'static [&'static str] {
             "ontology-status",
             "ontology-summary",
             "nodes-by-type",
+            "wcc",
+            "cdlp",
+            "pagerank",
+            "lcc",
+            "sssp",
         ],
         "branch" => &[
             "create", "info", "get", "list", "exists", "del", "fork", "diff", "merge", "export",

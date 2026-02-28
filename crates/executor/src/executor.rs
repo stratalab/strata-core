@@ -1318,6 +1318,73 @@ impl Executor {
                     object_type,
                 )
             }
+
+            // Graph Analytics
+            Command::GraphWcc { branch, graph } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_wcc(&self.primitives, branch, graph)
+            }
+            Command::GraphCdlp {
+                branch,
+                graph,
+                max_iterations,
+                direction,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_cdlp(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    max_iterations,
+                    direction,
+                )
+            }
+            Command::GraphPagerank {
+                branch,
+                graph,
+                damping,
+                max_iterations,
+                tolerance,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_pagerank(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    damping,
+                    max_iterations,
+                    tolerance,
+                )
+            }
+            Command::GraphLcc { branch, graph } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_lcc(&self.primitives, branch, graph)
+            }
+            Command::GraphSssp {
+                branch,
+                graph,
+                source,
+                direction,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_sssp(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    source,
+                    direction,
+                )
+            }
         };
 
         match &result {

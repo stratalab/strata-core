@@ -1109,6 +1109,72 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                 object_type,
             }))
         }
+        // Analytics
+        "wcc" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            Ok(CliAction::Execute(Command::GraphWcc {
+                branch: branch(state),
+                graph,
+            }))
+        }
+        "cdlp" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            let max_iterations = m
+                .get_one::<String>("max-iterations")
+                .unwrap()
+                .parse::<usize>()
+                .map_err(|e| format!("Invalid max-iterations: {}", e))?;
+            let direction = m.get_one::<String>("direction").cloned();
+            Ok(CliAction::Execute(Command::GraphCdlp {
+                branch: branch(state),
+                graph,
+                max_iterations,
+                direction,
+            }))
+        }
+        "pagerank" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            let damping = m
+                .get_one::<String>("damping")
+                .map(|s| s.parse::<f64>())
+                .transpose()
+                .map_err(|e| format!("Invalid damping: {}", e))?;
+            let max_iterations = m
+                .get_one::<String>("max-iterations")
+                .map(|s| s.parse::<usize>())
+                .transpose()
+                .map_err(|e| format!("Invalid max-iterations: {}", e))?;
+            let tolerance = m
+                .get_one::<String>("tolerance")
+                .map(|s| s.parse::<f64>())
+                .transpose()
+                .map_err(|e| format!("Invalid tolerance: {}", e))?;
+            Ok(CliAction::Execute(Command::GraphPagerank {
+                branch: branch(state),
+                graph,
+                damping,
+                max_iterations,
+                tolerance,
+            }))
+        }
+        "lcc" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            Ok(CliAction::Execute(Command::GraphLcc {
+                branch: branch(state),
+                graph,
+            }))
+        }
+        "sssp" => {
+            let graph = m.get_one::<String>("graph").unwrap().clone();
+            let source = m.get_one::<String>("source").unwrap().clone();
+            let direction = m.get_one::<String>("direction").cloned();
+            Ok(CliAction::Execute(Command::GraphSssp {
+                branch: branch(state),
+                graph,
+                source,
+                direction,
+            }))
+        }
         other => Err(format!("Unknown graph subcommand: {}", other)),
     }
 }

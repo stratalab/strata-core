@@ -5,6 +5,7 @@
 //! providing branch isolation, time-travel, and transactional guarantees.
 
 pub mod adjacency;
+pub mod analytics;
 pub mod boost;
 pub mod integrity;
 pub mod keys;

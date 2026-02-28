@@ -1131,6 +1131,63 @@ fn build_graph() -> Command {
                         .help("Object type name"),
                 ),
         )
+        // Analytics
+        .subcommand(
+            Command::new("wcc")
+                .about("Weakly Connected Components")
+                .arg(Arg::new("graph").required(true).help("Graph name")),
+        )
+        .subcommand(
+            Command::new("cdlp")
+                .about("Community Detection via Label Propagation")
+                .arg(Arg::new("graph").required(true).help("Graph name"))
+                .arg(
+                    Arg::new("max-iterations")
+                        .required(true)
+                        .help("Maximum iterations"),
+                )
+                .arg(
+                    Arg::new("direction")
+                        .long("direction")
+                        .help("Direction: outgoing, incoming, both"),
+                ),
+        )
+        .subcommand(
+            Command::new("pagerank")
+                .about("PageRank importance scoring")
+                .arg(Arg::new("graph").required(true).help("Graph name"))
+                .arg(
+                    Arg::new("damping")
+                        .long("damping")
+                        .help("Damping factor (default 0.85)"),
+                )
+                .arg(
+                    Arg::new("max-iterations")
+                        .long("max-iterations")
+                        .help("Maximum iterations (default 20)"),
+                )
+                .arg(
+                    Arg::new("tolerance")
+                        .long("tolerance")
+                        .help("Convergence tolerance (default 1e-6)"),
+                ),
+        )
+        .subcommand(
+            Command::new("lcc")
+                .about("Local Clustering Coefficient")
+                .arg(Arg::new("graph").required(true).help("Graph name")),
+        )
+        .subcommand(
+            Command::new("sssp")
+                .about("Single-Source Shortest Path (Dijkstra)")
+                .arg(Arg::new("graph").required(true).help("Graph name"))
+                .arg(Arg::new("source").required(true).help("Source node ID"))
+                .arg(
+                    Arg::new("direction")
+                        .long("direction")
+                        .help("Direction: outgoing, incoming, both"),
+                ),
+        )
 }
 
 // =========================================================================

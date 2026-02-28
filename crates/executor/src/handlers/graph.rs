@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use strata_core::Value;
 use strata_engine::graph::types::{
-    BfsOptions, CascadePolicy, Direction, EdgeData, GraphMeta, LinkTypeDef, NodeData, ObjectTypeDef,
+    BfsOptions, CascadePolicy, CdlpOptions, Direction, EdgeData, GraphMeta, LinkTypeDef, NodeData,
+    ObjectTypeDef, PageRankOptions, SsspOptions,
 };
 
 use crate::bridge::{to_core_branch_id, Primitives};
@@ -509,6 +510,105 @@ pub fn graph_nodes_by_type(
     let core_branch = to_core_branch_id(&branch)?;
     let node_ids = convert_result(p.graph.nodes_by_type(core_branch, &graph, &object_type))?;
     Ok(Output::Keys(node_ids))
+}
+
+// =============================================================================
+// Analytics handlers
+// =============================================================================
+
+/// Handle GraphWcc command.
+pub fn graph_wcc(p: &Arc<Primitives>, branch: BranchId, graph: String) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    let result = convert_result(p.graph.wcc(core_branch, &graph))?;
+    Ok(Output::GraphAnalyticsU64(
+        crate::types::GraphAnalyticsU64Result {
+            algorithm: "wcc".to_string(),
+            result: result.components,
+        },
+    ))
+}
+
+/// Handle GraphCdlp command.
+pub fn graph_cdlp(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+    max_iterations: usize,
+    direction: Option<String>,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    let dir = parse_direction(direction.as_deref())?;
+    let opts = CdlpOptions {
+        max_iterations,
+        direction: dir,
+    };
+    let result = convert_result(p.graph.cdlp(core_branch, &graph, opts))?;
+    Ok(Output::GraphAnalyticsU64(
+        crate::types::GraphAnalyticsU64Result {
+            algorithm: "cdlp".to_string(),
+            result: result.labels,
+        },
+    ))
+}
+
+/// Handle GraphPagerank command.
+pub fn graph_pagerank(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+    damping: Option<f64>,
+    max_iterations: Option<usize>,
+    tolerance: Option<f64>,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    let defaults = PageRankOptions::default();
+    let opts = PageRankOptions {
+        damping: damping.unwrap_or(defaults.damping),
+        max_iterations: max_iterations.unwrap_or(defaults.max_iterations),
+        tolerance: tolerance.unwrap_or(defaults.tolerance),
+    };
+    let result = convert_result(p.graph.pagerank(core_branch, &graph, opts))?;
+    Ok(Output::GraphAnalyticsF64(
+        crate::types::GraphAnalyticsF64Result {
+            algorithm: "pagerank".to_string(),
+            result: result.ranks,
+            iterations: Some(result.iterations),
+        },
+    ))
+}
+
+/// Handle GraphLcc command.
+pub fn graph_lcc(p: &Arc<Primitives>, branch: BranchId, graph: String) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    let result = convert_result(p.graph.lcc(core_branch, &graph))?;
+    Ok(Output::GraphAnalyticsF64(
+        crate::types::GraphAnalyticsF64Result {
+            algorithm: "lcc".to_string(),
+            result: result.coefficients,
+            iterations: None,
+        },
+    ))
+}
+
+/// Handle GraphSssp command.
+pub fn graph_sssp(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+    source: String,
+    direction: Option<String>,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    let dir = parse_direction(direction.as_deref())?;
+    let opts = SsspOptions { direction: dir };
+    let result = convert_result(p.graph.sssp(core_branch, &graph, &source, opts))?;
+    Ok(Output::GraphAnalyticsF64(
+        crate::types::GraphAnalyticsF64Result {
+            algorithm: "sssp".to_string(),
+            result: result.distances,
+            iterations: None,
+        },
+    ))
 }
 
 /// Convert serde_json::Value to strata_core::Value.

@@ -383,6 +383,8 @@ fn format_raw(output: &Output) -> String {
         }
         Output::ConfigValue(None) => String::new(),
         Output::ConfigValue(Some(v)) => v.clone(),
+        Output::GraphAnalyticsU64(result) => serde_json::to_string(&result).unwrap_or_default(),
+        Output::GraphAnalyticsF64(result) => serde_json::to_string(&result).unwrap_or_default(),
     }
 }
 
@@ -824,6 +826,22 @@ fn format_human(output: &Output) -> String {
         }
         Output::ConfigValue(None) => "(nil)".to_string(),
         Output::ConfigValue(Some(v)) => format!("\"{}\"", v),
+        Output::GraphAnalyticsU64(result) => {
+            format!(
+                "({}) {} node(s)\n{}",
+                result.algorithm,
+                result.result.len(),
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            )
+        }
+        Output::GraphAnalyticsF64(result) => {
+            format!(
+                "({}) {} node(s)\n{}",
+                result.algorithm,
+                result.result.len(),
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            )
+        }
     }
 }
 
