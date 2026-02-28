@@ -26,8 +26,8 @@
 //! The storage layer uses raw `u64` for version comparisons because:
 //! 1. All versions in storage are `Version::Txn` variants (transaction versions)
 //! 2. Raw u64 comparison is correct for same-variant versions
-//! 3. The `Version::Ord` implementation compares discriminant first, ensuring
-//!    cross-variant comparisons are safe (though they shouldn't occur here)
+//! 3. `Version` only supports same-variant comparison via `PartialOrd`
+//!    (cross-variant returns `None`), but storage only uses same-variant versions
 //! 4. Performance: Avoiding enum matching on every comparison
 
 use dashmap::DashMap;
@@ -398,6 +398,16 @@ impl ShardedStore {
     /// Get number of shards (branches)
     pub fn shard_count(&self) -> usize {
         self.shards.len()
+    }
+
+    /// Return `(entry_count, has_ordered_keys)` for a branch shard.
+    ///
+    /// Used for profiling graph OOM (#1297) — confirms the FxHashMap has the
+    /// expected entry count and whether the BTreeSet index has been built.
+    pub fn shard_stats(&self, branch_id: &BranchId) -> Option<(usize, bool)> {
+        self.shards
+            .get(branch_id)
+            .map(|s| (s.data.len(), s.ordered_keys.is_some()))
     }
 
     /// Check if a branch exists

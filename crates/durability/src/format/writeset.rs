@@ -635,6 +635,16 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
+    fn test_writeset_empty_strings() {
+        let branch_id = test_branch_id();
+        // In debug mode, empty keys trigger debug_assert panic in EntityRef constructors
+        let result = std::panic::catch_unwind(move || EntityRef::kv(branch_id, ""));
+        assert!(result.is_err(), "Empty key should panic in debug mode");
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
     fn test_writeset_empty_strings() {
         let branch_id = test_branch_id();
 

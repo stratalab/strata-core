@@ -121,11 +121,11 @@ mod tests {
 
     #[test]
     fn test_array() {
-        let arr = Value::Array(vec![
+        let arr = Value::Array(Box::new(vec![
             Value::String("hello".into()),
             Value::Int(42),
             Value::Null,
-        ]);
+        ]));
         assert_eq!(extract_text(&arr), Some("hello 42".into()));
     }
 
@@ -134,7 +134,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("name".to_string(), Value::String("Alice".into()));
         map.insert("age".to_string(), Value::Int(30));
-        let obj = Value::Object(map);
+        let obj = Value::Object(Box::new(map));
         let text = extract_text(&obj).unwrap();
         assert!(text.contains("age: 30"));
         assert!(text.contains("name: Alice"));
@@ -149,7 +149,7 @@ mod tests {
 
     #[test]
     fn test_empty_array() {
-        assert_eq!(extract_text(&Value::Array(vec![])), None);
+        assert_eq!(extract_text(&Value::Array(Box::new(vec![]))), None);
     }
 
     #[test]
@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn test_array_all_null() {
         assert_eq!(
-            extract_text(&Value::Array(vec![Value::Null, Value::Null])),
+            extract_text(&Value::Array(Box::new(vec![Value::Null, Value::Null]))),
             None
         );
     }
@@ -176,7 +176,7 @@ mod tests {
         // Build a deeply nested structure exceeding MAX_DEPTH
         let mut value = Value::String("deep".into());
         for _ in 0..20 {
-            value = Value::Array(vec![value]);
+            value = Value::Array(Box::new(vec![value]));
         }
         // The leaf "deep" is at depth 20, which exceeds MAX_DEPTH (16).
         // extract_text should return None because the recursion stops before reaching it.
@@ -188,7 +188,7 @@ mod tests {
         // Build a nested structure exactly at MAX_DEPTH (16 levels of nesting)
         let mut value = Value::String("found".into());
         for _ in 0..15 {
-            value = Value::Array(vec![value]);
+            value = Value::Array(Box::new(vec![value]));
         }
         // 15 levels of Array wrapping: depths 0..14 are Array, depth 15 is String.
         // All within MAX_DEPTH (16), so the text should be extractable.
@@ -201,7 +201,10 @@ mod tests {
         m1.insert("name".to_string(), Value::String("Alice".into()));
         let mut m2 = HashMap::new();
         m2.insert("name".to_string(), Value::String("Bob".into()));
-        let arr = Value::Array(vec![Value::Object(m1), Value::Object(m2)]);
+        let arr = Value::Array(Box::new(vec![
+            Value::Object(Box::new(m1)),
+            Value::Object(Box::new(m2)),
+        ]));
         let text = extract_text(&arr).unwrap();
         assert!(text.contains("name: Alice"));
         assert!(text.contains("name: Bob"));
@@ -212,13 +215,13 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("a".to_string(), Value::Null);
         map.insert("b".to_string(), Value::Null);
-        assert_eq!(extract_text(&Value::Object(map)), None);
+        assert_eq!(extract_text(&Value::Object(Box::new(map))), None);
     }
 
     #[test]
     fn test_empty_object() {
         let map = HashMap::new();
-        assert_eq!(extract_text(&Value::Object(map)), None);
+        assert_eq!(extract_text(&Value::Object(Box::new(map))), None);
     }
 
     #[test]
@@ -227,7 +230,7 @@ mod tests {
         map.insert("z".to_string(), Value::String("last".into()));
         map.insert("a".to_string(), Value::String("first".into()));
         map.insert("m".to_string(), Value::String("middle".into()));
-        let text = extract_text(&Value::Object(map)).unwrap();
+        let text = extract_text(&Value::Object(Box::new(map))).unwrap();
         let a_pos = text.find("a:").unwrap();
         let m_pos = text.find("m:").unwrap();
         let z_pos = text.find("z:").unwrap();
@@ -239,14 +242,14 @@ mod tests {
     fn test_mixed_depth_objects_and_arrays() {
         let mut inner = HashMap::new();
         inner.insert("nested".to_string(), Value::Bool(true));
-        let arr = Value::Array(vec![
+        let arr = Value::Array(Box::new(vec![
             Value::Int(1),
             Value::String("two".into()),
-            Value::Object(inner),
-        ]);
+            Value::Object(Box::new(inner)),
+        ]));
         let mut outer = HashMap::new();
         outer.insert("items".to_string(), arr);
-        let text = extract_text(&Value::Object(outer)).unwrap();
+        let text = extract_text(&Value::Object(Box::new(outer))).unwrap();
         assert!(text.contains("items:"));
         assert!(text.contains("1"));
         assert!(text.contains("two"));

@@ -16,12 +16,34 @@ pub mod types;
 
 use std::sync::Arc;
 
-use strata_core::types::BranchId;
+use strata_core::types::{BranchId, Key};
 use strata_core::{StrataError, StrataResult, Value};
 
 use crate::database::Database;
 use adjacency::AdjacencyIndex;
 use types::*;
+
+// ---------------------------------------------------------------------------
+// RSS reader for profiling graph OOM (#1297)
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+fn current_rss_mb() -> Option<u64> {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("VmRSS:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|kb| kb / 1024)
+        })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn current_rss_mb() -> Option<u64> {
+    None
+}
 
 /// Graph store providing CRUD operations on nodes and edges.
 ///
@@ -637,14 +659,34 @@ impl GraphStore {
         let empty_json = "{}";
         let default_edge_json = "{\"weight\":1.0}";
 
+        // --- Profiling: OOM diagnosis (#1297) ---
+        let t_start = std::time::Instant::now();
+        keys::reset_namespace_alloc_count();
+        tracing::info!(
+            "[graph::bulk_insert] START nodes={} edges={} chunk_size={} RSS={}MB",
+            nodes.len(),
+            edges.len(),
+            chunk_size,
+            current_rss_mb().unwrap_or(0),
+        );
+        // Log sizes of key storage types
+        tracing::info!(
+            "[graph::bulk_insert] SIZES: Key={} Namespace={} Arc<Namespace>={}",
+            std::mem::size_of::<strata_core::types::Key>(),
+            std::mem::size_of::<strata_core::types::Namespace>(),
+            std::mem::size_of::<Arc<strata_core::types::Namespace>>(),
+        );
+
+        // Hoist namespace once — avoids DashMap lookup per key in inner loops.
+        let ns = keys::graph_namespace(branch_id);
+
         // Insert nodes in chunks
         let mut nodes_inserted = 0usize;
         for chunk in nodes.chunks(chunk_size) {
             // Pre-compute keys and serialized values outside the transaction
-            let mut entries: Vec<(strata_core::types::Key, String)> =
-                Vec::with_capacity(chunk.len());
-            let mut ref_entries: Vec<strata_core::types::Key> = Vec::new();
-            let mut type_entries: Vec<strata_core::types::Key> = Vec::new();
+            let mut entries: Vec<(Key, String)> = Vec::with_capacity(chunk.len());
+            let mut ref_entries: Vec<Key> = Vec::new();
+            let mut type_entries: Vec<Key> = Vec::new();
 
             for (node_id, data) in chunk {
                 keys::validate_node_id(node_id)?;
@@ -655,7 +697,7 @@ impl GraphStore {
                 }
 
                 let user_key = keys::node_key(graph, node_id);
-                let sk = keys::storage_key(branch_id, &user_key);
+                let sk = Key::new_kv(ns.clone(), &user_key);
 
                 let json = if data.entity_ref.is_none()
                     && data.properties.is_none()
@@ -671,12 +713,12 @@ impl GraphStore {
 
                 if let Some(uri) = &data.entity_ref {
                     let rk = keys::ref_index_key(uri, graph, node_id);
-                    ref_entries.push(keys::storage_key(branch_id, &rk));
+                    ref_entries.push(Key::new_kv(ns.clone(), &rk));
                 }
 
                 if let Some(ot) = &data.object_type {
                     let tk = keys::type_index_key(graph, ot, node_id);
-                    type_entries.push(keys::storage_key(branch_id, &tk));
+                    type_entries.push(Key::new_kv(ns.clone(), &tk));
                 }
             }
 
@@ -684,16 +726,16 @@ impl GraphStore {
                 // Clean up old index entries for nodes being re-inserted (upsert)
                 for (node_id, _data) in chunk {
                     let user_key = keys::node_key(graph, node_id);
-                    let sk = keys::storage_key(branch_id, &user_key);
+                    let sk = Key::new_kv(ns.clone(), &user_key);
                     if let Some(Value::String(old_json)) = txn.get(&sk)? {
                         if let Ok(old_data) = serde_json::from_str::<NodeData>(&old_json) {
                             if let Some(old_uri) = old_data.entity_ref {
                                 let old_rk = keys::ref_index_key(&old_uri, graph, node_id);
-                                txn.delete(keys::storage_key(branch_id, &old_rk))?;
+                                txn.delete(Key::new_kv(ns.clone(), &old_rk))?;
                             }
                             if let Some(old_ot) = old_data.object_type {
                                 let old_tk = keys::type_index_key(graph, &old_ot, node_id);
-                                txn.delete(keys::storage_key(branch_id, &old_tk))?;
+                                txn.delete(Key::new_kv(ns.clone(), &old_tk))?;
                             }
                         }
                     }
@@ -714,12 +756,19 @@ impl GraphStore {
             nodes_inserted += chunk.len();
         }
 
+        tracing::info!(
+            "[graph::bulk_insert] NODES COMPLETE: {} nodes in {}ms, RSS={}MB, ns_allocs={}",
+            nodes_inserted,
+            t_start.elapsed().as_millis(),
+            current_rss_mb().unwrap_or(0),
+            keys::namespace_alloc_count(),
+        );
+
         // Insert edges in chunks (each edge = 2 puts, so use chunk_size/2)
         let edge_chunk_size = std::cmp::max(1, chunk_size / 2);
         let mut edges_inserted = 0usize;
         for chunk in edges.chunks(edge_chunk_size) {
-            let mut entries: Vec<(strata_core::types::Key, strata_core::types::Key, String)> =
-                Vec::with_capacity(chunk.len());
+            let mut entries: Vec<(Key, Key, String)> = Vec::with_capacity(chunk.len());
 
             for (src, dst, edge_type, data) in chunk {
                 keys::validate_node_id(src)?;
@@ -733,8 +782,8 @@ impl GraphStore {
 
                 let fwd = keys::forward_edge_key(graph, src, edge_type, dst);
                 let rev = keys::reverse_edge_key(graph, dst, edge_type, src);
-                let fwd_sk = keys::storage_key(branch_id, &fwd);
-                let rev_sk = keys::storage_key(branch_id, &rev);
+                let fwd_sk = Key::new_kv(ns.clone(), &fwd);
+                let rev_sk = Key::new_kv(ns.clone(), &rev);
 
                 let json = if data.properties.is_none() && (data.weight - 1.0).abs() < f64::EPSILON
                 {
@@ -756,7 +805,37 @@ impl GraphStore {
             })?;
 
             edges_inserted += chunk.len();
+
+            // Progress log every 1M edges
+            if edges_inserted % 1_000_000 < edge_chunk_size {
+                tracing::info!(
+                    "[graph::bulk_insert] EDGES: {}/{} ({:.1}%) RSS={}MB ns_allocs={}",
+                    edges_inserted,
+                    edges.len(),
+                    edges_inserted as f64 / edges.len().max(1) as f64 * 100.0,
+                    current_rss_mb().unwrap_or(0),
+                    keys::namespace_alloc_count(),
+                );
+            }
         }
+
+        // Shard diagnostics
+        if let Some((entry_count, has_btree)) = self.db.storage().shard_stats(&branch_id) {
+            tracing::info!(
+                "[graph::bulk_insert] SHARD: entries={} btree_built={}",
+                entry_count,
+                has_btree,
+            );
+        }
+
+        tracing::info!(
+            "[graph::bulk_insert] DONE: {} nodes + {} edges in {}ms, RSS={}MB, ns_allocs={}",
+            nodes_inserted,
+            edges_inserted,
+            t_start.elapsed().as_millis(),
+            current_rss_mb().unwrap_or(0),
+            keys::namespace_alloc_count(),
+        );
 
         Ok((nodes_inserted, edges_inserted))
     }

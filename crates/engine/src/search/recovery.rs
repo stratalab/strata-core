@@ -142,7 +142,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
         // --- Event entries ---
         for (key, vv) in db.storage().list_by_type(&branch_id, TypeTag::Event) {
             // Skip metadata keys (same as checkpoint logic)
-            if key.user_key == b"__meta__" || key.user_key.starts_with(b"__tidx__") {
+            if *key.user_key == *b"__meta__" || key.user_key.starts_with(b"__tidx__") {
                 continue;
             }
 
@@ -153,7 +153,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
 
             // Parse sequence from the key (8-byte big-endian u64)
             let sequence = if key.user_key.len() == 8 {
-                u64::from_be_bytes(key.user_key.as_slice().try_into().unwrap_or([0; 8]))
+                u64::from_be_bytes((*key.user_key).try_into().unwrap_or([0; 8]))
             } else {
                 continue; // Skip non-sequence keys
             };

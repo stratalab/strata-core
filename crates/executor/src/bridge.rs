@@ -214,12 +214,13 @@ fn value_to_serde_json(value: Value) -> StrataResult<serde_json::Value> {
             Ok(JV::String(format!("__bytes__:{}", encoded)))
         }
         Value::Array(arr) => {
-            let converted: Result<Vec<_>, _> = arr.into_iter().map(value_to_serde_json).collect();
+            let converted: Result<Vec<_>, _> =
+                (*arr).into_iter().map(value_to_serde_json).collect();
             Ok(JV::Array(converted?))
         }
         Value::Object(obj) => {
             let mut map = Map::new();
-            for (k, v) in obj {
+            for (k, v) in *obj {
                 map.insert(k, value_to_serde_json(v)?);
             }
             Ok(JV::Object(map))
@@ -261,14 +262,14 @@ fn serde_json_to_value(json: serde_json::Value) -> StrataResult<Value> {
         }
         JV::Array(arr) => {
             let converted: Result<Vec<_>, _> = arr.into_iter().map(serde_json_to_value).collect();
-            Ok(Value::Array(converted?))
+            Ok(Value::Array(Box::new(converted?)))
         }
         JV::Object(obj) => {
             let mut map = std::collections::HashMap::new();
             for (k, v) in obj {
                 map.insert(k, serde_json_to_value(v)?);
             }
-            Ok(Value::Object(map))
+            Ok(Value::Object(Box::new(map)))
         }
     }
 }

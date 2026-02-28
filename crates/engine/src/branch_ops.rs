@@ -264,7 +264,7 @@ pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> Strat
             .map(|(key, vv)| {
                 // Rewrite key with destination namespace (preserving space and user_key)
                 let new_ns = Arc::new(Namespace::for_branch_space(dest_id, &key.namespace.space));
-                let new_key = Key::new(new_ns, key.type_tag, key.user_key.clone());
+                let new_key = Key::new(new_ns, key.type_tag, key.user_key.to_vec());
                 (new_key, vv.value)
             })
             .collect();
@@ -358,13 +358,13 @@ pub fn diff_branches(
             maps_a
                 .entry(key.namespace.space.clone())
                 .or_default()
-                .insert((key.user_key.clone(), type_tag), vv.value);
+                .insert((key.user_key.to_vec(), type_tag), vv.value);
         }
         for (key, vv) in storage.list_by_type(&id_b, type_tag) {
             maps_b
                 .entry(key.namespace.space.clone())
                 .or_default()
-                .insert((key.user_key.clone(), type_tag), vv.value);
+                .insert((key.user_key.to_vec(), type_tag), vv.value);
         }
     }
 
@@ -565,7 +565,7 @@ pub fn merge_branches(
             let entries = storage.list_by_type(&source_id, type_tag);
             for (key, vv) in entries {
                 if key.namespace.space == *space {
-                    source_values.insert((key.user_key.clone(), type_tag), vv.value);
+                    source_values.insert((key.user_key.to_vec(), type_tag), vv.value);
                 }
             }
         }
@@ -700,7 +700,7 @@ mod tests {
         let storage = db.storage();
         let entries = storage.list_by_type(&branch_id, TypeTag::KV);
         for (k, vv) in entries {
-            if k.namespace.space == space && k.user_key == key.as_bytes() {
+            if k.namespace.space == space && *k.user_key == *key.as_bytes() {
                 return Some(vv.value);
             }
         }
@@ -746,7 +746,7 @@ mod tests {
         assert!(
             state_entries
                 .iter()
-                .any(|(k, _)| k.user_key == b"s1" && k.namespace.space == "default"),
+                .any(|(k, _)| *k.user_key == *b"s1" && k.namespace.space == "default"),
             "State data should be forked"
         );
 
@@ -755,7 +755,7 @@ mod tests {
         assert!(
             json_entries
                 .iter()
-                .any(|(k, _)| k.user_key == b"doc1" && k.namespace.space == "default"),
+                .any(|(k, _)| *k.user_key == *b"doc1" && k.namespace.space == "default"),
             "JSON data should be forked"
         );
     }
@@ -1130,8 +1130,10 @@ mod tests {
         let storage = db.storage();
         let target_events = storage.list_by_type(&target_id, TypeTag::Event);
         assert!(
-            target_events.iter().any(|(k, vv)| k.user_key == binary_key
-                && vv.value == Value::String("event-data".into())),
+            target_events
+                .iter()
+                .any(|(k, vv)| *k.user_key == *binary_key
+                    && vv.value == Value::String("event-data".into())),
             "Binary key event should be present in target after merge"
         );
     }

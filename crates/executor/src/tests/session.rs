@@ -408,10 +408,10 @@ fn test_event_append_in_txn() {
         branch: None,
         space: None,
         event_type: "test_stream".to_string(),
-        payload: Value::Object(std::collections::HashMap::from([(
+        payload: Value::Object(Box::new(std::collections::HashMap::from([(
             "data".to_string(),
             Value::String("event_data".into()),
-        )])),
+        )]))),
     });
     assert!(result.is_ok(), "EventAppend should succeed in txn");
 

@@ -3,11 +3,25 @@
 //! All graph data is stored under the `_graph_` space using KV-type keys.
 //! Key format uses `/` as a separator between path segments.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
 #[cfg(test)]
 use strata_core::types::TypeTag;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::{StrataError, StrataResult};
+
+/// Global cache of `Arc<Namespace>` per branch.  One heap allocation per branch,
+/// ever — all subsequent calls return `Arc::clone()` (atomic refcount bump, zero
+/// heap allocation).  Fixes graph OOM (#1297).
+static NS_CACHE: Lazy<DashMap<BranchId, Arc<Namespace>>> = Lazy::new(DashMap::new);
+
+/// Counter tracking the number of `graph_namespace` *calls* (cache lookups).
+/// Not actual heap allocations — after the first call per branch, the cache
+/// serves `Arc::clone()`.  Used for profiling graph OOM (#1297).
+static NAMESPACE_ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Separator used between path segments in graph keys.
 const SEP: char = '/';
@@ -64,8 +78,30 @@ pub fn validate_edge_type(t: &str) -> StrataResult<()> {
 pub const GRAPH_SPACE: &str = "_graph_";
 
 /// Build a namespace for graph operations on a given branch.
+///
+/// Returns a cached `Arc<Namespace>` — one heap allocation per branch, ever.
+/// Subsequent calls return `Arc::clone()` (atomic refcount bump only).
 pub fn graph_namespace(branch_id: BranchId) -> Arc<Namespace> {
-    Arc::new(Namespace::for_branch_space(branch_id, GRAPH_SPACE))
+    NAMESPACE_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+    NS_CACHE
+        .entry(branch_id)
+        .or_insert_with(|| Arc::new(Namespace::for_branch_space(branch_id, GRAPH_SPACE)))
+        .clone()
+}
+
+/// Remove a cached namespace entry (call on branch deletion).
+pub fn invalidate_namespace_cache(branch_id: &BranchId) {
+    NS_CACHE.remove(branch_id);
+}
+
+/// Return the cumulative number of `graph_namespace` allocations since last reset.
+pub fn namespace_alloc_count() -> u64 {
+    NAMESPACE_ALLOC_COUNT.load(Ordering::Relaxed)
+}
+
+/// Reset the namespace allocation counter to zero.
+pub fn reset_namespace_alloc_count() {
+    NAMESPACE_ALLOC_COUNT.store(0, Ordering::Relaxed);
 }
 
 /// Build a full storage Key from a user_key string in the graph namespace.
@@ -675,5 +711,108 @@ mod tests {
     fn parse_type_index_key_wrong_graph_returns_none() {
         let key = type_index_key("g", "Patient", "p1");
         assert!(parse_type_index_key("other", &key).is_none());
+    }
+
+    // --- Namespace cache tests (#1297) ---
+
+    #[test]
+    fn namespace_cache_returns_same_arc_pointer() {
+        // Use a unique branch ID to avoid interference from other tests
+        let branch =
+            BranchId::from_bytes([0xCA, 0xCE, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let ns1 = graph_namespace(branch);
+        let ns2 = graph_namespace(branch);
+        // Must be the *same* heap allocation (Arc pointer equality), not just
+        // value-equal — this is the whole point of the cache.
+        assert!(Arc::ptr_eq(&ns1, &ns2));
+    }
+
+    #[test]
+    fn namespace_cache_different_branches_return_different_namespaces() {
+        let branch_a =
+            BranchId::from_bytes([0xCA, 0xCE, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let branch_b =
+            BranchId::from_bytes([0xCA, 0xCE, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let ns_a = graph_namespace(branch_a);
+        let ns_b = graph_namespace(branch_b);
+        // Different branches → different namespace content
+        assert_ne!(*ns_a, *ns_b);
+        assert_eq!(ns_a.branch_id, branch_a);
+        assert_eq!(ns_b.branch_id, branch_b);
+        // Both must use the graph space
+        assert_eq!(ns_a.space, GRAPH_SPACE);
+        assert_eq!(ns_b.space, GRAPH_SPACE);
+    }
+
+    #[test]
+    fn invalidate_namespace_cache_forces_new_allocation() {
+        let branch =
+            BranchId::from_bytes([0xCA, 0xCE, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let ns_before = graph_namespace(branch);
+
+        invalidate_namespace_cache(&branch);
+
+        let ns_after = graph_namespace(branch);
+        // Value must be identical (same branch, same space)
+        assert_eq!(*ns_before, *ns_after);
+        // But must be a *new* heap allocation (different Arc pointer)
+        assert!(!Arc::ptr_eq(&ns_before, &ns_after));
+    }
+
+    #[test]
+    fn invalidate_nonexistent_branch_is_noop() {
+        let branch =
+            BranchId::from_bytes([0xCA, 0xCE, 0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        // Should not panic or error
+        invalidate_namespace_cache(&branch);
+    }
+
+    #[test]
+    fn hoisted_namespace_key_equals_storage_key() {
+        // Verify that the bulk_insert optimization path
+        // (Key::new_kv(ns.clone(), ...)) produces keys identical to
+        // the standard path (storage_key(branch_id, ...)).
+        let branch =
+            BranchId::from_bytes([0xCA, 0xCE, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let ns = graph_namespace(branch);
+
+        // Test with various user_key patterns used in graph operations
+        let user_keys = [
+            node_key("mygraph", "patient-1"),
+            forward_edge_key("mygraph", "A", "KNOWS", "B"),
+            reverse_edge_key("mygraph", "B", "KNOWS", "A"),
+            ref_index_key("kv://main/key1", "mygraph", "n1"),
+            type_index_key("mygraph", "Patient", "p1"),
+            meta_key("mygraph"),
+        ];
+
+        for user_key in &user_keys {
+            let via_storage = storage_key(branch, user_key);
+            let via_hoisted = Key::new_kv(ns.clone(), user_key);
+            assert_eq!(
+                via_storage, via_hoisted,
+                "Key mismatch for user_key={user_key:?}"
+            );
+            // Also verify ordering is consistent (used in BTreeMap scans)
+            assert_eq!(
+                via_storage.cmp(&via_hoisted),
+                std::cmp::Ordering::Equal,
+                "Ord mismatch for user_key={user_key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn namespace_cache_lookup_counter_increments() {
+        let branch =
+            BranchId::from_bytes([0xCA, 0xCE, 0x07, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let before = namespace_alloc_count();
+        graph_namespace(branch);
+        graph_namespace(branch);
+        graph_namespace(branch);
+        let after = namespace_alloc_count();
+        // Counter must have incremented by at least 3 (may be higher due to
+        // parallel tests, so we only assert the delta is >= 3).
+        assert!(after - before >= 3);
     }
 }

@@ -18,15 +18,18 @@ use tempfile::TempDir;
 
 /// Helper to create an object payload with a string value
 fn string_payload(s: &str) -> Value {
-    Value::Object(HashMap::from([(
+    Value::Object(Box::new(HashMap::from([(
         "data".to_string(),
         Value::String(s.into()),
-    )]))
+    )])))
 }
 
 /// Helper to create an object payload with an integer value
 fn int_payload(v: i64) -> Value {
-    Value::Object(HashMap::from([("value".to_string(), Value::Int(v))]))
+    Value::Object(Box::new(HashMap::from([(
+        "value".to_string(),
+        Value::Int(v),
+    )])))
 }
 
 fn setup() -> (Arc<Database>, TempDir, BranchId) {

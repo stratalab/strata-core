@@ -181,11 +181,11 @@ fn test_json_set_get_parity() {
         space: None,
         key: "doc1".to_string(),
         path: "".to_string(), // Root path
-        value: Value::Object(
+        value: Value::Object(Box::new(
             [("name".to_string(), Value::String("Alice".into()))]
                 .into_iter()
                 .collect(),
-        ),
+        )),
     });
 
     // JsonSet returns Version
@@ -226,11 +226,11 @@ fn test_event_append_get_by_type_parity() {
         branch: None,
         space: None,
         event_type: "events".to_string(),
-        payload: Value::Object(
+        payload: Value::Object(Box::new(
             [("type".to_string(), Value::String("click".into()))]
                 .into_iter()
                 .collect(),
-        ),
+        )),
     });
 
     // Just verify it returns a Version
@@ -246,11 +246,11 @@ fn test_event_append_get_by_type_parity() {
             &branch_id,
             "default",
             "events",
-            Value::Object(
+            Value::Object(Box::new(
                 [("type".to_string(), Value::String("scroll".into()))]
                     .into_iter()
                     .collect(),
-            ),
+            )),
         )
         .unwrap();
 
@@ -426,11 +426,11 @@ fn test_branch_create_get_parity() {
     // Create branch via executor with a UUID
     let result = executor.execute(Command::BranchCreate {
         branch_id: Some("550e8400-e29b-41d4-a716-446655440001".to_string()),
-        metadata: Some(Value::Object(
+        metadata: Some(Value::Object(Box::new(
             [("name".to_string(), Value::String("Test".into()))]
                 .into_iter()
                 .collect(),
-        )),
+        ))),
     });
 
     match result {

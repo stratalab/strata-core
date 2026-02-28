@@ -14,20 +14,23 @@ use tempfile::TempDir;
 
 /// Helper to create an empty object payload for EventLog
 fn empty_payload() -> Value {
-    Value::Object(HashMap::new())
+    Value::Object(Box::new(HashMap::new()))
 }
 
 /// Helper to create an object payload with an integer value
 fn int_payload(v: i64) -> Value {
-    Value::Object(HashMap::from([("value".to_string(), Value::Int(v))]))
+    Value::Object(Box::new(HashMap::from([(
+        "value".to_string(),
+        Value::Int(v),
+    )])))
 }
 
 /// Helper to create an object payload with a string value
 fn string_payload(s: &str) -> Value {
-    Value::Object(HashMap::from([(
+    Value::Object(Box::new(HashMap::from([(
         "data".to_string(),
         Value::String(s.into()),
-    )]))
+    )])))
 }
 
 fn setup() -> (Arc<Database>, TempDir) {

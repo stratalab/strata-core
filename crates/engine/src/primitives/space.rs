@@ -78,7 +78,7 @@ impl SpaceIndex {
 
             let mut spaces: Vec<String> = results
                 .into_iter()
-                .filter_map(|(k, _)| String::from_utf8(k.user_key.clone()).ok())
+                .filter_map(|(k, _)| String::from_utf8(k.user_key.to_vec()).ok())
                 .collect();
 
             // Always include "default"

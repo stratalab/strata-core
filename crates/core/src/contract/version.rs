@@ -174,36 +174,17 @@ impl Version {
 }
 
 impl PartialOrd for Version {
-    /// Compare versions
+    /// Compare versions within the same variant type.
     ///
-    /// Delegates to `Ord::cmp` for consistency.
-    /// For semantic same-variant comparison, use dedicated methods.
+    /// Returns `None` for cross-variant comparison (e.g., `Txn` vs `Sequence`),
+    /// since comparing across versioning schemes is not meaningful.
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Version {
-    /// Total ordering for sorting purposes
-    ///
-    /// WARNING: This provides a total ordering by comparing numeric values
-    /// regardless of variant. Use `partial_cmp` for semantic comparison.
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // First compare by variant discriminant, then by value
-        let self_discriminant = match self {
-            Version::Txn(_) => 0,
-            Version::Sequence(_) => 1,
-            Version::Counter(_) => 2,
-        };
-        let other_discriminant = match other {
-            Version::Txn(_) => 0,
-            Version::Sequence(_) => 1,
-            Version::Counter(_) => 2,
-        };
-
-        self_discriminant
-            .cmp(&other_discriminant)
-            .then_with(|| self.as_u64().cmp(&other.as_u64()))
+        match (self, other) {
+            (Version::Txn(a), Version::Txn(b)) => Some(a.cmp(b)),
+            (Version::Sequence(a), Version::Sequence(b)) => Some(a.cmp(b)),
+            (Version::Counter(a), Version::Counter(b)) => Some(a.cmp(b)),
+            _ => None,
+        }
     }
 }
 
@@ -314,43 +295,29 @@ mod tests {
 
     #[test]
     fn test_version_partial_ord_different_types() {
-        use std::cmp::Ordering;
-
-        // Cross-variant comparison delegates to Ord for consistency
-        // TxnId < Sequence < Counter
-        assert_eq!(
-            Version::Txn(1).partial_cmp(&Version::Sequence(1)),
-            Some(Ordering::Less)
-        );
-        assert_eq!(
-            Version::Sequence(1).partial_cmp(&Version::Counter(1)),
-            Some(Ordering::Less)
-        );
-        assert_eq!(
-            Version::Txn(1).partial_cmp(&Version::Counter(1)),
-            Some(Ordering::Less)
-        );
+        // Cross-variant comparison returns None (not meaningful)
+        assert_eq!(Version::Txn(1).partial_cmp(&Version::Sequence(1)), None);
+        assert_eq!(Version::Sequence(1).partial_cmp(&Version::Counter(1)), None);
+        assert_eq!(Version::Txn(1).partial_cmp(&Version::Counter(1)), None);
     }
 
     #[test]
     fn test_version_partial_ord_reverse_direction() {
-        use std::cmp::Ordering;
-
-        // Test the reverse direction (Greater)
+        // Cross-variant comparison returns None in both directions
         assert_eq!(
             Version::Sequence(1).partial_cmp(&Version::Txn(1)),
-            Some(Ordering::Greater),
-            "Sequence should be greater than Txn"
+            None,
+            "Cross-variant should return None"
         );
         assert_eq!(
             Version::Counter(1).partial_cmp(&Version::Sequence(1)),
-            Some(Ordering::Greater),
-            "Counter should be greater than Sequence"
+            None,
+            "Cross-variant should return None"
         );
         assert_eq!(
             Version::Counter(1).partial_cmp(&Version::Txn(1)),
-            Some(Ordering::Greater),
-            "Counter should be greater than Txn"
+            None,
+            "Cross-variant should return None"
         );
     }
 
@@ -379,26 +346,21 @@ mod tests {
 
     #[test]
     fn test_version_boundary_values_different_types() {
-        use std::cmp::Ordering;
-
-        // Even with extreme values, ordering by discriminant takes precedence
-        // Txn(MAX) < Sequence(0) because Txn discriminant < Sequence discriminant
+        // Cross-variant comparison returns None regardless of values
         assert_eq!(
             Version::Txn(u64::MAX).partial_cmp(&Version::Sequence(0)),
-            Some(Ordering::Less),
-            "Txn(MAX) should still be less than Sequence(0)"
+            None,
+            "Cross-variant should return None"
         );
         assert_eq!(
             Version::Sequence(u64::MAX).partial_cmp(&Version::Counter(0)),
-            Some(Ordering::Less),
-            "Sequence(MAX) should still be less than Counter(0)"
+            None,
+            "Cross-variant should return None"
         );
-
-        // And the reverse
         assert_eq!(
             Version::Counter(0).partial_cmp(&Version::Txn(u64::MAX)),
-            Some(Ordering::Greater),
-            "Counter(0) should be greater than Txn(MAX)"
+            None,
+            "Cross-variant should return None"
         );
     }
 
@@ -406,17 +368,14 @@ mod tests {
     fn test_version_ordering_symmetry() {
         use std::cmp::Ordering;
 
-        // For any a, b: if a < b then b > a (ordering symmetry)
-        let pairs = [
+        // Same-variant pairs have total ordering
+        let same_variant_pairs = [
             (Version::Txn(5), Version::Txn(10)),
             (Version::Sequence(5), Version::Sequence(10)),
             (Version::Counter(5), Version::Counter(10)),
-            (Version::Txn(5), Version::Sequence(5)),
-            (Version::Sequence(5), Version::Counter(5)),
-            (Version::Txn(5), Version::Counter(5)),
         ];
 
-        for (a, b) in pairs {
+        for (a, b) in same_variant_pairs {
             let a_cmp_b = a.partial_cmp(&b);
             let b_cmp_a = b.partial_cmp(&a);
 
@@ -430,66 +389,53 @@ mod tests {
                 ),
             }
         }
+
+        // Cross-variant pairs return None
+        let cross_variant_pairs = [
+            (Version::Txn(5), Version::Sequence(5)),
+            (Version::Sequence(5), Version::Counter(5)),
+            (Version::Txn(5), Version::Counter(5)),
+        ];
+
+        for (a, b) in cross_variant_pairs {
+            assert_eq!(
+                a.partial_cmp(&b),
+                None,
+                "Cross-variant {:?} vs {:?} should be None",
+                a,
+                b
+            );
+            assert_eq!(
+                b.partial_cmp(&a),
+                None,
+                "Cross-variant {:?} vs {:?} should be None",
+                b,
+                a
+            );
+        }
     }
 
     #[test]
-    fn test_version_cmp_directly() {
+    fn test_version_partial_cmp_same_variant() {
         use std::cmp::Ordering;
 
-        // TxnId < Sequence < Counter (by discriminant)
-        assert_eq!(Version::Txn(5).cmp(&Version::Sequence(5)), Ordering::Less);
+        // Same variant: compare by value
         assert_eq!(
-            Version::Txn(5).cmp(&Version::Counter(5)),
-            Ordering::Less,
-            "TxnId should be less than Counter"
+            Version::Txn(5).partial_cmp(&Version::Txn(10)),
+            Some(Ordering::Less)
         );
         assert_eq!(
-            Version::Sequence(5).cmp(&Version::Counter(5)),
-            Ordering::Less
+            Version::Txn(10).partial_cmp(&Version::Txn(5)),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            Version::Txn(5).partial_cmp(&Version::Txn(5)),
+            Some(Ordering::Equal)
         );
 
-        // Same variant, compare by value
-        assert_eq!(Version::Txn(5).cmp(&Version::Txn(10)), Ordering::Less);
-        assert_eq!(Version::Txn(10).cmp(&Version::Txn(5)), Ordering::Greater);
-        assert_eq!(Version::Txn(5).cmp(&Version::Txn(5)), Ordering::Equal);
-    }
-
-    #[test]
-    fn test_version_ord_total_ordering() {
-        // Total ordering groups by variant first, then by value
-        let mut versions = vec![
-            Version::Counter(5),
-            Version::Txn(10),
-            Version::Sequence(1),
-            Version::Txn(5),
-            Version::Sequence(10),
-            Version::Counter(1),
-        ];
-        versions.sort();
-
-        // Expected order: TxnId(5), TxnId(10), Sequence(1), Sequence(10), Counter(1), Counter(5)
-        assert_eq!(versions[0], Version::Txn(5), "First should be TxnId(5)");
-        assert_eq!(versions[1], Version::Txn(10), "Second should be TxnId(10)");
-        assert_eq!(
-            versions[2],
-            Version::Sequence(1),
-            "Third should be Sequence(1)"
-        );
-        assert_eq!(
-            versions[3],
-            Version::Sequence(10),
-            "Fourth should be Sequence(10)"
-        );
-        assert_eq!(
-            versions[4],
-            Version::Counter(1),
-            "Fifth should be Counter(1)"
-        );
-        assert_eq!(
-            versions[5],
-            Version::Counter(5),
-            "Sixth should be Counter(5)"
-        );
+        // Cross-variant: None
+        assert_eq!(Version::Txn(5).partial_cmp(&Version::Sequence(5)), None);
+        assert_eq!(Version::Sequence(5).partial_cmp(&Version::Counter(5)), None);
     }
 
     #[test]

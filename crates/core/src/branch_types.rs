@@ -157,6 +157,12 @@ impl BranchEventOffsets {
 
     /// Add an offset
     pub fn push(&mut self, offset: u64) {
+        debug_assert!(
+            self.offsets.last().map_or(true, |&last| offset >= last),
+            "BranchEventOffsets: new offset {} is less than last offset {:?}",
+            offset,
+            self.offsets.last()
+        );
         self.offsets.push(offset);
     }
 
@@ -363,12 +369,21 @@ mod tests {
     }
 
     #[test]
-    fn test_branch_event_offsets_ordering_not_enforced() {
-        // Offsets are just a Vec - no ordering enforcement
+    fn test_branch_event_offsets_monotonic_order() {
+        // Offsets should be pushed in monotonic order
         let mut offsets = BranchEventOffsets::new();
-        offsets.push(300);
         offsets.push(100);
         offsets.push(200);
-        assert_eq!(offsets.as_slice(), &[300, 100, 200]);
+        offsets.push(300);
+        assert_eq!(offsets.as_slice(), &[100, 200, 300]);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "new offset")]
+    fn test_branch_event_offsets_debug_rejects_non_monotonic() {
+        let mut offsets = BranchEventOffsets::new();
+        offsets.push(300);
+        offsets.push(100); // Should panic in debug
     }
 }
