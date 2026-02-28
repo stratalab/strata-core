@@ -187,7 +187,7 @@ pub struct Shard {
     /// HashMap with FxHash for O(1) lookups, storing version chains
     pub(crate) data: FxHashMap<Key, VersionChain>,
     /// Sorted index of all keys for O(log n + k) prefix scans.
-    /// Built lazily on first scan request, invalidated on new-key insertions.
+    /// Built lazily on first scan request, then maintained incrementally.
     pub(crate) ordered_keys: Option<BTreeSet<Key>>,
 }
 
@@ -208,7 +208,9 @@ impl Shard {
         }
     }
 
-    /// Rebuild `ordered_keys` from `data.keys()` if invalidated (None).
+    /// Rebuild `ordered_keys` from `data.keys()` if not yet built (None).
+    /// Once built, the index is maintained incrementally by `put()` and
+    /// `commit_batch()`, so this only triggers on the very first scan.
     pub(crate) fn ensure_ordered_keys(&mut self) {
         if self.ordered_keys.is_none() {
             self.ordered_keys = Some(self.data.keys().cloned().collect());
@@ -353,8 +355,10 @@ impl ShardedStore {
             // Add new version to existing chain
             chain.push(value);
         } else {
-            // Create new chain — invalidate ordered index (rebuilt lazily on scan)
-            shard.ordered_keys = None;
+            // Create new chain — incrementally update ordered index
+            if let Some(ref mut btree) = shard.ordered_keys {
+                btree.insert(key.clone());
+            }
             shard.data.insert(key, VersionChain::new(value));
         }
     }
@@ -513,14 +517,15 @@ impl ShardedStore {
         // Apply atomically per branch (hold shard lock for entire branch batch)
         for (branch_id, (branch_writes, branch_deletes)) in branch_ops {
             let mut shard = self.shards.entry(branch_id).or_default();
-            let mut has_new_keys = false;
 
             for (key, stored) in branch_writes {
                 if let Some(chain) = shard.data.get_mut(&key) {
                     chain.push(stored);
                 } else {
+                    if let Some(ref mut btree) = shard.ordered_keys {
+                        btree.insert(key.clone());
+                    }
                     shard.data.insert(key, VersionChain::new(stored));
-                    has_new_keys = true;
                 }
             }
 
@@ -529,14 +534,11 @@ impl ShardedStore {
                 if let Some(chain) = shard.data.get_mut(&key) {
                     chain.push(tombstone);
                 } else {
+                    if let Some(ref mut btree) = shard.ordered_keys {
+                        btree.insert(key.clone());
+                    }
                     shard.data.insert(key, VersionChain::new(tombstone));
-                    has_new_keys = true;
                 }
-            }
-
-            // Invalidate ordered index if new keys were added
-            if has_new_keys {
-                shard.ordered_keys = None;
             }
         }
 
@@ -3541,12 +3543,12 @@ mod tests {
         let branch_id = BranchId::new();
         let ns = strata_core::types::Namespace::for_branch(branch_id);
 
-        // Insert keys — ordered_keys starts as None, gets invalidated on each new key
+        // Insert keys — ordered_keys starts as None (never built yet)
         Storage::put(&store, Key::new_kv(ns.clone(), "c"), Value::Int(3), None).unwrap();
         Storage::put(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), None).unwrap();
         Storage::put(&store, Key::new_kv(ns.clone(), "b"), Value::Int(2), None).unwrap();
 
-        // ordered_keys should be None (invalidated by put)
+        // ordered_keys should be None (not yet built)
         {
             let shard = store.shards.get(&branch_id).unwrap();
             assert!(
@@ -3580,13 +3582,13 @@ mod tests {
             );
         }
 
-        // Insert a NEW key — should invalidate again
+        // Insert a NEW key — should be incrementally added to ordered_keys
         Storage::put(&store, Key::new_kv(ns.clone(), "aa"), Value::Int(4), None).unwrap();
         {
             let shard = store.shards.get(&branch_id).unwrap();
             assert!(
-                shard.ordered_keys.is_none(),
-                "ordered_keys should be None again after new key insertion"
+                shard.ordered_keys.is_some(),
+                "ordered_keys should remain Some after incremental insert"
             );
         }
 
@@ -3630,5 +3632,308 @@ mod tests {
                 "Updating an existing key must not invalidate the ordered index"
             );
         }
+    }
+
+    #[test]
+    fn test_incremental_ordered_keys_interleaved_insert_scan() {
+        // Reproduces the Workload E pattern: interleaved inserts and scans.
+        // Before the fix, each insert invalidated ordered_keys (set to None),
+        // forcing an O(N) rebuild on every subsequent scan.
+        use strata_core::traits::Storage;
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = strata_core::types::Namespace::for_branch(branch_id);
+
+        // Seed with initial keys
+        for i in 0..10 {
+            Storage::put(
+                &store,
+                Key::new_kv(ns.clone(), &format!("key_{:03}", i)),
+                Value::Int(i),
+                None,
+            )
+            .unwrap();
+        }
+
+        // First scan — builds ordered_keys from scratch
+        let prefix = Key::new_kv(ns.clone(), "");
+        let results = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
+        assert_eq!(results.len(), 10);
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert!(shard.ordered_keys.is_some());
+        }
+
+        // Interleaved insert-scan pattern (simulates Workload E)
+        for i in 10..20 {
+            // Insert a new key
+            Storage::put(
+                &store,
+                Key::new_kv(ns.clone(), &format!("key_{:03}", i)),
+                Value::Int(i),
+                None,
+            )
+            .unwrap();
+
+            // ordered_keys must remain Some (incremental insert, no invalidation)
+            {
+                let shard = store.shards.get(&branch_id).unwrap();
+                assert!(
+                    shard.ordered_keys.is_some(),
+                    "ordered_keys invalidated on insert {i} — should be incrementally maintained"
+                );
+            }
+
+            // Scan must return all keys so far, in sorted order
+            let results = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
+            assert_eq!(
+                results.len(),
+                i as usize + 1,
+                "Expected {} keys after insert {i}",
+                i + 1
+            );
+
+            // Verify sorted order
+            let keys: Vec<String> = results
+                .iter()
+                .filter_map(|(k, _)| k.user_key_string())
+                .collect();
+            let mut sorted = keys.clone();
+            sorted.sort();
+            assert_eq!(keys, sorted, "Keys not sorted after insert {i}");
+        }
+    }
+
+    #[test]
+    fn test_incremental_ordered_keys_btreeset_content_after_inserts() {
+        // Verifies that the BTreeSet content is exactly correct after
+        // incremental inserts — not just that it's Some.
+        use strata_core::traits::Storage;
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = strata_core::types::Namespace::for_branch(branch_id);
+
+        // Insert initial keys and build ordered_keys via scan
+        Storage::put(&store, Key::new_kv(ns.clone(), "b"), Value::Int(1), None).unwrap();
+        Storage::put(&store, Key::new_kv(ns.clone(), "d"), Value::Int(2), None).unwrap();
+        let prefix = Key::new_kv(ns.clone(), "");
+        let _ = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
+
+        // Incrementally insert new keys
+        Storage::put(&store, Key::new_kv(ns.clone(), "a"), Value::Int(3), None).unwrap();
+        Storage::put(&store, Key::new_kv(ns.clone(), "c"), Value::Int(4), None).unwrap();
+        Storage::put(&store, Key::new_kv(ns.clone(), "e"), Value::Int(5), None).unwrap();
+
+        // Verify BTreeSet matches data keys exactly
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            let btree = shard.ordered_keys.as_ref().expect("should be Some");
+            assert_eq!(
+                btree.len(),
+                shard.data.len(),
+                "BTreeSet length must match data length"
+            );
+            for k in shard.data.keys() {
+                assert!(btree.contains(k), "BTreeSet missing key from data: {:?}", k);
+            }
+            for k in btree.iter() {
+                assert!(
+                    shard.data.contains_key(k),
+                    "BTreeSet has key not in data: {:?}",
+                    k
+                );
+            }
+
+            // Verify BTreeSet iteration order
+            let btree_keys: Vec<String> =
+                btree.iter().filter_map(|k| k.user_key_string()).collect();
+            assert_eq!(btree_keys, vec!["a", "b", "c", "d", "e"]);
+        }
+    }
+
+    #[test]
+    fn test_incremental_ordered_keys_via_apply_batch() {
+        // Verifies that apply_batch (commit path) incrementally maintains
+        // ordered_keys instead of invalidating it.
+        use strata_core::traits::Storage;
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = strata_core::types::Namespace::for_branch(branch_id);
+
+        // Insert initial keys and build ordered_keys via scan
+        Storage::put(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), None).unwrap();
+        Storage::put(&store, Key::new_kv(ns.clone(), "c"), Value::Int(2), None).unwrap();
+        let prefix = Key::new_kv(ns.clone(), "");
+        let _ = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert!(
+                shard.ordered_keys.is_some(),
+                "precondition: ordered_keys built"
+            );
+        }
+
+        // apply_batch with new keys
+        let writes = vec![
+            (Key::new_kv(ns.clone(), "b"), Value::Int(3)),
+            (Key::new_kv(ns.clone(), "d"), Value::Int(4)),
+        ];
+        store.apply_batch(&writes, &[], 10).unwrap();
+
+        // ordered_keys must remain Some
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert!(
+                shard.ordered_keys.is_some(),
+                "apply_batch should not invalidate ordered_keys"
+            );
+            let btree = shard.ordered_keys.as_ref().unwrap();
+            assert_eq!(btree.len(), 4, "BTreeSet should have all 4 keys");
+        }
+
+        // Scan must return all keys in sorted order
+        let results = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
+        let keys: Vec<String> = results
+            .iter()
+            .filter_map(|(k, _)| k.user_key_string())
+            .collect();
+        assert_eq!(keys, vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn test_incremental_ordered_keys_via_apply_batch_deletes() {
+        // Verifies that apply_batch deletes of nonexistent keys (which create
+        // tombstone entries) also incrementally maintain ordered_keys.
+        use strata_core::traits::Storage;
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = strata_core::types::Namespace::for_branch(branch_id);
+
+        // Insert initial key and build ordered_keys via scan
+        Storage::put(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), None).unwrap();
+        let prefix = Key::new_kv(ns.clone(), "");
+        let _ = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert!(shard.ordered_keys.is_some());
+        }
+
+        // apply_batch: delete a key that doesn't exist yet (creates tombstone entry)
+        let deletes = vec![Key::new_kv(ns.clone(), "z")];
+        store.apply_batch(&[], &deletes, 10).unwrap();
+
+        // ordered_keys must remain Some and include the new tombstone key
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert!(
+                shard.ordered_keys.is_some(),
+                "apply_batch delete should not invalidate ordered_keys"
+            );
+            let btree = shard.ordered_keys.as_ref().unwrap();
+            assert_eq!(
+                btree.len(),
+                shard.data.len(),
+                "BTreeSet length must match data length after tombstone insert"
+            );
+        }
+    }
+
+    #[test]
+    fn test_incremental_ordered_keys_delete_nonexistent_key() {
+        // Deleting a nonexistent key goes through put() to create a tombstone.
+        // This must incrementally update ordered_keys.
+        use strata_core::traits::Storage;
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = strata_core::types::Namespace::for_branch(branch_id);
+
+        // Insert initial key and build ordered_keys via scan
+        Storage::put(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), None).unwrap();
+        let prefix = Key::new_kv(ns.clone(), "");
+        let _ = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert!(shard.ordered_keys.is_some());
+        }
+
+        // Delete a key that doesn't exist — creates tombstone via put()
+        let nonexistent = Key::new_kv(ns.clone(), "z");
+        Storage::delete(&store, &nonexistent).unwrap();
+
+        // ordered_keys must remain Some and include the tombstone key
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert!(
+                shard.ordered_keys.is_some(),
+                "delete of nonexistent key should not invalidate ordered_keys"
+            );
+            let btree = shard.ordered_keys.as_ref().unwrap();
+            assert_eq!(
+                btree.len(),
+                shard.data.len(),
+                "BTreeSet must include the tombstone key"
+            );
+        }
+    }
+
+    #[test]
+    fn test_incremental_ordered_keys_apply_batch_mixed() {
+        // apply_batch with a mix of: updates to existing keys, new key writes,
+        // and new key deletes. Only new keys should be added to the BTreeSet.
+        use strata_core::traits::Storage;
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = strata_core::types::Namespace::for_branch(branch_id);
+
+        // Insert initial keys and build ordered_keys
+        Storage::put(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), None).unwrap();
+        Storage::put(&store, Key::new_kv(ns.clone(), "c"), Value::Int(2), None).unwrap();
+        Storage::put(&store, Key::new_kv(ns.clone(), "e"), Value::Int(3), None).unwrap();
+        let prefix = Key::new_kv(ns.clone(), "");
+        let _ = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
+
+        // apply_batch: update "a" (existing), insert "b" (new), delete "d" (new tombstone)
+        let writes = vec![
+            (Key::new_kv(ns.clone(), "a"), Value::Int(10)), // existing
+            (Key::new_kv(ns.clone(), "b"), Value::Int(20)), // new
+        ];
+        let deletes = vec![
+            Key::new_kv(ns.clone(), "d"), // new (tombstone)
+        ];
+        store.apply_batch(&writes, &deletes, 10).unwrap();
+
+        // ordered_keys must remain Some
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert!(
+                shard.ordered_keys.is_some(),
+                "mixed apply_batch should not invalidate ordered_keys"
+            );
+            let btree = shard.ordered_keys.as_ref().unwrap();
+            // data should have: a, b, c, d (tombstone), e = 5 keys
+            assert_eq!(btree.len(), 5);
+            assert_eq!(shard.data.len(), 5);
+            assert_eq!(btree.len(), shard.data.len());
+        }
+
+        // Scan returns non-tombstoned keys in sorted order
+        let results = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
+        let keys: Vec<String> = results
+            .iter()
+            .filter_map(|(k, _)| k.user_key_string())
+            .collect();
+        assert_eq!(keys, vec!["a", "b", "c", "e"]);
     }
 }
