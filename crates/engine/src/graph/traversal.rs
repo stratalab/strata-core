@@ -112,11 +112,7 @@ impl GraphStore {
                         }
                         if !seen.contains(neighbor_id) {
                             seen.insert(neighbor_id.to_string());
-                            edges.push((
-                                current.clone(),
-                                neighbor_id.to_string(),
-                                et.to_string(),
-                            ));
+                            edges.push((current.clone(), neighbor_id.to_string(), et.to_string()));
                             queue.push_back((neighbor_id.to_string(), depth + 1));
                         }
                     }
@@ -954,10 +950,16 @@ mod tests {
 
         let result = gs.bfs(b, "g", "A", BfsOptions::default()).unwrap();
         assert_eq!(result.visited.len(), 2);
-        assert_eq!(result.visited.iter().filter(|v| v.as_str() == "B").count(), 1);
+        assert_eq!(
+            result.visited.iter().filter(|v| v.as_str() == "B").count(),
+            1
+        );
         // Self-loop edge should not appear in traversal edges (B already seen
         // when we try to follow B→B).
-        assert!(!result.edges.iter().any(|(src, dst, _)| src == "B" && dst == "B"));
+        assert!(!result
+            .edges
+            .iter()
+            .any(|(src, dst, _)| src == "B" && dst == "B"));
     }
 
     #[test]
