@@ -423,11 +423,7 @@ mod tests {
             Ok(())
         }
 
-        fn delete_with_version(
-            &self,
-            key: &Key,
-            _version: u64,
-        ) -> StrataResult<()> {
+        fn delete_with_version(&self, key: &Key, _version: u64) -> StrataResult<()> {
             self.delete(key)?;
             Ok(())
         }

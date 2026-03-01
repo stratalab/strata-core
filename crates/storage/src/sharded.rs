@@ -462,7 +462,11 @@ impl ShardedStore {
         let previous = self.shards.get(&key.namespace.branch_id).and_then(|shard| {
             shard.data.get(key).and_then(|chain| {
                 chain.latest().and_then(|sv| {
-                    if sv.is_tombstone() { None } else { Some(sv.versioned()) }
+                    if sv.is_tombstone() {
+                        None
+                    } else {
+                        Some(sv.versioned())
+                    }
                 })
             })
         });
@@ -479,11 +483,7 @@ impl ShardedStore {
     /// for MVCC snapshot isolation. Does not return the previous value —
     /// all production callers discard it.
     #[inline]
-    pub fn delete_with_version(
-        &self,
-        key: &Key,
-        version: u64,
-    ) -> StrataResult<()> {
+    pub fn delete_with_version(&self, key: &Key, version: u64) -> StrataResult<()> {
         let tombstone = StoredValue::tombstone(Version::txn(version));
         self.put(key.clone(), tombstone);
         Ok(())
@@ -589,8 +589,7 @@ impl ShardedStore {
             FxHashMap::default();
 
         for (key, value) in writes {
-            let stored =
-                StoredValue::with_timestamp(value, Version::txn(version), timestamp, None);
+            let stored = StoredValue::with_timestamp(value, Version::txn(version), timestamp, None);
             branch_ops
                 .entry(key.namespace.branch_id)
                 .or_insert_with(|| (Vec::new(), Vec::new()))
@@ -2786,21 +2785,21 @@ mod tests {
         assert!(Storage::current_version(&*store) >= 100);
 
         // Version 1 (before delete) should still be visible via MVCC
-        let snap_at_1 = store
-            .shards
-            .get(&branch_id)
-            .and_then(|shard| {
-                shard.data.get(&key).and_then(|chain| {
-                    chain.get_at_version(1).and_then(|sv| {
-                        if !sv.is_tombstone() {
-                            Some(sv.versioned())
-                        } else {
-                            None
-                        }
-                    })
+        let snap_at_1 = store.shards.get(&branch_id).and_then(|shard| {
+            shard.data.get(&key).and_then(|chain| {
+                chain.get_at_version(1).and_then(|sv| {
+                    if !sv.is_tombstone() {
+                        Some(sv.versioned())
+                    } else {
+                        None
+                    }
                 })
-            });
-        assert!(snap_at_1.is_some(), "Version 1 should still be visible via MVCC");
+            })
+        });
+        assert!(
+            snap_at_1.is_some(),
+            "Version 1 should still be visible via MVCC"
+        );
     }
 
     #[test]
@@ -2815,7 +2814,13 @@ mod tests {
         let key = Key::new_kv(ns, "version_check");
 
         // Put a value — version 1
-        Storage::put(&store, key.clone(), Value::String("hello".to_string()), None).unwrap();
+        Storage::put(
+            &store,
+            key.clone(),
+            Value::String("hello".to_string()),
+            None,
+        )
+        .unwrap();
 
         // get_version_only should return the version
         let version = Storage::get_version_only(&store, &key).unwrap();
@@ -2860,10 +2865,10 @@ mod tests {
 
     #[test]
     fn test_storage_trait_get_version_only_expired() {
+        use std::time::Duration;
         use strata_core::traits::Storage;
         use strata_core::types::Namespace;
         use strata_core::value::Value;
-        use std::time::Duration;
 
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
@@ -2917,7 +2922,9 @@ mod tests {
         let missing = Key::new_kv(ns, "nonexistent");
         assert_eq!(
             Storage::get_version_only(&store, &missing).unwrap(),
-            Storage::get(&store, &missing).unwrap().map(|vv| vv.version.as_u64())
+            Storage::get(&store, &missing)
+                .unwrap()
+                .map(|vv| vv.version.as_u64())
         );
     }
 
