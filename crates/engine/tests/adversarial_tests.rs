@@ -47,11 +47,11 @@ fn setup() -> (Arc<Database>, TempDir, BranchId) {
 }
 
 fn empty_payload() -> Value {
-    Value::Object(Box::new(HashMap::new()))
+    Value::object(HashMap::new())
 }
 
 fn int_payload(v: i64) -> Value {
-    Value::Object(Box::new(HashMap::from([("value".to_string(), Value::Int(v))])))
+    Value::object(HashMap::from([("value".to_string(), Value::Int(v))]))
 }
 
 // ============================================================================
@@ -450,7 +450,7 @@ fn test_eventlog_payload_validation() {
     }
 
     // Array payload should fail
-    let array_payload = Value::Array(Box::new(vec![Value::Int(1), Value::Int(2)]));
+    let array_payload = Value::array(vec![Value::Int(1), Value::Int(2)]);
     let result = event_log.append(&branch_id, "test", array_payload);
     assert!(result.is_err(), "Array payload should be rejected");
 }

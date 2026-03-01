@@ -652,16 +652,12 @@ mod tests {
         // Event payloads must be Objects
         db.event_append(
             "stream",
-            Value::Object(Box::new(
-                [("value".to_string(), Value::Int(1))].into_iter().collect(),
-            )),
+            Value::object([("value".to_string(), Value::Int(1))].into_iter().collect()),
         )
         .unwrap();
         db.event_append(
             "stream",
-            Value::Object(Box::new(
-                [("value".to_string(), Value::Int(2))].into_iter().collect(),
-            )),
+            Value::object([("value".to_string(), Value::Int(2))].into_iter().collect()),
         )
         .unwrap();
 
@@ -832,9 +828,7 @@ mod tests {
         db.state_set("state-cell", 10i64).unwrap();
         db.event_append(
             "stream",
-            Value::Object(Box::new(
-                [("x".to_string(), Value::Int(100))].into_iter().collect(),
-            )),
+            Value::object([("x".to_string(), Value::Int(100))].into_iter().collect()),
         )
         .unwrap();
 
@@ -1140,11 +1134,11 @@ mod tests {
             "ng",
             "n1",
             None,
-            Some(Value::Object(Box::new(
+            Some(Value::object(
                 [("name".to_string(), Value::String("Alice".into()))]
                     .into_iter()
                     .collect(),
-            ))),
+            )),
         )
         .unwrap();
 
@@ -1226,28 +1220,28 @@ mod tests {
             "patient_care",
             "patient-4821",
             Some("json://main/patient-4821"),
-            Some(Value::Object(Box::new(
+            Some(Value::object(
                 [(
                     "department".to_string(),
                     Value::String("endocrinology".into()),
                 )]
                 .into_iter()
                 .collect(),
-            ))),
+            )),
         )
         .unwrap();
         db.graph_add_node(
             "patient_care",
             "ICD:E11.9",
             None,
-            Some(Value::Object(Box::new(
+            Some(Value::object(
                 [(
                     "description".to_string(),
                     Value::String("Type 2 Diabetes".into()),
                 )]
                 .into_iter()
                 .collect(),
-            ))),
+            )),
         )
         .unwrap();
         db.graph_add_node(
@@ -1263,14 +1257,14 @@ mod tests {
             "patient_care",
             "ICD:N18.3",
             None,
-            Some(Value::Object(Box::new(
+            Some(Value::object(
                 [(
                     "description".to_string(),
                     Value::String("CKD Stage 3".into()),
                 )]
                 .into_iter()
                 .collect(),
-            ))),
+            )),
         )
         .unwrap();
 
@@ -1363,14 +1357,14 @@ mod tests {
             "ng",
             "patient-1",
             Some("kv://main/p1"),
-            Some(Value::Object(Box::new(
+            Some(Value::object(
                 [
                     ("department".to_string(), Value::String("cardiology".into())),
                     ("age".to_string(), Value::Int(45)),
                 ]
                 .into_iter()
                 .collect(),
-            ))),
+            )),
         )
         .unwrap();
 
@@ -1442,11 +1436,11 @@ mod tests {
             "B",
             "SCORED",
             Some(0.95),
-            Some(Value::Object(Box::new(
+            Some(Value::object(
                 [("confidence".to_string(), Value::String("high".into()))]
                     .into_iter()
                     .collect(),
-            ))),
+            )),
         )
         .unwrap();
 

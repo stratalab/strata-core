@@ -14,7 +14,7 @@ use std::thread;
 use strata_engine::{EventLogExt, KVStoreExt, StateCellExt};
 
 fn event_payload(data: Value) -> Value {
-    Value::Object(Box::new(HashMap::from([("data".to_string(), data)])))
+    Value::object(HashMap::from([("data".to_string(), data)]))
 }
 
 // ============================================================================

@@ -61,11 +61,11 @@ fn event_append_roundtrip() {
         branch: None,
         space: None,
         event_type: "events".into(),
-        payload: Value::Object(Box::new(
+        payload: Value::object(
             [("data".to_string(), Value::Int(123))]
                 .into_iter()
                 .collect(),
-        )),
+        ),
     };
 
     let json = serde_json::to_string(&cmd).unwrap();
@@ -97,11 +97,11 @@ fn vector_search_roundtrip() {
 fn branch_create_roundtrip() {
     let cmd = Command::BranchCreate {
         branch_id: Some("550e8400-e29b-41d4-a716-446655440401-id".into()),
-        metadata: Some(Value::Object(Box::new(
+        metadata: Some(Value::object(
             [("key".to_string(), Value::String("value".into()))]
                 .into_iter()
                 .collect(),
-        ))),
+        )),
     };
 
     let json = serde_json::to_string(&cmd).unwrap();
@@ -414,7 +414,7 @@ fn value_types_roundtrip() {
         branch: None,
         space: None,
         key: "k".into(),
-        value: Value::Array(Box::new(vec![Value::Int(1), Value::Int(2)])),
+        value: Value::array(vec![Value::Int(1), Value::Int(2)]),
     };
     let json = serde_json::to_string(&cmd).unwrap();
     let parsed: Command = serde_json::from_str(&json).unwrap();
@@ -425,11 +425,11 @@ fn value_types_roundtrip() {
         branch: None,
         space: None,
         key: "k".into(),
-        value: Value::Object(Box::new(
+        value: Value::object(
             [("nested".to_string(), Value::Int(1))]
                 .into_iter()
                 .collect(),
-        )),
+        ),
     };
     let json = serde_json::to_string(&cmd).unwrap();
     let parsed: Command = serde_json::from_str(&json).unwrap();

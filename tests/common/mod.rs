@@ -339,23 +339,20 @@ pub fn unit_vector(dimension: usize) -> Vec<f32> {
 
 /// Create an empty object payload for EventLog.
 pub fn empty_payload() -> Value {
-    Value::Object(Box::new(std::collections::HashMap::new()))
+    Value::object(std::collections::HashMap::new())
 }
 
 /// Create an object payload wrapping an integer.
 pub fn int_payload(v: i64) -> Value {
-    Value::Object(Box::new(HashMap::from([(
-        "value".to_string(),
-        Value::Int(v),
-    )])))
+    Value::object(HashMap::from([("value".to_string(), Value::Int(v))]))
 }
 
 /// Create an object payload wrapping a string.
 pub fn string_payload(s: &str) -> Value {
-    Value::Object(Box::new(HashMap::from([(
+    Value::object(HashMap::from([(
         "data".to_string(),
         Value::String(s.into()),
-    )])))
+    )]))
 }
 
 // ============================================================================
@@ -384,26 +381,26 @@ pub mod values {
         Value::Null
     }
     pub fn array(items: Vec<Value>) -> Value {
-        Value::Array(Box::new(items))
+        Value::array(items)
     }
     pub fn map(pairs: Vec<(&str, Value)>) -> Value {
         let mut m = std::collections::HashMap::new();
         for (k, v) in pairs {
             m.insert(k.to_string(), v);
         }
-        Value::Object(Box::new(m))
+        Value::object(m)
     }
 
     /// Event payload wrapping a value as `{"data": value}`.
     pub fn event_payload(value: Value) -> Value {
         let mut m = std::collections::HashMap::new();
         m.insert("data".to_string(), value);
-        Value::Object(Box::new(m))
+        Value::object(m)
     }
 
     /// Empty event payload.
     pub fn empty_event_payload() -> Value {
-        Value::Object(Box::new(std::collections::HashMap::new()))
+        Value::object(std::collections::HashMap::new())
     }
 
     /// Large bytes value for stress tests.

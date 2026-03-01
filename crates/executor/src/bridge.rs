@@ -262,14 +262,14 @@ fn serde_json_to_value(json: serde_json::Value) -> StrataResult<Value> {
         }
         JV::Array(arr) => {
             let converted: Result<Vec<_>, _> = arr.into_iter().map(serde_json_to_value).collect();
-            Ok(Value::Array(Box::new(converted?)))
+            Ok(Value::array(converted?))
         }
         JV::Object(obj) => {
             let mut map = std::collections::HashMap::new();
             for (k, v) in obj {
                 map.insert(k, serde_json_to_value(v)?);
             }
-            Ok(Value::Object(Box::new(map)))
+            Ok(Value::object(map))
         }
     }
 }

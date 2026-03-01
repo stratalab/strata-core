@@ -431,7 +431,7 @@ mod tests {
     fn test_array_at_max_length() {
         let limits = Limits::with_small_limits();
         let arr = vec![Value::Null; limits.max_array_len];
-        let value = Value::Array(Box::new(arr));
+        let value = Value::array(arr);
         assert!(limits.validate_value(&value).is_ok());
     }
 
@@ -439,7 +439,7 @@ mod tests {
     fn test_array_exceeds_max_length() {
         let limits = Limits::with_small_limits();
         let arr = vec![Value::Null; limits.max_array_len + 1];
-        let value = Value::Array(Box::new(arr));
+        let value = Value::array(arr);
         let result = limits.validate_value(&value);
         assert!(matches!(result, Err(LimitError::ValueTooLarge { .. })));
     }
@@ -453,7 +453,7 @@ mod tests {
         for i in 0..limits.max_object_entries {
             map.insert(format!("key{}", i), Value::Null);
         }
-        let value = Value::Object(Box::new(map));
+        let value = Value::object(map);
         assert!(limits.validate_value(&value).is_ok());
     }
 
@@ -464,7 +464,7 @@ mod tests {
         for i in 0..=limits.max_object_entries {
             map.insert(format!("key{}", i), Value::Null);
         }
-        let value = Value::Object(Box::new(map));
+        let value = Value::object(map);
         let result = limits.validate_value(&value);
         assert!(matches!(result, Err(LimitError::ValueTooLarge { .. })));
     }
@@ -474,7 +474,7 @@ mod tests {
     fn create_nested_array(depth: usize) -> Value {
         let mut value = Value::Null;
         for _ in 0..depth {
-            value = Value::Array(Box::new(vec![value]));
+            value = Value::array(vec![value]);
         }
         value
     }
@@ -684,14 +684,14 @@ mod tests {
     #[test]
     fn test_validate_value_full_empty_array() {
         let limits = Limits::default();
-        let value = Value::Array(Box::new(vec![]));
+        let value = Value::array(vec![]);
         assert!(limits.validate_value_full(&value).is_ok());
     }
 
     #[test]
     fn test_validate_value_full_empty_object() {
         let limits = Limits::default();
-        let value = Value::Object(Box::new(HashMap::new()));
+        let value = Value::object(HashMap::new());
         assert!(limits.validate_value_full(&value).is_ok());
     }
 

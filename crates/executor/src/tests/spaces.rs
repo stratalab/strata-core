@@ -195,14 +195,14 @@ fn test_event_isolation_across_spaces() {
     let mut db = strata();
 
     // Append events in default space (payload must be a JSON object)
-    let payload1 = Value::Object(Box::new(HashMap::from([(
+    let payload1 = Value::object(HashMap::from([(
         "page".into(),
         Value::String("page1".into()),
-    )])));
-    let payload2 = Value::Object(Box::new(HashMap::from([(
+    )]));
+    let payload2 = Value::object(HashMap::from([(
         "page".into(),
         Value::String("page2".into()),
-    )])));
+    )]));
     db.event_append("click", payload1).unwrap();
     db.event_append("click", payload2).unwrap();
 
@@ -215,10 +215,10 @@ fn test_event_isolation_across_spaces() {
     assert_eq!(epsilon_len, 0);
 
     // Append in epsilon
-    let payload3 = Value::Object(Box::new(HashMap::from([(
+    let payload3 = Value::object(HashMap::from([(
         "page".into(),
         Value::String("page3".into()),
-    )])));
+    )]));
     db.event_append("click", payload3).unwrap();
     assert_eq!(db.event_len().unwrap(), 1);
 
