@@ -175,7 +175,7 @@ impl TransactionCoordinator {
         if txn.is_expired(Self::TRANSACTION_TIMEOUT) {
             self.record_abort(txn_id);
             return Err(StrataError::transaction_timeout(
-                txn.elapsed().as_millis() as u64,
+                txn.elapsed().as_millis() as u64
             ));
         }
 
@@ -293,7 +293,7 @@ impl TransactionCoordinator {
         if txn.is_expired(Self::TRANSACTION_TIMEOUT) {
             self.record_abort(txn_id);
             return Err(StrataError::transaction_timeout(
-                txn.elapsed().as_millis() as u64,
+                txn.elapsed().as_millis() as u64
             ));
         }
 

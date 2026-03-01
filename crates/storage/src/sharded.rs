@@ -5187,10 +5187,7 @@ mod tests {
         }
 
         // Delete (tombstone) — should clean the TTL entry
-        store.put(
-            key.clone(),
-            StoredValue::tombstone(Version::txn(2)),
-        );
+        store.put(key.clone(), StoredValue::tombstone(Version::txn(2)));
         {
             let shard = store.shards.get(&key.namespace.branch_id).unwrap();
             assert!(
