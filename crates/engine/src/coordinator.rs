@@ -54,6 +54,8 @@ pub struct TransactionCoordinator {
     ///
     /// Used for GC safe point computation (`min_active_version()`).
     active_versions: Mutex<Vec<(u64, u64)>>,
+    /// Maximum entries in a transaction's write buffer (0 = unlimited).
+    max_write_buffer_entries: usize,
 }
 
 impl TransactionCoordinator {
@@ -78,6 +80,7 @@ impl TransactionCoordinator {
             total_committed: AtomicU64::new(0),
             total_aborted: AtomicU64::new(0),
             active_versions: Mutex::new(Vec::new()),
+            max_write_buffer_entries: 0,
         }
     }
 
@@ -103,6 +106,26 @@ impl TransactionCoordinator {
             total_committed: AtomicU64::new(0),
             total_aborted: AtomicU64::new(0),
             active_versions: Mutex::new(Vec::new()),
+            max_write_buffer_entries: 0,
+        }
+    }
+
+    /// Create coordinator from recovery result with write buffer limits.
+    pub fn from_recovery_with_limits(
+        result: &RecoveryResult,
+        max_write_buffer_entries: usize,
+    ) -> Self {
+        Self {
+            manager: TransactionManager::with_txn_id(
+                result.stats.final_version,
+                result.stats.max_txn_id,
+            ),
+            active_count: AtomicU64::new(0),
+            total_started: AtomicU64::new(0),
+            total_committed: AtomicU64::new(0),
+            total_aborted: AtomicU64::new(0),
+            active_versions: Mutex::new(Vec::new()),
+            max_write_buffer_entries,
         }
     }
 
@@ -132,7 +155,9 @@ impl TransactionCoordinator {
 
         debug!(target: "strata::txn", branch_id = %branch_id, "Transaction started");
 
-        TransactionContext::with_snapshot(txn_id, branch_id, Box::new(snapshot))
+        let mut txn = TransactionContext::with_snapshot(txn_id, branch_id, Box::new(snapshot));
+        txn.set_max_write_entries(self.max_write_buffer_entries);
+        txn
     }
 
     /// Allocate commit version
@@ -253,6 +278,16 @@ impl TransactionCoordinator {
     /// Get next transaction ID (for internal use)
     pub fn next_txn_id(&self) -> u64 {
         self.manager.next_txn_id()
+    }
+
+    /// Get the configured max write buffer entries limit.
+    pub fn max_write_buffer_entries(&self) -> usize {
+        self.max_write_buffer_entries
+    }
+
+    /// Set the max write buffer entries limit.
+    pub fn set_max_write_buffer_entries(&mut self, max: usize) {
+        self.max_write_buffer_entries = max;
     }
 
     /// Remove the per-branch commit lock for a deleted branch.

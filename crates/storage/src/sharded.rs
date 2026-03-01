@@ -34,10 +34,10 @@ use dashmap::DashMap;
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use strata_core::types::{BranchId, Key};
-use strata_core::{Timestamp, Version, VersionedValue};
+use strata_core::{StrataError, StrataResult, Timestamp, Version, VersionedValue};
 
 use crate::stored_value::StoredValue;
 use crate::ttl::TTLIndex;
@@ -325,6 +325,32 @@ impl Default for Shard {
     }
 }
 
+/// Memory usage statistics for the entire storage layer.
+#[derive(Debug, Clone)]
+pub struct StorageMemoryStats {
+    /// Total number of branches
+    pub total_branches: usize,
+    /// Total number of entries across all branches
+    pub total_entries: usize,
+    /// Estimated total memory usage in bytes
+    pub estimated_bytes: usize,
+    /// Per-branch breakdown
+    pub per_branch: Vec<BranchMemoryStats>,
+}
+
+/// Memory usage statistics for a single branch.
+#[derive(Debug, Clone)]
+pub struct BranchMemoryStats {
+    /// Branch identifier
+    pub branch_id: BranchId,
+    /// Number of entries in this branch
+    pub entry_count: usize,
+    /// Whether the BTreeSet ordered-key index has been built
+    pub has_btree_index: bool,
+    /// Estimated memory usage in bytes
+    pub estimated_bytes: usize,
+}
+
 /// Sharded storage - DashMap by BranchId, HashMap within
 ///
 /// # Design
@@ -354,6 +380,8 @@ pub struct ShardedStore {
     shards: DashMap<BranchId, Shard>,
     /// Global version for snapshots
     version: AtomicU64,
+    /// Maximum number of branches allowed (0 = unlimited)
+    max_branches: AtomicUsize,
 }
 
 impl ShardedStore {
@@ -362,6 +390,7 @@ impl ShardedStore {
         Self {
             shards: DashMap::new(),
             version: AtomicU64::new(0),
+            max_branches: AtomicUsize::new(0),
         }
     }
 
@@ -370,7 +399,24 @@ impl ShardedStore {
         Self {
             shards: DashMap::with_capacity(num_branches),
             version: AtomicU64::new(0),
+            max_branches: AtomicUsize::new(0),
         }
+    }
+
+    /// Create with a branch count limit
+    pub fn with_limits(max_branches: usize) -> Self {
+        Self {
+            shards: DashMap::new(),
+            version: AtomicU64::new(0),
+            max_branches: AtomicUsize::new(max_branches),
+        }
+    }
+
+    /// Set the maximum number of branches allowed (0 = unlimited).
+    ///
+    /// Callable after recovery without `&mut self`.
+    pub fn set_max_branches(&self, max: usize) {
+        self.max_branches.store(max, Ordering::Relaxed);
     }
 
     /// Get current version
@@ -424,6 +470,51 @@ impl ShardedStore {
         self.shards.iter().map(|entry| entry.value().len()).sum()
     }
 
+    /// Compute memory usage statistics across all branches.
+    ///
+    /// Estimates ~120 bytes per entry (56 StoredValue + ~64 Key/Arc overhead)
+    /// plus ~64 bytes per BTreeSet entry when the ordered-key index is built.
+    /// This is an O(branches) scan, not on any hot path.
+    pub fn memory_stats(&self) -> StorageMemoryStats {
+        // Per-entry estimate: StoredValue (56 bytes) + Key + Arc overhead (~64 bytes)
+        const BYTES_PER_ENTRY: usize = 120;
+        // BTreeSet node overhead per entry
+        const BYTES_PER_BTREE_ENTRY: usize = 64;
+
+        let mut total_entries = 0;
+        let mut total_bytes = 0;
+        let mut per_branch = Vec::with_capacity(self.shards.len());
+
+        for entry in self.shards.iter() {
+            let branch_id = *entry.key();
+            let shard = entry.value();
+            let count = shard.data.len();
+            let has_btree = shard.ordered_keys.is_some();
+
+            let mut branch_bytes = count * BYTES_PER_ENTRY;
+            if has_btree {
+                branch_bytes += count * BYTES_PER_BTREE_ENTRY;
+            }
+
+            total_entries += count;
+            total_bytes += branch_bytes;
+
+            per_branch.push(BranchMemoryStats {
+                branch_id,
+                entry_count: count,
+                has_btree_index: has_btree,
+                estimated_bytes: branch_bytes,
+            });
+        }
+
+        StorageMemoryStats {
+            total_branches: per_branch.len(),
+            total_entries,
+            estimated_bytes: total_bytes,
+            per_branch,
+        }
+    }
+
     // ========================================================================
     // Get/Put/Delete Operations
     // ========================================================================
@@ -432,6 +523,25 @@ impl ShardedStore {
     // which includes proper TTL expiration checks.
     // Use `Storage::get()` trait method instead of an inherent method
     // to ensure consistent behavior across all callers.
+
+    /// Check if adding a new branch would exceed the configured limit.
+    ///
+    /// Fast path: `max == 0` (unlimited) or branch already exists.
+    #[inline]
+    fn ensure_branch_limit(&self, branch_id: BranchId) -> StrataResult<()> {
+        let max = self.max_branches.load(Ordering::Relaxed);
+        if max == 0 || self.shards.contains_key(&branch_id) {
+            return Ok(());
+        }
+        if self.shards.len() >= max {
+            return Err(StrataError::capacity_exceeded(
+                "branches",
+                max,
+                self.shards.len() + 1,
+            ));
+        }
+        Ok(())
+    }
 
     /// Put a value for a key (adds to version chain for MVCC)
     ///
@@ -448,8 +558,9 @@ impl ShardedStore {
     /// - O(1) insert via FxHashMap
     /// - Only locks the target branch's shard
     #[inline]
-    pub fn put(&self, key: Key, value: StoredValue) {
+    pub fn put(&self, key: Key, value: StoredValue) -> StrataResult<()> {
         let branch_id = key.namespace.branch_id;
+        self.ensure_branch_limit(branch_id)?;
         let mut shard = self.shards.entry(branch_id).or_default();
 
         let new_expiry = value.expiry_timestamp();
@@ -484,6 +595,7 @@ impl ShardedStore {
                 shard.ttl_index.insert(exp, ttl_key.unwrap());
             }
         }
+        Ok(())
     }
 
     /// Delete a key by adding a tombstone
@@ -499,7 +611,7 @@ impl ShardedStore {
     /// # Returns
     /// The previous value if it existed and wasn't already deleted
     #[inline]
-    pub fn delete(&self, key: &Key) -> Option<VersionedValue> {
+    pub fn delete(&self, key: &Key) -> StrataResult<Option<VersionedValue>> {
         let delete_version = self.next_version();
 
         // Get the previous value before adding tombstone
@@ -516,9 +628,9 @@ impl ShardedStore {
         });
 
         let tombstone = StoredValue::tombstone(Version::txn(delete_version));
-        self.put(key.clone(), tombstone);
+        self.put(key.clone(), tombstone)?;
 
-        previous
+        Ok(previous)
     }
 
     /// Delete a key with a specific version (for batched deletes)
@@ -529,7 +641,7 @@ impl ShardedStore {
     #[inline]
     pub fn delete_with_version(&self, key: &Key, version: u64) -> StrataResult<()> {
         let tombstone = StoredValue::tombstone(Version::txn(version));
-        self.put(key.clone(), tombstone);
+        self.put(key.clone(), tombstone)?;
         Ok(())
     }
 
@@ -599,6 +711,12 @@ impl ShardedStore {
     /// Apply a batch of writes and deletes atomically
     ///
     /// All operations in the batch are applied with the given version.
+    /// Operations are grouped by branch and applied atomically **per branch**
+    /// (the shard lock is held for the entire branch batch). However, there is
+    /// no cross-branch rollback: if the batch spans branches A and B and A
+    /// succeeds before B fails (e.g. branch limit exceeded), A's writes are
+    /// already visible. Callers that need cross-branch atomicity should
+    /// validate preconditions before calling this method.
     ///
     /// # Arguments
     ///
@@ -608,7 +726,7 @@ impl ShardedStore {
     ///
     /// # Returns
     ///
-    /// * `Ok(())` - Always succeeds (for API compatibility with UnifiedStore)
+    /// * `Ok(())` - All operations applied successfully
     ///
     /// # Performance
     ///
@@ -647,6 +765,11 @@ impl ShardedStore {
                 .or_insert_with(|| (Vec::new(), Vec::new()))
                 .1
                 .push(key);
+        }
+
+        // Pre-check branch limits before applying any writes
+        for branch_id in branch_ops.keys() {
+            self.ensure_branch_limit(*branch_id)?;
         }
 
         // Apply atomically per branch (hold shard lock for entire branch batch)
@@ -1336,7 +1459,6 @@ impl std::fmt::Debug for ShardedSnapshot {
 use std::time::Duration;
 use strata_core::traits::Storage;
 use strata_core::value::Value;
-use strata_core::StrataResult;
 
 impl Storage for ShardedStore {
     /// Get current value for key (latest version)
@@ -1413,7 +1535,7 @@ impl Storage for ShardedStore {
         let stored = StoredValue::new(value, Version::txn(version), ttl);
 
         // Use the inherent put method which handles version chain
-        ShardedStore::put(self, key, stored);
+        ShardedStore::put(self, key, stored)?;
 
         Ok(version)
     }
@@ -1422,7 +1544,7 @@ impl Storage for ShardedStore {
     ///
     /// Returns the latest version's value if it existed.
     fn delete(&self, key: &Key) -> StrataResult<Option<VersionedValue>> {
-        Ok(ShardedStore::delete(self, key))
+        ShardedStore::delete(self, key)
     }
 
     /// Scan keys with given prefix at or before max_version
@@ -1513,7 +1635,7 @@ impl Storage for ShardedStore {
         let stored = StoredValue::new(value, Version::txn(version), ttl);
 
         // Use the inherent put method which handles version chain
-        ShardedStore::put(self, key, stored);
+        ShardedStore::put(self, key, stored)?;
 
         // Update global version to be at least this version
         self.version.fetch_max(version, Ordering::AcqRel);
@@ -1888,7 +2010,7 @@ mod tests {
         // Insert several keys
         for i in 0..5 {
             let key = create_test_key(branch_id, &format!("shared_{}", i));
-            store.put(key, create_stored_value(Value::Int(i), 1));
+            store.put(key, create_stored_value(Value::Int(i), 1)).unwrap();
         }
 
         // Force BTreeSet creation by doing a list operation
@@ -2022,7 +2144,7 @@ mod tests {
         let value = create_stored_value(Value::Int(42), 1);
 
         // Put
-        store.put(key.clone(), value);
+        store.put(key.clone(), value).unwrap();
 
         // Get (Storage trait returns Result<Option<...>>)
         let retrieved = store.get(&key).unwrap();
@@ -2048,11 +2170,11 @@ mod tests {
         let key = create_test_key(branch_id, "to_delete");
         let value = create_stored_value(Value::Int(42), 1);
 
-        store.put(key.clone(), value);
+        store.put(key.clone(), value).unwrap();
         assert!(store.get(&key).unwrap().is_some());
 
         // Delete
-        let deleted = store.delete(&key);
+        let deleted = store.delete(&key).unwrap();
         assert!(deleted.is_some());
         assert!(store.get(&key).unwrap().is_none());
     }
@@ -2063,7 +2185,7 @@ mod tests {
         let branch_id = BranchId::new();
         let key = create_test_key(branch_id, "nonexistent");
 
-        assert!(store.delete(&key).is_none());
+        assert!(store.delete(&key).unwrap().is_none());
     }
 
     #[test]
@@ -2076,7 +2198,7 @@ mod tests {
         let value = create_stored_value(Value::Int(42), 1);
 
         assert!(!store.contains(&key));
-        store.put(key.clone(), value);
+        store.put(key.clone(), value).unwrap();
         assert!(store.contains(&key));
     }
 
@@ -2088,8 +2210,8 @@ mod tests {
         let branch_id = BranchId::new();
         let key = create_test_key(branch_id, "overwrite");
 
-        store.put(key.clone(), create_stored_value(Value::Int(1), 1));
-        store.put(key.clone(), create_stored_value(Value::Int(2), 2));
+        store.put(key.clone(), create_stored_value(Value::Int(1), 1)).unwrap();
+        store.put(key.clone(), create_stored_value(Value::Int(2), 2)).unwrap();
 
         let retrieved = store.get(&key).unwrap().unwrap();
         assert_eq!(retrieved.value, Value::Int(2));
@@ -2107,8 +2229,8 @@ mod tests {
         let key1 = create_test_key(branch1, "key");
         let key2 = create_test_key(branch2, "key");
 
-        store.put(key1.clone(), create_stored_value(Value::Int(1), 1));
-        store.put(key2.clone(), create_stored_value(Value::Int(2), 1));
+        store.put(key1.clone(), create_stored_value(Value::Int(1), 1)).unwrap();
+        store.put(key2.clone(), create_stored_value(Value::Int(2), 1)).unwrap();
 
         // Different branches, same key name, different values
         assert_eq!(store.get(&key1).unwrap().unwrap().value, Value::Int(1));
@@ -2128,7 +2250,7 @@ mod tests {
         let key3 = create_test_key(branch_id, "batch3");
 
         // First, put key3 so we can delete it
-        store.put(key3.clone(), create_stored_value(Value::Int(999), 1));
+        store.put(key3.clone(), create_stored_value(Value::Int(999), 1)).unwrap();
 
         // Apply batch
         let writes = vec![(key1.clone(), Value::Int(1)), (key2.clone(), Value::Int(2))];
@@ -2153,7 +2275,7 @@ mod tests {
 
         for i in 0..5 {
             let key = create_test_key(branch_id, &format!("key{}", i));
-            store.put(key, create_stored_value(Value::Int(i), 1));
+            store.put(key, create_stored_value(Value::Int(i), 1)).unwrap();
         }
 
         assert_eq!(store.branch_entry_count(&branch_id), 5);
@@ -2175,7 +2297,7 @@ mod tests {
                     let branch_id = BranchId::new();
                     for i in 0..100 {
                         let key = create_test_key(branch_id, &format!("key{}", i));
-                        store.put(key, create_stored_value(Value::Int(i), 1));
+                        store.put(key, create_stored_value(Value::Int(i), 1)).unwrap();
                     }
                     branch_id
                 })
@@ -2216,7 +2338,7 @@ mod tests {
         // Insert some keys
         for i in 0..5 {
             let key = create_test_key(branch_id, &format!("key{}", i));
-            store.put(key, create_stored_value(Value::Int(i), 1));
+            store.put(key, create_stored_value(Value::Int(i), 1)).unwrap();
         }
 
         let results = store.list_branch(&branch_id);
@@ -2416,7 +2538,7 @@ mod tests {
         // Insert some data
         for i in 0..5 {
             let key = create_test_key(branch_id, &format!("key{}", i));
-            store.put(key, create_stored_value(Value::Int(i), 1));
+            store.put(key, create_stored_value(Value::Int(i), 1)).unwrap();
         }
 
         assert_eq!(store.branch_entry_count(&branch_id), 5);
@@ -2512,7 +2634,7 @@ mod tests {
 
         // Put some data (version=1)
         let key = create_test_key(branch_id, "test_key");
-        store.put(key.clone(), create_stored_value(Value::Int(42), 1));
+        store.put(key.clone(), create_stored_value(Value::Int(42), 1)).unwrap();
         // Update store version so snapshot can see data at version 1
         store.set_version(1);
 
@@ -2538,7 +2660,7 @@ mod tests {
         // Put some data at version 1
         for i in 0..5 {
             let key = create_test_key(branch_id, &format!("key{}", i));
-            store.put(key, create_stored_value(Value::Int(i), 1));
+            store.put(key, create_stored_value(Value::Int(i), 1)).unwrap();
         }
 
         // Advance store version to 1 so snapshot will see the data
@@ -2570,7 +2692,7 @@ mod tests {
 
         // Add data and increment version
         let key1 = create_test_key(branch_id, "key1");
-        store.put(key1.clone(), create_stored_value(Value::Int(1), 1));
+        store.put(key1.clone(), create_stored_value(Value::Int(1), 1)).unwrap();
         store.next_version();
 
         // Create second snapshot at version 1
@@ -2579,7 +2701,7 @@ mod tests {
 
         // Add more data
         let key2 = create_test_key(branch_id, "key2");
-        store.put(key2.clone(), create_stored_value(Value::Int(2), 2));
+        store.put(key2.clone(), create_stored_value(Value::Int(2), 2)).unwrap();
         store.next_version();
 
         // Create third snapshot at version 2
@@ -2986,7 +3108,7 @@ mod tests {
             strata_core::Timestamp::from_micros(0), // epoch = definitely expired
             Some(Duration::from_secs(1)),
         );
-        ShardedStore::put(&store, key.clone(), sv);
+        ShardedStore::put(&store, key.clone(), sv).unwrap();
 
         // get_version_only should return None for expired key (same as get())
         assert_eq!(Storage::get_version_only(&store, &key).unwrap(), None);
@@ -3917,7 +4039,7 @@ mod tests {
             old_ts,
             Some(std::time::Duration::from_secs(1)), // expired long ago
         );
-        store.put(key2.clone(), expired_value);
+        store.put(key2.clone(), expired_value).unwrap();
 
         // Update store version
         store.set_version(2);
@@ -4194,7 +4316,7 @@ mod tests {
             Timestamp::from_micros(1),               // ancient timestamp
             Some(std::time::Duration::from_secs(1)), // expired long ago
         );
-        store.put(key.clone(), expired_value);
+        store.put(key.clone(), expired_value).unwrap();
 
         assert!(
             store.get_direct(&key).is_none(),
@@ -4683,7 +4805,7 @@ mod tests {
             key.clone(),
             StoredValue::new(strata_core::value::Value::Int(1), Version::txn(1), None),
         );
-        store.put(key.clone(), StoredValue::tombstone(Version::txn(10)));
+        store.put(key.clone(), StoredValue::tombstone(Version::txn(10))).unwrap();
 
         // BTreeSet not built yet — verify GC handles the None case
         {
@@ -4725,7 +4847,7 @@ mod tests {
         ));
 
         let key = Key::new_kv(ns.clone(), "orphan_tombstone");
-        store.put(key.clone(), StoredValue::tombstone(Version::txn(5)));
+        store.put(key.clone(), StoredValue::tombstone(Version::txn(5))).unwrap();
 
         // gc() on Single is a noop (returns 0), but is_dead() should still
         // detect the single tombstone and remove it
@@ -4756,7 +4878,7 @@ mod tests {
             key.clone(),
             StoredValue::new(strata_core::value::Value::Int(1), Version::txn(1), None),
         );
-        store.put(key.clone(), StoredValue::tombstone(Version::txn(10)));
+        store.put(key.clone(), StoredValue::tombstone(Version::txn(10))).unwrap();
 
         // Trigger BTreeSet build before GC
         {
@@ -4801,7 +4923,7 @@ mod tests {
             key_b.clone(),
             StoredValue::new(strata_core::value::Value::Int(2), Version::txn(2), None),
         );
-        store.put(key_b.clone(), StoredValue::tombstone(Version::txn(10)));
+        store.put(key_b.clone(), StoredValue::tombstone(Version::txn(10))).unwrap();
 
         // Build BTreeSet
         {
@@ -4891,7 +5013,7 @@ mod tests {
             key.clone(),
             StoredValue::new(strata_core::value::Value::Int(1), Version::txn(10), None),
         );
-        store.put(key.clone(), StoredValue::tombstone(Version::txn(20)));
+        store.put(key.clone(), StoredValue::tombstone(Version::txn(20))).unwrap();
 
         // Build BTreeSet to verify it's maintained across progressive GC
         {
@@ -4956,7 +5078,7 @@ mod tests {
         );
 
         // Dead key (tombstone only)
-        store.put(key_dead.clone(), StoredValue::tombstone(Version::txn(2)));
+        store.put(key_dead.clone(), StoredValue::tombstone(Version::txn(2))).unwrap();
 
         // Build BTreeSet — should skip the dead key
         {
@@ -5011,7 +5133,7 @@ mod tests {
 
         // Tombstone beta
         let beta_key = Key::new_kv(ns.clone(), "beta");
-        store.put(beta_key.clone(), StoredValue::tombstone(Version::txn(100)));
+        store.put(beta_key.clone(), StoredValue::tombstone(Version::txn(100))).unwrap();
 
         // Scan before GC — beta should not appear (tombstoned)
         let prefix = Key::new_kv(ns.clone(), "");
@@ -5095,7 +5217,7 @@ mod tests {
         let sv = make_sv_with_ttl(1, 60);
         let expected_expiry = sv.expiry_timestamp().unwrap();
 
-        store.put(key.clone(), sv);
+        store.put(key.clone(), sv).unwrap();
 
         // Verify TTL index has the entry
         let shard = store.shards.get(&key.namespace.branch_id).unwrap();
@@ -5113,12 +5235,12 @@ mod tests {
         // First put with TTL=60s
         let sv1 = make_sv_with_ttl(1, 60);
         let old_expiry = sv1.expiry_timestamp().unwrap();
-        store.put(key.clone(), sv1);
+        store.put(key.clone(), sv1).unwrap();
 
         // Overwrite with TTL=120s
         let sv2 = make_sv_with_ttl(2, 120);
         let new_expiry = sv2.expiry_timestamp().unwrap();
-        store.put(key.clone(), sv2);
+        store.put(key.clone(), sv2).unwrap();
 
         let shard = store.shards.get(&key.namespace.branch_id).unwrap();
         // Should have exactly 1 TTL entry (the new one), not 2
@@ -5137,14 +5259,14 @@ mod tests {
         let key = test_ns_and_key("ttl_to_none");
 
         // First put with TTL
-        store.put(key.clone(), make_sv_with_ttl(1, 60));
+        store.put(key.clone(), make_sv_with_ttl(1, 60)).unwrap();
         {
             let shard = store.shards.get(&key.namespace.branch_id).unwrap();
             assert_eq!(shard.ttl_index.len(), 1);
         }
 
         // Overwrite without TTL
-        store.put(key.clone(), make_sv(2));
+        store.put(key.clone(), make_sv(2)).unwrap();
         {
             let shard = store.shards.get(&key.namespace.branch_id).unwrap();
             assert!(
@@ -5159,7 +5281,7 @@ mod tests {
         let store = ShardedStore::new();
         let key = test_ns_and_key("no_ttl");
 
-        store.put(key.clone(), make_sv(1));
+        store.put(key.clone(), make_sv(1)).unwrap();
 
         let shard = store.shards.get(&key.namespace.branch_id).unwrap();
         assert!(
@@ -5174,14 +5296,14 @@ mod tests {
         let key = test_ns_and_key("delete_ttl");
 
         // Put with TTL
-        store.put(key.clone(), make_sv_with_ttl(1, 60));
+        store.put(key.clone(), make_sv_with_ttl(1, 60)).unwrap();
         {
             let shard = store.shards.get(&key.namespace.branch_id).unwrap();
             assert_eq!(shard.ttl_index.len(), 1);
         }
 
         // Delete (tombstone) — should clean the TTL entry
-        store.put(key.clone(), StoredValue::tombstone(Version::txn(2)));
+        store.put(key.clone(), StoredValue::tombstone(Version::txn(2))).unwrap();
         {
             let shard = store.shards.get(&key.namespace.branch_id).unwrap();
             assert!(
@@ -5198,8 +5320,8 @@ mod tests {
         let key2 = test_ns_and_key("exp2");
 
         // Insert two keys with TTLs that are already expired (epoch + 1ms)
-        store.put(key1.clone(), make_expired_sv(1));
-        store.put(key2.clone(), make_expired_sv(2));
+        store.put(key1.clone(), make_expired_sv(1)).unwrap();
+        store.put(key2.clone(), make_expired_sv(2)).unwrap();
 
         {
             let shard = store.shards.get(&key1.namespace.branch_id).unwrap();
@@ -5223,14 +5345,14 @@ mod tests {
         let branch_id = key.namespace.branch_id;
 
         // Version 1: value with TTL (already expired)
-        store.put(key.clone(), make_expired_sv(1));
+        store.put(key.clone(), make_expired_sv(1)).unwrap();
         {
             let shard = store.shards.get(&branch_id).unwrap();
             assert_eq!(shard.ttl_index.len(), 1);
         }
 
         // Version 2: tombstone (makes it dead after GC)
-        store.put(key.clone(), StoredValue::tombstone(Version::txn(2)));
+        store.put(key.clone(), StoredValue::tombstone(Version::txn(2))).unwrap();
 
         // Tombstone should have cleaned the TTL entry from the put() path
         {
@@ -5257,7 +5379,7 @@ mod tests {
         let branch_id = key.namespace.branch_id;
 
         // Single expired version (no tombstone, just expired TTL)
-        store.put(key.clone(), make_expired_sv(1));
+        store.put(key.clone(), make_expired_sv(1)).unwrap();
         {
             let shard = store.shards.get(&branch_id).unwrap();
             assert_eq!(shard.ttl_index.len(), 1);
@@ -5284,7 +5406,7 @@ mod tests {
         let branch_id = key.namespace.branch_id;
 
         // First: put with TTL via the normal path
-        store.put(key.clone(), make_sv_with_ttl(1, 60));
+        store.put(key.clone(), make_sv_with_ttl(1, 60)).unwrap();
         {
             let shard = store.shards.get(&branch_id).unwrap();
             assert_eq!(shard.ttl_index.len(), 1);
@@ -5301,5 +5423,256 @@ mod tests {
             shard.ttl_index.is_empty(),
             "apply_batch overwrite should clean stale TTL entry"
         );
+    }
+
+    // ========================================================================
+    // Branch Limit Tests
+    // ========================================================================
+
+    #[test]
+    fn test_branch_limit_allows_up_to_max() {
+        use strata_core::value::Value;
+
+        let store = ShardedStore::with_limits(3);
+        for i in 0..3 {
+            let branch_id = BranchId::new();
+            let key = create_test_key(branch_id, &format!("k{}", i));
+            store
+                .put(key, create_stored_value(Value::Int(i), 1))
+                .unwrap();
+        }
+        assert_eq!(store.shard_count(), 3);
+    }
+
+    #[test]
+    fn test_branch_limit_rejects_at_max() {
+        use strata_core::value::Value;
+
+        let store = ShardedStore::with_limits(2);
+        for i in 0..2 {
+            let branch_id = BranchId::new();
+            let key = create_test_key(branch_id, &format!("k{}", i));
+            store
+                .put(key, create_stored_value(Value::Int(i), 1))
+                .unwrap();
+        }
+        // Third branch should fail
+        let branch_id = BranchId::new();
+        let key = create_test_key(branch_id, "overflow");
+        let err = store
+            .put(key, create_stored_value(Value::Int(99), 1))
+            .unwrap_err();
+        assert!(
+            format!("{}", err).contains("branches"),
+            "Error should mention branches: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_branch_limit_allows_write_to_existing() {
+        use strata_core::value::Value;
+
+        let store = ShardedStore::with_limits(1);
+        let branch_id = BranchId::new();
+        let key1 = create_test_key(branch_id, "k1");
+        let key2 = create_test_key(branch_id, "k2");
+        store
+            .put(key1, create_stored_value(Value::Int(1), 1))
+            .unwrap();
+        // Same branch — should succeed even though limit is 1
+        store
+            .put(key2, create_stored_value(Value::Int(2), 2))
+            .unwrap();
+        assert_eq!(store.shard_count(), 1);
+    }
+
+    #[test]
+    fn test_branch_limit_zero_unlimited() {
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new(); // max_branches = 0 (unlimited)
+        for i in 0..100 {
+            let branch_id = BranchId::new();
+            let key = create_test_key(branch_id, &format!("k{}", i));
+            store
+                .put(key, create_stored_value(Value::Int(i), 1))
+                .unwrap();
+        }
+        assert_eq!(store.shard_count(), 100);
+    }
+
+    #[test]
+    fn test_branch_limit_apply_batch() {
+        use strata_core::value::Value;
+
+        let store = ShardedStore::with_limits(1);
+        let b1 = BranchId::new();
+        let key1 = create_test_key(b1, "k1");
+        // First branch via apply_batch
+        store
+            .apply_batch(vec![(key1, Value::Int(1))], vec![], 1)
+            .unwrap();
+
+        // Second branch should fail
+        let b2 = BranchId::new();
+        let key2 = create_test_key(b2, "k2");
+        let err = store
+            .apply_batch(vec![(key2, Value::Int(2))], vec![], 2)
+            .unwrap_err();
+        assert!(format!("{}", err).contains("branches"));
+    }
+
+    // ========================================================================
+    // Memory Stats Tests
+    // ========================================================================
+
+    #[test]
+    fn test_memory_stats_empty() {
+        let store = ShardedStore::new();
+        let stats = store.memory_stats();
+        assert_eq!(stats.total_branches, 0);
+        assert_eq!(stats.total_entries, 0);
+        assert_eq!(stats.estimated_bytes, 0);
+        assert!(stats.per_branch.is_empty());
+    }
+
+    #[test]
+    fn test_memory_stats_with_data() {
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let b1 = BranchId::new();
+        let b2 = BranchId::new();
+
+        // Insert 10 entries in branch 1
+        for i in 0..10 {
+            let key = create_test_key(b1, &format!("k{}", i));
+            store
+                .put(key, create_stored_value(Value::Int(i), 1))
+                .unwrap();
+        }
+
+        // Insert 5 entries in branch 2
+        for i in 0..5 {
+            let key = create_test_key(b2, &format!("k{}", i));
+            store
+                .put(key, create_stored_value(Value::Int(i), 1))
+                .unwrap();
+        }
+
+        let stats = store.memory_stats();
+        assert_eq!(stats.total_branches, 2);
+        assert_eq!(stats.total_entries, 15);
+        assert!(stats.estimated_bytes > 0);
+        assert_eq!(stats.per_branch.len(), 2);
+
+        // Find branch stats
+        let b1_stats = stats
+            .per_branch
+            .iter()
+            .find(|s| s.branch_id == b1)
+            .unwrap();
+        assert_eq!(b1_stats.entry_count, 10);
+        assert!(b1_stats.estimated_bytes > 0);
+    }
+
+    #[test]
+    fn test_memory_stats_byte_formula() {
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let branch = BranchId::new();
+
+        // Insert exactly 10 entries
+        for i in 0..10 {
+            let key = create_test_key(branch, &format!("k{}", i));
+            store
+                .put(key, create_stored_value(Value::Int(i), 1))
+                .unwrap();
+        }
+
+        let stats = store.memory_stats();
+        assert_eq!(stats.total_entries, 10);
+        // 10 entries * 120 bytes/entry = 1200, no btree index by default
+        assert_eq!(stats.estimated_bytes, 10 * 120);
+
+        let branch_stats = &stats.per_branch[0];
+        assert_eq!(branch_stats.estimated_bytes, 10 * 120);
+        assert!(!branch_stats.has_btree_index);
+    }
+
+    #[test]
+    fn test_set_max_branches_dynamic() {
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new(); // unlimited
+        // Create 5 branches
+        let mut branches = Vec::new();
+        for i in 0..5 {
+            let branch = BranchId::new();
+            branches.push(branch);
+            let key = create_test_key(branch, &format!("k{}", i));
+            store
+                .put(key, create_stored_value(Value::Int(i), 1))
+                .unwrap();
+        }
+        assert_eq!(store.shard_count(), 5);
+
+        // Now set a limit of 5 — existing branches still writable
+        store.set_max_branches(5);
+        let key = create_test_key(branches[0], "extra");
+        store
+            .put(key, create_stored_value(Value::Int(99), 2))
+            .unwrap();
+
+        // But a 6th branch should fail
+        let new_branch = BranchId::new();
+        let key = create_test_key(new_branch, "overflow");
+        let err = store
+            .put(key, create_stored_value(Value::Int(100), 3))
+            .unwrap_err();
+        assert!(format!("{}", err).contains("branches"));
+    }
+
+    #[test]
+    fn test_branch_limit_delete_new_branch() {
+        use strata_core::value::Value;
+
+        let store = ShardedStore::with_limits(1);
+        let b1 = BranchId::new();
+        let key1 = create_test_key(b1, "k1");
+        store
+            .put(key1.clone(), create_stored_value(Value::Int(1), 1))
+            .unwrap();
+
+        // delete() on an existing branch is fine
+        store.delete(&key1).unwrap();
+
+        // delete() on a NEW branch should be rejected — delete inserts a
+        // tombstone, which creates the shard if it doesn't exist.
+        let b2 = BranchId::new();
+        let key2 = create_test_key(b2, "phantom");
+        let result = store.delete(&key2);
+        // delete() calls put() internally, which checks the branch limit
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_branch_limit_via_storage_trait() {
+        use strata_core::traits::Storage;
+        use strata_core::value::Value;
+
+        let store = ShardedStore::with_limits(1);
+        let b1 = BranchId::new();
+        let key1 = create_test_key(b1, "k1");
+        // Storage::put via trait
+        Storage::put(&store, key1, Value::Int(1), None).unwrap();
+
+        // Second branch via trait should fail
+        let b2 = BranchId::new();
+        let key2 = create_test_key(b2, "k2");
+        let err = Storage::put(&store, key2, Value::Int(2), None).unwrap_err();
+        assert!(format!("{}", err).contains("branches"));
     }
 }

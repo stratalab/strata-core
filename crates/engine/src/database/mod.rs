@@ -23,7 +23,9 @@ pub mod config;
 mod registry;
 mod transactions;
 
-pub use config::{ModelConfig, StrataConfig, SHADOW_EVENT, SHADOW_JSON, SHADOW_KV, SHADOW_STATE};
+pub use config::{
+    ModelConfig, StorageConfig, StrataConfig, SHADOW_EVENT, SHADOW_JSON, SHADOW_KV, SHADOW_STATE,
+};
 pub use registry::OPEN_DATABASES;
 pub use transactions::RetryConfig;
 
@@ -521,9 +523,6 @@ impl Database {
             }
         }
 
-        // Create coordinator from recovery result (preserves version continuity)
-        let coordinator = TransactionCoordinator::from_recovery(&result);
-
         let wal_arc = Arc::new(ParkingMutex::new(wal_writer));
         let flush_shutdown = Arc::new(AtomicBool::new(false));
 
@@ -553,9 +552,17 @@ impl Database {
             None
         };
 
+        // Create coordinator with write buffer limit from config (before moving result.storage)
+        let coordinator =
+            TransactionCoordinator::from_recovery_with_limits(&result, cfg.storage.max_write_buffer_entries);
+
+        // Apply storage resource limits from config
+        let storage = Arc::new(result.storage);
+        storage.set_max_branches(cfg.storage.max_branches);
+
         let db = Arc::new(Self {
             data_dir: canonical_path.clone(),
-            storage: Arc::new(result.storage),
+            storage,
             wal_writer: Some(wal_arc),
             persistence_mode: PersistenceMode::Disk,
             coordinator,
@@ -615,11 +622,15 @@ impl Database {
     /// | `cache()` | None | None | No |
     /// | `open(path)` | Yes | Yes (per config) | Yes |
     pub fn cache() -> StrataResult<Arc<Self>> {
-        // Create fresh storage
-        let storage = ShardedStore::new();
+        let cfg = StrataConfig::default();
 
-        // Create coordinator starting at version 1 (no recovery needed)
-        let coordinator = TransactionCoordinator::new(1);
+        // Create fresh storage with branch limit from default config
+        let storage = ShardedStore::new();
+        storage.set_max_branches(cfg.storage.max_branches);
+
+        // Create coordinator starting at version 1 (no recovery needed), with write buffer limit
+        let mut coordinator = TransactionCoordinator::new(1);
+        coordinator.set_max_write_buffer_entries(cfg.storage.max_write_buffer_entries);
 
         let db = Arc::new(Self {
             data_dir: PathBuf::new(), // Empty path for ephemeral
@@ -888,6 +899,13 @@ impl Database {
     /// Return a clone of the current configuration.
     pub fn config(&self) -> StrataConfig {
         self.config.read().clone()
+    }
+
+    /// Return memory usage statistics for the storage layer.
+    ///
+    /// O(branches) scan — call explicitly for diagnostics, not on hot paths.
+    pub fn storage_memory_stats(&self) -> strata_storage::StorageMemoryStats {
+        self.storage.memory_stats()
     }
 
     /// Apply a mutation to the configuration.
@@ -1831,7 +1849,9 @@ impl Database {
         let snapshot_version = snapshot.version();
         self.coordinator.record_start(txn_id, snapshot_version);
 
-        TransactionPool::acquire(txn_id, branch_id, Some(Box::new(snapshot)))
+        let mut txn = TransactionPool::acquire(txn_id, branch_id, Some(Box::new(snapshot)));
+        txn.set_max_write_entries(self.coordinator.max_write_buffer_entries());
+        txn
     }
 
     /// End a transaction (return to pool)
