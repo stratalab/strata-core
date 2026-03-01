@@ -248,12 +248,19 @@ impl StoredValue {
     /// Calculate the expiry timestamp
     ///
     /// Returns `Some(timestamp)` when the value will expire, or `None` if no TTL.
+    /// Returns `None` if the addition overflows to `Timestamp::MAX` (effectively
+    /// never expires, which is equivalent to no TTL).
     pub fn expiry_timestamp(&self) -> Option<Timestamp> {
         let millis = self.ttl_and_flags & TTL_MASK;
         if millis == 0 {
             None
         } else {
-            Some(self.timestamp.saturating_add(Duration::from_millis(millis)))
+            let expiry = self.timestamp.saturating_add(Duration::from_millis(millis));
+            if expiry == Timestamp::MAX {
+                None // Overflow — treat as no expiry
+            } else {
+                Some(expiry)
+            }
         }
     }
 }
@@ -566,6 +573,26 @@ mod tests {
         let sv = StoredValue::new(Value::Null, Version::txn(0), None);
         assert_eq!(sv.version_raw(), 0);
         assert_eq!(sv.version(), Version::Txn(0));
+    }
+
+    #[test]
+    fn test_expiry_timestamp_overflow() {
+        // When timestamp + TTL overflows to Timestamp::MAX, treat as no expiry
+        let near_max_ts = Timestamp::from_micros(u64::MAX - 1000);
+        let sv = StoredValue::with_timestamp(
+            Value::Null,
+            Version::txn(1),
+            near_max_ts,
+            Some(Duration::from_secs(60)), // 60_000ms >> 1000µs remaining
+        );
+        // saturating_add would produce Timestamp::MAX — should return None
+        assert!(
+            sv.expiry_timestamp().is_none(),
+            "Overflow to Timestamp::MAX should return None"
+        );
+        // is_expired still works correctly (elapsed-time comparison)
+        // near_max_ts is far in the future, so duration_since returns None → not expired
+        assert!(!sv.is_expired());
     }
 
     #[cfg(debug_assertions)]

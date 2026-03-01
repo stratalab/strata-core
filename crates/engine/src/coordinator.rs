@@ -9,8 +9,10 @@
 //! - Transaction metrics (started, committed, aborted)
 //! - Commit rate calculation
 
+use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use strata_concurrency::{RecoveryResult, TransactionContext, TransactionManager};
 use strata_core::traits::Storage;
 use strata_core::types::BranchId;
@@ -44,6 +46,20 @@ pub struct TransactionCoordinator {
     total_committed: AtomicU64,
     /// Total transactions aborted - uses Relaxed ordering
     total_aborted: AtomicU64,
+    /// Active transaction tracking: txn_id → (start_version, start_time)
+    ///
+    /// Used for GC safe point computation (`min_active_version()`) and
+    /// transaction timeout enforcement.
+    active_versions: DashMap<u64, (u64, Instant)>,
+}
+
+impl TransactionCoordinator {
+    /// Maximum allowed transaction duration before commit is rejected.
+    ///
+    /// Transactions that exceed this duration will fail at commit time
+    /// with a `TransactionTimeout` error. This prevents long-running
+    /// transactions from blocking GC indefinitely.
+    pub const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
 }
 
 impl TransactionCoordinator {
@@ -58,6 +74,7 @@ impl TransactionCoordinator {
             total_started: AtomicU64::new(0),
             total_committed: AtomicU64::new(0),
             total_aborted: AtomicU64::new(0),
+            active_versions: DashMap::new(),
         }
     }
 
@@ -82,6 +99,7 @@ impl TransactionCoordinator {
             total_started: AtomicU64::new(0),
             total_committed: AtomicU64::new(0),
             total_aborted: AtomicU64::new(0),
+            active_versions: DashMap::new(),
         }
     }
 
@@ -103,9 +121,12 @@ impl TransactionCoordinator {
     ) -> TransactionContext {
         let txn_id = self.manager.next_txn_id();
         let snapshot = storage.create_snapshot();
+        let snapshot_version = snapshot.version();
 
         self.active_count.fetch_add(1, Ordering::Relaxed);
         self.total_started.fetch_add(1, Ordering::Relaxed);
+        self.active_versions
+            .insert(txn_id, (snapshot_version, Instant::now()));
 
         debug!(target: "strata::txn", branch_id = %branch_id, "Transaction started");
 
@@ -148,33 +169,54 @@ impl TransactionCoordinator {
         store: &S,
         wal: Option<&mut WalWriter>,
     ) -> StrataResult<u64> {
+        let txn_id = txn.txn_id;
+
+        // Enforce transaction timeout
+        if txn.is_expired(Self::TRANSACTION_TIMEOUT) {
+            self.record_abort(txn_id);
+            return Err(StrataError::transaction_timeout(
+                txn.elapsed().as_millis() as u64,
+            ));
+        }
+
         match self.manager.commit(txn, store, wal) {
             Ok(version) => {
-                self.record_commit();
+                self.record_commit(txn_id);
                 info!(target: "strata::txn", "Transaction committed");
                 Ok(version)
             }
             Err(e) => {
-                self.record_abort();
+                self.record_abort(txn_id);
                 warn!(target: "strata::txn", error = %e, "Transaction aborted");
                 Err(StrataError::from(e))
             }
         }
     }
 
-    /// Record transaction start
+    /// Record transaction start with version tracking
     ///
-    /// Increments active count and total started count.
-    /// Used by pooled transaction API that manages context creation separately.
-    pub fn record_start(&self) {
+    /// Increments active count and total started count, and registers the
+    /// transaction in the active versions map for GC safe point computation.
+    ///
+    /// # Arguments
+    /// * `txn_id` - Unique transaction ID
+    /// * `start_version` - Snapshot version at transaction start
+    pub fn record_start(&self, txn_id: u64, start_version: u64) {
         self.active_count.fetch_add(1, Ordering::Relaxed);
         self.total_started.fetch_add(1, Ordering::Relaxed);
+        self.active_versions
+            .insert(txn_id, (start_version, Instant::now()));
     }
 
     /// Record transaction commit
     ///
-    /// Decrements active count (saturating at 0) and increments committed count.
-    pub fn record_commit(&self) {
+    /// Removes the transaction from active version tracking, decrements
+    /// active count (saturating at 0), and increments committed count.
+    ///
+    /// # Arguments
+    /// * `txn_id` - Transaction ID to remove from active tracking
+    pub fn record_commit(&self, txn_id: u64) {
+        self.active_versions.remove(&txn_id);
         // Use fetch_update for saturating decrement to prevent underflow
         let _ = self
             .active_count
@@ -186,8 +228,13 @@ impl TransactionCoordinator {
 
     /// Record transaction abort
     ///
-    /// Decrements active count and increments aborted count.
-    pub fn record_abort(&self) {
+    /// Removes the transaction from active version tracking, decrements
+    /// active count, and increments aborted count.
+    ///
+    /// # Arguments
+    /// * `txn_id` - Transaction ID to remove from active tracking
+    pub fn record_abort(&self, txn_id: u64) {
+        self.active_versions.remove(&txn_id);
         // Use fetch_update for saturating decrement to prevent underflow
         let _ = self
             .active_count
@@ -240,14 +287,24 @@ impl TransactionCoordinator {
         wal: Option<&mut WalWriter>,
         version: u64,
     ) -> StrataResult<u64> {
+        let txn_id = txn.txn_id;
+
+        // Enforce transaction timeout
+        if txn.is_expired(Self::TRANSACTION_TIMEOUT) {
+            self.record_abort(txn_id);
+            return Err(StrataError::transaction_timeout(
+                txn.elapsed().as_millis() as u64,
+            ));
+        }
+
         match self.manager.commit_with_version(txn, store, wal, version) {
             Ok(v) => {
-                self.record_commit();
+                self.record_commit(txn_id);
                 info!(target: "strata::txn", version = v, "Coordinated commit succeeded");
                 Ok(v)
             }
             Err(e) => {
-                self.record_abort();
+                self.record_abort(txn_id);
                 warn!(target: "strata::txn", error = %e, "Coordinated commit aborted");
                 Err(StrataError::from(e))
             }
@@ -277,6 +334,15 @@ impl TransactionCoordinator {
     /// Get current active transaction count
     pub fn active_count(&self) -> u64 {
         self.active_count.load(Ordering::SeqCst)
+    }
+
+    /// Minimum snapshot version held by any active transaction.
+    ///
+    /// Returns `None` if no transactions are active. Used by GC safe point
+    /// computation to ensure old versions needed by active snapshots are
+    /// not pruned.
+    pub fn min_active_version(&self) -> Option<u64> {
+        self.active_versions.iter().map(|e| e.value().0).min()
     }
 
     /// Wait for all active transactions to complete
@@ -403,8 +469,8 @@ mod tests {
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
-        let _txn = coordinator.start_transaction(branch_id, &storage);
-        coordinator.record_commit();
+        let txn = coordinator.start_transaction(branch_id, &storage);
+        coordinator.record_commit(txn.txn_id);
 
         let metrics = coordinator.metrics();
         assert_eq!(metrics.total_started, 1);
@@ -419,8 +485,8 @@ mod tests {
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
-        let _txn = coordinator.start_transaction(branch_id, &storage);
-        coordinator.record_abort();
+        let txn = coordinator.start_transaction(branch_id, &storage);
+        coordinator.record_abort(txn.txn_id);
 
         let metrics = coordinator.metrics();
         assert_eq!(metrics.total_started, 1);
@@ -450,16 +516,18 @@ mod tests {
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
-        // Start 4 transactions
+        // Start 4 transactions, collect txn_ids
+        let mut txn_ids = Vec::new();
         for _ in 0..4 {
-            let _txn = coordinator.start_transaction(branch_id, &storage);
+            let txn = coordinator.start_transaction(branch_id, &storage);
+            txn_ids.push(txn.txn_id);
         }
 
         // 3 commit, 1 abort
-        coordinator.record_commit();
-        coordinator.record_commit();
-        coordinator.record_commit();
-        coordinator.record_abort();
+        coordinator.record_commit(txn_ids[0]);
+        coordinator.record_commit(txn_ids[1]);
+        coordinator.record_commit(txn_ids[2]);
+        coordinator.record_abort(txn_ids[3]);
 
         let metrics = coordinator.metrics();
         assert_eq!(metrics.total_completed(), 4);
@@ -474,23 +542,23 @@ mod tests {
         let branch_id = BranchId::new();
 
         // Simulate realistic usage
-        let _txn1 = coordinator.start_transaction(branch_id, &storage);
-        let _txn2 = coordinator.start_transaction(branch_id, &storage);
+        let txn1 = coordinator.start_transaction(branch_id, &storage);
+        let txn2 = coordinator.start_transaction(branch_id, &storage);
 
         assert_eq!(coordinator.metrics().active_count, 2);
 
-        coordinator.record_commit(); // txn1 commits
+        coordinator.record_commit(txn1.txn_id); // txn1 commits
 
         assert_eq!(coordinator.metrics().active_count, 1);
         assert_eq!(coordinator.metrics().total_committed, 1);
 
-        let _txn3 = coordinator.start_transaction(branch_id, &storage);
+        let txn3 = coordinator.start_transaction(branch_id, &storage);
 
         assert_eq!(coordinator.metrics().active_count, 2);
         assert_eq!(coordinator.metrics().total_started, 3);
 
-        coordinator.record_abort(); // txn2 aborts
-        coordinator.record_commit(); // txn3 commits
+        coordinator.record_abort(txn2.txn_id); // txn2 aborts
+        coordinator.record_commit(txn3.txn_id); // txn3 commits
 
         let metrics = coordinator.metrics();
         assert_eq!(metrics.active_count, 0);
@@ -550,13 +618,14 @@ mod tests {
         let branch_id = BranchId::new();
 
         // Start a transaction
-        let _txn = coordinator.start_transaction(branch_id, &storage);
+        let txn = coordinator.start_transaction(branch_id, &storage);
+        let txn_id = txn.txn_id;
 
         // Spawn a thread to complete the transaction after a short delay
         let coordinator_clone = Arc::clone(&coordinator);
         let completer = thread::spawn(move || {
             thread::sleep(std::time::Duration::from_millis(25));
-            coordinator_clone.record_commit();
+            coordinator_clone.record_commit(txn_id);
         });
 
         // Wait for idle with a longer timeout
@@ -586,22 +655,26 @@ mod tests {
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
-        // Start 5 transactions
+        // Start 5 transactions, collect txn_ids
+        let mut txn_ids = Vec::new();
         for _ in 0..5 {
-            let _txn = coordinator.start_transaction(branch_id, &storage);
+            let txn = coordinator.start_transaction(branch_id, &storage);
+            txn_ids.push(txn.txn_id);
         }
         assert_eq!(coordinator.active_count(), 5);
 
         // Spawn threads to complete transactions with staggered timing
         let barrier = Arc::new(Barrier::new(6)); // 5 completers + 1 waiter
-        let handles: Vec<_> = (0..5)
-            .map(|i| {
+        let handles: Vec<_> = txn_ids
+            .into_iter()
+            .enumerate()
+            .map(|(i, txn_id)| {
                 let coord = Arc::clone(&coordinator);
                 let barrier = Arc::clone(&barrier);
                 thread::spawn(move || {
                     barrier.wait();
                     thread::sleep(std::time::Duration::from_millis(10 * (i + 1) as u64));
-                    coord.record_commit();
+                    coord.record_commit(txn_id);
                 })
             })
             .collect();
@@ -665,9 +738,9 @@ mod tests {
         let worker = thread::spawn(move || {
             let mut completed = 0;
             while !stop_clone.load(Ordering::SeqCst) {
-                let _txn = coord_clone.start_transaction(branch_id, &storage_clone);
+                let txn = coord_clone.start_transaction(branch_id, &storage_clone);
                 thread::yield_now();
-                coord_clone.record_commit();
+                coord_clone.record_commit(txn.txn_id);
                 completed += 1;
                 if completed >= 50 {
                     break;
@@ -694,6 +767,7 @@ mod tests {
 
     #[test]
     fn test_active_count_accuracy_under_concurrent_load() {
+        use parking_lot::Mutex;
         use std::sync::Barrier;
         use std::thread;
 
@@ -701,6 +775,7 @@ mod tests {
         let storage = Arc::new(ShardedStore::new());
         let branch_id = BranchId::new();
         let barrier = Arc::new(Barrier::new(10));
+        let txn_ids = Arc::new(Mutex::new(Vec::new()));
 
         // 10 threads start transactions concurrently, then 10 threads complete them
         let mut handles = Vec::new();
@@ -710,9 +785,11 @@ mod tests {
             let coord = Arc::clone(&coordinator);
             let stor = Arc::clone(&storage);
             let barr = Arc::clone(&barrier);
+            let ids = Arc::clone(&txn_ids);
             handles.push(thread::spawn(move || {
                 barr.wait();
-                let _txn = coord.start_transaction(branch_id, &stor);
+                let txn = coord.start_transaction(branch_id, &stor);
+                ids.lock().push(txn.txn_id);
                 // Don't record_commit - leave active
             }));
         }
@@ -728,14 +805,15 @@ mod tests {
 
         // Now complete them all concurrently
         let barrier2 = Arc::new(Barrier::new(10));
+        let collected_ids = txn_ids.lock().clone();
         let mut completers = Vec::new();
 
-        for _ in 0..10 {
+        for txn_id in collected_ids {
             let coord = Arc::clone(&coordinator);
             let barr = Arc::clone(&barrier2);
             completers.push(thread::spawn(move || {
                 barr.wait();
-                coord.record_commit();
+                coord.record_commit(txn_id);
             }));
         }
 
@@ -797,22 +875,22 @@ mod tests {
         let coordinator = TransactionCoordinator::new(0);
 
         // Start one transaction
-        coordinator.record_start();
+        coordinator.record_start(100, 0);
         assert_eq!(coordinator.active_count(), 1);
 
         // Commit it
-        coordinator.record_commit();
+        coordinator.record_commit(100);
         assert_eq!(coordinator.active_count(), 0);
 
         // Extra commits should saturate at 0, not underflow
-        coordinator.record_commit();
+        coordinator.record_commit(999);
         assert_eq!(
             coordinator.active_count(),
             0,
             "Should saturate at 0, not underflow"
         );
 
-        coordinator.record_commit();
+        coordinator.record_commit(998);
         assert_eq!(
             coordinator.active_count(),
             0,
@@ -820,7 +898,7 @@ mod tests {
         );
 
         // Same for abort
-        coordinator.record_abort();
+        coordinator.record_abort(997);
         assert_eq!(coordinator.active_count(), 0, "Abort also saturates at 0");
     }
 
@@ -851,13 +929,13 @@ mod tests {
 
                 thread::spawn(move || {
                     for _ in 0..iterations {
-                        let _txn = coord.start_transaction(branch_id, &stor);
+                        let txn = coord.start_transaction(branch_id, &stor);
                         started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
                         // Small delay to increase contention
                         thread::yield_now();
 
-                        coord.record_commit();
+                        coord.record_commit(txn.txn_id);
                         committed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     }
                 })
@@ -1017,9 +1095,9 @@ mod tests {
         let worker = thread::spawn(move || {
             let mut count = 0;
             while !stop_clone.load(Ordering::SeqCst) && count < 50 {
-                let _txn = coord_clone.start_transaction(branch_id, &stor_clone);
+                let txn = coord_clone.start_transaction(branch_id, &stor_clone);
                 // Very short delay
-                coord_clone.record_commit();
+                coord_clone.record_commit(txn.txn_id);
                 count += 1;
             }
             count
@@ -1093,5 +1171,80 @@ mod tests {
             40,
             "All threads should have collected results before panic"
         );
+    }
+
+    // ========================================================================
+    // Active Version Tracking Tests (T-4)
+    // ========================================================================
+
+    #[test]
+    fn test_min_active_version_empty() {
+        let coordinator = TransactionCoordinator::new(0);
+        assert_eq!(coordinator.min_active_version(), None);
+    }
+
+    #[test]
+    fn test_min_active_version_tracks_correctly() {
+        let coordinator = TransactionCoordinator::new(0);
+
+        // Register 3 transactions with known versions via record_start
+        coordinator.record_start(1, 10);
+        coordinator.record_start(2, 10);
+        coordinator.record_start(3, 10);
+
+        // All snapshots are at version 10
+        let min = coordinator.min_active_version().unwrap();
+        assert_eq!(min, 10);
+
+        // Committing the first doesn't change min (all at same version)
+        coordinator.record_commit(1);
+        let min = coordinator.min_active_version().unwrap();
+        assert_eq!(min, 10);
+
+        // Committing second, still at 10
+        coordinator.record_commit(2);
+        assert_eq!(coordinator.min_active_version().unwrap(), 10);
+
+        // Committing last → no active transactions
+        coordinator.record_commit(3);
+        assert_eq!(coordinator.min_active_version(), None);
+    }
+
+    #[test]
+    fn test_min_active_version_after_commit() {
+        let coordinator = TransactionCoordinator::new(0);
+
+        // Manually register with different versions to test ordering
+        coordinator.record_start(1, 5);
+        coordinator.record_start(2, 10);
+        coordinator.record_start(3, 3);
+
+        // Min should be 3
+        assert_eq!(coordinator.min_active_version(), Some(3));
+
+        // Remove the min → new min is 5
+        coordinator.record_commit(3);
+        assert_eq!(coordinator.min_active_version(), Some(5));
+
+        // Remove 5 → new min is 10
+        coordinator.record_abort(1);
+        assert_eq!(coordinator.min_active_version(), Some(10));
+
+        // Remove last → None
+        coordinator.record_commit(2);
+        assert_eq!(coordinator.min_active_version(), None);
+    }
+
+    #[test]
+    fn test_active_versions_cleaned_on_abort() {
+        let coordinator = TransactionCoordinator::new(0);
+        let storage = create_test_storage();
+        let branch_id = BranchId::new();
+
+        let txn = coordinator.start_transaction(branch_id, &storage);
+        assert!(coordinator.min_active_version().is_some());
+
+        coordinator.record_abort(txn.txn_id);
+        assert_eq!(coordinator.min_active_version(), None);
     }
 }
