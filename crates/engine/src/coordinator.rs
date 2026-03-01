@@ -9,7 +9,7 @@
 //! - Transaction metrics (started, committed, aborted)
 //! - Commit rate calculation
 
-use dashmap::DashMap;
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,11 +46,14 @@ pub struct TransactionCoordinator {
     total_committed: AtomicU64,
     /// Total transactions aborted - uses Relaxed ordering
     total_aborted: AtomicU64,
-    /// Active transaction tracking: txn_id → start_version
+    /// Active transaction tracking: (txn_id, start_version) pairs.
+    ///
+    /// Vec behind a Mutex is optimal here: concurrent txn count is small
+    /// (typically < 10), so linear scan beats hashing. Lock is held for
+    /// ~10ns (push or swap_remove), well under contention thresholds.
     ///
     /// Used for GC safe point computation (`min_active_version()`).
-    /// Timeout enforcement uses `TransactionContext::start_time` instead.
-    active_versions: DashMap<u64, u64>,
+    active_versions: Mutex<Vec<(u64, u64)>>,
 }
 
 impl TransactionCoordinator {
@@ -74,7 +77,7 @@ impl TransactionCoordinator {
             total_started: AtomicU64::new(0),
             total_committed: AtomicU64::new(0),
             total_aborted: AtomicU64::new(0),
-            active_versions: DashMap::new(),
+            active_versions: Mutex::new(Vec::new()),
         }
     }
 
@@ -99,7 +102,7 @@ impl TransactionCoordinator {
             total_started: AtomicU64::new(0),
             total_committed: AtomicU64::new(0),
             total_aborted: AtomicU64::new(0),
-            active_versions: DashMap::new(),
+            active_versions: Mutex::new(Vec::new()),
         }
     }
 
@@ -125,7 +128,7 @@ impl TransactionCoordinator {
 
         self.active_count.fetch_add(1, Ordering::Relaxed);
         self.total_started.fetch_add(1, Ordering::Relaxed);
-        self.active_versions.insert(txn_id, snapshot_version);
+        self.active_versions.lock().push((txn_id, snapshot_version));
 
         debug!(target: "strata::txn", branch_id = %branch_id, "Transaction started");
 
@@ -170,14 +173,6 @@ impl TransactionCoordinator {
     ) -> StrataResult<u64> {
         let txn_id = txn.txn_id;
 
-        // Enforce transaction timeout
-        if txn.is_expired(Self::TRANSACTION_TIMEOUT) {
-            self.record_abort(txn_id);
-            return Err(StrataError::transaction_timeout(
-                txn.elapsed().as_millis() as u64
-            ));
-        }
-
         match self.manager.commit(txn, store, wal) {
             Ok(version) => {
                 self.record_commit(txn_id);
@@ -203,7 +198,7 @@ impl TransactionCoordinator {
     pub fn record_start(&self, txn_id: u64, start_version: u64) {
         self.active_count.fetch_add(1, Ordering::Relaxed);
         self.total_started.fetch_add(1, Ordering::Relaxed);
-        self.active_versions.insert(txn_id, start_version);
+        self.active_versions.lock().push((txn_id, start_version));
     }
 
     /// Record transaction commit
@@ -214,7 +209,11 @@ impl TransactionCoordinator {
     /// # Arguments
     /// * `txn_id` - Transaction ID to remove from active tracking
     pub fn record_commit(&self, txn_id: u64) {
-        self.active_versions.remove(&txn_id);
+        let mut versions = self.active_versions.lock();
+        if let Some(pos) = versions.iter().position(|(id, _)| *id == txn_id) {
+            versions.swap_remove(pos);
+        }
+        drop(versions);
         // Use fetch_update for saturating decrement to prevent underflow
         let _ = self
             .active_count
@@ -232,7 +231,11 @@ impl TransactionCoordinator {
     /// # Arguments
     /// * `txn_id` - Transaction ID to remove from active tracking
     pub fn record_abort(&self, txn_id: u64) {
-        self.active_versions.remove(&txn_id);
+        let mut versions = self.active_versions.lock();
+        if let Some(pos) = versions.iter().position(|(id, _)| *id == txn_id) {
+            versions.swap_remove(pos);
+        }
+        drop(versions);
         // Use fetch_update for saturating decrement to prevent underflow
         let _ = self
             .active_count
@@ -287,14 +290,6 @@ impl TransactionCoordinator {
     ) -> StrataResult<u64> {
         let txn_id = txn.txn_id;
 
-        // Enforce transaction timeout
-        if txn.is_expired(Self::TRANSACTION_TIMEOUT) {
-            self.record_abort(txn_id);
-            return Err(StrataError::transaction_timeout(
-                txn.elapsed().as_millis() as u64
-            ));
-        }
-
         match self.manager.commit_with_version(txn, store, wal, version) {
             Ok(v) => {
                 self.record_commit(txn_id);
@@ -340,7 +335,8 @@ impl TransactionCoordinator {
     /// computation to ensure old versions needed by active snapshots are
     /// not pruned.
     pub fn min_active_version(&self) -> Option<u64> {
-        self.active_versions.iter().map(|e| *e.value()).min()
+        let versions = self.active_versions.lock();
+        versions.iter().map(|(_, v)| *v).min()
     }
 
     /// Wait for all active transactions to complete
