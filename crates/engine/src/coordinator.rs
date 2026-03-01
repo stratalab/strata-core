@@ -12,7 +12,7 @@
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use strata_concurrency::{RecoveryResult, TransactionContext, TransactionManager};
 use strata_core::traits::Storage;
 use strata_core::types::BranchId;
@@ -46,11 +46,11 @@ pub struct TransactionCoordinator {
     total_committed: AtomicU64,
     /// Total transactions aborted - uses Relaxed ordering
     total_aborted: AtomicU64,
-    /// Active transaction tracking: txn_id → (start_version, start_time)
+    /// Active transaction tracking: txn_id → start_version
     ///
-    /// Used for GC safe point computation (`min_active_version()`) and
-    /// transaction timeout enforcement.
-    active_versions: DashMap<u64, (u64, Instant)>,
+    /// Used for GC safe point computation (`min_active_version()`).
+    /// Timeout enforcement uses `TransactionContext::start_time` instead.
+    active_versions: DashMap<u64, u64>,
 }
 
 impl TransactionCoordinator {
@@ -125,8 +125,7 @@ impl TransactionCoordinator {
 
         self.active_count.fetch_add(1, Ordering::Relaxed);
         self.total_started.fetch_add(1, Ordering::Relaxed);
-        self.active_versions
-            .insert(txn_id, (snapshot_version, Instant::now()));
+        self.active_versions.insert(txn_id, snapshot_version);
 
         debug!(target: "strata::txn", branch_id = %branch_id, "Transaction started");
 
@@ -204,8 +203,7 @@ impl TransactionCoordinator {
     pub fn record_start(&self, txn_id: u64, start_version: u64) {
         self.active_count.fetch_add(1, Ordering::Relaxed);
         self.total_started.fetch_add(1, Ordering::Relaxed);
-        self.active_versions
-            .insert(txn_id, (start_version, Instant::now()));
+        self.active_versions.insert(txn_id, start_version);
     }
 
     /// Record transaction commit
@@ -342,7 +340,7 @@ impl TransactionCoordinator {
     /// computation to ensure old versions needed by active snapshots are
     /// not pruned.
     pub fn min_active_version(&self) -> Option<u64> {
-        self.active_versions.iter().map(|e| e.value().0).min()
+        self.active_versions.iter().map(|e| *e.value()).min()
     }
 
     /// Wait for all active transactions to complete

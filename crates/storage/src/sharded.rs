@@ -453,35 +453,36 @@ impl ShardedStore {
         let mut shard = self.shards.entry(branch_id).or_default();
 
         let new_expiry = value.expiry_timestamp();
-        // Clone key for TTL index only when there IS a TTL (rare path)
-        let ttl_key = new_expiry.as_ref().map(|_| key.clone());
 
-        // Capture old expiry via immutable borrow before mutating the chain
-        let old_expiry = shard
-            .data
-            .get(&key)
-            .and_then(|chain| chain.latest().and_then(|sv| sv.expiry_timestamp()));
-
-        // Remove old TTL entry if previous version had one
-        if let Some(exp) = old_expiry {
-            shard.ttl_index.remove(exp, &key);
-        }
+        // Split borrows on Shard to avoid a redundant hash lookup.
+        // DerefMut into &mut Shard lets the borrow checker see data and
+        // ttl_index as independent fields.
+        let shard = &mut *shard;
 
         if let Some(chain) = shard.data.get_mut(&key) {
-            // Add new version to existing chain
+            // Remove old TTL entry if previous version had one
+            let old_expiry = chain.latest().and_then(|sv| sv.expiry_timestamp());
+            if let Some(exp) = old_expiry {
+                shard.ttl_index.remove(exp, &key);
+            }
             chain.push(value);
+            // Register new TTL entry
+            if let Some(exp) = new_expiry {
+                shard.ttl_index.insert(exp, key);
+            }
         } else {
+            // Clone key for TTL index only when there IS a TTL (rare path)
+            let ttl_key = new_expiry.as_ref().map(|_| key.clone());
             // Create new chain — share Arc<Key> between HashMap and BTreeSet
             let arc_key = Arc::new(key);
             if let Some(ref mut btree) = shard.ordered_keys {
                 btree.insert(Arc::clone(&arc_key));
             }
             shard.data.insert(arc_key, VersionChain::new(value));
-        }
-
-        // Register new TTL entry (no-op for non-TTL values since new_expiry=None)
-        if let Some(exp) = new_expiry {
-            shard.ttl_index.insert(exp, ttl_key.unwrap());
+            // Register new TTL entry
+            if let Some(exp) = new_expiry {
+                shard.ttl_index.insert(exp, ttl_key.unwrap());
+            }
         }
     }
 
@@ -651,19 +652,16 @@ impl ShardedStore {
         // Apply atomically per branch (hold shard lock for entire branch batch)
         for (branch_id, (branch_writes, branch_deletes)) in branch_ops {
             let mut shard = self.shards.entry(branch_id).or_default();
+            // Split borrows to avoid redundant hash lookups
+            let shard = &mut *shard;
 
             for (key, stored) in branch_writes {
-                // Clean up old TTL entry if overwriting a key that had TTL.
-                // Batch writes always have ttl=None, so we only need removal, not insertion.
-                let old_expiry = shard
-                    .data
-                    .get(&key)
-                    .and_then(|chain| chain.latest().and_then(|sv| sv.expiry_timestamp()));
-                if let Some(exp) = old_expiry {
-                    shard.ttl_index.remove(exp, &key);
-                }
-
                 if let Some(chain) = shard.data.get_mut(&key) {
+                    // Clean up old TTL entry if overwriting a key that had TTL
+                    let old_expiry = chain.latest().and_then(|sv| sv.expiry_timestamp());
+                    if let Some(exp) = old_expiry {
+                        shard.ttl_index.remove(exp, &key);
+                    }
                     chain.push(stored);
                 } else {
                     let arc_key = Arc::new(key);
@@ -675,17 +673,13 @@ impl ShardedStore {
             }
 
             for key in branch_deletes {
-                // Clean up old TTL entry if deleting a key that had TTL
-                let old_expiry = shard
-                    .data
-                    .get(&key)
-                    .and_then(|chain| chain.latest().and_then(|sv| sv.expiry_timestamp()));
-                if let Some(exp) = old_expiry {
-                    shard.ttl_index.remove(exp, &key);
-                }
-
                 let tombstone = StoredValue::tombstone(Version::txn(version));
                 if let Some(chain) = shard.data.get_mut(&key) {
+                    // Clean up old TTL entry if deleting a key that had TTL
+                    let old_expiry = chain.latest().and_then(|sv| sv.expiry_timestamp());
+                    if let Some(exp) = old_expiry {
+                        shard.ttl_index.remove(exp, &key);
+                    }
                     chain.push(tombstone);
                 } else {
                     let arc_key = Arc::new(key);
