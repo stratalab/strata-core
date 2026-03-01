@@ -664,15 +664,6 @@ impl Database {
         &self.storage
     }
 
-    /// Direct single-key read bypassing the full transaction machinery.
-    ///
-    /// Returns the latest committed value without snapshot creation,
-    /// pool acquire/release, or coordinator bookkeeping.
-    /// Safe for single-key reads where multi-key consistency isn't needed.
-    pub(crate) fn get_direct(&self, key: &Key) -> Option<VersionedValue> {
-        self.storage.get_direct(key)
-    }
-
     /// Direct single-key read returning only the Value (no VersionedValue).
     ///
     /// Skips Version enum and VersionedValue construction. Used by the
