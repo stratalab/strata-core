@@ -1804,9 +1804,7 @@ mod tests {
         txn.put(test_key(&ns, "k1"), Value::Int(1)).unwrap();
         txn.delete(test_key(&ns, "k2")).unwrap();
         // Total = 2 (1 write + 1 delete), next should fail
-        let err = txn
-            .put(test_key(&ns, "k3"), Value::Int(3))
-            .unwrap_err();
+        let err = txn.put(test_key(&ns, "k3"), Value::Int(3)).unwrap_err();
         assert!(format!("{}", err).contains("transaction_write_buffer"));
     }
 
@@ -1864,9 +1862,7 @@ mod tests {
         txn.cas(test_key(&ns, "k2"), 0, Value::Int(2)).unwrap();
 
         // 3rd operation should fail (total = 2 >= limit of 2)
-        let err = txn
-            .put(test_key(&ns, "k3"), Value::Int(3))
-            .unwrap_err();
+        let err = txn.put(test_key(&ns, "k3"), Value::Int(3)).unwrap_err();
         assert!(format!("{}", err).contains("transaction_write_buffer"));
     }
 

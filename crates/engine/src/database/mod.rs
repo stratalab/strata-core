@@ -553,8 +553,10 @@ impl Database {
         };
 
         // Create coordinator with write buffer limit from config (before moving result.storage)
-        let coordinator =
-            TransactionCoordinator::from_recovery_with_limits(&result, cfg.storage.max_write_buffer_entries);
+        let coordinator = TransactionCoordinator::from_recovery_with_limits(
+            &result,
+            cfg.storage.max_write_buffer_entries,
+        );
 
         // Apply storage resource limits from config
         let storage = Arc::new(result.storage);

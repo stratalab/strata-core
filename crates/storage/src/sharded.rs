@@ -2010,7 +2010,9 @@ mod tests {
         // Insert several keys
         for i in 0..5 {
             let key = create_test_key(branch_id, &format!("shared_{}", i));
-            store.put(key, create_stored_value(Value::Int(i), 1)).unwrap();
+            store
+                .put(key, create_stored_value(Value::Int(i), 1))
+                .unwrap();
         }
 
         // Force BTreeSet creation by doing a list operation
@@ -2210,8 +2212,12 @@ mod tests {
         let branch_id = BranchId::new();
         let key = create_test_key(branch_id, "overwrite");
 
-        store.put(key.clone(), create_stored_value(Value::Int(1), 1)).unwrap();
-        store.put(key.clone(), create_stored_value(Value::Int(2), 2)).unwrap();
+        store
+            .put(key.clone(), create_stored_value(Value::Int(1), 1))
+            .unwrap();
+        store
+            .put(key.clone(), create_stored_value(Value::Int(2), 2))
+            .unwrap();
 
         let retrieved = store.get(&key).unwrap().unwrap();
         assert_eq!(retrieved.value, Value::Int(2));
@@ -2229,8 +2235,12 @@ mod tests {
         let key1 = create_test_key(branch1, "key");
         let key2 = create_test_key(branch2, "key");
 
-        store.put(key1.clone(), create_stored_value(Value::Int(1), 1)).unwrap();
-        store.put(key2.clone(), create_stored_value(Value::Int(2), 1)).unwrap();
+        store
+            .put(key1.clone(), create_stored_value(Value::Int(1), 1))
+            .unwrap();
+        store
+            .put(key2.clone(), create_stored_value(Value::Int(2), 1))
+            .unwrap();
 
         // Different branches, same key name, different values
         assert_eq!(store.get(&key1).unwrap().unwrap().value, Value::Int(1));
@@ -2250,7 +2260,9 @@ mod tests {
         let key3 = create_test_key(branch_id, "batch3");
 
         // First, put key3 so we can delete it
-        store.put(key3.clone(), create_stored_value(Value::Int(999), 1)).unwrap();
+        store
+            .put(key3.clone(), create_stored_value(Value::Int(999), 1))
+            .unwrap();
 
         // Apply batch
         let writes = vec![(key1.clone(), Value::Int(1)), (key2.clone(), Value::Int(2))];
@@ -2275,7 +2287,9 @@ mod tests {
 
         for i in 0..5 {
             let key = create_test_key(branch_id, &format!("key{}", i));
-            store.put(key, create_stored_value(Value::Int(i), 1)).unwrap();
+            store
+                .put(key, create_stored_value(Value::Int(i), 1))
+                .unwrap();
         }
 
         assert_eq!(store.branch_entry_count(&branch_id), 5);
@@ -2297,7 +2311,9 @@ mod tests {
                     let branch_id = BranchId::new();
                     for i in 0..100 {
                         let key = create_test_key(branch_id, &format!("key{}", i));
-                        store.put(key, create_stored_value(Value::Int(i), 1)).unwrap();
+                        store
+                            .put(key, create_stored_value(Value::Int(i), 1))
+                            .unwrap();
                     }
                     branch_id
                 })
@@ -2338,7 +2354,9 @@ mod tests {
         // Insert some keys
         for i in 0..5 {
             let key = create_test_key(branch_id, &format!("key{}", i));
-            store.put(key, create_stored_value(Value::Int(i), 1)).unwrap();
+            store
+                .put(key, create_stored_value(Value::Int(i), 1))
+                .unwrap();
         }
 
         let results = store.list_branch(&branch_id);
@@ -2538,7 +2556,9 @@ mod tests {
         // Insert some data
         for i in 0..5 {
             let key = create_test_key(branch_id, &format!("key{}", i));
-            store.put(key, create_stored_value(Value::Int(i), 1)).unwrap();
+            store
+                .put(key, create_stored_value(Value::Int(i), 1))
+                .unwrap();
         }
 
         assert_eq!(store.branch_entry_count(&branch_id), 5);
@@ -2634,7 +2654,9 @@ mod tests {
 
         // Put some data (version=1)
         let key = create_test_key(branch_id, "test_key");
-        store.put(key.clone(), create_stored_value(Value::Int(42), 1)).unwrap();
+        store
+            .put(key.clone(), create_stored_value(Value::Int(42), 1))
+            .unwrap();
         // Update store version so snapshot can see data at version 1
         store.set_version(1);
 
@@ -2660,7 +2682,9 @@ mod tests {
         // Put some data at version 1
         for i in 0..5 {
             let key = create_test_key(branch_id, &format!("key{}", i));
-            store.put(key, create_stored_value(Value::Int(i), 1)).unwrap();
+            store
+                .put(key, create_stored_value(Value::Int(i), 1))
+                .unwrap();
         }
 
         // Advance store version to 1 so snapshot will see the data
@@ -2692,7 +2716,9 @@ mod tests {
 
         // Add data and increment version
         let key1 = create_test_key(branch_id, "key1");
-        store.put(key1.clone(), create_stored_value(Value::Int(1), 1)).unwrap();
+        store
+            .put(key1.clone(), create_stored_value(Value::Int(1), 1))
+            .unwrap();
         store.next_version();
 
         // Create second snapshot at version 1
@@ -2701,7 +2727,9 @@ mod tests {
 
         // Add more data
         let key2 = create_test_key(branch_id, "key2");
-        store.put(key2.clone(), create_stored_value(Value::Int(2), 2)).unwrap();
+        store
+            .put(key2.clone(), create_stored_value(Value::Int(2), 2))
+            .unwrap();
         store.next_version();
 
         // Create third snapshot at version 2
@@ -4805,7 +4833,9 @@ mod tests {
             key.clone(),
             StoredValue::new(strata_core::value::Value::Int(1), Version::txn(1), None),
         );
-        store.put(key.clone(), StoredValue::tombstone(Version::txn(10))).unwrap();
+        store
+            .put(key.clone(), StoredValue::tombstone(Version::txn(10)))
+            .unwrap();
 
         // BTreeSet not built yet — verify GC handles the None case
         {
@@ -4847,7 +4877,9 @@ mod tests {
         ));
 
         let key = Key::new_kv(ns.clone(), "orphan_tombstone");
-        store.put(key.clone(), StoredValue::tombstone(Version::txn(5))).unwrap();
+        store
+            .put(key.clone(), StoredValue::tombstone(Version::txn(5)))
+            .unwrap();
 
         // gc() on Single is a noop (returns 0), but is_dead() should still
         // detect the single tombstone and remove it
@@ -4878,7 +4910,9 @@ mod tests {
             key.clone(),
             StoredValue::new(strata_core::value::Value::Int(1), Version::txn(1), None),
         );
-        store.put(key.clone(), StoredValue::tombstone(Version::txn(10))).unwrap();
+        store
+            .put(key.clone(), StoredValue::tombstone(Version::txn(10)))
+            .unwrap();
 
         // Trigger BTreeSet build before GC
         {
@@ -4923,7 +4957,9 @@ mod tests {
             key_b.clone(),
             StoredValue::new(strata_core::value::Value::Int(2), Version::txn(2), None),
         );
-        store.put(key_b.clone(), StoredValue::tombstone(Version::txn(10))).unwrap();
+        store
+            .put(key_b.clone(), StoredValue::tombstone(Version::txn(10)))
+            .unwrap();
 
         // Build BTreeSet
         {
@@ -5013,7 +5049,9 @@ mod tests {
             key.clone(),
             StoredValue::new(strata_core::value::Value::Int(1), Version::txn(10), None),
         );
-        store.put(key.clone(), StoredValue::tombstone(Version::txn(20))).unwrap();
+        store
+            .put(key.clone(), StoredValue::tombstone(Version::txn(20)))
+            .unwrap();
 
         // Build BTreeSet to verify it's maintained across progressive GC
         {
@@ -5078,7 +5116,9 @@ mod tests {
         );
 
         // Dead key (tombstone only)
-        store.put(key_dead.clone(), StoredValue::tombstone(Version::txn(2))).unwrap();
+        store
+            .put(key_dead.clone(), StoredValue::tombstone(Version::txn(2)))
+            .unwrap();
 
         // Build BTreeSet — should skip the dead key
         {
@@ -5133,7 +5173,9 @@ mod tests {
 
         // Tombstone beta
         let beta_key = Key::new_kv(ns.clone(), "beta");
-        store.put(beta_key.clone(), StoredValue::tombstone(Version::txn(100))).unwrap();
+        store
+            .put(beta_key.clone(), StoredValue::tombstone(Version::txn(100)))
+            .unwrap();
 
         // Scan before GC — beta should not appear (tombstoned)
         let prefix = Key::new_kv(ns.clone(), "");
@@ -5303,7 +5345,9 @@ mod tests {
         }
 
         // Delete (tombstone) — should clean the TTL entry
-        store.put(key.clone(), StoredValue::tombstone(Version::txn(2))).unwrap();
+        store
+            .put(key.clone(), StoredValue::tombstone(Version::txn(2)))
+            .unwrap();
         {
             let shard = store.shards.get(&key.namespace.branch_id).unwrap();
             assert!(
@@ -5352,7 +5396,9 @@ mod tests {
         }
 
         // Version 2: tombstone (makes it dead after GC)
-        store.put(key.clone(), StoredValue::tombstone(Version::txn(2))).unwrap();
+        store
+            .put(key.clone(), StoredValue::tombstone(Version::txn(2)))
+            .unwrap();
 
         // Tombstone should have cleaned the TTL entry from the put() path
         {
@@ -5568,11 +5614,7 @@ mod tests {
         assert_eq!(stats.per_branch.len(), 2);
 
         // Find branch stats
-        let b1_stats = stats
-            .per_branch
-            .iter()
-            .find(|s| s.branch_id == b1)
-            .unwrap();
+        let b1_stats = stats.per_branch.iter().find(|s| s.branch_id == b1).unwrap();
         assert_eq!(b1_stats.entry_count, 10);
         assert!(b1_stats.estimated_bytes > 0);
     }
@@ -5607,7 +5649,7 @@ mod tests {
         use strata_core::value::Value;
 
         let store = ShardedStore::new(); // unlimited
-        // Create 5 branches
+                                         // Create 5 branches
         let mut branches = Vec::new();
         for i in 0..5 {
             let branch = BranchId::new();
