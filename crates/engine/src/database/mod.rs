@@ -673,6 +673,14 @@ impl Database {
         self.storage.get_direct(key)
     }
 
+    /// Direct single-key read returning only the Value (no VersionedValue).
+    ///
+    /// Skips Version enum and VersionedValue construction. Used by the
+    /// KVStore::get() hot path where version metadata is not needed.
+    pub(crate) fn get_value_direct(&self, key: &Key) -> Option<strata_core::value::Value> {
+        self.storage.get_value_direct(key)
+    }
+
     /// Direct single-key blind write bypassing the full transaction machinery.
     ///
     /// Allocates a version, optionally writes to WAL, and applies directly
