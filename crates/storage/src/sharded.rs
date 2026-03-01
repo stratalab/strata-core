@@ -111,28 +111,18 @@ impl VersionChain {
 
     /// Get the version at or before the given max_version
     ///
-    /// Note: Uses raw u64 comparison since all storage versions are TxnId variants.
-    /// Debug assertions verify this invariant.
+    /// Uses raw u64 comparison. All storage versions are `Version::Txn`
+    /// variants — this invariant is enforced at `StoredValue` construction time.
     pub fn get_at_version(&self, max_version: u64) -> Option<&StoredValue> {
         match &self.versions {
             VersionStorage::Single(sv) => {
-                debug_assert!(
-                    sv.version().is_txn(),
-                    "Storage layer should only contain Txn versions"
-                );
-                if sv.version().as_u64() <= max_version {
+                if sv.version_raw() <= max_version {
                     Some(sv)
                 } else {
                     None
                 }
             }
-            VersionStorage::Multi(deque) => {
-                debug_assert!(
-                    deque.iter().all(|sv| sv.version().is_txn()),
-                    "Storage layer should only contain Txn versions"
-                );
-                deque.iter().find(|sv| sv.version().as_u64() <= max_version)
-            }
+            VersionStorage::Multi(deque) => deque.iter().find(|sv| sv.version_raw() <= max_version),
         }
     }
 
@@ -177,7 +167,7 @@ impl VersionChain {
                 let mut pruned = 0;
                 while deque.len() > 1 {
                     if let Some(oldest) = deque.back() {
-                        if oldest.version().as_u64() < min_version {
+                        if oldest.version_raw() < min_version {
                             deque.pop_back();
                             pruned += 1;
                         } else {
@@ -214,15 +204,11 @@ impl VersionChain {
     pub fn history(&self, limit: Option<usize>, before_version: Option<u64>) -> Vec<&StoredValue> {
         match &self.versions {
             VersionStorage::Single(sv) => {
-                debug_assert!(
-                    sv.version().is_txn(),
-                    "Storage layer should only contain Txn versions"
-                );
                 if limit == Some(0) {
                     return vec![];
                 }
                 let passes_filter = match before_version {
-                    Some(before) => sv.version().as_u64() < before,
+                    Some(before) => sv.version_raw() < before,
                     None => true,
                 };
                 if passes_filter {
@@ -232,14 +218,9 @@ impl VersionChain {
                 }
             }
             VersionStorage::Multi(deque) => {
-                debug_assert!(
-                    deque.iter().all(|sv| sv.version().is_txn()),
-                    "Storage layer should only contain Txn versions"
-                );
-
                 let iter = deque.iter();
                 let filtered: Vec<&StoredValue> = match before_version {
-                    Some(before) => iter.filter(|sv| sv.version().as_u64() < before).collect(),
+                    Some(before) => iter.filter(|sv| sv.version_raw() < before).collect(),
                     None => iter.collect(),
                 };
 
@@ -502,7 +483,7 @@ impl ShardedStore {
                     if sv.is_tombstone() {
                         None
                     } else {
-                        Some(sv.versioned().clone())
+                        Some(sv.versioned())
                     }
                 })
             })
@@ -549,7 +530,7 @@ impl ShardedStore {
             shard.data.get(key).and_then(|chain| {
                 chain.latest().and_then(|sv| {
                     if !sv.is_expired() && !sv.is_tombstone() {
-                        Some(sv.versioned().clone())
+                        Some(sv.versioned())
                     } else {
                         None
                     }
@@ -669,7 +650,7 @@ impl ShardedStore {
             shard.data.get(key).and_then(|chain| {
                 chain.get_at_timestamp(max_timestamp).and_then(|sv| {
                     if !sv.is_expired() && !sv.is_tombstone() {
-                        Some(sv.versioned().clone())
+                        Some(sv.versioned())
                     } else {
                         None
                     }
@@ -700,7 +681,7 @@ impl ShardedStore {
                         shard.data.get(k).and_then(|chain| {
                             chain.get_at_timestamp(max_timestamp).and_then(|sv| {
                                 if !sv.is_expired() && !sv.is_tombstone() {
-                                    Some(((**k).clone(), sv.versioned().clone()))
+                                    Some(((**k).clone(), sv.versioned()))
                                 } else {
                                     None
                                 }
@@ -787,7 +768,7 @@ impl ShardedStore {
                         shard.data.get(k).and_then(|chain| {
                             chain.latest().and_then(|sv| {
                                 if !sv.is_tombstone() {
-                                    Some(((**k).clone(), sv.versioned().clone()))
+                                    Some(((**k).clone(), sv.versioned()))
                                 } else {
                                     None
                                 }
@@ -831,7 +812,7 @@ impl ShardedStore {
                         shard.data.get(k).and_then(|chain| {
                             chain.latest().and_then(|sv| {
                                 if !sv.is_tombstone() {
-                                    Some(((**k).clone(), sv.versioned().clone()))
+                                    Some(((**k).clone(), sv.versioned()))
                                 } else {
                                     None
                                 }
@@ -874,7 +855,7 @@ impl ShardedStore {
                         shard.data.get(k).and_then(|chain| {
                             chain.latest().and_then(|sv| {
                                 if !sv.is_tombstone() {
-                                    Some(((**k).clone(), sv.versioned().clone()))
+                                    Some(((**k).clone(), sv.versioned()))
                                 } else {
                                     None
                                 }
@@ -1088,7 +1069,7 @@ impl ShardedSnapshot {
                         shard.data.get(k).and_then(|chain| {
                             chain.get_at_version(self.version).and_then(|sv| {
                                 if !sv.is_expired() && !sv.is_tombstone() {
-                                    Some(((**k).clone(), sv.versioned().clone()))
+                                    Some(((**k).clone(), sv.versioned()))
                                 } else {
                                     None
                                 }
@@ -1122,7 +1103,7 @@ impl ShardedSnapshot {
                         shard.data.get(k).and_then(|chain| {
                             chain.get_at_version(self.version).and_then(|sv| {
                                 if !sv.is_expired() && !sv.is_tombstone() {
-                                    Some(((**k).clone(), sv.versioned().clone()))
+                                    Some(((**k).clone(), sv.versioned()))
                                 } else {
                                     None
                                 }
@@ -1159,7 +1140,7 @@ impl ShardedSnapshot {
                         shard.data.get(k).and_then(|chain| {
                             chain.get_at_version(self.version).and_then(|sv| {
                                 if !sv.is_expired() && !sv.is_tombstone() {
-                                    Some(((**k).clone(), sv.versioned().clone()))
+                                    Some(((**k).clone(), sv.versioned()))
                                 } else {
                                     None
                                 }
@@ -1252,7 +1233,7 @@ impl Storage for ShardedStore {
                 chain.latest().and_then(|sv| {
                     // Filter out expired values and tombstones
                     if !sv.is_expired() && !sv.is_tombstone() {
-                        Some(sv.versioned().clone())
+                        Some(sv.versioned())
                     } else {
                         None
                     }
@@ -1271,7 +1252,7 @@ impl Storage for ShardedStore {
                 chain.get_at_version(max_version).and_then(|sv| {
                     // Filter out expired values and tombstones
                     if !sv.is_expired() && !sv.is_tombstone() {
-                        Some(sv.versioned().clone())
+                        Some(sv.versioned())
                     } else {
                         None
                     }
@@ -1298,7 +1279,7 @@ impl Storage for ShardedStore {
                     .history(limit, before_version)
                     .into_iter()
                     .filter(|sv| !sv.is_expired())
-                    .map(|sv| sv.versioned().clone())
+                    .map(|sv| sv.versioned())
                     .collect(),
                 None => Vec::new(),
             },
@@ -1353,7 +1334,7 @@ impl Storage for ShardedStore {
                         shard.data.get(k).and_then(|chain| {
                             chain.get_at_version(max_version).and_then(|sv| {
                                 if !sv.is_expired() && !sv.is_tombstone() {
-                                    Some(((**k).clone(), sv.versioned().clone()))
+                                    Some(((**k).clone(), sv.versioned()))
                                 } else {
                                     None
                                 }
@@ -1384,7 +1365,7 @@ impl Storage for ShardedStore {
                         chain.get_at_version(max_version).and_then(|sv| {
                             // Filter out expired values and tombstones
                             if !sv.is_expired() && !sv.is_tombstone() {
-                                Some(((**k).clone(), sv.versioned().clone()))
+                                Some(((**k).clone(), sv.versioned()))
                             } else {
                                 None
                             }
@@ -1475,7 +1456,7 @@ impl SnapshotView for ShardedSnapshot {
                         shard.data.get(k).and_then(|chain| {
                             chain.get_at_version(self.version).and_then(|sv| {
                                 if !sv.is_expired() && !sv.is_tombstone() {
-                                    Some(((**k).clone(), sv.versioned().clone()))
+                                    Some(((**k).clone(), sv.versioned()))
                                 } else {
                                     None
                                 }
