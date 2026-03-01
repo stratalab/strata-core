@@ -162,6 +162,11 @@ impl StoredValue {
     /// Returns an owned `VersionedValue` since the inner fields are no longer
     /// stored as a `VersionedValue` struct. Every caller previously did
     /// `.versioned().clone()`, so returning owned is a zero-cost change.
+    ///
+    /// **Clone cost (B6):** This method clones the inner `Value` on every call.
+    /// Wrapping `Value` in `Arc<Value>` would eliminate the clone but requires
+    /// changes to the public SDK API (`VersionedValue.value` field type).
+    /// Deferred until SDK breaking-change window.
     #[inline]
     pub fn versioned(&self) -> VersionedValue {
         VersionedValue {
