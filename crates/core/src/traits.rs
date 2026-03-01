@@ -240,6 +240,23 @@ pub trait SnapshotView: Send + Sync {
     /// Returns an error if the storage operation fails.
     fn scan_prefix(&self, prefix: &Key) -> StrataResult<Vec<(Key, VersionedValue)>>;
 
+    /// Get just the value and raw version for a key.
+    ///
+    /// Returns `(Value, u64)` without constructing a full `VersionedValue`.
+    /// Used by the transaction read path where only the value and version
+    /// number are needed (for conflict detection).
+    ///
+    /// Default implementation delegates to `get()` and destructures.
+    /// Implementations can override for efficiency (e.g., skipping
+    /// `Version::Txn` enum construction).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the storage operation fails.
+    fn get_value_and_version(&self, key: &Key) -> StrataResult<Option<(Value, u64)>> {
+        Ok(self.get(key)?.map(|vv| (vv.value, vv.version.as_u64())))
+    }
+
     /// Get snapshot version
     ///
     /// Returns the version this snapshot was created at.

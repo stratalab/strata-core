@@ -539,6 +539,26 @@ impl ShardedStore {
         })
     }
 
+    /// Direct single-key read returning only the Value (no VersionedValue construction).
+    ///
+    /// Avoids constructing `Version` enum and `VersionedValue` struct when only
+    /// the value is needed. Used by the `KVStore::get()` hot path.
+    #[inline]
+    pub fn get_value_direct(&self, key: &Key) -> Option<Value> {
+        let branch_id = key.namespace.branch_id;
+        self.shards.get(&branch_id).and_then(|shard| {
+            shard.data.get(key).and_then(|chain| {
+                chain.latest().and_then(|sv| {
+                    if !sv.is_expired() && !sv.is_tombstone() {
+                        Some(sv.value().clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+        })
+    }
+
     /// Apply a batch of writes and deletes atomically
     ///
     /// All operations in the batch are applied with the given version.
@@ -1466,6 +1486,25 @@ impl SnapshotView for ShardedSnapshot {
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    /// Get just the value and raw version, skipping VersionedValue construction.
+    ///
+    /// Avoids `Version::Txn` enum construction — returns raw `u64` directly
+    /// from the `StoredValue`. Used by the transaction read path.
+    fn get_value_and_version(&self, key: &Key) -> StrataResult<Option<(Value, u64)>> {
+        let branch_id = key.namespace.branch_id;
+        Ok(self.store.shards.get(&branch_id).and_then(|shard| {
+            shard.data.get(key).and_then(|chain| {
+                chain.get_at_version(self.version).and_then(|sv| {
+                    if !sv.is_expired() && !sv.is_tombstone() {
+                        Some((sv.value().clone(), sv.version_raw()))
+                    } else {
+                        None
+                    }
+                })
+            })
+        }))
     }
 
     /// Get snapshot version

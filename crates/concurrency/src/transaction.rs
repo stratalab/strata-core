@@ -578,24 +578,26 @@ impl TransactionContext {
     /// Read from snapshot and track in read_set
     ///
     /// This is the core read path that tracks reads for conflict detection.
+    /// Uses `get_value_and_version()` to skip full VersionedValue construction,
+    /// and moves the value instead of cloning.
     fn read_from_snapshot(&mut self, key: &Key) -> StrataResult<Option<Value>> {
         let snapshot = self.snapshot.as_ref().ok_or_else(|| {
             StrataError::invalid_input("Transaction has no snapshot for reads".to_string())
         })?;
 
-        let versioned = snapshot.get(key)?;
-
-        // Track in read_set for conflict detection
-        if let Some(ref vv) = versioned {
-            // Key exists - track its version (as u64 for comparison)
-            self.read_set.insert(key.clone(), vv.version.as_u64());
-            Ok(Some(vv.value.clone()))
-        } else {
-            // Key doesn't exist - track with version 0
-            // This is important: if someone creates this key before we commit,
-            // we have a conflict (we assumed it didn't exist)
-            self.read_set.insert(key.clone(), 0);
-            Ok(None)
+        match snapshot.get_value_and_version(key)? {
+            Some((value, version)) => {
+                // Key exists - track its version for conflict detection
+                self.read_set.insert(key.clone(), version);
+                Ok(Some(value)) // already owned, no clone needed
+            }
+            None => {
+                // Key doesn't exist - track with version 0
+                // This is important: if someone creates this key before we commit,
+                // we have a conflict (we assumed it didn't exist)
+                self.read_set.insert(key.clone(), 0);
+                Ok(None)
+            }
         }
     }
 
