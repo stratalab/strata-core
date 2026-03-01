@@ -713,11 +713,11 @@ impl Database {
             return Ok(version);
         }
 
-        let txn_id = self.coordinator.next_txn_id();
+        let txn_id = self.coordinator.next_txn_id()?;
         let start_version = self.coordinator.current_version();
         self.coordinator.record_start(txn_id, start_version);
 
-        let commit_version = self.coordinator.allocate_commit_version();
+        let commit_version = self.coordinator.allocate_commit_version()?;
 
         // WAL write (if needed for durability)
         if self.durability_mode.requires_wal() {
@@ -1719,7 +1719,7 @@ impl Database {
         F: FnOnce(&mut TransactionContext) -> StrataResult<T>,
     {
         self.check_accepting()?;
-        let mut txn = self.begin_transaction(branch_id);
+        let mut txn = self.begin_transaction(branch_id)?;
         let result = f(&mut txn);
         let outcome = self.run_single_attempt(&mut txn, result, self.durability_mode);
         self.end_transaction(txn);
@@ -1752,7 +1752,7 @@ impl Database {
         F: FnOnce(&mut TransactionContext) -> StrataResult<T>,
     {
         self.check_accepting()?;
-        let mut txn = self.begin_transaction(branch_id);
+        let mut txn = self.begin_transaction(branch_id)?;
         let result = f(&mut txn);
         let outcome = self.run_single_attempt(&mut txn, result, self.durability_mode);
         self.end_transaction(txn);
@@ -1801,7 +1801,7 @@ impl Database {
         let mut last_error = None;
 
         for attempt in 0..=config.max_retries {
-            let mut txn = self.begin_transaction(branch_id);
+            let mut txn = self.begin_transaction(branch_id)?;
             let result = f(&mut txn);
             let outcome = self.run_single_attempt(&mut txn, result, self.durability_mode);
             self.end_transaction(txn);
@@ -1840,20 +1840,33 @@ impl Database {
     ///
     /// # Example
     /// ```text
-    /// let mut txn = db.begin_transaction(branch_id);
+    /// let mut txn = db.begin_transaction(branch_id)?;
     /// txn.put(key, value)?;
     /// db.commit_transaction(&mut txn)?;
     /// db.end_transaction(txn); // Return to pool
     /// ```
-    pub fn begin_transaction(&self, branch_id: BranchId) -> TransactionContext {
-        let txn_id = self.coordinator.next_txn_id();
+    pub fn begin_transaction(&self, branch_id: BranchId) -> StrataResult<TransactionContext> {
+        let txn_id = self.coordinator.next_txn_id()?;
         let snapshot = self.storage.create_snapshot();
         let snapshot_version = snapshot.version();
         self.coordinator.record_start(txn_id, snapshot_version);
 
         let mut txn = TransactionPool::acquire(txn_id, branch_id, Some(Box::new(snapshot)));
         txn.set_max_write_entries(self.coordinator.max_write_buffer_entries());
-        txn
+        Ok(txn)
+    }
+
+    /// Begin a read-only transaction
+    ///
+    /// Returns a transaction that rejects writes and skips read-set tracking,
+    /// saving memory on large scan workloads.
+    pub fn begin_read_only_transaction(
+        &self,
+        branch_id: BranchId,
+    ) -> StrataResult<TransactionContext> {
+        let mut txn = self.begin_transaction(branch_id)?;
+        txn.set_read_only(true);
+        Ok(txn)
     }
 
     /// End a transaction (return to pool)
@@ -1869,7 +1882,7 @@ impl Database {
     ///
     /// # Example
     /// ```text
-    /// let mut txn = db.begin_transaction(branch_id);
+    /// let mut txn = db.begin_transaction(branch_id)?;
     /// txn.put(key, value)?;
     /// db.commit_transaction(&mut txn)?;
     /// db.end_transaction(txn); // Return to pool for reuse
@@ -2582,7 +2595,7 @@ mod tests {
         let key = Key::new_kv(ns, "manual_key");
 
         // Manual transaction control
-        let mut txn = db.begin_transaction(branch_id);
+        let mut txn = db.begin_transaction(branch_id).unwrap();
         txn.put(key.clone(), Value::Int(123)).unwrap();
 
         // Commit manually
@@ -2922,7 +2935,7 @@ mod tests {
         }
 
         // Start a transaction but don't commit it yet — pins version
-        let txn = db.begin_transaction(branch_id);
+        let txn = db.begin_transaction(branch_id).unwrap();
         let txn_start_version = txn.start_version;
 
         // Commit two more transactions to advance version further

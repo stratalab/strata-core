@@ -45,6 +45,9 @@ pub enum CommitError {
     /// A storage I/O error occurred while reading current versions for
     /// conflict detection. The transaction is aborted to prevent incorrect commits.
     StorageError(String),
+
+    /// Counter overflow (transaction ID or version counter reached u64::MAX)
+    CounterOverflow(String),
 }
 
 impl std::fmt::Display for CommitError {
@@ -56,6 +59,7 @@ impl std::fmt::Display for CommitError {
             CommitError::InvalidState(msg) => write!(f, "Invalid state: {}", msg),
             CommitError::WALError(msg) => write!(f, "WAL error: {}", msg),
             CommitError::StorageError(msg) => write!(f, "Storage error during validation: {}", msg),
+            CommitError::CounterOverflow(msg) => write!(f, "Counter overflow: {}", msg),
         }
     }
 }
@@ -78,6 +82,9 @@ impl From<CommitError> for StrataError {
                 message: format!("Storage error during validation: {}", msg),
                 source: None,
             },
+            CommitError::CounterOverflow(msg) => {
+                StrataError::capacity_exceeded(msg, usize::MAX, usize::MAX)
+            }
         }
     }
 }
@@ -352,6 +359,14 @@ pub trait JsonStoreExt {
 /// 2. **READ/WRITE**: Use `get()`, `put()`, `delete()`, `cas()`
 /// 3. **VALIDATE**: Call `mark_validating()`, check for conflicts
 /// 4. **COMMIT/ABORT**: Call `mark_committed()` or `mark_aborted()`
+///
+/// # Future: Savepoints
+///
+/// A future enhancement could add savepoint support (partial rollback
+/// within a transaction). This would allow `SAVEPOINT name` /
+/// `ROLLBACK TO name` semantics by snapshotting the write/delete/cas
+/// sets at savepoint time and restoring them on rollback. Deferred
+/// to a later milestone.
 pub struct TransactionContext {
     // Identity
     /// Unique transaction ID
@@ -434,6 +449,12 @@ pub struct TransactionContext {
     /// Maximum entries allowed in the write buffer (0 = unlimited).
     /// Counts puts + deletes + CAS operations.
     max_write_entries: usize,
+
+    /// Per-transaction read-only mode.
+    ///
+    /// When true, writes are rejected and read-set tracking is skipped,
+    /// saving memory on large scan workloads.
+    read_only: bool,
 }
 
 impl TransactionContext {
@@ -477,6 +498,7 @@ impl TransactionContext {
             status: TransactionStatus::Active,
             start_time: Instant::now(),
             max_write_entries: 0,
+            read_only: false,
         }
     }
 
@@ -526,6 +548,7 @@ impl TransactionContext {
             status: TransactionStatus::Active,
             start_time: Instant::now(),
             max_write_entries: 0,
+            read_only: false,
         }
     }
 
@@ -594,14 +617,18 @@ impl TransactionContext {
         match snapshot.get_value_and_version(key)? {
             Some((value, version)) => {
                 // Key exists - track its version for conflict detection
-                self.read_set.insert(key.clone(), version);
+                if !self.read_only {
+                    self.read_set.insert(key.clone(), version);
+                }
                 Ok(Some(value)) // already owned, no clone needed
             }
             None => {
                 // Key doesn't exist - track with version 0
                 // This is important: if someone creates this key before we commit,
                 // we have a conflict (we assumed it didn't exist)
-                self.read_set.insert(key.clone(), 0);
+                if !self.read_only {
+                    self.read_set.insert(key.clone(), 0);
+                }
                 Ok(None)
             }
         }
@@ -646,11 +673,13 @@ impl TransactionContext {
 
         let versioned = snapshot.get(key)?;
 
-        // Track in read_set for conflict detection
-        if let Some(ref vv) = versioned {
-            self.read_set.insert(key.clone(), vv.version.as_u64());
-        } else {
-            self.read_set.insert(key.clone(), 0);
+        // Track in read_set for conflict detection (skip in read-only mode)
+        if !self.read_only {
+            if let Some(ref vv) = versioned {
+                self.read_set.insert(key.clone(), vv.version.as_u64());
+            } else {
+                self.read_set.insert(key.clone(), 0);
+            }
         }
 
         Ok(versioned)
@@ -714,7 +743,9 @@ impl TransactionContext {
             // This is important for conflict detection: if another transaction modifies
             // a key we observed during scan (even if we're deleting it), we should detect
             // the conflict. Otherwise, our delete could overwrite concurrent updates.
-            self.read_set.insert(key.clone(), vv.version.as_u64());
+            if !self.read_only {
+                self.read_set.insert(key.clone(), vv.version.as_u64());
+            }
 
             if !self.delete_set.contains(&key) {
                 // Only include non-deleted keys in the result set
@@ -747,6 +778,19 @@ impl TransactionContext {
     /// Set the maximum number of write buffer entries (0 = unlimited).
     pub fn set_max_write_entries(&mut self, max: usize) {
         self.max_write_entries = max;
+    }
+
+    /// Enable or disable per-transaction read-only mode.
+    ///
+    /// When enabled, write operations (`put`, `delete`, `cas`) are rejected
+    /// and read-set tracking is skipped, saving memory on large scans.
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
+    }
+
+    /// Check if this transaction is in per-transaction read-only mode.
+    pub fn is_read_only_mode(&self) -> bool {
+        self.read_only
     }
 
     /// Check if the write buffer has exceeded the configured limit.
@@ -807,6 +851,11 @@ impl TransactionContext {
     /// ```
     pub fn put(&mut self, key: Key, value: Value) -> StrataResult<()> {
         self.ensure_active()?;
+        if self.read_only {
+            return Err(StrataError::invalid_input(
+                "Cannot write in a read-only transaction",
+            ));
+        }
         self.check_write_limit(Some(&key))?;
 
         // Remove from delete_set if previously deleted in this txn
@@ -847,6 +896,11 @@ impl TransactionContext {
     /// ```
     pub fn delete(&mut self, key: Key) -> StrataResult<()> {
         self.ensure_active()?;
+        if self.read_only {
+            return Err(StrataError::invalid_input(
+                "Cannot write in a read-only transaction",
+            ));
+        }
         self.check_write_limit(Some(&key))?;
 
         // Remove from write_set if previously written in this txn
@@ -893,8 +947,40 @@ impl TransactionContext {
     /// ```
     pub fn cas(&mut self, key: Key, expected_version: u64, new_value: Value) -> StrataResult<()> {
         self.ensure_active()?;
+        if self.read_only {
+            return Err(StrataError::invalid_input(
+                "Cannot write in a read-only transaction",
+            ));
+        }
         self.check_write_limit(None)?;
 
+        self.cas_set.push(CASOperation {
+            key,
+            expected_version,
+            new_value,
+        });
+        Ok(())
+    }
+
+    /// Compare-and-swap with automatic read-set tracking.
+    ///
+    /// Like `cas()`, but also reads the key from the snapshot to populate
+    /// the read-set. This gives BOTH CAS validation AND read-set protection.
+    /// Equivalent to `txn.get(&key)?; txn.cas(key, expected_version, value)?;`
+    pub fn cas_with_read(
+        &mut self,
+        key: Key,
+        expected_version: u64,
+        new_value: Value,
+    ) -> StrataResult<()> {
+        self.ensure_active()?;
+        if self.read_only {
+            return Err(StrataError::invalid_input(
+                "Cannot write in a read-only transaction",
+            ));
+        }
+        self.check_write_limit(None)?;
+        self.read_from_snapshot(&key)?;
         self.cas_set.push(CASOperation {
             key,
             expected_version,
@@ -1470,6 +1556,7 @@ impl TransactionContext {
         // Reset state
         self.status = TransactionStatus::Active;
         self.start_time = Instant::now();
+        self.read_only = false;
     }
 
     /// Get current capacity of internal collections (for debugging/testing)
@@ -1925,5 +2012,231 @@ mod tests {
 
         // Capacity should be preserved (not shrunk)
         assert_eq!(txn.write_set.capacity(), cap_before);
+    }
+
+    // ========================================================================
+    // Read-Only Mode Tests
+    // ========================================================================
+
+    #[test]
+    fn test_read_only_skips_read_set() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let mut data = BTreeMap::new();
+        let key = test_key(&ns, "k1");
+        data.insert(
+            key.clone(),
+            VersionedValue {
+                value: Value::Int(42),
+                version: Version::Txn(1),
+                timestamp: strata_core::Timestamp::from_micros(0),
+            },
+        );
+        let snapshot = Box::new(ClonedSnapshotView::new(1, data));
+        let mut txn = TransactionContext::with_snapshot(1, branch_id, snapshot);
+        txn.set_read_only(true);
+
+        // Read should succeed
+        let val = txn.get(&key).unwrap();
+        assert_eq!(val, Some(Value::Int(42)));
+
+        // But read_set should be empty
+        assert!(
+            txn.read_set.is_empty(),
+            "read_set should be empty in read-only mode"
+        );
+    }
+
+    #[test]
+    fn test_read_only_rejects_put() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let mut txn = TransactionContext::new(1, branch_id, 0);
+        txn.set_read_only(true);
+
+        let key = test_key(&ns, "k1");
+        let result = txn.put(key, Value::Int(1));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_only_rejects_delete() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let mut txn = TransactionContext::new(1, branch_id, 0);
+        txn.set_read_only(true);
+
+        let key = test_key(&ns, "k1");
+        let result = txn.delete(key);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_only_rejects_cas() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let mut txn = TransactionContext::new(1, branch_id, 0);
+        txn.set_read_only(true);
+
+        let key = test_key(&ns, "k1");
+        let result = txn.cas(key, 0, Value::Int(1));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_only_reset_clears_flag() {
+        let branch_id = BranchId::new();
+        let mut txn = TransactionContext::new(1, branch_id, 0);
+        txn.set_read_only(true);
+        assert!(txn.is_read_only_mode());
+
+        let snap = Box::new(ClonedSnapshotView::empty(100));
+        txn.reset(2, branch_id, Some(snap));
+        assert!(
+            !txn.is_read_only_mode(),
+            "read_only should be cleared after reset"
+        );
+    }
+
+    // ========================================================================
+    // CAS with Read Tests
+    // ========================================================================
+
+    #[test]
+    fn test_cas_with_read_populates_read_set() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let key = test_key(&ns, "k1");
+        let mut data = BTreeMap::new();
+        data.insert(
+            key.clone(),
+            VersionedValue {
+                value: Value::Int(10),
+                version: Version::Txn(5),
+                timestamp: strata_core::Timestamp::from_micros(0),
+            },
+        );
+        let snapshot = Box::new(ClonedSnapshotView::new(5, data));
+        let mut txn = TransactionContext::with_snapshot(1, branch_id, snapshot);
+
+        txn.cas_with_read(key.clone(), 5, Value::Int(20)).unwrap();
+
+        // read_set should contain the key (from the read)
+        assert_eq!(txn.read_set.get(&key), Some(&5));
+        // cas_set should have the CAS operation
+        assert_eq!(txn.cas_set.len(), 1);
+        assert_eq!(txn.cas_set[0].expected_version, 5);
+    }
+
+    #[test]
+    fn test_cas_with_read_nonexistent_key_tracks_version_zero() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let key = test_key(&ns, "missing");
+        // Empty snapshot — key doesn't exist
+        let snapshot = Box::new(ClonedSnapshotView::new(1, BTreeMap::new()));
+        let mut txn = TransactionContext::with_snapshot(1, branch_id, snapshot);
+
+        txn.cas_with_read(key.clone(), 0, Value::Int(1)).unwrap();
+
+        // Non-existent key should be tracked with version 0
+        assert_eq!(txn.read_set.get(&key), Some(&0));
+        assert_eq!(txn.cas_set.len(), 1);
+    }
+
+    #[test]
+    fn test_cas_with_read_rejects_read_only() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let snapshot = Box::new(ClonedSnapshotView::new(1, BTreeMap::new()));
+        let mut txn = TransactionContext::with_snapshot(1, branch_id, snapshot);
+        txn.set_read_only(true);
+
+        let key = test_key(&ns, "k1");
+        let result = txn.cas_with_read(key, 0, Value::Int(1));
+        assert!(result.is_err());
+        assert!(
+            format!("{}", result.unwrap_err()).contains("read-only"),
+            "Error should mention read-only"
+        );
+    }
+
+    #[test]
+    fn test_read_only_get_versioned_skips_read_set() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let key = test_key(&ns, "k1");
+        let mut data = BTreeMap::new();
+        data.insert(
+            key.clone(),
+            VersionedValue {
+                value: Value::Int(42),
+                version: Version::Txn(7),
+                timestamp: strata_core::Timestamp::from_micros(0),
+            },
+        );
+        let snapshot = Box::new(ClonedSnapshotView::new(7, data));
+        let mut txn = TransactionContext::with_snapshot(1, branch_id, snapshot);
+        txn.set_read_only(true);
+
+        // get_versioned should return the value
+        let result = txn.get_versioned(&key).unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().version.as_u64(), 7);
+
+        // But read_set should remain empty
+        assert!(
+            txn.read_set.is_empty(),
+            "read_set should be empty after get_versioned in read-only mode"
+        );
+    }
+
+    #[test]
+    fn test_read_only_get_versioned_nonexistent_skips_read_set() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let snapshot = Box::new(ClonedSnapshotView::new(1, BTreeMap::new()));
+        let mut txn = TransactionContext::with_snapshot(1, branch_id, snapshot);
+        txn.set_read_only(true);
+
+        let key = test_key(&ns, "missing");
+        let result = txn.get_versioned(&key).unwrap();
+        assert!(result.is_none());
+
+        // Non-existent key lookup should also skip read_set
+        assert!(
+            txn.read_set.is_empty(),
+            "read_set should be empty for non-existent key in read-only mode"
+        );
+    }
+
+    #[test]
+    fn test_read_only_scan_prefix_skips_read_set() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let mut data = BTreeMap::new();
+        for i in 0..3 {
+            data.insert(
+                test_key(&ns, &format!("pfx:{}", i)),
+                VersionedValue {
+                    value: Value::Int(i as i64),
+                    version: Version::Txn(1),
+                    timestamp: strata_core::Timestamp::from_micros(0),
+                },
+            );
+        }
+        let snapshot = Box::new(ClonedSnapshotView::new(1, data));
+        let mut txn = TransactionContext::with_snapshot(1, branch_id, snapshot);
+        txn.set_read_only(true);
+
+        let prefix = test_key(&ns, "pfx:");
+        let results = txn.scan_prefix(&prefix).unwrap();
+        assert_eq!(results.len(), 3);
+
+        // All 3 keys scanned, but read_set should be empty
+        assert!(
+            txn.read_set.is_empty(),
+            "read_set should be empty after scan_prefix in read-only mode"
+        );
     }
 }

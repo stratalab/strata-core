@@ -784,7 +784,7 @@ mod tests {
 
         // Start a manual transaction, read, then check the versioned read
         // is consistent even if a concurrent write happens
-        let mut txn = db.begin_transaction(branch_id);
+        let mut txn = db.begin_transaction(branch_id).unwrap();
         let ns = Arc::new(Namespace::for_branch(branch_id));
         let storage_key = strata_core::types::Key::new_kv(ns.clone(), "iso_key");
         let vv = txn.get_versioned(&storage_key).unwrap().unwrap();

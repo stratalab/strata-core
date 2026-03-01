@@ -317,7 +317,7 @@ fn durability_uncommitted_lost() {
     let branch_id = test_db.branch_id;
 
     // Start transaction but don't commit
-    let _ctx = test_db.db.begin_transaction(branch_id);
+    let _ctx = test_db.db.begin_transaction(branch_id).unwrap();
 
     // End without commit (let it drop)
     test_db.db.end_transaction(_ctx);

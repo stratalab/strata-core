@@ -1,9 +1,37 @@
-//! Transaction validation for OCC
+//! Transaction validation for OCC (Optimistic Concurrency Control)
 //!
 //! This module implements conflict detection per Section 3 of
 //! `docs/architecture/M2_TRANSACTION_SEMANTICS.md`.
 //!
-//! Key rules from the spec:
+//! # Snapshot Isolation Semantics
+//!
+//! Strata uses **Snapshot Isolation (SI)** with first-committer-wins:
+//!
+//! - Each transaction reads from a consistent point-in-time snapshot.
+//! - At commit, only the **read-set** is validated: if any key read by
+//!   the transaction was modified (version changed) since the snapshot,
+//!   the transaction aborts.
+//! - **Blind writes** (writes without a preceding read) never conflict.
+//!
+//! # Write Skew
+//!
+//! SI intentionally **allows** write skew. Write skew occurs when two
+//! transactions each read disjoint keys but write to the other's read
+//! key, and both commit:
+//!
+//! ```text
+//! T1: read(A), write(B)
+//! T2: read(B), write(A)
+//! // Both pass validation → both commit → write skew
+//! ```
+//!
+//! Mitigation strategies:
+//! - Use `cas()` or `cas_with_read()` for atomic check-and-set
+//! - Combine reads and writes on the same key
+//! - Use application-level locking for invariants that span keys
+//!
+//! # Key rules from the spec
+//!
 //! - First-committer-wins based on READ-SET, not write-set
 //! - Blind writes (write without read) do NOT conflict
 //! - CAS is validated separately from read-set
@@ -231,6 +259,19 @@ pub fn validate_cas_set<S: Storage>(
 /// Per M5 spec: JSON conflict detection is document-level (conservative).
 /// If any JSON document read during the transaction has been modified,
 /// the transaction must abort.
+///
+/// # Document-Level vs Path-Level Detection
+///
+/// This uses **document-level** (conservative) detection: if a JSON
+/// document's version changed at all, the transaction aborts — even if
+/// the modified paths don't overlap with the paths read by the
+/// transaction. This is simpler and cheaper than path-level tracking,
+/// but may cause false positives when concurrent transactions modify
+/// disjoint paths within the same document.
+///
+/// Path-level detection would reduce false positives but requires
+/// tracking every path read and comparing against every path written,
+/// adding O(paths_read × paths_written) overhead per document.
 ///
 /// # Arguments
 /// * `json_snapshot_versions` - Document keys and their versions at read time

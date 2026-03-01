@@ -51,9 +51,12 @@ fn parallel_commits_different_runs_no_contention() {
 
                 // Each thread commits 10 transactions
                 for i in 0..10 {
-                    let txn_id = manager.next_txn_id();
-                    let mut txn =
-                        TransactionContext::new(txn_id, branch_id, manager.allocate_version());
+                    let txn_id = manager.next_txn_id().unwrap();
+                    let mut txn = TransactionContext::new(
+                        txn_id,
+                        branch_id,
+                        manager.allocate_version().unwrap(),
+                    );
 
                     // Read and write
                     let v = Storage::get(&*store, &key)
@@ -141,7 +144,7 @@ fn high_contention_single_key() {
                         let read_version = current.version.as_u64();
 
                         // Create transaction
-                        let txn_id = manager.next_txn_id();
+                        let txn_id = manager.next_txn_id().unwrap();
                         let mut txn = TransactionContext::new(txn_id, branch_id, read_version);
                         txn.read_set.insert(key.clone(), read_version);
                         txn.write_set
@@ -250,7 +253,7 @@ fn version_allocation_is_unique() {
                 barrier.wait();
                 let mut versions = Vec::with_capacity(1000);
                 for _ in 0..1000 {
-                    versions.push(manager.allocate_version());
+                    versions.push(manager.allocate_version().unwrap());
                 }
                 versions
             })
@@ -289,7 +292,7 @@ fn txn_id_allocation_is_unique() {
                 barrier.wait();
                 let mut ids = Vec::with_capacity(100);
                 for _ in 0..100 {
-                    ids.push(manager.next_txn_id());
+                    ids.push(manager.next_txn_id().unwrap());
                 }
                 ids
             })
@@ -322,9 +325,9 @@ fn txn_id_allocation_is_unique() {
 fn manager_version_monotonically_increases() {
     let manager = TransactionManager::new(100);
 
-    let v1 = manager.allocate_version();
-    let v2 = manager.allocate_version();
-    let v3 = manager.allocate_version();
+    let v1 = manager.allocate_version().unwrap();
+    let v2 = manager.allocate_version().unwrap();
+    let v3 = manager.allocate_version().unwrap();
 
     assert!(v2 > v1);
     assert!(v3 > v2);
@@ -334,7 +337,7 @@ fn manager_version_monotonically_increases() {
 fn manager_with_initial_version() {
     let manager = TransactionManager::new(1000);
 
-    let v1 = manager.allocate_version();
+    let v1 = manager.allocate_version().unwrap();
     assert!(v1 >= 1000, "First version should be >= initial");
 }
 
@@ -343,7 +346,7 @@ fn manager_with_txn_id_recovery() {
     // Simulating recovery where we need to continue from a known max txn_id
     let manager = TransactionManager::with_txn_id(100, 500);
 
-    let txn_id = manager.next_txn_id();
+    let txn_id = manager.next_txn_id().unwrap();
     assert!(txn_id > 500, "Txn ID should continue from max");
 }
 
@@ -389,8 +392,8 @@ fn rapid_transaction_creation() {
     // Create many transactions rapidly
     let txns: Vec<_> = (0..1000)
         .map(|_| {
-            let txn_id = manager.next_txn_id();
-            let start_version = manager.allocate_version();
+            let txn_id = manager.next_txn_id().unwrap();
+            let start_version = manager.allocate_version().unwrap();
             TransactionContext::new(txn_id, branch_id, start_version)
         })
         .collect();

@@ -207,7 +207,7 @@ impl Session {
         };
 
         let core_branch_id = to_core_branch_id(&branch)?;
-        let ctx = self.db.begin_transaction(core_branch_id);
+        let ctx = self.db.begin_transaction(core_branch_id)?;
         self.txn_ctx = Some(ctx);
         self.txn_branch_id = Some(core_branch_id);
 

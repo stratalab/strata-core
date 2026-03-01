@@ -30,17 +30,22 @@ use strata_core::types::Key;
 use strata_core::StrataResult;
 use strata_core::VersionedValue;
 
-/// M2 Implementation: Clone-based snapshot
+/// Clone-based snapshot (O(n) deep copy).
 ///
 /// Creates an immutable, isolated view of storage by cloning the data
-/// at snapshot creation time.
+/// at snapshot creation time. This is primarily used in **tests** and
+/// **recovery** where simplicity matters more than performance.
 ///
-/// # Known Limitations (Acceptable for M2)
+/// For production transaction workloads, prefer `ShardedSnapshot` from
+/// `strata_storage`, which provides O(1) snapshot creation via
+/// lock-free DashMap iteration.
+///
+/// # Known Limitations
 ///
 /// - **Memory**: O(data_size) per active transaction
 /// - **Time**: O(data_size) per snapshot creation
 ///
-/// # Why This is Acceptable for M2
+/// # Why This Exists
 ///
 /// - Agent workloads have small working sets (<100MB typical)
 /// - Transactions are short-lived (<1 second)

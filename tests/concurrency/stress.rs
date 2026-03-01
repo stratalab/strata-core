@@ -59,7 +59,7 @@ fn stress_concurrent_read_write() {
                         let current = Storage::get(&*store, &key).unwrap().unwrap();
                         let version = current.version.as_u64();
 
-                        let txn_id = manager.next_txn_id();
+                        let txn_id = manager.next_txn_id().unwrap();
                         let mut txn = TransactionContext::new(txn_id, branch_id, version);
                         txn.read_set.insert(key.clone(), version);
                         txn.write_set
@@ -122,7 +122,7 @@ fn stress_transaction_throughput() {
         let current = Storage::get(&*store, &key).unwrap().unwrap();
         let version = current.version.as_u64();
 
-        let txn_id = manager.next_txn_id();
+        let txn_id = manager.next_txn_id().unwrap();
         let mut txn = TransactionContext::new(txn_id, branch_id, version);
         txn.read_set.insert(key.clone(), version);
 
@@ -215,7 +215,7 @@ fn stress_many_branches() {
                 barrier.wait();
 
                 for i in 0..100 {
-                    let txn_id = manager.next_txn_id();
+                    let txn_id = manager.next_txn_id().unwrap();
                     let mut txn = TransactionContext::new(txn_id, branch_id, 1);
                     txn.write_set.insert(key.clone(), Value::Int(i));
 
@@ -326,7 +326,7 @@ fn stress_sustained_workload() {
                         let current = Storage::get(&*store, &key).unwrap().unwrap();
                         let version = current.version.as_u64();
 
-                        let txn_id = manager.next_txn_id();
+                        let txn_id = manager.next_txn_id().unwrap();
                         let mut txn = TransactionContext::new(txn_id, branch_id, version);
                         txn.read_set.insert(key.clone(), version);
                         txn.write_set

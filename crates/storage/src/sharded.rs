@@ -425,9 +425,12 @@ impl ShardedStore {
         self.version.load(Ordering::Acquire)
     }
 
-    /// Increment version and return new value
+    /// Increment version and return new value.
     ///
-    /// Uses wrapping arithmetic to prevent panic at u64::MAX.
+    /// Uses wrapping arithmetic intentionally — this is a storage-local
+    /// counter (not the global MVCC version in `TransactionManager`).
+    /// Wrapping at u64::MAX is safe here because the counter is only
+    /// used for snapshot ordering within a single `ShardedStore` instance.
     /// In practice, overflow is extremely unlikely (~584 years at 1B versions/sec).
     #[inline]
     pub fn next_version(&self) -> u64 {
