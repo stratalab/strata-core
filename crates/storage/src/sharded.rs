@@ -4612,18 +4612,17 @@ mod tests {
         let key = Key::new_kv(ns.clone(), "victim");
         store.put(
             key.clone(),
-            StoredValue::new(
-                strata_core::value::Value::Int(1),
-                Version::txn(1),
-                None,
-            ),
+            StoredValue::new(strata_core::value::Value::Int(1), Version::txn(1), None),
         );
         store.put(key.clone(), StoredValue::tombstone(Version::txn(10)));
 
         // BTreeSet not built yet — verify GC handles the None case
         {
             let shard = store.shards.get(&branch_id).unwrap();
-            assert!(shard.ordered_keys.is_none(), "BTreeSet should not exist yet");
+            assert!(
+                shard.ordered_keys.is_none(),
+                "BTreeSet should not exist yet"
+            );
         }
 
         // GC with min_version high enough to prune the live version
@@ -4686,11 +4685,7 @@ mod tests {
         let key = Key::new_kv(ns.clone(), "victim");
         store.put(
             key.clone(),
-            StoredValue::new(
-                strata_core::value::Value::Int(1),
-                Version::txn(1),
-                None,
-            ),
+            StoredValue::new(strata_core::value::Value::Int(1), Version::txn(1), None),
         );
         store.put(key.clone(), StoredValue::tombstone(Version::txn(10)));
 
@@ -4729,21 +4724,13 @@ mod tests {
         // Key A: live value
         store.put(
             key_a.clone(),
-            StoredValue::new(
-                strata_core::value::Value::Int(1),
-                Version::txn(1),
-                None,
-            ),
+            StoredValue::new(strata_core::value::Value::Int(1), Version::txn(1), None),
         );
 
         // Key B: value then tombstone
         store.put(
             key_b.clone(),
-            StoredValue::new(
-                strata_core::value::Value::Int(2),
-                Version::txn(2),
-                None,
-            ),
+            StoredValue::new(strata_core::value::Value::Int(2), Version::txn(2), None),
         );
         store.put(key_b.clone(), StoredValue::tombstone(Version::txn(10)));
 
@@ -4787,19 +4774,11 @@ mod tests {
         // v5: old value, v10: updated value (both live)
         store.put(
             key.clone(),
-            StoredValue::new(
-                strata_core::value::Value::Int(1),
-                Version::txn(5),
-                None,
-            ),
+            StoredValue::new(strata_core::value::Value::Int(1), Version::txn(5), None),
         );
         store.put(
             key.clone(),
-            StoredValue::new(
-                strata_core::value::Value::Int(2),
-                Version::txn(10),
-                None,
-            ),
+            StoredValue::new(strata_core::value::Value::Int(2), Version::txn(10), None),
         );
 
         // Build BTreeSet before GC
@@ -4841,11 +4820,7 @@ mod tests {
         // v10: live value, v20: tombstone
         store.put(
             key.clone(),
-            StoredValue::new(
-                strata_core::value::Value::Int(1),
-                Version::txn(10),
-                None,
-            ),
+            StoredValue::new(strata_core::value::Value::Int(1), Version::txn(10), None),
         );
         store.put(key.clone(), StoredValue::tombstone(Version::txn(20)));
 
@@ -4857,7 +4832,10 @@ mod tests {
 
         // GC with min_version=5 → too low to prune v10, key stays
         let pruned = store.gc_branch(branch_id, 5);
-        assert_eq!(pruned, 0, "nothing to prune when min_version < all versions");
+        assert_eq!(
+            pruned, 0,
+            "nothing to prune when min_version < all versions"
+        );
         {
             let shard = store.shards.get(&branch_id).unwrap();
             assert!(
@@ -4905,18 +4883,11 @@ mod tests {
         // Live key
         store.put(
             key_live.clone(),
-            StoredValue::new(
-                strata_core::value::Value::Int(1),
-                Version::txn(1),
-                None,
-            ),
+            StoredValue::new(strata_core::value::Value::Int(1), Version::txn(1), None),
         );
 
         // Dead key (tombstone only)
-        store.put(
-            key_dead.clone(),
-            StoredValue::tombstone(Version::txn(2)),
-        );
+        store.put(key_dead.clone(), StoredValue::tombstone(Version::txn(2)));
 
         // Build BTreeSet — should skip the dead key
         {
@@ -4953,9 +4924,21 @@ mod tests {
         ));
 
         // Insert keys: alpha (live), beta (will be tombstoned), gamma (live)
-        Storage::put(&store, Key::new_kv(ns.clone(), "alpha"), Value::Int(1), None).unwrap();
+        Storage::put(
+            &store,
+            Key::new_kv(ns.clone(), "alpha"),
+            Value::Int(1),
+            None,
+        )
+        .unwrap();
         Storage::put(&store, Key::new_kv(ns.clone(), "beta"), Value::Int(2), None).unwrap();
-        Storage::put(&store, Key::new_kv(ns.clone(), "gamma"), Value::Int(3), None).unwrap();
+        Storage::put(
+            &store,
+            Key::new_kv(ns.clone(), "gamma"),
+            Value::Int(3),
+            None,
+        )
+        .unwrap();
 
         // Tombstone beta
         let beta_key = Key::new_kv(ns.clone(), "beta");
