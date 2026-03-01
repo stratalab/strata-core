@@ -116,13 +116,11 @@ impl TransactionManager {
 
     /// Allocate next transaction ID
     ///
-    /// # Panics
-    ///
-    /// Panics if the transaction ID counter reaches `u64::MAX` (overflow).
-    pub fn next_txn_id(&self) -> u64 {
+    /// Returns an error if the transaction ID counter reaches `u64::MAX` (overflow).
+    pub fn next_txn_id(&self) -> std::result::Result<u64, CommitError> {
         self.next_txn_id
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_add(1))
-            .expect("transaction ID overflow: u64::MAX reached")
+            .map_err(|_| CommitError::CounterOverflow("transaction ID counter at u64::MAX".into()))
     }
 
     /// Allocate next commit version (increment global version)
@@ -140,14 +138,12 @@ impl TransactionManager {
     /// while failure handling during commit does not attempt to "return"
     /// the allocated version.
     ///
-    /// # Panics
-    ///
-    /// Panics if the version counter reaches `u64::MAX` (overflow).
-    pub fn allocate_version(&self) -> u64 {
+    /// Returns an error if the version counter reaches `u64::MAX` (overflow).
+    pub fn allocate_version(&self) -> std::result::Result<u64, CommitError> {
         self.version
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_add(1))
-            .expect("version counter overflow: u64::MAX reached")
-            + 1
+            .map(|v| v + 1)
+            .map_err(|_| CommitError::CounterOverflow("version counter at u64::MAX".into()))
     }
 
     /// Commit a transaction atomically
@@ -242,7 +238,7 @@ impl TransactionManager {
         // but NOT yet durable (not in WAL)
 
         // Step 2: Allocate commit version
-        let commit_version = self.allocate_version();
+        let commit_version = self.allocate_version()?;
 
         // Step 3: Write to WAL (durability) - only for transactions with mutations
         // Skip WAL for read-only transactions (no writes, deletes, CAS ops, or JSON patches)
@@ -488,9 +484,9 @@ mod tests {
     #[test]
     fn test_allocate_version_increments() {
         let manager = TransactionManager::new(0);
-        assert_eq!(manager.allocate_version(), 1);
-        assert_eq!(manager.allocate_version(), 2);
-        assert_eq!(manager.allocate_version(), 3);
+        assert_eq!(manager.allocate_version().unwrap(), 1);
+        assert_eq!(manager.allocate_version().unwrap(), 2);
+        assert_eq!(manager.allocate_version().unwrap(), 3);
         assert_eq!(manager.current_version(), 3);
     }
 
@@ -498,16 +494,37 @@ mod tests {
     fn test_next_txn_id_increments() {
         // TransactionManager::new(0) calls with_txn_id(0, 0), which sets next_txn_id = 0 + 1 = 1
         let manager = TransactionManager::new(0);
-        assert_eq!(manager.next_txn_id(), 1);
-        assert_eq!(manager.next_txn_id(), 2);
-        assert_eq!(manager.next_txn_id(), 3);
+        assert_eq!(manager.next_txn_id().unwrap(), 1);
+        assert_eq!(manager.next_txn_id().unwrap(), 2);
+        assert_eq!(manager.next_txn_id().unwrap(), 3);
     }
 
     #[test]
     fn test_with_txn_id_starts_from_max_plus_one() {
         let manager = TransactionManager::with_txn_id(50, 100);
         assert_eq!(manager.current_version(), 50);
-        assert_eq!(manager.next_txn_id(), 101); // max_txn_id + 1
+        assert_eq!(manager.next_txn_id().unwrap(), 101); // max_txn_id + 1
+    }
+
+    #[test]
+    fn test_next_txn_id_overflow_returns_error() {
+        // with_txn_id(0, max_txn_id) sets next_txn_id = max_txn_id + 1
+        // So with_txn_id(0, u64::MAX - 2) → next_txn_id starts at u64::MAX - 1
+        let manager = TransactionManager::with_txn_id(0, u64::MAX - 2);
+        // First call: returns u64::MAX - 1, counter advances to u64::MAX
+        assert!(manager.next_txn_id().is_ok());
+        // Second call fails: counter is at u64::MAX, cannot increment
+        assert!(manager.next_txn_id().is_err());
+    }
+
+    #[test]
+    fn test_allocate_version_overflow_returns_error() {
+        // Version starts at u64::MAX - 1
+        let manager = TransactionManager::with_txn_id(u64::MAX - 1, 0);
+        // First call: version advances from MAX-1 to MAX, returns MAX
+        assert!(manager.allocate_version().is_ok());
+        // Second call fails: version is at u64::MAX, cannot increment
+        assert!(manager.allocate_version().is_err());
     }
 
     #[test]

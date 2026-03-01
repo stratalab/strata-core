@@ -887,7 +887,7 @@ mod tests {
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.txn_manager.current_version(), 100);
-        let new_txn_id = result.txn_manager.next_txn_id();
+        let new_txn_id = result.txn_manager.next_txn_id().unwrap();
         assert!(new_txn_id > 0);
     }
 

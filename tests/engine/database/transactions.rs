@@ -198,7 +198,7 @@ fn begin_transaction_returns_context() {
     let test_db = TestDb::new();
     let branch_id = test_db.branch_id;
 
-    let ctx = test_db.db.begin_transaction(branch_id);
+    let ctx = test_db.db.begin_transaction(branch_id).unwrap();
 
     // Context is active
     assert!(ctx.is_active());
@@ -213,7 +213,7 @@ fn commit_transaction_returns_version() {
     let test_db = TestDb::new();
     let branch_id = test_db.branch_id;
 
-    let mut ctx = test_db.db.begin_transaction(branch_id);
+    let mut ctx = test_db.db.begin_transaction(branch_id).unwrap();
 
     // Add a write to the transaction
     use std::sync::Arc;
@@ -233,7 +233,7 @@ fn end_transaction_cleans_up() {
     let test_db = TestDb::new();
     let branch_id = test_db.branch_id;
 
-    let ctx = test_db.db.begin_transaction(branch_id);
+    let ctx = test_db.db.begin_transaction(branch_id).unwrap();
 
     // End without commit
     test_db.db.end_transaction(ctx);

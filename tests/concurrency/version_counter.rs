@@ -21,7 +21,7 @@ fn versions_monotonically_increase() {
 
     let mut prev = 0u64;
     for _ in 0..100 {
-        let v = manager.allocate_version();
+        let v = manager.allocate_version().unwrap();
         assert!(v > prev, "Version should increase: {} -> {}", prev, v);
         prev = v;
     }
@@ -33,7 +33,7 @@ fn txn_ids_monotonically_increase() {
 
     let mut prev = 0u64;
     for _ in 0..100 {
-        let id = manager.next_txn_id();
+        let id = manager.next_txn_id().unwrap();
         assert!(id > prev, "Txn ID should increase: {} -> {}", prev, id);
         prev = id;
     }
@@ -43,7 +43,7 @@ fn txn_ids_monotonically_increase() {
 fn version_starts_from_initial() {
     let manager = TransactionManager::new(1000);
 
-    let v = manager.allocate_version();
+    let v = manager.allocate_version().unwrap();
     assert!(
         v >= 1000,
         "First version should be >= initial (1000), got {}",
@@ -70,7 +70,7 @@ fn concurrent_version_allocation_unique() {
                 barrier.wait();
                 let mut versions = Vec::with_capacity(count_per_thread);
                 for _ in 0..count_per_thread {
-                    versions.push(manager.allocate_version());
+                    versions.push(manager.allocate_version().unwrap());
                 }
                 versions
             })
@@ -109,7 +109,7 @@ fn concurrent_txn_id_allocation_unique() {
                 barrier.wait();
                 let mut ids = Vec::with_capacity(500);
                 for _ in 0..500 {
-                    ids.push(manager.next_txn_id());
+                    ids.push(manager.next_txn_id().unwrap());
                 }
                 ids
             })
@@ -143,7 +143,7 @@ fn high_contention_version_allocation() {
             thread::spawn(move || {
                 barrier.wait();
                 for _ in 0..100 {
-                    let _ = manager.allocate_version();
+                    let _ = manager.allocate_version().unwrap();
                     total.fetch_add(1, Ordering::Relaxed);
                 }
             })
@@ -168,7 +168,7 @@ fn sequential_allocation_no_gaps() {
 
     let mut versions = Vec::new();
     for _ in 0..100 {
-        versions.push(manager.allocate_version());
+        versions.push(manager.allocate_version().unwrap());
     }
 
     // Should form a contiguous sequence
@@ -192,7 +192,7 @@ fn manager_with_txn_id_continues_from_max() {
     // Simulating recovery where max txn_id was 1000
     let manager = TransactionManager::with_txn_id(100, 1000);
 
-    let id = manager.next_txn_id();
+    let id = manager.next_txn_id().unwrap();
     assert!(
         id > 1000,
         "After recovery, txn_id should be > max (1000), got {}",
@@ -204,7 +204,7 @@ fn manager_with_txn_id_continues_from_max() {
 fn manager_initial_version_respected() {
     let manager = TransactionManager::new(5000);
 
-    let v = manager.allocate_version();
+    let v = manager.allocate_version().unwrap();
     assert!(v >= 5000, "Initial version should be respected");
 }
 
@@ -214,15 +214,15 @@ fn manager_recovery_scenario() {
     let manager = TransactionManager::with_txn_id(10000, 500);
 
     // New allocations should continue from those points
-    let v1 = manager.allocate_version();
-    let id1 = manager.next_txn_id();
+    let v1 = manager.allocate_version().unwrap();
+    let id1 = manager.next_txn_id().unwrap();
 
     assert!(v1 >= 10000, "Version should continue from 10000");
     assert!(id1 > 500, "Txn ID should continue from 500");
 
     // Subsequent allocations should still be monotonic
-    let v2 = manager.allocate_version();
-    let id2 = manager.next_txn_id();
+    let v2 = manager.allocate_version().unwrap();
+    let id2 = manager.next_txn_id().unwrap();
 
     assert!(v2 > v1);
     assert!(id2 > id1);
@@ -242,7 +242,7 @@ fn version_allocation_thread_safe() {
             let manager = Arc::clone(&manager);
             thread::spawn(move || {
                 for _ in 0..1000 {
-                    let v = manager.allocate_version();
+                    let v = manager.allocate_version().unwrap();
                     // Each version should be valid (non-zero after first allocation)
                     assert!(v > 0 || v == 1);
                 }
@@ -264,10 +264,10 @@ fn interleaved_version_and_txn_id_allocation() {
 
     // Interleave allocations
     for _ in 0..50 {
-        versions.push(manager.allocate_version());
-        txn_ids.push(manager.next_txn_id());
-        versions.push(manager.allocate_version());
-        txn_ids.push(manager.next_txn_id());
+        versions.push(manager.allocate_version().unwrap());
+        txn_ids.push(manager.next_txn_id().unwrap());
+        versions.push(manager.allocate_version().unwrap());
+        txn_ids.push(manager.next_txn_id().unwrap());
     }
 
     // Both should be monotonic independently
@@ -288,7 +288,7 @@ fn rapid_allocation_performance() {
 
     let start = std::time::Instant::now();
     for _ in 0..100_000 {
-        let _ = manager.allocate_version();
+        let _ = manager.allocate_version().unwrap();
     }
     let elapsed = start.elapsed();
 

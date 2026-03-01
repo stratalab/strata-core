@@ -46,6 +46,8 @@ pub struct TransactionCoordinator {
     total_committed: AtomicU64,
     /// Total transactions aborted - uses Relaxed ordering
     total_aborted: AtomicU64,
+    /// Cumulative commit duration in microseconds (includes lock wait)
+    commit_time_us: AtomicU64,
     /// Active transaction tracking: (txn_id, start_version) pairs.
     ///
     /// Vec behind a Mutex is optimal here: concurrent txn count is small
@@ -79,6 +81,7 @@ impl TransactionCoordinator {
             total_started: AtomicU64::new(0),
             total_committed: AtomicU64::new(0),
             total_aborted: AtomicU64::new(0),
+            commit_time_us: AtomicU64::new(0),
             active_versions: Mutex::new(Vec::new()),
             max_write_buffer_entries: 0,
         }
@@ -105,6 +108,7 @@ impl TransactionCoordinator {
             total_started: AtomicU64::new(0),
             total_committed: AtomicU64::new(0),
             total_aborted: AtomicU64::new(0),
+            commit_time_us: AtomicU64::new(0),
             active_versions: Mutex::new(Vec::new()),
             max_write_buffer_entries: 0,
         }
@@ -124,6 +128,7 @@ impl TransactionCoordinator {
             total_started: AtomicU64::new(0),
             total_committed: AtomicU64::new(0),
             total_aborted: AtomicU64::new(0),
+            commit_time_us: AtomicU64::new(0),
             active_versions: Mutex::new(Vec::new()),
             max_write_buffer_entries,
         }
@@ -144,8 +149,8 @@ impl TransactionCoordinator {
         &self,
         branch_id: BranchId,
         storage: &Arc<ShardedStore>,
-    ) -> TransactionContext {
-        let txn_id = self.manager.next_txn_id();
+    ) -> StrataResult<TransactionContext> {
+        let txn_id = self.manager.next_txn_id().map_err(StrataError::from)?;
         let snapshot = storage.create_snapshot();
         let snapshot_version = snapshot.version();
 
@@ -157,15 +162,15 @@ impl TransactionCoordinator {
 
         let mut txn = TransactionContext::with_snapshot(txn_id, branch_id, Box::new(snapshot));
         txn.set_max_write_entries(self.max_write_buffer_entries);
-        txn
+        Ok(txn)
     }
 
     /// Allocate commit version
     ///
     /// Per spec Section 6.1: Version incremented ONCE for the whole transaction.
     /// All keys in a transaction get the same commit version.
-    pub fn allocate_commit_version(&self) -> u64 {
-        self.manager.allocate_version()
+    pub fn allocate_commit_version(&self) -> StrataResult<u64> {
+        self.manager.allocate_version().map_err(StrataError::from)
     }
 
     /// Commit a transaction through the concurrency layer
@@ -198,7 +203,12 @@ impl TransactionCoordinator {
     ) -> StrataResult<u64> {
         let txn_id = txn.txn_id;
 
-        match self.manager.commit(txn, store, wal) {
+        let start = std::time::Instant::now();
+        let result = self.manager.commit(txn, store, wal);
+        self.commit_time_us
+            .fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+
+        match result {
             Ok(version) => {
                 self.record_commit(txn_id);
                 info!(target: "strata::txn", "Transaction committed");
@@ -276,8 +286,8 @@ impl TransactionCoordinator {
     }
 
     /// Get next transaction ID (for internal use)
-    pub fn next_txn_id(&self) -> u64 {
-        self.manager.next_txn_id()
+    pub fn next_txn_id(&self) -> StrataResult<u64> {
+        self.manager.next_txn_id().map_err(StrataError::from)
     }
 
     /// Get the configured max write buffer entries limit.
@@ -351,6 +361,7 @@ impl TransactionCoordinator {
             total_started: started,
             total_committed: committed,
             total_aborted: self.total_aborted.load(Ordering::Relaxed),
+            commit_time_us: self.commit_time_us.load(Ordering::Relaxed),
             commit_rate: if started > 0 {
                 committed as f64 / started as f64
             } else {
@@ -413,6 +424,8 @@ pub struct TransactionMetrics {
     pub total_committed: u64,
     /// Total number of transactions aborted
     pub total_aborted: u64,
+    /// Cumulative commit duration in microseconds (includes lock wait)
+    pub commit_time_us: u64,
     /// Commit success rate (committed / started)
     pub commit_rate: f64,
 }
@@ -484,8 +497,8 @@ mod tests {
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
-        let _txn1 = coordinator.start_transaction(branch_id, &storage);
-        let _txn2 = coordinator.start_transaction(branch_id, &storage);
+        let _txn1 = coordinator.start_transaction(branch_id, &storage).unwrap();
+        let _txn2 = coordinator.start_transaction(branch_id, &storage).unwrap();
 
         let metrics = coordinator.metrics();
         assert_eq!(metrics.total_started, 2);
@@ -498,7 +511,7 @@ mod tests {
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
-        let txn = coordinator.start_transaction(branch_id, &storage);
+        let txn = coordinator.start_transaction(branch_id, &storage).unwrap();
         coordinator.record_commit(txn.txn_id);
 
         let metrics = coordinator.metrics();
@@ -514,7 +527,7 @@ mod tests {
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
-        let txn = coordinator.start_transaction(branch_id, &storage);
+        let txn = coordinator.start_transaction(branch_id, &storage).unwrap();
         coordinator.record_abort(txn.txn_id);
 
         let metrics = coordinator.metrics();
@@ -528,9 +541,9 @@ mod tests {
     fn test_version_monotonic() {
         let coordinator = TransactionCoordinator::new(100);
 
-        let v1 = coordinator.allocate_commit_version();
-        let v2 = coordinator.allocate_commit_version();
-        let v3 = coordinator.allocate_commit_version();
+        let v1 = coordinator.allocate_commit_version().unwrap();
+        let v2 = coordinator.allocate_commit_version().unwrap();
+        let v3 = coordinator.allocate_commit_version().unwrap();
 
         assert!(v1 < v2);
         assert!(v2 < v3);
@@ -548,7 +561,7 @@ mod tests {
         // Start 4 transactions, collect txn_ids
         let mut txn_ids = Vec::new();
         for _ in 0..4 {
-            let txn = coordinator.start_transaction(branch_id, &storage);
+            let txn = coordinator.start_transaction(branch_id, &storage).unwrap();
             txn_ids.push(txn.txn_id);
         }
 
@@ -571,8 +584,8 @@ mod tests {
         let branch_id = BranchId::new();
 
         // Simulate realistic usage
-        let txn1 = coordinator.start_transaction(branch_id, &storage);
-        let txn2 = coordinator.start_transaction(branch_id, &storage);
+        let txn1 = coordinator.start_transaction(branch_id, &storage).unwrap();
+        let txn2 = coordinator.start_transaction(branch_id, &storage).unwrap();
 
         assert_eq!(coordinator.metrics().active_count, 2);
 
@@ -581,7 +594,7 @@ mod tests {
         assert_eq!(coordinator.metrics().active_count, 1);
         assert_eq!(coordinator.metrics().total_committed, 1);
 
-        let txn3 = coordinator.start_transaction(branch_id, &storage);
+        let txn3 = coordinator.start_transaction(branch_id, &storage).unwrap();
 
         assert_eq!(coordinator.metrics().active_count, 2);
         assert_eq!(coordinator.metrics().total_started, 3);
@@ -617,7 +630,7 @@ mod tests {
         let branch_id = BranchId::new();
 
         // Start a transaction but don't complete it
-        let _txn = coordinator.start_transaction(branch_id, &storage);
+        let _txn = coordinator.start_transaction(branch_id, &storage).unwrap();
         assert_eq!(coordinator.active_count(), 1);
 
         // Wait with a short timeout - should return false
@@ -647,7 +660,7 @@ mod tests {
         let branch_id = BranchId::new();
 
         // Start a transaction
-        let txn = coordinator.start_transaction(branch_id, &storage);
+        let txn = coordinator.start_transaction(branch_id, &storage).unwrap();
         let txn_id = txn.txn_id;
 
         // Spawn a thread to complete the transaction after a short delay
@@ -687,7 +700,7 @@ mod tests {
         // Start 5 transactions, collect txn_ids
         let mut txn_ids = Vec::new();
         for _ in 0..5 {
-            let txn = coordinator.start_transaction(branch_id, &storage);
+            let txn = coordinator.start_transaction(branch_id, &storage).unwrap();
             txn_ids.push(txn.txn_id);
         }
         assert_eq!(coordinator.active_count(), 5);
@@ -731,7 +744,7 @@ mod tests {
         let branch_id = BranchId::new();
 
         // Start a transaction
-        let _txn = coordinator.start_transaction(branch_id, &storage);
+        let _txn = coordinator.start_transaction(branch_id, &storage).unwrap();
 
         // Zero timeout should return false immediately
         let start = std::time::Instant::now();
@@ -767,7 +780,9 @@ mod tests {
         let worker = thread::spawn(move || {
             let mut completed = 0;
             while !stop_clone.load(Ordering::SeqCst) {
-                let txn = coord_clone.start_transaction(branch_id, &storage_clone);
+                let txn = coord_clone
+                    .start_transaction(branch_id, &storage_clone)
+                    .unwrap();
                 thread::yield_now();
                 coord_clone.record_commit(txn.txn_id);
                 completed += 1;
@@ -817,7 +832,7 @@ mod tests {
             let ids = Arc::clone(&txn_ids);
             handles.push(thread::spawn(move || {
                 barr.wait();
-                let txn = coord.start_transaction(branch_id, &stor);
+                let txn = coord.start_transaction(branch_id, &stor).unwrap();
                 ids.lock().push(txn.txn_id);
                 // Don't record_commit - leave active
             }));
@@ -882,7 +897,7 @@ mod tests {
         assert_eq!(coordinator.current_version(), 500);
 
         // Next txn_id should be > max_txn_id from recovery
-        let next_id = coordinator.next_txn_id();
+        let next_id = coordinator.next_txn_id().unwrap();
         assert!(
             next_id > 15,
             "Next txn_id ({}) should be > max_txn_id from recovery (15)",
@@ -958,7 +973,7 @@ mod tests {
 
                 thread::spawn(move || {
                     for _ in 0..iterations {
-                        let txn = coord.start_transaction(branch_id, &stor);
+                        let txn = coord.start_transaction(branch_id, &stor).unwrap();
                         started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
                         // Small delay to increase contention
@@ -1014,7 +1029,7 @@ mod tests {
                 thread::spawn(move || {
                     let mut local_versions = Vec::new();
                     for _ in 0..100 {
-                        let v = coord.allocate_commit_version();
+                        let v = coord.allocate_commit_version().unwrap();
                         local_versions.push(v);
                     }
                     vers.lock().extend(local_versions);
@@ -1063,7 +1078,7 @@ mod tests {
                 thread::spawn(move || {
                     let mut local_ids = Vec::new();
                     for _ in 0..100 {
-                        let id = coord.next_txn_id();
+                        let id = coord.next_txn_id().unwrap();
                         local_ids.push(id);
                     }
                     ids.lock().extend(local_ids);
@@ -1124,7 +1139,9 @@ mod tests {
         let worker = thread::spawn(move || {
             let mut count = 0;
             while !stop_clone.load(Ordering::SeqCst) && count < 50 {
-                let txn = coord_clone.start_transaction(branch_id, &stor_clone);
+                let txn = coord_clone
+                    .start_transaction(branch_id, &stor_clone)
+                    .unwrap();
                 // Very short delay
                 coord_clone.record_commit(txn.txn_id);
                 count += 1;
@@ -1174,7 +1191,7 @@ mod tests {
                 thread::spawn(move || {
                     let mut local = Vec::new();
                     for _ in 0..10 {
-                        let v = coord.allocate_commit_version();
+                        let v = coord.allocate_commit_version().unwrap();
                         local.push(v);
                     }
 
@@ -1270,10 +1287,38 @@ mod tests {
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
-        let txn = coordinator.start_transaction(branch_id, &storage);
+        let txn = coordinator.start_transaction(branch_id, &storage).unwrap();
         assert!(coordinator.min_active_version().is_some());
 
         coordinator.record_abort(txn.txn_id);
         assert_eq!(coordinator.min_active_version(), None);
+    }
+
+    #[test]
+    fn test_metrics_includes_commit_time() {
+        let coordinator = TransactionCoordinator::new(0);
+        let storage = create_test_storage();
+        let branch_id = BranchId::new();
+
+        // Commit a transaction through the coordinator
+        let snapshot = storage.snapshot();
+        let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+        txn.put(
+            strata_core::types::Key::new_kv(
+                std::sync::Arc::new(strata_core::types::Namespace::for_branch(branch_id)),
+                "key",
+            ),
+            strata_core::value::Value::Int(1),
+        )
+        .unwrap();
+        coordinator.record_start(1, 0);
+
+        let _ = coordinator.commit(&mut txn, storage.as_ref(), None);
+
+        let metrics = coordinator.metrics();
+        assert!(
+            metrics.commit_time_us > 0,
+            "commit_time_us should be > 0 after a commit"
+        );
     }
 }
