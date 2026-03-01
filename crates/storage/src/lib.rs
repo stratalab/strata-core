@@ -25,5 +25,5 @@ pub use primitive_ext::{
     PrimitiveExtError, PrimitiveStorageExt,
 };
 pub use registry::PrimitiveRegistry;
-pub use sharded::{Shard, ShardedSnapshot, ShardedStore};
+pub use sharded::{BranchMemoryStats, Shard, ShardedSnapshot, ShardedStore, StorageMemoryStats};
 pub use ttl::TTLIndex;

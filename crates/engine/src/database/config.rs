@@ -48,6 +48,38 @@ fn default_timeout_ms() -> u64 {
     5000
 }
 
+/// Storage layer resource limits.
+///
+/// Controls maximum branches and per-transaction write buffer sizes.
+/// All limits default to generous values suitable for production use.
+/// Set to `0` for unlimited (backward-compatible default).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StorageConfig {
+    /// Maximum number of branches allowed. Default: 1024. Set to 0 for unlimited.
+    #[serde(default = "default_max_branches")]
+    pub max_branches: usize,
+    /// Maximum entries in a single transaction's write buffer. Default: 100_000. Set to 0 for unlimited.
+    #[serde(default = "default_max_write_buffer_entries")]
+    pub max_write_buffer_entries: usize,
+}
+
+fn default_max_branches() -> usize {
+    1024
+}
+
+fn default_max_write_buffer_entries() -> usize {
+    100_000
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            max_branches: default_max_branches(),
+            max_write_buffer_entries: default_max_write_buffer_entries(),
+        }
+    }
+}
+
 /// Database configuration loaded from `strata.toml`.
 ///
 /// # Example
@@ -109,6 +141,9 @@ pub struct StrataConfig {
     /// Google (Gemini) API key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub google_api_key: Option<String>,
+    /// Storage layer resource limits.
+    #[serde(default)]
+    pub storage: StorageConfig,
 }
 
 fn default_durability_str() -> String {
@@ -142,6 +177,7 @@ impl Default for StrataConfig {
             anthropic_api_key: None,
             openai_api_key: None,
             google_api_key: None,
+            storage: StorageConfig::default(),
         }
     }
 }
@@ -219,6 +255,11 @@ auto_embed = false
 # anthropic_api_key = "sk-ant-..."
 # openai_api_key = "sk-..."
 # google_api_key = "AIza..."
+
+# Storage resource limits.
+# [storage]
+# max_branches = 1024
+# max_write_buffer_entries = 100000
 "#
     }
 
@@ -722,5 +763,28 @@ auto_embed = false
 
         let loaded = StrataConfig::from_file(&path).unwrap();
         assert_eq!(loaded.embed_batch_size, Some(1024));
+    }
+
+    // -----------------------------------------------------------------------
+    // Storage config
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_storage_config_defaults() {
+        let config = StrataConfig::default();
+        assert_eq!(config.storage.max_branches, 1024);
+        assert_eq!(config.storage.max_write_buffer_entries, 100_000);
+    }
+
+    #[test]
+    fn test_storage_config_backward_compat() {
+        // Old config files without [storage] section should parse fine
+        let old_toml = r#"
+durability = "standard"
+auto_embed = false
+"#;
+        let config: StrataConfig = toml::from_str(old_toml).unwrap();
+        assert_eq!(config.storage.max_branches, 1024);
+        assert_eq!(config.storage.max_write_buffer_entries, 100_000);
     }
 }

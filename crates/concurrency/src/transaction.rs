@@ -430,6 +430,10 @@ pub struct TransactionContext {
     // Timing
     /// When this transaction was created
     start_time: Instant,
+
+    /// Maximum entries allowed in the write buffer (0 = unlimited).
+    /// Counts puts + deletes + CAS operations.
+    max_write_entries: usize,
 }
 
 impl TransactionContext {
@@ -472,6 +476,7 @@ impl TransactionContext {
             json_snapshot_versions: None,
             status: TransactionStatus::Active,
             start_time: Instant::now(),
+            max_write_entries: 0,
         }
     }
 
@@ -520,6 +525,7 @@ impl TransactionContext {
             json_snapshot_versions: None,
             status: TransactionStatus::Active,
             start_time: Instant::now(),
+            max_write_entries: 0,
         }
     }
 
@@ -738,6 +744,39 @@ impl TransactionContext {
 
     // === Write Operations ===
 
+    /// Set the maximum number of write buffer entries (0 = unlimited).
+    pub fn set_max_write_entries(&mut self, max: usize) {
+        self.max_write_entries = max;
+    }
+
+    /// Check if the write buffer has exceeded the configured limit.
+    ///
+    /// For put/delete operations, pass the key to allow overwrites of already-tracked
+    /// keys (the operation won't increase the total count). For CAS, pass `None`
+    /// because CAS always appends to the cas_set.
+    #[inline]
+    fn check_write_limit(&self, key: Option<&Key>) -> StrataResult<()> {
+        if self.max_write_entries == 0 {
+            return Ok(());
+        }
+        // If the key is already tracked in write_set or delete_set, the mutation
+        // won't increase the total count — allow it unconditionally.
+        if let Some(k) = key {
+            if self.write_set.contains_key(k) || self.delete_set.contains(k) {
+                return Ok(());
+            }
+        }
+        let total = self.write_set.len() + self.delete_set.len() + self.cas_set.len();
+        if total >= self.max_write_entries {
+            return Err(StrataError::capacity_exceeded(
+                "transaction_write_buffer",
+                self.max_write_entries,
+                total + 1,
+            ));
+        }
+        Ok(())
+    }
+
     /// Buffer a write operation
     ///
     /// The write is NOT applied to storage until commit.
@@ -768,6 +807,7 @@ impl TransactionContext {
     /// ```
     pub fn put(&mut self, key: Key, value: Value) -> StrataResult<()> {
         self.ensure_active()?;
+        self.check_write_limit(Some(&key))?;
 
         // Remove from delete_set if previously deleted in this txn
         self.delete_set.remove(&key);
@@ -807,6 +847,7 @@ impl TransactionContext {
     /// ```
     pub fn delete(&mut self, key: Key) -> StrataResult<()> {
         self.ensure_active()?;
+        self.check_write_limit(Some(&key))?;
 
         // Remove from write_set if previously written in this txn
         self.write_set.remove(&key);
@@ -852,6 +893,7 @@ impl TransactionContext {
     /// ```
     pub fn cas(&mut self, key: Key, expected_version: u64, new_value: Value) -> StrataResult<()> {
         self.ensure_active()?;
+        self.check_write_limit(None)?;
 
         self.cas_set.push(CASOperation {
             key,
@@ -1403,6 +1445,19 @@ impl TransactionContext {
         self.delete_set.clear();
         self.cas_set.clear();
 
+        // Reclaim memory if a large transaction inflated capacity beyond threshold.
+        // Normal workloads (< 4096 entries) keep their allocations intact.
+        const SHRINK_THRESHOLD: usize = 4096;
+        if self.read_set.capacity() > SHRINK_THRESHOLD {
+            self.read_set.shrink_to(SHRINK_THRESHOLD / 2);
+        }
+        if self.write_set.capacity() > SHRINK_THRESHOLD {
+            self.write_set.shrink_to(SHRINK_THRESHOLD / 2);
+        }
+        if self.delete_set.capacity() > SHRINK_THRESHOLD {
+            self.delete_set.shrink_to(SHRINK_THRESHOLD / 2);
+        }
+
         // Clear event state (deallocate, since event ops are rare)
         self.event_sequence_count = None;
         self.event_last_hash = None;
@@ -1710,5 +1765,165 @@ mod tests {
         let _ = txn.get_versioned(&key).unwrap();
         // Verify version tracked for conflict detection
         assert_eq!(txn.read_set.get(&key), Some(&15));
+    }
+
+    // ========================================================================
+    // Write Buffer Limit Tests
+    // ========================================================================
+
+    #[test]
+    fn test_write_buffer_limit_rejects_at_max() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let mut txn = TransactionContext::new(1, branch_id, 100);
+        txn.set_max_write_entries(3);
+
+        // Put 3 entries — should succeed
+        for i in 0..3 {
+            txn.put(test_key(&ns, &format!("k{}", i)), Value::Int(i as i64))
+                .unwrap();
+        }
+        // 4th should fail
+        let err = txn
+            .put(test_key(&ns, "overflow"), Value::Int(99))
+            .unwrap_err();
+        assert!(
+            format!("{}", err).contains("transaction_write_buffer"),
+            "Error should mention transaction_write_buffer: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_write_buffer_limit_counts_deletes() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let mut txn = TransactionContext::new(1, branch_id, 100);
+        txn.set_max_write_entries(2);
+
+        txn.put(test_key(&ns, "k1"), Value::Int(1)).unwrap();
+        txn.delete(test_key(&ns, "k2")).unwrap();
+        // Total = 2 (1 write + 1 delete), next should fail
+        let err = txn.put(test_key(&ns, "k3"), Value::Int(3)).unwrap_err();
+        assert!(format!("{}", err).contains("transaction_write_buffer"));
+    }
+
+    #[test]
+    fn test_write_buffer_limit_zero_unlimited() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let mut txn = TransactionContext::new(1, branch_id, 100);
+        // max_write_entries = 0 (default, unlimited)
+
+        for i in 0..1000 {
+            txn.put(test_key(&ns, &format!("k{}", i)), Value::Int(i as i64))
+                .unwrap();
+        }
+        assert_eq!(txn.write_set.len(), 1000);
+    }
+
+    // ========================================================================
+    // Conditional Shrink Tests
+    // ========================================================================
+
+    #[test]
+    fn test_reset_shrinks_large_capacity() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let mut txn = TransactionContext::new(1, branch_id, 100);
+
+        // Inflate capacity well beyond the 4096 threshold
+        for i in 0..5000 {
+            txn.put(test_key(&ns, &format!("k{}", i)), Value::Int(i as i64))
+                .unwrap();
+        }
+        assert!(txn.write_set.capacity() >= 5000);
+
+        let snap = Box::new(ClonedSnapshotView::empty(200));
+        txn.reset(2, branch_id, Some(snap));
+
+        // After reset, capacity should be shrunk below threshold
+        assert!(
+            txn.write_set.capacity() <= 4096,
+            "write_set capacity should be shrunk: {}",
+            txn.write_set.capacity()
+        );
+    }
+
+    #[test]
+    fn test_write_buffer_limit_counts_cas() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let mut txn = TransactionContext::new(1, branch_id, 100);
+        txn.set_max_write_entries(2);
+
+        // 1 put + 1 CAS = 2
+        txn.put(test_key(&ns, "k1"), Value::Int(1)).unwrap();
+        txn.cas(test_key(&ns, "k2"), 0, Value::Int(2)).unwrap();
+
+        // 3rd operation should fail (total = 2 >= limit of 2)
+        let err = txn.put(test_key(&ns, "k3"), Value::Int(3)).unwrap_err();
+        assert!(format!("{}", err).contains("transaction_write_buffer"));
+    }
+
+    #[test]
+    fn test_write_buffer_overwrite_at_limit() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let mut txn = TransactionContext::new(1, branch_id, 100);
+        txn.set_max_write_entries(2);
+
+        // Fill to limit
+        txn.put(test_key(&ns, "k1"), Value::Int(1)).unwrap();
+        txn.put(test_key(&ns, "k2"), Value::Int(2)).unwrap();
+
+        // Overwriting an existing key should succeed (net-zero change)
+        txn.put(test_key(&ns, "k1"), Value::Int(10)).unwrap();
+        // Value should be updated
+        assert_eq!(
+            txn.write_set.get(&test_key(&ns, "k1")).unwrap().clone(),
+            Value::Int(10)
+        );
+    }
+
+    #[test]
+    fn test_write_buffer_delete_existing_at_limit() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let mut txn = TransactionContext::new(1, branch_id, 100);
+        txn.set_max_write_entries(2);
+
+        // Fill: 1 put + 1 delete = 2
+        txn.put(test_key(&ns, "k1"), Value::Int(1)).unwrap();
+        txn.delete(test_key(&ns, "k2")).unwrap();
+
+        // Delete k2 again — already in delete_set, should succeed
+        txn.delete(test_key(&ns, "k2")).unwrap();
+        // Put to k1 again — already in write_set, should succeed
+        txn.put(test_key(&ns, "k1"), Value::Int(99)).unwrap();
+
+        // A truly new key should still fail
+        let err = txn.put(test_key(&ns, "k3"), Value::Int(3)).unwrap_err();
+        assert!(format!("{}", err).contains("transaction_write_buffer"));
+    }
+
+    #[test]
+    fn test_reset_preserves_normal_capacity() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let mut txn = TransactionContext::new(1, branch_id, 100);
+
+        // Insert a modest number of entries (below threshold)
+        for i in 0..100 {
+            txn.put(test_key(&ns, &format!("k{}", i)), Value::Int(i as i64))
+                .unwrap();
+        }
+        let cap_before = txn.write_set.capacity();
+
+        let snap = Box::new(ClonedSnapshotView::empty(200));
+        txn.reset(2, branch_id, Some(snap));
+
+        // Capacity should be preserved (not shrunk)
+        assert_eq!(txn.write_set.capacity(), cap_before);
     }
 }
