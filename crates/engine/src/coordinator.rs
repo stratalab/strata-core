@@ -9,7 +9,6 @@
 //! - Transaction metrics (started, committed, aborted)
 //! - Commit rate calculation
 
-use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,16 +45,11 @@ pub struct TransactionCoordinator {
     total_committed: AtomicU64,
     /// Total transactions aborted - uses Relaxed ordering
     total_aborted: AtomicU64,
-    /// Cumulative commit duration in microseconds (includes lock wait)
-    commit_time_us: AtomicU64,
-    /// Active transaction tracking: (txn_id, start_version) pairs.
-    ///
-    /// Vec behind a Mutex is optimal here: concurrent txn count is small
-    /// (typically < 10), so linear scan beats hashing. Lock is held for
-    /// ~10ns (push or swap_remove), well under contention thresholds.
-    ///
-    /// Used for GC safe point computation (`min_active_version()`).
-    active_versions: Mutex<Vec<(u64, u64)>>,
+    /// Lock-free GC safe point: the version at which all prior transactions
+    /// have completed. Advances via `fetch_max` only when active_count drains
+    /// to 0, ensuring it is always ≤ the minimum active snapshot version.
+    /// Initialized to 0 (no drain has occurred yet).
+    gc_safe_version: AtomicU64,
     /// Maximum entries in a transaction's write buffer (0 = unlimited).
     max_write_buffer_entries: usize,
 }
@@ -81,8 +75,7 @@ impl TransactionCoordinator {
             total_started: AtomicU64::new(0),
             total_committed: AtomicU64::new(0),
             total_aborted: AtomicU64::new(0),
-            commit_time_us: AtomicU64::new(0),
-            active_versions: Mutex::new(Vec::new()),
+            gc_safe_version: AtomicU64::new(0),
             max_write_buffer_entries: 0,
         }
     }
@@ -108,8 +101,7 @@ impl TransactionCoordinator {
             total_started: AtomicU64::new(0),
             total_committed: AtomicU64::new(0),
             total_aborted: AtomicU64::new(0),
-            commit_time_us: AtomicU64::new(0),
-            active_versions: Mutex::new(Vec::new()),
+            gc_safe_version: AtomicU64::new(0),
             max_write_buffer_entries: 0,
         }
     }
@@ -128,8 +120,7 @@ impl TransactionCoordinator {
             total_started: AtomicU64::new(0),
             total_committed: AtomicU64::new(0),
             total_aborted: AtomicU64::new(0),
-            commit_time_us: AtomicU64::new(0),
-            active_versions: Mutex::new(Vec::new()),
+            gc_safe_version: AtomicU64::new(0),
             max_write_buffer_entries,
         }
     }
@@ -151,12 +142,14 @@ impl TransactionCoordinator {
         storage: &Arc<ShardedStore>,
     ) -> StrataResult<TransactionContext> {
         let txn_id = self.manager.next_txn_id().map_err(StrataError::from)?;
-        let snapshot = storage.create_snapshot();
-        let snapshot_version = snapshot.version();
 
+        // Register in active_count BEFORE creating the snapshot so that a
+        // concurrent drain (active_count → 0) cannot set gc_safe_version
+        // past our about-to-be-created snapshot version.
         self.active_count.fetch_add(1, Ordering::Relaxed);
         self.total_started.fetch_add(1, Ordering::Relaxed);
-        self.active_versions.lock().push((txn_id, snapshot_version));
+
+        let snapshot = storage.create_snapshot();
 
         debug!(target: "strata::txn", branch_id = %branch_id, "Transaction started");
 
@@ -203,10 +196,7 @@ impl TransactionCoordinator {
     ) -> StrataResult<u64> {
         let txn_id = txn.txn_id;
 
-        let start = std::time::Instant::now();
         let result = self.manager.commit(txn, store, wal);
-        self.commit_time_us
-            .fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
 
         match result {
             Ok(version) => {
@@ -222,62 +212,71 @@ impl TransactionCoordinator {
         }
     }
 
-    /// Record transaction start with version tracking
+    /// Record transaction start
     ///
-    /// Increments active count and total started count, and registers the
-    /// transaction in the active versions map for GC safe point computation.
+    /// Increments active count and total started count.
     ///
     /// # Arguments
-    /// * `txn_id` - Unique transaction ID
-    /// * `start_version` - Snapshot version at transaction start
-    pub fn record_start(&self, txn_id: u64, start_version: u64) {
+    /// * `_txn_id` - Unique transaction ID (unused, kept for API compat)
+    /// * `_start_version` - Snapshot version at transaction start (unused)
+    pub fn record_start(&self, _txn_id: u64, _start_version: u64) {
         self.active_count.fetch_add(1, Ordering::Relaxed);
         self.total_started.fetch_add(1, Ordering::Relaxed);
-        self.active_versions.lock().push((txn_id, start_version));
     }
 
     /// Record transaction commit
     ///
-    /// Removes the transaction from active version tracking, decrements
-    /// active count (saturating at 0), and increments committed count.
+    /// Decrements active count (saturating at 0), increments committed count,
+    /// and advances `gc_safe_version` when all transactions have drained.
     ///
     /// # Arguments
-    /// * `txn_id` - Transaction ID to remove from active tracking
-    pub fn record_commit(&self, txn_id: u64) {
-        let mut versions = self.active_versions.lock();
-        if let Some(pos) = versions.iter().position(|(id, _)| *id == txn_id) {
-            versions.swap_remove(pos);
-        }
-        drop(versions);
+    /// * `_txn_id` - Transaction ID (unused, kept for API compat)
+    pub fn record_commit(&self, _txn_id: u64) {
+        // Capture version BEFORE the decrement so gc_safe_version is always
+        // ≤ the snapshot version of any concurrently-starting transaction.
+        // A transaction that starts between our version read and the
+        // decrement will have a snapshot version ≥ drain_version.
+        let drain_version = self.manager.current_version();
+
         // Use fetch_update for saturating decrement to prevent underflow
-        let _ = self
+        let prev = self
             .active_count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| {
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |x| {
                 Some(x.saturating_sub(1))
-            });
+            })
+            .unwrap_or(0);
         self.total_committed.fetch_add(1, Ordering::Relaxed);
+        if prev == 1 {
+            // All transactions drained — advance GC safe point
+            self.gc_safe_version
+                .fetch_max(drain_version, Ordering::Release);
+        }
     }
 
     /// Record transaction abort
     ///
-    /// Removes the transaction from active version tracking, decrements
-    /// active count, and increments aborted count.
+    /// Decrements active count, increments aborted count,
+    /// and advances `gc_safe_version` when all transactions have drained.
     ///
     /// # Arguments
-    /// * `txn_id` - Transaction ID to remove from active tracking
-    pub fn record_abort(&self, txn_id: u64) {
-        let mut versions = self.active_versions.lock();
-        if let Some(pos) = versions.iter().position(|(id, _)| *id == txn_id) {
-            versions.swap_remove(pos);
-        }
-        drop(versions);
+    /// * `_txn_id` - Transaction ID (unused, kept for API compat)
+    pub fn record_abort(&self, _txn_id: u64) {
+        // Capture version BEFORE the decrement (same rationale as record_commit)
+        let drain_version = self.manager.current_version();
+
         // Use fetch_update for saturating decrement to prevent underflow
-        let _ = self
+        let prev = self
             .active_count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| {
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |x| {
                 Some(x.saturating_sub(1))
-            });
+            })
+            .unwrap_or(0);
         self.total_aborted.fetch_add(1, Ordering::Relaxed);
+        if prev == 1 {
+            // All transactions drained — advance GC safe point
+            self.gc_safe_version
+                .fetch_max(drain_version, Ordering::Release);
+        }
     }
 
     /// Get current global version
@@ -361,7 +360,6 @@ impl TransactionCoordinator {
             total_started: started,
             total_committed: committed,
             total_aborted: self.total_aborted.load(Ordering::Relaxed),
-            commit_time_us: self.commit_time_us.load(Ordering::Relaxed),
             commit_rate: if started > 0 {
                 committed as f64 / started as f64
             } else {
@@ -375,14 +373,20 @@ impl TransactionCoordinator {
         self.active_count.load(Ordering::SeqCst)
     }
 
-    /// Minimum snapshot version held by any active transaction.
+    /// Conservative lower bound on the minimum snapshot version held by
+    /// any active transaction.
     ///
-    /// Returns `None` if no transactions are active. Used by GC safe point
-    /// computation to ensure old versions needed by active snapshots are
-    /// not pruned.
+    /// Returns `None` when no GC constraint exists (no drain has ever
+    /// occurred). The returned value may be lower than the true minimum —
+    /// GC is conservative, never pruning versions that an active
+    /// transaction might need.
     pub fn min_active_version(&self) -> Option<u64> {
-        let versions = self.active_versions.lock();
-        versions.iter().map(|(_, v)| *v).min()
+        let v = self.gc_safe_version.load(Ordering::Acquire);
+        if v == 0 {
+            None
+        } else {
+            Some(v)
+        }
     }
 
     /// Wait for all active transactions to complete
@@ -424,8 +428,6 @@ pub struct TransactionMetrics {
     pub total_committed: u64,
     /// Total number of transactions aborted
     pub total_aborted: u64,
-    /// Cumulative commit duration in microseconds (includes lock wait)
-    pub commit_time_us: u64,
     /// Commit success rate (committed / started)
     pub commit_rate: f64,
 }
@@ -1220,105 +1222,312 @@ mod tests {
     }
 
     // ========================================================================
-    // Active Version Tracking Tests (T-4)
+    // GC Safe Version Tests
     // ========================================================================
 
     #[test]
     fn test_min_active_version_empty() {
         let coordinator = TransactionCoordinator::new(0);
+        // No transactions ever started → gc_safe_version is 0 (sentinel) → returns None
         assert_eq!(coordinator.min_active_version(), None);
     }
 
     #[test]
     fn test_min_active_version_tracks_correctly() {
-        let coordinator = TransactionCoordinator::new(0);
+        let coordinator = TransactionCoordinator::new(10);
 
-        // Register 3 transactions with known versions via record_start
+        // Register 3 transactions
         coordinator.record_start(1, 10);
         coordinator.record_start(2, 10);
         coordinator.record_start(3, 10);
 
-        // All snapshots are at version 10
-        let min = coordinator.min_active_version().unwrap();
-        assert_eq!(min, 10);
-
-        // Committing the first doesn't change min (all at same version)
-        coordinator.record_commit(1);
-        let min = coordinator.min_active_version().unwrap();
-        assert_eq!(min, 10);
-
-        // Committing second, still at 10
-        coordinator.record_commit(2);
-        assert_eq!(coordinator.min_active_version().unwrap(), 10);
-
-        // Committing last → no active transactions
-        coordinator.record_commit(3);
+        // While transactions are active, gc_safe_version hasn't advanced yet
+        // (no full drain has occurred), so min_active_version returns None
         assert_eq!(coordinator.min_active_version(), None);
+
+        // Committing first two doesn't cause a full drain (active_count stays > 0)
+        coordinator.record_commit(1);
+        assert_eq!(
+            coordinator.min_active_version(),
+            None,
+            "partial drain should not advance gc_safe_version"
+        );
+
+        coordinator.record_commit(2);
+        assert_eq!(
+            coordinator.min_active_version(),
+            None,
+            "still one active txn, no drain"
+        );
+
+        // Committing last → full drain → gc_safe_version advances to current_version (10)
+        coordinator.record_commit(3);
+        assert_eq!(
+            coordinator.min_active_version(),
+            Some(10),
+            "full drain should set gc_safe_version to current_version"
+        );
     }
 
     #[test]
     fn test_min_active_version_after_commit() {
-        let coordinator = TransactionCoordinator::new(0);
+        let coordinator = TransactionCoordinator::new(5);
 
-        // Manually register with different versions to test ordering
+        // Start and fully drain a transaction → gc_safe_version advances
         coordinator.record_start(1, 5);
-        coordinator.record_start(2, 10);
-        coordinator.record_start(3, 3);
+        coordinator.record_commit(1);
 
-        // Min should be 3
-        assert_eq!(coordinator.min_active_version(), Some(3));
+        // gc_safe_version should be exactly 5 (current_version at drain time)
+        assert_eq!(
+            coordinator.min_active_version(),
+            Some(5),
+            "gc_safe_version should be 5 after drain at version 5"
+        );
 
-        // Remove the min → new min is 5
-        coordinator.record_commit(3);
-        assert_eq!(coordinator.min_active_version(), Some(5));
+        // Allocate some versions to advance current_version
+        let _ = coordinator.allocate_commit_version(); // 6
+        let _ = coordinator.allocate_commit_version(); // 7
 
-        // Remove 5 → new min is 10
-        coordinator.record_abort(1);
-        assert_eq!(coordinator.min_active_version(), Some(10));
+        // gc_safe_version should still be 5 (no new drain)
+        assert_eq!(
+            coordinator.min_active_version(),
+            Some(5),
+            "allocating versions without drain should not change gc_safe_version"
+        );
 
-        // Remove last → None
+        // Start and drain again → gc_safe_version advances to 7
+        coordinator.record_start(2, 7);
         coordinator.record_commit(2);
-        assert_eq!(coordinator.min_active_version(), None);
+
+        assert_eq!(
+            coordinator.min_active_version(),
+            Some(7),
+            "gc_safe_version should advance to 7 after second drain"
+        );
     }
 
     #[test]
     fn test_active_versions_cleaned_on_abort() {
-        let coordinator = TransactionCoordinator::new(0);
-        let storage = create_test_storage();
-        let branch_id = BranchId::new();
+        // Use non-zero initial version so drain produces a non-sentinel gc_safe_version
+        let coordinator = TransactionCoordinator::new(5);
 
-        let txn = coordinator.start_transaction(branch_id, &storage).unwrap();
-        assert!(coordinator.min_active_version().is_some());
+        // Start a transaction then abort it — triggers drain
+        coordinator.record_start(1, 5);
+        assert_eq!(coordinator.active_count(), 1);
 
-        coordinator.record_abort(txn.txn_id);
-        assert_eq!(coordinator.min_active_version(), None);
+        coordinator.record_abort(1);
+        assert_eq!(coordinator.active_count(), 0);
+
+        // After abort with full drain, gc_safe_version should be exactly 5
+        assert_eq!(
+            coordinator.min_active_version(),
+            Some(5),
+            "abort drain should set gc_safe_version to current_version (5)"
+        );
     }
 
     #[test]
-    fn test_metrics_includes_commit_time() {
-        let coordinator = TransactionCoordinator::new(0);
-        let storage = create_test_storage();
+    fn test_gc_safe_version_advances_on_full_drain() {
+        let coordinator = TransactionCoordinator::new(10);
+
+        // Start 3 transactions at version 10
+        coordinator.record_start(1, 10);
+        coordinator.record_start(2, 10);
+        coordinator.record_start(3, 10);
+
+        // Partial commits don't trigger drain
+        coordinator.record_commit(1);
+        assert_eq!(
+            coordinator.min_active_version(),
+            None,
+            "2 still active, no drain"
+        );
+
+        coordinator.record_commit(2);
+        assert_eq!(
+            coordinator.min_active_version(),
+            None,
+            "1 still active, no drain"
+        );
+
+        // Final commit → full drain → gc_safe_version = 10
+        coordinator.record_commit(3);
+        assert_eq!(
+            coordinator.min_active_version(),
+            Some(10),
+            "full drain should set gc_safe_version to 10"
+        );
+    }
+
+    #[test]
+    fn test_gc_safe_version_conservative_while_active() {
+        let coordinator = TransactionCoordinator::new(5);
+
+        // Drain once to establish a gc_safe_version
+        coordinator.record_start(1, 5);
+        coordinator.record_commit(1);
+        assert_eq!(coordinator.min_active_version(), Some(5));
+
+        // Advance version and start new transaction
+        let _ = coordinator.allocate_commit_version(); // 6
+        let _ = coordinator.allocate_commit_version(); // 7
+
+        coordinator.record_start(2, 7);
+
+        // While txn 2 is active, gc_safe_version stays at the old value
+        // (no new drain has occurred)
+        assert_eq!(
+            coordinator.min_active_version(),
+            Some(5),
+            "gc_safe_version must not advance while txns are active"
+        );
+
+        // Commit txn 2 → drain → gc_safe_version advances to 7
+        coordinator.record_commit(2);
+        assert_eq!(
+            coordinator.min_active_version(),
+            Some(7),
+            "gc_safe_version should advance after second drain"
+        );
+    }
+
+    /// Test gc_safe_version monotonicity: multiple drain cycles with
+    /// increasing versions should produce monotonically increasing safe points.
+    #[test]
+    fn test_gc_safe_version_monotonically_increases() {
+        let coordinator = TransactionCoordinator::new(1);
+
+        let mut last_safe = 0u64;
+
+        for round in 0..5 {
+            // Start and drain a transaction
+            coordinator.record_start(round + 1, 0);
+            let _ = coordinator.allocate_commit_version();
+            coordinator.record_commit(round + 1);
+
+            if let Some(v) = coordinator.min_active_version() {
+                assert!(
+                    v >= last_safe,
+                    "gc_safe_version went backwards: {} < {} at round {}",
+                    v,
+                    last_safe,
+                    round
+                );
+                last_safe = v;
+            }
+        }
+
+        assert!(last_safe > 0, "should have advanced at least once");
+    }
+
+    /// Concurrent start/commit with gc_safe_version: verify gc_safe_version
+    /// never exceeds the snapshot version of any active transaction.
+    #[test]
+    fn test_gc_safe_version_concurrent_safety() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        let coordinator = Arc::new(TransactionCoordinator::new(100));
+        let storage = Arc::new(ShardedStore::new());
         let branch_id = BranchId::new();
 
-        // Commit a transaction through the coordinator
-        let snapshot = storage.snapshot();
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
-        txn.put(
-            strata_core::types::Key::new_kv(
-                std::sync::Arc::new(strata_core::types::Namespace::for_branch(branch_id)),
-                "key",
-            ),
-            strata_core::value::Value::Int(1),
-        )
-        .unwrap();
-        coordinator.record_start(1, 0);
+        // Allocate some versions first so gc_safe_version has something to track
+        for _ in 0..10 {
+            let _ = coordinator.allocate_commit_version();
+        }
 
-        let _ = coordinator.commit(&mut txn, storage.as_ref(), None);
+        let barrier = Arc::new(Barrier::new(8));
 
-        let metrics = coordinator.metrics();
+        // 8 threads each do 200 start/commit cycles
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let coord = Arc::clone(&coordinator);
+                let stor = Arc::clone(&storage);
+                let barr = Arc::clone(&barrier);
+
+                thread::spawn(move || {
+                    barr.wait();
+                    for _ in 0..200 {
+                        let txn = coord.start_transaction(branch_id, &stor).unwrap();
+                        // Simulate brief work
+                        thread::yield_now();
+                        coord.record_commit(txn.txn_id);
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // After all threads complete:
+        // 1. active_count must be 0
+        assert_eq!(
+            coordinator.active_count(),
+            0,
+            "all txns should have completed"
+        );
+        // 2. gc_safe_version should have advanced (Some, not None)
+        let v = coordinator.min_active_version();
         assert!(
-            metrics.commit_time_us > 0,
-            "commit_time_us should be > 0 after a commit"
+            v.is_some(),
+            "gc_safe_version should have advanced after concurrent drains"
+        );
+        // 3. gc_safe_version should be ≤ current_version (never overshoots)
+        let current = coordinator.current_version();
+        assert!(
+            v.unwrap() <= current,
+            "gc_safe_version ({}) must not exceed current_version ({})",
+            v.unwrap(),
+            current
+        );
+        // 4. Metrics should be consistent
+        let metrics = coordinator.metrics();
+        assert_eq!(metrics.total_started, 8 * 200);
+        assert_eq!(metrics.total_committed, 8 * 200);
+    }
+
+    /// Test that interleaved start/commit from multiple threads with
+    /// version allocations in between results in a valid gc_safe_version
+    /// that is always ≤ current_version.
+    #[test]
+    fn test_gc_safe_version_with_interleaved_version_bumps() {
+        let coordinator = Arc::new(TransactionCoordinator::new(1));
+        let storage = Arc::new(ShardedStore::new());
+        let branch_id = BranchId::new();
+
+        // Phase 1: Start 3 transactions, allocate versions between them
+        let txn1 = coordinator.start_transaction(branch_id, &storage).unwrap();
+        let _ = coordinator.allocate_commit_version(); // version 2
+        let txn2 = coordinator.start_transaction(branch_id, &storage).unwrap();
+        let _ = coordinator.allocate_commit_version(); // version 3
+        let txn3 = coordinator.start_transaction(branch_id, &storage).unwrap();
+
+        assert_eq!(coordinator.active_count(), 3);
+        assert_eq!(coordinator.min_active_version(), None); // no drain yet
+
+        // Phase 2: Commit in reverse order — txn3 first, txn1 last
+        coordinator.record_commit(txn3.txn_id);
+        assert_eq!(coordinator.min_active_version(), None); // still 2 active
+
+        coordinator.record_commit(txn2.txn_id);
+        assert_eq!(coordinator.min_active_version(), None); // still 1 active
+
+        coordinator.record_commit(txn1.txn_id); // drain!
+
+        // gc_safe_version should be exactly current_version at drain time
+        let v = coordinator.min_active_version().unwrap();
+        let current = coordinator.current_version();
+        assert!(
+            v <= current,
+            "gc_safe_version ({}) must be ≤ current_version ({})",
+            v,
+            current
+        );
+        assert_eq!(
+            v, 3,
+            "gc_safe_version should be 3 (current version at drain time)"
         );
     }
 }
