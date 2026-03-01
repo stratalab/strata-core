@@ -8,7 +8,7 @@ use strata_engine::{EventLogExt, KVStoreExt, StateCellExt};
 
 /// Helper to create an event payload object
 fn event_payload(data: Value) -> Value {
-    Value::Object(Box::new(HashMap::from([("data".to_string(), data)])))
+    Value::object(HashMap::from([("data".to_string(), data)]))
 }
 
 // ============================================================================

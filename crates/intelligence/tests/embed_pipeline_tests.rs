@@ -23,7 +23,7 @@ fn test_extract_returns_none_for_non_embeddable() {
     assert!(extract_text(&Value::Null).is_none());
     assert!(extract_text(&Value::Bytes(vec![1, 2, 3])).is_none());
     assert!(extract_text(&Value::String("".into())).is_none());
-    assert!(extract_text(&Value::Array(Box::new(vec![Value::Null, Value::Null]))).is_none());
+    assert!(extract_text(&Value::array(vec![Value::Null, Value::Null])).is_none());
 }
 
 #[test]
@@ -52,9 +52,9 @@ fn test_extract_complex_value() {
     map.insert("name".to_string(), Value::String("Alice".into()));
     map.insert(
         "scores".to_string(),
-        Value::Array(Box::new(vec![Value::Int(10), Value::Int(20)])),
+        Value::array(vec![Value::Int(10), Value::Int(20)]),
     );
-    let nested = Value::Object(Box::new(map));
+    let nested = Value::object(map);
 
     let text = extract_text(&nested).unwrap();
     assert!(text.contains("name: Alice"));
@@ -65,13 +65,13 @@ fn test_extract_complex_value() {
 
 #[test]
 fn test_extract_mixed_array_filters_nulls() {
-    let arr = Value::Array(Box::new(vec![
+    let arr = Value::array(vec![
         Value::String("keep".into()),
         Value::Null,
         Value::Int(7),
         Value::Bytes(vec![0xFF]),
         Value::String("also keep".into()),
-    ]));
+    ]);
     let text = extract_text(&arr).unwrap();
     assert!(text.contains("keep"));
     assert!(text.contains("7"));
@@ -87,9 +87,9 @@ fn test_extract_preserves_key_order_in_nested_objects() {
     inner.insert("a_field".to_string(), Value::String("first".into()));
 
     let mut outer = HashMap::new();
-    outer.insert("data".to_string(), Value::Object(Box::new(inner)));
+    outer.insert("data".to_string(), Value::object(inner));
 
-    let text = extract_text(&Value::Object(Box::new(outer))).unwrap();
+    let text = extract_text(&Value::object(outer)).unwrap();
     let a_pos = text.find("a_field").expect("a_field missing");
     let z_pos = text.find("z_field").expect("z_field missing");
     assert!(
@@ -207,7 +207,7 @@ fn test_extract_object_then_embed_produces_valid_vector() {
         Value::String("Rust programming".into()),
     );
     map.insert("year".to_string(), Value::Int(2024));
-    let obj = Value::Object(Box::new(map));
+    let obj = Value::object(map);
 
     let text = extract_text(&obj).expect("extraction should succeed");
     let engine = strata_intelligence::EmbeddingEngine::from_registry("miniLM")

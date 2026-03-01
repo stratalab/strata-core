@@ -724,10 +724,10 @@ fn large_nested_object() {
     }
 
     let mut outer = std::collections::HashMap::new();
-    outer.insert("nested".to_string(), Value::Object(Box::new(inner)));
+    outer.insert("nested".to_string(), Value::object(inner));
     outer.insert(
         "array".to_string(),
-        Value::Array(Box::new((0..100).map(|i| Value::Int(i)).collect())),
+        Value::array((0..100).map(|i| Value::Int(i)).collect()),
     );
 
     executor
@@ -735,7 +735,7 @@ fn large_nested_object() {
             branch: None,
             space: None,
             key: "large_object".into(),
-            value: Value::Object(Box::new(outer.clone())),
+            value: Value::object(outer.clone()),
         })
         .unwrap();
 
@@ -751,7 +751,7 @@ fn large_nested_object() {
     match output {
         Output::MaybeVersioned(Some(vv)) => {
             let val = vv.value;
-            assert_eq!(val, Value::Object(Box::new(outer)));
+            assert_eq!(val, Value::object(outer));
         }
         _ => panic!("Large object should be retrievable"),
     }

@@ -143,11 +143,11 @@ fn test_command_event_append() {
         branch: Some(BranchId::from("default")),
         space: None,
         event_type: "events".to_string(),
-        payload: Value::Object(Box::new(
+        payload: Value::object(
             [("type".to_string(), Value::String("click".to_string()))]
                 .into_iter()
                 .collect(),
-        )),
+        ),
     });
 }
 
@@ -218,11 +218,11 @@ fn test_command_vector_upsert() {
         collection: "embeddings".to_string(),
         key: "vec1".to_string(),
         vector: vec![0.1, 0.2, 0.3, 0.4],
-        metadata: Some(Value::Object(Box::new(
+        metadata: Some(Value::object(
             [("label".to_string(), Value::String("test".to_string()))]
                 .into_iter()
                 .collect(),
-        ))),
+        )),
     });
 }
 
@@ -259,11 +259,11 @@ fn test_command_vector_create_collection() {
 fn test_command_branch_create() {
     test_command_round_trip(Command::BranchCreate {
         branch_id: Some("my-branch".to_string()),
-        metadata: Some(Value::Object(Box::new(
+        metadata: Some(Value::object(
             [("name".to_string(), Value::String("Test Branch".to_string()))]
                 .into_iter()
                 .collect(),
-        ))),
+        )),
     });
 }
 
@@ -447,7 +447,7 @@ fn test_command_search_full() {
 
 #[test]
 fn test_command_with_complex_value() {
-    let complex_value = Value::Object(Box::new(
+    let complex_value = Value::object(
         [
             ("string".to_string(), Value::String("hello".to_string())),
             ("int".to_string(), Value::Int(42)),
@@ -456,20 +456,20 @@ fn test_command_with_complex_value() {
             ("null".to_string(), Value::Null),
             (
                 "array".to_string(),
-                Value::Array(Box::new(vec![Value::Int(1), Value::Int(2), Value::Int(3)])),
+                Value::array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
             ),
             (
                 "nested".to_string(),
-                Value::Object(Box::new(
+                Value::object(
                     [("deep".to_string(), Value::String("value".to_string()))]
                         .into_iter()
                         .collect(),
-                )),
+                ),
             ),
         ]
         .into_iter()
         .collect(),
-    ));
+    );
 
     test_command_round_trip(Command::KvPut {
         branch: Some(BranchId::from("default")),

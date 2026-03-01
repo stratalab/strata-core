@@ -13,23 +13,20 @@ use tempfile::TempDir;
 
 /// Helper to create an empty object payload for EventLog
 fn empty_payload() -> Value {
-    Value::Object(Box::new(HashMap::new()))
+    Value::object(HashMap::new())
 }
 
 /// Helper to create an object payload with a string value
 fn string_payload(s: &str) -> Value {
-    Value::Object(Box::new(HashMap::from([(
+    Value::object(HashMap::from([(
         "data".to_string(),
         Value::String(s.into()),
-    )])))
+    )]))
 }
 
 /// Helper to create an object payload with an integer value
 fn int_payload(v: i64) -> Value {
-    Value::Object(Box::new(HashMap::from([(
-        "value".to_string(),
-        Value::Int(v),
-    )])))
+    Value::object(HashMap::from([("value".to_string(), Value::Int(v))]))
 }
 
 fn setup() -> (Arc<Database>, TempDir, BranchId) {
@@ -245,10 +242,7 @@ fn test_nested_primitive_operations() {
         let kv_value = txn.kv_get("initial_value")?;
         let inner_value = kv_value.unwrap_or(Value::Null);
         // EventLog requires object payloads, so wrap the KV value
-        let payload = Value::Object(Box::new(HashMap::from([(
-            "from_kv".to_string(),
-            inner_value,
-        )])));
+        let payload = Value::object(HashMap::from([("from_kv".to_string(), inner_value)]));
 
         // Append Event with payload from KV (sequence starts at 0)
         let seq = txn.event_append("chained_event", payload)?;
@@ -267,10 +261,7 @@ fn test_nested_primitive_operations() {
     let event_log = EventLog::new(db.clone());
     let event = event_log.get(&branch_id, "default", 0).unwrap().unwrap();
     // Payload is now wrapped: {"from_kv": 42}
-    let expected_payload = Value::Object(Box::new(HashMap::from([(
-        "from_kv".to_string(),
-        Value::Int(42),
-    )])));
+    let expected_payload = Value::object(HashMap::from([("from_kv".to_string(), Value::Int(42))]));
     assert_eq!(event.value.payload, expected_payload);
 
     let state = state_cell

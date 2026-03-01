@@ -712,12 +712,12 @@ mod tests {
             &branch_id,
             "default",
             "array",
-            Value::Array(Box::new(vec![Value::Int(1), Value::Int(2)])),
+            Value::array(vec![Value::Int(1), Value::Int(2)]),
         )
         .unwrap();
         assert_eq!(
             kv.get(&branch_id, "default", "array").unwrap(),
-            Some(Value::Array(Box::new(vec![Value::Int(1), Value::Int(2)])))
+            Some(Value::array(vec![Value::Int(1), Value::Int(2)]))
         );
     }
 
