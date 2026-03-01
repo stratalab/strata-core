@@ -40,6 +40,7 @@ use strata_core::types::{BranchId, Key};
 use strata_core::{Timestamp, Version, VersionedValue};
 
 use crate::stored_value::StoredValue;
+use crate::ttl::TTLIndex;
 
 /// Internal storage for version chains — optimized for the common single-version case.
 ///
@@ -268,6 +269,9 @@ pub struct Shard {
     /// Sorted index of all keys for O(log n + k) prefix scans.
     /// Built lazily on first scan request, then maintained incrementally.
     pub(crate) ordered_keys: Option<BTreeSet<Arc<Key>>>,
+    /// TTL index for efficient expiration cleanup.
+    /// Maps expiry timestamps to keys for O(expired) cleanup.
+    pub(crate) ttl_index: TTLIndex,
 }
 
 impl Shard {
@@ -276,6 +280,7 @@ impl Shard {
         Self {
             data: FxHashMap::default(),
             ordered_keys: None,
+            ttl_index: TTLIndex::new(),
         }
     }
 
@@ -284,6 +289,7 @@ impl Shard {
         Self {
             data: FxHashMap::with_capacity_and_hasher(capacity, Default::default()),
             ordered_keys: None,
+            ttl_index: TTLIndex::new(),
         }
     }
 
@@ -446,6 +452,21 @@ impl ShardedStore {
         let branch_id = key.namespace.branch_id;
         let mut shard = self.shards.entry(branch_id).or_default();
 
+        let new_expiry = value.expiry_timestamp();
+        // Clone key for TTL index only when there IS a TTL (rare path)
+        let ttl_key = new_expiry.as_ref().map(|_| key.clone());
+
+        // Capture old expiry via immutable borrow before mutating the chain
+        let old_expiry = shard
+            .data
+            .get(&key)
+            .and_then(|chain| chain.latest().and_then(|sv| sv.expiry_timestamp()));
+
+        // Remove old TTL entry if previous version had one
+        if let Some(exp) = old_expiry {
+            shard.ttl_index.remove(exp, &key);
+        }
+
         if let Some(chain) = shard.data.get_mut(&key) {
             // Add new version to existing chain
             chain.push(value);
@@ -456,6 +477,11 @@ impl ShardedStore {
                 btree.insert(Arc::clone(&arc_key));
             }
             shard.data.insert(arc_key, VersionChain::new(value));
+        }
+
+        // Register new TTL entry (no-op for non-TTL values since new_expiry=None)
+        if let Some(exp) = new_expiry {
+            shard.ttl_index.insert(exp, ttl_key.unwrap());
         }
     }
 
@@ -627,6 +653,16 @@ impl ShardedStore {
             let mut shard = self.shards.entry(branch_id).or_default();
 
             for (key, stored) in branch_writes {
+                // Clean up old TTL entry if overwriting a key that had TTL.
+                // Batch writes always have ttl=None, so we only need removal, not insertion.
+                let old_expiry = shard
+                    .data
+                    .get(&key)
+                    .and_then(|chain| chain.latest().and_then(|sv| sv.expiry_timestamp()));
+                if let Some(exp) = old_expiry {
+                    shard.ttl_index.remove(exp, &key);
+                }
+
                 if let Some(chain) = shard.data.get_mut(&key) {
                     chain.push(stored);
                 } else {
@@ -639,6 +675,15 @@ impl ShardedStore {
             }
 
             for key in branch_deletes {
+                // Clean up old TTL entry if deleting a key that had TTL
+                let old_expiry = shard
+                    .data
+                    .get(&key)
+                    .and_then(|chain| chain.latest().and_then(|sv| sv.expiry_timestamp()));
+                if let Some(exp) = old_expiry {
+                    shard.ttl_index.remove(exp, &key);
+                }
+
                 let tombstone = StoredValue::tombstone(Version::txn(version));
                 if let Some(chain) = shard.data.get_mut(&key) {
                     chain.push(tombstone);
@@ -763,15 +808,28 @@ impl ShardedStore {
             // Collect dead keys during retain — keys whose only remaining
             // version is a tombstone or expired entry after GC.
             let mut dead_keys: Vec<Arc<Key>> = Vec::new();
+            // Collect TTL entries to remove after retain releases the data borrow
+            let mut ttl_removals: Vec<(Timestamp, Arc<Key>)> = Vec::new();
 
             shard.data.retain(|key, chain| {
+                // Capture expiry before GC potentially changes the chain
+                let had_expiry = chain.latest().and_then(|sv| sv.expiry_timestamp());
+
                 pruned += chain.gc(min_version);
                 if chain.is_dead() {
+                    if let Some(exp) = had_expiry {
+                        ttl_removals.push((exp, Arc::clone(key)));
+                    }
                     dead_keys.push(Arc::clone(key));
                     return false; // Remove from HashMap
                 }
                 true
             });
+
+            // Remove TTL entries for dead keys (after retain releases data borrow)
+            for (exp, key) in &ttl_removals {
+                shard.ttl_index.remove(*exp, key);
+            }
 
             // Remove dead keys from BTreeSet (if it exists)
             if !dead_keys.is_empty() {
@@ -783,6 +841,23 @@ impl ShardedStore {
             }
         }
         pruned
+    }
+
+    /// Clean expired entries from TTL indexes across all branches.
+    ///
+    /// Removes stale timestamp→key mappings from TTL indexes. Does NOT
+    /// add tombstones — expired keys are already detected by `is_expired()`
+    /// and removed by `gc_branch()` via `is_dead()`.
+    ///
+    /// Returns the number of expired index entries removed.
+    pub fn expire_ttl_keys(&self, now: Timestamp) -> usize {
+        let mut total = 0;
+        for branch_id in self.branch_ids() {
+            if let Some(mut shard) = self.shards.get_mut(&branch_id) {
+                total += shard.ttl_index.remove_expired(now);
+            }
+        }
+        total
     }
 
     // ========================================================================
@@ -4981,5 +5056,256 @@ mod tests {
         assert_eq!(results[0].1.value, Value::Int(1));
         assert_eq!(results[1].0.user_key_string().unwrap(), "gamma");
         assert_eq!(results[1].1.value, Value::Int(3));
+    }
+
+    // ========================================================================
+    // TTL Index Wiring Tests (S-4)
+    // ========================================================================
+
+    fn make_sv_with_ttl(version: u64, ttl_secs: u64) -> StoredValue {
+        StoredValue::with_timestamp(
+            strata_core::value::Value::Int(version as i64),
+            Version::txn(version),
+            Timestamp::from_micros(1_000_000), // fixed ts=1s for predictable expiry
+            Some(std::time::Duration::from_secs(ttl_secs)),
+        )
+    }
+
+    fn make_expired_sv(version: u64) -> StoredValue {
+        // Timestamp at epoch + 1ms TTL → definitely expired
+        StoredValue::with_timestamp(
+            strata_core::value::Value::Int(version as i64),
+            Version::txn(version),
+            Timestamp::from_micros(0),
+            Some(std::time::Duration::from_millis(1)),
+        )
+    }
+
+    fn test_ns_and_key(suffix: &str) -> Key {
+        use strata_core::types::Namespace;
+        let branch_id = BranchId::from_bytes([1u8; 16]);
+        let ns = Arc::new(Namespace::new(
+            "t".to_string(),
+            "a".to_string(),
+            "g".to_string(),
+            branch_id,
+            "default".to_string(),
+        ));
+        Key::new_kv(ns, suffix)
+    }
+
+    #[test]
+    fn test_put_with_ttl_updates_ttl_index() {
+        let store = ShardedStore::new();
+        let key = test_ns_and_key("ttl_key");
+        let sv = make_sv_with_ttl(1, 60);
+        let expected_expiry = sv.expiry_timestamp().unwrap();
+
+        store.put(key.clone(), sv);
+
+        // Verify TTL index has the entry
+        let shard = store.shards.get(&key.namespace.branch_id).unwrap();
+        assert_eq!(shard.ttl_index.len(), 1);
+        let expired = shard.ttl_index.find_expired(expected_expiry);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0], key);
+    }
+
+    #[test]
+    fn test_put_overwrite_removes_old_ttl() {
+        let store = ShardedStore::new();
+        let key = test_ns_and_key("overwrite_key");
+
+        // First put with TTL=60s
+        let sv1 = make_sv_with_ttl(1, 60);
+        let old_expiry = sv1.expiry_timestamp().unwrap();
+        store.put(key.clone(), sv1);
+
+        // Overwrite with TTL=120s
+        let sv2 = make_sv_with_ttl(2, 120);
+        let new_expiry = sv2.expiry_timestamp().unwrap();
+        store.put(key.clone(), sv2);
+
+        let shard = store.shards.get(&key.namespace.branch_id).unwrap();
+        // Should have exactly 1 TTL entry (the new one), not 2
+        assert_eq!(shard.ttl_index.len(), 1);
+        // Old expiry should find nothing
+        let at_old = shard.ttl_index.find_expired(old_expiry);
+        assert!(at_old.is_empty(), "Old TTL entry should be removed");
+        // New expiry should find the key
+        let at_new = shard.ttl_index.find_expired(new_expiry);
+        assert_eq!(at_new.len(), 1);
+    }
+
+    #[test]
+    fn test_put_overwrite_ttl_with_no_ttl_cleans_index() {
+        let store = ShardedStore::new();
+        let key = test_ns_and_key("ttl_to_none");
+
+        // First put with TTL
+        store.put(key.clone(), make_sv_with_ttl(1, 60));
+        {
+            let shard = store.shards.get(&key.namespace.branch_id).unwrap();
+            assert_eq!(shard.ttl_index.len(), 1);
+        }
+
+        // Overwrite without TTL
+        store.put(key.clone(), make_sv(2));
+        {
+            let shard = store.shards.get(&key.namespace.branch_id).unwrap();
+            assert!(
+                shard.ttl_index.is_empty(),
+                "TTL index should be empty after overwrite with non-TTL value"
+            );
+        }
+    }
+
+    #[test]
+    fn test_put_without_ttl_no_index_overhead() {
+        let store = ShardedStore::new();
+        let key = test_ns_and_key("no_ttl");
+
+        store.put(key.clone(), make_sv(1));
+
+        let shard = store.shards.get(&key.namespace.branch_id).unwrap();
+        assert!(
+            shard.ttl_index.is_empty(),
+            "Non-TTL put should not touch TTL index"
+        );
+    }
+
+    #[test]
+    fn test_delete_over_ttl_key_cleans_index() {
+        let store = ShardedStore::new();
+        let key = test_ns_and_key("delete_ttl");
+
+        // Put with TTL
+        store.put(key.clone(), make_sv_with_ttl(1, 60));
+        {
+            let shard = store.shards.get(&key.namespace.branch_id).unwrap();
+            assert_eq!(shard.ttl_index.len(), 1);
+        }
+
+        // Delete (tombstone) — should clean the TTL entry
+        store.put(key.clone(), StoredValue::tombstone(Version::txn(2)));
+        {
+            let shard = store.shards.get(&key.namespace.branch_id).unwrap();
+            assert!(
+                shard.ttl_index.is_empty(),
+                "Tombstone over TTL key should clean TTL index"
+            );
+        }
+    }
+
+    #[test]
+    fn test_expire_ttl_keys_cleans_index() {
+        let store = ShardedStore::new();
+        let key1 = test_ns_and_key("exp1");
+        let key2 = test_ns_and_key("exp2");
+
+        // Insert two keys with TTLs that are already expired (epoch + 1ms)
+        store.put(key1.clone(), make_expired_sv(1));
+        store.put(key2.clone(), make_expired_sv(2));
+
+        {
+            let shard = store.shards.get(&key1.namespace.branch_id).unwrap();
+            assert_eq!(shard.ttl_index.len(), 2);
+        }
+
+        // Expire — should clean both index entries
+        let removed = store.expire_ttl_keys(Timestamp::now());
+        assert_eq!(removed, 2);
+
+        {
+            let shard = store.shards.get(&key1.namespace.branch_id).unwrap();
+            assert!(shard.ttl_index.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_gc_branch_cleans_ttl_entries_for_dead_keys() {
+        let store = ShardedStore::new();
+        let key = test_ns_and_key("gc_ttl");
+        let branch_id = key.namespace.branch_id;
+
+        // Version 1: value with TTL (already expired)
+        store.put(key.clone(), make_expired_sv(1));
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert_eq!(shard.ttl_index.len(), 1);
+        }
+
+        // Version 2: tombstone (makes it dead after GC)
+        store.put(key.clone(), StoredValue::tombstone(Version::txn(2)));
+
+        // Tombstone should have cleaned the TTL entry from the put() path
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert!(
+                shard.ttl_index.is_empty(),
+                "TTL index should be clean after tombstone"
+            );
+        }
+
+        // GC with min_version=3 should remove the dead key entirely
+        let pruned = store.gc_branch(branch_id, 3);
+        assert!(pruned > 0);
+
+        // Key should be gone from data
+        let shard = store.shards.get(&branch_id).unwrap();
+        assert!(shard.data.is_empty());
+    }
+
+    #[test]
+    fn test_gc_branch_cleans_ttl_for_expired_only_key() {
+        let store = ShardedStore::new();
+        let key = test_ns_and_key("gc_exp_only");
+        let branch_id = key.namespace.branch_id;
+
+        // Single expired version (no tombstone, just expired TTL)
+        store.put(key.clone(), make_expired_sv(1));
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert_eq!(shard.ttl_index.len(), 1);
+        }
+
+        // GC with min_version=2 — the expired entry is dead, should be removed
+        let pruned = store.gc_branch(branch_id, 2);
+        // The chain is dead (expired), so key removed from data AND ttl index
+        let shard = store.shards.get(&branch_id).unwrap();
+        assert!(shard.data.is_empty(), "Dead expired key should be removed");
+        assert!(
+            shard.ttl_index.is_empty(),
+            "TTL entry for dead expired key should be cleaned"
+        );
+        let _ = pruned;
+    }
+
+    #[test]
+    fn test_apply_batch_cleans_ttl_on_overwrite() {
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let key = test_ns_and_key("batch_ttl");
+        let branch_id = key.namespace.branch_id;
+
+        // First: put with TTL via the normal path
+        store.put(key.clone(), make_sv_with_ttl(1, 60));
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert_eq!(shard.ttl_index.len(), 1);
+        }
+
+        // Then: apply_batch overwrites the same key (no TTL in batch writes)
+        store
+            .apply_batch(vec![(key.clone(), Value::Int(99))], vec![], 2)
+            .unwrap();
+
+        // TTL entry should have been cleaned up
+        let shard = store.shards.get(&branch_id).unwrap();
+        assert!(
+            shard.ttl_index.is_empty(),
+            "apply_batch overwrite should clean stale TTL entry"
+        );
     }
 }

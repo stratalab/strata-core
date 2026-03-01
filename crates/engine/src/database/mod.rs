@@ -700,7 +700,9 @@ impl Database {
             return Ok(version);
         }
 
-        self.coordinator.record_start();
+        let txn_id = self.coordinator.next_txn_id();
+        let start_version = self.coordinator.current_version();
+        self.coordinator.record_start(txn_id, start_version);
 
         let commit_version = self.coordinator.allocate_commit_version();
 
@@ -712,7 +714,6 @@ impl Database {
                     use strata_durability::format::WalRecord;
                     use strata_durability::now_micros;
 
-                    let txn_id = self.coordinator.next_txn_id();
                     let payload = TransactionPayload {
                         version: commit_version,
                         puts: vec![(key.clone(), value.clone())],
@@ -727,7 +728,7 @@ impl Database {
 
                     let mut wal = wal_arc.lock();
                     if let Err(e) = wal.append(&record) {
-                        self.coordinator.record_abort();
+                        self.coordinator.record_abort(txn_id);
                         return Err(StrataError::storage(format!(
                             "WAL write failed in put_direct: {}",
                             e
@@ -735,7 +736,7 @@ impl Database {
                     }
                 }
                 None => {
-                    self.coordinator.record_abort();
+                    self.coordinator.record_abort(txn_id);
                     return Err(StrataError::storage(
                         "WAL required by durability mode but writer is unavailable".to_string(),
                     ));
@@ -749,11 +750,11 @@ impl Database {
             .storage
             .put_with_version(key, value, commit_version, None)
         {
-            self.coordinator.record_abort();
+            self.coordinator.record_abort(txn_id);
             return Err(e);
         }
 
-        self.coordinator.record_commit();
+        self.coordinator.record_commit(txn_id);
         Ok(commit_version)
     }
 
@@ -1002,6 +1003,60 @@ impl Database {
     /// a safe GC boundary when no active snapshots need older versions.
     pub fn current_version(&self) -> u64 {
         self.coordinator.current_version()
+    }
+
+    /// Compute the GC safe point — the oldest version that can be pruned.
+    ///
+    /// `safe_point = min(current_version - 1, min_active_version)`
+    ///
+    /// Versions strictly older than `safe_point` can be pruned from version
+    /// chains. Returns 0 if no GC is safe (only one version or version 0).
+    pub fn gc_safe_point(&self) -> u64 {
+        let current = self.current_version();
+        if current <= 1 {
+            return 0;
+        }
+        let version_bound = current - 1;
+        match self.coordinator.min_active_version() {
+            Some(min_active) => version_bound.min(min_active),
+            None => version_bound,
+        }
+    }
+
+    /// Run garbage collection across all branches using the computed safe point.
+    ///
+    /// This is NOT called automatically — it must be invoked explicitly.
+    /// A future PR will add a background maintenance thread.
+    ///
+    /// Returns `(safe_point, total_versions_pruned)`.
+    pub fn run_gc(&self) -> (u64, usize) {
+        let safe_point = self.gc_safe_point();
+        if safe_point == 0 {
+            return (0, 0);
+        }
+
+        let mut total_pruned = 0;
+        for branch_id in self.storage.branch_ids() {
+            total_pruned += self.storage.gc_branch(branch_id, safe_point);
+        }
+
+        if total_pruned > 0 {
+            tracing::debug!(pruned = total_pruned, safe_point, "GC cycle complete");
+        }
+
+        (safe_point, total_pruned)
+    }
+
+    /// Run a full maintenance cycle: GC + TTL expiration.
+    ///
+    /// This is NOT called automatically. It must be invoked explicitly
+    /// (e.g., from tests, CLI, or a future background thread).
+    ///
+    /// Returns `(safe_point, versions_pruned, ttl_entries_expired)`.
+    pub fn run_maintenance(&self) -> (u64, usize, usize) {
+        let (safe_point, pruned) = self.run_gc();
+        let expired = self.storage.expire_ttl_keys(strata_core::Timestamp::now());
+        (safe_point, pruned, expired)
     }
 
     /// Remove the per-branch commit lock after a branch is deleted.
@@ -1609,7 +1664,7 @@ impl Database {
             }
             Err(e) => {
                 let _ = txn.mark_aborted(format!("Closure error: {}", e));
-                self.coordinator.record_abort();
+                self.coordinator.record_abort(txn.txn_id);
                 Err(e)
             }
         }
@@ -1773,7 +1828,8 @@ impl Database {
     pub fn begin_transaction(&self, branch_id: BranchId) -> TransactionContext {
         let txn_id = self.coordinator.next_txn_id();
         let snapshot = self.storage.create_snapshot();
-        self.coordinator.record_start();
+        let snapshot_version = snapshot.version();
+        self.coordinator.record_start(txn_id, snapshot_version);
 
         TransactionPool::acquire(txn_id, branch_id, Some(Box::new(snapshot)))
     }
@@ -2796,5 +2852,171 @@ mod tests {
 
         // Now compact should succeed
         assert!(db.compact().is_ok());
+    }
+
+    #[test]
+    fn test_gc_safe_point_no_active_txns() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open(temp_dir.path().join("db")).unwrap();
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        // Fresh DB: version starts at 0, gc_safe_point should be 0 (current <= 1)
+        assert_eq!(db.gc_safe_point(), 0);
+
+        // Commit two transactions to advance version past 1
+        let key = Key::new_kv(ns.clone(), "gc_key");
+        db.transaction(branch_id, |txn| {
+            txn.put(key.clone(), Value::Int(1))?;
+            Ok(())
+        })
+        .unwrap();
+        db.transaction(branch_id, |txn| {
+            txn.put(key.clone(), Value::Int(2))?;
+            Ok(())
+        })
+        .unwrap();
+
+        // Now current_version >= 2, no active txns → safe_point = current - 1
+        let sp = db.gc_safe_point();
+        assert!(sp >= 1, "safe point should be at least 1, got {}", sp);
+    }
+
+    #[test]
+    fn test_gc_safe_point_with_active_txn() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open(temp_dir.path().join("db")).unwrap();
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        // Commit a few transactions to advance version well past 1
+        for i in 0..5 {
+            let key = Key::new_kv(ns.clone(), &format!("key_{}", i));
+            db.transaction(branch_id, |txn| {
+                txn.put(key.clone(), Value::Int(i))?;
+                Ok(())
+            })
+            .unwrap();
+        }
+
+        // Start a transaction but don't commit it yet — pins version
+        let txn = db.begin_transaction(branch_id);
+        let txn_start_version = txn.start_version;
+
+        // Commit two more transactions to advance version further
+        for i in 5..7 {
+            let key = Key::new_kv(ns.clone(), &format!("key_{}", i));
+            db.transaction(branch_id, |t| {
+                t.put(key.clone(), Value::Int(i))?;
+                Ok(())
+            })
+            .unwrap();
+        }
+
+        // GC safe point should be min(current - 1, min_active_version)
+        // The active txn pins the safe point at its start version
+        let sp = db.gc_safe_point();
+        assert!(
+            sp <= txn_start_version,
+            "safe point {} should be <= active txn start version {}",
+            sp,
+            txn_start_version
+        );
+
+        // Abort the active transaction
+        db.coordinator.record_abort(txn.txn_id);
+
+        // Now safe point should advance to current - 1 since no active txns
+        let sp_after = db.gc_safe_point();
+        assert!(
+            sp_after > sp,
+            "safe point should advance after abort: {} > {}",
+            sp_after,
+            sp
+        );
+    }
+
+    #[test]
+    fn test_run_gc_prunes_old_versions() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open(temp_dir.path().join("db")).unwrap();
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = Key::new_kv(ns, "gc_prune");
+
+        // Write v1
+        db.transaction(branch_id, |txn| {
+            txn.put(key.clone(), Value::Int(1))?;
+            Ok(())
+        })
+        .unwrap();
+
+        // Overwrite with v2
+        db.transaction(branch_id, |txn| {
+            txn.put(key.clone(), Value::Int(2))?;
+            Ok(())
+        })
+        .unwrap();
+
+        // Overwrite with v3
+        db.transaction(branch_id, |txn| {
+            txn.put(key.clone(), Value::Int(3))?;
+            Ok(())
+        })
+        .unwrap();
+
+        // Run GC — should prune old versions
+        let (safe_point, pruned) = db.run_gc();
+        assert!(safe_point > 0, "safe point should be non-zero");
+        assert!(pruned > 0, "should have pruned at least 1 old version");
+
+        // Latest value should still be readable
+        let stored = db.storage().get(&key).unwrap().unwrap();
+        assert_eq!(stored.value, Value::Int(3));
+    }
+
+    #[test]
+    fn test_run_gc_no_prune_at_version_zero() {
+        let db = Database::cache().unwrap();
+
+        // Version is 1, gc_safe_point returns 0
+        let (safe_point, pruned) = db.run_gc();
+        assert_eq!(safe_point, 0);
+        assert_eq!(pruned, 0);
+    }
+
+    #[test]
+    fn test_run_maintenance_end_to_end() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open(temp_dir.path().join("db")).unwrap();
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        // Write and overwrite a key to create GC-able versions
+        let key = Key::new_kv(ns, "maint_key");
+        db.transaction(branch_id, |txn| {
+            txn.put(key.clone(), Value::Int(1))?;
+            Ok(())
+        })
+        .unwrap();
+
+        db.transaction(branch_id, |txn| {
+            txn.put(key.clone(), Value::Int(2))?;
+            Ok(())
+        })
+        .unwrap();
+
+        // Run full maintenance cycle
+        let (safe_point, pruned, expired) = db.run_maintenance();
+        assert!(safe_point > 0, "safe point should be non-zero");
+        // pruned may or may not be > 0 depending on version chain gc logic
+        // expired should be 0 since we didn't use TTL
+        assert_eq!(expired, 0, "no TTL entries to expire");
+
+        // Data should still be readable
+        let stored = db.storage().get(&key).unwrap().unwrap();
+        assert_eq!(stored.value, Value::Int(2));
+
+        let _ = pruned; // suppress unused warning
     }
 }
