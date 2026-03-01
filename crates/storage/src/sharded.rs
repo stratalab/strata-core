@@ -190,6 +190,17 @@ impl VersionChain {
         }
     }
 
+    /// Returns true if this chain represents a dead key — only a single
+    /// tombstone or expired version remains. After GC, such keys can be
+    /// fully removed from storage since no active snapshot can see a
+    /// non-deleted value.
+    pub fn is_dead(&self) -> bool {
+        self.version_count() == 1
+            && self
+                .latest()
+                .is_some_and(|sv| sv.is_tombstone() || sv.is_expired())
+    }
+
     /// Get version history (newest first)
     ///
     /// Returns versions in descending order (newest first).
@@ -281,7 +292,13 @@ impl Shard {
     /// `commit_batch()`, so this only triggers on the very first scan.
     pub(crate) fn ensure_ordered_keys(&mut self) {
         if self.ordered_keys.is_none() {
-            self.ordered_keys = Some(self.data.keys().cloned().collect());
+            self.ordered_keys = Some(
+                self.data
+                    .iter()
+                    .filter(|(_, chain)| !chain.is_dead())
+                    .map(|(k, _)| Arc::clone(k))
+                    .collect(),
+            );
         }
     }
 
@@ -743,8 +760,26 @@ impl ShardedStore {
     pub fn gc_branch(&self, branch_id: BranchId, min_version: u64) -> usize {
         let mut pruned = 0;
         if let Some(mut shard) = self.shards.get_mut(&branch_id) {
-            for chain in shard.data.values_mut() {
+            // Collect dead keys during retain — keys whose only remaining
+            // version is a tombstone or expired entry after GC.
+            let mut dead_keys: Vec<Arc<Key>> = Vec::new();
+
+            shard.data.retain(|key, chain| {
                 pruned += chain.gc(min_version);
+                if chain.is_dead() {
+                    dead_keys.push(Arc::clone(key));
+                    return false; // Remove from HashMap
+                }
+                true
+            });
+
+            // Remove dead keys from BTreeSet (if it exists)
+            if !dead_keys.is_empty() {
+                if let Some(ref mut btree) = shard.ordered_keys {
+                    for key in &dead_keys {
+                        btree.remove(key);
+                    }
+                }
             }
         }
         pruned
@@ -4521,5 +4556,430 @@ mod tests {
             .filter_map(|(k, _)| k.user_key_string())
             .collect();
         assert_eq!(keys, vec!["a", "b", "c", "e"]);
+    }
+
+    // ========================================================================
+    // Dead Key GC Tests (Issue #1304)
+    // ========================================================================
+
+    #[test]
+    fn test_version_chain_is_dead() {
+        // Single tombstone → dead
+        let chain = VersionChain::new(StoredValue::tombstone(Version::txn(1)));
+        assert!(chain.is_dead());
+
+        // Single expired value → dead
+        let expired = StoredValue::with_timestamp(
+            strata_core::value::Value::Int(1),
+            Version::txn(1),
+            Timestamp::from_micros(0),
+            Some(std::time::Duration::from_secs(1)),
+        );
+        let chain = VersionChain::new(expired);
+        assert!(chain.is_dead());
+
+        // Single live value → not dead
+        let chain = VersionChain::new(make_sv(1));
+        assert!(!chain.is_dead());
+
+        // Multi with tombstone latest + live older → not dead
+        let mut chain = VersionChain::new(make_sv(1));
+        chain.push(StoredValue::tombstone(Version::txn(10)));
+        assert!(!chain.is_dead());
+
+        // After GC reduces to single tombstone → dead
+        let mut chain = VersionChain::new(make_sv(1));
+        chain.push(StoredValue::tombstone(Version::txn(10)));
+        assert_eq!(chain.version_count(), 2);
+        chain.gc(5); // Prunes v1, leaves v10 tombstone
+        assert_eq!(chain.version_count(), 1);
+        assert!(chain.is_dead());
+    }
+
+    #[test]
+    fn test_gc_branch_removes_dead_keys_from_hashmap() {
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = Arc::new(strata_core::types::Namespace::new(
+            "t".to_string(),
+            "a".to_string(),
+            "g".to_string(),
+            branch_id,
+            "default".to_string(),
+        ));
+
+        // Insert a key, then tombstone it
+        let key = Key::new_kv(ns.clone(), "victim");
+        store.put(
+            key.clone(),
+            StoredValue::new(strata_core::value::Value::Int(1), Version::txn(1), None),
+        );
+        store.put(key.clone(), StoredValue::tombstone(Version::txn(10)));
+
+        // BTreeSet not built yet — verify GC handles the None case
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert!(
+                shard.ordered_keys.is_none(),
+                "BTreeSet should not exist yet"
+            );
+        }
+
+        // GC with min_version high enough to prune the live version
+        let pruned = store.gc_branch(branch_id, 5);
+        assert_eq!(pruned, 1, "should report 1 version pruned (v1 live value)");
+
+        // Key should be removed from HashMap
+        let shard = store.shards.get(&branch_id).unwrap();
+        assert!(
+            !shard.data.contains_key(&key),
+            "dead key should be removed from HashMap after GC"
+        );
+        assert!(
+            shard.ordered_keys.is_none(),
+            "BTreeSet should remain None (never built)"
+        );
+    }
+
+    #[test]
+    fn test_gc_branch_removes_single_tombstone_no_prior_value() {
+        // Key inserted directly as tombstone (no prior live value) —
+        // exercises the Single(tombstone) → gc() noop → is_dead() true path
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = Arc::new(strata_core::types::Namespace::new(
+            "t".to_string(),
+            "a".to_string(),
+            "g".to_string(),
+            branch_id,
+            "default".to_string(),
+        ));
+
+        let key = Key::new_kv(ns.clone(), "orphan_tombstone");
+        store.put(key.clone(), StoredValue::tombstone(Version::txn(5)));
+
+        // gc() on Single is a noop (returns 0), but is_dead() should still
+        // detect the single tombstone and remove it
+        let pruned = store.gc_branch(branch_id, 100);
+        assert_eq!(pruned, 0, "gc on Single is always 0");
+
+        let shard = store.shards.get(&branch_id).unwrap();
+        assert!(
+            !shard.data.contains_key(&key),
+            "single tombstone with no prior value should be removed"
+        );
+    }
+
+    #[test]
+    fn test_gc_branch_removes_dead_keys_from_btreeset() {
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = Arc::new(strata_core::types::Namespace::new(
+            "t".to_string(),
+            "a".to_string(),
+            "g".to_string(),
+            branch_id,
+            "default".to_string(),
+        ));
+
+        let key = Key::new_kv(ns.clone(), "victim");
+        store.put(
+            key.clone(),
+            StoredValue::new(strata_core::value::Value::Int(1), Version::txn(1), None),
+        );
+        store.put(key.clone(), StoredValue::tombstone(Version::txn(10)));
+
+        // Trigger BTreeSet build before GC
+        {
+            let mut shard = store.shards.get_mut(&branch_id).unwrap();
+            shard.ensure_ordered_keys();
+            assert!(shard.ordered_keys.as_ref().unwrap().contains(&key));
+        }
+
+        store.gc_branch(branch_id, 5);
+
+        let shard = store.shards.get(&branch_id).unwrap();
+        let btree = shard.ordered_keys.as_ref().unwrap();
+        assert!(
+            !btree.contains(&key),
+            "dead key should be removed from BTreeSet after GC"
+        );
+    }
+
+    #[test]
+    fn test_gc_branch_keeps_alive_keys() {
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = Arc::new(strata_core::types::Namespace::new(
+            "t".to_string(),
+            "a".to_string(),
+            "g".to_string(),
+            branch_id,
+            "default".to_string(),
+        ));
+
+        let key_a = Key::new_kv(ns.clone(), "alive");
+        let key_b = Key::new_kv(ns.clone(), "dead");
+
+        // Key A: live value
+        store.put(
+            key_a.clone(),
+            StoredValue::new(strata_core::value::Value::Int(1), Version::txn(1), None),
+        );
+
+        // Key B: value then tombstone
+        store.put(
+            key_b.clone(),
+            StoredValue::new(strata_core::value::Value::Int(2), Version::txn(2), None),
+        );
+        store.put(key_b.clone(), StoredValue::tombstone(Version::txn(10)));
+
+        // Build BTreeSet
+        {
+            let mut shard = store.shards.get_mut(&branch_id).unwrap();
+            shard.ensure_ordered_keys();
+        }
+
+        let pruned = store.gc_branch(branch_id, 5);
+        assert_eq!(pruned, 1, "only v2 of key_b should be pruned");
+
+        let shard = store.shards.get(&branch_id).unwrap();
+        // A remains in HashMap and BTreeSet with correct value
+        assert!(shard.data.contains_key(&key_a));
+        assert!(shard.ordered_keys.as_ref().unwrap().contains(&key_a));
+        let chain_a = shard.data.get(&key_a).unwrap();
+        assert_eq!(chain_a.version_count(), 1);
+        assert!(!chain_a.is_dead());
+        // B removed from both
+        assert!(!shard.data.contains_key(&key_b));
+        assert!(!shard.ordered_keys.as_ref().unwrap().contains(&key_b));
+    }
+
+    #[test]
+    fn test_gc_branch_keeps_multi_reduced_to_live() {
+        // Critical negative case: Multi chain reduced to a single LIVE value
+        // by GC must NOT be treated as dead. Guards against is_dead() regressing
+        // to just `version_count() == 1`.
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = Arc::new(strata_core::types::Namespace::new(
+            "t".to_string(),
+            "a".to_string(),
+            "g".to_string(),
+            branch_id,
+            "default".to_string(),
+        ));
+
+        let key = Key::new_kv(ns.clone(), "survivor");
+        // v5: old value, v10: updated value (both live)
+        store.put(
+            key.clone(),
+            StoredValue::new(strata_core::value::Value::Int(1), Version::txn(5), None),
+        );
+        store.put(
+            key.clone(),
+            StoredValue::new(strata_core::value::Value::Int(2), Version::txn(10), None),
+        );
+
+        // Build BTreeSet before GC
+        {
+            let mut shard = store.shards.get_mut(&branch_id).unwrap();
+            shard.ensure_ordered_keys();
+        }
+
+        // GC with min_version=8 → prunes v5, leaves v10 (live)
+        let pruned = store.gc_branch(branch_id, 8);
+        assert_eq!(pruned, 1, "v5 should be pruned");
+
+        let shard = store.shards.get(&branch_id).unwrap();
+        // Key MUST survive — single live value is not dead
+        assert!(
+            shard.data.contains_key(&key),
+            "key reduced to single LIVE value must NOT be removed"
+        );
+        assert!(shard.ordered_keys.as_ref().unwrap().contains(&key));
+        let chain = shard.data.get(&key).unwrap();
+        assert_eq!(chain.version_count(), 1);
+        assert!(!chain.is_dead());
+        assert_eq!(chain.latest().unwrap().version(), Version::txn(10));
+    }
+
+    #[test]
+    fn test_gc_branch_keeps_key_with_multiple_versions() {
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = Arc::new(strata_core::types::Namespace::new(
+            "t".to_string(),
+            "a".to_string(),
+            "g".to_string(),
+            branch_id,
+            "default".to_string(),
+        ));
+
+        let key = Key::new_kv(ns.clone(), "multi");
+        // v10: live value, v20: tombstone
+        store.put(
+            key.clone(),
+            StoredValue::new(strata_core::value::Value::Int(1), Version::txn(10), None),
+        );
+        store.put(key.clone(), StoredValue::tombstone(Version::txn(20)));
+
+        // Build BTreeSet to verify it's maintained across progressive GC
+        {
+            let mut shard = store.shards.get_mut(&branch_id).unwrap();
+            shard.ensure_ordered_keys();
+        }
+
+        // GC with min_version=5 → too low to prune v10, key stays
+        let pruned = store.gc_branch(branch_id, 5);
+        assert_eq!(
+            pruned, 0,
+            "nothing to prune when min_version < all versions"
+        );
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert!(
+                shard.data.contains_key(&key),
+                "key with multiple versions should survive low min_version GC"
+            );
+            assert!(
+                shard.ordered_keys.as_ref().unwrap().contains(&key),
+                "key should remain in BTreeSet after surviving GC"
+            );
+            assert_eq!(shard.data.get(&key).unwrap().version_count(), 2);
+        }
+
+        // GC with min_version=15 → prunes v10, leaves only v20 tombstone → dead
+        let pruned = store.gc_branch(branch_id, 15);
+        assert_eq!(pruned, 1, "v10 should be pruned");
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert!(
+                !shard.data.contains_key(&key),
+                "key reduced to single tombstone should be removed from HashMap"
+            );
+            assert!(
+                !shard.ordered_keys.as_ref().unwrap().contains(&key),
+                "key reduced to single tombstone should be removed from BTreeSet"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ensure_ordered_keys_skips_dead_keys() {
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = Arc::new(strata_core::types::Namespace::new(
+            "t".to_string(),
+            "a".to_string(),
+            "g".to_string(),
+            branch_id,
+            "default".to_string(),
+        ));
+
+        let key_live = Key::new_kv(ns.clone(), "live");
+        let key_dead = Key::new_kv(ns.clone(), "dead");
+
+        // Live key
+        store.put(
+            key_live.clone(),
+            StoredValue::new(strata_core::value::Value::Int(1), Version::txn(1), None),
+        );
+
+        // Dead key (tombstone only)
+        store.put(key_dead.clone(), StoredValue::tombstone(Version::txn(2)));
+
+        // Build BTreeSet — should skip the dead key
+        {
+            let mut shard = store.shards.get_mut(&branch_id).unwrap();
+            shard.ensure_ordered_keys();
+            let btree = shard.ordered_keys.as_ref().unwrap();
+            assert!(btree.contains(&key_live));
+            assert!(
+                !btree.contains(&key_dead),
+                "ensure_ordered_keys should skip dead (tombstone-only) keys"
+            );
+            // HashMap must still contain the dead key — filtering is BTreeSet-only
+            assert!(
+                shard.data.contains_key(&key_dead),
+                "ensure_ordered_keys must NOT remove from HashMap"
+            );
+            assert_eq!(btree.len(), 1, "BTreeSet should only contain the live key");
+            assert_eq!(shard.data.len(), 2, "HashMap should contain both keys");
+        }
+    }
+
+    #[test]
+    fn test_scan_prefix_after_gc_removes_dead_keys() {
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = Arc::new(strata_core::types::Namespace::new(
+            "t".to_string(),
+            "a".to_string(),
+            "g".to_string(),
+            branch_id,
+            "default".to_string(),
+        ));
+
+        // Insert keys: alpha (live), beta (will be tombstoned), gamma (live)
+        Storage::put(
+            &store,
+            Key::new_kv(ns.clone(), "alpha"),
+            Value::Int(1),
+            None,
+        )
+        .unwrap();
+        Storage::put(&store, Key::new_kv(ns.clone(), "beta"), Value::Int(2), None).unwrap();
+        Storage::put(
+            &store,
+            Key::new_kv(ns.clone(), "gamma"),
+            Value::Int(3),
+            None,
+        )
+        .unwrap();
+
+        // Tombstone beta
+        let beta_key = Key::new_kv(ns.clone(), "beta");
+        store.put(beta_key.clone(), StoredValue::tombstone(Version::txn(100)));
+
+        // Scan before GC — beta should not appear (tombstoned)
+        let prefix = Key::new_kv(ns.clone(), "");
+        let results = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
+        let keys: Vec<String> = results
+            .iter()
+            .filter_map(|(k, _)| k.user_key_string())
+            .collect();
+        assert_eq!(keys, vec!["alpha", "gamma"]);
+
+        // Verify beta is still in internal structures before GC
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert!(
+                shard.data.contains_key(&beta_key),
+                "beta should still be in HashMap before GC"
+            );
+            assert_eq!(shard.data.len(), 3, "all 3 keys in HashMap before GC");
+        }
+
+        // Run GC to actually remove dead keys
+        store.gc_branch(branch_id, 50);
+
+        // Verify beta is gone from internal structures
+        {
+            let shard = store.shards.get(&branch_id).unwrap();
+            assert!(!shard.data.contains_key(&beta_key));
+            assert!(!shard.ordered_keys.as_ref().unwrap().contains(&beta_key));
+            assert_eq!(shard.data.len(), 2, "only live keys remain after GC");
+        } // Drop read guard before scan_prefix needs get_mut
+
+        // Scan after GC — same result, live keys still present with correct values
+        let results = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0.user_key_string().unwrap(), "alpha");
+        assert_eq!(results[0].1.value, Value::Int(1));
+        assert_eq!(results[1].0.user_key_string().unwrap(), "gamma");
+        assert_eq!(results[1].1.value, Value::Int(3));
     }
 }
