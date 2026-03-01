@@ -153,8 +153,8 @@ pub fn validate_read_set<S: Storage>(
 
     for (key, read_version) in read_set {
         // Get current version from storage (as u64 for comparison)
-        let current_version = match store.get(key) {
-            Ok(Some(vv)) => vv.version.as_u64(),
+        let current_version = match store.get_version_only(key) {
+            Ok(Some(v)) => v,
             Ok(None) => 0, // Key doesn't exist = version 0
             Err(e) => {
                 // Storage error - abort validation to prevent incorrect commit
@@ -202,8 +202,8 @@ pub fn validate_cas_set<S: Storage>(
 
     for cas_op in cas_set {
         // Get current version from storage (as u64 for comparison)
-        let current_version = match store.get(&cas_op.key) {
-            Ok(Some(vv)) => vv.version.as_u64(),
+        let current_version = match store.get_version_only(&cas_op.key) {
+            Ok(Some(v)) => v,
             Ok(None) => 0, // Key doesn't exist = version 0
             Err(e) => {
                 return Err(strata_core::StrataError::internal(format!(
@@ -250,8 +250,8 @@ pub fn validate_json_set<S: Storage>(
 
     for (key, snapshot_version) in versions {
         // Get current version from storage
-        let current_version = match store.get(key) {
-            Ok(Some(vv)) => vv.version.as_u64(),
+        let current_version = match store.get_version_only(key) {
+            Ok(Some(v)) => v,
             Ok(None) => 0, // Document deleted = version 0
             Err(e) => {
                 return Err(strata_core::StrataError::internal(format!(

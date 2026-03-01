@@ -235,12 +235,12 @@ impl GraphStore {
 
             // Write ref index
             if let Some(rk) = ref_key.clone() {
-                txn.put(rk, Value::String(String::new()))?;
+                txn.put(rk, Value::Null)?;
             }
 
             // Write type index
             if let Some(tk) = type_key.clone() {
-                txn.put(tk, Value::String(String::new()))?;
+                txn.put(tk, Value::Null)?;
             }
             Ok(())
         })
@@ -745,10 +745,10 @@ impl GraphStore {
                     txn.put(sk.clone(), Value::String(json.clone()))?;
                 }
                 for rk in &ref_entries {
-                    txn.put(rk.clone(), Value::String(String::new()))?;
+                    txn.put(rk.clone(), Value::Null)?;
                 }
                 for tk in &type_entries {
-                    txn.put(tk.clone(), Value::String(String::new()))?;
+                    txn.put(tk.clone(), Value::Null)?;
                 }
                 Ok(())
             })?;

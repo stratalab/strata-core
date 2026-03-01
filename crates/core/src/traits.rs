@@ -186,13 +186,25 @@ pub trait Storage: Send + Sync {
     /// * `key` - The key to delete
     /// * `version` - The version for this delete operation
     ///
-    /// # Returns
-    /// The deleted value if it existed, None otherwise.
+    /// # Errors
+    ///
+    /// Returns an error if the storage operation fails.
+    fn delete_with_version(&self, key: &Key, version: u64) -> StrataResult<()>;
+
+    /// Get only the version number for a key (no Value clone)
+    ///
+    /// Returns the raw version as `u64` without constructing a `VersionedValue`.
+    /// Used by validation paths that only need version comparison.
+    ///
+    /// Default implementation delegates to `get()` and extracts the version.
+    /// Implementations can override for efficiency (e.g., skipping Value clone).
     ///
     /// # Errors
     ///
     /// Returns an error if the storage operation fails.
-    fn delete_with_version(&self, key: &Key, version: u64) -> StrataResult<Option<VersionedValue>>;
+    fn get_version_only(&self, key: &Key) -> StrataResult<Option<u64>> {
+        Ok(self.get(key)?.map(|vv| vv.version.as_u64()))
+    }
 }
 
 /// Snapshot view abstraction for snapshot isolation
@@ -411,12 +423,9 @@ mod tests {
             Ok(())
         }
 
-        fn delete_with_version(
-            &self,
-            key: &Key,
-            _version: u64,
-        ) -> StrataResult<Option<VersionedValue>> {
-            self.delete(key)
+        fn delete_with_version(&self, key: &Key, _version: u64) -> StrataResult<()> {
+            self.delete(key)?;
+            Ok(())
         }
     }
 
@@ -825,7 +834,7 @@ mod tests {
         ) -> StrataResult<()> {
             Err(StrataError::storage("disk write failed"))
         }
-        fn delete_with_version(&self, _: &Key, _: u64) -> StrataResult<Option<VersionedValue>> {
+        fn delete_with_version(&self, _: &Key, _: u64) -> StrataResult<()> {
             Err(StrataError::storage("disk write failed"))
         }
     }

@@ -457,29 +457,11 @@ impl ShardedStore {
     #[inline]
     pub fn delete(&self, key: &Key) -> Option<VersionedValue> {
         let delete_version = self.next_version();
-        // delete_with_version always succeeds, unwrap is safe
-        self.delete_with_version(key, delete_version).unwrap()
-    }
-
-    /// Delete a key with a specific version (for batched deletes)
-    ///
-    /// Adds a tombstone at the specified version. Old versions are preserved
-    /// for MVCC snapshot isolation.
-    #[inline]
-    pub fn delete_with_version(
-        &self,
-        key: &Key,
-        version: u64,
-    ) -> StrataResult<Option<VersionedValue>> {
-        use strata_core::Version;
-
-        let branch_id = key.namespace.branch_id;
 
         // Get the previous value before adding tombstone
-        let previous = self.shards.get(&branch_id).and_then(|shard| {
+        let previous = self.shards.get(&key.namespace.branch_id).and_then(|shard| {
             shard.data.get(key).and_then(|chain| {
                 chain.latest().and_then(|sv| {
-                    // Don't return tombstones as "previous value"
                     if sv.is_tombstone() {
                         None
                     } else {
@@ -489,11 +471,22 @@ impl ShardedStore {
             })
         });
 
-        // Add tombstone to version chain
-        let tombstone = StoredValue::tombstone(Version::txn(version));
+        let tombstone = StoredValue::tombstone(Version::txn(delete_version));
         self.put(key.clone(), tombstone);
 
-        Ok(previous)
+        previous
+    }
+
+    /// Delete a key with a specific version (for batched deletes)
+    ///
+    /// Adds a tombstone at the specified version. Old versions are preserved
+    /// for MVCC snapshot isolation. Does not return the previous value —
+    /// all production callers discard it.
+    #[inline]
+    pub fn delete_with_version(&self, key: &Key, version: u64) -> StrataResult<()> {
+        let tombstone = StoredValue::tombstone(Version::txn(version));
+        self.put(key.clone(), tombstone);
+        Ok(())
     }
 
     /// Check if a key exists (excluding tombstones)
@@ -580,8 +573,8 @@ impl ShardedStore {
     #[allow(clippy::type_complexity)]
     pub fn apply_batch(
         &self,
-        writes: &[(Key, strata_core::value::Value)],
-        deletes: &[Key],
+        writes: Vec<(Key, strata_core::value::Value)>,
+        deletes: Vec<Key>,
         version: u64,
     ) -> strata_core::StrataResult<()> {
         use std::sync::atomic::Ordering;
@@ -596,13 +589,12 @@ impl ShardedStore {
             FxHashMap::default();
 
         for (key, value) in writes {
-            let stored =
-                StoredValue::with_timestamp(value.clone(), Version::txn(version), timestamp, None);
+            let stored = StoredValue::with_timestamp(value, Version::txn(version), timestamp, None);
             branch_ops
                 .entry(key.namespace.branch_id)
                 .or_insert_with(|| (Vec::new(), Vec::new()))
                 .0
-                .push((key.clone(), stored));
+                .push((key, stored));
         }
 
         for key in deletes {
@@ -610,7 +602,7 @@ impl ShardedStore {
                 .entry(key.namespace.branch_id)
                 .or_insert_with(|| (Vec::new(), Vec::new()))
                 .1
-                .push(key.clone());
+                .push(key);
         }
 
         // Apply atomically per branch (hold shard lock for entire branch batch)
@@ -1428,13 +1420,32 @@ impl Storage for ShardedStore {
     /// Delete a key with a specific version (creates tombstone)
     ///
     /// Used by transaction commit to apply deletes.
-    fn delete_with_version(&self, key: &Key, version: u64) -> StrataResult<Option<VersionedValue>> {
-        let result = ShardedStore::delete_with_version(self, key, version);
+    fn delete_with_version(&self, key: &Key, version: u64) -> StrataResult<()> {
+        ShardedStore::delete_with_version(self, key, version)?;
 
         // Update global version to be at least this version
         self.version.fetch_max(version, Ordering::AcqRel);
 
-        result
+        Ok(())
+    }
+
+    /// Get only the version number for a key (no Value clone)
+    ///
+    /// Skips `StoredValue::versioned()` entirely — no Value clone, no Version
+    /// enum construction. Used by validation paths that only need version comparison.
+    fn get_version_only(&self, key: &Key) -> StrataResult<Option<u64>> {
+        let branch_id = key.namespace.branch_id;
+        Ok(self.shards.get(&branch_id).and_then(|shard| {
+            shard.data.get(key).and_then(|chain| {
+                chain.latest().and_then(|sv| {
+                    if !sv.is_expired() && !sv.is_tombstone() {
+                        Some(sv.version_raw())
+                    } else {
+                        None
+                    }
+                })
+            })
+        }))
     }
 }
 
@@ -2019,7 +2030,7 @@ mod tests {
         let writes = vec![(key1.clone(), Value::Int(1)), (key2.clone(), Value::Int(2))];
         let deletes = vec![key3.clone()];
 
-        store.apply_batch(&writes, &deletes, 2).unwrap();
+        store.apply_batch(writes, deletes, 2).unwrap();
 
         assert_eq!(store.get(&key1).unwrap().unwrap().value, Value::Int(1));
         assert_eq!(store.get(&key1).unwrap().unwrap().version, Version::txn(2));
@@ -2747,6 +2758,174 @@ mod tests {
 
         // current_version should be updated
         assert!(Storage::current_version(&store) >= 42);
+    }
+
+    #[test]
+    fn test_storage_trait_delete_with_version() {
+        use strata_core::traits::Storage;
+        use strata_core::types::Namespace;
+        use strata_core::value::Value;
+
+        let store = Arc::new(ShardedStore::new());
+        let branch_id = BranchId::new();
+        let ns = Arc::new(Namespace::for_branch(branch_id));
+        let key = Key::new_kv(ns, "versioned_delete");
+
+        // Put a value
+        Storage::put(&*store, key.clone(), Value::Int(42), None).unwrap();
+        assert!(Storage::get(&*store, &key).unwrap().is_some());
+
+        // Delete with specific version
+        Storage::delete_with_version(&*store, &key, 100).unwrap();
+
+        // Key should no longer be visible
+        assert!(Storage::get(&*store, &key).unwrap().is_none());
+
+        // Global version should be updated
+        assert!(Storage::current_version(&*store) >= 100);
+
+        // Version 1 (before delete) should still be visible via MVCC
+        let snap_at_1 = store.shards.get(&branch_id).and_then(|shard| {
+            shard.data.get(&key).and_then(|chain| {
+                chain.get_at_version(1).and_then(|sv| {
+                    if !sv.is_tombstone() {
+                        Some(sv.versioned())
+                    } else {
+                        None
+                    }
+                })
+            })
+        });
+        assert!(
+            snap_at_1.is_some(),
+            "Version 1 should still be visible via MVCC"
+        );
+    }
+
+    #[test]
+    fn test_storage_trait_get_version_only_existing_key() {
+        use strata_core::traits::Storage;
+        use strata_core::types::Namespace;
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = Arc::new(Namespace::for_branch(branch_id));
+        let key = Key::new_kv(ns, "version_check");
+
+        // Put a value — version 1
+        Storage::put(
+            &store,
+            key.clone(),
+            Value::String("hello".to_string()),
+            None,
+        )
+        .unwrap();
+
+        // get_version_only should return the version
+        let version = Storage::get_version_only(&store, &key).unwrap();
+        assert_eq!(version, Some(1));
+
+        // Should match what get() returns
+        let full = Storage::get(&store, &key).unwrap().unwrap();
+        assert_eq!(version.unwrap(), full.version.as_u64());
+    }
+
+    #[test]
+    fn test_storage_trait_get_version_only_nonexistent() {
+        use strata_core::traits::Storage;
+        use strata_core::types::Namespace;
+
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = Arc::new(Namespace::for_branch(branch_id));
+        let key = Key::new_kv(ns, "missing");
+
+        assert_eq!(Storage::get_version_only(&store, &key).unwrap(), None);
+    }
+
+    #[test]
+    fn test_storage_trait_get_version_only_tombstoned() {
+        use strata_core::traits::Storage;
+        use strata_core::types::Namespace;
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = Arc::new(Namespace::for_branch(branch_id));
+        let key = Key::new_kv(ns, "to_delete");
+
+        Storage::put(&store, key.clone(), Value::Int(1), None).unwrap();
+        Storage::delete(&store, &key).unwrap();
+
+        // get_version_only should return None for tombstoned key (same as get())
+        assert_eq!(Storage::get_version_only(&store, &key).unwrap(), None);
+        assert!(Storage::get(&store, &key).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_storage_trait_get_version_only_expired() {
+        use std::time::Duration;
+        use strata_core::traits::Storage;
+        use strata_core::types::Namespace;
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = Arc::new(Namespace::for_branch(branch_id));
+        let key = Key::new_kv(ns, "expiring");
+
+        // Put with an already-expired TTL (use put_with_version + manual StoredValue)
+        let sv = StoredValue::with_timestamp(
+            Value::Int(1),
+            Version::txn(1),
+            strata_core::Timestamp::from_micros(0), // epoch = definitely expired
+            Some(Duration::from_secs(1)),
+        );
+        ShardedStore::put(&store, key.clone(), sv);
+
+        // get_version_only should return None for expired key (same as get())
+        assert_eq!(Storage::get_version_only(&store, &key).unwrap(), None);
+        assert!(Storage::get(&store, &key).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_storage_trait_get_version_only_matches_get() {
+        use strata_core::traits::Storage;
+        use strata_core::types::Namespace;
+        use strata_core::value::Value;
+
+        let store = ShardedStore::new();
+        let branch_id = BranchId::new();
+        let ns = Arc::new(Namespace::for_branch(branch_id));
+
+        // Write multiple keys with different versions
+        for i in 0..5 {
+            let key = Key::new_kv(ns.clone(), &format!("key{}", i));
+            Storage::put(&store, key, Value::Int(i), None).unwrap();
+        }
+
+        // Verify get_version_only matches get() for all keys
+        for i in 0..5 {
+            let key = Key::new_kv(ns.clone(), &format!("key{}", i));
+            let version_only = Storage::get_version_only(&store, &key).unwrap();
+            let full_get = Storage::get(&store, &key).unwrap();
+            assert_eq!(
+                version_only,
+                full_get.map(|vv| vv.version.as_u64()),
+                "get_version_only must match get() for key{}",
+                i
+            );
+        }
+
+        // Also check a nonexistent key
+        let missing = Key::new_kv(ns, "nonexistent");
+        assert_eq!(
+            Storage::get_version_only(&store, &missing).unwrap(),
+            Storage::get(&store, &missing)
+                .unwrap()
+                .map(|vv| vv.version.as_u64())
+        );
     }
 
     #[test]
@@ -3534,7 +3713,7 @@ mod tests {
             .collect();
 
         // Apply batch
-        store.apply_batch(&writes, &[], 1).unwrap();
+        store.apply_batch(writes, vec![], 1).unwrap();
 
         // All keys should be written with same version
         for (i, key) in keys.iter().enumerate() {
@@ -3561,13 +3740,13 @@ mod tests {
 
         // Apply batch at version 100 first
         store
-            .apply_batch(&[(key.clone(), Value::Int(100))], &[], 100)
+            .apply_batch(vec![(key.clone(), Value::Int(100))], vec![], 100)
             .unwrap();
         assert_eq!(store.version(), 100);
 
         // Apply batch at version 50 (older) - version should stay at 100
         store
-            .apply_batch(&[(key.clone(), Value::Int(50))], &[], 50)
+            .apply_batch(vec![(key.clone(), Value::Int(50))], vec![], 50)
             .unwrap();
         assert_eq!(
             store.version(),
@@ -3577,7 +3756,7 @@ mod tests {
 
         // Apply batch at version 150 - version should update
         store
-            .apply_batch(&[(key.clone(), Value::Int(150))], &[], 150)
+            .apply_batch(vec![(key.clone(), Value::Int(150))], vec![], 150)
             .unwrap();
         assert_eq!(store.version(), 150);
     }
@@ -4191,7 +4370,7 @@ mod tests {
             (Key::new_kv(ns.clone(), "b"), Value::Int(3)),
             (Key::new_kv(ns.clone(), "d"), Value::Int(4)),
         ];
-        store.apply_batch(&writes, &[], 10).unwrap();
+        store.apply_batch(writes, vec![], 10).unwrap();
 
         // ordered_keys must remain Some
         {
@@ -4235,7 +4414,7 @@ mod tests {
 
         // apply_batch: delete a key that doesn't exist yet (creates tombstone entry)
         let deletes = vec![Key::new_kv(ns.clone(), "z")];
-        store.apply_batch(&[], &deletes, 10).unwrap();
+        store.apply_batch(vec![], deletes, 10).unwrap();
 
         // ordered_keys must remain Some and include the new tombstone key
         {
@@ -4319,7 +4498,7 @@ mod tests {
         let deletes = vec![
             Key::new_kv(ns.clone(), "d"), // new (tombstone)
         ];
-        store.apply_batch(&writes, &deletes, 10).unwrap();
+        store.apply_batch(writes, deletes, 10).unwrap();
 
         // ordered_keys must remain Some
         {
