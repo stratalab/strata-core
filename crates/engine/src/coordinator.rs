@@ -9,6 +9,7 @@
 //! - Transaction metrics (started, committed, aborted)
 //! - Commit rate calculation
 
+use parking_lot::Mutex as ParkingMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -199,6 +200,32 @@ impl TransactionCoordinator {
         let result = self.manager.commit(txn, store, wal);
 
         match result {
+            Ok(version) => {
+                self.record_commit(txn_id);
+                info!(target: "strata::txn", "Transaction committed");
+                Ok(version)
+            }
+            Err(e) => {
+                self.record_abort(txn_id);
+                warn!(target: "strata::txn", error = %e, "Transaction aborted");
+                Err(StrataError::from(e))
+            }
+        }
+    }
+
+    /// Commit a transaction with narrow WAL lock scope.
+    ///
+    /// Same as `commit()` but takes `Arc<Mutex<WalWriter>>` so the WAL lock
+    /// is held only for the append I/O, not for validation or storage apply.
+    pub fn commit_with_wal_arc<S: Storage>(
+        &self,
+        txn: &mut TransactionContext,
+        store: &S,
+        wal_arc: Option<&Arc<ParkingMutex<WalWriter>>>,
+    ) -> StrataResult<u64> {
+        let txn_id = txn.txn_id;
+
+        match self.manager.commit_with_wal_arc(txn, store, wal_arc) {
             Ok(version) => {
                 self.record_commit(txn_id);
                 info!(target: "strata::txn", "Transaction committed");

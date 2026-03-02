@@ -2011,17 +2011,14 @@ impl Database {
             return self.commit_coordinated(txn, durability);
         }
 
-        let needs_wal =
-            durability.requires_wal() && (!txn.is_read_only() || !txn.json_writes().is_empty());
-
-        let mut wal_guard = if needs_wal {
-            self.wal_writer.as_ref().map(|w| w.lock())
+        let wal_arc = if durability.requires_wal() {
+            self.wal_writer.as_ref()
         } else {
             None
         };
-        let wal_ref = wal_guard.as_deref_mut();
 
-        self.coordinator.commit(txn, self.storage.as_ref(), wal_ref)
+        self.coordinator
+            .commit_with_wal_arc(txn, self.storage.as_ref(), wal_arc)
     }
 
     /// Coordinated commit for multi-process mode.

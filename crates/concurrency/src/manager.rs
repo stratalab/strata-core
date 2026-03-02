@@ -32,6 +32,7 @@ use crate::{CommitError, TransactionContext, TransactionStatus};
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use strata_core::traits::Storage;
 use strata_core::types::BranchId;
 use strata_durability::format::WalRecord;
@@ -318,6 +319,126 @@ impl TransactionManager {
         }
 
         // Step 5: Return commit version
+        Ok(commit_version)
+    }
+
+    /// Commit a transaction with narrow WAL lock scope.
+    ///
+    /// Same commit protocol as `commit()`, but takes `Arc<Mutex<WalWriter>>`
+    /// instead of `&mut WalWriter`. This allows pre-serializing the WAL record
+    /// (CRC + allocations) **outside** the WAL lock, then briefly locking only
+    /// for the append I/O.
+    ///
+    /// # Lock ordering
+    ///
+    /// branch lock → WAL lock (acquired inside, released before storage apply).
+    ///
+    /// # Arguments
+    /// * `txn` - Transaction to commit (must be in Active state)
+    /// * `store` - Storage to validate against and apply writes to
+    /// * `wal_arc` - Optional WAL for durability. Pass `None` for ephemeral
+    ///   databases or when durability is not required.
+    pub fn commit_with_wal_arc<S: Storage>(
+        &self,
+        txn: &mut TransactionContext,
+        store: &S,
+        wal_arc: Option<&Arc<Mutex<WalWriter>>>,
+    ) -> std::result::Result<u64, CommitError> {
+        // Fast path: read-only transactions skip lock, validation, version alloc, WAL, apply
+        if txn.is_read_only() && txn.json_writes().is_empty() {
+            if !txn.is_active() {
+                return Err(CommitError::InvalidState(format!(
+                    "Cannot commit transaction {} from {:?} state - must be Active",
+                    txn.txn_id, txn.status
+                )));
+            }
+            txn.status = TransactionStatus::Committed;
+            return Ok(self.version.load(Ordering::Acquire));
+        }
+
+        // Acquire per-branch commit lock (TOCTOU prevention)
+        let branch_lock = self
+            .commit_locks
+            .entry(txn.branch_id)
+            .or_insert_with(|| Mutex::new(()));
+        let _commit_guard = branch_lock.lock();
+
+        // Step 1: Validate and mark committed (no WAL lock held)
+        let can_skip_validation = txn.read_set.is_empty()
+            && txn.cas_set.is_empty()
+            && txn.json_snapshot_versions().map_or(true, |v| v.is_empty())
+            && txn.json_writes().is_empty();
+
+        if can_skip_validation {
+            if !txn.is_active() {
+                return Err(CommitError::InvalidState(format!(
+                    "Cannot commit transaction {} from {:?} state - must be Active",
+                    txn.txn_id, txn.status
+                )));
+            }
+            txn.status = TransactionStatus::Committed;
+        } else {
+            txn.commit(store)?;
+            tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, "Validation passed");
+        }
+
+        // Step 2: Allocate commit version (no WAL lock held)
+        let commit_version = self.allocate_version()?;
+
+        // Step 3: Write to WAL — narrow lock scope
+        let has_mutations = !txn.is_read_only() || !txn.json_writes().is_empty();
+        if has_mutations {
+            if let Some(wal_arc) = wal_arc {
+                let payload = TransactionPayload::from_transaction(txn, commit_version);
+                let timestamp = now_micros();
+                let record = WalRecord::new(
+                    txn.txn_id,
+                    *txn.branch_id.as_bytes(),
+                    timestamp,
+                    payload.to_bytes(),
+                );
+
+                // Pre-serialize outside WAL lock (CRC + allocations)
+                let record_bytes = record.to_bytes();
+
+                // Narrow WAL lock: held only for the append I/O
+                {
+                    let mut wal = wal_arc.lock();
+                    if let Err(e) = wal.append_pre_serialized(&record_bytes, txn.txn_id, timestamp)
+                    {
+                        txn.status = TransactionStatus::Aborted {
+                            reason: format!("WAL write failed: {}", e),
+                        };
+                        return Err(CommitError::WALError(e.to_string()));
+                    }
+                }
+                // WAL lock released
+
+                tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, commit_version, "WAL durable");
+            }
+        }
+
+        // Step 4: Apply to storage (no WAL lock held)
+        if let Err(e) = txn.apply_writes(store, commit_version) {
+            if wal_arc.is_some() {
+                tracing::error!(
+                    target: "strata::txn",
+                    txn_id = txn.txn_id,
+                    commit_version = commit_version,
+                    error = %e,
+                    "Storage application failed after WAL commit - will be recovered on restart"
+                );
+            } else {
+                txn.status = TransactionStatus::Aborted {
+                    reason: format!("Storage application failed: {}", e),
+                };
+                return Err(CommitError::WALError(format!(
+                    "Storage application failed (no WAL): {}",
+                    e
+                )));
+            }
+        }
+
         Ok(commit_version)
     }
 
@@ -1036,5 +1157,361 @@ mod tests {
         assert!(result.is_ok());
         // Verify it went through the normal path (version incremented)
         assert!(manager.current_version() > 0);
+    }
+
+    // ========================================================================
+    // commit_with_wal_arc Tests (narrow WAL lock scope)
+    // ========================================================================
+
+    #[test]
+    fn test_commit_with_wal_arc_basic_with_recovery() {
+        // Commit via narrow-lock path, then recover from WAL to prove
+        // append_pre_serialized wrote valid, recoverable records.
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
+        let store = Arc::new(ShardedStore::new());
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = create_test_key(&ns, "arc_basic");
+
+        let snapshot = store.snapshot();
+        let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+        txn.put(key.clone(), Value::Int(42)).unwrap();
+
+        let v = manager
+            .commit_with_wal_arc(&mut txn, store.as_ref(), Some(&wal))
+            .unwrap();
+        assert_eq!(v, 1);
+
+        // Verify in-memory storage
+        let stored = store.get(&key).unwrap().unwrap();
+        assert_eq!(stored.value, Value::Int(42));
+        assert_eq!(stored.version.as_u64(), 1);
+
+        // Drop WAL to flush buffers, then recover from disk
+        drop(wal);
+        let recovery = crate::RecoveryCoordinator::new(wal_dir);
+        let result = recovery.recover().unwrap();
+
+        // Recovery should find exactly 1 transaction
+        assert_eq!(result.stats.txns_replayed, 1);
+        assert_eq!(result.stats.final_version, 1);
+        assert_eq!(result.stats.writes_applied, 1);
+
+        // Recovered storage should contain the committed value
+        let recovered = result.storage.get(&key).unwrap().unwrap();
+        assert_eq!(recovered.value, Value::Int(42));
+        assert_eq!(recovered.version.as_u64(), 1);
+    }
+
+    #[test]
+    fn test_commit_with_wal_arc_no_wal() {
+        let store = Arc::new(ShardedStore::new());
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = create_test_key(&ns, "no_wal");
+
+        let snapshot = store.snapshot();
+        let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+        txn.put(key.clone(), Value::Int(7)).unwrap();
+
+        let v = manager
+            .commit_with_wal_arc(&mut txn, store.as_ref(), None)
+            .unwrap();
+        assert_eq!(v, 1);
+
+        let stored = store.get(&key).unwrap().unwrap();
+        assert_eq!(stored.value, Value::Int(7));
+    }
+
+    #[test]
+    fn test_commit_with_wal_arc_many_parallel_branches() {
+        // Stress test: 10 threads, each on a different branch, sharing one WAL Arc.
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
+        let store = Arc::new(ShardedStore::new());
+        let manager = Arc::new(TransactionManager::new(0));
+
+        let num_threads = 10;
+        let mut handles = Vec::new();
+
+        for i in 0..num_threads {
+            let m = Arc::clone(&manager);
+            let s = Arc::clone(&store);
+            let w = Arc::clone(&wal);
+
+            handles.push(std::thread::spawn(move || {
+                let branch_id = BranchId::new();
+                let ns = create_test_namespace(branch_id);
+                let key = create_test_key(&ns, &format!("key_{}", i));
+
+                let snapshot = s.snapshot();
+                let mut txn =
+                    TransactionContext::with_snapshot(i as u64 + 1, branch_id, Box::new(snapshot));
+                txn.put(key, Value::Int(i as i64)).unwrap();
+
+                m.commit_with_wal_arc(&mut txn, s.as_ref(), Some(&w))
+            }));
+        }
+
+        let versions: Vec<u64> = handles
+            .into_iter()
+            .map(|h| h.join().unwrap().unwrap())
+            .collect();
+
+        // All versions should be unique and in range 1..=num_threads
+        let mut sorted = versions.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), num_threads);
+        assert_eq!(sorted[0], 1);
+        assert_eq!(sorted[num_threads - 1], num_threads as u64);
+
+        // Recover from WAL to verify all 10 records are well-formed
+        drop(wal);
+        let recovery = crate::RecoveryCoordinator::new(wal_dir);
+        let result = recovery.recover().unwrap();
+        assert_eq!(result.stats.txns_replayed, num_threads);
+        assert_eq!(result.stats.final_version, num_threads as u64);
+    }
+
+    #[test]
+    fn test_commit_with_wal_arc_validation_conflict_not_in_wal() {
+        // Key invariant: validation failure must abort BEFORE WAL write.
+        // Verify by recovering and counting WAL records.
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
+        let store = Arc::new(ShardedStore::new());
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = create_test_key(&ns, "conflict");
+
+        // Setup: store initial value (WAL record #1)
+        {
+            let snapshot = store.snapshot();
+            let mut setup = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+            setup.put(key.clone(), Value::Int(1)).unwrap();
+            manager
+                .commit_with_wal_arc(&mut setup, store.as_ref(), Some(&wal))
+                .unwrap();
+        }
+
+        // T1: read-modify-write (will conflict)
+        let snapshot = store.snapshot();
+        let mut txn1 = TransactionContext::with_snapshot(2, branch_id, Box::new(snapshot));
+        let _ = txn1.get(&key).unwrap(); // Creates read_set entry
+        txn1.put(key.clone(), Value::Int(10)).unwrap();
+
+        // T2: concurrent blind write, commits first (WAL record #2)
+        {
+            let snapshot2 = store.snapshot();
+            let mut txn2 = TransactionContext::with_snapshot(3, branch_id, Box::new(snapshot2));
+            txn2.put(key.clone(), Value::Int(99)).unwrap();
+            manager
+                .commit_with_wal_arc(&mut txn2, store.as_ref(), Some(&wal))
+                .unwrap();
+        }
+
+        // T1 should fail validation
+        let result = manager.commit_with_wal_arc(&mut txn1, store.as_ref(), Some(&wal));
+        assert!(result.is_err(), "Should detect read-write conflict");
+
+        // T2's value should be preserved in storage
+        let stored = store.get(&key).unwrap().unwrap();
+        assert_eq!(stored.value, Value::Int(99));
+
+        // KEY ASSERTION: WAL should contain exactly 2 records (setup + T2).
+        // T1 was aborted before WAL write, so its record must NOT be in WAL.
+        drop(wal);
+        let recovery = crate::RecoveryCoordinator::new(wal_dir);
+        let result = recovery.recover().unwrap();
+        assert_eq!(
+            result.stats.txns_replayed, 2,
+            "Aborted txn must not appear in WAL"
+        );
+
+        // Recovered value should be T2's write
+        let recovered = result.storage.get(&key).unwrap().unwrap();
+        assert_eq!(recovered.value, Value::Int(99));
+    }
+
+    #[test]
+    fn test_commit_with_wal_arc_read_only_fast_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
+        let store = Arc::new(ShardedStore::new());
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+
+        let v_before = manager.current_version();
+
+        // Read-only transaction: no writes
+        let snapshot = store.snapshot();
+        let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+        let result = manager.commit_with_wal_arc(&mut txn, store.as_ref(), Some(&wal));
+        assert!(result.is_ok());
+
+        // Version should NOT have been incremented (fast-pathed, skips WAL entirely)
+        assert_eq!(manager.current_version(), v_before);
+
+        // WAL should be empty — no records written for read-only txn
+        drop(wal);
+        let recovery = crate::RecoveryCoordinator::new(wal_dir);
+        let result = recovery.recover().unwrap();
+        assert_eq!(result.stats.txns_replayed, 0);
+    }
+
+    #[test]
+    fn test_commit_with_wal_arc_with_json_writes_takes_normal_path() {
+        // A txn with no KV writes but json_writes should still go through
+        // the full path (version alloc + WAL write), not the read-only fast path.
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
+        let store = Arc::new(ShardedStore::new());
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        let v_before = manager.current_version();
+
+        let snapshot = store.snapshot();
+        let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+        // No KV writes, but has json_writes → not fast-pathed
+        use strata_core::primitives::json::{JsonPatch, JsonPath};
+        txn.record_json_write(
+            create_test_key(&ns, "doc"),
+            JsonPatch::set_at(JsonPath::root(), serde_json::json!({"a": 1}).into()),
+            0,
+        );
+
+        let result = manager.commit_with_wal_arc(&mut txn, store.as_ref(), Some(&wal));
+        assert!(result.is_ok());
+
+        // Version SHOULD have been incremented (not fast-pathed)
+        assert!(manager.current_version() > v_before);
+
+        // WAL should have a record
+        drop(wal);
+        let recovery = crate::RecoveryCoordinator::new(wal_dir);
+        let rec_result = recovery.recover().unwrap();
+        assert_eq!(rec_result.stats.txns_replayed, 1);
+    }
+
+    #[test]
+    fn test_commit_with_wal_arc_multiple_operations_recovery() {
+        // Transaction with puts + deletes, verify recovery roundtrip.
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
+        let store = Arc::new(ShardedStore::new());
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key_a = create_test_key(&ns, "multi_a");
+        let key_b = create_test_key(&ns, "multi_b");
+        let key_c = create_test_key(&ns, "multi_c");
+
+        // Setup: write key_a and key_b
+        {
+            let snapshot = store.snapshot();
+            let mut setup = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+            setup.put(key_a.clone(), Value::Int(10)).unwrap();
+            setup.put(key_b.clone(), Value::Int(20)).unwrap();
+            manager
+                .commit_with_wal_arc(&mut setup, store.as_ref(), Some(&wal))
+                .unwrap();
+        }
+
+        // Transaction: delete key_a, update key_b, insert key_c
+        {
+            let snapshot = store.snapshot();
+            let mut txn = TransactionContext::with_snapshot(2, branch_id, Box::new(snapshot));
+            txn.delete(key_a.clone()).unwrap();
+            txn.put(key_b.clone(), Value::Int(200)).unwrap();
+            txn.put(key_c.clone(), Value::Bytes(b"hello".to_vec()))
+                .unwrap();
+            manager
+                .commit_with_wal_arc(&mut txn, store.as_ref(), Some(&wal))
+                .unwrap();
+        }
+
+        // Verify in-memory state
+        assert!(store.get(&key_a).unwrap().is_none());
+        assert_eq!(store.get(&key_b).unwrap().unwrap().value, Value::Int(200));
+        assert_eq!(
+            store.get(&key_c).unwrap().unwrap().value,
+            Value::Bytes(b"hello".to_vec())
+        );
+
+        // Recover from WAL and verify all operations replayed correctly
+        drop(wal);
+        let recovery = crate::RecoveryCoordinator::new(wal_dir);
+        let result = recovery.recover().unwrap();
+        assert_eq!(result.stats.txns_replayed, 2);
+
+        // key_a: was written in txn1 then deleted in txn2
+        assert!(result.storage.get(&key_a).unwrap().is_none());
+        // key_b: updated from 20 → 200
+        assert_eq!(
+            result.storage.get(&key_b).unwrap().unwrap().value,
+            Value::Int(200)
+        );
+        // key_c: newly inserted
+        assert_eq!(
+            result.storage.get(&key_c).unwrap().unwrap().value,
+            Value::Bytes(b"hello".to_vec())
+        );
+    }
+
+    #[test]
+    fn test_commit_with_wal_arc_sequential_same_branch() {
+        // Two sequential commits on the same branch verify that the branch lock
+        // and WAL lock ordering work correctly without deadlock.
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
+        let store = Arc::new(ShardedStore::new());
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key1 = create_test_key(&ns, "seq1");
+        let key2 = create_test_key(&ns, "seq2");
+
+        {
+            let snapshot = store.snapshot();
+            let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+            txn.put(key1.clone(), Value::Int(100)).unwrap();
+            let v = manager
+                .commit_with_wal_arc(&mut txn, store.as_ref(), Some(&wal))
+                .unwrap();
+            assert_eq!(v, 1);
+        }
+
+        {
+            let snapshot = store.snapshot();
+            let mut txn = TransactionContext::with_snapshot(2, branch_id, Box::new(snapshot));
+            txn.put(key2.clone(), Value::Int(200)).unwrap();
+            let v = manager
+                .commit_with_wal_arc(&mut txn, store.as_ref(), Some(&wal))
+                .unwrap();
+            assert_eq!(v, 2);
+        }
+
+        // Both values present with correct versions
+        let v1 = store.get(&key1).unwrap().unwrap();
+        assert_eq!(v1.value, Value::Int(100));
+        assert_eq!(v1.version.as_u64(), 1);
+
+        let v2 = store.get(&key2).unwrap().unwrap();
+        assert_eq!(v2.value, Value::Int(200));
+        assert_eq!(v2.version.as_u64(), 2);
     }
 }
