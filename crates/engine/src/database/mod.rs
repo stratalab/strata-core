@@ -440,6 +440,8 @@ impl Database {
             registry.insert(canonical_path, Arc::downgrade(&db));
             drop(registry);
 
+            crate::primitives::vector::register_vector_recovery();
+            crate::search::register_search_recovery();
             crate::recovery::recover_all_participants(&db)?;
             let index = db.extension::<crate::search::InvertedIndex>()?;
             if !index.is_enabled() {
@@ -469,6 +471,8 @@ impl Database {
             Some(lock_file),
         )?;
 
+        crate::primitives::vector::register_vector_recovery();
+        crate::search::register_search_recovery();
         crate::recovery::recover_all_participants(&db)?;
         let index = db.extension::<crate::search::InvertedIndex>()?;
         if !index.is_enabled() {
@@ -496,12 +500,19 @@ impl Database {
         let result = match recovery.recover() {
             Ok(result) => result,
             Err(e) => {
-                warn!(
-                    target: "strata::db",
-                    error = %e,
-                    "Recovery failed — starting with empty state. Data from WAL may be lost."
-                );
-                strata_concurrency::RecoveryResult::empty()
+                if cfg.allow_lossy_recovery {
+                    warn!(
+                        target: "strata::db",
+                        error = %e,
+                        "Recovery failed — starting with empty state (allow_lossy_recovery=true)"
+                    );
+                    strata_concurrency::RecoveryResult::empty()
+                } else {
+                    return Err(StrataError::corruption(format!(
+                        "WAL recovery failed: {}. Set allow_lossy_recovery=true to force open with data loss.",
+                        e
+                    )));
+                }
             }
         };
 
@@ -2133,17 +2144,17 @@ impl Database {
     /// With lite KV records (embedding stripped), the mmap cache is required
     /// for the next recovery to reconstruct embeddings. This is called during
     /// shutdown and drop.
-    fn freeze_vector_heaps(&self) {
+    fn freeze_vector_heaps(&self) -> StrataResult<()> {
         use crate::primitives::vector::VectorBackendState;
 
         let data_dir = self.data_dir();
         if data_dir.as_os_str().is_empty() {
-            return; // Ephemeral database — no mmap
+            return Ok(()); // Ephemeral database — no mmap
         }
 
         let state = match self.extension::<VectorBackendState>() {
             Ok(s) => s,
-            Err(_) => return, // No vector state registered
+            Err(_) => return Ok(()), // No vector state registered
         };
 
         let backends = state.backends.read();
@@ -2153,47 +2164,29 @@ impl Database {
                 .join("vectors")
                 .join(&branch_hex)
                 .join(format!("{}.vec", cid.name));
-            if let Err(e) = backend.freeze_heap_to_disk(&vec_path) {
-                tracing::warn!(
-                    target: "strata::vector",
-                    collection = %cid.name,
-                    error = %e,
-                    "Failed to freeze vector heap at shutdown"
-                );
-            }
+            backend.freeze_heap_to_disk(&vec_path)?;
 
             // Also freeze graphs
             let gdir = data_dir
                 .join("vectors")
                 .join(&branch_hex)
                 .join(format!("{}_graphs", cid.name));
-            if let Err(e) = backend.freeze_graphs_to_disk(&gdir) {
-                tracing::warn!(
-                    target: "strata::vector",
-                    collection = %cid.name,
-                    error = %e,
-                    "Failed to freeze vector graphs at shutdown"
-                );
-            }
+            backend.freeze_graphs_to_disk(&gdir)?;
         }
+        Ok(())
     }
 
     /// Freeze the search index to disk for fast recovery on next open.
-    fn freeze_search_index(&self) {
+    fn freeze_search_index(&self) -> StrataResult<()> {
         let data_dir = self.data_dir();
         if data_dir.as_os_str().is_empty() {
-            return; // Ephemeral database — no persistence
+            return Ok(()); // Ephemeral database — no persistence
         }
 
         if let Ok(index) = self.extension::<crate::search::InvertedIndex>() {
-            if let Err(e) = index.freeze_to_disk() {
-                tracing::warn!(
-                    target: "strata::search",
-                    error = %e,
-                    "Failed to freeze search index at shutdown"
-                );
-            }
+            index.freeze_to_disk()?;
         }
+        Ok(())
     }
 
     /// This method:
@@ -2235,11 +2228,12 @@ impl Database {
         // Final flush to ensure all data is persisted
         self.flush()?;
 
-        // Freeze vector heaps to mmap so lite KV records can recover
-        self.freeze_vector_heaps();
-
-        // Freeze search index to disk for fast recovery
-        self.freeze_search_index();
+        // Freeze both vector heaps and search index. Attempt both even if
+        // the first fails, so a vector freeze error doesn't also lose search data.
+        let vec_result = self.freeze_vector_heaps();
+        let search_result = self.freeze_search_index();
+        vec_result?;
+        search_result?;
 
         Ok(())
     }
@@ -2260,10 +2254,14 @@ impl Drop for Database {
         let _ = self.flush();
 
         // Freeze vector heaps to mmap so lite KV records can recover
-        self.freeze_vector_heaps();
+        if let Err(e) = self.freeze_vector_heaps() {
+            tracing::warn!(target: "strata::db", error = %e, "Failed to freeze vector heaps in drop");
+        }
 
         // Freeze search index to disk for fast recovery
-        self.freeze_search_index();
+        if let Err(e) = self.freeze_search_index() {
+            tracing::warn!(target: "strata::db", error = %e, "Failed to freeze search index in drop");
+        }
 
         // Remove from registry if we're disk-backed (skip in multi-process mode:
         // multi-process instances are not registered in the singleton registry).
@@ -3123,5 +3121,147 @@ mod tests {
         assert_eq!(stored.value, Value::Int(2));
 
         let _ = pruned; // suppress unused warning
+    }
+
+    // ========================================================================
+    // E-1: Recovery Failure Tests
+    // ========================================================================
+
+    /// Helper: create a corrupted WAL segment file in the given db path.
+    /// Returns the WAL directory path.
+    fn corrupt_wal_segment(db_path: &std::path::Path) -> PathBuf {
+        let wal_dir = db_path.join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+        let segment_path = wal_dir.join("wal-000001.seg");
+        std::fs::write(&segment_path, b"GARBAGE_NOT_A_VALID_SEGMENT_HEADER").unwrap();
+        wal_dir
+    }
+
+    #[test]
+    fn test_open_corrupted_wal_fails_by_default() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("db");
+        corrupt_wal_segment(&db_path);
+
+        // Default behavior: refuse to open
+        let result = Database::open(&db_path);
+        match result {
+            Err(ref e) => {
+                // Verify it's a Corruption variant, not just any error
+                assert!(
+                    matches!(e, StrataError::Corruption { .. }),
+                    "Expected Corruption error variant, got: {}",
+                    e
+                );
+                let err_msg = format!("{}", e);
+                assert!(
+                    err_msg.contains("WAL recovery failed"),
+                    "Error should mention WAL recovery failure, got: {}",
+                    err_msg
+                );
+                assert!(
+                    err_msg.contains("allow_lossy_recovery"),
+                    "Error should hint at the escape hatch, got: {}",
+                    err_msg
+                );
+            }
+            Ok(_) => panic!("Database should refuse to open with corrupted WAL"),
+        }
+    }
+
+    #[test]
+    fn test_open_corrupted_wal_succeeds_with_lossy_flag() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("db");
+        corrupt_wal_segment(&db_path);
+
+        // With allow_lossy_recovery=true, should open with empty state
+        let cfg = StrataConfig {
+            allow_lossy_recovery: true,
+            ..StrataConfig::default()
+        };
+        let result = Database::open_with_config(&db_path, cfg);
+        assert!(
+            result.is_ok(),
+            "Database should open with allow_lossy_recovery=true, got: {:?}",
+            result.err()
+        );
+
+        let db = result.unwrap();
+        assert_eq!(
+            db.storage().current_version(),
+            0,
+            "Should start with empty state"
+        );
+    }
+
+    #[test]
+    fn test_lossy_recovery_discards_valid_data_before_corruption() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("db");
+
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let wal_dir = db_path.join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        // Write a VALID WAL record first
+        write_wal_txn(
+            &wal_dir,
+            1,
+            branch_id,
+            vec![(
+                Key::new_kv(ns.clone(), "important_data"),
+                Value::Bytes(b"precious".to_vec()),
+            )],
+            vec![],
+            1,
+        );
+
+        // Now corrupt by adding a second segment file with invalid header.
+        // The WAL reader iterates segments in order and the corrupted segment
+        // will cause read_all to error.
+        let corrupt_segment = wal_dir.join("wal-000002.seg");
+        std::fs::write(&corrupt_segment, b"GARBAGE_NOT_A_VALID_SEGMENT_HEADER").unwrap();
+
+        // Without lossy: should refuse to open
+        let result = Database::open(&db_path);
+        assert!(result.is_err(), "Should fail without lossy flag");
+
+        // With lossy: opens but data is LOST (recovery falls back to empty)
+        let cfg = StrataConfig {
+            allow_lossy_recovery: true,
+            ..StrataConfig::default()
+        };
+        let db = Database::open_with_config(&db_path, cfg).unwrap();
+        let key = Key::new_kv(ns, "important_data");
+        assert!(
+            db.storage().get(&key).unwrap().is_none(),
+            "Valid data before corruption should be lost in lossy mode"
+        );
+        assert_eq!(db.storage().current_version(), 0);
+    }
+
+    // ========================================================================
+    // E-4: Auto-Registration Tests
+    // ========================================================================
+
+    #[test]
+    fn test_recovery_participants_auto_registered() {
+        // After Database::open, both vector and search recovery should be
+        // registered automatically (no need for executor to call
+        // register_vector_recovery / register_search_recovery).
+        let temp_dir = TempDir::new().unwrap();
+        let _db = Database::open(temp_dir.path().join("db")).unwrap();
+
+        // The registry is global and additive (idempotent), so other tests
+        // may have already registered participants. We just verify the count
+        // is at least 2 (vector + search).
+        let count = crate::recovery::recovery_registry_count();
+        assert!(
+            count >= 2,
+            "Expected at least 2 recovery participants (vector + search), got {}",
+            count
+        );
     }
 }
