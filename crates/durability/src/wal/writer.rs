@@ -339,6 +339,7 @@ impl WalWriter {
             self.total_sync_nanos += elapsed.as_nanos() as u64;
         }
         self.reset_sync_counters();
+        self.flush_active_meta();
         debug!(target: "strata::wal", segment = self.current_segment_number, "WAL flushed");
         Ok(())
     }
@@ -391,6 +392,24 @@ impl WalWriter {
             sync_calls: self.total_sync_calls,
             bytes_written: self.total_bytes_written,
             sync_nanos: self.total_sync_nanos,
+        }
+    }
+
+    /// Persist the active segment's .meta sidecar to disk.
+    ///
+    /// Best-effort optimization — if the write fails, recovery falls back
+    /// to scanning the segment. Called periodically by the background flush
+    /// thread and on explicit flush.
+    pub fn flush_active_meta(&self) {
+        if let Some(ref meta) = self.current_segment_meta {
+            if !meta.is_empty() {
+                if let Err(e) = meta.write_to_file(&self.wal_dir) {
+                    debug!(target: "strata::wal",
+                        segment = self.current_segment_number,
+                        error = %e,
+                        "Failed to flush active segment .meta (non-fatal)");
+                }
+            }
         }
     }
 
@@ -556,16 +575,8 @@ impl WalWriter {
 
     /// Close the writer, ensuring all data is flushed.
     pub fn close(mut self) -> std::io::Result<()> {
+        // flush() syncs segment data AND calls flush_active_meta()
         self.flush()?;
-
-        // Write .meta for the current segment before closing
-        if let Some(ref meta) = self.current_segment_meta {
-            if !meta.is_empty() {
-                if let Err(e) = meta.write_to_file(&self.wal_dir) {
-                    warn!(target: "strata::wal", segment = self.current_segment_number, error = %e, "Failed to write .meta sidecar on close");
-                }
-            }
-        }
 
         if let Some(ref mut segment) = self.segment {
             segment.close()?;
@@ -1002,5 +1013,126 @@ mod tests {
         // No sync even though deadline exceeded — no unsynced data
         assert_eq!(writer.total_sync_calls, sync_calls_before);
         assert!(!writer.has_unsynced_data);
+    }
+
+    // ========================================================================
+    // D-7: Active segment .meta sidecar tests
+    // ========================================================================
+
+    #[test]
+    fn test_flush_active_meta_writes_file() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let mut writer = make_writer(&wal_dir, DurabilityMode::Always);
+
+        // Write some records
+        for i in 1..=5 {
+            writer
+                .append(&WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8]))
+                .unwrap();
+        }
+
+        // Explicitly flush active meta
+        writer.flush_active_meta();
+
+        // Verify .meta file exists
+        let seg_num = writer.current_segment();
+        let meta = SegmentMeta::read_from_file(&wal_dir, seg_num)
+            .unwrap()
+            .expect(".meta should exist after flush_active_meta");
+
+        assert_eq!(meta.segment_number, seg_num);
+        assert_eq!(meta.record_count, 5);
+        assert_eq!(meta.min_txn_id, 1);
+        assert_eq!(meta.max_txn_id, 5);
+        // Verify timestamps are also tracked correctly
+        assert_eq!(meta.min_timestamp, 1000);
+        assert_eq!(meta.max_timestamp, 5000);
+    }
+
+    #[test]
+    fn test_flush_active_meta_updates_on_new_records() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let mut writer = make_writer(&wal_dir, DurabilityMode::Always);
+
+        // Write initial records and flush meta
+        for i in 1..=3 {
+            writer
+                .append(&WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8]))
+                .unwrap();
+        }
+        writer.flush_active_meta();
+
+        let seg_num = writer.current_segment();
+        let meta = SegmentMeta::read_from_file(&wal_dir, seg_num)
+            .unwrap()
+            .expect(".meta should exist");
+        assert_eq!(meta.record_count, 3);
+        assert_eq!(meta.max_txn_id, 3);
+        assert_eq!(meta.min_timestamp, 1000);
+        assert_eq!(meta.max_timestamp, 3000);
+
+        // Write more records and flush again
+        for i in 4..=7 {
+            writer
+                .append(&WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8]))
+                .unwrap();
+        }
+        writer.flush_active_meta();
+
+        let meta = SegmentMeta::read_from_file(&wal_dir, seg_num)
+            .unwrap()
+            .expect(".meta should exist after update");
+        assert_eq!(meta.record_count, 7);
+        assert_eq!(meta.min_txn_id, 1);
+        assert_eq!(meta.max_txn_id, 7);
+        assert_eq!(meta.min_timestamp, 1000);
+        assert_eq!(meta.max_timestamp, 7000);
+    }
+
+    #[test]
+    fn test_flush_active_meta_noop_cache_mode() {
+        let dir = tempdir().unwrap();
+
+        let mut writer = make_writer(dir.path(), DurabilityMode::Cache);
+        writer.append(&make_record(1)).unwrap();
+        writer.flush_active_meta();
+
+        // No files should be created in Cache mode
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+            "Cache mode should not create any files"
+        );
+    }
+
+    #[test]
+    fn test_flush_writes_active_meta() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let mut writer = make_writer(&wal_dir, DurabilityMode::Always);
+
+        // Write records
+        for i in 1..=3 {
+            writer
+                .append(&WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8]))
+                .unwrap();
+        }
+
+        // Call flush() — should also persist .meta
+        writer.flush().unwrap();
+
+        let seg_num = writer.current_segment();
+        let meta = SegmentMeta::read_from_file(&wal_dir, seg_num)
+            .unwrap()
+            .expect(".meta should exist after flush()");
+
+        assert_eq!(meta.segment_number, seg_num);
+        assert_eq!(meta.record_count, 3);
+        assert_eq!(meta.min_txn_id, 1);
+        assert_eq!(meta.max_txn_id, 3);
     }
 }

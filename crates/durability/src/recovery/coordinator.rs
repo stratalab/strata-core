@@ -100,10 +100,16 @@ impl RecoveryCoordinator {
         }
 
         // Step 3: Determine recovery path
+        // D-5: Validate snapshot file actually exists before including in plan
         let (snapshot_path, watermark) = if let Some(snapshot_id) = manifest.snapshot_id {
             let path = snapshot_path(&self.snapshots_dir(), snapshot_id);
-            let watermark = manifest.snapshot_watermark;
-            (Some(path), watermark)
+            if !path.exists() {
+                warn!(target: "strata::recovery", snapshot_id,
+                    "MANIFEST references snapshot that does not exist — full WAL replay");
+                (None, None)
+            } else {
+                (Some(path), manifest.snapshot_watermark)
+            }
         } else {
             (None, None)
         };
@@ -135,11 +141,26 @@ impl RecoveryCoordinator {
         R: FnMut(&WalRecord) -> Result<(), RecoveryError>,
     {
         let plan = self.plan_recovery()?;
+        let mut effective_watermark = plan.watermark;
 
         // Load snapshot if exists
         if let Some(snapshot_path) = &plan.snapshot_path {
             let snapshot_reader = SnapshotReader::new(clone_codec(self.codec.as_ref())?);
             let loaded = snapshot_reader.load(snapshot_path)?;
+
+            // D-5: Validate watermark consistency between MANIFEST and snapshot
+            if let Some(manifest_wm) = plan.watermark {
+                if loaded.header.watermark_txn != manifest_wm {
+                    warn!(target: "strata::recovery",
+                        manifest_watermark = manifest_wm,
+                        snapshot_watermark = loaded.header.watermark_txn,
+                        "Watermark mismatch — using minimum for safety");
+                    effective_watermark = Some(manifest_wm.min(loaded.header.watermark_txn));
+                }
+            } else {
+                // MANIFEST has no watermark but snapshot does — use snapshot's
+                effective_watermark = Some(loaded.header.watermark_txn);
+            }
 
             on_snapshot(RecoverySnapshot {
                 snapshot_id: loaded.header.snapshot_id,
@@ -148,9 +169,9 @@ impl RecoveryCoordinator {
             })?;
         }
 
-        // Replay WAL
+        // Replay WAL using effective watermark (conservative — replays extra rather than skipping)
         let replayer = WalReplayer::new(plan.wal_dir.clone(), clone_codec(self.codec.as_ref())?);
-        let replay_stats = replayer.replay_after(plan.watermark, |record| {
+        let replay_stats = replayer.replay_after(effective_watermark, |record| {
             on_record(record).map_err(|e| WalReplayError::Apply(e.to_string()))
         })?;
 
@@ -163,7 +184,7 @@ impl RecoveryCoordinator {
 
         Ok(RecoveryResult {
             manifest: plan.manifest,
-            snapshot_watermark: plan.watermark,
+            snapshot_watermark: effective_watermark,
             replay_stats,
             bytes_truncated: truncated,
             meta_files_rebuilt: meta_rebuilt,
@@ -699,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recover_missing_snapshot_file() {
+    fn test_missing_snapshot_file_falls_back_to_full_replay() {
         let dir = tempdir().unwrap();
         let db_dir = dir.path().to_path_buf();
 
@@ -712,21 +733,38 @@ mod tests {
         // Create SNAPSHOTS directory but don't put the snapshot file there
         std::fs::create_dir_all(db_dir.join("SNAPSHOTS")).unwrap();
 
-        // Setup WAL
-        let records: Vec<_> = (51..=60)
+        // Setup WAL with records 1..=60
+        let records: Vec<_> = (1..=60)
             .map(|i| WalRecord::new(i, test_uuid(), i * 1000, vec![i as u8]))
             .collect();
         setup_wal(&db_dir, &records);
 
-        // Try to recover - should fail with Snapshot error (file not found)
+        // D-5: Recovery should succeed with full WAL replay (no snapshot skip)
         let coordinator = RecoveryCoordinator::new(db_dir, make_codec());
-        let result = coordinator.recover(|_| Ok(()), |_| Ok(()));
+        let mut snapshot_loaded = false;
+        let mut applied = Vec::new();
 
-        assert!(
-            matches!(result, Err(RecoveryError::Snapshot(_))),
-            "Expected Snapshot error for missing snapshot file, got: {:?}",
-            result
-        );
+        let result = coordinator
+            .recover(
+                |_snapshot| {
+                    snapshot_loaded = true;
+                    Ok(())
+                },
+                |record| {
+                    applied.push(record.txn_id);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert!(!snapshot_loaded, "Snapshot should not be loaded");
+        assert!(result.snapshot_watermark.is_none());
+        // All 60 records should be replayed (no watermark skip)
+        assert_eq!(result.replay_stats.records_applied, 60);
+        assert_eq!(result.replay_stats.records_skipped, 0);
+        // Verify exact record IDs in order (not just count)
+        let expected: Vec<u64> = (1..=60).collect();
+        assert_eq!(applied, expected);
     }
 
     #[test]
@@ -938,5 +976,187 @@ mod tests {
             assert_eq!(meta.segment_number, seg_num);
             assert_eq!(meta.record_count, 1);
         }
+    }
+
+    // ========================================================================
+    // D-5: Watermark-snapshot consistency tests
+    // ========================================================================
+
+    #[test]
+    fn test_watermark_mismatch_uses_minimum() {
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().to_path_buf();
+
+        // Setup manifest with watermark=100 (higher than snapshot's actual 50)
+        let mut manager =
+            ManifestManager::create(db_dir.join("MANIFEST"), test_uuid(), "identity".to_string())
+                .unwrap();
+        manager.set_snapshot_watermark(1, 100).unwrap();
+
+        // Create snapshot with watermark=50 (lower than manifest)
+        setup_snapshot(&db_dir, 1, 50);
+
+        // Create WAL with records 1..=100
+        let records: Vec<_> = (1..=100)
+            .map(|i| WalRecord::new(i, test_uuid(), i * 1000, vec![i as u8]))
+            .collect();
+        setup_wal(&db_dir, &records);
+
+        let coordinator = RecoveryCoordinator::new(db_dir, make_codec());
+        let mut applied = Vec::new();
+
+        let result = coordinator
+            .recover(
+                |snapshot| {
+                    assert_eq!(snapshot.watermark_txn, 50);
+                    Ok(())
+                },
+                |record| {
+                    applied.push(record.txn_id);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        // D-5: Should use min(100, 50) = 50, so records 51-100 are replayed
+        assert_eq!(result.snapshot_watermark, Some(50));
+        // Verify exact IDs replayed
+        let expected: Vec<u64> = (51..=100).collect();
+        assert_eq!(applied, expected);
+        assert_eq!(result.replay_stats.records_applied, 50);
+        assert_eq!(result.replay_stats.records_skipped, 50);
+    }
+
+    #[test]
+    fn test_watermark_mismatch_snapshot_higher_uses_minimum() {
+        // Reverse direction: manifest watermark is stale/lower than snapshot.
+        // This can happen if snapshot was re-created at a higher watermark
+        // but the MANIFEST update crashed before persisting.
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().to_path_buf();
+
+        // MANIFEST watermark=30, snapshot watermark=80
+        let mut manager =
+            ManifestManager::create(db_dir.join("MANIFEST"), test_uuid(), "identity".to_string())
+                .unwrap();
+        manager.set_snapshot_watermark(1, 30).unwrap();
+
+        setup_snapshot(&db_dir, 1, 80);
+
+        let records: Vec<_> = (1..=100)
+            .map(|i| WalRecord::new(i, test_uuid(), i * 1000, vec![i as u8]))
+            .collect();
+        setup_wal(&db_dir, &records);
+
+        let coordinator = RecoveryCoordinator::new(db_dir, make_codec());
+        let mut applied = Vec::new();
+
+        let result = coordinator
+            .recover(
+                |snapshot| {
+                    // Snapshot reports its own watermark (80)
+                    assert_eq!(snapshot.watermark_txn, 80);
+                    Ok(())
+                },
+                |record| {
+                    applied.push(record.txn_id);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        // min(30, 80) = 30, so records 31-100 are replayed (conservative)
+        assert_eq!(result.snapshot_watermark, Some(30));
+        let expected: Vec<u64> = (31..=100).collect();
+        assert_eq!(applied, expected);
+        assert_eq!(result.replay_stats.records_applied, 70);
+        assert_eq!(result.replay_stats.records_skipped, 30);
+    }
+
+    #[test]
+    fn test_consistent_watermarks_normal_path() {
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().to_path_buf();
+
+        // Setup manifest and snapshot with matching watermark=50
+        let mut manager =
+            ManifestManager::create(db_dir.join("MANIFEST"), test_uuid(), "identity".to_string())
+                .unwrap();
+        manager.set_snapshot_watermark(1, 50).unwrap();
+
+        setup_snapshot(&db_dir, 1, 50);
+
+        // Create WAL with records 1..=100
+        let records: Vec<_> = (1..=100)
+            .map(|i| WalRecord::new(i, test_uuid(), i * 1000, vec![i as u8]))
+            .collect();
+        setup_wal(&db_dir, &records);
+
+        let coordinator = RecoveryCoordinator::new(db_dir, make_codec());
+        let mut snapshot_loaded = false;
+        let mut applied = Vec::new();
+
+        let result = coordinator
+            .recover(
+                |snapshot| {
+                    snapshot_loaded = true;
+                    assert_eq!(snapshot.watermark_txn, 50);
+                    Ok(())
+                },
+                |record| {
+                    applied.push(record.txn_id);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert!(snapshot_loaded);
+        assert_eq!(result.snapshot_watermark, Some(50));
+        assert_eq!(result.replay_stats.records_skipped, 50);
+        assert_eq!(result.replay_stats.records_applied, 50);
+        // Verify exact IDs
+        let expected: Vec<u64> = (51..=100).collect();
+        assert_eq!(applied, expected);
+    }
+
+    #[test]
+    fn test_missing_snapshots_dir_falls_back_to_full_replay() {
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().to_path_buf();
+
+        // MANIFEST references snapshot, but SNAPSHOTS directory doesn't exist at all
+        let mut manager =
+            ManifestManager::create(db_dir.join("MANIFEST"), test_uuid(), "identity".to_string())
+                .unwrap();
+        manager.set_snapshot_watermark(1, 50).unwrap();
+
+        // Intentionally do NOT create SNAPSHOTS directory
+
+        let records: Vec<_> = (1..=20)
+            .map(|i| WalRecord::new(i, test_uuid(), i * 1000, vec![i as u8]))
+            .collect();
+        setup_wal(&db_dir, &records);
+
+        let coordinator = RecoveryCoordinator::new(db_dir, make_codec());
+        let mut snapshot_loaded = false;
+        let mut applied = Vec::new();
+
+        let result = coordinator
+            .recover(
+                |_| {
+                    snapshot_loaded = true;
+                    Ok(())
+                },
+                |record| {
+                    applied.push(record.txn_id);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert!(!snapshot_loaded);
+        assert!(result.snapshot_watermark.is_none());
+        let expected: Vec<u64> = (1..=20).collect();
+        assert_eq!(applied, expected);
     }
 }
