@@ -144,6 +144,10 @@ pub struct StrataConfig {
     /// Storage layer resource limits.
     #[serde(default)]
     pub storage: StorageConfig,
+    /// If true, silently start with empty state when WAL recovery fails.
+    /// Default: false (refuse to open — safer).
+    #[serde(default)]
+    pub allow_lossy_recovery: bool,
 }
 
 fn default_durability_str() -> String {
@@ -178,6 +182,7 @@ impl Default for StrataConfig {
             openai_api_key: None,
             google_api_key: None,
             storage: StorageConfig::default(),
+            allow_lossy_recovery: false,
         }
     }
 }
@@ -786,5 +791,40 @@ auto_embed = false
         let config: StrataConfig = toml::from_str(old_toml).unwrap();
         assert_eq!(config.storage.max_branches, 1024);
         assert_eq!(config.storage.max_write_buffer_entries, 100_000);
+    }
+
+    // -----------------------------------------------------------------------
+    // allow_lossy_recovery config
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_allow_lossy_recovery_defaults_to_false() {
+        let config = StrataConfig::default();
+        assert!(!config.allow_lossy_recovery);
+    }
+
+    #[test]
+    fn test_allow_lossy_recovery_backward_compat() {
+        // Old config files without allow_lossy_recovery should default to false
+        let old_toml = r#"
+durability = "standard"
+auto_embed = false
+"#;
+        let config: StrataConfig = toml::from_str(old_toml).unwrap();
+        assert!(
+            !config.allow_lossy_recovery,
+            "Missing allow_lossy_recovery should default to false (safe)"
+        );
+    }
+
+    #[test]
+    fn test_allow_lossy_recovery_round_trip() {
+        let config = StrataConfig {
+            allow_lossy_recovery: true,
+            ..StrataConfig::default()
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: StrataConfig = toml::from_str(&toml_str).unwrap();
+        assert!(parsed.allow_lossy_recovery);
     }
 }

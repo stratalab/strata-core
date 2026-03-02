@@ -444,6 +444,61 @@ mod tests {
         );
     }
 
+    // ========================================================================
+    // E-7: Counter file corruption tests
+    // ========================================================================
+
+    #[test]
+    fn test_counter_file_garbage_does_not_silently_zero() {
+        // Counter format is 16 raw bytes (two LE u64). Any 16+ bytes are
+        // technically valid — there's no magic number or checksum. This test
+        // verifies that garbage bytes don't accidentally decode to (0,0),
+        // which would silently reset counters. The truncation tests below
+        // cover the case where corruption *does* produce an error.
+        let dir = tempdir().unwrap();
+        let cf = CounterFile::new(dir.path());
+
+        std::fs::write(dir.path().join("counters"), b"garbage_data_here!!!").unwrap();
+
+        let (v, t) = cf.read_or_default().unwrap();
+        assert!(v != 0 || t != 0, "Garbage bytes should not decode to (0,0)");
+    }
+
+    #[test]
+    fn test_counter_file_truncated_returns_error() {
+        let dir = tempdir().unwrap();
+        let cf = CounterFile::new(dir.path());
+
+        // Write only 4 bytes (need 16) — simulates crash during write
+        std::fs::write(dir.path().join("counters"), &[0xAA; 4]).unwrap();
+
+        // read_or_default should return Err because read_exact fails
+        // (file exists so NotFound branch is not taken, but UnexpectedEof occurs)
+        let result = cf.read_or_default();
+        assert!(
+            result.is_err(),
+            "Truncated counter file should return error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_counter_file_empty_returns_error() {
+        let dir = tempdir().unwrap();
+        let cf = CounterFile::new(dir.path());
+
+        // Write empty file — simulates crash right after file creation
+        std::fs::write(dir.path().join("counters"), &[]).unwrap();
+
+        // read_or_default should return Err (file exists but empty)
+        let result = cf.read_or_default();
+        assert!(
+            result.is_err(),
+            "Empty counter file should return error, got {:?}",
+            result
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_is_process_alive_current_pid() {
