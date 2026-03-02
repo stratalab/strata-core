@@ -139,6 +139,13 @@ impl SegmentHeader {
             }
             stored_crc
         } else {
+            tracing::warn!(
+                target: "strata::format",
+                segment_number,
+                format_version,
+                "Reading v1 segment header without CRC — lacks integrity protection. \
+                 Will be replaced after next checkpoint + compaction cycle.",
+            );
             0 // v1 header, no CRC
         };
 
@@ -823,5 +830,76 @@ mod tests {
         }
 
         assert_eq!(offset, all_bytes.len());
+    }
+
+    // ========================================================================
+    // D-10: V1/V2 segment header tests
+    // ========================================================================
+
+    #[test]
+    fn test_v1_header_still_readable() {
+        // Construct a 32-byte v1 header manually (format_version=1, no CRC)
+        let mut bytes = [0u8; SEGMENT_HEADER_SIZE];
+        bytes[0..4].copy_from_slice(&SEGMENT_MAGIC);
+        bytes[4..8].copy_from_slice(&1u32.to_le_bytes()); // format_version = 1
+        bytes[8..16].copy_from_slice(&42u64.to_le_bytes()); // segment_number = 42
+        bytes[16..32].copy_from_slice(&[0xAB; 16]); // database_uuid
+
+        let header = SegmentHeader::from_bytes_slice(&bytes).unwrap();
+        assert!(header.is_valid());
+        assert_eq!(header.format_version, 1);
+        assert_eq!(header.segment_number, 42);
+        assert_eq!(header.database_uuid, [0xAB; 16]);
+        assert_eq!(header.header_crc, 0); // v1 has no CRC
+    }
+
+    #[test]
+    fn test_v2_header_rejects_bad_crc() {
+        // Create a valid v2 header, then corrupt the CRC
+        let header = SegmentHeader::new(1, [0; 16]);
+        let mut bytes = header.to_bytes();
+
+        // Corrupt the CRC bytes (last 4 bytes of the 36-byte header)
+        bytes[32] ^= 0xFF;
+
+        let result = SegmentHeader::from_bytes_slice(&bytes);
+        assert!(result.is_none(), "Should reject v2 header with bad CRC");
+    }
+
+    #[test]
+    fn test_v2_header_rejects_corrupted_payload() {
+        // Create a valid v2 header, then corrupt a data byte (not the CRC)
+        let header = SegmentHeader::new(42, [0xCC; 16]);
+        let mut bytes = header.to_bytes();
+
+        // Corrupt a byte in the segment_number field
+        bytes[10] ^= 0xFF;
+
+        // CRC should now mismatch because the payload changed
+        let result = SegmentHeader::from_bytes_slice(&bytes);
+        assert!(
+            result.is_none(),
+            "Should reject v2 header with corrupted payload"
+        );
+    }
+
+    #[test]
+    fn test_v1_header_with_trailing_data_not_confused_as_v2() {
+        // 32-byte v1 header followed by 4 bytes of unrelated data.
+        // from_bytes_slice should parse it as v1 (format_version=1),
+        // not try to read a CRC from the trailing bytes.
+        let mut bytes = [0u8; 36];
+        bytes[0..4].copy_from_slice(&SEGMENT_MAGIC);
+        bytes[4..8].copy_from_slice(&1u32.to_le_bytes()); // format_version = 1
+        bytes[8..16].copy_from_slice(&7u64.to_le_bytes()); // segment_number = 7
+        bytes[16..32].copy_from_slice(&[0xBB; 16]); // database_uuid
+        bytes[32..36].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // garbage trailing
+
+        let header = SegmentHeader::from_bytes_slice(&bytes).unwrap();
+        assert!(header.is_valid());
+        assert_eq!(header.format_version, 1);
+        assert_eq!(header.segment_number, 7);
+        // v1 path — trailing bytes ignored, CRC set to 0
+        assert_eq!(header.header_crc, 0);
     }
 }

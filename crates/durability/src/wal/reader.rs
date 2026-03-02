@@ -11,7 +11,7 @@ use tracing::warn;
 
 /// Maximum number of bytes to scan forward when searching for the next
 /// valid record after encountering corruption during WAL recovery.
-const MAX_RECOVERY_SCAN_WINDOW: usize = 1_024 * 1_024; // 1 MB
+const MAX_RECOVERY_SCAN_WINDOW: usize = 8 * 1_024 * 1_024; // 8 MB
 
 /// WAL reader for iterating over records in segments.
 ///
@@ -117,6 +117,16 @@ impl WalReader {
                     }
 
                     // No valid record found within scan window — stop
+                    let unscanned_bytes = buffer.len() - scan_end;
+                    if unscanned_bytes > 0 {
+                        tracing::warn!(
+                            target: "strata::recovery",
+                            corrupted_offset = offset,
+                            scan_window_bytes = MAX_RECOVERY_SCAN_WINDOW,
+                            unscanned_bytes,
+                            "Corruption scan window exhausted — unscanned data will be lost",
+                        );
+                    }
                     stop_reason = ReadStopReason::ChecksumMismatch { offset };
                     break;
                 }
