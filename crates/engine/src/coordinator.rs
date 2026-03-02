@@ -332,8 +332,10 @@ impl TransactionCoordinator {
     ///
     /// Delegates to `TransactionManager::remove_branch_lock` to prevent
     /// unbounded growth of the commit_locks map when branches are deleted.
-    pub fn remove_branch_lock(&self, branch_id: &BranchId) {
-        self.manager.remove_branch_lock(branch_id);
+    /// Returns `true` if removed (or didn't exist), `false` if skipped
+    /// because a concurrent commit is in-flight.
+    pub fn remove_branch_lock(&self, branch_id: &BranchId) -> bool {
+        self.manager.remove_branch_lock(branch_id)
     }
 
     /// Advance the version counter to at least `v`.

@@ -445,16 +445,41 @@ impl TransactionManager {
     /// Remove the per-branch commit lock for a deleted branch.
     ///
     /// Called during branch deletion to prevent unbounded growth of the
-    /// `commit_locks` map. Safe to call even if no lock exists for the branch.
+    /// `commit_locks` map. Returns `true` if the lock was removed (or didn't
+    /// exist), `false` if a concurrent commit is in-flight and removal was
+    /// skipped.
     ///
-    /// # Safety
-    ///
-    /// This should only be called after the branch has been fully deleted
-    /// and no further transactions will target it. If a concurrent transaction
-    /// is in-flight for this branch, the lock will be lazily re-created on
-    /// next commit (via `or_insert_with` in `commit()`).
-    pub fn remove_branch_lock(&self, branch_id: &BranchId) {
-        self.commit_locks.remove(branch_id);
+    /// If a concurrent commit holds the lock, removal is skipped to avoid
+    /// defeating the TOCTOU protection the lock provides. The stale entry
+    /// will be cleaned up on the next branch delete attempt or lazily collected.
+    pub fn remove_branch_lock(&self, branch_id: &BranchId) -> bool {
+        let can_remove = match self.commit_locks.get(branch_id) {
+            Some(entry) => {
+                // Try to acquire the lock to verify no commit is in-flight
+                let held = entry.value().try_lock().is_some();
+                // Drop entry ref (and any guard) before we attempt removal
+                drop(entry);
+                held
+            }
+            None => {
+                // No lock entry exists — nothing to remove
+                return true;
+            }
+        };
+
+        if can_remove {
+            // Lock was not held — safe to remove
+            self.commit_locks.remove(branch_id);
+            true
+        } else {
+            // Lock is held — concurrent commit in-flight, skip removal
+            tracing::warn!(
+                target: "strata::txn",
+                branch = %branch_id,
+                "Skipping branch lock removal: concurrent commit in-flight"
+            );
+            false
+        }
     }
 
     /// Advance the version counter to at least `v`.
@@ -1513,5 +1538,123 @@ mod tests {
         let v2 = store.get(&key2).unwrap().unwrap();
         assert_eq!(v2.value, Value::Int(200));
         assert_eq!(v2.version.as_u64(), 2);
+    }
+
+    // ========================================================================
+    // E-8: remove_branch_lock coordination tests
+    // ========================================================================
+
+    #[test]
+    fn test_remove_branch_lock_succeeds_when_not_held() {
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+
+        // Insert a lock entry by accessing it (simulates a prior commit)
+        manager
+            .commit_locks
+            .entry(branch_id)
+            .or_insert_with(|| Mutex::new(()));
+        assert!(manager.commit_locks.contains_key(&branch_id));
+
+        // Removal should succeed since no one holds the lock
+        assert!(manager.remove_branch_lock(&branch_id));
+        assert!(!manager.commit_locks.contains_key(&branch_id));
+    }
+
+    #[test]
+    fn test_remove_branch_lock_skips_when_held() {
+        let manager = Arc::new(TransactionManager::new(0));
+        let branch_id = BranchId::new();
+
+        // Insert a lock entry
+        manager
+            .commit_locks
+            .entry(branch_id)
+            .or_insert_with(|| Mutex::new(()));
+
+        // Hold the lock on a background thread
+        let manager2 = Arc::clone(&manager);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let handle = std::thread::spawn(move || {
+            let entry = manager2.commit_locks.get(&branch_id).unwrap();
+            let _guard = entry.value().lock();
+            // Signal that lock is held
+            tx.send(()).unwrap();
+            // Wait for main thread to finish its check
+            done_rx.recv().unwrap();
+        });
+
+        // Wait for background thread to hold the lock
+        rx.recv().unwrap();
+
+        // Removal should fail since the lock is held
+        assert!(!manager.remove_branch_lock(&branch_id));
+        assert!(manager.commit_locks.contains_key(&branch_id));
+
+        // Release the background thread
+        done_tx.send(()).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_remove_branch_lock_nonexistent_succeeds() {
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+
+        // No lock entry exists — removal should return true
+        assert!(manager.remove_branch_lock(&branch_id));
+    }
+
+    #[test]
+    fn test_remove_branch_lock_still_functional_after_failed_removal() {
+        // After remove_branch_lock returns false (skipped because lock was
+        // held), verify the lock is still present and functional — a
+        // subsequent commit can still acquire and use it.
+        let manager = Arc::new(TransactionManager::new(0));
+        let branch_id = BranchId::new();
+
+        // Insert a lock entry
+        manager
+            .commit_locks
+            .entry(branch_id)
+            .or_insert_with(|| Mutex::new(()));
+
+        // Hold the lock on a background thread
+        let manager2 = Arc::clone(&manager);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let handle = std::thread::spawn(move || {
+            let entry = manager2.commit_locks.get(&branch_id).unwrap();
+            let _guard = entry.value().lock();
+            tx.send(()).unwrap();
+            done_rx.recv().unwrap();
+        });
+
+        rx.recv().unwrap();
+
+        // Removal should fail
+        assert!(!manager.remove_branch_lock(&branch_id));
+
+        // Release background thread's lock
+        done_tx.send(()).unwrap();
+        handle.join().unwrap();
+
+        // Lock should still exist and be acquirable
+        assert!(manager.commit_locks.contains_key(&branch_id));
+        let entry = manager.commit_locks.get(&branch_id).unwrap();
+        let guard = entry.value().try_lock();
+        assert!(
+            guard.is_some(),
+            "Lock should be acquirable after failed removal and holder release"
+        );
+        drop(guard);
+        drop(entry);
+
+        // Now removal should succeed since no one holds it
+        assert!(manager.remove_branch_lock(&branch_id));
+        assert!(!manager.commit_locks.contains_key(&branch_id));
     }
 }

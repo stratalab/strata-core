@@ -162,7 +162,9 @@ pub fn branch_delete(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
     // Cleanup: remove per-branch commit lock (#944)
     // Convert the executor BranchId to core BranchId for the lock cleanup
     if let Ok(core_branch_id) = crate::bridge::to_core_branch_id(&branch) {
-        p.db.remove_branch_lock(&core_branch_id);
+        // Best-effort: if a concurrent commit holds the lock, skip removal.
+        // The stale entry is harmless and will be cleaned up on next attempt.
+        let _ = p.db.remove_branch_lock(&core_branch_id);
 
         // Cleanup: delete all vector collections for this branch (#946)
         // Best-effort: silently continue if vector cleanup fails, since the
