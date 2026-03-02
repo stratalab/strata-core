@@ -26,13 +26,17 @@ impl WalFileLock {
     /// Acquire the WAL file lock, blocking until available.
     pub fn acquire(wal_dir: &Path) -> io::Result<Self> {
         let lock_path = wal_dir.join(".wal-lock");
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
             .open(&lock_path)?;
         fs2::FileExt::lock_exclusive(&file)?;
+        // Write PID for stale-lock detection
+        file.set_len(0)?;
+        write!(file, "{}", std::process::id())?;
+        file.sync_all()?;
         Ok(WalFileLock { _file: file })
     }
 
@@ -42,14 +46,20 @@ impl WalFileLock {
     /// holds the lock.
     pub fn try_acquire(wal_dir: &Path) -> io::Result<Option<Self>> {
         let lock_path = wal_dir.join(".wal-lock");
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
             .open(&lock_path)?;
         match fs2::FileExt::try_lock_exclusive(&file) {
-            Ok(()) => Ok(Some(WalFileLock { _file: file })),
+            Ok(()) => {
+                // Write PID for stale-lock detection
+                file.set_len(0)?;
+                write!(file, "{}", std::process::id())?;
+                file.sync_all()?;
+                Ok(Some(WalFileLock { _file: file }))
+            }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
             // On some platforms, try_lock returns EAGAIN (11) or EACCES (13)
             // which may not map to WouldBlock.
@@ -64,6 +74,66 @@ impl WalFileLock {
             Err(e) => Err(e),
         }
     }
+
+    /// Acquire the WAL file lock with stale-lock recovery.
+    ///
+    /// Attempts a non-blocking acquire first. If the lock is held, checks whether
+    /// the holder PID is still alive. If the holder has crashed (PID dead), removes
+    /// the stale lock file and re-acquires. Falls back to blocking acquire if the
+    /// holder is alive or if the PID cannot be determined.
+    pub fn acquire_with_stale_check(wal_dir: &Path) -> io::Result<Self> {
+        // Fast path: try non-blocking acquisition
+        if let Some(lock) = Self::try_acquire(wal_dir)? {
+            return Ok(lock);
+        }
+
+        // Lock held — check if holder is alive
+        let lock_path = wal_dir.join(".wal-lock");
+        if let Ok(contents) = std::fs::read_to_string(&lock_path) {
+            if let Ok(pid) = contents.trim().parse::<u32>() {
+                if !is_process_alive(pid) {
+                    tracing::warn!(
+                        target: "strata::wal",
+                        pid,
+                        "Stale WAL lock — holder is dead, recovering"
+                    );
+                    // Remove stale lock file so acquire() can create a fresh one.
+                    // Ignore NotFound — another process may have already recovered it.
+                    if let Err(e) = std::fs::remove_file(&lock_path) {
+                        if e.kind() != io::ErrorKind::NotFound {
+                            return Err(e);
+                        }
+                    }
+                    return Self::acquire(wal_dir);
+                }
+            }
+        }
+
+        // Holder is alive or PID unreadable — block normally
+        Self::acquire(wal_dir)
+    }
+}
+
+/// Check whether a process with the given PID is still alive.
+#[cfg(unix)]
+fn is_process_alive(pid: u32) -> bool {
+    // kill(pid, 0) checks existence without sending a signal.
+    // Returns 0 if we have permission and the process exists.
+    // Returns -1 with ESRCH if the process does not exist.
+    // Returns -1 with EPERM if the process exists but we lack permission.
+    let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if ret == 0 {
+        return true;
+    }
+    // EPERM means the process exists but we can't signal it — still alive.
+    // Use std::io::Error for portable errno access (works on Linux + macOS).
+    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Conservative fallback: assume alive on non-Unix platforms.
+#[cfg(not(unix))]
+fn is_process_alive(_pid: u32) -> bool {
+    true
 }
 
 // fs2 file locks are released on drop (when the File is closed).
@@ -138,8 +208,15 @@ mod tests {
         let dir = tempdir().unwrap();
         let lock = WalFileLock::acquire(dir.path());
         assert!(lock.is_ok());
-        // Lock file should exist
-        assert!(dir.path().join(".wal-lock").exists());
+        // Lock file should exist and contain our PID
+        let lock_path = dir.path().join(".wal-lock");
+        assert!(lock_path.exists());
+        let contents = std::fs::read_to_string(&lock_path).unwrap();
+        assert_eq!(
+            contents.trim(),
+            std::process::id().to_string(),
+            "Lock file should contain current PID"
+        );
     }
 
     #[test]
@@ -215,5 +292,175 @@ mod tests {
         let (v, t) = cf.read().unwrap();
         assert_eq!(v, 2);
         assert_eq!(t, 2);
+    }
+
+    // ========================================================================
+    // D-3: PID validation tests
+    // ========================================================================
+
+    #[test]
+    fn test_acquire_writes_pid() {
+        let dir = tempdir().unwrap();
+        let _lock = WalFileLock::acquire(dir.path()).unwrap();
+
+        let contents = std::fs::read_to_string(dir.path().join(".wal-lock")).unwrap();
+        assert_eq!(contents.trim(), std::process::id().to_string());
+    }
+
+    #[test]
+    fn test_try_acquire_writes_pid() {
+        let dir = tempdir().unwrap();
+        let _lock = WalFileLock::try_acquire(dir.path()).unwrap().unwrap();
+
+        let contents = std::fs::read_to_string(dir.path().join(".wal-lock")).unwrap();
+        assert_eq!(contents.trim(), std::process::id().to_string());
+    }
+
+    #[test]
+    fn test_stale_lock_recovery_no_flock() {
+        // Scenario: lock file exists with dead PID but NO flock is held.
+        // This happens when a process crashed so hard the OS cleaned up
+        // file descriptors (normal case on local filesystems).
+        // acquire_with_stale_check should succeed via the try_acquire fast path.
+        let dir = tempdir().unwrap();
+        let lock_path = dir.path().join(".wal-lock");
+
+        std::fs::write(&lock_path, format!("{}", u32::MAX - 1)).unwrap();
+
+        let lock = WalFileLock::acquire_with_stale_check(dir.path());
+        assert!(lock.is_ok(), "Should acquire lock when no flock is held");
+
+        // Lock file should now contain our PID (written by try_acquire fast path)
+        let contents = std::fs::read_to_string(&lock_path).unwrap();
+        assert_eq!(contents.trim(), std::process::id().to_string());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stale_lock_recovery_with_held_flock() {
+        // Scenario: flock is still held (simulating NFS/FUSE where flock doesn't
+        // auto-release on crash) but the PID in the file is dead.
+        // acquire_with_stale_check should detect the dead PID, remove the file,
+        // and acquire a fresh lock on a new inode.
+        let dir = tempdir().unwrap();
+        let lock_path = dir.path().join(".wal-lock");
+
+        // Step 1: Acquire the real flock (simulates an unreleased NFS lock)
+        let _held_lock = WalFileLock::acquire(dir.path()).unwrap();
+
+        // Step 2: Overwrite the PID with a dead PID.
+        // This writes to the same inode that _held_lock's fd has flock'd.
+        std::fs::write(&lock_path, format!("{}", u32::MAX - 1)).unwrap();
+
+        // Step 3: From another thread, call acquire_with_stale_check.
+        // - try_acquire() will fail (flock is held by _held_lock's fd)
+        // - reads dead PID from file → detects stale lock
+        // - removes the file (unlinks the path from the old inode)
+        // - acquire() creates a NEW file (new inode) and gets flock on it
+        let wal_dir = dir.path().to_path_buf();
+        let handle = std::thread::spawn(move || WalFileLock::acquire_with_stale_check(&wal_dir));
+
+        let result = handle.join().unwrap();
+        assert!(result.is_ok(), "Should recover stale lock with dead PID");
+
+        // The new lock file should contain our PID (same process, different thread)
+        let contents = std::fs::read_to_string(&lock_path).unwrap();
+        assert_eq!(contents.trim(), std::process::id().to_string());
+    }
+
+    #[test]
+    fn test_acquire_with_stale_check_garbage_pid() {
+        // If the lock file contains garbage (not a valid PID), the function
+        // should fall through safely to blocking acquire.
+        let dir = tempdir().unwrap();
+        let lock_path = dir.path().join(".wal-lock");
+
+        // Write garbage to the lock file (no flock held)
+        std::fs::write(&lock_path, "not-a-pid\n").unwrap();
+
+        // Should succeed — try_acquire fast path works since no flock is held
+        let lock = WalFileLock::acquire_with_stale_check(dir.path());
+        assert!(lock.is_ok());
+
+        let contents = std::fs::read_to_string(&lock_path).unwrap();
+        assert_eq!(contents.trim(), std::process::id().to_string());
+    }
+
+    #[test]
+    fn test_acquire_with_stale_check_empty_file() {
+        // Empty lock file — PID parse fails, should fall through gracefully.
+        let dir = tempdir().unwrap();
+        let lock_path = dir.path().join(".wal-lock");
+
+        std::fs::write(&lock_path, "").unwrap();
+
+        let lock = WalFileLock::acquire_with_stale_check(dir.path());
+        assert!(lock.is_ok());
+
+        let contents = std::fs::read_to_string(&lock_path).unwrap();
+        assert_eq!(contents.trim(), std::process::id().to_string());
+    }
+
+    #[test]
+    fn test_alive_pid_does_not_remove_lock() {
+        let dir = tempdir().unwrap();
+
+        // Acquire the lock in the current process
+        let _lock = WalFileLock::acquire(dir.path()).unwrap();
+
+        // Another try_acquire should return None (lock is held by us)
+        let result = WalFileLock::try_acquire(dir.path()).unwrap();
+        assert!(result.is_none(), "Lock should still be held");
+
+        // Lock file should still exist with our PID
+        let lock_path = dir.path().join(".wal-lock");
+        assert!(lock_path.exists());
+        let contents = std::fs::read_to_string(&lock_path).unwrap();
+        assert_eq!(contents.trim(), std::process::id().to_string());
+    }
+
+    #[test]
+    fn test_pid_overwritten_on_reacquire() {
+        // When a lock is dropped and re-acquired, the PID should be
+        // updated to the new holder (even if same process).
+        let dir = tempdir().unwrap();
+        let lock_path = dir.path().join(".wal-lock");
+
+        {
+            let _lock = WalFileLock::acquire(dir.path()).unwrap();
+            let contents = std::fs::read_to_string(&lock_path).unwrap();
+            assert_eq!(contents.trim(), std::process::id().to_string());
+        }
+        // Lock dropped — write a fake old PID to simulate stale content
+        std::fs::write(&lock_path, "99999").unwrap();
+
+        // Re-acquire should overwrite with current PID
+        let _lock = WalFileLock::acquire(dir.path()).unwrap();
+        let contents = std::fs::read_to_string(&lock_path).unwrap();
+        assert_eq!(
+            contents.trim(),
+            std::process::id().to_string(),
+            "PID should be overwritten on re-acquire"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_is_process_alive_current_pid() {
+        assert!(is_process_alive(std::process::id()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_is_process_alive_dead_pid() {
+        // PID u32::MAX - 1 is almost certainly not alive on any system
+        assert!(!is_process_alive(u32::MAX - 1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_is_process_alive_pid_1() {
+        // PID 1 (init/systemd) should always be alive on Unix
+        assert!(is_process_alive(1));
     }
 }

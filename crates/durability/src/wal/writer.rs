@@ -249,10 +249,29 @@ impl WalWriter {
                 }
                 self.reset_sync_counters();
             }
-            DurabilityMode::Standard { .. } => {
+            DurabilityMode::Standard { interval_ms, .. } => {
                 // Standard mode: fsync is deferred to the background flush thread (#969).
                 // Data is already written to the BufWriter by append().
                 // The background thread periodically calls sync_if_overdue().
+                //
+                // Safety net: if background thread is stalled (3× interval without sync),
+                // perform inline sync to maintain durability guarantee.
+                let deadline_ms = interval_ms.saturating_mul(3);
+                let elapsed_ms = self.last_sync_time.elapsed().as_millis() as u64;
+                if self.has_unsynced_data && elapsed_ms >= deadline_ms {
+                    warn!(target: "strata::wal",
+                        elapsed_ms,
+                        deadline_ms,
+                        "Background flush thread appears stalled — inline sync fallback");
+                    if let Some(ref mut segment) = self.segment {
+                        let start = Instant::now();
+                        segment.sync()?;
+                        let elapsed = start.elapsed();
+                        self.total_sync_calls += 1;
+                        self.total_sync_nanos += elapsed.as_nanos() as u64;
+                    }
+                    self.reset_sync_counters();
+                }
             }
             DurabilityMode::Cache => {
                 // No sync needed
@@ -559,7 +578,11 @@ impl Drop for WalWriter {
     fn drop(&mut self) {
         if self.has_unsynced_data {
             if let Some(ref mut segment) = self.segment {
-                let _ = segment.sync();
+                if let Err(e) = segment.sync() {
+                    eprintln!(
+                        "strata::wal: WAL sync on drop failed: {e} — data may not be durable"
+                    );
+                }
             }
         }
     }
@@ -878,5 +901,106 @@ mod tests {
 
         // Segment should have data
         assert!(writer.current_segment_size() > SEGMENT_HEADER_SIZE_V2 as u64);
+    }
+
+    // ========================================================================
+    // D-1: Inline sync fallback tests
+    // ========================================================================
+
+    #[test]
+    fn test_maybe_sync_inline_fallback_triggers() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        // Use a very short interval so the 3× deadline is easily exceeded
+        let mut writer = make_writer(
+            &wal_dir,
+            DurabilityMode::Standard {
+                interval_ms: 1,
+                batch_size: 10000,
+            },
+        );
+
+        // Write a record to get data on disk
+        writer.append(&make_record(1)).unwrap();
+
+        // Explicitly set the state we need — the append above may or may not
+        // have triggered the fallback (depending on machine speed), so force
+        // the preconditions rather than relying on timing.
+        writer.has_unsynced_data = true;
+        writer.last_sync_time = Instant::now() - std::time::Duration::from_millis(100);
+
+        let sync_calls_before = writer.total_sync_calls;
+        writer.maybe_sync().unwrap();
+
+        // Inline fallback should have performed a sync
+        assert!(
+            writer.total_sync_calls > sync_calls_before,
+            "Expected inline sync fallback to trigger"
+        );
+        // has_unsynced_data should be reset by reset_sync_counters()
+        assert!(!writer.has_unsynced_data);
+        // bytes_since_sync and writes_since_sync should also be reset
+        assert_eq!(writer.bytes_since_sync, 0);
+        assert_eq!(writer.writes_since_sync, 0);
+    }
+
+    #[test]
+    fn test_maybe_sync_noop_within_deadline() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let mut writer = make_writer(
+            &wal_dir,
+            DurabilityMode::Standard {
+                interval_ms: 60_000, // 60s — deadline is 180s
+                batch_size: 10000,
+            },
+        );
+
+        writer.append(&make_record(1)).unwrap();
+        // Confirm precondition: data is unsynced
+        assert!(
+            writer.has_unsynced_data,
+            "append should mark data as unsynced"
+        );
+
+        let sync_calls_before = writer.total_sync_calls;
+        writer.maybe_sync().unwrap();
+
+        // No sync should have occurred — we're well within the 180s deadline
+        assert_eq!(writer.total_sync_calls, sync_calls_before);
+        // Data should still be marked unsynced
+        assert!(writer.has_unsynced_data);
+    }
+
+    #[test]
+    fn test_maybe_sync_noop_no_unsynced_data() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let mut writer = make_writer(
+            &wal_dir,
+            DurabilityMode::Standard {
+                interval_ms: 1,
+                batch_size: 10000,
+            },
+        );
+
+        // Don't write any records — has_unsynced_data must be false
+        assert!(
+            !writer.has_unsynced_data,
+            "fresh writer should have no unsynced data"
+        );
+
+        // Force last_sync_time into the past so deadline is exceeded
+        writer.last_sync_time = Instant::now() - std::time::Duration::from_millis(100);
+
+        let sync_calls_before = writer.total_sync_calls;
+        writer.maybe_sync().unwrap();
+
+        // No sync even though deadline exceeded — no unsynced data
+        assert_eq!(writer.total_sync_calls, sync_calls_before);
+        assert!(!writer.has_unsynced_data);
     }
 }
