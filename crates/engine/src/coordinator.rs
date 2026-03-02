@@ -226,8 +226,12 @@ impl TransactionCoordinator {
 
     /// Record transaction commit
     ///
-    /// Decrements active count (saturating at 0), increments committed count,
+    /// Decrements active count, increments committed count,
     /// and advances `gc_safe_version` when all transactions have drained.
+    ///
+    /// # Panics (debug only)
+    /// Debug-asserts that `active_count > 0`. A zero active_count at this
+    /// point indicates a bug (missing `record_start`).
     ///
     /// # Arguments
     /// * `_txn_id` - Transaction ID (unused, kept for API compat)
@@ -238,13 +242,10 @@ impl TransactionCoordinator {
         // decrement will have a snapshot version ≥ drain_version.
         let drain_version = self.manager.current_version();
 
-        // Use fetch_update for saturating decrement to prevent underflow
-        let prev = self
-            .active_count
-            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |x| {
-                Some(x.saturating_sub(1))
-            })
-            .unwrap_or(0);
+        // Single LOCK XADD instruction — no CAS loop. Underflow is a bug
+        // (record_start always precedes record_commit), so debug-assert.
+        let prev = self.active_count.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(prev > 0, "active_count underflow in record_commit");
         self.total_committed.fetch_add(1, Ordering::Relaxed);
         if prev == 1 {
             // All transactions drained — advance GC safe point
@@ -258,19 +259,20 @@ impl TransactionCoordinator {
     /// Decrements active count, increments aborted count,
     /// and advances `gc_safe_version` when all transactions have drained.
     ///
+    /// # Panics (debug only)
+    /// Debug-asserts that `active_count > 0`. A zero active_count at this
+    /// point indicates a bug (missing `record_start`).
+    ///
     /// # Arguments
     /// * `_txn_id` - Transaction ID (unused, kept for API compat)
     pub fn record_abort(&self, _txn_id: u64) {
         // Capture version BEFORE the decrement (same rationale as record_commit)
         let drain_version = self.manager.current_version();
 
-        // Use fetch_update for saturating decrement to prevent underflow
-        let prev = self
-            .active_count
-            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |x| {
-                Some(x.saturating_sub(1))
-            })
-            .unwrap_or(0);
+        // Single LOCK XADD instruction — no CAS loop. Underflow is a bug
+        // (record_start always precedes record_abort), so debug-assert.
+        let prev = self.active_count.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(prev > 0, "active_count underflow in record_abort");
         self.total_aborted.fetch_add(1, Ordering::Relaxed);
         if prev == 1 {
             // All transactions drained — advance GC safe point
@@ -370,7 +372,7 @@ impl TransactionCoordinator {
 
     /// Get current active transaction count
     pub fn active_count(&self) -> u64 {
-        self.active_count.load(Ordering::SeqCst)
+        self.active_count.load(Ordering::Relaxed)
     }
 
     /// Conservative lower bound on the minimum snapshot version held by
@@ -911,41 +913,130 @@ mod tests {
     // ADVERSARIAL TESTS - Bug Hunting
     // ========================================================================
 
-    /// Verify active_count saturates at 0 instead of underflowing
-    ///
-    /// Previously, calling record_commit/abort more times than record_start
-    /// would cause underflow (panic in debug, wrap in release).
-    /// Now it saturates at 0 for defensive safety.
+    /// Verify active_count tracks correctly through balanced start/commit/abort
+    /// cycles and that GC safe point advances on drain.
     #[test]
-    fn test_active_count_saturates_at_zero() {
+    fn test_active_count_balanced_start_commit() {
         let coordinator = TransactionCoordinator::new(0);
 
-        // Start one transaction
+        // Start one transaction, commit it
         coordinator.record_start(100, 0);
         assert_eq!(coordinator.active_count(), 1);
-
-        // Commit it
         coordinator.record_commit(100);
         assert_eq!(coordinator.active_count(), 0);
 
-        // Extra commits should saturate at 0, not underflow
+        // Start and abort
+        coordinator.record_start(101, 0);
+        assert_eq!(coordinator.active_count(), 1);
+        coordinator.record_abort(101);
+        assert_eq!(coordinator.active_count(), 0);
+
+        // Interleaved: 3 starts, then 2 commits + 1 abort
+        coordinator.record_start(200, 0);
+        coordinator.record_start(201, 0);
+        coordinator.record_start(202, 0);
+        assert_eq!(coordinator.active_count(), 3);
+
+        coordinator.record_commit(200);
+        assert_eq!(coordinator.active_count(), 2);
+        coordinator.record_abort(201);
+        assert_eq!(coordinator.active_count(), 1);
+        // Last one drains — should be 0 after
+        coordinator.record_commit(202);
+        assert_eq!(coordinator.active_count(), 0);
+    }
+
+    /// Verify that GC safe point advances when active_count drains to 0
+    /// via fetch_sub (prev == 1 triggers drain detection).
+    #[test]
+    fn test_gc_safe_point_advances_after_fetch_sub_drain() {
+        let coordinator = TransactionCoordinator::new(0);
+
+        // Bump version so gc_safe_version can advance
+        let _ = coordinator.allocate_commit_version().unwrap(); // version → 1
+
+        // Start and commit a single transaction — drains active_count
+        coordinator.record_start(1, 0);
+        coordinator.record_commit(1);
+
+        // GC safe point should have advanced (drain_version = 1)
+        assert!(
+            coordinator.min_active_version().is_some(),
+            "GC safe point should advance after drain"
+        );
+        assert_eq!(coordinator.min_active_version().unwrap(), 1);
+
+        // Now with multiple transactions: only the LAST drain advances
+        let _ = coordinator.allocate_commit_version().unwrap(); // version → 2
+        coordinator.record_start(2, 0);
+        coordinator.record_start(3, 0);
+        // Commit first — active_count goes from 2 → 1, prev=2, no drain
+        coordinator.record_commit(2);
+        // GC safe point should still be at 1 (no drain yet)
+        assert_eq!(coordinator.min_active_version().unwrap(), 1);
+        // Commit second — active_count goes from 1 → 0, prev=1, drain!
+        coordinator.record_commit(3);
+        assert_eq!(coordinator.min_active_version().unwrap(), 2);
+    }
+
+    /// Verify concurrent start/commit cycles don't corrupt active_count
+    /// with the fetch_sub implementation (no CAS loop).
+    #[test]
+    fn test_active_count_fetch_sub_concurrent_correctness() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let coordinator = Arc::new(TransactionCoordinator::new(0));
+        let num_threads = 8;
+        let iterations = 500;
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|t| {
+                let coord = Arc::clone(&coordinator);
+                thread::spawn(move || {
+                    for i in 0..iterations {
+                        let id = (t * iterations + i) as u64;
+                        coord.record_start(id, 0);
+                        // Small amount of "work"
+                        std::hint::black_box(id);
+                        if i % 3 == 0 {
+                            coord.record_abort(id);
+                        } else {
+                            coord.record_commit(id);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // All transactions balanced — active_count must be exactly 0
+        assert_eq!(
+            coordinator.active_count(),
+            0,
+            "active_count must be 0 after all balanced start/commit|abort cycles"
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "active_count underflow in record_commit")]
+    fn test_active_count_underflow_panics_in_debug_commit() {
+        let coordinator = TransactionCoordinator::new(0);
+        // Commit without a preceding start — should panic in debug builds
         coordinator.record_commit(999);
-        assert_eq!(
-            coordinator.active_count(),
-            0,
-            "Should saturate at 0, not underflow"
-        );
+    }
 
-        coordinator.record_commit(998);
-        assert_eq!(
-            coordinator.active_count(),
-            0,
-            "Still 0 after multiple extra commits"
-        );
-
-        // Same for abort
-        coordinator.record_abort(997);
-        assert_eq!(coordinator.active_count(), 0, "Abort also saturates at 0");
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "active_count underflow in record_abort")]
+    fn test_active_count_underflow_panics_in_debug_abort() {
+        let coordinator = TransactionCoordinator::new(0);
+        // Abort without a preceding start — should panic in debug builds
+        coordinator.record_abort(999);
     }
 
     /// BUG HUNT: Metrics consistency under high concurrency

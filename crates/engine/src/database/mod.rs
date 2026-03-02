@@ -714,10 +714,15 @@ impl Database {
         }
 
         let txn_id = self.coordinator.next_txn_id()?;
-        let start_version = self.coordinator.current_version();
-        self.coordinator.record_start(txn_id, start_version);
+        self.coordinator.record_start(txn_id, 0);
 
-        let commit_version = self.coordinator.allocate_commit_version()?;
+        let commit_version = match self.coordinator.allocate_commit_version() {
+            Ok(v) => v,
+            Err(e) => {
+                self.coordinator.record_abort(txn_id);
+                return Err(e);
+            }
+        };
 
         // WAL write (if needed for durability)
         if self.durability_mode.requires_wal() {

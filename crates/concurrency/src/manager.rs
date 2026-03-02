@@ -111,7 +111,7 @@ impl TransactionManager {
 
     /// Get current global version
     pub fn current_version(&self) -> u64 {
-        self.version.load(Ordering::SeqCst)
+        self.version.load(Ordering::Acquire)
     }
 
     /// Allocate next transaction ID
@@ -119,7 +119,7 @@ impl TransactionManager {
     /// Returns an error if the transaction ID counter reaches `u64::MAX` (overflow).
     pub fn next_txn_id(&self) -> std::result::Result<u64, CommitError> {
         self.next_txn_id
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_add(1))
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |v| v.checked_add(1))
             .map_err(|_| CommitError::CounterOverflow("transaction ID counter at u64::MAX".into()))
     }
 
@@ -141,7 +141,7 @@ impl TransactionManager {
     /// Returns an error if the version counter reaches `u64::MAX` (overflow).
     pub fn allocate_version(&self) -> std::result::Result<u64, CommitError> {
         self.version
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_add(1))
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |v| v.checked_add(1))
             .map(|v| v + 1)
             .map_err(|_| CommitError::CounterOverflow("version counter at u64::MAX".into()))
     }
@@ -199,7 +199,7 @@ impl TransactionManager {
                 )));
             }
             txn.status = TransactionStatus::Committed;
-            return Ok(self.version.load(Ordering::SeqCst));
+            return Ok(self.version.load(Ordering::Acquire));
         }
 
         // Acquire per-branch commit lock to prevent TOCTOU race between validation and apply
@@ -316,7 +316,7 @@ impl TransactionManager {
     /// reflects writes applied from other processes' WAL entries.
     /// Uses `fetch_max` so the counter never goes backward.
     pub fn catch_up_version(&self, v: u64) {
-        self.version.fetch_max(v, Ordering::SeqCst);
+        self.version.fetch_max(v, Ordering::AcqRel);
     }
 
     /// Advance the next_txn_id counter to at least `id + 1`.
@@ -324,7 +324,7 @@ impl TransactionManager {
     /// Used during multi-process refresh to ensure locally-allocated transaction
     /// IDs never collide with IDs already used by other processes.
     pub fn catch_up_txn_id(&self, id: u64) {
-        self.next_txn_id.fetch_max(id + 1, Ordering::SeqCst);
+        self.next_txn_id.fetch_max(id + 1, Ordering::AcqRel);
     }
 
     /// Commit a transaction with an externally-allocated version.
@@ -383,7 +383,7 @@ impl TransactionManager {
         let commit_version = version;
 
         // Advance local counter so it stays in sync
-        self.version.fetch_max(commit_version, Ordering::SeqCst);
+        self.version.fetch_max(commit_version, Ordering::AcqRel);
 
         // Write to WAL
         let has_mutations = !txn.is_read_only() || !txn.json_writes().is_empty();
