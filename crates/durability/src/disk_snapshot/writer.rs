@@ -127,9 +127,8 @@ impl SnapshotWriter {
         // Step 3: Atomic rename
         std::fs::rename(&temp_path, &final_path)?;
 
-        // Step 4: fsync parent directory
-        let dir = File::open(&self.snapshots_dir)?;
-        dir.sync_all()?;
+        // Step 4: fsync parent directory (with single retry)
+        fsync_directory(&self.snapshots_dir)?;
 
         Ok(SnapshotInfo {
             snapshot_id,
@@ -204,6 +203,24 @@ pub struct SnapshotInfo {
     pub path: PathBuf,
     /// CRC32 checksum of the snapshot contents
     pub crc: u32,
+}
+
+/// fsync a directory to ensure durability of rename operations.
+/// Retries once on transient failure.
+fn fsync_directory(dir_path: &Path) -> io::Result<()> {
+    let do_sync = || -> io::Result<()> {
+        let dir = File::open(dir_path)?;
+        dir.sync_all()
+    };
+    match do_sync() {
+        Ok(()) => Ok(()),
+        Err(first_err) => {
+            tracing::warn!(target: "strata::snapshot",
+                error = %first_err, path = %dir_path.display(),
+                "Directory fsync failed, retrying once");
+            do_sync()
+        }
+    }
 }
 
 #[cfg(test)]

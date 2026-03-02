@@ -11,7 +11,7 @@ use tracing::warn;
 
 /// Maximum number of bytes to scan forward when searching for the next
 /// valid record after encountering corruption during WAL recovery.
-const MAX_RECOVERY_SCAN_WINDOW: usize = 1_024 * 1_024; // 1 MB
+const MAX_RECOVERY_SCAN_WINDOW: usize = 8 * 1_024 * 1_024; // 8 MB
 
 /// WAL reader for iterating over records in segments.
 ///
@@ -117,6 +117,16 @@ impl WalReader {
                     }
 
                     // No valid record found within scan window — stop
+                    let unscanned_bytes = buffer.len() - scan_end;
+                    if unscanned_bytes > 0 {
+                        tracing::warn!(
+                            target: "strata::recovery",
+                            corrupted_offset = offset,
+                            scan_window_bytes = MAX_RECOVERY_SCAN_WINDOW,
+                            unscanned_bytes,
+                            "Corruption scan window exhausted — unscanned data will be lost",
+                        );
+                    }
                     stop_reason = ReadStopReason::ChecksumMismatch { offset };
                     break;
                 }
@@ -1120,22 +1130,22 @@ mod tests {
         let dir = tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
-        // Write records to a single segment (no rotation, no .meta)
+        // Write records to a single segment.
+        // D-7: flush() now writes .meta for the active segment, so delete it
+        // to simulate the pre-D-7 scenario where active segments lack .meta.
         let records: Vec<_> = (1..=5)
             .map(|i| WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8]))
             .collect();
         write_records(&wal_dir, &records);
 
-        // Verify precondition: exactly 1 segment, no .meta
+        // Remove .meta to simulate pre-D-7 / crash-before-flush scenario
         let reader = WalReader::new(make_codec());
         let segments = reader.list_segments(&wal_dir).unwrap();
         assert_eq!(segments.len(), 1);
-        assert!(
-            SegmentMeta::read_from_file(&wal_dir, segments[0])
-                .unwrap()
-                .is_none(),
-            "Active segment should not have .meta"
-        );
+        let meta_path = SegmentMeta::meta_path(&wal_dir, segments[0]);
+        if meta_path.exists() {
+            std::fs::remove_file(&meta_path).unwrap();
+        }
 
         // Watermark=3: only txn_ids 4,5 returned
         let filtered = reader.read_all_after_watermark(&wal_dir, 3).unwrap();

@@ -55,12 +55,30 @@ impl WalOnlyCompactor {
     /// - `NoSnapshot`: No snapshot exists to compact against
     /// - `Io`: File system errors during segment access/deletion
     pub fn compact(&self) -> Result<CompactInfo, CompactionError> {
+        self.compact_with_active_override(0)
+    }
+
+    /// Perform WAL-only compaction with an explicit active segment override.
+    ///
+    /// The `writer_active_segment` parameter provides the WAL writer's in-memory
+    /// current segment number, which may be ahead of the MANIFEST value if
+    /// rotations occurred since last recovery/checkpoint. The compactor uses
+    /// `max(manifest_active, writer_active_segment)` as the safe boundary.
+    ///
+    /// # Errors
+    ///
+    /// - `NoSnapshot`: No snapshot exists to compact against
+    /// - `Io`: File system errors during segment access/deletion
+    pub fn compact_with_active_override(
+        &self,
+        writer_active_segment: u64,
+    ) -> Result<CompactInfo, CompactionError> {
         info!(target: "strata::compaction", "WAL compaction started");
         let start_time = std::time::Instant::now();
         let mut info = CompactInfo::new(CompactMode::WALOnly);
 
         // Get snapshot watermark from MANIFEST
-        let (watermark, active_segment) = {
+        let (watermark, manifest_active) = {
             let manifest = self.manifest.lock();
 
             let watermark = manifest
@@ -73,14 +91,18 @@ impl WalOnlyCompactor {
             (watermark, active_segment)
         };
 
+        // Use the higher of manifest vs writer's in-memory segment number.
+        // The writer may have rotated since the last MANIFEST update.
+        let safe_active = manifest_active.max(writer_active_segment);
+
         info.snapshot_watermark = Some(watermark);
 
         // List all WAL segments
         let segments = self.list_segments()?;
 
         for segment_number in segments {
-            // Never remove active segment
-            if segment_number >= active_segment {
+            // Never remove active segment or any segment at/above it
+            if segment_number >= safe_active {
                 continue;
             }
 
@@ -591,5 +613,168 @@ mod tests {
         // Should be removed (meta.max_txn_id=3 <= watermark=3)
         assert_eq!(info.wal_segments_removed, 1);
         assert!(!segment_path(&wal_dir, 1).exists());
+    }
+
+    // ========================================================================
+    // D-6: Stale active segment guard tests
+    // ========================================================================
+
+    #[test]
+    fn test_compact_with_stale_manifest_uses_override() {
+        let (_dir, wal_dir, manifest) = setup_test_env();
+
+        // Create segments 1-5, all with txn_ids <= 10 (covered by watermark)
+        for seg in 1..=5 {
+            create_segment_with_records(&wal_dir, seg, &[seg * 2]).unwrap();
+        }
+
+        // MANIFEST says active=3 (stale), but writer is really at segment 5.
+        // safe_active = max(3, 5) = 5. Segments >= 5 are protected.
+        {
+            let mut m = manifest.lock();
+            m.set_snapshot_watermark(1, 100).unwrap(); // high watermark covers all
+            m.manifest_mut().active_wal_segment = 3;
+            m.persist().unwrap();
+        }
+
+        let compactor = WalOnlyCompactor::new(wal_dir.clone(), manifest);
+        let info = compactor.compact_with_active_override(5).unwrap();
+
+        // Segments 1-4 deleted (< safe_active=5, covered by watermark)
+        assert!(!segment_path(&wal_dir, 1).exists());
+        assert!(!segment_path(&wal_dir, 2).exists());
+        assert!(!segment_path(&wal_dir, 3).exists());
+        assert!(!segment_path(&wal_dir, 4).exists());
+
+        // Segment 5 must NOT be deleted (it IS the active segment)
+        assert!(segment_path(&wal_dir, 5).exists());
+        assert_eq!(info.wal_segments_removed, 4);
+    }
+
+    #[test]
+    fn test_compact_override_uses_max() {
+        let (_dir, wal_dir, manifest) = setup_test_env();
+
+        // Create segments 1-5
+        for seg in 1..=5 {
+            create_segment_with_records(&wal_dir, seg, &[seg]).unwrap();
+        }
+
+        // MANIFEST active=5, override=3 → max(5,3)=5
+        {
+            let mut m = manifest.lock();
+            m.set_snapshot_watermark(1, 100).unwrap();
+            m.manifest_mut().active_wal_segment = 5;
+            m.persist().unwrap();
+        }
+
+        let compactor = WalOnlyCompactor::new(wal_dir.clone(), manifest);
+        let info = compactor.compact_with_active_override(3).unwrap();
+
+        // Segments 1-4 removed, segment 5 (active per manifest) protected
+        assert_eq!(info.wal_segments_removed, 4);
+        assert!(segment_path(&wal_dir, 5).exists());
+    }
+
+    #[test]
+    fn test_compact_zero_override_delegates_to_manifest() {
+        let (_dir, wal_dir, manifest) = setup_test_env();
+
+        create_segment_with_records(&wal_dir, 1, &[1, 2, 3]).unwrap();
+        create_segment_with_records(&wal_dir, 2, &[4, 5, 6]).unwrap();
+
+        {
+            let mut m = manifest.lock();
+            m.set_snapshot_watermark(1, 10).unwrap();
+            m.manifest_mut().active_wal_segment = 3;
+            m.persist().unwrap();
+        }
+
+        let compactor = WalOnlyCompactor::new(wal_dir.clone(), manifest);
+
+        // Override=0 → max(3,0)=3 → same as original compact()
+        let info = compactor.compact_with_active_override(0).unwrap();
+        assert_eq!(info.wal_segments_removed, 2);
+        assert!(!segment_path(&wal_dir, 1).exists());
+        assert!(!segment_path(&wal_dir, 2).exists());
+    }
+
+    #[test]
+    fn test_compact_override_interacts_with_watermark() {
+        // Verifies that BOTH the watermark check and the active-segment guard
+        // are required for deletion. A segment below safe_active that is NOT
+        // covered by the watermark must survive.
+        let (_dir, wal_dir, manifest) = setup_test_env();
+
+        // seg 1: max_txn_id=3  (covered by watermark=5)
+        // seg 2: max_txn_id=10 (NOT covered by watermark=5)
+        // seg 3: max_txn_id=4  (covered by watermark=5)
+        // seg 4: active segment (writer override)
+        create_segment_with_records(&wal_dir, 1, &[1, 2, 3]).unwrap();
+        create_segment_with_records(&wal_dir, 2, &[8, 9, 10]).unwrap();
+        create_segment_with_records(&wal_dir, 3, &[4]).unwrap();
+        create_segment_with_records(&wal_dir, 4, &[11]).unwrap();
+
+        {
+            let mut m = manifest.lock();
+            m.set_snapshot_watermark(1, 5).unwrap();
+            m.manifest_mut().active_wal_segment = 2; // stale
+            m.persist().unwrap();
+        }
+
+        let compactor = WalOnlyCompactor::new(wal_dir.clone(), manifest);
+        // Writer is really at segment 4 → safe_active = max(2, 4) = 4
+        let info = compactor.compact_with_active_override(4).unwrap();
+
+        // seg 1: < 4 AND covered → DELETED
+        assert!(!segment_path(&wal_dir, 1).exists());
+        // seg 2: < 4 BUT max_txn_id=10 > watermark=5 → KEPT
+        assert!(segment_path(&wal_dir, 2).exists());
+        // seg 3: < 4 AND covered → DELETED
+        assert!(!segment_path(&wal_dir, 3).exists());
+        // seg 4: >= safe_active → KEPT (active)
+        assert!(segment_path(&wal_dir, 4).exists());
+
+        assert_eq!(info.wal_segments_removed, 2);
+    }
+
+    #[test]
+    fn test_compact_stale_manifest_without_override_is_conservative() {
+        // Demonstrates why the override matters: without it, the stale manifest
+        // active=2 would prevent compacting segment 2 even though it's closed.
+        // With override=4, segment 2 becomes eligible (but still needs watermark).
+        let (_dir, wal_dir, manifest) = setup_test_env();
+
+        create_segment_with_records(&wal_dir, 1, &[1, 2]).unwrap();
+        create_segment_with_records(&wal_dir, 2, &[3, 4]).unwrap();
+        create_segment_with_records(&wal_dir, 3, &[5]).unwrap();
+
+        {
+            let mut m = manifest.lock();
+            m.set_snapshot_watermark(1, 10).unwrap(); // covers everything
+            m.manifest_mut().active_wal_segment = 2; // stale: writer is at 4
+            m.persist().unwrap();
+        }
+
+        let compactor = WalOnlyCompactor::new(wal_dir.clone(), manifest.clone());
+
+        // Without override (compact()): safe_active = max(2,0) = 2
+        // Only segment 1 (< 2) is compacted
+        let info_no_override = compactor.compact().unwrap();
+        assert_eq!(info_no_override.wal_segments_removed, 1);
+        assert!(!segment_path(&wal_dir, 1).exists());
+        assert!(segment_path(&wal_dir, 2).exists()); // protected by stale manifest
+        assert!(segment_path(&wal_dir, 3).exists()); // protected by stale manifest
+
+        // Recreate segment 1 for the second run
+        create_segment_with_records(&wal_dir, 1, &[1, 2]).unwrap();
+
+        // With override=4: safe_active = max(2,4) = 4
+        // Segments 1, 2, 3 (all < 4 and covered) are compacted
+        let info_with_override = compactor.compact_with_active_override(4).unwrap();
+        assert_eq!(info_with_override.wal_segments_removed, 3);
+        assert!(!segment_path(&wal_dir, 1).exists());
+        assert!(!segment_path(&wal_dir, 2).exists());
+        assert!(!segment_path(&wal_dir, 3).exists());
     }
 }
