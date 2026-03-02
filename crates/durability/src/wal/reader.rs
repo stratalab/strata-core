@@ -1120,22 +1120,22 @@ mod tests {
         let dir = tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
-        // Write records to a single segment (no rotation, no .meta)
+        // Write records to a single segment.
+        // D-7: flush() now writes .meta for the active segment, so delete it
+        // to simulate the pre-D-7 scenario where active segments lack .meta.
         let records: Vec<_> = (1..=5)
             .map(|i| WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8]))
             .collect();
         write_records(&wal_dir, &records);
 
-        // Verify precondition: exactly 1 segment, no .meta
+        // Remove .meta to simulate pre-D-7 / crash-before-flush scenario
         let reader = WalReader::new(make_codec());
         let segments = reader.list_segments(&wal_dir).unwrap();
         assert_eq!(segments.len(), 1);
-        assert!(
-            SegmentMeta::read_from_file(&wal_dir, segments[0])
-                .unwrap()
-                .is_none(),
-            "Active segment should not have .meta"
-        );
+        let meta_path = SegmentMeta::meta_path(&wal_dir, segments[0]);
+        if meta_path.exists() {
+            std::fs::remove_file(&meta_path).unwrap();
+        }
 
         // Watermark=3: only txn_ids 4,5 returned
         let filtered = reader.read_all_after_watermark(&wal_dir, 3).unwrap();

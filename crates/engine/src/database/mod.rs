@@ -544,6 +544,7 @@ impl Database {
                         if let Err(e) = wal.sync_if_overdue() {
                             tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
                         }
+                        wal.flush_active_meta();
                     }
                 })
                 .map_err(|e| {
