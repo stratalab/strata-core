@@ -732,6 +732,7 @@ impl Database {
                     use strata_durability::format::WalRecord;
                     use strata_durability::now_micros;
 
+                    let timestamp = now_micros();
                     let payload = TransactionPayload {
                         version: commit_version,
                         puts: vec![(key.clone(), value.clone())],
@@ -740,12 +741,16 @@ impl Database {
                     let record = WalRecord::new(
                         txn_id,
                         *key.namespace.branch_id.as_bytes(),
-                        now_micros(),
+                        timestamp,
                         payload.to_bytes(),
                     );
 
+                    // Pre-serialize outside the lock: moves CRC computation
+                    // and two Vec allocations out of the critical section.
+                    let record_bytes = record.to_bytes();
+
                     let mut wal = wal_arc.lock();
-                    if let Err(e) = wal.append(&record) {
+                    if let Err(e) = wal.append_pre_serialized(&record_bytes, txn_id, timestamp) {
                         self.coordinator.record_abort(txn_id);
                         return Err(StrataError::storage(format!(
                             "WAL write failed in put_direct: {}",

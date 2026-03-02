@@ -116,11 +116,29 @@ impl TransactionManager {
 
     /// Allocate next transaction ID
     ///
-    /// Returns an error if the transaction ID counter reaches `u64::MAX` (overflow).
+    /// Uses a single `fetch_add` (LOCK XADD on x86) instead of a CAS loop.
+    /// Overflow at `u64::MAX` is detected and repaired — practically unreachable
+    /// (584 years at 1 billion txn/sec).
+    ///
+    /// # Overflow race tradeoff
+    ///
+    /// At `u64::MAX`, `fetch_add` wraps to 0 before the `store` repair runs.
+    /// A concurrent caller could observe the wrapped value and return a
+    /// duplicate ID. The old `fetch_update` (CAS loop) was atomic at this
+    /// boundary but suffered thundering-herd contention at 16+ threads.
+    /// Since reaching `u64::MAX` is physically impossible at any realistic
+    /// throughput, we accept this theoretical race in exchange for
+    /// contention-free allocation.
     pub fn next_txn_id(&self) -> std::result::Result<u64, CommitError> {
-        self.next_txn_id
-            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |v| v.checked_add(1))
-            .map_err(|_| CommitError::CounterOverflow("transaction ID counter at u64::MAX".into()))
+        let prev = self.next_txn_id.fetch_add(1, Ordering::AcqRel);
+        if prev == u64::MAX {
+            // Undo the wrapping increment: restore counter to u64::MAX
+            self.next_txn_id.store(u64::MAX, Ordering::Release);
+            return Err(CommitError::CounterOverflow(
+                "transaction ID counter at u64::MAX".into(),
+            ));
+        }
+        Ok(prev)
     }
 
     /// Allocate next commit version (increment global version)
@@ -138,12 +156,20 @@ impl TransactionManager {
     /// while failure handling during commit does not attempt to "return"
     /// the allocated version.
     ///
-    /// Returns an error if the version counter reaches `u64::MAX` (overflow).
+    /// Uses a single `fetch_add` (LOCK XADD on x86) instead of a CAS loop.
+    /// Overflow at `u64::MAX` is detected and repaired — practically unreachable
+    /// (584 years at 1 billion txn/sec). See `next_txn_id` for the overflow
+    /// race tradeoff rationale.
     pub fn allocate_version(&self) -> std::result::Result<u64, CommitError> {
-        self.version
-            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |v| v.checked_add(1))
-            .map(|v| v + 1)
-            .map_err(|_| CommitError::CounterOverflow("version counter at u64::MAX".into()))
+        let prev = self.version.fetch_add(1, Ordering::AcqRel);
+        if prev == u64::MAX {
+            // Undo the wrapping increment: restore counter to u64::MAX
+            self.version.store(u64::MAX, Ordering::Release);
+            return Err(CommitError::CounterOverflow(
+                "version counter at u64::MAX".into(),
+            ));
+        }
+        Ok(prev + 1)
     }
 
     /// Commit a transaction atomically
