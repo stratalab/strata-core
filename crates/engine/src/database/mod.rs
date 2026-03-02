@@ -102,6 +102,34 @@ pub(crate) enum PersistenceMode {
 }
 
 // ============================================================================
+// Disk Usage
+// ============================================================================
+
+/// Database disk usage summary.
+#[derive(Debug, Clone, Default)]
+pub struct DatabaseDiskUsage {
+    /// WAL directory usage.
+    pub wal: strata_durability::WalDiskUsage,
+    /// Snapshot directory usage in bytes.
+    pub snapshot_bytes: u64,
+}
+
+/// Sum file sizes in a directory (non-recursive, best-effort).
+fn scan_dir_size(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Ok(metadata) = entry.metadata() {
+                if metadata.is_file() {
+                    total += metadata.len();
+                }
+            }
+        }
+    }
+    total
+}
+
+// ============================================================================
 // Database Struct
 // ============================================================================
 
@@ -1510,14 +1538,23 @@ impl Database {
         let manifest = self.load_or_create_manifest()?;
         let manifest_arc = Arc::new(parking_lot::Mutex::new(manifest));
 
-        // Create compactor and run
+        // Get the writer's in-memory segment number (may be ahead of MANIFEST)
+        let writer_active = self
+            .wal_writer
+            .as_ref()
+            .map(|w| w.lock().current_segment())
+            .unwrap_or(0);
+
+        // Create compactor and run with the writer's active segment override
         let compactor = WalOnlyCompactor::new(wal_dir, manifest_arc);
-        let compact_info = compactor.compact().map_err(|e: CompactionError| match e {
-            CompactionError::NoSnapshot => StrataError::invalid_input(
-                "No checkpoint exists yet. Run checkpoint() before compact().".to_string(),
-            ),
-            other => StrataError::internal(format!("compaction failed: {}", other)),
-        })?;
+        let compact_info = compactor
+            .compact_with_active_override(writer_active)
+            .map_err(|e: CompactionError| match e {
+                CompactionError::NoSnapshot => StrataError::invalid_input(
+                    "No checkpoint exists yet. Run checkpoint() before compact().".to_string(),
+                ),
+                other => StrataError::internal(format!("compaction failed: {}", other)),
+            })?;
 
         info!(
             target: "strata::db",
@@ -1527,6 +1564,29 @@ impl Database {
         );
 
         Ok(())
+    }
+
+    /// Compute database disk usage across WAL and snapshot directories.
+    ///
+    /// Returns zeros for ephemeral databases.
+    pub fn disk_usage(&self) -> DatabaseDiskUsage {
+        if self.persistence_mode == PersistenceMode::Ephemeral {
+            return DatabaseDiskUsage::default();
+        }
+
+        let wal = self
+            .wal_writer
+            .as_ref()
+            .map(|w| w.lock().wal_disk_usage())
+            .unwrap_or_default();
+
+        let snapshots_dir = self.data_dir.join("snapshots");
+        let snapshot_bytes = scan_dir_size(&snapshots_dir);
+
+        DatabaseDiskUsage {
+            wal,
+            snapshot_bytes,
+        }
     }
 
     /// Collect all primitive data from storage for checkpointing.

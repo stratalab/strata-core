@@ -15,6 +15,15 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
+/// WAL disk usage summary.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WalDiskUsage {
+    /// Total bytes used by WAL segment files.
+    pub total_bytes: u64,
+    /// Number of WAL segment files.
+    pub segment_count: usize,
+}
+
 /// Cumulative WAL operation counters.
 ///
 /// These counters accumulate over the lifetime of the WalWriter
@@ -374,6 +383,11 @@ impl WalWriter {
 
         info!(target: "strata::wal", old_segment, new_segment = self.current_segment_number, "WAL segment rotated");
 
+        if self.current_segment_number > 1000 {
+            warn!(target: "strata::wal", segments = self.current_segment_number,
+                "WAL has over 1000 segments — consider running checkpoint() + compact()");
+        }
+
         Ok(())
     }
 
@@ -443,6 +457,35 @@ impl WalWriter {
             sync_calls: self.total_sync_calls,
             bytes_written: self.total_bytes_written,
             sync_nanos: self.total_sync_nanos,
+        }
+    }
+
+    /// Compute WAL disk usage by scanning the WAL directory.
+    ///
+    /// Returns zeros in Cache mode (no WAL files).
+    pub fn wal_disk_usage(&self) -> WalDiskUsage {
+        if !self.durability.requires_wal() {
+            return WalDiskUsage::default();
+        }
+
+        let mut total_bytes = 0u64;
+        let mut segment_count = 0usize;
+
+        if let Ok(entries) = std::fs::read_dir(&self.wal_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("wal-") && name.ends_with(".seg") {
+                    if let Ok(metadata) = entry.metadata() {
+                        total_bytes += metadata.len();
+                        segment_count += 1;
+                    }
+                }
+            }
+        }
+
+        WalDiskUsage {
+            total_bytes,
+            segment_count,
         }
     }
 
@@ -1358,5 +1401,121 @@ mod tests {
         assert_eq!(meta.record_count, 3);
         assert_eq!(meta.min_txn_id, 1);
         assert_eq!(meta.max_txn_id, 3);
+    }
+
+    // ========================================================================
+    // D-9: WAL disk usage tests
+    // ========================================================================
+
+    #[test]
+    fn test_wal_disk_usage_empty() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let writer = make_writer(&wal_dir, DurabilityMode::Always);
+        let usage = writer.wal_disk_usage();
+
+        // Fresh writer has 1 segment (the initial one)
+        assert_eq!(usage.segment_count, 1);
+        assert!(usage.total_bytes > 0, "Should include header bytes");
+    }
+
+    #[test]
+    fn test_wal_disk_usage_after_writes() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let mut writer = make_writer(&wal_dir, DurabilityMode::Always);
+        let usage_before = writer.wal_disk_usage();
+
+        // Still 1 segment, just the header
+        assert_eq!(usage_before.segment_count, 1);
+
+        for i in 1..=10 {
+            writer
+                .append(&WalRecord::new(i, [1u8; 16], i * 1000, vec![0; 50]))
+                .unwrap();
+        }
+        writer.flush().unwrap();
+
+        let usage_after = writer.wal_disk_usage();
+        assert!(
+            usage_after.total_bytes > usage_before.total_bytes,
+            "Bytes should increase after writes: before={}, after={}",
+            usage_before.total_bytes,
+            usage_after.total_bytes
+        );
+        // Still 1 segment (no rotation with default large segment size)
+        assert_eq!(usage_after.segment_count, 1);
+    }
+
+    #[test]
+    fn test_wal_disk_usage_after_rotation() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let config = WalConfig::new()
+            .with_segment_size(100)
+            .with_buffered_sync_bytes(50);
+
+        let mut writer = WalWriter::new(
+            wal_dir.clone(),
+            [1u8; 16],
+            DurabilityMode::Always,
+            config,
+            Box::new(IdentityCodec),
+        )
+        .unwrap();
+
+        let usage_before = writer.wal_disk_usage();
+        assert_eq!(usage_before.segment_count, 1);
+
+        // Write enough to force rotation
+        for i in 0..10 {
+            writer
+                .append(&WalRecord::new(i, [1u8; 16], 0, vec![0; 50]))
+                .unwrap();
+        }
+
+        let usage = writer.wal_disk_usage();
+        assert!(
+            usage.segment_count >= 2,
+            "Should have multiple segments after rotation, got {}",
+            usage.segment_count
+        );
+        // Total bytes should include ALL segments (rotated + current)
+        assert!(
+            usage.total_bytes > usage_before.total_bytes,
+            "Total bytes should include all segment files"
+        );
+    }
+
+    #[test]
+    fn test_wal_disk_usage_cache_mode() {
+        let dir = tempdir().unwrap();
+
+        let mut writer = make_writer(dir.path(), DurabilityMode::Cache);
+        writer.append(&make_record(1)).unwrap();
+
+        let usage = writer.wal_disk_usage();
+        assert_eq!(usage.total_bytes, 0);
+        assert_eq!(usage.segment_count, 0);
+    }
+
+    #[test]
+    fn test_wal_disk_usage_ignores_non_segment_files() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let writer = make_writer(&wal_dir, DurabilityMode::Always);
+
+        // Write some .meta and other files that should NOT be counted
+        std::fs::write(wal_dir.join("wal-000001.meta"), b"metadata").unwrap();
+        std::fs::write(wal_dir.join("MANIFEST"), b"manifest data").unwrap();
+        std::fs::write(wal_dir.join("some_other_file.txt"), b"junk").unwrap();
+
+        let usage = writer.wal_disk_usage();
+        // Only the .seg file should be counted
+        assert_eq!(usage.segment_count, 1);
     }
 }
