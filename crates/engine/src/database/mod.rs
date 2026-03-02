@@ -541,7 +541,9 @@ impl Database {
                             break;
                         }
                         let mut wal = wal.lock();
-                        let _ = wal.sync_if_overdue();
+                        if let Err(e) = wal.sync_if_overdue() {
+                            tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
+                        }
                     }
                 })
                 .map_err(|e| {
@@ -1984,8 +1986,8 @@ impl Database {
             return self.coordinator.commit(txn, self.storage.as_ref(), None);
         }
 
-        // Acquire WAL file lock (blocks until available)
-        let _wal_lock = WalFileLock::acquire(&self.wal_dir)
+        // Acquire WAL file lock with stale-lock recovery (blocks until available)
+        let _wal_lock = WalFileLock::acquire_with_stale_check(&self.wal_dir)
             .map_err(|e| StrataError::storage(format!("Failed to acquire WAL file lock: {}", e)))?;
 
         // Step 1: Refresh from WAL (apply other processes' writes)
