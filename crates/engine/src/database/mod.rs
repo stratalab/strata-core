@@ -585,6 +585,11 @@ impl Database {
                         }
                         wal.flush_active_meta();
                     }
+                    // Final sync: flush any data written since the last periodic sync
+                    let mut wal = wal.lock();
+                    if let Err(e) = wal.flush() {
+                        tracing::error!(target: "strata::wal", error = %e, "Final WAL flush failed during shutdown");
+                    }
                 })
                 .map_err(|e| {
                     StrataError::internal(format!("failed to spawn WAL flush thread: {}", e))
@@ -1135,10 +1140,12 @@ impl Database {
     ///
     /// This prevents unbounded growth of the commit_locks map in the
     /// TransactionManager when branches are repeatedly created and deleted.
+    /// Returns `true` if removed (or didn't exist), `false` if skipped
+    /// because a concurrent commit is in-flight.
     ///
     /// Should be called after `BranchIndex::delete_branch()` succeeds.
-    pub fn remove_branch_lock(&self, branch_id: &BranchId) {
-        self.coordinator.remove_branch_lock(branch_id);
+    pub fn remove_branch_lock(&self, branch_id: &BranchId) -> bool {
+        self.coordinator.remove_branch_lock(branch_id)
     }
 
     // ========================================================================
@@ -2201,23 +2208,15 @@ impl Database {
     /// assert!(!db.is_open());
     /// ```
     pub fn shutdown(&self) -> StrataResult<()> {
-        // Stop accepting new transactions
+        // 1. Stop accepting new transactions
         self.accepting_transactions.store(false, Ordering::SeqCst);
 
-        // Drain background tasks (embeddings etc.) before final WAL flush
+        // 2. Drain background tasks (embeddings etc.) before final WAL flush
         self.scheduler.drain();
 
-        // Signal the background flush thread to stop
-        self.flush_shutdown.store(true, Ordering::SeqCst);
-
-        // Join the flush thread so it releases the WAL lock
-        if let Some(handle) = self.flush_handle.lock().take() {
-            let _ = handle.join();
-        }
-
-        // Wait for in-flight transactions to complete
-        // This ensures all transactions that started before shutdown
-        // have a chance to commit before we flush the WAL.
+        // 3. Wait for in-flight transactions to complete FIRST.
+        //    The flush thread keeps running during this window, providing
+        //    periodic syncs for any transactions that commit during drain.
         let timeout = std::time::Duration::from_secs(30);
         let start = std::time::Instant::now();
 
@@ -2225,10 +2224,30 @@ impl Database {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
-        // Final flush to ensure all data is persisted
+        let remaining = self.coordinator.active_count();
+        if remaining > 0 {
+            warn!(
+                target: "strata::db",
+                remaining,
+                "Shutdown timed out waiting for {} active transaction(s) after {:?}",
+                remaining,
+                timeout,
+            );
+        }
+
+        // 4. Signal the background flush thread to stop (after transactions are drained)
+        self.flush_shutdown.store(true, Ordering::SeqCst);
+
+        // Join the flush thread so it releases the WAL lock
+        // (E-5: the thread performs a final sync before exiting)
+        if let Some(handle) = self.flush_handle.lock().take() {
+            let _ = handle.join();
+        }
+
+        // 5. Final flush to ensure all data is persisted
         self.flush()?;
 
-        // Freeze both vector heaps and search index. Attempt both even if
+        // 6. Freeze both vector heaps and search index. Attempt both even if
         // the first fails, so a vector freeze error doesn't also lose search data.
         let vec_result = self.freeze_vector_heaps();
         let search_result = self.freeze_search_index();
@@ -3263,5 +3282,246 @@ mod tests {
             "Expected at least 2 recovery participants (vector + search), got {}",
             count
         );
+    }
+
+    // ========================================================================
+    // E-5 + E-2: Shutdown coordination tests
+    // ========================================================================
+
+    #[test]
+    fn test_flush_thread_performs_final_sync() {
+        // Use a 2-second flush interval so the periodic sync will NOT have
+        // run by the time we call shutdown() (the write + shutdown completes
+        // well within the first sleep cycle). In Standard mode, commit only
+        // writes to BufWriter without fsync. The data can only reach disk via:
+        //   (a) the flush thread's final sync (E-5), or
+        //   (b) shutdown's explicit self.flush()
+        //
+        // This test verifies the full shutdown path (a + b) persists data.
+        // The E-5 final sync provides defense-in-depth for crash scenarios
+        // where the process dies between thread join and the explicit flush.
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("final_sync_db");
+
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = Key::new_kv(ns.clone(), "final_sync_key");
+
+        {
+            // 2s interval: long enough that no periodic sync runs before we
+            // call shutdown, short enough that the test doesn't take forever
+            // (the flush thread sleeps for one interval before checking the flag).
+            let mode = DurabilityMode::Standard {
+                interval_ms: 2_000,
+                batch_size: 1_000_000,
+            };
+            let db = Database::open_with_mode(&db_path, mode).unwrap();
+
+            db.transaction(branch_id, |txn| {
+                txn.put(key.clone(), Value::Bytes(b"final_sync_value".to_vec()))?;
+                Ok(())
+            })
+            .unwrap();
+
+            // At this point data is in the WAL BufWriter but NOT fsynced.
+            // Neither the periodic sync (2s away) nor the inline safety-net
+            // (3×2s = 6s away) could have run.
+            db.shutdown().unwrap();
+        }
+
+        // Re-open and verify data was persisted
+        let db = Database::open(&db_path).unwrap();
+        let val = db.storage().get(&key).unwrap();
+        assert!(
+            val.is_some(),
+            "Data should be recoverable after shutdown (flush thread final sync + explicit flush)"
+        );
+        assert_eq!(
+            val.unwrap().value,
+            Value::Bytes(b"final_sync_value".to_vec())
+        );
+    }
+
+    #[test]
+    fn test_shutdown_blocks_until_in_flight_transactions_drain() {
+        // Verify that shutdown() actually BLOCKS while a transaction is
+        // in-flight, rather than returning immediately.
+        //
+        // Sequence:
+        //   1. Background thread: begin_transaction (active_count=1)
+        //   2. Background thread: signal "txn started"
+        //   3. Main thread: call shutdown() → enters drain loop (blocked)
+        //   4. Background thread: sleep 200ms → commit → active_count=0
+        //   5. Main thread: drain loop exits → shutdown continues
+        //
+        // We verify shutdown took at least 150ms (i.e., it actually waited
+        // for the transaction, not just returned immediately).
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("drain_db");
+        let db = Database::open(&db_path).unwrap();
+
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = Key::new_kv(ns.clone(), "drain_key");
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+
+        let db2 = Arc::clone(&db);
+        let key2 = key.clone();
+        let handle = std::thread::spawn(move || {
+            let mut txn = db2.begin_transaction(branch_id).unwrap();
+            // Signal that the transaction is in-flight
+            started_tx.send(()).unwrap();
+            // Hold the transaction open for 200ms before committing
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            txn.put(key2, Value::Bytes(b"drain_value".to_vec()))
+                .unwrap();
+            db2.commit_transaction(&mut txn).unwrap();
+            db2.end_transaction(txn);
+        });
+
+        // Wait until the background thread has started the transaction
+        started_rx.recv().unwrap();
+        assert_eq!(
+            db.coordinator.active_count(),
+            1,
+            "Should have 1 active transaction before shutdown"
+        );
+
+        // shutdown() should block until the transaction commits (~200ms)
+        let start = std::time::Instant::now();
+        db.shutdown().unwrap();
+        let elapsed = start.elapsed();
+
+        handle.join().unwrap();
+
+        // Verify shutdown actually waited for the transaction
+        assert!(
+            elapsed >= std::time::Duration::from_millis(150),
+            "Shutdown returned in {:?}, should have blocked waiting for in-flight transaction",
+            elapsed
+        );
+
+        // Re-open and verify committed data was persisted
+        drop(db);
+        let db = Database::open(&db_path).unwrap();
+        let val = db.storage().get(&key).unwrap();
+        assert!(
+            val.is_some(),
+            "Transaction committed during shutdown drain should be persisted"
+        );
+        assert_eq!(val.unwrap().value, Value::Bytes(b"drain_value".to_vec()));
+    }
+
+    #[test]
+    fn test_shutdown_proceeds_after_draining_with_no_transactions() {
+        // Verify that shutdown completes quickly when no transactions are
+        // active, and that data committed before shutdown is persisted.
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("fast_shutdown_db");
+        let db = Database::open(&db_path).unwrap();
+
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = Key::new_kv(ns.clone(), "pre_shutdown_key");
+
+        // Commit data, then verify shutdown is fast and data persists
+        db.transaction(branch_id, |txn| {
+            txn.put(key.clone(), Value::Bytes(b"pre_shutdown".to_vec()))?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            db.coordinator.active_count(),
+            0,
+            "No active transactions after commit"
+        );
+
+        let start = std::time::Instant::now();
+        db.shutdown().unwrap();
+        let elapsed = start.elapsed();
+
+        // Drain loop should skip immediately when active_count == 0
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "Shutdown took {:?}, expected fast completion with no active transactions",
+            elapsed
+        );
+        assert!(!db.is_open());
+
+        // Re-open and verify persistence
+        drop(db);
+        let db = Database::open(&db_path).unwrap();
+        let val = db.storage().get(&key).unwrap();
+        assert!(val.is_some(), "Data committed before shutdown must persist");
+    }
+
+    #[test]
+    fn test_shutdown_multiple_in_flight_transactions() {
+        // Verify shutdown waits for ALL in-flight transactions, not just one.
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("multi_txn_db");
+        let db = Database::open(&db_path).unwrap();
+
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key1 = Key::new_kv(ns.clone(), "txn1_key");
+        let key2 = Key::new_kv(ns.clone(), "txn2_key");
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+
+        // Spawn two transactions that hold open for different durations
+        let db2 = Arc::clone(&db);
+        let k1 = key1.clone();
+        let started_tx1 = started_tx.clone();
+        let h1 = std::thread::spawn(move || {
+            let mut txn = db2.begin_transaction(branch_id).unwrap();
+            started_tx1.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            txn.put(k1, Value::Bytes(b"value1".to_vec())).unwrap();
+            db2.commit_transaction(&mut txn).unwrap();
+            db2.end_transaction(txn);
+        });
+
+        let db3 = Arc::clone(&db);
+        let k2 = key2.clone();
+        let h2 = std::thread::spawn(move || {
+            let mut txn = db3.begin_transaction(branch_id).unwrap();
+            started_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            txn.put(k2, Value::Bytes(b"value2".to_vec())).unwrap();
+            db3.commit_transaction(&mut txn).unwrap();
+            db3.end_transaction(txn);
+        });
+
+        // Wait for both transactions to start
+        started_rx.recv().unwrap();
+        started_rx.recv().unwrap();
+        assert!(
+            db.coordinator.active_count() >= 2,
+            "Should have 2 active transactions"
+        );
+
+        // Shutdown must wait for BOTH transactions
+        let start = std::time::Instant::now();
+        db.shutdown().unwrap();
+        let elapsed = start.elapsed();
+
+        h1.join().unwrap();
+        h2.join().unwrap();
+
+        // Should have waited for the slower transaction (~250ms)
+        assert!(
+            elapsed >= std::time::Duration::from_millis(200),
+            "Shutdown returned in {:?}, should have waited for both transactions",
+            elapsed
+        );
+
+        // Both transactions' data should be persisted
+        drop(db);
+        let db = Database::open(&db_path).unwrap();
+        assert!(db.storage().get(&key1).unwrap().is_some(), "txn1 data lost");
+        assert!(db.storage().get(&key2).unwrap().is_some(), "txn2 data lost");
     }
 }
