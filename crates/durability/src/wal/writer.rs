@@ -235,6 +235,57 @@ impl WalWriter {
         Ok(())
     }
 
+    /// Append a pre-serialized WAL record.
+    ///
+    /// Like `append()`, but accepts already-serialized record bytes (from
+    /// `WalRecord::to_bytes()`). This avoids serialization + CRC under the
+    /// WAL lock, reducing lock hold time on the hot path.
+    pub fn append_pre_serialized(
+        &mut self,
+        record_bytes: &[u8],
+        txn_id: u64,
+        timestamp: u64,
+    ) -> std::io::Result<()> {
+        if !self.durability.requires_wal() {
+            return Ok(());
+        }
+
+        let segment = self
+            .segment
+            .as_mut()
+            .expect("Segment should exist for non-Cache mode");
+
+        // Encode through codec (identity codec: memcpy only)
+        let encoded = self.codec.encode(record_bytes);
+
+        // Check if we need to rotate before writing
+        if segment.size() + encoded.len() as u64 > self.config.segment_size {
+            self.rotate_segment()?;
+        }
+
+        // Write to segment
+        let segment = self.segment.as_mut().unwrap();
+        segment.write(&encoded)?;
+
+        // Track metadata for the current segment
+        if let Some(ref mut meta) = self.current_segment_meta {
+            meta.track_record(txn_id, timestamp);
+        }
+
+        self.total_wal_appends += 1;
+        self.total_bytes_written += encoded.len() as u64;
+
+        debug!(target: "strata::wal", txn_id, record_bytes = encoded.len(), segment = self.current_segment_number, "WAL record appended");
+
+        self.bytes_since_sync += encoded.len() as u64;
+        self.writes_since_sync += 1;
+        self.has_unsynced_data = true;
+
+        self.maybe_sync()?;
+
+        Ok(())
+    }
+
     /// Handle fsync based on durability mode.
     fn maybe_sync(&mut self) -> std::io::Result<()> {
         match self.durability {
@@ -878,5 +929,178 @@ mod tests {
 
         // Segment should have data
         assert!(writer.current_segment_size() > SEGMENT_HEADER_SIZE_V2 as u64);
+    }
+
+    // ========================================================================
+    // append_pre_serialized tests
+    // ========================================================================
+
+    #[test]
+    fn test_pre_serialized_roundtrip_readable() {
+        // Records written via append_pre_serialized must be readable by WalReader
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let mut writer = make_writer(&wal_dir, DurabilityMode::Always);
+
+        let record = make_record(42);
+        let record_bytes = record.to_bytes();
+        writer
+            .append_pre_serialized(&record_bytes, 42, 12345)
+            .unwrap();
+        writer.flush().unwrap();
+
+        // Read back via WalReader
+        let reader = crate::wal::WalReader::new(Box::new(IdentityCodec));
+        let result = reader.read_all(&wal_dir).unwrap();
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(result.records[0].txn_id, 42);
+        assert_eq!(result.records[0].timestamp, 12345);
+        assert_eq!(result.records[0].writeset, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_pre_serialized_equivalent_to_append() {
+        // append_pre_serialized must produce byte-identical output to append
+        let dir1 = tempdir().unwrap();
+        let dir2 = tempdir().unwrap();
+        let wal_dir1 = dir1.path().join("wal");
+        let wal_dir2 = dir2.path().join("wal");
+
+        // Write via append()
+        let mut writer1 = make_writer(&wal_dir1, DurabilityMode::Always);
+        let record = make_record(7);
+        writer1.append(&record).unwrap();
+        writer1.flush().unwrap();
+
+        // Write via append_pre_serialized()
+        let mut writer2 = make_writer(&wal_dir2, DurabilityMode::Always);
+        let record_bytes = record.to_bytes();
+        writer2
+            .append_pre_serialized(&record_bytes, record.txn_id, record.timestamp)
+            .unwrap();
+        writer2.flush().unwrap();
+
+        // Read back both and compare
+        let reader = crate::wal::WalReader::new(Box::new(IdentityCodec));
+        let result1 = reader.read_all(&wal_dir1).unwrap();
+        let result2 = reader.read_all(&wal_dir2).unwrap();
+
+        assert_eq!(result1.records.len(), 1);
+        assert_eq!(result2.records.len(), 1);
+        assert_eq!(result1.records[0], result2.records[0]);
+    }
+
+    #[test]
+    fn test_pre_serialized_segment_rotation() {
+        // append_pre_serialized must handle segment rotation correctly
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let config = WalConfig::new()
+            .with_segment_size(100) // Very small to force rotation
+            .with_buffered_sync_bytes(50);
+
+        let mut writer = WalWriter::new(
+            wal_dir.clone(),
+            [1u8; 16],
+            DurabilityMode::Always,
+            config,
+            Box::new(IdentityCodec),
+        )
+        .unwrap();
+
+        // Write enough records via pre_serialized to trigger rotation
+        for i in 0..10u64 {
+            let record = WalRecord::new(i, [1u8; 16], i * 1000, vec![0; 50]);
+            let record_bytes = record.to_bytes();
+            writer
+                .append_pre_serialized(&record_bytes, i, i * 1000)
+                .unwrap();
+        }
+
+        // Should have rotated to multiple segments
+        let segments = writer.list_segments().unwrap();
+        assert!(
+            segments.len() > 1,
+            "Should have rotated, got {} segments",
+            segments.len()
+        );
+
+        // All records should be readable
+        writer.flush().unwrap();
+        let reader = crate::wal::WalReader::new(Box::new(IdentityCodec));
+        let result = reader.read_all(&wal_dir).unwrap();
+        assert_eq!(result.records.len(), 10);
+        for (i, rec) in result.records.iter().enumerate() {
+            assert_eq!(rec.txn_id, i as u64);
+        }
+    }
+
+    #[test]
+    fn test_pre_serialized_cache_mode_noop() {
+        let dir = tempdir().unwrap();
+
+        let mut writer = make_writer(dir.path(), DurabilityMode::Cache);
+        let record = make_record(1);
+        let record_bytes = record.to_bytes();
+        writer
+            .append_pre_serialized(&record_bytes, 1, 12345)
+            .unwrap();
+
+        // No files should be created
+        assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn test_pre_serialized_counters_updated() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let mut writer = make_writer(&wal_dir, DurabilityMode::Always);
+
+        let counters_before = writer.counters();
+        assert_eq!(counters_before.wal_appends, 0);
+
+        let record = make_record(1);
+        let record_bytes = record.to_bytes();
+        writer
+            .append_pre_serialized(&record_bytes, 1, 12345)
+            .unwrap();
+
+        let counters_after = writer.counters();
+        assert_eq!(counters_after.wal_appends, 1);
+        assert!(counters_after.bytes_written > 0);
+        // Always mode fsyncs on every append
+        assert!(counters_after.sync_calls >= 1);
+    }
+
+    #[test]
+    fn test_pre_serialized_interleaved_with_append() {
+        // Mixing append() and append_pre_serialized() should produce
+        // all records in order
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let mut writer = make_writer(&wal_dir, DurabilityMode::Always);
+
+        // append()
+        writer.append(&make_record(1)).unwrap();
+
+        // append_pre_serialized()
+        let r2 = make_record(2);
+        writer
+            .append_pre_serialized(&r2.to_bytes(), 2, 12345)
+            .unwrap();
+
+        // append()
+        writer.append(&make_record(3)).unwrap();
+
+        writer.flush().unwrap();
+
+        let reader = crate::wal::WalReader::new(Box::new(IdentityCodec));
+        let result = reader.read_all(&wal_dir).unwrap();
+        let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
     }
 }
