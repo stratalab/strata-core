@@ -306,7 +306,12 @@ impl GraphStore {
 
         let type_def = match self.get_object_type(branch_id, graph, object_type)? {
             Some(def) => def,
-            None => return Ok(()), // undeclared type: open-world, pass through
+            None => {
+                return Err(StrataError::invalid_input(format!(
+                    "Object type '{}' is not declared in frozen ontology for graph '{}'",
+                    object_type, graph
+                )))
+            }
         };
 
         // Check required properties
@@ -343,7 +348,12 @@ impl GraphStore {
     ) -> StrataResult<()> {
         let link_def = match self.get_link_type(branch_id, graph, edge_type)? {
             Some(def) => def,
-            None => return Ok(()), // undeclared edge type: no validation
+            None => {
+                return Err(StrataError::invalid_input(format!(
+                    "Edge type '{}' is not declared in frozen ontology for graph '{}'",
+                    edge_type, graph
+                )))
+            }
         };
 
         // Check source node's object_type
@@ -502,22 +512,24 @@ impl GraphStore {
         }
     }
 
-    /// Count edges of a given type by scanning forward edges.
+    /// Count edges of a given type by scanning packed forward adjacency lists.
     fn count_edges_by_type(
         &self,
         branch_id: BranchId,
         graph: &str,
         edge_type: &str,
     ) -> StrataResult<u64> {
-        let prefix = keys::all_edges_prefix(graph);
+        use super::packed;
+        let prefix = keys::all_forward_adj_prefix(graph);
         let prefix_key = keys::storage_key(branch_id, &prefix);
 
         self.db.transaction(branch_id, |txn| {
             let results = txn.scan_prefix(&prefix_key)?;
             let mut count = 0u64;
-            for (key, _) in results {
-                if let Some(user_key) = key.user_key_string() {
-                    if let Some((_, et, _)) = keys::parse_forward_edge_key(graph, &user_key) {
+            for (_key, val) in results {
+                if let Value::Bytes(bytes) = val {
+                    let edges = packed::decode(&bytes)?;
+                    for (_, et, _) in &edges {
                         if et == edge_type {
                             count += 1;
                         }
@@ -985,7 +997,7 @@ mod tests {
     }
 
     #[test]
-    fn frozen_edge_undeclared_type_succeeds() {
+    fn frozen_edge_undeclared_type_rejected() {
         let (_db, gs) = setup();
         let b = default_branch();
         gs.create_graph(b, "g", None).unwrap();
@@ -1006,9 +1018,15 @@ mod tests {
         .unwrap();
         gs.add_node(b, "g", "n1", NodeData::default()).unwrap();
 
-        // FRIEND is not a declared link type → no validation
-        gs.add_edge(b, "g", "p1", "n1", "FRIEND", EdgeData::default())
-            .unwrap();
+        // FRIEND is not a declared link type → rejected (closed-world)
+        let result = gs.add_edge(b, "g", "p1", "n1", "FRIEND", EdgeData::default());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not declared") && err.contains("frozen ontology"),
+            "Error should mention undeclared edge type in frozen ontology: {}",
+            err
+        );
     }
 
     #[test]
@@ -1383,7 +1401,7 @@ mod tests {
     }
 
     #[test]
-    fn frozen_undeclared_object_type_passes_validation() {
+    fn frozen_undeclared_object_type_rejected() {
         let (_db, gs) = setup();
         let b = default_branch();
         gs.create_graph(b, "g", None).unwrap();
@@ -1391,17 +1409,24 @@ mod tests {
         gs.define_object_type(b, "g", patient_type()).unwrap();
         gs.freeze_ontology(b, "g").unwrap();
 
-        // Node with undeclared type should pass (open-world)
+        // Node with undeclared type should be rejected (closed-world)
         let data = NodeData {
             object_type: Some("UnknownType".to_string()),
             properties: None,
             ..Default::default()
         };
-        gs.add_node(b, "g", "n1", data).unwrap();
+        let result = gs.add_node(b, "g", "n1", data);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not declared") && err.contains("frozen ontology"),
+            "Error should mention undeclared type in frozen ontology: {}",
+            err
+        );
     }
 
     #[test]
-    fn frozen_edge_nonexistent_endpoints_passes() {
+    fn frozen_edge_nonexistent_endpoints_rejected() {
         let (_db, gs) = setup();
         let b = default_branch();
         gs.create_graph(b, "g", None).unwrap();
@@ -1411,21 +1436,22 @@ mod tests {
         gs.define_link_type(b, "g", has_result_link()).unwrap();
         gs.freeze_ontology(b, "g").unwrap();
 
-        // Create nodes but don't create the endpoints that the edge references
-        gs.add_node(b, "g", "n1", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "n2", NodeData::default()).unwrap();
-
-        // Edge from non-existent nodes should still succeed (get_node returns None,
-        // so validation skips type checks)
-        gs.add_edge(
+        // Edge from non-existent nodes should be rejected (node existence check)
+        let result = gs.add_edge(
             b,
             "g",
             "phantom_src",
             "phantom_dst",
             "HAS_RESULT",
             EdgeData::default(),
-        )
-        .unwrap();
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("does not exist"),
+            "Error should mention non-existent node: {}",
+            err
+        );
     }
 
     #[test]
@@ -1605,5 +1631,179 @@ mod tests {
 
         let result = gs.bulk_insert(b, "g", &nodes, &[], None);
         assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // G-14: Closed-world semantics for frozen ontology
+    // =========================================================================
+
+    #[test]
+    fn test_frozen_ontology_rejects_undeclared_node_type() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+        gs.create_graph(b, "g", None).unwrap();
+
+        gs.define_object_type(b, "g", patient_type()).unwrap();
+        gs.freeze_ontology(b, "g").unwrap();
+
+        // Try adding a node with an undeclared type
+        let result = gs.add_node(
+            b,
+            "g",
+            "x1",
+            NodeData {
+                object_type: Some("Unknown".to_string()),
+                properties: None,
+                ..Default::default()
+            },
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not declared") && err.contains("frozen ontology"),
+            "Error should mention undeclared type in frozen ontology: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_frozen_ontology_rejects_undeclared_edge_type() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+        gs.create_graph(b, "g", None).unwrap();
+
+        gs.define_object_type(b, "g", patient_type()).unwrap();
+        gs.define_object_type(b, "g", lab_result_type()).unwrap();
+        gs.define_link_type(b, "g", has_result_link()).unwrap();
+        gs.freeze_ontology(b, "g").unwrap();
+
+        // Create nodes so the edge can reference them
+        gs.add_node(
+            b,
+            "g",
+            "p1",
+            NodeData {
+                object_type: Some("Patient".to_string()),
+                properties: Some(serde_json::json!({"name": "Alice"})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        gs.add_node(
+            b,
+            "g",
+            "p2",
+            NodeData {
+                object_type: Some("Patient".to_string()),
+                properties: Some(serde_json::json!({"name": "Bob"})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Try adding an edge with an undeclared type
+        let result = gs.add_edge(b, "g", "p1", "p2", "LIKES", EdgeData::default());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not declared") && err.contains("frozen ontology"),
+            "Error should mention undeclared edge type in frozen ontology: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_frozen_ontology_allows_declared_types() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+        gs.create_graph(b, "g", None).unwrap();
+
+        gs.define_object_type(b, "g", patient_type()).unwrap();
+        gs.define_object_type(b, "g", lab_result_type()).unwrap();
+        gs.define_link_type(b, "g", has_result_link()).unwrap();
+        gs.freeze_ontology(b, "g").unwrap();
+
+        // Declared node type should succeed
+        let result = gs.add_node(
+            b,
+            "g",
+            "p1",
+            NodeData {
+                object_type: Some("Patient".to_string()),
+                properties: Some(serde_json::json!({"name": "Alice"})),
+                ..Default::default()
+            },
+        );
+        assert!(result.is_ok());
+
+        let result = gs.add_node(
+            b,
+            "g",
+            "l1",
+            NodeData {
+                object_type: Some("LabResult".to_string()),
+                properties: Some(serde_json::json!({"value": 42})),
+                ..Default::default()
+            },
+        );
+        assert!(result.is_ok());
+
+        // Declared edge type should succeed
+        let result = gs.add_edge(b, "g", "p1", "l1", "HAS_RESULT", EdgeData::default());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_unfrozen_ontology_allows_undeclared_types() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+        gs.create_graph(b, "g", None).unwrap();
+
+        // No types defined, no freeze — undeclared types should pass
+        let result = gs.add_node(
+            b,
+            "g",
+            "x1",
+            NodeData {
+                object_type: Some("Anything".to_string()),
+                properties: None,
+                ..Default::default()
+            },
+        );
+        assert!(result.is_ok());
+
+        gs.add_node(b, "g", "x2", NodeData::default()).unwrap();
+        let result = gs.add_edge(b, "g", "x1", "x2", "WHATEVER", EdgeData::default());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_draft_ontology_allows_undeclared_types() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+        gs.create_graph(b, "g", None).unwrap();
+
+        // Define some types but do NOT freeze — ontology is in draft status
+        gs.define_object_type(b, "g", patient_type()).unwrap();
+        gs.define_link_type(b, "g", has_result_link()).unwrap();
+
+        // Undeclared node type should still pass (draft, not frozen)
+        let result = gs.add_node(
+            b,
+            "g",
+            "x1",
+            NodeData {
+                object_type: Some("UnknownType".to_string()),
+                properties: None,
+                ..Default::default()
+            },
+        );
+        assert!(result.is_ok());
+
+        gs.add_node(b, "g", "x2", NodeData::default()).unwrap();
+
+        // Undeclared edge type should still pass (draft, not frozen)
+        let result = gs.add_edge(b, "g", "x1", "x2", "UNDECLARED_LINK", EdgeData::default());
+        assert!(result.is_ok());
     }
 }

@@ -97,6 +97,9 @@ mod tests {
         let (_db, gs) = setup();
         let b = branch();
         gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
         gs.add_edge(
             b,
             "g",
@@ -127,6 +130,9 @@ mod tests {
         let (_db, gs) = setup();
         let b = branch();
         gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
         gs.add_edge(b, "g", "A", "B", "E", EdgeData::default())
             .unwrap();
         gs.add_edge(b, "g", "A", "C", "E", EdgeData::default())
@@ -146,6 +152,8 @@ mod tests {
         let (_db, gs) = setup();
         let b = branch();
         gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
         gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
             .unwrap();
 
@@ -164,6 +172,8 @@ mod tests {
         let (_db, gs) = setup();
         let b = branch();
         gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "X", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "Y", NodeData::default()).unwrap();
         gs.add_edge(b, "g", "X", "Y", "E", EdgeData::default())
             .unwrap();
 

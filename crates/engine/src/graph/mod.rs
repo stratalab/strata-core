@@ -10,6 +10,7 @@ pub mod boost;
 pub mod integrity;
 pub mod keys;
 pub mod ontology;
+pub mod packed;
 mod snapshot;
 pub mod traversal;
 pub mod types;
@@ -295,12 +296,10 @@ impl GraphStore {
     pub fn remove_node(&self, branch_id: BranchId, graph: &str, node_id: &str) -> StrataResult<()> {
         let node_user_key = keys::node_key(graph, node_id);
         let node_storage_key = keys::storage_key(branch_id, &node_user_key);
-
-        // Prefixes for scanning incident edges
-        let fwd_prefix = keys::forward_edges_prefix(graph, node_id);
-        let fwd_prefix_key = keys::storage_key(branch_id, &fwd_prefix);
-        let rev_prefix = keys::reverse_edges_prefix(graph, node_id);
-        let rev_prefix_key = keys::storage_key(branch_id, &rev_prefix);
+        let fwd_adj_uk = keys::forward_adj_key(graph, node_id);
+        let fwd_adj_sk = keys::storage_key(branch_id, &fwd_adj_uk);
+        let rev_adj_uk = keys::reverse_adj_key(graph, node_id);
+        let rev_adj_sk = keys::storage_key(branch_id, &rev_adj_uk);
 
         self.db.transaction(branch_id, |txn| {
             // Read node to get entity_ref for ref index cleanup
@@ -325,39 +324,49 @@ impl GraphStore {
                 }
             }
 
-            // Delete outgoing edges (forward + their reverse counterparts)
-            let fwd_edges = txn.scan_prefix(&fwd_prefix_key)?;
-            for (key, _) in fwd_edges {
-                if let Some(user_key) = key.user_key_string() {
-                    if let Some((src, edge_type, dst)) =
-                        keys::parse_forward_edge_key(graph, &user_key)
-                    {
-                        // Delete the reverse counterpart
-                        let rev_key = keys::reverse_edge_key(graph, &dst, &edge_type, &src);
-                        let rev_sk = keys::storage_key(branch_id, &rev_key);
-                        txn.delete(rev_sk)?;
+            // Remove this node from each neighbor's reverse adjacency list
+            if let Some(Value::Bytes(fwd_bytes)) = txn.get(&fwd_adj_sk)? {
+                let outgoing = packed::decode(&fwd_bytes)?;
+                for (dst, edge_type, _) in &outgoing {
+                    let dst_rev_uk = keys::reverse_adj_key(graph, dst);
+                    let dst_rev_sk = keys::storage_key(branch_id, &dst_rev_uk);
+                    if let Some(Value::Bytes(dst_rev_bytes)) = txn.get(&dst_rev_sk)? {
+                        if let Some(new_bytes) =
+                            packed::remove_edge(&dst_rev_bytes, node_id, edge_type)
+                        {
+                            if packed::edge_count(&new_bytes) == 0 {
+                                txn.delete(dst_rev_sk)?;
+                            } else {
+                                txn.put(dst_rev_sk, Value::Bytes(new_bytes))?;
+                            }
+                        }
                     }
                 }
-                txn.delete(key)?;
             }
 
-            // Delete incoming edges (reverse + their forward counterparts)
-            let rev_edges = txn.scan_prefix(&rev_prefix_key)?;
-            for (key, _) in rev_edges {
-                if let Some(user_key) = key.user_key_string() {
-                    if let Some((dst, edge_type, src)) =
-                        keys::parse_reverse_edge_key(graph, &user_key)
-                    {
-                        // Delete the forward counterpart
-                        let fwd_key = keys::forward_edge_key(graph, &src, &edge_type, &dst);
-                        let fwd_sk = keys::storage_key(branch_id, &fwd_key);
-                        txn.delete(fwd_sk)?;
+            // Remove this node from each neighbor's forward adjacency list
+            if let Some(Value::Bytes(rev_bytes)) = txn.get(&rev_adj_sk)? {
+                let incoming = packed::decode(&rev_bytes)?;
+                for (src, edge_type, _) in &incoming {
+                    let src_fwd_uk = keys::forward_adj_key(graph, src);
+                    let src_fwd_sk = keys::storage_key(branch_id, &src_fwd_uk);
+                    if let Some(Value::Bytes(src_fwd_bytes)) = txn.get(&src_fwd_sk)? {
+                        if let Some(new_bytes) =
+                            packed::remove_edge(&src_fwd_bytes, node_id, edge_type)
+                        {
+                            if packed::edge_count(&new_bytes) == 0 {
+                                txn.delete(src_fwd_sk)?;
+                            } else {
+                                txn.put(src_fwd_sk, Value::Bytes(new_bytes))?;
+                            }
+                        }
                     }
                 }
-                txn.delete(key)?;
             }
 
-            // Delete the node itself
+            // Delete the node's own adjacency lists and the node itself
+            txn.delete(fwd_adj_sk)?;
+            txn.delete(rev_adj_sk)?;
             txn.delete(node_storage_key.clone())?;
             Ok(())
         })
@@ -368,7 +377,7 @@ impl GraphStore {
     // =========================================================================
 
     /// Add or update an edge in the graph.
-    /// Creates both forward and reverse entries atomically.
+    /// Appends to packed forward and reverse adjacency lists atomically.
     pub fn add_edge(
         &self,
         branch_id: BranchId,
@@ -390,17 +399,54 @@ impl GraphStore {
             }
         }
 
-        let edge_json =
-            serde_json::to_string(&data).map_err(|e| StrataError::serialization(e.to_string()))?;
+        let src_node_uk = keys::node_key(graph, src);
+        let dst_node_uk = keys::node_key(graph, dst);
+        let src_node_key = keys::storage_key(branch_id, &src_node_uk);
+        let dst_node_key = keys::storage_key(branch_id, &dst_node_uk);
 
-        let fwd = keys::forward_edge_key(graph, src, edge_type, dst);
-        let rev = keys::reverse_edge_key(graph, dst, edge_type, src);
-        let fwd_sk = keys::storage_key(branch_id, &fwd);
-        let rev_sk = keys::storage_key(branch_id, &rev);
+        let fwd_uk = keys::forward_adj_key(graph, src);
+        let fwd_sk = keys::storage_key(branch_id, &fwd_uk);
+        let rev_uk = keys::reverse_adj_key(graph, dst);
+        let rev_sk = keys::storage_key(branch_id, &rev_uk);
 
         self.db.transaction(branch_id, |txn| {
-            txn.put(fwd_sk.clone(), Value::String(edge_json.clone()))?;
-            txn.put(rev_sk.clone(), Value::String(edge_json.clone()))?;
+            // Validate both nodes exist within the transaction (prevents TOCTOU)
+            if txn.get(&src_node_key)?.is_none() {
+                return Err(StrataError::invalid_input(format!(
+                    "Source node '{}' does not exist in graph '{}'",
+                    src, graph
+                )));
+            }
+            if txn.get(&dst_node_key)?.is_none() {
+                return Err(StrataError::invalid_input(format!(
+                    "Target node '{}' does not exist in graph '{}'",
+                    dst, graph
+                )));
+            }
+
+            // Read-modify-write forward adjacency list (src → dst)
+            let mut fwd_buf = match txn.get(&fwd_sk)? {
+                Some(Value::Bytes(b)) => b,
+                _ => packed::empty(),
+            };
+            // Remove existing edge if present (upsert semantics)
+            if let Some(new_buf) = packed::remove_edge(&fwd_buf, dst, edge_type) {
+                fwd_buf = new_buf;
+            }
+            packed::append_edge(&mut fwd_buf, dst, edge_type, &data)?;
+            txn.put(fwd_sk.clone(), Value::Bytes(fwd_buf))?;
+
+            // Read-modify-write reverse adjacency list (dst ← src)
+            let mut rev_buf = match txn.get(&rev_sk)? {
+                Some(Value::Bytes(b)) => b,
+                _ => packed::empty(),
+            };
+            if let Some(new_buf) = packed::remove_edge(&rev_buf, src, edge_type) {
+                rev_buf = new_buf;
+            }
+            packed::append_edge(&mut rev_buf, src, edge_type, &data)?;
+            txn.put(rev_sk.clone(), Value::Bytes(rev_buf))?;
+
             Ok(())
         })
     }
@@ -414,26 +460,17 @@ impl GraphStore {
         dst: &str,
         edge_type: &str,
     ) -> StrataResult<Option<EdgeData>> {
-        let fwd = keys::forward_edge_key(graph, src, edge_type, dst);
-        let fwd_sk = keys::storage_key(branch_id, &fwd);
+        let fwd_uk = keys::forward_adj_key(graph, src);
+        let fwd_sk = keys::storage_key(branch_id, &fwd_uk);
 
-        self.db.transaction(branch_id, |txn| {
-            let val = txn.get(&fwd_sk)?;
-            match val {
-                Some(Value::String(s)) => {
-                    let data: EdgeData = serde_json::from_str(&s)
-                        .map_err(|e| StrataError::serialization(e.to_string()))?;
-                    Ok(Some(data))
-                }
-                Some(_) => Err(StrataError::serialization(
-                    "Edge data is not a string".to_string(),
-                )),
-                None => Ok(None),
-            }
-        })
+        self.db
+            .transaction(branch_id, |txn| match txn.get(&fwd_sk)? {
+                Some(Value::Bytes(bytes)) => Ok(packed::find_edge(&bytes, dst, edge_type)),
+                _ => Ok(None),
+            })
     }
 
-    /// Remove an edge (both forward and reverse entries).
+    /// Remove an edge (from both forward and reverse adjacency lists).
     pub fn remove_edge(
         &self,
         branch_id: BranchId,
@@ -442,14 +479,34 @@ impl GraphStore {
         dst: &str,
         edge_type: &str,
     ) -> StrataResult<()> {
-        let fwd = keys::forward_edge_key(graph, src, edge_type, dst);
-        let rev = keys::reverse_edge_key(graph, dst, edge_type, src);
-        let fwd_sk = keys::storage_key(branch_id, &fwd);
-        let rev_sk = keys::storage_key(branch_id, &rev);
+        let fwd_uk = keys::forward_adj_key(graph, src);
+        let fwd_sk = keys::storage_key(branch_id, &fwd_uk);
+        let rev_uk = keys::reverse_adj_key(graph, dst);
+        let rev_sk = keys::storage_key(branch_id, &rev_uk);
 
         self.db.transaction(branch_id, |txn| {
-            txn.delete(fwd_sk.clone())?;
-            txn.delete(rev_sk.clone())?;
+            // Remove from forward adjacency list
+            if let Some(Value::Bytes(fwd_bytes)) = txn.get(&fwd_sk)? {
+                if let Some(new_bytes) = packed::remove_edge(&fwd_bytes, dst, edge_type) {
+                    if packed::edge_count(&new_bytes) == 0 {
+                        txn.delete(fwd_sk.clone())?;
+                    } else {
+                        txn.put(fwd_sk.clone(), Value::Bytes(new_bytes))?;
+                    }
+                }
+            }
+
+            // Remove from reverse adjacency list
+            if let Some(Value::Bytes(rev_bytes)) = txn.get(&rev_sk)? {
+                if let Some(new_bytes) = packed::remove_edge(&rev_bytes, src, edge_type) {
+                    if packed::edge_count(&new_bytes) == 0 {
+                        txn.delete(rev_sk.clone())?;
+                    } else {
+                        txn.put(rev_sk.clone(), Value::Bytes(new_bytes))?;
+                    }
+                }
+            }
+
             Ok(())
         })
     }
@@ -466,35 +523,30 @@ impl GraphStore {
         node_id: &str,
         edge_type_filter: Option<&str>,
     ) -> StrataResult<Vec<Neighbor>> {
-        let prefix = match edge_type_filter {
-            Some(et) => keys::forward_edges_typed_prefix(graph, node_id, et),
-            None => keys::forward_edges_prefix(graph, node_id),
-        };
-        let prefix_key = keys::storage_key(branch_id, &prefix);
+        let fwd_uk = keys::forward_adj_key(graph, node_id);
+        let fwd_sk = keys::storage_key(branch_id, &fwd_uk);
 
-        self.db.transaction(branch_id, |txn| {
-            let results = txn.scan_prefix(&prefix_key)?;
-            let mut neighbors = Vec::new();
-            for (key, val) in results {
-                if let Some(user_key) = key.user_key_string() {
-                    if let Some((_src, edge_type, dst)) =
-                        keys::parse_forward_edge_key(graph, &user_key)
-                    {
-                        let edge_data = if let Value::String(s) = val {
-                            serde_json::from_str(&s).unwrap_or_default()
-                        } else {
-                            EdgeData::default()
-                        };
+        self.db
+            .transaction(branch_id, |txn| match txn.get(&fwd_sk)? {
+                Some(Value::Bytes(bytes)) => {
+                    let edges = packed::decode(&bytes)?;
+                    let mut neighbors = Vec::new();
+                    for (dst, edge_type, edge_data) in edges {
+                        if let Some(filter) = edge_type_filter {
+                            if edge_type != filter {
+                                continue;
+                            }
+                        }
                         neighbors.push(Neighbor {
                             node_id: dst,
                             edge_type,
                             edge_data,
                         });
                     }
+                    Ok(neighbors)
                 }
-            }
-            Ok(neighbors)
-        })
+                _ => Ok(Vec::new()),
+            })
     }
 
     /// Get incoming neighbors of a node (optionally filtered by edge type).
@@ -505,42 +557,35 @@ impl GraphStore {
         node_id: &str,
         edge_type_filter: Option<&str>,
     ) -> StrataResult<Vec<Neighbor>> {
-        let prefix = keys::reverse_edges_prefix(graph, node_id);
-        let prefix_key = keys::storage_key(branch_id, &prefix);
+        let rev_uk = keys::reverse_adj_key(graph, node_id);
+        let rev_sk = keys::storage_key(branch_id, &rev_uk);
 
-        self.db.transaction(branch_id, |txn| {
-            let results = txn.scan_prefix(&prefix_key)?;
-            let mut neighbors = Vec::new();
-            for (key, val) in results {
-                if let Some(user_key) = key.user_key_string() {
-                    if let Some((_dst, edge_type, src)) =
-                        keys::parse_reverse_edge_key(graph, &user_key)
-                    {
+        self.db
+            .transaction(branch_id, |txn| match txn.get(&rev_sk)? {
+                Some(Value::Bytes(bytes)) => {
+                    let edges = packed::decode(&bytes)?;
+                    let mut neighbors = Vec::new();
+                    for (src, edge_type, edge_data) in edges {
                         if let Some(filter) = edge_type_filter {
                             if edge_type != filter {
                                 continue;
                             }
                         }
-                        let edge_data = if let Value::String(s) = val {
-                            serde_json::from_str(&s).unwrap_or_default()
-                        } else {
-                            EdgeData::default()
-                        };
                         neighbors.push(Neighbor {
                             node_id: src,
                             edge_type,
                             edge_data,
                         });
                     }
+                    Ok(neighbors)
                 }
-            }
-            Ok(neighbors)
-        })
+                _ => Ok(Vec::new()),
+            })
     }
 
     /// Get all edges in a graph (for snapshot).
     pub fn all_edges(&self, branch_id: BranchId, graph: &str) -> StrataResult<Vec<Edge>> {
-        let prefix = keys::all_edges_prefix(graph);
+        let prefix = keys::all_forward_adj_prefix(graph);
         let prefix_key = keys::storage_key(branch_id, &prefix);
 
         self.db.transaction(branch_id, |txn| {
@@ -548,20 +593,18 @@ impl GraphStore {
             let mut edges = Vec::new();
             for (key, val) in results {
                 if let Some(user_key) = key.user_key_string() {
-                    if let Some((src, edge_type, dst)) =
-                        keys::parse_forward_edge_key(graph, &user_key)
-                    {
-                        let data = if let Value::String(s) = val {
-                            serde_json::from_str(&s).unwrap_or_default()
-                        } else {
-                            EdgeData::default()
-                        };
-                        edges.push(Edge {
-                            src,
-                            dst,
-                            edge_type,
-                            data,
-                        });
+                    if let Some(src) = keys::parse_forward_adj_key(graph, &user_key) {
+                        if let Value::Bytes(bytes) = val {
+                            let adj = packed::decode(&bytes)?;
+                            for (dst, edge_type, data) in adj {
+                                edges.push(Edge {
+                                    src: src.clone(),
+                                    dst,
+                                    edge_type,
+                                    data,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -585,7 +628,12 @@ impl GraphStore {
                 if let Some(user_key) = key.user_key_string() {
                     if let Some(node_id) = keys::parse_node_key(graph, &user_key) {
                         let data = if let Value::String(s) = val {
-                            serde_json::from_str(&s).unwrap_or_default()
+                            serde_json::from_str(&s).map_err(|e| {
+                                StrataError::serialization(format!(
+                                    "Corrupt node data in graph '{}': {}",
+                                    graph, e
+                                ))
+                            })?
                         } else {
                             NodeData::default()
                         };
@@ -631,12 +679,8 @@ impl GraphStore {
 
     /// Bulk insert nodes and edges into a graph using chunked transactions.
     ///
-    /// This is much faster than individual `add_node`/`add_edge` calls because
-    /// it batches many operations into fewer transactions. Each chunk of nodes
-    /// or edges is committed atomically.
-    ///
-    /// For best performance, use this for fresh insertion. It also handles
-    /// re-insertion (upsert) correctly by cleaning up old index entries.
+    /// Edges are grouped by source/destination and packed into adjacency lists,
+    /// reducing KV entry count by ~27x compared to per-edge storage.
     ///
     /// Returns `(nodes_inserted, edges_inserted)`.
     pub fn bulk_insert(
@@ -657,7 +701,6 @@ impl GraphStore {
 
         let chunk_size = std::cmp::max(1, chunk_size.unwrap_or(Self::DEFAULT_BULK_CHUNK_SIZE));
         let empty_json = "{}";
-        let default_edge_json = "{\"weight\":1.0}";
 
         // --- Profiling: OOM diagnosis (#1297) ---
         let t_start = std::time::Instant::now();
@@ -669,7 +712,6 @@ impl GraphStore {
             chunk_size,
             current_rss_mb().unwrap_or(0),
         );
-        // Log sizes of key storage types
         tracing::info!(
             "[graph::bulk_insert] SIZES: Key={} Namespace={} Arc<Namespace>={}",
             std::mem::size_of::<strata_core::types::Key>(),
@@ -683,7 +725,6 @@ impl GraphStore {
         // Insert nodes in chunks
         let mut nodes_inserted = 0usize;
         for chunk in nodes.chunks(chunk_size) {
-            // Pre-compute keys and serialized values outside the transaction
             let mut entries: Vec<(Key, String)> = Vec::with_capacity(chunk.len());
             let mut ref_entries: Vec<Key> = Vec::new();
             let mut type_entries: Vec<Key> = Vec::new();
@@ -691,7 +732,6 @@ impl GraphStore {
             for (node_id, data) in chunk {
                 keys::validate_node_id(node_id)?;
 
-                // Validate against frozen ontology
                 if is_frozen && data.object_type.is_some() {
                     self.validate_node(branch_id, graph, node_id, data)?;
                 }
@@ -764,60 +804,72 @@ impl GraphStore {
             keys::namespace_alloc_count(),
         );
 
-        // Insert edges in chunks (each edge = 2 puts, so use chunk_size/2)
-        let edge_chunk_size = std::cmp::max(1, chunk_size / 2);
-        let mut edges_inserted = 0usize;
-        for chunk in edges.chunks(edge_chunk_size) {
-            let mut entries: Vec<(Key, Key, String)> = Vec::with_capacity(chunk.len());
+        // Group edges by source (forward) and destination (reverse)
+        let mut fwd_map: std::collections::HashMap<&str, Vec<(&str, &str, &EdgeData)>> =
+            std::collections::HashMap::new();
+        let mut rev_map: std::collections::HashMap<&str, Vec<(&str, &str, &EdgeData)>> =
+            std::collections::HashMap::new();
 
-            for (src, dst, edge_type, data) in chunk {
-                keys::validate_node_id(src)?;
-                keys::validate_node_id(dst)?;
-                keys::validate_edge_type(edge_type)?;
+        for (src, dst, edge_type, data) in edges {
+            keys::validate_node_id(src)?;
+            keys::validate_node_id(dst)?;
+            keys::validate_edge_type(edge_type)?;
 
-                // Validate edge against frozen ontology
-                if is_frozen {
-                    self.validate_edge(branch_id, graph, src, dst, edge_type)?;
-                }
-
-                let fwd = keys::forward_edge_key(graph, src, edge_type, dst);
-                let rev = keys::reverse_edge_key(graph, dst, edge_type, src);
-                let fwd_sk = Key::new_kv(ns.clone(), &fwd);
-                let rev_sk = Key::new_kv(ns.clone(), &rev);
-
-                let json = if data.properties.is_none() && (data.weight - 1.0).abs() < f64::EPSILON
-                {
-                    default_edge_json.to_string()
-                } else {
-                    serde_json::to_string(data)
-                        .map_err(|e| StrataError::serialization(e.to_string()))?
-                };
-
-                entries.push((fwd_sk, rev_sk, json));
+            if is_frozen {
+                self.validate_edge(branch_id, graph, src, dst, edge_type)?;
             }
 
+            fwd_map
+                .entry(src.as_str())
+                .or_default()
+                .push((dst.as_str(), edge_type.as_str(), data));
+            rev_map
+                .entry(dst.as_str())
+                .or_default()
+                .push((src.as_str(), edge_type.as_str(), data));
+        }
+
+        // Write packed forward adjacency lists in chunks, merging with existing lists
+        let fwd_entries: Vec<_> = fwd_map.into_iter().collect();
+        for chunk in fwd_entries.chunks(chunk_size) {
             self.db.transaction(branch_id, |txn| {
-                for (fwd_sk, rev_sk, json) in &entries {
-                    txn.put(fwd_sk.clone(), Value::String(json.clone()))?;
-                    txn.put(rev_sk.clone(), Value::String(json.clone()))?;
+                for (node_id, new_edges) in chunk {
+                    let uk = keys::forward_adj_key(graph, node_id);
+                    let sk = Key::new_kv(ns.clone(), &uk);
+                    let mut buf = match txn.get(&sk)? {
+                        Some(Value::Bytes(existing)) => existing,
+                        _ => packed::empty(),
+                    };
+                    for &(target_id, edge_type, data) in new_edges {
+                        packed::append_edge(&mut buf, target_id, edge_type, data)?;
+                    }
+                    txn.put(sk, Value::Bytes(buf))?;
                 }
                 Ok(())
             })?;
-
-            edges_inserted += chunk.len();
-
-            // Progress log every 1M edges
-            if edges_inserted % 1_000_000 < edge_chunk_size {
-                tracing::info!(
-                    "[graph::bulk_insert] EDGES: {}/{} ({:.1}%) RSS={}MB ns_allocs={}",
-                    edges_inserted,
-                    edges.len(),
-                    edges_inserted as f64 / edges.len().max(1) as f64 * 100.0,
-                    current_rss_mb().unwrap_or(0),
-                    keys::namespace_alloc_count(),
-                );
-            }
         }
+
+        // Write packed reverse adjacency lists in chunks, merging with existing lists
+        let rev_entries: Vec<_> = rev_map.into_iter().collect();
+        for chunk in rev_entries.chunks(chunk_size) {
+            self.db.transaction(branch_id, |txn| {
+                for (node_id, new_edges) in chunk {
+                    let uk = keys::reverse_adj_key(graph, node_id);
+                    let sk = Key::new_kv(ns.clone(), &uk);
+                    let mut buf = match txn.get(&sk)? {
+                        Some(Value::Bytes(existing)) => existing,
+                        _ => packed::empty(),
+                    };
+                    for &(target_id, edge_type, data) in new_edges {
+                        packed::append_edge(&mut buf, target_id, edge_type, data)?;
+                    }
+                    txn.put(sk, Value::Bytes(buf))?;
+                }
+                Ok(())
+            })?;
+        }
+
+        let edges_inserted = edges.len();
 
         // Shard diagnostics
         if let Some((entry_count, has_btree)) = self.db.storage().shard_stats(&branch_id) {
@@ -1101,6 +1153,8 @@ mod tests {
         let branch = default_branch();
 
         gs.create_graph(branch, "eg", None).unwrap();
+        gs.add_node(branch, "eg", "A", NodeData::default()).unwrap();
+        gs.add_node(branch, "eg", "B", NodeData::default()).unwrap();
         gs.add_edge(branch, "eg", "A", "B", "KNOWS", EdgeData::default())
             .unwrap();
 
@@ -1115,6 +1169,8 @@ mod tests {
         let branch = default_branch();
 
         gs.create_graph(branch, "eg", None).unwrap();
+        gs.add_node(branch, "eg", "A", NodeData::default()).unwrap();
+        gs.add_node(branch, "eg", "B", NodeData::default()).unwrap();
         gs.add_edge(
             branch,
             "eg",
@@ -1145,19 +1201,28 @@ mod tests {
         let branch = default_branch();
 
         gs.create_graph(branch, "eg", None).unwrap();
+        gs.add_node(branch, "eg", "A", NodeData::default()).unwrap();
+        gs.add_node(branch, "eg", "B", NodeData::default()).unwrap();
         gs.add_edge(branch, "eg", "A", "B", "KNOWS", EdgeData::default())
             .unwrap();
 
-        // Verify via raw key reads
-        let fwd = keys::forward_edge_key("eg", "A", "KNOWS", "B");
-        let rev = keys::reverse_edge_key("eg", "B", "KNOWS", "A");
-        let fwd_sk = keys::storage_key(branch, &fwd);
-        let rev_sk = keys::storage_key(branch, &rev);
+        // Verify via raw key reads — packed adjacency lists
+        let fwd_uk = keys::forward_adj_key("eg", "A");
+        let rev_uk = keys::reverse_adj_key("eg", "B");
+        let fwd_sk = keys::storage_key(branch, &fwd_uk);
+        let rev_sk = keys::storage_key(branch, &rev_uk);
 
         let fwd_exists = gs.db.transaction(branch, |txn| txn.get(&fwd_sk)).unwrap();
         let rev_exists = gs.db.transaction(branch, |txn| txn.get(&rev_sk)).unwrap();
         assert!(fwd_exists.is_some());
         assert!(rev_exists.is_some());
+
+        // Verify the packed list contains the expected edge
+        if let Some(Value::Bytes(bytes)) = fwd_exists {
+            assert!(packed::find_edge(&bytes, "B", "KNOWS").is_some());
+        } else {
+            panic!("Forward adjacency list should be Value::Bytes");
+        }
     }
 
     #[test]
@@ -1166,6 +1231,8 @@ mod tests {
         let branch = default_branch();
 
         gs.create_graph(branch, "eg", None).unwrap();
+        gs.add_node(branch, "eg", "A", NodeData::default()).unwrap();
+        gs.add_node(branch, "eg", "B", NodeData::default()).unwrap();
         gs.add_edge(branch, "eg", "A", "B", "KNOWS", EdgeData::default())
             .unwrap();
         gs.remove_edge(branch, "eg", "A", "B", "KNOWS").unwrap();
@@ -1175,11 +1242,12 @@ mod tests {
             .unwrap()
             .is_none());
 
-        // Verify reverse is also gone
-        let rev = keys::reverse_edge_key("eg", "B", "KNOWS", "A");
-        let rev_sk = keys::storage_key(branch, &rev);
-        let rev_exists = gs.db.transaction(branch, |txn| txn.get(&rev_sk)).unwrap();
-        assert!(rev_exists.is_none());
+        // Verify reverse adjacency list no longer contains the edge
+        let rev_uk = keys::reverse_adj_key("eg", "B");
+        let rev_sk = keys::storage_key(branch, &rev_uk);
+        let rev_val = gs.db.transaction(branch, |txn| txn.get(&rev_sk)).unwrap();
+        // Should be deleted entirely (last edge was removed)
+        assert!(rev_val.is_none());
     }
 
     #[test]
@@ -1188,6 +1256,8 @@ mod tests {
         let branch = default_branch();
 
         gs.create_graph(branch, "eg", None).unwrap();
+        gs.add_node(branch, "eg", "X", NodeData::default()).unwrap();
+        gs.add_node(branch, "eg", "Y", NodeData::default()).unwrap();
         gs.add_edge(branch, "eg", "X", "Y", "LINKS", EdgeData::default())
             .unwrap();
 
@@ -1235,6 +1305,8 @@ mod tests {
         let branch = default_branch();
 
         gs.create_graph(branch, "eg", None).unwrap();
+        gs.add_node(branch, "eg", "A", NodeData::default()).unwrap();
+        gs.add_node(branch, "eg", "B", NodeData::default()).unwrap();
         gs.add_edge(
             branch,
             "eg",
@@ -1554,6 +1626,8 @@ mod tests {
         let branch = default_branch();
 
         gs.create_graph(branch, "eg", None).unwrap();
+        gs.add_node(branch, "eg", "A", NodeData::default()).unwrap();
+        gs.add_node(branch, "eg", "B", NodeData::default()).unwrap();
         gs.add_edge(
             branch,
             "eg",
@@ -2075,7 +2149,7 @@ mod tests {
 
         gs.create_graph(branch, "bg", None).unwrap();
 
-        // Edges without corresponding node entries (graph allows this)
+        // bulk_insert bypasses add_edge() node existence checks for performance
         let edges: Vec<(String, String, String, EdgeData)> =
             vec![("X".into(), "Y".into(), "E".into(), EdgeData::default())];
 
@@ -2118,5 +2192,413 @@ mod tests {
         assert_eq!(snap.edges[0].dst, "B");
         assert_eq!(snap.edges[0].edge_type, "E1");
         assert_eq!(snap.edges[0].data.weight, 2.5);
+    }
+
+    // =========================================================================
+    // G-1: Deserialization error propagation
+    // =========================================================================
+
+    #[test]
+    fn test_corrupt_edge_data_returns_error() {
+        let (db, gs) = setup();
+        let branch = default_branch();
+        gs.create_graph(branch, "g", None).unwrap();
+        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(branch, "g", "B", NodeData::default()).unwrap();
+        gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+
+        // Corrupt the packed forward adjacency list with truncated bytes
+        let fwd_uk = keys::forward_adj_key("g", "A");
+        let fwd_sk = keys::storage_key(branch, &fwd_uk);
+        db.transaction(branch, |txn| {
+            // Header says 1 edge, but no actual edge data follows
+            txn.put(fwd_sk.clone(), Value::Bytes(vec![1, 0, 0, 0]))
+        })
+        .unwrap();
+
+        let result = gs.outgoing_neighbors(branch, "g", "A", None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("truncated or corrupt"),
+            "Error should mention corrupt data: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_corrupt_edge_data_incoming_returns_error() {
+        let (db, gs) = setup();
+        let branch = default_branch();
+        gs.create_graph(branch, "g", None).unwrap();
+        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(branch, "g", "B", NodeData::default()).unwrap();
+        gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+
+        // Corrupt the packed reverse adjacency list
+        let rev_uk = keys::reverse_adj_key("g", "B");
+        let rev_sk = keys::storage_key(branch, &rev_uk);
+        db.transaction(branch, |txn| {
+            txn.put(rev_sk.clone(), Value::Bytes(vec![1, 0, 0, 0]))
+        })
+        .unwrap();
+
+        let result = gs.incoming_neighbors(branch, "g", "B", None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("truncated or corrupt"),
+            "Error should mention corrupt data: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_corrupt_edge_data_all_edges_returns_error() {
+        let (db, gs) = setup();
+        let branch = default_branch();
+        gs.create_graph(branch, "g", None).unwrap();
+        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(branch, "g", "B", NodeData::default()).unwrap();
+        gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+
+        // Corrupt the packed forward adjacency list
+        let fwd_uk = keys::forward_adj_key("g", "A");
+        let fwd_sk = keys::storage_key(branch, &fwd_uk);
+        db.transaction(branch, |txn| {
+            txn.put(fwd_sk.clone(), Value::Bytes(vec![1, 0, 0, 0]))
+        })
+        .unwrap();
+
+        let result = gs.all_edges(branch, "g");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("truncated or corrupt"),
+            "Error should mention corrupt data: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_corrupt_node_data_returns_error() {
+        let (db, gs) = setup();
+        let branch = default_branch();
+        gs.create_graph(branch, "g", None).unwrap();
+        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
+
+        // Corrupt the node value directly via the underlying KV store
+        let node_uk = keys::node_key("g", "A");
+        let node_sk = keys::storage_key(branch, &node_uk);
+        db.transaction(branch, |txn| {
+            txn.put(node_sk.clone(), Value::String("NOT VALID JSON{{".into()))
+        })
+        .unwrap();
+
+        let result = gs.all_nodes(branch, "g");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Corrupt node data"),
+            "Error should mention corrupt node data: {}",
+            err
+        );
+    }
+
+    // =========================================================================
+    // G-7: Node existence validation on edge creation
+    // =========================================================================
+
+    #[test]
+    fn test_add_edge_rejects_nonexistent_source() {
+        let (_db, gs) = setup();
+        let branch = default_branch();
+        gs.create_graph(branch, "g", None).unwrap();
+        gs.add_node(branch, "g", "B", NodeData::default()).unwrap();
+
+        let result = gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Source node") && err.contains("does not exist"),
+            "Error should mention source node: {}",
+            err
+        );
+
+        // Verify no partial writes — neither forward nor reverse edge should exist
+        assert!(gs
+            .get_edge(branch, "g", "A", "B", "KNOWS")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_add_edge_rejects_nonexistent_target() {
+        let (_db, gs) = setup();
+        let branch = default_branch();
+        gs.create_graph(branch, "g", None).unwrap();
+        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
+
+        let result = gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Target node") && err.contains("does not exist"),
+            "Error should mention target node: {}",
+            err
+        );
+
+        // Verify no partial writes
+        assert!(gs
+            .get_edge(branch, "g", "A", "B", "KNOWS")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_add_edge_rejects_both_nonexistent() {
+        let (_db, gs) = setup();
+        let branch = default_branch();
+        gs.create_graph(branch, "g", None).unwrap();
+
+        let result = gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("does not exist"),
+            "Error should mention non-existence: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_add_edge_succeeds_when_both_nodes_exist() {
+        let (_db, gs) = setup();
+        let branch = default_branch();
+        gs.create_graph(branch, "g", None).unwrap();
+        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(branch, "g", "B", NodeData::default()).unwrap();
+
+        let result = gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default());
+        assert!(result.is_ok());
+
+        // Verify edge was actually created
+        let edge = gs.get_edge(branch, "g", "A", "B", "KNOWS").unwrap();
+        assert!(edge.is_some());
+    }
+
+    #[test]
+    fn test_add_edge_self_loop_succeeds() {
+        let (_db, gs) = setup();
+        let branch = default_branch();
+        gs.create_graph(branch, "g", None).unwrap();
+        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
+
+        // Self-edge: src == dst, node exists — should succeed
+        let result = gs.add_edge(branch, "g", "A", "A", "SELF", EdgeData::default());
+        assert!(result.is_ok());
+
+        let edge = gs.get_edge(branch, "g", "A", "A", "SELF").unwrap();
+        assert!(edge.is_some());
+    }
+
+    #[test]
+    fn test_add_edge_self_loop_nonexistent_node() {
+        let (_db, gs) = setup();
+        let branch = default_branch();
+        gs.create_graph(branch, "g", None).unwrap();
+
+        // Self-edge to nonexistent node
+        let result = gs.add_edge(branch, "g", "X", "X", "SELF", EdgeData::default());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("does not exist"),
+            "Error should mention non-existence: {}",
+            err
+        );
+    }
+
+    // =========================================================================
+    // Edge-case tests: remove_node with multiple edges to same neighbor
+    // =========================================================================
+
+    #[test]
+    fn remove_node_with_multiple_edges_to_same_neighbor() {
+        let (_db, gs) = setup();
+        let branch = default_branch();
+        gs.create_graph(branch, "g", None).unwrap();
+        for id in &["A", "B"] {
+            gs.add_node(branch, "g", id, NodeData::default()).unwrap();
+        }
+        // Two different edge types from A to B
+        gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(branch, "g", "A", "B", "LIKES", EdgeData::default())
+            .unwrap();
+
+        gs.remove_node(branch, "g", "A").unwrap();
+
+        assert!(gs
+            .get_edge(branch, "g", "A", "B", "KNOWS")
+            .unwrap()
+            .is_none());
+        assert!(gs
+            .get_edge(branch, "g", "A", "B", "LIKES")
+            .unwrap()
+            .is_none());
+        // B's reverse adj list should be empty (both edges removed)
+        let incoming = gs.incoming_neighbors(branch, "g", "B", None).unwrap();
+        assert!(incoming.is_empty());
+    }
+
+    #[test]
+    fn remove_node_with_self_loop() {
+        let (_db, gs) = setup();
+        let branch = default_branch();
+        gs.create_graph(branch, "g", None).unwrap();
+        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(branch, "g", "B", NodeData::default()).unwrap();
+        gs.add_edge(branch, "g", "A", "A", "SELF", EdgeData::default())
+            .unwrap();
+        gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+
+        gs.remove_node(branch, "g", "A").unwrap();
+
+        assert!(gs.get_node(branch, "g", "A").unwrap().is_none());
+        assert!(gs
+            .get_edge(branch, "g", "A", "A", "SELF")
+            .unwrap()
+            .is_none());
+        assert!(gs
+            .get_edge(branch, "g", "A", "B", "KNOWS")
+            .unwrap()
+            .is_none());
+        // B's reverse list should be empty
+        let incoming = gs.incoming_neighbors(branch, "g", "B", None).unwrap();
+        assert!(incoming.is_empty());
+    }
+
+    #[test]
+    fn remove_node_hub_with_many_neighbors() {
+        let (_db, gs) = setup();
+        let branch = default_branch();
+        gs.create_graph(branch, "g", None).unwrap();
+        // Create a hub node A with edges to 10 neighbors
+        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
+        for i in 0..10 {
+            let id = format!("N{}", i);
+            gs.add_node(branch, "g", &id, NodeData::default()).unwrap();
+            gs.add_edge(branch, "g", "A", &id, "E", EdgeData::default())
+                .unwrap();
+        }
+
+        gs.remove_node(branch, "g", "A").unwrap();
+
+        // All edges removed
+        for i in 0..10 {
+            let id = format!("N{}", i);
+            assert!(gs.get_edge(branch, "g", "A", &id, "E").unwrap().is_none());
+            let incoming = gs.incoming_neighbors(branch, "g", &id, None).unwrap();
+            assert!(incoming.is_empty(), "N{} should have no incoming edges", i);
+        }
+    }
+
+    // =========================================================================
+    // Edge-case tests: bulk_insert merging with existing edges
+    // =========================================================================
+
+    #[test]
+    fn bulk_insert_merges_with_existing_edges() {
+        let (_db, gs) = setup();
+        let branch = default_branch();
+        gs.create_graph(branch, "g", None).unwrap();
+
+        // Insert nodes and an initial edge via add_edge
+        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(branch, "g", "B", NodeData::default()).unwrap();
+        gs.add_node(branch, "g", "C", NodeData::default()).unwrap();
+        gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+
+        // Now bulk_insert a new edge from the same source A
+        let edges = vec![("A".into(), "C".into(), "LIKES".into(), EdgeData::default())];
+        gs.bulk_insert(branch, "g", &[], &edges, None).unwrap();
+
+        // Both edges should exist
+        assert!(gs
+            .get_edge(branch, "g", "A", "B", "KNOWS")
+            .unwrap()
+            .is_some());
+        assert!(gs
+            .get_edge(branch, "g", "A", "C", "LIKES")
+            .unwrap()
+            .is_some());
+
+        // A should have 2 outgoing neighbors
+        let outgoing = gs.outgoing_neighbors(branch, "g", "A", None).unwrap();
+        assert_eq!(outgoing.len(), 2);
+    }
+
+    #[test]
+    fn bulk_insert_two_batches_merge() {
+        let (_db, gs) = setup();
+        let branch = default_branch();
+        gs.create_graph(branch, "g", None).unwrap();
+
+        let nodes = vec![
+            ("A".into(), NodeData::default()),
+            ("B".into(), NodeData::default()),
+            ("C".into(), NodeData::default()),
+            ("D".into(), NodeData::default()),
+        ];
+        let edges1 = vec![("A".into(), "B".into(), "E1".into(), EdgeData::default())];
+        gs.bulk_insert(branch, "g", &nodes, &edges1, None).unwrap();
+
+        // Second batch adds another edge from A
+        let edges2 = vec![("A".into(), "C".into(), "E2".into(), EdgeData::default())];
+        gs.bulk_insert(branch, "g", &[], &edges2, None).unwrap();
+
+        // Third batch adds edge from A to D
+        let edges3 = vec![("A".into(), "D".into(), "E3".into(), EdgeData::default())];
+        gs.bulk_insert(branch, "g", &[], &edges3, None).unwrap();
+
+        // All edges should coexist
+        assert!(gs.get_edge(branch, "g", "A", "B", "E1").unwrap().is_some());
+        assert!(gs.get_edge(branch, "g", "A", "C", "E2").unwrap().is_some());
+        assert!(gs.get_edge(branch, "g", "A", "D", "E3").unwrap().is_some());
+        let outgoing = gs.outgoing_neighbors(branch, "g", "A", None).unwrap();
+        assert_eq!(outgoing.len(), 3);
+    }
+
+    #[test]
+    fn bulk_insert_reverse_adj_lists_merge_correctly() {
+        let (_db, gs) = setup();
+        let branch = default_branch();
+        gs.create_graph(branch, "g", None).unwrap();
+
+        let nodes = vec![
+            ("A".into(), NodeData::default()),
+            ("B".into(), NodeData::default()),
+            ("C".into(), NodeData::default()),
+        ];
+        // Batch 1: A→C
+        let edges1 = vec![("A".into(), "C".into(), "E1".into(), EdgeData::default())];
+        gs.bulk_insert(branch, "g", &nodes, &edges1, None).unwrap();
+
+        // Batch 2: B→C (same destination, different source)
+        let edges2 = vec![("B".into(), "C".into(), "E2".into(), EdgeData::default())];
+        gs.bulk_insert(branch, "g", &[], &edges2, None).unwrap();
+
+        // C should have 2 incoming neighbors
+        let incoming = gs.incoming_neighbors(branch, "g", "C", None).unwrap();
+        assert_eq!(incoming.len(), 2);
+        let src_ids: Vec<&str> = incoming.iter().map(|n| n.node_id.as_str()).collect();
+        assert!(src_ids.contains(&"A"));
+        assert!(src_ids.contains(&"B"));
     }
 }

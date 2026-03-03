@@ -26,6 +26,9 @@ static NAMESPACE_ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Separator used between path segments in graph keys.
 const SEP: char = '/';
 
+/// Maximum length (in bytes) for graph names, node IDs, and edge types.
+const MAX_IDENTIFIER_BYTES: usize = 255;
+
 // =============================================================================
 // Validation
 // =============================================================================
@@ -45,6 +48,12 @@ pub fn validate_graph_name(name: &str) -> StrataResult<()> {
             "Graph name must not start with '__' (reserved)",
         ));
     }
+    if name.len() > MAX_IDENTIFIER_BYTES {
+        return Err(StrataError::invalid_input(format!(
+            "Graph name exceeds maximum length of {} bytes",
+            MAX_IDENTIFIER_BYTES
+        )));
+    }
     Ok(())
 }
 
@@ -56,6 +65,12 @@ pub fn validate_node_id(id: &str) -> StrataResult<()> {
     if id.contains(SEP) {
         return Err(StrataError::invalid_input("Node ID must not contain '/'"));
     }
+    if id.len() > MAX_IDENTIFIER_BYTES {
+        return Err(StrataError::invalid_input(format!(
+            "Node ID exceeds maximum length of {} bytes",
+            MAX_IDENTIFIER_BYTES
+        )));
+    }
     Ok(())
 }
 
@@ -66,6 +81,12 @@ pub fn validate_edge_type(t: &str) -> StrataResult<()> {
     }
     if t.contains(SEP) {
         return Err(StrataError::invalid_input("Edge type must not contain '/'"));
+    }
+    if t.len() > MAX_IDENTIFIER_BYTES {
+        return Err(StrataError::invalid_input(format!(
+            "Edge type exceeds maximum length of {} bytes",
+            MAX_IDENTIFIER_BYTES
+        )));
     }
     Ok(())
 }
@@ -109,65 +130,32 @@ pub fn graph_key(branch_id: BranchId, user_key: &str) -> Key {
     Key::new_kv(graph_namespace(branch_id), user_key)
 }
 
-// --- Forward edge keys ---
+// --- Packed adjacency list keys ---
 
-/// Key for a forward edge: `{graph}/e/{src}/{edge_type}/{dst}`
-pub fn forward_edge_key(graph: &str, src: &str, edge_type: &str, dst: &str) -> String {
-    format!("{}{SEP}e{SEP}{}{SEP}{}{SEP}{}", graph, src, edge_type, dst)
+/// Key for a forward (outgoing) adjacency list: `{graph}/fwd/{node_id}`
+pub fn forward_adj_key(graph: &str, node_id: &str) -> String {
+    format!("{}{SEP}fwd{SEP}{}", graph, node_id)
 }
 
-/// Prefix for all forward edges from a given source: `{graph}/e/{src}/`
-pub fn forward_edges_prefix(graph: &str, src: &str) -> String {
-    format!("{}{SEP}e{SEP}{}{SEP}", graph, src)
+/// Key for a reverse (incoming) adjacency list: `{graph}/rev/{node_id}`
+pub fn reverse_adj_key(graph: &str, node_id: &str) -> String {
+    format!("{}{SEP}rev{SEP}{}", graph, node_id)
 }
 
-/// Prefix for forward edges of a specific type: `{graph}/e/{src}/{edge_type}/`
-pub fn forward_edges_typed_prefix(graph: &str, src: &str, edge_type: &str) -> String {
-    format!("{}{SEP}e{SEP}{}{SEP}{}{SEP}", graph, src, edge_type)
+/// Prefix for all forward adjacency lists in a graph: `{graph}/fwd/`
+pub fn all_forward_adj_prefix(graph: &str) -> String {
+    format!("{}{SEP}fwd{SEP}", graph)
 }
 
-/// Parse a forward edge key back into (src, edge_type, dst).
-pub fn parse_forward_edge_key(graph: &str, user_key: &str) -> Option<(String, String, String)> {
-    let prefix = format!("{}{SEP}e{SEP}", graph);
-    let rest = user_key.strip_prefix(&prefix)?;
-    let parts: Vec<&str> = rest.splitn(3, SEP).collect();
-    if parts.len() == 3 {
-        Some((
-            parts[0].to_string(),
-            parts[1].to_string(),
-            parts[2].to_string(),
-        ))
-    } else {
-        None
-    }
+/// Prefix for all reverse adjacency lists in a graph: `{graph}/rev/`
+pub fn all_reverse_adj_prefix(graph: &str) -> String {
+    format!("{}{SEP}rev{SEP}", graph)
 }
 
-// --- Reverse edge keys ---
-
-/// Key for a reverse edge: `{graph}/r/{dst}/{edge_type}/{src}`
-pub fn reverse_edge_key(graph: &str, dst: &str, edge_type: &str, src: &str) -> String {
-    format!("{}{SEP}r{SEP}{}{SEP}{}{SEP}{}", graph, dst, edge_type, src)
-}
-
-/// Prefix for all reverse edges to a given destination: `{graph}/r/{dst}/`
-pub fn reverse_edges_prefix(graph: &str, dst: &str) -> String {
-    format!("{}{SEP}r{SEP}{}{SEP}", graph, dst)
-}
-
-/// Parse a reverse edge key back into (dst, edge_type, src).
-pub fn parse_reverse_edge_key(graph: &str, user_key: &str) -> Option<(String, String, String)> {
-    let prefix = format!("{}{SEP}r{SEP}", graph);
-    let rest = user_key.strip_prefix(&prefix)?;
-    let parts: Vec<&str> = rest.splitn(3, SEP).collect();
-    if parts.len() == 3 {
-        Some((
-            parts[0].to_string(),
-            parts[1].to_string(),
-            parts[2].to_string(),
-        ))
-    } else {
-        None
-    }
+/// Parse a forward adjacency key back into node_id.
+pub fn parse_forward_adj_key(graph: &str, user_key: &str) -> Option<String> {
+    let prefix = format!("{}{SEP}fwd{SEP}", graph);
+    user_key.strip_prefix(&prefix).map(|s| s.to_string())
 }
 
 // --- Node keys ---
@@ -317,16 +305,6 @@ pub fn validate_type_name(name: &str) -> StrataResult<()> {
 
 // --- Broad prefixes ---
 
-/// Prefix for all forward edge keys in a graph: `{graph}/e/`
-pub fn all_edges_prefix(graph: &str) -> String {
-    format!("{}{SEP}e{SEP}", graph)
-}
-
-/// Prefix for all reverse edge keys in a graph: `{graph}/r/`
-pub fn all_reverse_edges_prefix(graph: &str) -> String {
-    format!("{}{SEP}r{SEP}", graph)
-}
-
 /// Prefix for all keys in a graph: `{graph}/`
 pub fn graph_prefix(graph: &str) -> String {
     format!("{}{SEP}", graph)
@@ -354,21 +332,17 @@ mod tests {
     // --- Round-trip tests ---
 
     #[test]
-    fn forward_edge_key_roundtrip() {
-        let key = forward_edge_key("g", "A", "KNOWS", "B");
-        let (src, edge_type, dst) = parse_forward_edge_key("g", &key).unwrap();
-        assert_eq!(src, "A");
-        assert_eq!(edge_type, "KNOWS");
-        assert_eq!(dst, "B");
+    fn forward_adj_key_roundtrip() {
+        let key = forward_adj_key("g", "A");
+        assert_eq!(key, "g/fwd/A");
+        let node_id = parse_forward_adj_key("g", &key).unwrap();
+        assert_eq!(node_id, "A");
     }
 
     #[test]
-    fn reverse_edge_key_roundtrip() {
-        let key = reverse_edge_key("g", "B", "KNOWS", "A");
-        let (dst, edge_type, src) = parse_reverse_edge_key("g", &key).unwrap();
-        assert_eq!(dst, "B");
-        assert_eq!(edge_type, "KNOWS");
-        assert_eq!(src, "A");
+    fn reverse_adj_key_format() {
+        let key = reverse_adj_key("g", "B");
+        assert_eq!(key, "g/rev/B");
     }
 
     #[test]
@@ -395,30 +369,15 @@ mod tests {
     // --- Prefix correctness ---
 
     #[test]
-    fn forward_edges_prefix_is_prefix() {
-        let key = forward_edge_key("g", "A", "T", "B");
-        assert!(key.starts_with(&forward_edges_prefix("g", "A")));
+    fn forward_adj_prefix_is_prefix() {
+        let key = forward_adj_key("g", "A");
+        assert!(key.starts_with(&all_forward_adj_prefix("g")));
     }
 
     #[test]
-    fn forward_edges_typed_prefix_matches_type() {
-        let key = forward_edge_key("g", "A", "T", "B");
-        assert!(key.starts_with(&forward_edges_typed_prefix("g", "A", "T")));
-
-        let other_key = forward_edge_key("g", "A", "OTHER", "B");
-        assert!(!other_key.starts_with(&forward_edges_typed_prefix("g", "A", "T")));
-    }
-
-    #[test]
-    fn reverse_edges_prefix_is_prefix() {
-        let key = reverse_edge_key("g", "B", "T", "A");
-        assert!(key.starts_with(&reverse_edges_prefix("g", "B")));
-    }
-
-    #[test]
-    fn all_edges_prefix_matches_forward_keys() {
-        let key = forward_edge_key("g", "A", "T", "B");
-        assert!(key.starts_with(&all_edges_prefix("g")));
+    fn reverse_adj_prefix_is_prefix() {
+        let key = reverse_adj_key("g", "B");
+        assert!(key.starts_with(&all_reverse_adj_prefix("g")));
     }
 
     #[test]
@@ -430,11 +389,13 @@ mod tests {
     #[test]
     fn graph_prefix_matches_all_keys() {
         let nk = node_key("g", "X");
-        let fk = forward_edge_key("g", "A", "T", "B");
+        let fk = forward_adj_key("g", "A");
+        let rk = reverse_adj_key("g", "B");
         let mk = meta_key("g");
         let pfx = graph_prefix("g");
         assert!(nk.starts_with(&pfx));
         assert!(fk.starts_with(&pfx));
+        assert!(rk.starts_with(&pfx));
         assert!(mk.starts_with(&pfx));
     }
 
@@ -561,21 +522,15 @@ mod tests {
     // --- Negative parsing tests ---
 
     #[test]
-    fn parse_forward_edge_key_wrong_graph_returns_none() {
-        let key = forward_edge_key("g", "A", "T", "B");
-        assert!(parse_forward_edge_key("other", &key).is_none());
+    fn parse_forward_adj_key_wrong_graph_returns_none() {
+        let key = forward_adj_key("g", "A");
+        assert!(parse_forward_adj_key("other", &key).is_none());
     }
 
     #[test]
-    fn parse_forward_edge_key_malformed_returns_none() {
-        assert!(parse_forward_edge_key("g", "g/e/A").is_none());
-        assert!(parse_forward_edge_key("g", "garbage").is_none());
-    }
-
-    #[test]
-    fn parse_reverse_edge_key_wrong_graph_returns_none() {
-        let key = reverse_edge_key("g", "B", "T", "A");
-        assert!(parse_reverse_edge_key("other", &key).is_none());
+    fn parse_forward_adj_key_malformed_returns_none() {
+        assert!(parse_forward_adj_key("g", "g/fwd").is_none());
+        assert!(parse_forward_adj_key("g", "garbage").is_none());
     }
 
     #[test]
@@ -593,22 +548,16 @@ mod tests {
     // --- Cross-type parsing tests ---
 
     #[test]
-    fn forward_edge_key_not_parseable_as_node() {
-        let key = forward_edge_key("g", "A", "T", "B");
-        assert!(
-            parse_node_key("g", &key).is_none() || {
-                // It may parse as a node key but the result should not be "A"
-                // since the format is different
-                let parsed = parse_node_key("g", &key).unwrap();
-                parsed != "A"
-            }
-        );
+    fn forward_adj_key_not_parseable_as_node() {
+        let key = forward_adj_key("g", "A");
+        // fwd key should not parse as a node key (prefix is fwd, not n)
+        assert!(parse_node_key("g", &key).is_none());
     }
 
     #[test]
-    fn node_key_not_parseable_as_forward_edge() {
+    fn node_key_not_parseable_as_forward_adj() {
         let key = node_key("g", "mynode");
-        assert!(parse_forward_edge_key("g", &key).is_none());
+        assert!(parse_forward_adj_key("g", &key).is_none());
     }
 
     // --- Ontology key tests ---
@@ -779,8 +728,8 @@ mod tests {
         // Test with various user_key patterns used in graph operations
         let user_keys = [
             node_key("mygraph", "patient-1"),
-            forward_edge_key("mygraph", "A", "KNOWS", "B"),
-            reverse_edge_key("mygraph", "B", "KNOWS", "A"),
+            forward_adj_key("mygraph", "A"),
+            reverse_adj_key("mygraph", "B"),
             ref_index_key("kv://main/key1", "mygraph", "n1"),
             type_index_key("mygraph", "Patient", "p1"),
             meta_key("mygraph"),
@@ -800,6 +749,52 @@ mod tests {
                 "Ord mismatch for user_key={user_key:?}"
             );
         }
+    }
+
+    // --- Identifier length limit tests (G-6) ---
+
+    #[test]
+    fn test_graph_name_length_limit() {
+        // Exactly at limit — should pass
+        let at_limit = "a".repeat(MAX_IDENTIFIER_BYTES);
+        assert!(validate_graph_name(&at_limit).is_ok());
+
+        // One byte over — should fail with descriptive message
+        let over_limit = "a".repeat(MAX_IDENTIFIER_BYTES + 1);
+        let err = validate_graph_name(&over_limit).unwrap_err().to_string();
+        assert!(
+            err.contains("exceeds maximum length"),
+            "Error should mention max length: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_node_id_length_limit() {
+        let at_limit = "n".repeat(MAX_IDENTIFIER_BYTES);
+        assert!(validate_node_id(&at_limit).is_ok());
+
+        let over_limit = "n".repeat(MAX_IDENTIFIER_BYTES + 1);
+        let err = validate_node_id(&over_limit).unwrap_err().to_string();
+        assert!(
+            err.contains("exceeds maximum length"),
+            "Error should mention max length: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_edge_type_length_limit() {
+        let at_limit = "E".repeat(MAX_IDENTIFIER_BYTES);
+        assert!(validate_edge_type(&at_limit).is_ok());
+
+        let over_limit = "E".repeat(MAX_IDENTIFIER_BYTES + 1);
+        let err = validate_edge_type(&over_limit).unwrap_err().to_string();
+        assert!(
+            err.contains("exceeds maximum length"),
+            "Error should mention max length: {}",
+            err
+        );
     }
 
     #[test]
