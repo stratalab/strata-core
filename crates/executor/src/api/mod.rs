@@ -1156,6 +1156,8 @@ mod tests {
     fn test_graph_edge_crud() {
         let db = create_strata();
         db.graph_create("eg").unwrap();
+        db.graph_add_node("eg", "A", None, None).unwrap();
+        db.graph_add_node("eg", "B", None, None).unwrap();
 
         db.graph_add_edge("eg", "A", "B", "KNOWS", None, None)
             .unwrap();
@@ -1175,6 +1177,9 @@ mod tests {
     fn test_graph_bfs() {
         let db = create_strata();
         db.graph_create("bg").unwrap();
+        for id in &["A", "B", "C", "D"] {
+            db.graph_add_node("bg", id, None, None).unwrap();
+        }
 
         db.graph_add_edge("bg", "A", "B", "E", None, None).unwrap();
         db.graph_add_edge("bg", "B", "C", "E", None, None).unwrap();
@@ -1429,6 +1434,8 @@ mod tests {
     fn test_graph_edge_with_weight_and_properties() {
         let db = create_strata();
         db.graph_create("wg").unwrap();
+        db.graph_add_node("wg", "A", None, None).unwrap();
+        db.graph_add_node("wg", "B", None, None).unwrap();
 
         db.graph_add_edge(
             "wg",
@@ -1454,6 +1461,9 @@ mod tests {
     fn test_graph_bfs_with_max_depth() {
         let db = create_strata();
         db.graph_create("bg").unwrap();
+        for id in &["A", "B", "C", "D"] {
+            db.graph_add_node("bg", id, None, None).unwrap();
+        }
 
         // A → B → C → D
         db.graph_add_edge("bg", "A", "B", "E", None, None).unwrap();
@@ -1471,6 +1481,9 @@ mod tests {
     fn test_graph_bfs_depths_correct() {
         let db = create_strata();
         db.graph_create("dg").unwrap();
+        for id in &["A", "B", "C"] {
+            db.graph_add_node("dg", id, None, None).unwrap();
+        }
 
         db.graph_add_edge("dg", "A", "B", "E", None, None).unwrap();
         db.graph_add_edge("dg", "B", "C", "E", None, None).unwrap();
