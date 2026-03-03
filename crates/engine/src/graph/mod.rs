@@ -24,28 +24,6 @@ use crate::database::Database;
 use adjacency::AdjacencyIndex;
 use types::*;
 
-// ---------------------------------------------------------------------------
-// RSS reader for profiling graph OOM (#1297)
-// ---------------------------------------------------------------------------
-
-#[cfg(target_os = "linux")]
-fn current_rss_mb() -> Option<u64> {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("VmRSS:"))
-                .and_then(|l| l.split_whitespace().nth(1))
-                .and_then(|v| v.parse::<u64>().ok())
-                .map(|kb| kb / 1024)
-        })
-}
-
-#[cfg(not(target_os = "linux"))]
-fn current_rss_mb() -> Option<u64> {
-    None
-}
-
 /// Graph store providing CRUD operations on nodes and edges.
 ///
 /// All data is stored in the underlying KV engine under the `_graph_` space.
@@ -675,7 +653,7 @@ impl GraphStore {
     // =========================================================================
 
     /// Default chunk size for bulk insert operations.
-    pub const DEFAULT_BULK_CHUNK_SIZE: usize = 50_000;
+    pub const DEFAULT_BULK_CHUNK_SIZE: usize = 250_000;
 
     /// Bulk insert nodes and edges into a graph using chunked transactions.
     ///
@@ -701,23 +679,6 @@ impl GraphStore {
 
         let chunk_size = std::cmp::max(1, chunk_size.unwrap_or(Self::DEFAULT_BULK_CHUNK_SIZE));
         let empty_json = "{}";
-
-        // --- Profiling: OOM diagnosis (#1297) ---
-        let t_start = std::time::Instant::now();
-        keys::reset_namespace_alloc_count();
-        tracing::info!(
-            "[graph::bulk_insert] START nodes={} edges={} chunk_size={} RSS={}MB",
-            nodes.len(),
-            edges.len(),
-            chunk_size,
-            current_rss_mb().unwrap_or(0),
-        );
-        tracing::info!(
-            "[graph::bulk_insert] SIZES: Key={} Namespace={} Arc<Namespace>={}",
-            std::mem::size_of::<strata_core::types::Key>(),
-            std::mem::size_of::<strata_core::types::Namespace>(),
-            std::mem::size_of::<Arc<strata_core::types::Namespace>>(),
-        );
 
         // Hoist namespace once — avoids DashMap lookup per key in inner loops.
         let ns = keys::graph_namespace(branch_id);
@@ -796,16 +757,7 @@ impl GraphStore {
             nodes_inserted += chunk.len();
         }
 
-        tracing::info!(
-            "[graph::bulk_insert] NODES COMPLETE: {} nodes in {}ms, RSS={}MB, ns_allocs={}",
-            nodes_inserted,
-            t_start.elapsed().as_millis(),
-            current_rss_mb().unwrap_or(0),
-            keys::namespace_alloc_count(),
-        );
-
         // Group edges by source (forward) and destination (reverse)
-        let t_group = std::time::Instant::now();
         let mut fwd_map: std::collections::HashMap<&str, Vec<(&str, &str, &EdgeData)>> =
             std::collections::HashMap::new();
         let mut rev_map: std::collections::HashMap<&str, Vec<(&str, &str, &EdgeData)>> =
@@ -829,24 +781,13 @@ impl GraphStore {
                 .or_default()
                 .push((src.as_str(), edge_type.as_str(), data));
         }
-        eprintln!(
-            "  [bulk_insert] group: {}ms, fwd_nodes={} rev_nodes={} RSS={}MB",
-            t_group.elapsed().as_millis(),
-            fwd_map.len(),
-            rev_map.len(),
-            current_rss_mb().unwrap_or(0),
-        );
 
         // Write packed forward adjacency lists in chunks, merging with existing lists.
         // Reads use get_value_direct() (store-direct, no read-set tracking) so that
         // commit skips OCC validation — bulk_insert is single-writer, no conflicts.
         let fwd_entries: Vec<_> = fwd_map.into_iter().collect();
-        let mut fwd_chunks_done = 0usize;
         for chunk in fwd_entries.chunks(chunk_size) {
-            let t_chunk = std::time::Instant::now();
-            // Build packed adj lists, reading existing lists directly from the store
             let mut bufs: Vec<(Key, Vec<u8>)> = Vec::with_capacity(chunk.len());
-            let mut total_buf_bytes = 0usize;
             for (node_id, new_edges) in chunk {
                 let uk = keys::forward_adj_key(graph, node_id);
                 let sk = Key::new_kv(ns.clone(), &uk);
@@ -858,36 +799,20 @@ impl GraphStore {
                     packed::append_edge(&mut buf, target_id, edge_type, data)?;
                 }
                 buf.shrink_to_fit();
-                total_buf_bytes += buf.len();
                 bufs.push((sk, buf));
             }
-            let t_encode = t_chunk.elapsed();
-            // Write through transaction (WAL + versioning) — read_set empty → no validation
             self.db.transaction(branch_id, |txn| {
                 for (sk, buf) in bufs {
                     txn.put_replace(sk, Value::Bytes(buf))?;
                 }
                 Ok(())
             })?;
-            fwd_chunks_done += chunk.len();
-            eprintln!(
-                "  [bulk_insert] fwd {}/{}: encode={}ms commit={}ms buf_data={}MB RSS={}MB",
-                fwd_chunks_done,
-                fwd_entries.len(),
-                t_encode.as_millis(),
-                t_chunk.elapsed().as_millis(),
-                total_buf_bytes / (1024 * 1024),
-                current_rss_mb().unwrap_or(0),
-            );
         }
 
         // Write packed reverse adjacency lists in chunks, merging with existing lists.
         let rev_entries: Vec<_> = rev_map.into_iter().collect();
-        let mut rev_chunks_done = 0usize;
         for chunk in rev_entries.chunks(chunk_size) {
-            let t_chunk = std::time::Instant::now();
             let mut bufs: Vec<(Key, Vec<u8>)> = Vec::with_capacity(chunk.len());
-            let mut total_buf_bytes = 0usize;
             for (node_id, new_edges) in chunk {
                 let uk = keys::reverse_adj_key(graph, node_id);
                 let sk = Key::new_kv(ns.clone(), &uk);
@@ -899,52 +824,17 @@ impl GraphStore {
                     packed::append_edge(&mut buf, target_id, edge_type, data)?;
                 }
                 buf.shrink_to_fit();
-                total_buf_bytes += buf.len();
                 bufs.push((sk, buf));
             }
-            let t_encode = t_chunk.elapsed();
             self.db.transaction(branch_id, |txn| {
                 for (sk, buf) in bufs {
                     txn.put_replace(sk, Value::Bytes(buf))?;
                 }
                 Ok(())
             })?;
-            rev_chunks_done += chunk.len();
-            eprintln!(
-                "  [bulk_insert] rev {}/{}: encode={}ms commit={}ms buf_data={}MB RSS={}MB",
-                rev_chunks_done,
-                rev_entries.len(),
-                t_encode.as_millis(),
-                t_chunk.elapsed().as_millis(),
-                total_buf_bytes / (1024 * 1024),
-                current_rss_mb().unwrap_or(0),
-            );
         }
 
-        let edges_inserted = edges.len();
-
-        // Shard diagnostics
-        if let Some((entries, versions, has_btree)) =
-            self.db.storage().shard_stats_detailed(&branch_id)
-        {
-            eprintln!(
-                "  [bulk_insert] SHARD: entries={} versions={} btree={} ratio={:.2}",
-                entries,
-                versions,
-                has_btree,
-                versions as f64 / entries.max(1) as f64,
-            );
-        }
-
-        eprintln!(
-            "  [bulk_insert] DONE: {} nodes + {} edges in {}ms, RSS={}MB",
-            nodes_inserted,
-            edges_inserted,
-            t_start.elapsed().as_millis(),
-            current_rss_mb().unwrap_or(0),
-        );
-
-        Ok((nodes_inserted, edges_inserted))
+        Ok((nodes_inserted, edges.len()))
     }
 
     /// Look up all (graph, node_id) pairs bound to a given entity ref URI.

@@ -58,7 +58,7 @@ pub struct StorageConfig {
     /// Maximum number of branches allowed. Default: 1024. Set to 0 for unlimited.
     #[serde(default = "default_max_branches")]
     pub max_branches: usize,
-    /// Maximum entries in a single transaction's write buffer. Default: 100_000. Set to 0 for unlimited.
+    /// Maximum entries in a single transaction's write buffer. Default: 500_000. Set to 0 for unlimited.
     #[serde(default = "default_max_write_buffer_entries")]
     pub max_write_buffer_entries: usize,
 }
@@ -68,7 +68,7 @@ fn default_max_branches() -> usize {
 }
 
 fn default_max_write_buffer_entries() -> usize {
-    100_000
+    500_000
 }
 
 impl Default for StorageConfig {
@@ -264,7 +264,7 @@ auto_embed = false
 # Storage resource limits.
 # [storage]
 # max_branches = 1024
-# max_write_buffer_entries = 100000
+# max_write_buffer_entries = 500000
 "#
     }
 
@@ -778,7 +778,7 @@ auto_embed = false
     fn test_storage_config_defaults() {
         let config = StrataConfig::default();
         assert_eq!(config.storage.max_branches, 1024);
-        assert_eq!(config.storage.max_write_buffer_entries, 100_000);
+        assert_eq!(config.storage.max_write_buffer_entries, 500_000);
     }
 
     #[test]
@@ -790,7 +790,7 @@ auto_embed = false
 "#;
         let config: StrataConfig = toml::from_str(old_toml).unwrap();
         assert_eq!(config.storage.max_branches, 1024);
-        assert_eq!(config.storage.max_write_buffer_entries, 100_000);
+        assert_eq!(config.storage.max_write_buffer_entries, 500_000);
     }
 
     // -----------------------------------------------------------------------

@@ -153,6 +153,24 @@ pub fn edge_count(bytes: &[u8]) -> u32 {
     u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
 
+/// Merge two packed adjacency lists by appending `new` edges onto `existing`.
+///
+/// Updates the header count and concatenates the edge bytes. No decoding needed.
+pub fn merge(mut existing: Vec<u8>, new: &[u8]) -> Vec<u8> {
+    if new.len() <= 4 {
+        return existing;
+    }
+    if existing.len() < 4 {
+        return new.to_vec();
+    }
+    let existing_count = u32::from_le_bytes([existing[0], existing[1], existing[2], existing[3]]);
+    let new_count = u32::from_le_bytes([new[0], new[1], new[2], new[3]]);
+    let total = existing_count + new_count;
+    existing[0..4].copy_from_slice(&total.to_le_bytes());
+    existing.extend_from_slice(&new[4..]);
+    existing
+}
+
 /// Encode an empty adjacency list (count = 0).
 pub fn empty() -> Vec<u8> {
     0u32.to_le_bytes().to_vec()
