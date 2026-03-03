@@ -2571,8 +2571,7 @@ mod tests {
                     )
                 })
                 .collect();
-            gs.bulk_insert(branch, "bg", &[], &edges, Some(3))
-                .unwrap();
+            gs.bulk_insert(branch, "bg", &[], &edges, Some(3)).unwrap();
         }
 
         // Check version counts — adj lists should have 1 version each (replaced, not accumulated)
@@ -2598,9 +2597,21 @@ mod tests {
             for i in 0..5 {
                 let edge_type = format!("E{}", batch * 5 + i);
                 let edge = gs
-                    .get_edge(branch, "bg", &format!("n{}", i), &format!("n{}", i + 5), &edge_type)
+                    .get_edge(
+                        branch,
+                        "bg",
+                        &format!("n{}", i),
+                        &format!("n{}", i + 5),
+                        &edge_type,
+                    )
                     .unwrap();
-                assert!(edge.is_some(), "edge n{} -> n{} type {} missing", i, i + 5, edge_type);
+                assert!(
+                    edge.is_some(),
+                    "edge n{} -> n{} type {} missing",
+                    i,
+                    i + 5,
+                    edge_type
+                );
             }
         }
     }
