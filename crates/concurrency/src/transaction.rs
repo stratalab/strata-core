@@ -10,7 +10,7 @@ use crate::validation::{validate_transaction, ValidationResult};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 use strata_core::primitives::json::{get_at_path, JsonPatch, JsonPath, JsonValue};
-use strata_core::traits::{SnapshotView, Storage};
+use strata_core::traits::{SnapshotView, Storage, WriteMode};
 use strata_core::types::{BranchId, Key};
 use strata_core::value::Value;
 use strata_core::StrataError;
@@ -455,6 +455,13 @@ pub struct TransactionContext {
     /// When true, writes are rejected and read-set tracking is skipped,
     /// saving memory on large scan workloads.
     read_only: bool,
+
+    /// Keys that should use `WriteMode::Replace` at commit time.
+    ///
+    /// Keys in this set will overwrite all previous versions instead of
+    /// appending a new MVCC version. Used for internal data like graph
+    /// adjacency lists where version history wastes memory.
+    replace_keys: HashSet<Key>,
 }
 
 impl TransactionContext {
@@ -499,6 +506,7 @@ impl TransactionContext {
             start_time: Instant::now(),
             max_write_entries: 0,
             read_only: false,
+            replace_keys: HashSet::new(),
         }
     }
 
@@ -549,6 +557,7 @@ impl TransactionContext {
             start_time: Instant::now(),
             max_write_entries: 0,
             read_only: false,
+            replace_keys: HashSet::new(),
         }
     }
 
@@ -864,6 +873,17 @@ impl TransactionContext {
         // Add to write_set (overwrites any previous write to same key)
         self.write_set.insert(key, value);
         Ok(())
+    }
+
+    /// Buffer a write that will replace (not append) at commit time.
+    ///
+    /// Same as `put()`, but marks this key for `WriteMode::Replace` so the
+    /// storage layer overwrites all previous versions instead of accumulating
+    /// a new MVCC version. Use for internal data (e.g., graph adjacency lists)
+    /// where version history is not needed and would waste memory.
+    pub fn put_replace(&mut self, key: Key, value: Value) -> StrataResult<()> {
+        self.replace_keys.insert(key.clone());
+        self.put(key, value)
     }
 
     /// Buffer a delete operation
@@ -1405,7 +1425,12 @@ impl TransactionContext {
 
         // Apply puts from write_set — drain to avoid cloning keys and values
         for (key, value) in self.write_set.drain() {
-            store.put_with_version(key, value, commit_version, None)?;
+            let mode = if self.replace_keys.contains(&key) {
+                WriteMode::Replace
+            } else {
+                WriteMode::Append
+            };
+            store.put_with_version_mode(key, value, commit_version, None, mode)?;
             result.puts_applied += 1;
         }
 

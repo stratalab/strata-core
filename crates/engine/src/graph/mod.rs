@@ -24,28 +24,6 @@ use crate::database::Database;
 use adjacency::AdjacencyIndex;
 use types::*;
 
-// ---------------------------------------------------------------------------
-// RSS reader for profiling graph OOM (#1297)
-// ---------------------------------------------------------------------------
-
-#[cfg(target_os = "linux")]
-fn current_rss_mb() -> Option<u64> {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("VmRSS:"))
-                .and_then(|l| l.split_whitespace().nth(1))
-                .and_then(|v| v.parse::<u64>().ok())
-                .map(|kb| kb / 1024)
-        })
-}
-
-#[cfg(not(target_os = "linux"))]
-fn current_rss_mb() -> Option<u64> {
-    None
-}
-
 /// Graph store providing CRUD operations on nodes and edges.
 ///
 /// All data is stored in the underlying KV engine under the `_graph_` space.
@@ -337,7 +315,7 @@ impl GraphStore {
                             if packed::edge_count(&new_bytes) == 0 {
                                 txn.delete(dst_rev_sk)?;
                             } else {
-                                txn.put(dst_rev_sk, Value::Bytes(new_bytes))?;
+                                txn.put_replace(dst_rev_sk, Value::Bytes(new_bytes))?;
                             }
                         }
                     }
@@ -357,7 +335,7 @@ impl GraphStore {
                             if packed::edge_count(&new_bytes) == 0 {
                                 txn.delete(src_fwd_sk)?;
                             } else {
-                                txn.put(src_fwd_sk, Value::Bytes(new_bytes))?;
+                                txn.put_replace(src_fwd_sk, Value::Bytes(new_bytes))?;
                             }
                         }
                     }
@@ -434,7 +412,7 @@ impl GraphStore {
                 fwd_buf = new_buf;
             }
             packed::append_edge(&mut fwd_buf, dst, edge_type, &data)?;
-            txn.put(fwd_sk.clone(), Value::Bytes(fwd_buf))?;
+            txn.put_replace(fwd_sk.clone(), Value::Bytes(fwd_buf))?;
 
             // Read-modify-write reverse adjacency list (dst ← src)
             let mut rev_buf = match txn.get(&rev_sk)? {
@@ -445,7 +423,7 @@ impl GraphStore {
                 rev_buf = new_buf;
             }
             packed::append_edge(&mut rev_buf, src, edge_type, &data)?;
-            txn.put(rev_sk.clone(), Value::Bytes(rev_buf))?;
+            txn.put_replace(rev_sk.clone(), Value::Bytes(rev_buf))?;
 
             Ok(())
         })
@@ -491,7 +469,7 @@ impl GraphStore {
                     if packed::edge_count(&new_bytes) == 0 {
                         txn.delete(fwd_sk.clone())?;
                     } else {
-                        txn.put(fwd_sk.clone(), Value::Bytes(new_bytes))?;
+                        txn.put_replace(fwd_sk.clone(), Value::Bytes(new_bytes))?;
                     }
                 }
             }
@@ -502,7 +480,7 @@ impl GraphStore {
                     if packed::edge_count(&new_bytes) == 0 {
                         txn.delete(rev_sk.clone())?;
                     } else {
-                        txn.put(rev_sk.clone(), Value::Bytes(new_bytes))?;
+                        txn.put_replace(rev_sk.clone(), Value::Bytes(new_bytes))?;
                     }
                 }
             }
@@ -675,7 +653,7 @@ impl GraphStore {
     // =========================================================================
 
     /// Default chunk size for bulk insert operations.
-    pub const DEFAULT_BULK_CHUNK_SIZE: usize = 10_000;
+    pub const DEFAULT_BULK_CHUNK_SIZE: usize = 250_000;
 
     /// Bulk insert nodes and edges into a graph using chunked transactions.
     ///
@@ -701,23 +679,6 @@ impl GraphStore {
 
         let chunk_size = std::cmp::max(1, chunk_size.unwrap_or(Self::DEFAULT_BULK_CHUNK_SIZE));
         let empty_json = "{}";
-
-        // --- Profiling: OOM diagnosis (#1297) ---
-        let t_start = std::time::Instant::now();
-        keys::reset_namespace_alloc_count();
-        tracing::info!(
-            "[graph::bulk_insert] START nodes={} edges={} chunk_size={} RSS={}MB",
-            nodes.len(),
-            edges.len(),
-            chunk_size,
-            current_rss_mb().unwrap_or(0),
-        );
-        tracing::info!(
-            "[graph::bulk_insert] SIZES: Key={} Namespace={} Arc<Namespace>={}",
-            std::mem::size_of::<strata_core::types::Key>(),
-            std::mem::size_of::<strata_core::types::Namespace>(),
-            std::mem::size_of::<Arc<strata_core::types::Namespace>>(),
-        );
 
         // Hoist namespace once — avoids DashMap lookup per key in inner loops.
         let ns = keys::graph_namespace(branch_id);
@@ -796,14 +757,6 @@ impl GraphStore {
             nodes_inserted += chunk.len();
         }
 
-        tracing::info!(
-            "[graph::bulk_insert] NODES COMPLETE: {} nodes in {}ms, RSS={}MB, ns_allocs={}",
-            nodes_inserted,
-            t_start.elapsed().as_millis(),
-            current_rss_mb().unwrap_or(0),
-            keys::namespace_alloc_count(),
-        );
-
         // Group edges by source (forward) and destination (reverse)
         let mut fwd_map: std::collections::HashMap<&str, Vec<(&str, &str, &EdgeData)>> =
             std::collections::HashMap::new();
@@ -829,73 +782,59 @@ impl GraphStore {
                 .push((src.as_str(), edge_type.as_str(), data));
         }
 
-        // Write packed forward adjacency lists in chunks, merging with existing lists
+        // Write packed forward adjacency lists in chunks, merging with existing lists.
+        // Reads use get_value_direct() (store-direct, no read-set tracking) so that
+        // commit skips OCC validation — bulk_insert is single-writer, no conflicts.
         let fwd_entries: Vec<_> = fwd_map.into_iter().collect();
         for chunk in fwd_entries.chunks(chunk_size) {
+            let mut bufs: Vec<(Key, Vec<u8>)> = Vec::with_capacity(chunk.len());
+            for (node_id, new_edges) in chunk {
+                let uk = keys::forward_adj_key(graph, node_id);
+                let sk = Key::new_kv(ns.clone(), &uk);
+                let mut buf = match self.db.get_value_direct(&sk) {
+                    Some(Value::Bytes(existing)) => existing,
+                    _ => packed::empty(),
+                };
+                for &(target_id, edge_type, data) in new_edges {
+                    packed::append_edge(&mut buf, target_id, edge_type, data)?;
+                }
+                buf.shrink_to_fit();
+                bufs.push((sk, buf));
+            }
             self.db.transaction(branch_id, |txn| {
-                for (node_id, new_edges) in chunk {
-                    let uk = keys::forward_adj_key(graph, node_id);
-                    let sk = Key::new_kv(ns.clone(), &uk);
-                    let mut buf = match txn.get(&sk)? {
-                        Some(Value::Bytes(existing)) => existing,
-                        _ => packed::empty(),
-                    };
-                    for &(target_id, edge_type, data) in new_edges {
-                        packed::append_edge(&mut buf, target_id, edge_type, data)?;
-                    }
-                    txn.put(sk, Value::Bytes(buf))?;
+                for (sk, buf) in bufs {
+                    txn.put_replace(sk, Value::Bytes(buf))?;
                 }
                 Ok(())
             })?;
         }
 
-        // Write packed reverse adjacency lists in chunks, merging with existing lists
+        // Write packed reverse adjacency lists in chunks, merging with existing lists.
         let rev_entries: Vec<_> = rev_map.into_iter().collect();
         for chunk in rev_entries.chunks(chunk_size) {
+            let mut bufs: Vec<(Key, Vec<u8>)> = Vec::with_capacity(chunk.len());
+            for (node_id, new_edges) in chunk {
+                let uk = keys::reverse_adj_key(graph, node_id);
+                let sk = Key::new_kv(ns.clone(), &uk);
+                let mut buf = match self.db.get_value_direct(&sk) {
+                    Some(Value::Bytes(existing)) => existing,
+                    _ => packed::empty(),
+                };
+                for &(target_id, edge_type, data) in new_edges {
+                    packed::append_edge(&mut buf, target_id, edge_type, data)?;
+                }
+                buf.shrink_to_fit();
+                bufs.push((sk, buf));
+            }
             self.db.transaction(branch_id, |txn| {
-                for (node_id, new_edges) in chunk {
-                    let uk = keys::reverse_adj_key(graph, node_id);
-                    let sk = Key::new_kv(ns.clone(), &uk);
-                    let mut buf = match txn.get(&sk)? {
-                        Some(Value::Bytes(existing)) => existing,
-                        _ => packed::empty(),
-                    };
-                    for &(target_id, edge_type, data) in new_edges {
-                        packed::append_edge(&mut buf, target_id, edge_type, data)?;
-                    }
-                    txn.put(sk, Value::Bytes(buf))?;
+                for (sk, buf) in bufs {
+                    txn.put_replace(sk, Value::Bytes(buf))?;
                 }
                 Ok(())
             })?;
         }
 
-        // GC old version chain entries — each read-modify-write above created a
-        // new version for adj list keys that already existed from prior batches.
-        // Without this, the MVCC layer keeps all intermediate versions, negating
-        // the entry-count reduction from packed adjacency lists.
-        self.db.run_gc();
-
-        let edges_inserted = edges.len();
-
-        // Shard diagnostics
-        if let Some((entry_count, has_btree)) = self.db.storage().shard_stats(&branch_id) {
-            tracing::info!(
-                "[graph::bulk_insert] SHARD: entries={} btree_built={}",
-                entry_count,
-                has_btree,
-            );
-        }
-
-        tracing::info!(
-            "[graph::bulk_insert] DONE: {} nodes + {} edges in {}ms, RSS={}MB, ns_allocs={}",
-            nodes_inserted,
-            edges_inserted,
-            t_start.elapsed().as_millis(),
-            current_rss_mb().unwrap_or(0),
-            keys::namespace_alloc_count(),
-        );
-
-        Ok((nodes_inserted, edges_inserted))
+        Ok((nodes_inserted, edges.len()))
     }
 
     /// Look up all (graph, node_id) pairs bound to a given entity ref URI.
@@ -2606,5 +2545,74 @@ mod tests {
         let src_ids: Vec<&str> = incoming.iter().map(|n| n.node_id.as_str()).collect();
         assert!(src_ids.contains(&"A"));
         assert!(src_ids.contains(&"B"));
+    }
+
+    #[test]
+    fn bulk_insert_replace_mode_prevents_version_accumulation() {
+        let (db, gs) = setup();
+        let branch = default_branch();
+        gs.create_graph(branch, "bg", None).unwrap();
+
+        // Insert nodes
+        let nodes: Vec<(String, NodeData)> = (0..10)
+            .map(|i| (format!("n{}", i), NodeData::default()))
+            .collect();
+        gs.bulk_insert(branch, "bg", &nodes, &[], None).unwrap();
+
+        // Insert edges in 5 separate batches to the same nodes
+        for batch in 0..5 {
+            let edges: Vec<(String, String, String, EdgeData)> = (0..5)
+                .map(|i| {
+                    (
+                        format!("n{}", i),
+                        format!("n{}", i + 5),
+                        format!("E{}", batch * 5 + i),
+                        EdgeData::default(),
+                    )
+                })
+                .collect();
+            gs.bulk_insert(branch, "bg", &[], &edges, Some(3)).unwrap();
+        }
+
+        // Check version counts — adj lists should have 1 version each (replaced, not accumulated)
+        let (entries, versions, btree) = db
+            .storage()
+            .shard_stats_detailed(&branch)
+            .expect("shard should exist");
+
+        // Version ratio should be ~1.0 (each entry has exactly 1 version)
+        let ratio = versions as f64 / entries as f64;
+        assert!(
+            ratio <= 1.01,
+            "Version ratio {:.2} (entries={}, versions={}, btree={}) — \
+             adj lists are accumulating versions instead of replacing!",
+            ratio,
+            entries,
+            versions,
+            btree,
+        );
+
+        // Verify edges are correct (all 25 edges should be present)
+        for batch in 0..5 {
+            for i in 0..5 {
+                let edge_type = format!("E{}", batch * 5 + i);
+                let edge = gs
+                    .get_edge(
+                        branch,
+                        "bg",
+                        &format!("n{}", i),
+                        &format!("n{}", i + 5),
+                        &edge_type,
+                    )
+                    .unwrap();
+                assert!(
+                    edge.is_some(),
+                    "edge n{} -> n{} type {} missing",
+                    i,
+                    i + 5,
+                    edge_type
+                );
+            }
+        }
     }
 }

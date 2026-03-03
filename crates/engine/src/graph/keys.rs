@@ -3,7 +3,6 @@
 //! All graph data is stored under the `_graph_` space using KV-type keys.
 //! Key format uses `/` as a separator between path segments.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -17,11 +16,6 @@ use strata_core::{StrataError, StrataResult};
 /// ever — all subsequent calls return `Arc::clone()` (atomic refcount bump, zero
 /// heap allocation).  Fixes graph OOM (#1297).
 static NS_CACHE: Lazy<DashMap<BranchId, Arc<Namespace>>> = Lazy::new(DashMap::new);
-
-/// Counter tracking the number of `graph_namespace` *calls* (cache lookups).
-/// Not actual heap allocations — after the first call per branch, the cache
-/// serves `Arc::clone()`.  Used for profiling graph OOM (#1297).
-static NAMESPACE_ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Separator used between path segments in graph keys.
 const SEP: char = '/';
@@ -103,7 +97,6 @@ pub const GRAPH_SPACE: &str = "_graph_";
 /// Returns a cached `Arc<Namespace>` — one heap allocation per branch, ever.
 /// Subsequent calls return `Arc::clone()` (atomic refcount bump only).
 pub fn graph_namespace(branch_id: BranchId) -> Arc<Namespace> {
-    NAMESPACE_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
     NS_CACHE
         .entry(branch_id)
         .or_insert_with(|| Arc::new(Namespace::for_branch_space(branch_id, GRAPH_SPACE)))
@@ -113,16 +106,6 @@ pub fn graph_namespace(branch_id: BranchId) -> Arc<Namespace> {
 /// Remove a cached namespace entry (call on branch deletion).
 pub fn invalidate_namespace_cache(branch_id: &BranchId) {
     NS_CACHE.remove(branch_id);
-}
-
-/// Return the cumulative number of `graph_namespace` allocations since last reset.
-pub fn namespace_alloc_count() -> u64 {
-    NAMESPACE_ALLOC_COUNT.load(Ordering::Relaxed)
-}
-
-/// Reset the namespace allocation counter to zero.
-pub fn reset_namespace_alloc_count() {
-    NAMESPACE_ALLOC_COUNT.store(0, Ordering::Relaxed);
 }
 
 /// Build a full storage Key from a user_key string in the graph namespace.
@@ -795,19 +778,5 @@ mod tests {
             "Error should mention max length: {}",
             err
         );
-    }
-
-    #[test]
-    fn namespace_cache_lookup_counter_increments() {
-        let branch =
-            BranchId::from_bytes([0xCA, 0xCE, 0x07, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        let before = namespace_alloc_count();
-        graph_namespace(branch);
-        graph_namespace(branch);
-        graph_namespace(branch);
-        let after = namespace_alloc_count();
-        // Counter must have incremented by at least 3 (may be higher due to
-        // parallel tests, so we only assert the delta is >= 3).
-        assert!(after - before >= 3);
     }
 }
