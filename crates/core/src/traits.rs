@@ -10,6 +10,21 @@ use crate::error::StrataResult;
 use crate::types::{BranchId, Key};
 use crate::value::Value;
 
+/// Controls how a write interacts with existing versions of a key.
+///
+/// - `Append` (default): Standard MVCC — adds a new version, preserving history.
+/// - `Replace`: Overwrites the latest version, dropping all old versions.
+///   Use for internal data (e.g., graph adjacency lists) where multi-version
+///   history wastes memory without providing value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WriteMode {
+    /// Standard MVCC: push a new version onto the chain (keeps history)
+    #[default]
+    Append,
+    /// Single-version: replace the latest value, drop all old versions
+    Replace,
+}
+
 /// Storage abstraction for unified backend
 ///
 /// This trait enables replacing the MVP BTreeMap+RwLock implementation
@@ -176,6 +191,27 @@ pub trait Storage: Send + Sync {
         version: u64,
         ttl: Option<Duration>,
     ) -> StrataResult<()>;
+
+    /// Put a value with a specific version and write mode.
+    ///
+    /// Same as `put_with_version`, but respects `WriteMode`:
+    /// - `Append`: standard MVCC (adds version to chain)
+    /// - `Replace`: overwrites all previous versions (single-version)
+    ///
+    /// Default implementation ignores the mode and delegates to `put_with_version`.
+    /// Backends that support single-version writes (e.g., ShardedStore) should
+    /// override for memory efficiency.
+    fn put_with_version_mode(
+        &self,
+        key: Key,
+        value: Value,
+        version: u64,
+        ttl: Option<Duration>,
+        mode: WriteMode,
+    ) -> StrataResult<()> {
+        let _ = mode; // default ignores mode
+        self.put_with_version(key, value, version, ttl)
+    }
 
     /// Delete a key with a specific version (creates tombstone)
     ///

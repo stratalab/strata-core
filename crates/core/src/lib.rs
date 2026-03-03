@@ -32,7 +32,7 @@ pub use error::{
     ConstraintReason, DetailValue, ErrorCode, ErrorDetails, StrataError, StrataResult,
 };
 pub use limits::{LimitError, Limits};
-pub use traits::{SnapshotView, Storage};
+pub use traits::{SnapshotView, Storage, WriteMode};
 pub use types::{validate_space_name, BranchId, Key, Namespace, TypeTag};
 pub use value::Value;
 

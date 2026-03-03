@@ -36,6 +36,7 @@ use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use strata_core::traits::WriteMode;
 use strata_core::types::{BranchId, Key};
 use strata_core::{StrataError, StrataResult, Timestamp, Version, VersionedValue};
 
@@ -79,6 +80,28 @@ impl VersionChain {
     pub fn new(value: StoredValue) -> Self {
         Self {
             versions: VersionStorage::Single(value),
+        }
+    }
+
+    /// Replace the latest version in-place (no history accumulation).
+    ///
+    /// Drops all previous versions and stores only this value.
+    /// Use for internal data (e.g., graph adjacency lists) where
+    /// multi-version history is not needed and would waste memory.
+    #[inline]
+    pub fn replace_latest(&mut self, value: StoredValue) {
+        self.versions = VersionStorage::Single(value);
+    }
+
+    /// Add a new version, respecting the write mode.
+    ///
+    /// - `WriteMode::Append`: standard MVCC — pushes a new version (keeps history)
+    /// - `WriteMode::Replace`: overwrites — drops all old versions (no history)
+    #[inline]
+    pub fn put(&mut self, value: StoredValue, mode: WriteMode) {
+        match mode {
+            WriteMode::Append => self.push(value),
+            WriteMode::Replace => self.replace_latest(value),
         }
     }
 
@@ -463,6 +486,14 @@ impl ShardedStore {
             .map(|s| (s.data.len(), s.ordered_keys.is_some()))
     }
 
+    /// Get (entry_count, total_version_count, btree_built) for a branch.
+    pub fn shard_stats_detailed(&self, branch_id: &BranchId) -> Option<(usize, usize, bool)> {
+        self.shards.get(branch_id).map(|s| {
+            let total_versions: usize = s.data.values().map(|c| c.version_count()).sum();
+            (s.data.len(), total_versions, s.ordered_keys.is_some())
+        })
+    }
+
     /// Check if a branch exists
     pub fn has_branch(&self, branch_id: &BranchId) -> bool {
         self.shards.contains_key(branch_id)
@@ -561,7 +592,7 @@ impl ShardedStore {
     /// - O(1) insert via FxHashMap
     /// - Only locks the target branch's shard
     #[inline]
-    pub fn put(&self, key: Key, value: StoredValue) -> StrataResult<()> {
+    pub fn put(&self, key: Key, value: StoredValue, mode: WriteMode) -> StrataResult<()> {
         let branch_id = key.namespace.branch_id;
         self.ensure_branch_limit(branch_id)?;
         let mut shard = self.shards.entry(branch_id).or_default();
@@ -579,7 +610,7 @@ impl ShardedStore {
             if let Some(exp) = old_expiry {
                 shard.ttl_index.remove(exp, &key);
             }
-            chain.push(value);
+            chain.put(value, mode);
             // Register new TTL entry
             if let Some(exp) = new_expiry {
                 shard.ttl_index.insert(exp, key);
@@ -631,7 +662,7 @@ impl ShardedStore {
         });
 
         let tombstone = StoredValue::tombstone(Version::txn(delete_version));
-        self.put(key.clone(), tombstone)?;
+        self.put(key.clone(), tombstone, WriteMode::Append)?;
 
         Ok(previous)
     }
@@ -644,7 +675,7 @@ impl ShardedStore {
     #[inline]
     pub fn delete_with_version(&self, key: &Key, version: u64) -> StrataResult<()> {
         let tombstone = StoredValue::tombstone(Version::txn(version));
-        self.put(key.clone(), tombstone)?;
+        self.put(key.clone(), tombstone, WriteMode::Append)?;
         Ok(())
     }
 
@@ -1538,7 +1569,7 @@ impl Storage for ShardedStore {
         let stored = StoredValue::new(value, Version::txn(version), ttl);
 
         // Use the inherent put method which handles version chain
-        ShardedStore::put(self, key, stored)?;
+        ShardedStore::put(self, key, stored, WriteMode::Append)?;
 
         Ok(version)
     }
@@ -1635,10 +1666,21 @@ impl Storage for ShardedStore {
         version: u64,
         ttl: Option<Duration>,
     ) -> StrataResult<()> {
+        self.put_with_version_mode(key, value, version, ttl, WriteMode::Append)
+    }
+
+    fn put_with_version_mode(
+        &self,
+        key: Key,
+        value: Value,
+        version: u64,
+        ttl: Option<Duration>,
+        mode: WriteMode,
+    ) -> StrataResult<()> {
         let stored = StoredValue::new(value, Version::txn(version), ttl);
 
-        // Use the inherent put method which handles version chain
-        ShardedStore::put(self, key, stored)?;
+        // Use the inherent put method which handles version chain + mode
+        ShardedStore::put(self, key, stored, mode)?;
 
         // Update global version to be at least this version
         self.version.fetch_max(version, Ordering::AcqRel);
@@ -2014,7 +2056,11 @@ mod tests {
         for i in 0..5 {
             let key = create_test_key(branch_id, &format!("shared_{}", i));
             store
-                .put(key, create_stored_value(Value::Int(i), 1))
+                .put(
+                    key,
+                    create_stored_value(Value::Int(i), 1),
+                    WriteMode::Append,
+                )
                 .unwrap();
         }
 
@@ -2149,7 +2195,7 @@ mod tests {
         let value = create_stored_value(Value::Int(42), 1);
 
         // Put
-        store.put(key.clone(), value).unwrap();
+        store.put(key.clone(), value, WriteMode::Append).unwrap();
 
         // Get (Storage trait returns Result<Option<...>>)
         let retrieved = store.get(&key).unwrap();
@@ -2175,7 +2221,7 @@ mod tests {
         let key = create_test_key(branch_id, "to_delete");
         let value = create_stored_value(Value::Int(42), 1);
 
-        store.put(key.clone(), value).unwrap();
+        store.put(key.clone(), value, WriteMode::Append).unwrap();
         assert!(store.get(&key).unwrap().is_some());
 
         // Delete
@@ -2203,7 +2249,7 @@ mod tests {
         let value = create_stored_value(Value::Int(42), 1);
 
         assert!(!store.contains(&key));
-        store.put(key.clone(), value).unwrap();
+        store.put(key.clone(), value, WriteMode::Append).unwrap();
         assert!(store.contains(&key));
     }
 
@@ -2216,10 +2262,18 @@ mod tests {
         let key = create_test_key(branch_id, "overwrite");
 
         store
-            .put(key.clone(), create_stored_value(Value::Int(1), 1))
+            .put(
+                key.clone(),
+                create_stored_value(Value::Int(1), 1),
+                WriteMode::Append,
+            )
             .unwrap();
         store
-            .put(key.clone(), create_stored_value(Value::Int(2), 2))
+            .put(
+                key.clone(),
+                create_stored_value(Value::Int(2), 2),
+                WriteMode::Append,
+            )
             .unwrap();
 
         let retrieved = store.get(&key).unwrap().unwrap();
@@ -2239,10 +2293,18 @@ mod tests {
         let key2 = create_test_key(branch2, "key");
 
         store
-            .put(key1.clone(), create_stored_value(Value::Int(1), 1))
+            .put(
+                key1.clone(),
+                create_stored_value(Value::Int(1), 1),
+                WriteMode::Append,
+            )
             .unwrap();
         store
-            .put(key2.clone(), create_stored_value(Value::Int(2), 1))
+            .put(
+                key2.clone(),
+                create_stored_value(Value::Int(2), 1),
+                WriteMode::Append,
+            )
             .unwrap();
 
         // Different branches, same key name, different values
@@ -2264,7 +2326,11 @@ mod tests {
 
         // First, put key3 so we can delete it
         store
-            .put(key3.clone(), create_stored_value(Value::Int(999), 1))
+            .put(
+                key3.clone(),
+                create_stored_value(Value::Int(999), 1),
+                WriteMode::Append,
+            )
             .unwrap();
 
         // Apply batch
@@ -2291,7 +2357,11 @@ mod tests {
         for i in 0..5 {
             let key = create_test_key(branch_id, &format!("key{}", i));
             store
-                .put(key, create_stored_value(Value::Int(i), 1))
+                .put(
+                    key,
+                    create_stored_value(Value::Int(i), 1),
+                    WriteMode::Append,
+                )
                 .unwrap();
         }
 
@@ -2315,7 +2385,11 @@ mod tests {
                     for i in 0..100 {
                         let key = create_test_key(branch_id, &format!("key{}", i));
                         store
-                            .put(key, create_stored_value(Value::Int(i), 1))
+                            .put(
+                                key,
+                                create_stored_value(Value::Int(i), 1),
+                                WriteMode::Append,
+                            )
                             .unwrap();
                     }
                     branch_id
@@ -2358,7 +2432,11 @@ mod tests {
         for i in 0..5 {
             let key = create_test_key(branch_id, &format!("key{}", i));
             store
-                .put(key, create_stored_value(Value::Int(i), 1))
+                .put(
+                    key,
+                    create_stored_value(Value::Int(i), 1),
+                    WriteMode::Append,
+                )
                 .unwrap();
         }
 
@@ -2390,14 +2468,17 @@ mod tests {
         store.put(
             Key::new_kv(ns.clone(), "user:alice"),
             create_stored_value(Value::Int(1), 1),
+            WriteMode::Append,
         );
         store.put(
             Key::new_kv(ns.clone(), "user:bob"),
             create_stored_value(Value::Int(2), 1),
+            WriteMode::Append,
         );
         store.put(
             Key::new_kv(ns.clone(), "config:timeout"),
             create_stored_value(Value::Int(3), 1),
+            WriteMode::Append,
         );
 
         // Query with "user:" prefix
@@ -2428,6 +2509,7 @@ mod tests {
         store.put(
             Key::new_kv(ns.clone(), "data:foo"),
             create_stored_value(Value::Int(1), 1),
+            WriteMode::Append,
         );
 
         // Query with non-matching prefix
@@ -2456,22 +2538,26 @@ mod tests {
         store.put(
             Key::new_kv(ns.clone(), "kv1"),
             create_stored_value(Value::Int(1), 1),
+            WriteMode::Append,
         );
         store.put(
             Key::new_kv(ns.clone(), "kv2"),
             create_stored_value(Value::Int(2), 1),
+            WriteMode::Append,
         );
 
         // Insert Event entries
         store.put(
             Key::new_event(ns.clone(), 1),
             create_stored_value(Value::Int(10), 1),
+            WriteMode::Append,
         );
 
         // Insert State entries
         store.put(
             Key::new_state(ns.clone(), "state1"),
             create_stored_value(Value::Int(20), 1),
+            WriteMode::Append,
         );
 
         // Query by type
@@ -2505,12 +2591,14 @@ mod tests {
             store.put(
                 Key::new_kv(ns.clone(), format!("kv{}", i)),
                 create_stored_value(Value::Int(i), 1),
+                WriteMode::Append,
             );
         }
         for i in 0..3 {
             store.put(
                 Key::new_event(ns.clone(), i as u64),
                 create_stored_value(Value::Int(i), 1),
+                WriteMode::Append,
             );
         }
 
@@ -2532,14 +2620,17 @@ mod tests {
         store.put(
             create_test_key(branch1, "k1"),
             create_stored_value(Value::Int(1), 1),
+            WriteMode::Append,
         );
         store.put(
             create_test_key(branch2, "k1"),
             create_stored_value(Value::Int(2), 1),
+            WriteMode::Append,
         );
         store.put(
             create_test_key(branch3, "k1"),
             create_stored_value(Value::Int(3), 1),
+            WriteMode::Append,
         );
 
         let branch_ids = store.branch_ids();
@@ -2560,7 +2651,11 @@ mod tests {
         for i in 0..5 {
             let key = create_test_key(branch_id, &format!("key{}", i));
             store
-                .put(key, create_stored_value(Value::Int(i), 1))
+                .put(
+                    key,
+                    create_stored_value(Value::Int(i), 1),
+                    WriteMode::Append,
+                )
                 .unwrap();
         }
 
@@ -2604,6 +2699,7 @@ mod tests {
             store.put(
                 Key::new_kv(ns.clone(), *k),
                 create_stored_value(Value::String(k.to_string()), 1),
+                WriteMode::Append,
             );
         }
 
@@ -2658,7 +2754,11 @@ mod tests {
         // Put some data (version=1)
         let key = create_test_key(branch_id, "test_key");
         store
-            .put(key.clone(), create_stored_value(Value::Int(42), 1))
+            .put(
+                key.clone(),
+                create_stored_value(Value::Int(42), 1),
+                WriteMode::Append,
+            )
             .unwrap();
         // Update store version so snapshot can see data at version 1
         store.set_version(1);
@@ -2686,7 +2786,11 @@ mod tests {
         for i in 0..5 {
             let key = create_test_key(branch_id, &format!("key{}", i));
             store
-                .put(key, create_stored_value(Value::Int(i), 1))
+                .put(
+                    key,
+                    create_stored_value(Value::Int(i), 1),
+                    WriteMode::Append,
+                )
                 .unwrap();
         }
 
@@ -2720,7 +2824,11 @@ mod tests {
         // Add data and increment version
         let key1 = create_test_key(branch_id, "key1");
         store
-            .put(key1.clone(), create_stored_value(Value::Int(1), 1))
+            .put(
+                key1.clone(),
+                create_stored_value(Value::Int(1), 1),
+                WriteMode::Append,
+            )
             .unwrap();
         store.next_version();
 
@@ -2731,7 +2839,11 @@ mod tests {
         // Add more data
         let key2 = create_test_key(branch_id, "key2");
         store
-            .put(key2.clone(), create_stored_value(Value::Int(2), 2))
+            .put(
+                key2.clone(),
+                create_stored_value(Value::Int(2), 2),
+                WriteMode::Append,
+            )
             .unwrap();
         store.next_version();
 
@@ -2820,6 +2932,7 @@ mod tests {
             store.put(
                 key,
                 create_stored_value(strata_core::value::Value::Int(i), 1),
+                WriteMode::Append,
             );
         }
 
@@ -3139,7 +3252,7 @@ mod tests {
             strata_core::Timestamp::from_micros(0), // epoch = definitely expired
             Some(Duration::from_secs(1)),
         );
-        ShardedStore::put(&store, key.clone(), sv).unwrap();
+        ShardedStore::put(&store, key.clone(), sv, WriteMode::Append).unwrap();
 
         // get_version_only should return None for expired key (same as get())
         assert_eq!(Storage::get_version_only(&store, &key).unwrap(), None);
@@ -4070,7 +4183,9 @@ mod tests {
             old_ts,
             Some(std::time::Duration::from_secs(1)), // expired long ago
         );
-        store.put(key2.clone(), expired_value).unwrap();
+        store
+            .put(key2.clone(), expired_value, WriteMode::Append)
+            .unwrap();
 
         // Update store version
         store.set_version(2);
@@ -4347,7 +4462,9 @@ mod tests {
             Timestamp::from_micros(1),               // ancient timestamp
             Some(std::time::Duration::from_secs(1)), // expired long ago
         );
-        store.put(key.clone(), expired_value).unwrap();
+        store
+            .put(key.clone(), expired_value, WriteMode::Append)
+            .unwrap();
 
         assert!(
             store.get_direct(&key).is_none(),
@@ -4835,9 +4952,14 @@ mod tests {
         store.put(
             key.clone(),
             StoredValue::new(strata_core::value::Value::Int(1), Version::txn(1), None),
+            WriteMode::Append,
         );
         store
-            .put(key.clone(), StoredValue::tombstone(Version::txn(10)))
+            .put(
+                key.clone(),
+                StoredValue::tombstone(Version::txn(10)),
+                WriteMode::Append,
+            )
             .unwrap();
 
         // BTreeSet not built yet — verify GC handles the None case
@@ -4881,7 +5003,11 @@ mod tests {
 
         let key = Key::new_kv(ns.clone(), "orphan_tombstone");
         store
-            .put(key.clone(), StoredValue::tombstone(Version::txn(5)))
+            .put(
+                key.clone(),
+                StoredValue::tombstone(Version::txn(5)),
+                WriteMode::Append,
+            )
             .unwrap();
 
         // gc() on Single is a noop (returns 0), but is_dead() should still
@@ -4912,9 +5038,14 @@ mod tests {
         store.put(
             key.clone(),
             StoredValue::new(strata_core::value::Value::Int(1), Version::txn(1), None),
+            WriteMode::Append,
         );
         store
-            .put(key.clone(), StoredValue::tombstone(Version::txn(10)))
+            .put(
+                key.clone(),
+                StoredValue::tombstone(Version::txn(10)),
+                WriteMode::Append,
+            )
             .unwrap();
 
         // Trigger BTreeSet build before GC
@@ -4953,15 +5084,21 @@ mod tests {
         store.put(
             key_a.clone(),
             StoredValue::new(strata_core::value::Value::Int(1), Version::txn(1), None),
+            WriteMode::Append,
         );
 
         // Key B: value then tombstone
         store.put(
             key_b.clone(),
             StoredValue::new(strata_core::value::Value::Int(2), Version::txn(2), None),
+            WriteMode::Append,
         );
         store
-            .put(key_b.clone(), StoredValue::tombstone(Version::txn(10)))
+            .put(
+                key_b.clone(),
+                StoredValue::tombstone(Version::txn(10)),
+                WriteMode::Append,
+            )
             .unwrap();
 
         // Build BTreeSet
@@ -5005,10 +5142,12 @@ mod tests {
         store.put(
             key.clone(),
             StoredValue::new(strata_core::value::Value::Int(1), Version::txn(5), None),
+            WriteMode::Append,
         );
         store.put(
             key.clone(),
             StoredValue::new(strata_core::value::Value::Int(2), Version::txn(10), None),
+            WriteMode::Append,
         );
 
         // Build BTreeSet before GC
@@ -5051,9 +5190,14 @@ mod tests {
         store.put(
             key.clone(),
             StoredValue::new(strata_core::value::Value::Int(1), Version::txn(10), None),
+            WriteMode::Append,
         );
         store
-            .put(key.clone(), StoredValue::tombstone(Version::txn(20)))
+            .put(
+                key.clone(),
+                StoredValue::tombstone(Version::txn(20)),
+                WriteMode::Append,
+            )
             .unwrap();
 
         // Build BTreeSet to verify it's maintained across progressive GC
@@ -5116,11 +5260,16 @@ mod tests {
         store.put(
             key_live.clone(),
             StoredValue::new(strata_core::value::Value::Int(1), Version::txn(1), None),
+            WriteMode::Append,
         );
 
         // Dead key (tombstone only)
         store
-            .put(key_dead.clone(), StoredValue::tombstone(Version::txn(2)))
+            .put(
+                key_dead.clone(),
+                StoredValue::tombstone(Version::txn(2)),
+                WriteMode::Append,
+            )
             .unwrap();
 
         // Build BTreeSet — should skip the dead key
@@ -5177,7 +5326,11 @@ mod tests {
         // Tombstone beta
         let beta_key = Key::new_kv(ns.clone(), "beta");
         store
-            .put(beta_key.clone(), StoredValue::tombstone(Version::txn(100)))
+            .put(
+                beta_key.clone(),
+                StoredValue::tombstone(Version::txn(100)),
+                WriteMode::Append,
+            )
             .unwrap();
 
         // Scan before GC — beta should not appear (tombstoned)
@@ -5262,7 +5415,7 @@ mod tests {
         let sv = make_sv_with_ttl(1, 60);
         let expected_expiry = sv.expiry_timestamp().unwrap();
 
-        store.put(key.clone(), sv).unwrap();
+        store.put(key.clone(), sv, WriteMode::Append).unwrap();
 
         // Verify TTL index has the entry
         let shard = store.shards.get(&key.namespace.branch_id).unwrap();
@@ -5280,12 +5433,12 @@ mod tests {
         // First put with TTL=60s
         let sv1 = make_sv_with_ttl(1, 60);
         let old_expiry = sv1.expiry_timestamp().unwrap();
-        store.put(key.clone(), sv1).unwrap();
+        store.put(key.clone(), sv1, WriteMode::Append).unwrap();
 
         // Overwrite with TTL=120s
         let sv2 = make_sv_with_ttl(2, 120);
         let new_expiry = sv2.expiry_timestamp().unwrap();
-        store.put(key.clone(), sv2).unwrap();
+        store.put(key.clone(), sv2, WriteMode::Append).unwrap();
 
         let shard = store.shards.get(&key.namespace.branch_id).unwrap();
         // Should have exactly 1 TTL entry (the new one), not 2
@@ -5304,14 +5457,18 @@ mod tests {
         let key = test_ns_and_key("ttl_to_none");
 
         // First put with TTL
-        store.put(key.clone(), make_sv_with_ttl(1, 60)).unwrap();
+        store
+            .put(key.clone(), make_sv_with_ttl(1, 60), WriteMode::Append)
+            .unwrap();
         {
             let shard = store.shards.get(&key.namespace.branch_id).unwrap();
             assert_eq!(shard.ttl_index.len(), 1);
         }
 
         // Overwrite without TTL
-        store.put(key.clone(), make_sv(2)).unwrap();
+        store
+            .put(key.clone(), make_sv(2), WriteMode::Append)
+            .unwrap();
         {
             let shard = store.shards.get(&key.namespace.branch_id).unwrap();
             assert!(
@@ -5326,7 +5483,9 @@ mod tests {
         let store = ShardedStore::new();
         let key = test_ns_and_key("no_ttl");
 
-        store.put(key.clone(), make_sv(1)).unwrap();
+        store
+            .put(key.clone(), make_sv(1), WriteMode::Append)
+            .unwrap();
 
         let shard = store.shards.get(&key.namespace.branch_id).unwrap();
         assert!(
@@ -5341,7 +5500,9 @@ mod tests {
         let key = test_ns_and_key("delete_ttl");
 
         // Put with TTL
-        store.put(key.clone(), make_sv_with_ttl(1, 60)).unwrap();
+        store
+            .put(key.clone(), make_sv_with_ttl(1, 60), WriteMode::Append)
+            .unwrap();
         {
             let shard = store.shards.get(&key.namespace.branch_id).unwrap();
             assert_eq!(shard.ttl_index.len(), 1);
@@ -5349,7 +5510,11 @@ mod tests {
 
         // Delete (tombstone) — should clean the TTL entry
         store
-            .put(key.clone(), StoredValue::tombstone(Version::txn(2)))
+            .put(
+                key.clone(),
+                StoredValue::tombstone(Version::txn(2)),
+                WriteMode::Append,
+            )
             .unwrap();
         {
             let shard = store.shards.get(&key.namespace.branch_id).unwrap();
@@ -5367,8 +5532,12 @@ mod tests {
         let key2 = test_ns_and_key("exp2");
 
         // Insert two keys with TTLs that are already expired (epoch + 1ms)
-        store.put(key1.clone(), make_expired_sv(1)).unwrap();
-        store.put(key2.clone(), make_expired_sv(2)).unwrap();
+        store
+            .put(key1.clone(), make_expired_sv(1), WriteMode::Append)
+            .unwrap();
+        store
+            .put(key2.clone(), make_expired_sv(2), WriteMode::Append)
+            .unwrap();
 
         {
             let shard = store.shards.get(&key1.namespace.branch_id).unwrap();
@@ -5392,7 +5561,9 @@ mod tests {
         let branch_id = key.namespace.branch_id;
 
         // Version 1: value with TTL (already expired)
-        store.put(key.clone(), make_expired_sv(1)).unwrap();
+        store
+            .put(key.clone(), make_expired_sv(1), WriteMode::Append)
+            .unwrap();
         {
             let shard = store.shards.get(&branch_id).unwrap();
             assert_eq!(shard.ttl_index.len(), 1);
@@ -5400,7 +5571,11 @@ mod tests {
 
         // Version 2: tombstone (makes it dead after GC)
         store
-            .put(key.clone(), StoredValue::tombstone(Version::txn(2)))
+            .put(
+                key.clone(),
+                StoredValue::tombstone(Version::txn(2)),
+                WriteMode::Append,
+            )
             .unwrap();
 
         // Tombstone should have cleaned the TTL entry from the put() path
@@ -5428,7 +5603,9 @@ mod tests {
         let branch_id = key.namespace.branch_id;
 
         // Single expired version (no tombstone, just expired TTL)
-        store.put(key.clone(), make_expired_sv(1)).unwrap();
+        store
+            .put(key.clone(), make_expired_sv(1), WriteMode::Append)
+            .unwrap();
         {
             let shard = store.shards.get(&branch_id).unwrap();
             assert_eq!(shard.ttl_index.len(), 1);
@@ -5455,7 +5632,9 @@ mod tests {
         let branch_id = key.namespace.branch_id;
 
         // First: put with TTL via the normal path
-        store.put(key.clone(), make_sv_with_ttl(1, 60)).unwrap();
+        store
+            .put(key.clone(), make_sv_with_ttl(1, 60), WriteMode::Append)
+            .unwrap();
         {
             let shard = store.shards.get(&branch_id).unwrap();
             assert_eq!(shard.ttl_index.len(), 1);
@@ -5487,7 +5666,11 @@ mod tests {
             let branch_id = BranchId::new();
             let key = create_test_key(branch_id, &format!("k{}", i));
             store
-                .put(key, create_stored_value(Value::Int(i), 1))
+                .put(
+                    key,
+                    create_stored_value(Value::Int(i), 1),
+                    WriteMode::Append,
+                )
                 .unwrap();
         }
         assert_eq!(store.shard_count(), 3);
@@ -5502,14 +5685,22 @@ mod tests {
             let branch_id = BranchId::new();
             let key = create_test_key(branch_id, &format!("k{}", i));
             store
-                .put(key, create_stored_value(Value::Int(i), 1))
+                .put(
+                    key,
+                    create_stored_value(Value::Int(i), 1),
+                    WriteMode::Append,
+                )
                 .unwrap();
         }
         // Third branch should fail
         let branch_id = BranchId::new();
         let key = create_test_key(branch_id, "overflow");
         let err = store
-            .put(key, create_stored_value(Value::Int(99), 1))
+            .put(
+                key,
+                create_stored_value(Value::Int(99), 1),
+                WriteMode::Append,
+            )
             .unwrap_err();
         assert!(
             format!("{}", err).contains("branches"),
@@ -5527,11 +5718,19 @@ mod tests {
         let key1 = create_test_key(branch_id, "k1");
         let key2 = create_test_key(branch_id, "k2");
         store
-            .put(key1, create_stored_value(Value::Int(1), 1))
+            .put(
+                key1,
+                create_stored_value(Value::Int(1), 1),
+                WriteMode::Append,
+            )
             .unwrap();
         // Same branch — should succeed even though limit is 1
         store
-            .put(key2, create_stored_value(Value::Int(2), 2))
+            .put(
+                key2,
+                create_stored_value(Value::Int(2), 2),
+                WriteMode::Append,
+            )
             .unwrap();
         assert_eq!(store.shard_count(), 1);
     }
@@ -5545,7 +5744,11 @@ mod tests {
             let branch_id = BranchId::new();
             let key = create_test_key(branch_id, &format!("k{}", i));
             store
-                .put(key, create_stored_value(Value::Int(i), 1))
+                .put(
+                    key,
+                    create_stored_value(Value::Int(i), 1),
+                    WriteMode::Append,
+                )
                 .unwrap();
         }
         assert_eq!(store.shard_count(), 100);
@@ -5598,7 +5801,11 @@ mod tests {
         for i in 0..10 {
             let key = create_test_key(b1, &format!("k{}", i));
             store
-                .put(key, create_stored_value(Value::Int(i), 1))
+                .put(
+                    key,
+                    create_stored_value(Value::Int(i), 1),
+                    WriteMode::Append,
+                )
                 .unwrap();
         }
 
@@ -5606,7 +5813,11 @@ mod tests {
         for i in 0..5 {
             let key = create_test_key(b2, &format!("k{}", i));
             store
-                .put(key, create_stored_value(Value::Int(i), 1))
+                .put(
+                    key,
+                    create_stored_value(Value::Int(i), 1),
+                    WriteMode::Append,
+                )
                 .unwrap();
         }
 
@@ -5633,7 +5844,11 @@ mod tests {
         for i in 0..10 {
             let key = create_test_key(branch, &format!("k{}", i));
             store
-                .put(key, create_stored_value(Value::Int(i), 1))
+                .put(
+                    key,
+                    create_stored_value(Value::Int(i), 1),
+                    WriteMode::Append,
+                )
                 .unwrap();
         }
 
@@ -5659,7 +5874,11 @@ mod tests {
             branches.push(branch);
             let key = create_test_key(branch, &format!("k{}", i));
             store
-                .put(key, create_stored_value(Value::Int(i), 1))
+                .put(
+                    key,
+                    create_stored_value(Value::Int(i), 1),
+                    WriteMode::Append,
+                )
                 .unwrap();
         }
         assert_eq!(store.shard_count(), 5);
@@ -5668,14 +5887,22 @@ mod tests {
         store.set_max_branches(5);
         let key = create_test_key(branches[0], "extra");
         store
-            .put(key, create_stored_value(Value::Int(99), 2))
+            .put(
+                key,
+                create_stored_value(Value::Int(99), 2),
+                WriteMode::Append,
+            )
             .unwrap();
 
         // But a 6th branch should fail
         let new_branch = BranchId::new();
         let key = create_test_key(new_branch, "overflow");
         let err = store
-            .put(key, create_stored_value(Value::Int(100), 3))
+            .put(
+                key,
+                create_stored_value(Value::Int(100), 3),
+                WriteMode::Append,
+            )
             .unwrap_err();
         assert!(format!("{}", err).contains("branches"));
     }
@@ -5688,7 +5915,11 @@ mod tests {
         let b1 = BranchId::new();
         let key1 = create_test_key(b1, "k1");
         store
-            .put(key1.clone(), create_stored_value(Value::Int(1), 1))
+            .put(
+                key1.clone(),
+                create_stored_value(Value::Int(1), 1),
+                WriteMode::Append,
+            )
             .unwrap();
 
         // delete() on an existing branch is fine
