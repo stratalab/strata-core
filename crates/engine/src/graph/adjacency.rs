@@ -53,18 +53,29 @@ impl AdjacencyIndex {
         }
     }
 
-    /// Add an edge to the index.
+    /// Add an edge to the index (dedup: last-write-wins for same dst+edge_type).
     pub fn add_edge(&mut self, src: &str, dst: &str, edge_type: &str, data: EdgeData) {
-        self.outgoing.entry(src.to_string()).or_default().push((
-            dst.to_string(),
-            edge_type.to_string(),
-            data.clone(),
-        ));
-        self.incoming.entry(dst.to_string()).or_default().push((
-            src.to_string(),
-            edge_type.to_string(),
-            data,
-        ));
+        // Forward: dedup on (dst, edge_type)
+        let fwd = self.outgoing.entry(src.to_string()).or_default();
+        if let Some(existing) = fwd
+            .iter_mut()
+            .find(|(d, et, _)| d == dst && et == edge_type)
+        {
+            existing.2 = data.clone();
+        } else {
+            fwd.push((dst.to_string(), edge_type.to_string(), data.clone()));
+        }
+
+        // Reverse: dedup on (src, edge_type)
+        let rev = self.incoming.entry(dst.to_string()).or_default();
+        if let Some(existing) = rev
+            .iter_mut()
+            .find(|(s, et, _)| s == src && et == edge_type)
+        {
+            existing.2 = data;
+        } else {
+            rev.push((src.to_string(), edge_type.to_string(), data));
+        }
     }
 
     /// Remove an edge from the index.
@@ -252,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn add_edge_duplicate_appends() {
+    fn add_edge_duplicate_replaces() {
         let mut idx = AdjacencyIndex::new();
         idx.add_edge("A", "B", "KNOWS", EdgeData::default());
         idx.add_edge(
@@ -265,9 +276,32 @@ mod tests {
             },
         );
 
-        // AdjacencyIndex doesn't deduplicate — caller is responsible
+        // Dedup: same (dst, edge_type) → last-write-wins
+        let out = idx.outgoing_neighbors("A", None);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].edge_data.weight, 2.0);
+
+        let inc = idx.incoming_neighbors("B", None);
+        assert_eq!(inc.len(), 1);
+        assert_eq!(inc[0].edge_data.weight, 2.0);
+    }
+
+    #[test]
+    fn different_edge_types_same_dst_not_deduped() {
+        let mut idx = AdjacencyIndex::new();
+        idx.add_edge("A", "B", "KNOWS", EdgeData::default());
+        idx.add_edge("A", "B", "LIKES", EdgeData::default());
+
+        // Same (src, dst) but different edge types → kept as separate edges
         let out = idx.outgoing_neighbors("A", None);
         assert_eq!(out.len(), 2);
+
+        let inc = idx.incoming_neighbors("B", None);
+        assert_eq!(inc.len(), 2);
+
+        // Each type should be separately queryable
+        assert_eq!(idx.outgoing_neighbors("A", Some("KNOWS")).len(), 1);
+        assert_eq!(idx.outgoing_neighbors("A", Some("LIKES")).len(), 1);
     }
 
     #[test]

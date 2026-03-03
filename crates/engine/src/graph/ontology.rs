@@ -220,23 +220,22 @@ impl GraphStore {
     pub fn freeze_ontology(&self, branch_id: BranchId, graph: &str) -> StrataResult<()> {
         keys::validate_graph_name(graph)?;
 
+        // Pre-validate outside the transaction (cheap, fast-fail for obvious errors).
         let meta = self
             .get_graph_meta(branch_id, graph)?
             .ok_or_else(|| StrataError::invalid_input("Graph does not exist"))?;
 
-        // Already frozen → no-op
         if meta.ontology_status == Some(OntologyStatus::Frozen) {
             return Ok(());
         }
-
-        // Must be draft to freeze
         if meta.ontology_status.is_none() {
             return Err(StrataError::invalid_input(
                 "Cannot freeze ontology: no types defined (graph is untyped)",
             ));
         }
 
-        // Collect object type names
+        // Collect and validate type definitions (reads are safe outside txn — they
+        // are self-consistent and only checked against each other).
         let object_types = self.list_object_types(branch_id, graph)?;
         let link_types = self.list_link_types(branch_id, graph)?;
 
@@ -246,7 +245,6 @@ impl GraphStore {
             ));
         }
 
-        // Validate link type source/target references
         let obj_set: std::collections::HashSet<&str> =
             object_types.iter().map(|s| s.as_str()).collect();
         for lt_name in &link_types {
@@ -269,18 +267,35 @@ impl GraphStore {
             }
         }
 
-        // Update meta to Frozen
-        let new_meta = GraphMeta {
-            ontology_status: Some(OntologyStatus::Frozen),
-            ..meta
-        };
-        let meta_json = serde_json::to_string(&new_meta)
-            .map_err(|e| StrataError::serialization(e.to_string()))?;
-        let user_key = keys::meta_key(graph);
-        let storage_key = keys::storage_key(branch_id, &user_key);
+        // Atomic read-modify-write: read meta inside the transaction so OCC will
+        // abort if a concurrent define_object_type() modified meta between our
+        // pre-check and this write.
+        let meta_user_key = keys::meta_key(graph);
+        let meta_storage_key = keys::storage_key(branch_id, &meta_user_key);
 
         self.db.transaction(branch_id, |txn| {
-            txn.put(storage_key.clone(), Value::String(meta_json.clone()))
+            // Re-read meta inside txn — OCC tracks this read.
+            let current_val = txn.get(&meta_storage_key)?;
+            let current_meta: GraphMeta = match current_val {
+                Some(Value::String(s)) => serde_json::from_str(&s)
+                    .map_err(|e| StrataError::serialization(e.to_string()))?,
+                _ => {
+                    return Err(StrataError::invalid_input("Graph does not exist"));
+                }
+            };
+
+            // Re-check status inside txn (may have changed concurrently)
+            if current_meta.ontology_status == Some(OntologyStatus::Frozen) {
+                return Ok(());
+            }
+
+            let new_meta = GraphMeta {
+                ontology_status: Some(OntologyStatus::Frozen),
+                ..current_meta
+            };
+            let meta_json = serde_json::to_string(&new_meta)
+                .map_err(|e| StrataError::serialization(e.to_string()))?;
+            txn.put(meta_storage_key.clone(), Value::String(meta_json))
         })
     }
 
@@ -314,7 +329,7 @@ impl GraphStore {
             }
         };
 
-        // Check required properties
+        // Check required properties and type enforcement
         for (prop_name, prop_def) in &type_def.properties {
             if prop_def.required {
                 let has_prop = data
@@ -330,6 +345,9 @@ impl GraphStore {
                     )));
                 }
             }
+
+            // Type enforcement (G-16)
+            Self::check_property_type(object_type, prop_name, prop_def, data.properties.as_ref())?;
         }
 
         Ok(())
@@ -345,6 +363,7 @@ impl GraphStore {
         src: &str,
         dst: &str,
         edge_type: &str,
+        edge_data: &EdgeData,
     ) -> StrataResult<()> {
         let link_def = match self.get_link_type(branch_id, graph, edge_type)? {
             Some(def) => def,
@@ -382,7 +401,182 @@ impl GraphStore {
             // Untyped target: skip check
         }
 
+        // Check edge property types (G-16)
+        for (prop_name, prop_def) in &link_def.properties {
+            if prop_def.required {
+                let has_prop = edge_data
+                    .properties
+                    .as_ref()
+                    .and_then(|p| p.as_object())
+                    .map(|obj| obj.contains_key(prop_name))
+                    .unwrap_or(false);
+                if !has_prop {
+                    return Err(StrataError::invalid_input(format!(
+                        "Edge of type '{}' is missing required property '{}'",
+                        edge_type, prop_name
+                    )));
+                }
+            }
+            Self::check_property_type(
+                edge_type,
+                prop_name,
+                prop_def,
+                edge_data.properties.as_ref(),
+            )?;
+        }
+
         Ok(())
+    }
+
+    // =========================================================================
+    // Cached validation (for bulk operations)
+    // =========================================================================
+
+    /// Validate a node using pre-loaded type definitions (no KV reads).
+    pub(crate) fn validate_node_cached(
+        &self,
+        graph: &str,
+        _node_id: &str,
+        data: &NodeData,
+        object_type_cache: &HashMap<String, ObjectTypeDef>,
+    ) -> StrataResult<()> {
+        let object_type = match &data.object_type {
+            Some(t) => t,
+            None => return Ok(()),
+        };
+
+        let type_def = object_type_cache.get(object_type).ok_or_else(|| {
+            StrataError::invalid_input(format!(
+                "Object type '{}' is not declared in frozen ontology for graph '{}'",
+                object_type, graph
+            ))
+        })?;
+
+        // Check required properties
+        for (prop_name, prop_def) in &type_def.properties {
+            if prop_def.required {
+                let has_prop = data
+                    .properties
+                    .as_ref()
+                    .and_then(|p| p.as_object())
+                    .map(|obj| obj.contains_key(prop_name))
+                    .unwrap_or(false);
+                if !has_prop {
+                    return Err(StrataError::invalid_input(format!(
+                        "Node of type '{}' is missing required property '{}'",
+                        object_type, prop_name
+                    )));
+                }
+            }
+
+            // Type enforcement (G-16)
+            Self::check_property_type(object_type, prop_name, prop_def, data.properties.as_ref())?;
+        }
+
+        Ok(())
+    }
+
+    /// Validate an edge using pre-loaded type definitions (no KV reads for types).
+    ///
+    /// Still reads nodes to check source/target object_type, but link type defs
+    /// come from the cache.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn validate_edge_cached(
+        &self,
+        branch_id: BranchId,
+        graph: &str,
+        src: &str,
+        dst: &str,
+        edge_type: &str,
+        edge_data: &EdgeData,
+        link_type_cache: &HashMap<String, LinkTypeDef>,
+    ) -> StrataResult<()> {
+        let link_def = link_type_cache.get(edge_type).ok_or_else(|| {
+            StrataError::invalid_input(format!(
+                "Edge type '{}' is not declared in frozen ontology for graph '{}'",
+                edge_type, graph
+            ))
+        })?;
+
+        if let Some(src_data) = self.get_node(branch_id, graph, src)? {
+            if let Some(src_type) = &src_data.object_type {
+                if src_type != &link_def.source {
+                    return Err(StrataError::invalid_input(format!(
+                        "Edge type '{}' requires source type '{}', but node '{}' has type '{}'",
+                        edge_type, link_def.source, src, src_type
+                    )));
+                }
+            }
+        }
+
+        if let Some(dst_data) = self.get_node(branch_id, graph, dst)? {
+            if let Some(dst_type) = &dst_data.object_type {
+                if dst_type != &link_def.target {
+                    return Err(StrataError::invalid_input(format!(
+                        "Edge type '{}' requires target type '{}', but node '{}' has type '{}'",
+                        edge_type, link_def.target, dst, dst_type
+                    )));
+                }
+            }
+        }
+
+        // Check edge property types (G-16)
+        for (prop_name, prop_def) in &link_def.properties {
+            if prop_def.required {
+                let has_prop = edge_data
+                    .properties
+                    .as_ref()
+                    .and_then(|p| p.as_object())
+                    .map(|obj| obj.contains_key(prop_name))
+                    .unwrap_or(false);
+                if !has_prop {
+                    return Err(StrataError::invalid_input(format!(
+                        "Edge of type '{}' is missing required property '{}'",
+                        edge_type, prop_name
+                    )));
+                }
+            }
+            Self::check_property_type(
+                edge_type,
+                prop_name,
+                prop_def,
+                edge_data.properties.as_ref(),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Load all object type definitions into a cache for bulk validation.
+    pub(crate) fn load_object_type_cache(
+        &self,
+        branch_id: BranchId,
+        graph: &str,
+    ) -> StrataResult<HashMap<String, ObjectTypeDef>> {
+        let names = self.list_object_types(branch_id, graph)?;
+        let mut cache = HashMap::with_capacity(names.len());
+        for name in names {
+            if let Some(def) = self.get_object_type(branch_id, graph, &name)? {
+                cache.insert(name, def);
+            }
+        }
+        Ok(cache)
+    }
+
+    /// Load all link type definitions into a cache for bulk validation.
+    pub(crate) fn load_link_type_cache(
+        &self,
+        branch_id: BranchId,
+        graph: &str,
+    ) -> StrataResult<HashMap<String, LinkTypeDef>> {
+        let names = self.list_link_types(branch_id, graph)?;
+        let mut cache = HashMap::with_capacity(names.len());
+        for name in names {
+            if let Some(def) = self.get_link_type(branch_id, graph, &name)? {
+                cache.insert(name, def);
+            }
+        }
+        Ok(cache)
     }
 
     // =========================================================================
@@ -512,6 +706,53 @@ impl GraphStore {
         }
     }
 
+    /// Check that a property value matches the declared type hint (G-16).
+    ///
+    /// Only enforces when the property exists AND has a type hint.
+    /// Missing optional properties and unknown type hints are silently accepted.
+    fn check_property_type(
+        type_name: &str,
+        prop_name: &str,
+        prop_def: &PropertyDef,
+        properties: Option<&serde_json::Value>,
+    ) -> StrataResult<()> {
+        let expected_type = match &prop_def.r#type {
+            Some(t) => t.as_str(),
+            None => return Ok(()),
+        };
+
+        // Get the actual value; if the property is absent, skip (handled by required check)
+        let value = match properties
+            .and_then(|p| p.as_object())
+            .and_then(|obj| obj.get(prop_name))
+        {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+
+        let ok = match expected_type {
+            "string" => value.is_string(),
+            "integer" | "int" => value.is_i64() || value.is_u64(),
+            "number" | "float" => value.is_number(),
+            "boolean" | "bool" => value.is_boolean(),
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            _ => true, // unknown type hint — skip (backward compat)
+        };
+
+        if !ok {
+            return Err(StrataError::invalid_input(format!(
+                "Property '{}' on type '{}' must be of type '{}', got {}",
+                prop_name,
+                type_name,
+                expected_type,
+                json_type_name(value)
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Count edges of a given type by scanning packed forward adjacency lists.
     fn count_edges_by_type(
         &self,
@@ -538,6 +779,18 @@ impl GraphStore {
             }
             Ok(count)
         })
+    }
+}
+
+/// Return a human-readable JSON type name for error messages.
+fn json_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
     }
 }
 
@@ -1805,5 +2058,457 @@ mod tests {
         // Undeclared edge type should still pass (draft, not frozen)
         let result = gs.add_edge(b, "g", "x1", "x2", "UNDECLARED_LINK", EdgeData::default());
         assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // Property type enforcement (G-16)
+    // =========================================================================
+
+    #[test]
+    fn property_type_string_enforced() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+        gs.create_graph(b, "g", None).unwrap();
+
+        let mut props = HashMap::new();
+        props.insert(
+            "name".to_string(),
+            PropertyDef {
+                r#type: Some("string".to_string()),
+                required: true,
+            },
+        );
+        gs.define_object_type(
+            b,
+            "g",
+            ObjectTypeDef {
+                name: "Item".to_string(),
+                properties: props,
+            },
+        )
+        .unwrap();
+        gs.freeze_ontology(b, "g").unwrap();
+
+        // Correct type: string
+        let ok_data = NodeData {
+            object_type: Some("Item".to_string()),
+            properties: Some(serde_json::json!({"name": "widget"})),
+            ..Default::default()
+        };
+        assert!(gs.add_node(b, "g", "i1", ok_data).is_ok());
+
+        // Wrong type: number
+        let bad_data = NodeData {
+            object_type: Some("Item".to_string()),
+            properties: Some(serde_json::json!({"name": 42})),
+            ..Default::default()
+        };
+        let err = gs.add_node(b, "g", "i2", bad_data).unwrap_err();
+        assert!(err.to_string().contains("must be of type 'string'"));
+    }
+
+    #[test]
+    fn property_type_integer_enforced() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+        gs.create_graph(b, "g", None).unwrap();
+
+        let mut props = HashMap::new();
+        props.insert(
+            "count".to_string(),
+            PropertyDef {
+                r#type: Some("integer".to_string()),
+                required: false,
+            },
+        );
+        gs.define_object_type(
+            b,
+            "g",
+            ObjectTypeDef {
+                name: "Counter".to_string(),
+                properties: props,
+            },
+        )
+        .unwrap();
+        gs.freeze_ontology(b, "g").unwrap();
+
+        // integer accepted
+        let ok = NodeData {
+            object_type: Some("Counter".to_string()),
+            properties: Some(serde_json::json!({"count": 5})),
+            ..Default::default()
+        };
+        assert!(gs.add_node(b, "g", "c1", ok).is_ok());
+
+        // float is not integer
+        let bad = NodeData {
+            object_type: Some("Counter".to_string()),
+            properties: Some(serde_json::json!({"count": 3.14})),
+            ..Default::default()
+        };
+        let err = gs.add_node(b, "g", "c2", bad).unwrap_err();
+        assert!(err.to_string().contains("must be of type 'integer'"));
+
+        // Missing optional property: OK
+        let missing = NodeData {
+            object_type: Some("Counter".to_string()),
+            properties: Some(serde_json::json!({})),
+            ..Default::default()
+        };
+        assert!(gs.add_node(b, "g", "c3", missing).is_ok());
+    }
+
+    #[test]
+    fn property_type_boolean_enforced() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+        gs.create_graph(b, "g", None).unwrap();
+
+        let mut props = HashMap::new();
+        props.insert(
+            "active".to_string(),
+            PropertyDef {
+                r#type: Some("boolean".to_string()),
+                required: true,
+            },
+        );
+        gs.define_object_type(
+            b,
+            "g",
+            ObjectTypeDef {
+                name: "Flag".to_string(),
+                properties: props,
+            },
+        )
+        .unwrap();
+        gs.freeze_ontology(b, "g").unwrap();
+
+        let ok = NodeData {
+            object_type: Some("Flag".to_string()),
+            properties: Some(serde_json::json!({"active": true})),
+            ..Default::default()
+        };
+        assert!(gs.add_node(b, "g", "f1", ok).is_ok());
+
+        let bad = NodeData {
+            object_type: Some("Flag".to_string()),
+            properties: Some(serde_json::json!({"active": "yes"})),
+            ..Default::default()
+        };
+        let err = gs.add_node(b, "g", "f2", bad).unwrap_err();
+        assert!(err.to_string().contains("must be of type 'boolean'"));
+    }
+
+    #[test]
+    fn property_type_number_accepts_int_and_float() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+        gs.create_graph(b, "g", None).unwrap();
+
+        let mut props = HashMap::new();
+        props.insert(
+            "score".to_string(),
+            PropertyDef {
+                r#type: Some("number".to_string()),
+                required: true,
+            },
+        );
+        gs.define_object_type(
+            b,
+            "g",
+            ObjectTypeDef {
+                name: "Score".to_string(),
+                properties: props,
+            },
+        )
+        .unwrap();
+        gs.freeze_ontology(b, "g").unwrap();
+
+        // integer counts as number
+        let int_data = NodeData {
+            object_type: Some("Score".to_string()),
+            properties: Some(serde_json::json!({"score": 42})),
+            ..Default::default()
+        };
+        assert!(gs.add_node(b, "g", "s1", int_data).is_ok());
+
+        // float counts as number
+        let float_data = NodeData {
+            object_type: Some("Score".to_string()),
+            properties: Some(serde_json::json!({"score": 3.14})),
+            ..Default::default()
+        };
+        assert!(gs.add_node(b, "g", "s2", float_data).is_ok());
+
+        // string is not a number
+        let bad = NodeData {
+            object_type: Some("Score".to_string()),
+            properties: Some(serde_json::json!({"score": "high"})),
+            ..Default::default()
+        };
+        assert!(gs.add_node(b, "g", "s3", bad).is_err());
+    }
+
+    #[test]
+    fn property_type_unknown_hint_is_ignored() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+        gs.create_graph(b, "g", None).unwrap();
+
+        let mut props = HashMap::new();
+        props.insert(
+            "data".to_string(),
+            PropertyDef {
+                r#type: Some("custom_type".to_string()),
+                required: true,
+            },
+        );
+        gs.define_object_type(
+            b,
+            "g",
+            ObjectTypeDef {
+                name: "Flex".to_string(),
+                properties: props,
+            },
+        )
+        .unwrap();
+        gs.freeze_ontology(b, "g").unwrap();
+
+        // Unknown type → no enforcement (backward compat)
+        let data = NodeData {
+            object_type: Some("Flex".to_string()),
+            properties: Some(serde_json::json!({"data": [1, 2, 3]})),
+            ..Default::default()
+        };
+        assert!(gs.add_node(b, "g", "x1", data).is_ok());
+    }
+
+    #[test]
+    fn property_type_object_enforced() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+        gs.create_graph(b, "g", None).unwrap();
+
+        let mut props = HashMap::new();
+        props.insert(
+            "meta".to_string(),
+            PropertyDef {
+                r#type: Some("object".to_string()),
+                required: true,
+            },
+        );
+        gs.define_object_type(
+            b,
+            "g",
+            ObjectTypeDef {
+                name: "Doc".to_string(),
+                properties: props,
+            },
+        )
+        .unwrap();
+        gs.freeze_ontology(b, "g").unwrap();
+
+        // Correct: object value
+        let ok = NodeData {
+            object_type: Some("Doc".to_string()),
+            properties: Some(serde_json::json!({"meta": {"key": "value"}})),
+            ..Default::default()
+        };
+        assert!(gs.add_node(b, "g", "d1", ok).is_ok());
+
+        // Wrong: array instead of object
+        let bad = NodeData {
+            object_type: Some("Doc".to_string()),
+            properties: Some(serde_json::json!({"meta": [1, 2, 3]})),
+            ..Default::default()
+        };
+        let err = gs.add_node(b, "g", "d2", bad).unwrap_err();
+        assert!(err.to_string().contains("must be of type 'object'"));
+
+        // Wrong: string instead of object
+        let bad2 = NodeData {
+            object_type: Some("Doc".to_string()),
+            properties: Some(serde_json::json!({"meta": "not-an-object"})),
+            ..Default::default()
+        };
+        let err2 = gs.add_node(b, "g", "d3", bad2).unwrap_err();
+        assert!(err2.to_string().contains("must be of type 'object'"));
+    }
+
+    #[test]
+    fn property_type_array_enforced() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+        gs.create_graph(b, "g", None).unwrap();
+
+        let mut props = HashMap::new();
+        props.insert(
+            "tags".to_string(),
+            PropertyDef {
+                r#type: Some("array".to_string()),
+                required: true,
+            },
+        );
+        gs.define_object_type(
+            b,
+            "g",
+            ObjectTypeDef {
+                name: "Tagged".to_string(),
+                properties: props,
+            },
+        )
+        .unwrap();
+        gs.freeze_ontology(b, "g").unwrap();
+
+        // Correct: array value
+        let ok = NodeData {
+            object_type: Some("Tagged".to_string()),
+            properties: Some(serde_json::json!({"tags": ["a", "b", "c"]})),
+            ..Default::default()
+        };
+        assert!(gs.add_node(b, "g", "t1", ok).is_ok());
+
+        // Wrong: object instead of array
+        let bad = NodeData {
+            object_type: Some("Tagged".to_string()),
+            properties: Some(serde_json::json!({"tags": {"not": "array"}})),
+            ..Default::default()
+        };
+        let err = gs.add_node(b, "g", "t2", bad).unwrap_err();
+        assert!(err.to_string().contains("must be of type 'array'"));
+
+        // Wrong: string instead of array
+        let bad2 = NodeData {
+            object_type: Some("Tagged".to_string()),
+            properties: Some(serde_json::json!({"tags": "not-an-array"})),
+            ..Default::default()
+        };
+        let err2 = gs.add_node(b, "g", "t3", bad2).unwrap_err();
+        assert!(err2.to_string().contains("must be of type 'array'"));
+    }
+
+    #[test]
+    fn edge_property_type_enforced() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+        gs.create_graph(b, "g", None).unwrap();
+
+        gs.define_object_type(b, "g", patient_type()).unwrap();
+        gs.define_object_type(b, "g", lab_result_type()).unwrap();
+
+        let mut link_props = HashMap::new();
+        link_props.insert(
+            "confidence".to_string(),
+            PropertyDef {
+                r#type: Some("number".to_string()),
+                required: true,
+            },
+        );
+        gs.define_link_type(
+            b,
+            "g",
+            LinkTypeDef {
+                name: "HAS_RESULT".to_string(),
+                source: "Patient".to_string(),
+                target: "LabResult".to_string(),
+                cardinality: None,
+                properties: link_props,
+            },
+        )
+        .unwrap();
+        gs.freeze_ontology(b, "g").unwrap();
+
+        gs.add_node(
+            b,
+            "g",
+            "p1",
+            NodeData {
+                object_type: Some("Patient".to_string()),
+                properties: Some(serde_json::json!({"name": "Alice"})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        gs.add_node(
+            b,
+            "g",
+            "l1",
+            NodeData {
+                object_type: Some("LabResult".to_string()),
+                properties: Some(serde_json::json!({"value": 42})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Correct: number property
+        let ok_data = EdgeData {
+            weight: 1.0,
+            properties: Some(serde_json::json!({"confidence": 0.95})),
+        };
+        assert!(gs
+            .add_edge(b, "g", "p1", "l1", "HAS_RESULT", ok_data)
+            .is_ok());
+
+        // Wrong: string instead of number
+        let bad_data = EdgeData {
+            weight: 1.0,
+            properties: Some(serde_json::json!({"confidence": "high"})),
+        };
+        let err = gs
+            .add_edge(b, "g", "p1", "l1", "HAS_RESULT", bad_data)
+            .unwrap_err();
+        assert!(err.to_string().contains("must be of type 'number'"));
+
+        // Missing required property
+        let missing_data = EdgeData {
+            weight: 1.0,
+            properties: None,
+        };
+        let err2 = gs
+            .add_edge(b, "g", "p1", "l1", "HAS_RESULT", missing_data)
+            .unwrap_err();
+        assert!(err2.to_string().contains("missing required property"));
+    }
+
+    #[test]
+    fn property_type_no_hint_skips_check() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+        gs.create_graph(b, "g", None).unwrap();
+
+        let mut props = HashMap::new();
+        props.insert(
+            "anything".to_string(),
+            PropertyDef {
+                r#type: None,
+                required: true,
+            },
+        );
+        gs.define_object_type(
+            b,
+            "g",
+            ObjectTypeDef {
+                name: "Any".to_string(),
+                properties: props,
+            },
+        )
+        .unwrap();
+        gs.freeze_ontology(b, "g").unwrap();
+
+        // Any type accepted when no type hint
+        for val in [
+            serde_json::json!(42),
+            serde_json::json!("text"),
+            serde_json::json!(true),
+            serde_json::json!([1, 2]),
+        ] {
+            let data = NodeData {
+                object_type: Some("Any".to_string()),
+                properties: Some(serde_json::json!({"anything": val})),
+                ..Default::default()
+            };
+            assert!(gs.add_node(b, "g", "a1", data).is_ok());
+        }
     }
 }

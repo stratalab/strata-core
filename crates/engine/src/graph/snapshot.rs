@@ -225,4 +225,135 @@ mod tests {
         assert_eq!(degrees["B"], 2); // A→B + B→C
         assert_eq!(degrees["C"], 1); // B→C
     }
+
+    // =========================================================================
+    // snapshot_stats (G-12)
+    // =========================================================================
+
+    #[test]
+    fn snapshot_stats_empty_graph() {
+        let (_db, gs) = setup();
+        let b = branch();
+        gs.create_graph(b, "g", None).unwrap();
+        let stats = gs.snapshot_stats(b, "g").unwrap();
+        assert_eq!(stats.node_count, 0);
+        assert_eq!(stats.edge_count, 0);
+    }
+
+    #[test]
+    fn snapshot_stats_matches_snapshot() {
+        let (_db, gs) = setup();
+        let b = branch();
+        gs.create_graph(b, "g", None).unwrap();
+        for id in &["A", "B", "C"] {
+            gs.add_node(b, "g", id, NodeData::default()).unwrap();
+        }
+        gs.add_edge(b, "g", "A", "B", "E1", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "B", "C", "E2", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "A", "C", "E3", EdgeData::default())
+            .unwrap();
+
+        let stats = gs.snapshot_stats(b, "g").unwrap();
+        let snap = gs.snapshot(b, "g").unwrap();
+
+        assert_eq!(stats.node_count, snap.node_count());
+        assert_eq!(stats.edge_count, snap.edge_count());
+    }
+
+    #[test]
+    fn snapshot_stats_after_remove() {
+        let (_db, gs) = setup();
+        let b = branch();
+        gs.create_graph(b, "g", None).unwrap();
+        for id in &["A", "B"] {
+            gs.add_node(b, "g", id, NodeData::default()).unwrap();
+        }
+        gs.add_edge(b, "g", "A", "B", "E", EdgeData::default())
+            .unwrap();
+        gs.remove_node(b, "g", "A").unwrap();
+
+        let stats = gs.snapshot_stats(b, "g").unwrap();
+        assert_eq!(stats.node_count, 1);
+        assert_eq!(stats.edge_count, 0);
+    }
+
+    // =========================================================================
+    // for_each_edge (G-12)
+    // =========================================================================
+
+    #[test]
+    fn for_each_edge_empty_graph() {
+        let (_db, gs) = setup();
+        let b = branch();
+        gs.create_graph(b, "g", None).unwrap();
+        let mut count = 0;
+        gs.for_each_edge(b, "g", |_| count += 1).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn for_each_edge_nodes_only_no_edges() {
+        let (_db, gs) = setup();
+        let b = branch();
+        gs.create_graph(b, "g", None).unwrap();
+        for id in &["A", "B", "C"] {
+            gs.add_node(b, "g", id, NodeData::default()).unwrap();
+        }
+        let mut count = 0;
+        gs.for_each_edge(b, "g", |_| count += 1).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn for_each_edge_matches_all_edges() {
+        let (_db, gs) = setup();
+        let b = branch();
+        gs.create_graph(b, "g", None).unwrap();
+        for id in &["A", "B", "C"] {
+            gs.add_node(b, "g", id, NodeData::default()).unwrap();
+        }
+        gs.add_edge(b, "g", "A", "B", "E1", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "B", "C", "E2", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "A", "C", "E3", EdgeData::default())
+            .unwrap();
+
+        let mut edges = Vec::new();
+        gs.for_each_edge(b, "g", |e| edges.push(e)).unwrap();
+        assert_eq!(edges.len(), 3);
+
+        let all_edges = gs.all_edges(b, "g").unwrap();
+        assert_eq!(edges.len(), all_edges.len());
+    }
+
+    #[test]
+    fn for_each_edge_preserves_edge_data() {
+        let (_db, gs) = setup();
+        let b = branch();
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+        gs.add_edge(
+            b,
+            "g",
+            "A",
+            "B",
+            "SCORED",
+            EdgeData {
+                weight: 0.42,
+                properties: Some(serde_json::json!({"source": "test"})),
+            },
+        )
+        .unwrap();
+
+        let mut edges = Vec::new();
+        gs.for_each_edge(b, "g", |e| edges.push(e)).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].src, "A");
+        assert_eq!(edges[0].dst, "B");
+        assert!((edges[0].data.weight - 0.42).abs() < f64::EPSILON);
+    }
 }

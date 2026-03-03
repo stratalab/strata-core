@@ -168,14 +168,54 @@ pub fn meta_key(graph: &str) -> String {
 
 // --- Ref index keys ---
 
-/// Encode a URI for use in key paths (escape `/` → `%2F`, `%` → `%25`).
+/// Encode a URI for use in key paths.
+///
+/// Escapes: `%` → `%25`, `/` → `%2F`, null byte → `%00`,
+/// control characters (U+0001–U+001F) → `%XX`.
 fn encode_uri(uri: &str) -> String {
-    uri.replace('%', "%25").replace('/', "%2F")
+    let mut out = String::with_capacity(uri.len());
+    for b in uri.bytes() {
+        match b {
+            b'%' => out.push_str("%25"),
+            b'/' => out.push_str("%2F"),
+            0x00..=0x1F => {
+                out.push('%');
+                out.push(char::from(b"0123456789ABCDEF"[(b >> 4) as usize]));
+                out.push(char::from(b"0123456789ABCDEF"[(b & 0x0F) as usize]));
+            }
+            _ => out.push(b as char),
+        }
+    }
+    out
 }
 
-/// Decode a URI from a key path.
+/// Decode a URI from a key path (reverses `encode_uri`).
 fn decode_uri(encoded: &str) -> String {
-    encoded.replace("%2F", "/").replace("%25", "%")
+    let mut out = String::with_capacity(encoded.len());
+    let bytes = encoded.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push((hi << 4 | lo) as char);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+/// Parse a single hex digit (case-insensitive).
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        _ => None,
+    }
 }
 
 /// Key for the reverse entity-ref index: `__ref__/{encoded_uri}/{graph}/{node_id}`
@@ -689,6 +729,36 @@ mod tests {
         assert_eq!(*ns_before, *ns_after);
         // But must be a *new* heap allocation (different Arc pointer)
         assert!(!Arc::ptr_eq(&ns_before, &ns_after));
+    }
+
+    #[test]
+    fn uri_encode_decode_null_byte() {
+        let uri = "kv://main/has\0null";
+        let encoded = encode_uri(uri);
+        assert!(encoded.contains("%00"));
+        assert!(!encoded.contains('\0'));
+        let decoded = decode_uri(&encoded);
+        assert_eq!(decoded, uri);
+    }
+
+    #[test]
+    fn uri_encode_decode_control_chars() {
+        let uri = "kv://main/tab\there\x01\x1F";
+        let encoded = encode_uri(uri);
+        assert!(encoded.contains("%09")); // tab
+        assert!(encoded.contains("%01"));
+        assert!(encoded.contains("%1F"));
+        let decoded = decode_uri(&encoded);
+        assert_eq!(decoded, uri);
+    }
+
+    #[test]
+    fn uri_encode_decode_mixed_special_chars() {
+        // Mix of slashes, percent, null, and control chars
+        let uri = "kv://main/path\0/100%/\x01end";
+        let encoded = encode_uri(uri);
+        let decoded = decode_uri(&encoded);
+        assert_eq!(decoded, uri);
     }
 
     #[test]
