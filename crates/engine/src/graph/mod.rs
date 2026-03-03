@@ -869,6 +869,12 @@ impl GraphStore {
             })?;
         }
 
+        // GC old version chain entries — each read-modify-write above created a
+        // new version for adj list keys that already existed from prior batches.
+        // Without this, the MVCC layer keeps all intermediate versions, negating
+        // the entry-count reduction from packed adjacency lists.
+        self.db.run_gc();
+
         let edges_inserted = edges.len();
 
         // Shard diagnostics
