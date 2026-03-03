@@ -392,6 +392,42 @@ impl Default for SsspOptions {
     }
 }
 
+/// Result of a cascade operation triggered by entity deletion.
+#[derive(Debug, Clone)]
+pub struct CascadeResult {
+    /// Number of bindings that were processed successfully.
+    pub succeeded: usize,
+    /// Per-binding failures (graph, node_id, error message).
+    pub failed: Vec<CascadeError>,
+}
+
+/// A single cascade failure for one (graph, node_id) binding.
+#[derive(Debug, Clone)]
+pub struct CascadeError {
+    /// Graph name where the cascade failed.
+    pub graph: String,
+    /// Node ID that failed to cascade.
+    pub node_id: String,
+    /// Error description.
+    pub error: String,
+}
+
+impl CascadeResult {
+    /// Returns true if all bindings were processed successfully.
+    pub fn is_ok(&self) -> bool {
+        self.failed.is_empty()
+    }
+}
+
+/// Statistics about a graph (node and edge counts without full materialization).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphStats {
+    /// Number of nodes in the graph.
+    pub node_count: usize,
+    /// Number of edges in the graph.
+    pub edge_count: usize,
+}
+
 /// Trait for graph algorithms that operate on a snapshot.
 pub trait GraphAlgorithm {
     /// The result type of this algorithm.

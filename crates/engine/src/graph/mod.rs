@@ -373,7 +373,7 @@ impl GraphStore {
         // Validate against frozen ontology
         if let Some(meta) = self.get_graph_meta(branch_id, graph)? {
             if meta.ontology_status == Some(types::OntologyStatus::Frozen) {
-                self.validate_edge(branch_id, graph, src, dst, edge_type)?;
+                self.validate_edge(branch_id, graph, src, dst, edge_type, &data)?;
             }
         }
 
@@ -630,6 +630,75 @@ impl GraphStore {
         Ok(GraphSnapshot { nodes, edges })
     }
 
+    /// Get graph statistics (node/edge counts) without loading all data.
+    ///
+    /// Uses `packed::edge_count()` on each forward adjacency entry (header-only,
+    /// no full decode) and counts node keys via prefix scan.
+    /// Both counts are read in a single transaction for consistency.
+    pub fn snapshot_stats(&self, branch_id: BranchId, graph: &str) -> StrataResult<GraphStats> {
+        let node_prefix = keys::all_nodes_prefix(graph);
+        let node_prefix_key = keys::storage_key(branch_id, &node_prefix);
+        let fwd_prefix = keys::all_forward_adj_prefix(graph);
+        let fwd_prefix_key = keys::storage_key(branch_id, &fwd_prefix);
+
+        self.db.transaction(branch_id, |txn| {
+            // Count nodes via prefix scan (no decode — just count keys)
+            let node_count = txn.scan_prefix(&node_prefix_key)?.len();
+
+            // Count edges via forward adjacency prefix scan + packed header read
+            let mut edge_count = 0usize;
+            for (_key, val) in txn.scan_prefix(&fwd_prefix_key)? {
+                if let Value::Bytes(bytes) = val {
+                    edge_count += packed::edge_count(&bytes) as usize;
+                }
+            }
+
+            Ok(GraphStats {
+                node_count,
+                edge_count,
+            })
+        })
+    }
+
+    /// Stream edges one packed adjacency list at a time without accumulating.
+    ///
+    /// For each forward adjacency entry, decodes the packed list and calls `callback`
+    /// with each edge. This avoids materializing all edges in memory.
+    pub fn for_each_edge<F>(
+        &self,
+        branch_id: BranchId,
+        graph: &str,
+        mut callback: F,
+    ) -> StrataResult<()>
+    where
+        F: FnMut(Edge),
+    {
+        let prefix = keys::all_forward_adj_prefix(graph);
+        let prefix_key = keys::storage_key(branch_id, &prefix);
+
+        self.db.transaction(branch_id, |txn| {
+            let results = txn.scan_prefix(&prefix_key)?;
+            for (key, val) in results {
+                if let Some(user_key) = key.user_key_string() {
+                    if let Some(src) = keys::parse_forward_adj_key(graph, &user_key) {
+                        if let Value::Bytes(bytes) = val {
+                            let adj = packed::decode(&bytes)?;
+                            for (dst, edge_type, data) in adj {
+                                callback(Edge {
+                                    src: src.clone(),
+                                    dst,
+                                    edge_type,
+                                    data,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// Build an in-memory adjacency index for a graph.
     ///
     /// Loads all edges in a single prefix scan and populates an AdjacencyIndex
@@ -677,6 +746,18 @@ impl GraphStore {
             .and_then(|m| m.ontology_status)
             == Some(types::OntologyStatus::Frozen);
 
+        // Cache type definitions once for bulk validation (G-13).
+        let obj_type_cache = if is_frozen {
+            Some(self.load_object_type_cache(branch_id, graph)?)
+        } else {
+            None
+        };
+        let link_type_cache = if is_frozen {
+            Some(self.load_link_type_cache(branch_id, graph)?)
+        } else {
+            None
+        };
+
         let chunk_size = std::cmp::max(1, chunk_size.unwrap_or(Self::DEFAULT_BULK_CHUNK_SIZE));
         let empty_json = "{}";
 
@@ -694,7 +775,9 @@ impl GraphStore {
                 keys::validate_node_id(node_id)?;
 
                 if is_frozen && data.object_type.is_some() {
-                    self.validate_node(branch_id, graph, node_id, data)?;
+                    if let Some(ref cache) = obj_type_cache {
+                        self.validate_node_cached(graph, node_id, data, cache)?;
+                    }
                 }
 
                 let user_key = keys::node_key(graph, node_id);
@@ -769,7 +852,9 @@ impl GraphStore {
             keys::validate_edge_type(edge_type)?;
 
             if is_frozen {
-                self.validate_edge(branch_id, graph, src, dst, edge_type)?;
+                if let Some(ref cache) = link_type_cache {
+                    self.validate_edge_cached(branch_id, graph, src, dst, edge_type, data, cache)?;
+                }
             }
 
             fwd_map

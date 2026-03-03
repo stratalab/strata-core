@@ -41,6 +41,9 @@ impl GraphStore {
     }
 
     /// Get the degree of a node (number of edges in a given direction).
+    ///
+    /// Uses `packed::edge_count()` to read the 4-byte header directly,
+    /// avoiding full adjacency list decode.
     pub fn degree(
         &self,
         branch_id: BranchId,
@@ -48,8 +51,37 @@ impl GraphStore {
         node_id: &str,
         direction: Direction,
     ) -> StrataResult<usize> {
-        let neighbors = self.neighbors(branch_id, graph, node_id, direction, None)?;
-        Ok(neighbors.len())
+        match direction {
+            Direction::Outgoing => self.degree_packed(branch_id, graph, node_id, true),
+            Direction::Incoming => self.degree_packed(branch_id, graph, node_id, false),
+            Direction::Both => {
+                let out = self.degree_packed(branch_id, graph, node_id, true)?;
+                let inc = self.degree_packed(branch_id, graph, node_id, false)?;
+                Ok(out + inc)
+            }
+        }
+    }
+
+    /// Read degree from packed adjacency list header (zero decode).
+    fn degree_packed(
+        &self,
+        branch_id: BranchId,
+        graph: &str,
+        node_id: &str,
+        forward: bool,
+    ) -> StrataResult<usize> {
+        let user_key = if forward {
+            super::keys::forward_adj_key(graph, node_id)
+        } else {
+            super::keys::reverse_adj_key(graph, node_id)
+        };
+        let storage_key = super::keys::storage_key(branch_id, &user_key);
+        match self.db.get_value_direct(&storage_key) {
+            Some(strata_core::Value::Bytes(bytes)) => {
+                Ok(super::packed::edge_count(&bytes) as usize)
+            }
+            _ => Ok(0),
+        }
     }
 
     /// Breadth-first search from a start node.
