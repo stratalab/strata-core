@@ -74,7 +74,7 @@ pub fn compute_similarity_cached(
 /// Vectors are used as-is.
 #[inline]
 pub fn compute_similarity(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
-    debug_assert_eq!(
+    assert_eq!(
         a.len(),
         b.len(),
         "Dimension mismatch in similarity computation"
@@ -957,6 +957,14 @@ mod tests {
 
         let direct = compute_similarity(&zero, &nonzero, DistanceMetric::Cosine);
         assert_eq!(direct, 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Dimension mismatch")]
+    fn test_dimension_mismatch_panics() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![1.0, 0.0];
+        compute_similarity(&a, &b, DistanceMetric::Cosine);
     }
 }
 

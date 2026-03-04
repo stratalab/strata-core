@@ -689,28 +689,28 @@ impl VectorStore {
         let collection_id = CollectionId::new(branch_id, collection);
         let kv_key = Key::new_vector(self.namespace_for(branch_id, space), collection, key);
 
-        // Get existing record
+        // Hold write lock for entire check-then-delete (mirrors insert_inner fix #936)
+        let state = self.state()?;
+        let mut backends = state.backends.write();
+
         let Some(record) = self.get_vector_record_by_key(&kv_key)? else {
             return Ok(false);
         };
 
         let vector_id = VectorId(record.vector_id);
 
-        // Delete from backend
-        {
-            use super::types::now_micros;
-            let state = self.state()?;
-            let mut backends = state.backends.write();
-            if let Some(backend) = backends.get_mut(&collection_id) {
-                backend.delete_with_timestamp(vector_id, now_micros())?;
-                backend.remove_inline_meta(vector_id);
-            }
-        }
-
-        // Delete from KV
+        // KV first (mirrors insert_inner fix #937)
         self.db
             .transaction(branch_id, |txn| txn.delete(kv_key.clone()))
             .map_err(|e| VectorError::Storage(e.to_string()))?;
+
+        // Backend after KV succeeds
+        if let Some(backend) = backends.get_mut(&collection_id) {
+            use super::types::now_micros;
+            backend.delete_with_timestamp(vector_id, now_micros())?;
+            backend.remove_inline_meta(vector_id);
+        }
+        drop(backends);
 
         Ok(true)
     }
@@ -3003,6 +3003,57 @@ mod tests {
         // Delete again returns false
         let deleted = store.delete(branch_id, "default", "test", "doc1").unwrap();
         assert!(!deleted);
+    }
+
+    #[test]
+    fn test_delete_removes_from_kv_and_backend() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        // Insert two vectors
+        store
+            .insert(branch_id, "default", "test", "v1", &[1.0, 0.0, 0.0], None)
+            .unwrap();
+        store
+            .insert(branch_id, "default", "test", "v2", &[0.0, 1.0, 0.0], None)
+            .unwrap();
+
+        // Verify both are searchable
+        let results = store
+            .search(branch_id, "default", "test", &[1.0, 0.0, 0.0], 10, None)
+            .unwrap();
+        assert_eq!(results.len(), 2);
+
+        // Delete v1
+        let deleted = store.delete(branch_id, "default", "test", "v1").unwrap();
+        assert!(deleted);
+
+        // KV record must be gone
+        let entry = store.get(branch_id, "default", "test", "v1").unwrap();
+        assert!(entry.is_none(), "KV record should be deleted");
+
+        // Backend must exclude deleted vector from search
+        let results = store
+            .search(branch_id, "default", "test", &[1.0, 0.0, 0.0], 10, None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "v2");
+
+        // Re-insert with same key should work (slot is reusable)
+        store
+            .insert(branch_id, "default", "test", "v1", &[0.0, 0.0, 1.0], None)
+            .unwrap();
+        let entry = store
+            .get(branch_id, "default", "test", "v1")
+            .unwrap()
+            .unwrap()
+            .value;
+        assert_eq!(entry.embedding, vec![0.0, 0.0, 1.0]);
     }
 
     #[test]

@@ -305,7 +305,11 @@ impl VectorHeap {
                     self.norms[idx] = compute_l2_norm(embedding);
                 }
             }
-            VectorData::Mmap(_) => panic!("cannot mutate mmap-backed VectorHeap"),
+            VectorData::Mmap(_) => {
+                return Err(VectorError::Internal(
+                    "cannot mutate mmap-backed VectorHeap".into(),
+                ))
+            }
             VectorData::Tiered {
                 overlay,
                 overlay_id_to_offset,
@@ -765,6 +769,8 @@ impl VectorHeap {
         self.id_to_offset.iter().map(move |(&id, &offset)| {
             let embedding = match data {
                 VectorData::InMemory(vec) => &vec[offset..offset + dim],
+                // Invariant: id_to_offset is always consistent with the mmap data.
+                // A mismatch here means the structure is corrupt.
                 VectorData::Mmap(mmap) => mmap.get(id).expect("id_to_offset has stale entry"),
                 VectorData::Tiered {
                     base,
@@ -775,6 +781,8 @@ impl VectorHeap {
                     if let Some(&off) = overlay_id_to_offset.get(&id) {
                         &overlay[off..off + dim]
                     } else {
+                        // Invariant: id_to_offset is always consistent with the base mmap.
+                        // A mismatch here means the structure is corrupt.
                         base.get(id)
                             .expect("id_to_offset has stale entry (tiered base)")
                     }
@@ -792,6 +800,10 @@ impl VectorHeap {
     /// Get raw data slice (for snapshot serialization)
     ///
     /// Only available for InMemory heaps. Panics on Mmap/Tiered variants.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the heap is backed by mmap or tiered storage.
     pub fn raw_data(&self) -> &[f32] {
         match &self.data {
             VectorData::InMemory(vec) => vec,
@@ -1363,6 +1375,35 @@ mod tests {
 
         // Deleting nonexistent ID returns false
         assert!(!mmap_heap.delete(VectorId::new(99)));
+    }
+
+    #[test]
+    fn test_upsert_on_mmap_heap_returns_error() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let vec_path = temp_dir.path().join("test.vec");
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        let mut heap = VectorHeap::new(config.clone());
+        heap.upsert(VectorId::new(1), &[1.0, 0.0, 0.0]).unwrap();
+        heap.freeze_to_disk(&vec_path).unwrap();
+
+        // Reopen as mmap
+        let mut mmap_heap = VectorHeap::from_mmap(&vec_path, config).unwrap();
+        assert!(mmap_heap.is_mmap());
+
+        // Upsert on mmap heap should return an error, not panic
+        let result = mmap_heap.upsert(VectorId::new(2), &[0.0, 1.0, 0.0]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("cannot mutate mmap-backed"),
+            "Error message should mention mmap mutation: {}",
+            err
+        );
+
+        // Existing data should be unaffected
+        assert_eq!(mmap_heap.len(), 1);
+        assert!(mmap_heap.get(VectorId::new(1)).is_some());
     }
 
     // ====================================================================

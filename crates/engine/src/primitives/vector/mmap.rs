@@ -343,11 +343,19 @@ pub(crate) fn write_mmap_file(
     file.write_all(bytes)
         .map_err(|e| VectorError::Io(e.to_string()))?;
 
-    file.flush().map_err(|e| VectorError::Io(e.to_string()))?;
+    file.sync_all()
+        .map_err(|e| VectorError::Io(e.to_string()))?;
     drop(file);
 
     // Atomic rename
     fs::rename(&temp_path, path).map_err(|e| VectorError::Io(e.to_string()))?;
+
+    // fsync parent directory so the rename is durable on Linux/ext4
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
 
     Ok(())
 }
