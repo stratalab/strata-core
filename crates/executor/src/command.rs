@@ -1081,6 +1081,21 @@ pub enum Command {
         graph: String,
     },
 
+    /// List node IDs with cursor-based pagination.
+    /// Returns: `Output::GraphPage`
+    GraphListNodesPaginated {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+        /// Maximum number of items per page.
+        limit: usize,
+        /// Cursor for continuation (None = first page).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<String>,
+    },
+
     /// Add or update an edge.
     /// Returns: `Output::Unit`
     GraphAddEdge {
@@ -1536,6 +1551,7 @@ impl Command {
             Command::GraphGetNode { .. } => "GraphGetNode",
             Command::GraphRemoveNode { .. } => "GraphRemoveNode",
             Command::GraphListNodes { .. } => "GraphListNodes",
+            Command::GraphListNodesPaginated { .. } => "GraphListNodesPaginated",
             Command::GraphAddEdge { .. } => "GraphAddEdge",
             Command::GraphRemoveEdge { .. } => "GraphRemoveEdge",
             Command::GraphNeighbors { .. } => "GraphNeighbors",
@@ -1653,6 +1669,7 @@ impl Command {
             | Command::GraphGetNode { branch, .. }
             | Command::GraphRemoveNode { branch, .. }
             | Command::GraphListNodes { branch, .. }
+            | Command::GraphListNodesPaginated { branch, .. }
             | Command::GraphAddEdge { branch, .. }
             | Command::GraphRemoveEdge { branch, .. }
             | Command::GraphNeighbors { branch, .. }

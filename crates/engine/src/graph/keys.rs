@@ -326,6 +326,20 @@ pub fn validate_type_name(name: &str) -> StrataResult<()> {
     Ok(())
 }
 
+// --- Graph catalog key ---
+
+/// Key for the graph catalog listing all graph names: `__catalog__`
+pub fn graph_catalog_key() -> &'static str {
+    "__catalog__"
+}
+
+// --- Edge type count keys ---
+
+/// Key for per-type edge count: `{graph}/__edge_count__/{edge_type}`
+pub fn edge_type_count_key(graph: &str, edge_type: &str) -> String {
+    format!("{}{SEP}__edge_count__{SEP}{}", graph, edge_type)
+}
+
 // --- Broad prefixes ---
 
 /// Prefix for all keys in a graph: `{graph}/`

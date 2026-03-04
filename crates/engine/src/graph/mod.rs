@@ -56,9 +56,23 @@ impl GraphStore {
             serde_json::to_string(&meta).map_err(|e| StrataError::serialization(e.to_string()))?;
         let user_key = keys::meta_key(graph);
         let storage_key = keys::storage_key(branch_id, &user_key);
+        let catalog_sk = keys::storage_key(branch_id, keys::graph_catalog_key());
 
         self.db.transaction(branch_id, |txn| {
-            txn.put(storage_key.clone(), Value::String(meta_json.clone()))
+            txn.put(storage_key.clone(), Value::String(meta_json.clone()))?;
+
+            // Update catalog: read JSON array, append name, write back
+            let mut catalog: Vec<String> = match txn.get(&catalog_sk)? {
+                Some(Value::String(s)) => serde_json::from_str(&s).unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            if !catalog.contains(&graph.to_string()) {
+                catalog.push(graph.to_string());
+                let catalog_json = serde_json::to_string(&catalog)
+                    .map_err(|e| StrataError::serialization(e.to_string()))?;
+                txn.put(catalog_sk.clone(), Value::String(catalog_json))?;
+            }
+            Ok(())
         })
     }
 
@@ -88,13 +102,27 @@ impl GraphStore {
     }
 
     /// List all graph names on a branch.
+    ///
+    /// Reads a single catalog key (O(1)) instead of scanning all graph data.
+    /// Falls back to full scan if catalog is missing (legacy data), and lazily
+    /// creates the catalog on fallback.
     pub fn list_graphs(&self, branch_id: BranchId) -> StrataResult<Vec<String>> {
-        // Scan all keys and filter for meta keys: `{graph}/__meta__`
-        // We scan with empty prefix to get all graph keys, then filter.
+        let catalog_sk = keys::storage_key(branch_id, keys::graph_catalog_key());
+
+        // Try catalog first (fast path)
+        let catalog_val = self.db.transaction(branch_id, |txn| txn.get(&catalog_sk))?;
+
+        if let Some(Value::String(s)) = catalog_val {
+            let catalog: Vec<String> =
+                serde_json::from_str(&s).map_err(|e| StrataError::serialization(e.to_string()))?;
+            return Ok(catalog);
+        }
+
+        // Fallback: scan for __meta__ keys (legacy data without catalog)
         let ns = keys::graph_namespace(branch_id);
         let prefix_key = strata_core::types::Key::new_kv(ns, "");
 
-        self.db.transaction(branch_id, |txn| {
+        let graphs = self.db.transaction(branch_id, |txn| {
             let results = txn.scan_prefix(&prefix_key)?;
             let mut graphs = Vec::new();
             for (key, _) in results {
@@ -107,48 +135,113 @@ impl GraphStore {
                 }
             }
             Ok(graphs)
-        })
+        })?;
+
+        // Lazily create the catalog for next time
+        if !graphs.is_empty() {
+            let catalog_json = serde_json::to_string(&graphs)
+                .map_err(|e| StrataError::serialization(e.to_string()))?;
+            let _ = self.db.transaction(branch_id, |txn| {
+                txn.put(catalog_sk.clone(), Value::String(catalog_json.clone()))
+            });
+        }
+
+        Ok(graphs)
     }
 
+    /// Maximum keys to delete per transaction batch during graph deletion.
+    const DELETE_BATCH_SIZE: usize = 10_000;
+
     /// Delete a graph and all its data (nodes, edges, meta, ref index entries).
+    ///
+    /// Uses batched deletion with bounded memory: each batch is its own
+    /// transaction, preventing massive write sets on large graphs.
     pub fn delete_graph(&self, branch_id: BranchId, graph: &str) -> StrataResult<()> {
-        let prefix = keys::graph_prefix(graph);
-        let prefix_key = keys::storage_key(branch_id, &prefix);
         let node_prefix = keys::all_nodes_prefix(graph);
+        let node_prefix_key = keys::storage_key(branch_id, &node_prefix);
+        let catalog_sk = keys::storage_key(branch_id, keys::graph_catalog_key());
 
-        self.db.transaction(branch_id, |txn| {
-            let results = txn.scan_prefix(&prefix_key)?;
+        // Step 1: Scan nodes, extract entity_refs, delete ref index entries (batched)
+        loop {
+            let done = self.db.transaction(branch_id, |txn| {
+                let results = txn.scan_prefix(&node_prefix_key)?;
+                if results.is_empty() {
+                    return Ok(true);
+                }
 
-            // First pass: collect ref index keys to delete from nodes
-            let mut ref_keys_to_delete = Vec::new();
-            for (key, val) in &results {
-                if let Some(user_key) = key.user_key_string() {
-                    if user_key.starts_with(&node_prefix) {
+                let batch: Vec<_> = results.into_iter().take(Self::DELETE_BATCH_SIZE).collect();
+                let is_last = batch.len() < Self::DELETE_BATCH_SIZE;
+
+                for (key, val) in &batch {
+                    if let Some(user_key) = key.user_key_string() {
                         if let Value::String(json) = val {
                             if let Ok(data) = serde_json::from_str::<NodeData>(json) {
                                 if let Some(uri) = data.entity_ref {
                                     if let Some(node_id) = keys::parse_node_key(graph, &user_key) {
                                         let rk = keys::ref_index_key(&uri, graph, &node_id);
-                                        ref_keys_to_delete.push(keys::storage_key(branch_id, &rk));
+                                        txn.delete(keys::storage_key(branch_id, &rk))?;
                                     }
                                 }
                             }
                         }
                     }
+                    txn.delete(key.clone())?;
+                }
+
+                Ok(is_last)
+            })?;
+
+            if done {
+                break;
+            }
+        }
+
+        // Step 2: Delete remaining graph keys (fwd adj, rev adj, type index,
+        // ontology, edge counters, meta) in batches
+        let graph_prefix = keys::graph_prefix(graph);
+        let graph_prefix_key = keys::storage_key(branch_id, &graph_prefix);
+        self.delete_prefix_batched(branch_id, &graph_prefix_key)?;
+
+        // Step 3: Update catalog
+        self.db.transaction(branch_id, |txn| {
+            if let Some(Value::String(s)) = txn.get(&catalog_sk)? {
+                if let Ok(mut catalog) = serde_json::from_str::<Vec<String>>(&s) {
+                    catalog.retain(|g| g != graph);
+                    let catalog_json = serde_json::to_string(&catalog)
+                        .map_err(|e| StrataError::serialization(e.to_string()))?;
+                    txn.put(catalog_sk.clone(), Value::String(catalog_json))?;
                 }
             }
-
-            // Delete ref index entries
-            for rk in ref_keys_to_delete {
-                txn.delete(rk)?;
-            }
-
-            // Delete all graph keys (nodes, edges, meta)
-            for (key, _) in results {
-                txn.delete(key)?;
-            }
             Ok(())
-        })
+        })?;
+
+        Ok(())
+    }
+
+    /// Delete all keys matching a prefix in batches of DELETE_BATCH_SIZE.
+    fn delete_prefix_batched(&self, branch_id: BranchId, prefix_key: &Key) -> StrataResult<()> {
+        loop {
+            let done = self.db.transaction(branch_id, |txn| {
+                let results = txn.scan_prefix(prefix_key)?;
+                if results.is_empty() {
+                    return Ok(true);
+                }
+
+                let batch: Vec<_> = results.into_iter().take(Self::DELETE_BATCH_SIZE).collect();
+                let is_last = batch.len() < Self::DELETE_BATCH_SIZE;
+
+                for (key, _) in batch {
+                    txn.delete(key)?;
+                }
+
+                Ok(is_last)
+            })?;
+
+            if done {
+                break;
+            }
+        }
+        Ok(())
     }
 
     // =========================================================================
@@ -270,6 +363,80 @@ impl GraphStore {
         })
     }
 
+    /// List node IDs with cursor-based pagination.
+    ///
+    /// KV keys are sorted, so cursor-based pagination is natural.
+    /// `next_cursor` is the last returned node_id, or None if this is the last page.
+    pub fn list_nodes_paginated(
+        &self,
+        branch_id: BranchId,
+        graph: &str,
+        page: PageRequest,
+    ) -> StrataResult<PageResponse<String>> {
+        let prefix = keys::all_nodes_prefix(graph);
+        let prefix_key = keys::storage_key(branch_id, &prefix);
+
+        self.db.transaction(branch_id, |txn| {
+            let results = txn.scan_prefix(&prefix_key)?;
+            let mut items = Vec::new();
+            for (key, _) in results {
+                if let Some(user_key) = key.user_key_string() {
+                    if let Some(id) = keys::parse_node_key(graph, &user_key) {
+                        // Skip entries at or before cursor
+                        if let Some(ref cursor) = page.cursor {
+                            if id.as_str() <= cursor.as_str() {
+                                continue;
+                            }
+                        }
+                        items.push(id);
+                        if items.len() >= page.limit {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            let next_cursor = if items.len() >= page.limit {
+                items.last().cloned()
+            } else {
+                None
+            };
+
+            Ok(PageResponse { items, next_cursor })
+        })
+    }
+
+    /// List graph names with cursor-based pagination.
+    pub fn list_graphs_paginated(
+        &self,
+        branch_id: BranchId,
+        page: PageRequest,
+    ) -> StrataResult<PageResponse<String>> {
+        let mut graphs = self.list_graphs(branch_id)?;
+        graphs.sort();
+
+        // Apply cursor: skip entries at or before cursor
+        let start = if let Some(ref cursor) = page.cursor {
+            graphs
+                .iter()
+                .position(|g| g.as_str() > cursor.as_str())
+                .unwrap_or(graphs.len())
+        } else {
+            0
+        };
+
+        let end = std::cmp::min(start + page.limit, graphs.len());
+        let items: Vec<String> = graphs[start..end].to_vec();
+
+        let next_cursor = if end < graphs.len() {
+            items.last().cloned()
+        } else {
+            None
+        };
+
+        Ok(PageResponse { items, next_cursor })
+    }
+
     /// Remove a node and all its incident edges.
     pub fn remove_node(&self, branch_id: BranchId, graph: &str, node_id: &str) -> StrataResult<()> {
         let node_user_key = keys::node_key(graph, node_id);
@@ -302,10 +469,16 @@ impl GraphStore {
                 }
             }
 
+            // Track edge type counts to decrement (only from outgoing edges,
+            // since each edge is counted once via the forward adj list)
+            let mut edge_type_decrements: std::collections::HashMap<String, u64> =
+                std::collections::HashMap::new();
+
             // Remove this node from each neighbor's reverse adjacency list
             if let Some(Value::Bytes(fwd_bytes)) = txn.get(&fwd_adj_sk)? {
                 let outgoing = packed::decode(&fwd_bytes)?;
                 for (dst, edge_type, _) in &outgoing {
+                    *edge_type_decrements.entry(edge_type.clone()).or_insert(0) += 1;
                     let dst_rev_uk = keys::reverse_adj_key(graph, dst);
                     let dst_rev_sk = keys::storage_key(branch_id, &dst_rev_uk);
                     if let Some(Value::Bytes(dst_rev_bytes)) = txn.get(&dst_rev_sk)? {
@@ -322,10 +495,15 @@ impl GraphStore {
                 }
             }
 
-            // Remove this node from each neighbor's forward adjacency list
+            // Count incoming edges that are NOT already counted as outgoing
+            // (i.e., exclude self-loops which were already counted above)
             if let Some(Value::Bytes(rev_bytes)) = txn.get(&rev_adj_sk)? {
                 let incoming = packed::decode(&rev_bytes)?;
                 for (src, edge_type, _) in &incoming {
+                    // Only count incoming edges from OTHER nodes (self-loops already counted)
+                    if src != node_id {
+                        *edge_type_decrements.entry(edge_type.clone()).or_insert(0) += 1;
+                    }
                     let src_fwd_uk = keys::forward_adj_key(graph, src);
                     let src_fwd_sk = keys::storage_key(branch_id, &src_fwd_uk);
                     if let Some(Value::Bytes(src_fwd_bytes)) = txn.get(&src_fwd_sk)? {
@@ -340,6 +518,14 @@ impl GraphStore {
                         }
                     }
                 }
+            }
+
+            // Decrement edge type counters
+            for (et, dec) in &edge_type_decrements {
+                let count_uk = keys::edge_type_count_key(graph, et);
+                let count_sk = keys::storage_key(branch_id, &count_uk);
+                let count = Self::read_edge_type_count(txn, &count_sk)?;
+                Self::write_edge_type_count(txn, &count_sk, count.saturating_sub(*dec))?;
             }
 
             // Delete the node's own adjacency lists and the node itself
@@ -387,6 +573,9 @@ impl GraphStore {
         let rev_uk = keys::reverse_adj_key(graph, dst);
         let rev_sk = keys::storage_key(branch_id, &rev_uk);
 
+        let count_uk = keys::edge_type_count_key(graph, edge_type);
+        let count_sk = keys::storage_key(branch_id, &count_uk);
+
         self.db.transaction(branch_id, |txn| {
             // Validate both nodes exist within the transaction (prevents TOCTOU)
             if txn.get(&src_node_key)?.is_none() {
@@ -408,9 +597,12 @@ impl GraphStore {
                 _ => packed::empty(),
             };
             // Remove existing edge if present (upsert semantics)
-            if let Some(new_buf) = packed::remove_edge(&fwd_buf, dst, edge_type) {
+            let was_update = if let Some(new_buf) = packed::remove_edge(&fwd_buf, dst, edge_type) {
                 fwd_buf = new_buf;
-            }
+                true
+            } else {
+                false
+            };
             packed::append_edge(&mut fwd_buf, dst, edge_type, &data)?;
             txn.put_replace(fwd_sk.clone(), Value::Bytes(fwd_buf))?;
 
@@ -424,6 +616,12 @@ impl GraphStore {
             }
             packed::append_edge(&mut rev_buf, src, edge_type, &data)?;
             txn.put_replace(rev_sk.clone(), Value::Bytes(rev_buf))?;
+
+            // Increment edge type counter only for new edges (not updates)
+            if !was_update {
+                let count = Self::read_edge_type_count(txn, &count_sk)?;
+                Self::write_edge_type_count(txn, &count_sk, count + 1)?;
+            }
 
             Ok(())
         })
@@ -461,11 +659,15 @@ impl GraphStore {
         let fwd_sk = keys::storage_key(branch_id, &fwd_uk);
         let rev_uk = keys::reverse_adj_key(graph, dst);
         let rev_sk = keys::storage_key(branch_id, &rev_uk);
+        let count_uk = keys::edge_type_count_key(graph, edge_type);
+        let count_sk = keys::storage_key(branch_id, &count_uk);
 
         self.db.transaction(branch_id, |txn| {
             // Remove from forward adjacency list
+            let mut removed = false;
             if let Some(Value::Bytes(fwd_bytes)) = txn.get(&fwd_sk)? {
                 if let Some(new_bytes) = packed::remove_edge(&fwd_bytes, dst, edge_type) {
+                    removed = true;
                     if packed::edge_count(&new_bytes) == 0 {
                         txn.delete(fwd_sk.clone())?;
                     } else {
@@ -482,6 +684,14 @@ impl GraphStore {
                     } else {
                         txn.put_replace(rev_sk.clone(), Value::Bytes(new_bytes))?;
                     }
+                }
+            }
+
+            // Decrement edge type counter
+            if removed {
+                let count = Self::read_edge_type_count(txn, &count_sk)?;
+                if count > 0 {
+                    Self::write_edge_type_count(txn, &count_sk, count - 1)?;
                 }
             }
 
@@ -840,10 +1050,13 @@ impl GraphStore {
             nodes_inserted += chunk.len();
         }
 
-        // Group edges by source (forward) and destination (reverse)
+        // Group edges by source (forward) and destination (reverse),
+        // and accumulate per-type edge counts for counters (G-3).
         let mut fwd_map: std::collections::HashMap<&str, Vec<(&str, &str, &EdgeData)>> =
             std::collections::HashMap::new();
         let mut rev_map: std::collections::HashMap<&str, Vec<(&str, &str, &EdgeData)>> =
+            std::collections::HashMap::new();
+        let mut edge_type_counts: std::collections::HashMap<&str, u64> =
             std::collections::HashMap::new();
 
         for (src, dst, edge_type, data) in edges {
@@ -857,6 +1070,7 @@ impl GraphStore {
                 }
             }
 
+            *edge_type_counts.entry(edge_type.as_str()).or_insert(0) += 1;
             fwd_map
                 .entry(src.as_str())
                 .or_default()
@@ -919,7 +1133,46 @@ impl GraphStore {
             })?;
         }
 
+        // Write accumulated edge type counters (G-3)
+        if !edge_type_counts.is_empty() {
+            self.db.transaction(branch_id, |txn| {
+                for (et, new_count) in &edge_type_counts {
+                    let count_uk = keys::edge_type_count_key(graph, et);
+                    let count_sk = Key::new_kv(ns.clone(), &count_uk);
+                    let existing = Self::read_edge_type_count(txn, &count_sk)?;
+                    Self::write_edge_type_count(txn, &count_sk, existing + new_count)?;
+                }
+                Ok(())
+            })?;
+        }
+
         Ok((nodes_inserted, edges.len()))
+    }
+
+    // =========================================================================
+    // Edge type count helpers (G-3)
+    // =========================================================================
+
+    /// Read an edge type count from a transaction.
+    fn read_edge_type_count(
+        txn: &mut strata_concurrency::TransactionContext,
+        count_sk: &Key,
+    ) -> StrataResult<u64> {
+        match txn.get(count_sk)? {
+            Some(Value::String(s)) => s
+                .parse::<u64>()
+                .map_err(|e| StrataError::serialization(e.to_string())),
+            _ => Ok(0),
+        }
+    }
+
+    /// Write an edge type count in a transaction.
+    fn write_edge_type_count(
+        txn: &mut strata_concurrency::TransactionContext,
+        count_sk: &Key,
+        count: u64,
+    ) -> StrataResult<()> {
+        txn.put(count_sk.clone(), Value::String(count.to_string()))
     }
 
     /// Look up all (graph, node_id) pairs bound to a given entity ref URI.
@@ -2699,5 +2952,623 @@ mod tests {
                 );
             }
         }
+    }
+
+    // =========================================================================
+    // G-5: Graph catalog tests
+    // =========================================================================
+
+    #[test]
+    fn catalog_idempotent_create() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "g", None).unwrap(); // second create
+
+        let graphs = gs.list_graphs(b).unwrap();
+        assert_eq!(
+            graphs.iter().filter(|g| g.as_str() == "g").count(),
+            1,
+            "catalog should not have duplicate entries"
+        );
+    }
+
+    #[test]
+    fn catalog_updated_on_delete() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "a", None).unwrap();
+        gs.create_graph(b, "b", None).unwrap();
+        gs.create_graph(b, "c", None).unwrap();
+
+        gs.delete_graph(b, "b").unwrap();
+
+        let mut graphs = gs.list_graphs(b).unwrap();
+        graphs.sort();
+        assert_eq!(graphs, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn catalog_create_after_delete_readds() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.delete_graph(b, "g").unwrap();
+        assert!(gs.list_graphs(b).unwrap().is_empty());
+
+        gs.create_graph(b, "g", None).unwrap();
+        assert_eq!(gs.list_graphs(b).unwrap(), vec!["g"]);
+    }
+
+    #[test]
+    fn catalog_delete_nonexistent_graph_noop() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "keep", None).unwrap();
+        // Deleting a graph that doesn't exist should not crash or corrupt catalog
+        gs.delete_graph(b, "ghost").unwrap();
+
+        assert_eq!(gs.list_graphs(b).unwrap(), vec!["keep"]);
+    }
+
+    // =========================================================================
+    // G-3: Edge type counter tests
+    // =========================================================================
+
+    #[test]
+    fn edge_type_counter_basic_add() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
+
+        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "A", "C", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "B", "C", "HATES", EdgeData::default())
+            .unwrap();
+
+        assert_eq!(gs.count_edges_by_type(b, "g", "KNOWS").unwrap(), 2);
+        assert_eq!(gs.count_edges_by_type(b, "g", "HATES").unwrap(), 1);
+        assert_eq!(gs.count_edges_by_type(b, "g", "MISSING").unwrap(), 0);
+    }
+
+    #[test]
+    fn edge_type_counter_upsert_no_double_count() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+
+        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+        // Upsert same edge with different weight
+        gs.add_edge(
+            b,
+            "g",
+            "A",
+            "B",
+            "KNOWS",
+            EdgeData {
+                weight: 0.5,
+                properties: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            gs.count_edges_by_type(b, "g", "KNOWS").unwrap(),
+            1,
+            "upsert should not double-count"
+        );
+    }
+
+    #[test]
+    fn edge_type_counter_decrements_on_remove() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
+
+        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "A", "C", "KNOWS", EdgeData::default())
+            .unwrap();
+
+        assert_eq!(gs.count_edges_by_type(b, "g", "KNOWS").unwrap(), 2);
+
+        gs.remove_edge(b, "g", "A", "B", "KNOWS").unwrap();
+        assert_eq!(gs.count_edges_by_type(b, "g", "KNOWS").unwrap(), 1);
+
+        gs.remove_edge(b, "g", "A", "C", "KNOWS").unwrap();
+        assert_eq!(gs.count_edges_by_type(b, "g", "KNOWS").unwrap(), 0);
+    }
+
+    #[test]
+    fn edge_type_counter_remove_nonexistent_edge_no_underflow() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+
+        // Remove an edge that was never added — should not underflow
+        gs.remove_edge(b, "g", "A", "B", "GHOST").unwrap();
+        assert_eq!(gs.count_edges_by_type(b, "g", "GHOST").unwrap(), 0);
+    }
+
+    #[test]
+    fn edge_type_counter_self_loop() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
+
+        gs.add_edge(b, "g", "A", "A", "SELF", EdgeData::default())
+            .unwrap();
+        assert_eq!(gs.count_edges_by_type(b, "g", "SELF").unwrap(), 1);
+
+        gs.remove_edge(b, "g", "A", "A", "SELF").unwrap();
+        assert_eq!(gs.count_edges_by_type(b, "g", "SELF").unwrap(), 0);
+    }
+
+    #[test]
+    fn edge_type_counter_remove_node_decrements() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
+
+        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "C", "A", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "A", "B", "TRUSTS", EdgeData::default())
+            .unwrap();
+
+        assert_eq!(gs.count_edges_by_type(b, "g", "KNOWS").unwrap(), 2);
+        assert_eq!(gs.count_edges_by_type(b, "g", "TRUSTS").unwrap(), 1);
+
+        // Removing A should decrement all edges incident to A
+        gs.remove_node(b, "g", "A").unwrap();
+
+        assert_eq!(gs.count_edges_by_type(b, "g", "KNOWS").unwrap(), 0);
+        assert_eq!(gs.count_edges_by_type(b, "g", "TRUSTS").unwrap(), 0);
+    }
+
+    #[test]
+    fn edge_type_counter_remove_node_with_self_loop() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+
+        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "A", "A", "SELF", EdgeData::default())
+            .unwrap();
+
+        assert_eq!(gs.count_edges_by_type(b, "g", "KNOWS").unwrap(), 1);
+        assert_eq!(gs.count_edges_by_type(b, "g", "SELF").unwrap(), 1);
+
+        gs.remove_node(b, "g", "A").unwrap();
+
+        assert_eq!(
+            gs.count_edges_by_type(b, "g", "KNOWS").unwrap(),
+            0,
+            "outgoing KNOWS edge should be decremented"
+        );
+        assert_eq!(
+            gs.count_edges_by_type(b, "g", "SELF").unwrap(),
+            0,
+            "self-loop should be decremented exactly once"
+        );
+    }
+
+    #[test]
+    fn edge_type_counter_multiple_types() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
+
+        // A→B (KNOWS), A→B (TRUSTS) are different edges (different types)
+        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "A", "B", "TRUSTS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "B", "C", "KNOWS", EdgeData::default())
+            .unwrap();
+
+        assert_eq!(gs.count_edges_by_type(b, "g", "KNOWS").unwrap(), 2);
+        assert_eq!(gs.count_edges_by_type(b, "g", "TRUSTS").unwrap(), 1);
+    }
+
+    #[test]
+    fn edge_type_counter_bulk_insert() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+
+        let nodes: Vec<(String, NodeData)> = (0..5)
+            .map(|i| (format!("n{}", i), NodeData::default()))
+            .collect();
+        let edges: Vec<(String, String, String, EdgeData)> = vec![
+            (
+                "n0".into(),
+                "n1".into(),
+                "KNOWS".into(),
+                EdgeData::default(),
+            ),
+            (
+                "n1".into(),
+                "n2".into(),
+                "KNOWS".into(),
+                EdgeData::default(),
+            ),
+            (
+                "n2".into(),
+                "n3".into(),
+                "TRUSTS".into(),
+                EdgeData::default(),
+            ),
+            (
+                "n3".into(),
+                "n4".into(),
+                "KNOWS".into(),
+                EdgeData::default(),
+            ),
+        ];
+
+        gs.bulk_insert(b, "g", &nodes, &edges, None).unwrap();
+
+        assert_eq!(gs.count_edges_by_type(b, "g", "KNOWS").unwrap(), 3);
+        assert_eq!(gs.count_edges_by_type(b, "g", "TRUSTS").unwrap(), 1);
+    }
+
+    // =========================================================================
+    // G-18: Pagination tests
+    // =========================================================================
+
+    #[test]
+    fn list_nodes_paginated_basic() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        for id in &["a", "b", "c", "d", "e"] {
+            gs.add_node(b, "g", id, NodeData::default()).unwrap();
+        }
+
+        let page = gs
+            .list_nodes_paginated(
+                b,
+                "g",
+                PageRequest {
+                    limit: 3,
+                    cursor: None,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(page.items.len(), 3);
+        assert!(page.next_cursor.is_some(), "should have a next page");
+    }
+
+    #[test]
+    fn list_nodes_paginated_iterate_all() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        let expected: Vec<String> = (0..7).map(|i| format!("n{:02}", i)).collect();
+        for id in &expected {
+            gs.add_node(b, "g", id, NodeData::default()).unwrap();
+        }
+
+        let mut all_items = Vec::new();
+        let mut cursor = None;
+        let mut pages = 0;
+
+        loop {
+            let page = gs
+                .list_nodes_paginated(
+                    b,
+                    "g",
+                    PageRequest {
+                        limit: 3,
+                        cursor: cursor.clone(),
+                    },
+                )
+                .unwrap();
+            all_items.extend(page.items);
+            cursor = page.next_cursor;
+            pages += 1;
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        assert_eq!(
+            all_items, expected,
+            "paginated iteration should return all nodes in order"
+        );
+        assert!(pages >= 2, "should have taken multiple pages");
+    }
+
+    #[test]
+    fn list_nodes_paginated_empty_graph() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+
+        let page = gs
+            .list_nodes_paginated(
+                b,
+                "g",
+                PageRequest {
+                    limit: 10,
+                    cursor: None,
+                },
+            )
+            .unwrap();
+
+        assert!(page.items.is_empty());
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn list_nodes_paginated_exact_limit() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        for id in &["a", "b", "c"] {
+            gs.add_node(b, "g", id, NodeData::default()).unwrap();
+        }
+
+        // Request exactly 3 nodes when there are exactly 3
+        let page = gs
+            .list_nodes_paginated(
+                b,
+                "g",
+                PageRequest {
+                    limit: 3,
+                    cursor: None,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(page.items.len(), 3);
+        // next_cursor may be Some (we don't know there are no more),
+        // but a subsequent call should return empty
+        if let Some(cursor) = page.next_cursor {
+            let page2 = gs
+                .list_nodes_paginated(
+                    b,
+                    "g",
+                    PageRequest {
+                        limit: 3,
+                        cursor: Some(cursor),
+                    },
+                )
+                .unwrap();
+            assert!(page2.items.is_empty());
+            assert!(page2.next_cursor.is_none());
+        }
+    }
+
+    #[test]
+    fn list_nodes_paginated_cursor_past_end() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "a", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "b", NodeData::default()).unwrap();
+
+        // Use a cursor past all existing node IDs
+        let page = gs
+            .list_nodes_paginated(
+                b,
+                "g",
+                PageRequest {
+                    limit: 10,
+                    cursor: Some("zzz".to_string()),
+                },
+            )
+            .unwrap();
+
+        assert!(page.items.is_empty());
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn list_graphs_paginated_basic() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        for name in &["alpha", "beta", "gamma", "delta", "epsilon"] {
+            gs.create_graph(b, name, None).unwrap();
+        }
+
+        let page = gs
+            .list_graphs_paginated(
+                b,
+                PageRequest {
+                    limit: 2,
+                    cursor: None,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(page.items.len(), 2);
+        assert!(page.next_cursor.is_some());
+        // First page should be alphabetically first two
+        assert_eq!(page.items[0], "alpha");
+        assert_eq!(page.items[1], "beta");
+    }
+
+    #[test]
+    fn list_graphs_paginated_iterate_all() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        let expected = vec!["a", "b", "c", "d", "e"];
+        for name in &expected {
+            gs.create_graph(b, name, None).unwrap();
+        }
+
+        let mut all = Vec::new();
+        let mut cursor = None;
+
+        loop {
+            let page = gs
+                .list_graphs_paginated(
+                    b,
+                    PageRequest {
+                        limit: 2,
+                        cursor: cursor.clone(),
+                    },
+                )
+                .unwrap();
+            all.extend(page.items);
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        let expected_sorted: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+        assert_eq!(all, expected_sorted);
+    }
+
+    #[test]
+    fn list_graphs_paginated_empty() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        let page = gs
+            .list_graphs_paginated(
+                b,
+                PageRequest {
+                    limit: 10,
+                    cursor: None,
+                },
+            )
+            .unwrap();
+
+        assert!(page.items.is_empty());
+        assert!(page.next_cursor.is_none());
+    }
+
+    // =========================================================================
+    // G-11: Batched deletion tests
+    // =========================================================================
+
+    #[test]
+    fn delete_graph_cleans_ref_index() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(
+            b,
+            "g",
+            "n1",
+            NodeData {
+                entity_ref: Some("kv://main/entity1".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Verify ref index exists before delete
+        let bindings = gs.nodes_for_entity(b, "kv://main/entity1").unwrap();
+        assert_eq!(bindings.len(), 1);
+
+        gs.delete_graph(b, "g").unwrap();
+
+        // Ref index should be cleaned up
+        let bindings = gs.nodes_for_entity(b, "kv://main/entity1").unwrap();
+        assert!(
+            bindings.is_empty(),
+            "ref index should be cleaned after graph deletion"
+        );
+    }
+
+    #[test]
+    fn delete_graph_with_many_nodes() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+
+        // Insert enough nodes to require multiple batches if batch size were small
+        let nodes: Vec<(String, NodeData)> = (0..50)
+            .map(|i| (format!("n{:04}", i), NodeData::default()))
+            .collect();
+        let edges: Vec<(String, String, String, EdgeData)> = (0..49)
+            .map(|i| {
+                (
+                    format!("n{:04}", i),
+                    format!("n{:04}", i + 1),
+                    "NEXT".to_string(),
+                    EdgeData::default(),
+                )
+            })
+            .collect();
+
+        gs.bulk_insert(b, "g", &nodes, &edges, None).unwrap();
+
+        gs.delete_graph(b, "g").unwrap();
+
+        assert!(gs.get_graph_meta(b, "g").unwrap().is_none());
+        assert!(gs.list_nodes(b, "g").unwrap().is_empty());
+        assert!(gs.list_graphs(b).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_graph_preserves_other_graphs() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "keep", None).unwrap();
+        gs.add_node(b, "keep", "A", NodeData::default()).unwrap();
+
+        gs.create_graph(b, "remove", None).unwrap();
+        gs.add_node(b, "remove", "B", NodeData::default()).unwrap();
+
+        gs.delete_graph(b, "remove").unwrap();
+
+        // "keep" graph should be untouched
+        assert!(gs.get_graph_meta(b, "keep").unwrap().is_some());
+        assert!(gs.get_node(b, "keep", "A").unwrap().is_some());
+        assert_eq!(gs.list_graphs(b).unwrap(), vec!["keep"]);
     }
 }

@@ -156,6 +156,28 @@ impl Strata {
         }
     }
 
+    /// List node IDs with cursor-based pagination.
+    ///
+    /// Returns `(items, next_cursor)`. When `next_cursor` is `None`, there are no more pages.
+    pub fn graph_list_nodes_paginated(
+        &self,
+        graph: &str,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> Result<(Vec<String>, Option<String>)> {
+        match self.executor.execute(Command::GraphListNodesPaginated {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+            limit,
+            cursor: cursor.map(|s| s.to_string()),
+        })? {
+            Output::GraphPage { items, next_cursor } => Ok((items, next_cursor)),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphListNodesPaginated".into(),
+            }),
+        }
+    }
+
     // =========================================================================
     // Edge CRUD
     // =========================================================================

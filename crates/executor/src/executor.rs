@@ -1088,6 +1088,23 @@ impl Executor {
                 })?;
                 crate::handlers::graph::graph_list_nodes(&self.primitives, branch, graph)
             }
+            Command::GraphListNodesPaginated {
+                branch,
+                graph,
+                limit,
+                cursor,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_list_nodes_paginated(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    limit,
+                    cursor,
+                )
+            }
             Command::GraphAddEdge {
                 branch,
                 graph,

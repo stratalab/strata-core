@@ -193,8 +193,8 @@ pub struct BfsOptions {
 impl Default for BfsOptions {
     fn default() -> Self {
         Self {
-            max_depth: usize::MAX,
-            max_nodes: None,
+            max_depth: 100,
+            max_nodes: Some(10_000),
             edge_types: None,
             direction: Direction::Outgoing,
         }
@@ -428,6 +428,24 @@ pub struct GraphStats {
     pub edge_count: usize,
 }
 
+/// Cursor-based pagination request.
+#[derive(Debug, Clone)]
+pub struct PageRequest {
+    /// Maximum number of items to return.
+    pub limit: usize,
+    /// Exclusive start key for continuation (None = start from beginning).
+    pub cursor: Option<String>,
+}
+
+/// Cursor-based pagination response.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageResponse<T> {
+    /// Items in this page.
+    pub items: Vec<T>,
+    /// Cursor for the next page (None = last page).
+    pub next_cursor: Option<String>,
+}
+
 /// Trait for graph algorithms that operate on a snapshot.
 pub trait GraphAlgorithm {
     /// The result type of this algorithm.
@@ -560,7 +578,8 @@ mod tests {
     #[test]
     fn bfs_options_defaults() {
         let opts = BfsOptions::default();
-        assert!(opts.max_nodes.is_none());
+        assert_eq!(opts.max_depth, 100);
+        assert_eq!(opts.max_nodes, Some(10_000));
         assert!(opts.edge_types.is_none());
         assert_eq!(opts.direction, Direction::Outgoing);
     }

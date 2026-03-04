@@ -156,6 +156,24 @@ pub fn graph_list_nodes(p: &Arc<Primitives>, branch: BranchId, graph: String) ->
     Ok(Output::Keys(nodes))
 }
 
+/// Handle GraphListNodesPaginated command.
+pub fn graph_list_nodes_paginated(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+    limit: usize,
+    cursor: Option<String>,
+) -> Result<Output> {
+    use strata_engine::graph::types::PageRequest;
+    let core_branch = to_core_branch_id(&branch)?;
+    let page = PageRequest { limit, cursor };
+    let result = convert_result(p.graph.list_nodes_paginated(core_branch, &graph, page))?;
+    Ok(Output::GraphPage {
+        items: result.items,
+        next_cursor: result.next_cursor,
+    })
+}
+
 /// Handle GraphAddEdge command.
 #[allow(clippy::too_many_arguments)]
 pub fn graph_add_edge(
