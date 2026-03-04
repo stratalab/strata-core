@@ -1315,6 +1315,16 @@ pub enum Command {
         graph: String,
     },
 
+    /// List all ontology types (both object and link types).
+    /// Returns: `Output::Keys`
+    GraphListOntologyTypes {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Graph name.
+        graph: String,
+    },
+
     /// Get all node IDs of a given object type.
     /// Returns: `Output::Keys`
     GraphNodesByType {
@@ -1560,6 +1570,7 @@ impl Command {
             Command::GraphDefineObjectType { .. } => "GraphDefineObjectType",
             Command::GraphGetObjectType { .. } => "GraphGetObjectType",
             Command::GraphListObjectTypes { .. } => "GraphListObjectTypes",
+            Command::GraphListOntologyTypes { .. } => "GraphListOntologyTypes",
             Command::GraphDeleteObjectType { .. } => "GraphDeleteObjectType",
             Command::GraphDefineLinkType { .. } => "GraphDefineLinkType",
             Command::GraphGetLinkType { .. } => "GraphGetLinkType",
@@ -1678,6 +1689,7 @@ impl Command {
             | Command::GraphDefineObjectType { branch, .. }
             | Command::GraphGetObjectType { branch, .. }
             | Command::GraphListObjectTypes { branch, .. }
+            | Command::GraphListOntologyTypes { branch, .. }
             | Command::GraphDeleteObjectType { branch, .. }
             | Command::GraphDefineLinkType { branch, .. }
             | Command::GraphGetLinkType { branch, .. }

@@ -492,23 +492,8 @@ fn subcommands_for(cmd: &str) -> &'static [&'static str] {
             "neighbors",
             "bulk-insert",
             "bfs",
-            "define-object-type",
-            "get-object-type",
-            "list-object-types",
-            "delete-object-type",
-            "define-link-type",
-            "get-link-type",
-            "list-link-types",
-            "delete-link-type",
-            "freeze-ontology",
-            "ontology-status",
-            "ontology-summary",
-            "nodes-by-type",
-            "wcc",
-            "cdlp",
-            "pagerank",
-            "lcc",
-            "sssp",
+            "ontology",
+            "analytics",
         ],
         "branch" => &[
             "create", "info", "get", "list", "exists", "del", "fork", "diff", "merge", "export",
@@ -517,6 +502,17 @@ fn subcommands_for(cmd: &str) -> &'static [&'static str] {
         "space" => &["list", "create", "del", "exists"],
         "txn" => &["info", "active"],
         "config" => &["set", "get", "list"],
+        _ => &[],
+    }
+}
+
+/// Known sub-subcommands for nested commands (3rd level).
+fn sub_subcommands_for(cmd: &str, sub: &str) -> &'static [&'static str] {
+    match (cmd, sub) {
+        ("graph", "ontology") => &[
+            "define", "get", "list", "delete", "freeze", "status", "summary",
+        ],
+        ("graph", "analytics") => &["wcc", "cdlp", "pagerank", "lcc", "sssp"],
         _ => &[],
     }
 }
@@ -593,6 +589,37 @@ impl Completer for StrataHelper {
                 })
                 .collect();
             Ok((start, candidates))
+        } else if parts.len() == 2 && trailing_space {
+            // Just typed "graph ontology ", completing sub-subcommand
+            let sub_subs = sub_subcommands_for(parts[0], parts[1]);
+            if !sub_subs.is_empty() {
+                let candidates: Vec<Pair> = sub_subs
+                    .iter()
+                    .map(|s| Pair {
+                        display: s.to_string(),
+                        replacement: s.to_string(),
+                    })
+                    .collect();
+                return Ok((pos, candidates));
+            }
+            Ok((pos, vec![]))
+        } else if parts.len() == 3 && !trailing_space {
+            // Completing partial sub-subcommand
+            let sub_subs = sub_subcommands_for(parts[0], parts[1]);
+            if !sub_subs.is_empty() {
+                let prefix = parts[2];
+                let start = pos - prefix.len();
+                let candidates: Vec<Pair> = sub_subs
+                    .iter()
+                    .filter(|s| s.starts_with(prefix))
+                    .map(|s| Pair {
+                        display: s.to_string(),
+                        replacement: s.to_string(),
+                    })
+                    .collect();
+                return Ok((start, candidates));
+            }
+            Ok((pos, vec![]))
         } else {
             Ok((pos, vec![]))
         }

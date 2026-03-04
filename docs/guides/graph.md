@@ -352,7 +352,7 @@ let result = db.graph_wcc("social")?;
 
 **CLI:**
 ```
-graph wcc social
+graph analytics wcc social
 ```
 
 ### CDLP — Community Detection via Label Propagation
@@ -373,8 +373,8 @@ let result = db.graph_cdlp("social", 10, Some("outgoing"))?;
 
 **CLI:**
 ```
-graph cdlp social 10
-graph cdlp social 10 --direction outgoing
+graph analytics cdlp social 10
+graph analytics cdlp social 10 --direction outgoing
 ```
 
 ### PageRank — Iterative Importance Scoring
@@ -396,8 +396,8 @@ let result = db.graph_pagerank("social", Some(0.90), Some(50), Some(1e-8))?;
 
 **CLI:**
 ```
-graph pagerank social
-graph pagerank social --damping 0.90 --max-iterations 50 --tolerance 0.00000001
+graph analytics pagerank social
+graph analytics pagerank social --damping 0.90 --max-iterations 50 --tolerance 0.00000001
 ```
 
 ### LCC — Local Clustering Coefficient
@@ -413,7 +413,7 @@ let result = db.graph_lcc("social")?;
 
 **CLI:**
 ```
-graph lcc social
+graph analytics lcc social
 ```
 
 ### SSSP — Single-Source Shortest Path
@@ -437,8 +437,8 @@ let result = db.graph_sssp("social", "alice", Some("both"))?;
 
 **CLI:**
 ```
-graph sssp social alice
-graph sssp social alice --direction both
+graph analytics sssp social alice
+graph analytics sssp social alice --direction both
 ```
 
 ### Direction Parameter

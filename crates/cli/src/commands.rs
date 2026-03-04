@@ -949,7 +949,8 @@ fn build_graph() -> Command {
         .subcommand(
             Command::new("list-nodes")
                 .about("List all nodes in a graph")
-                .arg(Arg::new("graph").required(true).help("Graph name")),
+                .arg(Arg::new("graph").required(true).help("Graph name"))
+                .arg(Arg::new("type").long("type").help("Filter by object type")),
         )
         // Edges
         .subcommand(
@@ -1035,157 +1036,136 @@ fn build_graph() -> Command {
                         .help("Direction: outgoing, incoming, both"),
                 ),
         )
-        // Ontology — Object Types
+        // Ontology (nested)
         .subcommand(
-            Command::new("define-object-type")
-                .about("Define an object type in the ontology")
-                .arg(Arg::new("graph").required(true).help("Graph name"))
-                .arg(
-                    Arg::new("json")
-                        .required_unless_present("file")
-                        .help("Object type definition as JSON"),
+            Command::new("ontology")
+                .about("Ontology operations (define, get, list, delete, freeze, status, summary)")
+                .subcommand_required(true)
+                .subcommand(
+                    Command::new("define")
+                        .about("Define an object or link type (auto-detected from JSON)")
+                        .arg(Arg::new("graph").required(true).help("Graph name"))
+                        .arg(
+                            Arg::new("json")
+                                .required_unless_present("file")
+                                .help("Type definition as JSON"),
+                        )
+                        .arg(
+                            Arg::new("file")
+                                .long("file")
+                                .short('f')
+                                .value_name("PATH")
+                                .help("Read JSON from file ('-' for stdin)"),
+                        ),
                 )
-                .arg(
-                    Arg::new("file")
-                        .long("file")
-                        .short('f')
-                        .value_name("PATH")
-                        .help("Read JSON from file ('-' for stdin)"),
+                .subcommand(
+                    Command::new("get")
+                        .about("Get a type definition")
+                        .arg(Arg::new("graph").required(true).help("Graph name"))
+                        .arg(Arg::new("name").required(true).help("Type name"))
+                        .arg(
+                            Arg::new("kind")
+                                .long("kind")
+                                .help("Type kind: object or link (default: try object first)"),
+                        ),
+                )
+                .subcommand(
+                    Command::new("list")
+                        .about("List ontology types")
+                        .arg(Arg::new("graph").required(true).help("Graph name"))
+                        .arg(
+                            Arg::new("kind")
+                                .long("kind")
+                                .help("Type kind: object or link (default: list both)"),
+                        ),
+                )
+                .subcommand(
+                    Command::new("delete")
+                        .about("Delete a type definition")
+                        .arg(Arg::new("graph").required(true).help("Graph name"))
+                        .arg(Arg::new("name").required(true).help("Type name"))
+                        .arg(
+                            Arg::new("kind")
+                                .long("kind")
+                                .help("Type kind: object or link (default: try object first)"),
+                        ),
+                )
+                .subcommand(
+                    Command::new("freeze")
+                        .about("Freeze the graph ontology")
+                        .arg(Arg::new("graph").required(true).help("Graph name")),
+                )
+                .subcommand(
+                    Command::new("status")
+                        .about("Get ontology status")
+                        .arg(Arg::new("graph").required(true).help("Graph name")),
+                )
+                .subcommand(
+                    Command::new("summary")
+                        .about("Get ontology summary")
+                        .arg(Arg::new("graph").required(true).help("Graph name")),
                 ),
         )
+        // Analytics (nested)
         .subcommand(
-            Command::new("get-object-type")
-                .about("Get an object type definition")
-                .arg(Arg::new("graph").required(true).help("Graph name"))
-                .arg(Arg::new("name").required(true).help("Object type name")),
-        )
-        .subcommand(
-            Command::new("list-object-types")
-                .about("List all object types")
-                .arg(Arg::new("graph").required(true).help("Graph name")),
-        )
-        .subcommand(
-            Command::new("delete-object-type")
-                .about("Delete an object type")
-                .arg(Arg::new("graph").required(true).help("Graph name"))
-                .arg(Arg::new("name").required(true).help("Object type name")),
-        )
-        // Ontology — Link Types
-        .subcommand(
-            Command::new("define-link-type")
-                .about("Define a link type in the ontology")
-                .arg(Arg::new("graph").required(true).help("Graph name"))
-                .arg(
-                    Arg::new("json")
-                        .required_unless_present("file")
-                        .help("Link type definition as JSON"),
+            Command::new("analytics")
+                .about("Graph analytics algorithms (wcc, cdlp, pagerank, lcc, sssp)")
+                .subcommand_required(true)
+                .subcommand(
+                    Command::new("wcc")
+                        .about("Weakly Connected Components")
+                        .arg(Arg::new("graph").required(true).help("Graph name")),
                 )
-                .arg(
-                    Arg::new("file")
-                        .long("file")
-                        .short('f')
-                        .value_name("PATH")
-                        .help("Read JSON from file ('-' for stdin)"),
-                ),
-        )
-        .subcommand(
-            Command::new("get-link-type")
-                .about("Get a link type definition")
-                .arg(Arg::new("graph").required(true).help("Graph name"))
-                .arg(Arg::new("name").required(true).help("Link type name")),
-        )
-        .subcommand(
-            Command::new("list-link-types")
-                .about("List all link types")
-                .arg(Arg::new("graph").required(true).help("Graph name")),
-        )
-        .subcommand(
-            Command::new("delete-link-type")
-                .about("Delete a link type")
-                .arg(Arg::new("graph").required(true).help("Graph name"))
-                .arg(Arg::new("name").required(true).help("Link type name")),
-        )
-        // Ontology — Management
-        .subcommand(
-            Command::new("freeze-ontology")
-                .about("Freeze the graph ontology")
-                .arg(Arg::new("graph").required(true).help("Graph name")),
-        )
-        .subcommand(
-            Command::new("ontology-status")
-                .about("Get ontology status")
-                .arg(Arg::new("graph").required(true).help("Graph name")),
-        )
-        .subcommand(
-            Command::new("ontology-summary")
-                .about("Get ontology summary")
-                .arg(Arg::new("graph").required(true).help("Graph name")),
-        )
-        .subcommand(
-            Command::new("nodes-by-type")
-                .about("List nodes by object type")
-                .arg(Arg::new("graph").required(true).help("Graph name"))
-                .arg(
-                    Arg::new("object-type")
-                        .required(true)
-                        .help("Object type name"),
-                ),
-        )
-        // Analytics
-        .subcommand(
-            Command::new("wcc")
-                .about("Weakly Connected Components")
-                .arg(Arg::new("graph").required(true).help("Graph name")),
-        )
-        .subcommand(
-            Command::new("cdlp")
-                .about("Community Detection via Label Propagation")
-                .arg(Arg::new("graph").required(true).help("Graph name"))
-                .arg(
-                    Arg::new("max-iterations")
-                        .required(true)
-                        .help("Maximum iterations"),
+                .subcommand(
+                    Command::new("cdlp")
+                        .about("Community Detection via Label Propagation")
+                        .arg(Arg::new("graph").required(true).help("Graph name"))
+                        .arg(
+                            Arg::new("max-iterations")
+                                .required(true)
+                                .help("Maximum iterations"),
+                        )
+                        .arg(
+                            Arg::new("direction")
+                                .long("direction")
+                                .help("Direction: outgoing, incoming, both"),
+                        ),
                 )
-                .arg(
-                    Arg::new("direction")
-                        .long("direction")
-                        .help("Direction: outgoing, incoming, both"),
-                ),
-        )
-        .subcommand(
-            Command::new("pagerank")
-                .about("PageRank importance scoring")
-                .arg(Arg::new("graph").required(true).help("Graph name"))
-                .arg(
-                    Arg::new("damping")
-                        .long("damping")
-                        .help("Damping factor (default 0.85)"),
+                .subcommand(
+                    Command::new("pagerank")
+                        .about("PageRank importance scoring")
+                        .arg(Arg::new("graph").required(true).help("Graph name"))
+                        .arg(
+                            Arg::new("damping")
+                                .long("damping")
+                                .help("Damping factor (default 0.85)"),
+                        )
+                        .arg(
+                            Arg::new("max-iterations")
+                                .long("max-iterations")
+                                .help("Maximum iterations (default 20)"),
+                        )
+                        .arg(
+                            Arg::new("tolerance")
+                                .long("tolerance")
+                                .help("Convergence tolerance (default 1e-6)"),
+                        ),
                 )
-                .arg(
-                    Arg::new("max-iterations")
-                        .long("max-iterations")
-                        .help("Maximum iterations (default 20)"),
+                .subcommand(
+                    Command::new("lcc")
+                        .about("Local Clustering Coefficient")
+                        .arg(Arg::new("graph").required(true).help("Graph name")),
                 )
-                .arg(
-                    Arg::new("tolerance")
-                        .long("tolerance")
-                        .help("Convergence tolerance (default 1e-6)"),
-                ),
-        )
-        .subcommand(
-            Command::new("lcc")
-                .about("Local Clustering Coefficient")
-                .arg(Arg::new("graph").required(true).help("Graph name")),
-        )
-        .subcommand(
-            Command::new("sssp")
-                .about("Single-Source Shortest Path (Dijkstra)")
-                .arg(Arg::new("graph").required(true).help("Graph name"))
-                .arg(Arg::new("source").required(true).help("Source node ID"))
-                .arg(
-                    Arg::new("direction")
-                        .long("direction")
-                        .help("Direction: outgoing, incoming, both"),
+                .subcommand(
+                    Command::new("sssp")
+                        .about("Single-Source Shortest Path (Dijkstra)")
+                        .arg(Arg::new("graph").required(true).help("Graph name"))
+                        .arg(Arg::new("source").required(true).help("Source node ID"))
+                        .arg(
+                            Arg::new("direction")
+                                .long("direction")
+                                .help("Direction: outgoing, incoming, both"),
+                        ),
                 ),
         )
 }

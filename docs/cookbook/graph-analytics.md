@@ -91,7 +91,7 @@ let components = db.graph_wcc("social")?;
 ```
 
 ```
-graph wcc social
+graph analytics wcc social
 ```
 
 Now remove the bridge and check again:
@@ -119,7 +119,7 @@ let communities = db.graph_cdlp("social", 10, None)?;
 ```
 
 ```
-graph cdlp social 10
+graph analytics cdlp social 10
 ```
 
 Try directed community detection:
@@ -130,7 +130,7 @@ let communities = db.graph_cdlp("social", 10, Some("outgoing"))?;
 ```
 
 ```
-graph cdlp social 10 --direction outgoing
+graph analytics cdlp social 10 --direction outgoing
 ```
 
 **Use case:** Interest-based user grouping, topic clustering, organizational structure detection.
@@ -147,7 +147,7 @@ let ranks = db.graph_pagerank("social", None, None, None)?;
 ```
 
 ```
-graph pagerank social
+graph analytics pagerank social
 ```
 
 Tune the algorithm:
@@ -158,7 +158,7 @@ let ranks = db.graph_pagerank("social", Some(0.95), Some(100), Some(1e-8))?;
 ```
 
 ```
-graph pagerank social --damping 0.95 --max-iterations 100 --tolerance 0.00000001
+graph analytics pagerank social --damping 0.95 --max-iterations 100 --tolerance 0.00000001
 ```
 
 **Use case:** Identifying key influencers, ranking documents, finding critical infrastructure nodes.
@@ -177,7 +177,7 @@ let coefficients = db.graph_lcc("social")?;
 ```
 
 ```
-graph lcc social
+graph analytics lcc social
 ```
 
 **Use case:** Identifying cliques, measuring social cohesion, spam detection (spammers tend to have low LCC).
@@ -193,7 +193,7 @@ let distances = db.graph_sssp("social", "alice", None)?;
 ```
 
 ```
-graph sssp social alice
+graph analytics sssp social alice
 ```
 
 With weighted edges:
@@ -217,7 +217,7 @@ let distances = db.graph_sssp("social", "dave", Some("incoming"))?;
 ```
 
 ```
-graph sssp social dave --direction incoming
+graph analytics sssp social dave --direction incoming
 ```
 
 **Use case:** Network routing, supply chain optimization, social distance measurement.
