@@ -22,6 +22,9 @@
 //! gives byte offsets into the embeddings section (measured in f32 elements,
 //! not bytes, matching VectorHeap conventions).
 
+#[cfg(not(target_endian = "little"))]
+compile_error!("MmapVectorData requires little-endian architecture for zero-copy f32 access");
+
 use memmap2::Mmap;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -112,6 +115,8 @@ pub(crate) struct MmapVectorData {
     free_slots: Vec<usize>,
     /// Byte offset where embeddings data starts in the mmap
     embeddings_offset: usize,
+    /// Held to keep advisory shared lock for the struct lifetime
+    _lock_file: File,
 }
 
 impl MmapVectorData {
@@ -120,6 +125,8 @@ impl MmapVectorData {
     /// Returns `None` if the file doesn't exist or is invalid (caller falls back to KV).
     pub(crate) fn open(path: &Path, expected_dimension: usize) -> Result<Self, VectorError> {
         let file = File::open(path).map_err(|e| VectorError::Io(e.to_string()))?;
+        fs2::FileExt::lock_shared(&file)
+            .map_err(|e| VectorError::Io(format!("failed to lock {}: {e}", path.display())))?;
         // SAFETY: We treat the mmap as read-only and the file is opened read-only.
         let mmap = unsafe { Mmap::map(&file) }.map_err(|e| VectorError::Io(e.to_string()))?;
 
@@ -210,6 +217,7 @@ impl MmapVectorData {
             index,
             free_slots,
             embeddings_offset,
+            _lock_file: file,
         })
     }
 
@@ -222,7 +230,11 @@ impl MmapVectorData {
             return None;
         }
         let slice = &self.mmap[byte_start..byte_end];
-        // SAFETY: f32 is 4 bytes, alignment is guaranteed by the file format,
+        assert!(
+            slice.as_ptr() as usize % std::mem::align_of::<f32>() == 0,
+            "mmap slice pointer is not aligned to f32"
+        );
+        // SAFETY: f32 is 4 bytes, alignment is asserted above,
         // and we've verified the bounds.
         let floats =
             unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const f32, self.dimension) };
@@ -237,6 +249,10 @@ impl MmapVectorData {
             return None;
         }
         let slice = &self.mmap[byte_start..byte_end];
+        assert!(
+            slice.as_ptr() as usize % std::mem::align_of::<f32>() == 0,
+            "mmap slice pointer is not aligned to f32"
+        );
         let floats = unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const f32, dim) };
         Some(floats)
     }
@@ -308,6 +324,8 @@ pub(crate) fn write_mmap_file(
     // Write to temp file then rename for atomicity
     let temp_path = path.with_extension("vec.tmp");
     let mut file = File::create(&temp_path).map_err(|e| VectorError::Io(e.to_string()))?;
+    fs2::FileExt::lock_exclusive(&file)
+        .map_err(|e| VectorError::Io(format!("failed to lock {}: {e}", temp_path.display())))?;
 
     // Header
     file.write_all(MAGIC)

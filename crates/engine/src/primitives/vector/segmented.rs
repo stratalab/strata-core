@@ -110,7 +110,7 @@ static SEARCH_POOL: Lazy<rayon::ThreadPool> = Lazy::new(|| {
         .thread_name(|i| format!("strata-vsearch-{}", i))
         .stack_size(1024 * 1024) // 1 MB per thread (vs default 2 MB)
         .build()
-        .expect("failed to build vector search thread pool")
+        .unwrap_or_else(|e| panic!("failed to build vector search thread pool: {e}"))
 });
 
 /// Minimum number of sealed segments before using parallel search.
