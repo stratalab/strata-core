@@ -173,6 +173,9 @@ impl GraphStore {
     }
 
     /// Extract a subgraph containing only the specified node IDs.
+    ///
+    /// Uses per-node adjacency lookups instead of scanning all edges,
+    /// so cost is O(Σ degree(n) for n in node_ids) instead of O(E_total).
     pub fn subgraph(
         &self,
         branch_id: BranchId,
@@ -190,11 +193,21 @@ impl GraphStore {
             }
         }
 
-        // Collect edges between nodes in the set
-        let all_edges = self.all_edges(branch_id, graph)?;
-        for edge in all_edges {
-            if node_set.contains(edge.src.as_str()) && node_set.contains(edge.dst.as_str()) {
-                edges.push(edge);
+        // Collect edges between nodes in the set via per-node outgoing lookups
+        for src_id in node_ids {
+            if !nodes.contains_key(src_id) {
+                continue; // skip nonexistent nodes
+            }
+            let neighbors = self.outgoing_neighbors(branch_id, graph, src_id, None)?;
+            for n in neighbors {
+                if node_set.contains(n.node_id.as_str()) {
+                    edges.push(Edge {
+                        src: src_id.clone(),
+                        dst: n.node_id,
+                        edge_type: n.edge_type,
+                        data: n.edge_data,
+                    });
+                }
             }
         }
 

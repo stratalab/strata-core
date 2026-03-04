@@ -224,6 +224,14 @@ pub enum Output {
 
     /// Graph analytics result with f64 values (PageRank, LCC, SSSP).
     GraphAnalyticsF64(GraphAnalyticsF64Result),
+
+    /// Graph paginated result (items + optional cursor).
+    GraphPage {
+        /// Items in this page.
+        items: Vec<String>,
+        /// Cursor for the next page (None = last page).
+        next_cursor: Option<String>,
+    },
 }
 
 /// Snapshot of the embedding pipeline status.

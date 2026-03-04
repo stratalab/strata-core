@@ -753,13 +753,28 @@ impl GraphStore {
         Ok(())
     }
 
-    /// Count edges of a given type by scanning packed forward adjacency lists.
-    fn count_edges_by_type(
+    /// Count edges of a given type using the per-type counter (O(1) read).
+    ///
+    /// Falls back to full scan if counter is missing (legacy data without counters).
+    pub(crate) fn count_edges_by_type(
         &self,
         branch_id: BranchId,
         graph: &str,
         edge_type: &str,
     ) -> StrataResult<u64> {
+        let count_uk = keys::edge_type_count_key(graph, edge_type);
+        let count_sk = keys::storage_key(branch_id, &count_uk);
+
+        // Try counter first (fast path)
+        let counter_val = self.db.transaction(branch_id, |txn| txn.get(&count_sk))?;
+
+        if let Some(Value::String(s)) = counter_val {
+            return s
+                .parse::<u64>()
+                .map_err(|e| StrataError::serialization(e.to_string()));
+        }
+
+        // Fallback: scan forward adjacency lists (legacy data)
         use super::packed;
         let prefix = keys::all_forward_adj_prefix(graph);
         let prefix_key = keys::storage_key(branch_id, &prefix);
