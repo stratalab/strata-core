@@ -1113,7 +1113,7 @@ impl NeighborData {
                 if *len == 0 {
                     return &[];
                 }
-                debug_assert!(
+                assert!(
                     *byte_offset % 8 == 0,
                     "NeighborData mmap byte_offset must be 8-byte aligned, got {}",
                     byte_offset

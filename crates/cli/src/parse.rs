@@ -1949,13 +1949,13 @@ mod tests {
     }
 
     // =========================================================================
-    // Ontology — Object Types
+    // Ontology — Object Types (via `graph ontology` subcommands)
     // =========================================================================
 
     #[test]
     fn graph_define_object_type_inline() {
         let json = r#"{"name":"Person","properties":{"age":"int"}}"#;
-        let cmd = parse_cmd(&["graph", "define-object-type", "social", json]);
+        let cmd = parse_cmd(&["graph", "ontology", "define", "social", json]);
         assert_eq!(
             cmd,
             Command::GraphDefineObjectType {
@@ -1970,7 +1970,7 @@ mod tests {
 
     #[test]
     fn graph_get_object_type() {
-        let cmd = parse_cmd(&["graph", "get-object-type", "social", "Person"]);
+        let cmd = parse_cmd(&["graph", "ontology", "get", "social", "Person"]);
         assert_eq!(
             cmd,
             Command::GraphGetObjectType {
@@ -1983,7 +1983,7 @@ mod tests {
 
     #[test]
     fn graph_list_object_types() {
-        let cmd = parse_cmd(&["graph", "list-object-types", "social"]);
+        let cmd = parse_cmd(&["graph", "ontology", "list", "social", "--kind", "object"]);
         assert_eq!(
             cmd,
             Command::GraphListObjectTypes {
@@ -1995,7 +1995,7 @@ mod tests {
 
     #[test]
     fn graph_delete_object_type() {
-        let cmd = parse_cmd(&["graph", "delete-object-type", "social", "Person"]);
+        let cmd = parse_cmd(&["graph", "ontology", "delete", "social", "Person"]);
         assert_eq!(
             cmd,
             Command::GraphDeleteObjectType {
@@ -2007,13 +2007,13 @@ mod tests {
     }
 
     // =========================================================================
-    // Ontology — Link Types
+    // Ontology — Link Types (via `graph ontology` subcommands)
     // =========================================================================
 
     #[test]
     fn graph_define_link_type_inline() {
         let json = r#"{"name":"FOLLOWS","source":"Person","target":"Person"}"#;
-        let cmd = parse_cmd(&["graph", "define-link-type", "social", json]);
+        let cmd = parse_cmd(&["graph", "ontology", "define", "social", json]);
         assert_eq!(
             cmd,
             Command::GraphDefineLinkType {
@@ -2028,7 +2028,9 @@ mod tests {
 
     #[test]
     fn graph_get_link_type() {
-        let cmd = parse_cmd(&["graph", "get-link-type", "social", "FOLLOWS"]);
+        let cmd = parse_cmd(&[
+            "graph", "ontology", "get", "social", "FOLLOWS", "--kind", "link",
+        ]);
         assert_eq!(
             cmd,
             Command::GraphGetLinkType {
@@ -2041,7 +2043,7 @@ mod tests {
 
     #[test]
     fn graph_list_link_types() {
-        let cmd = parse_cmd(&["graph", "list-link-types", "social"]);
+        let cmd = parse_cmd(&["graph", "ontology", "list", "social", "--kind", "link"]);
         assert_eq!(
             cmd,
             Command::GraphListLinkTypes {
@@ -2053,7 +2055,9 @@ mod tests {
 
     #[test]
     fn graph_delete_link_type() {
-        let cmd = parse_cmd(&["graph", "delete-link-type", "social", "FOLLOWS"]);
+        let cmd = parse_cmd(&[
+            "graph", "ontology", "delete", "social", "FOLLOWS", "--kind", "link",
+        ]);
         assert_eq!(
             cmd,
             Command::GraphDeleteLinkType {
@@ -2065,12 +2069,12 @@ mod tests {
     }
 
     // =========================================================================
-    // Ontology — Management
+    // Ontology — Management (via `graph ontology` subcommands)
     // =========================================================================
 
     #[test]
     fn graph_freeze_ontology() {
-        let cmd = parse_cmd(&["graph", "freeze-ontology", "social"]);
+        let cmd = parse_cmd(&["graph", "ontology", "freeze", "social"]);
         assert_eq!(
             cmd,
             Command::GraphFreezeOntology {
@@ -2082,7 +2086,7 @@ mod tests {
 
     #[test]
     fn graph_ontology_status() {
-        let cmd = parse_cmd(&["graph", "ontology-status", "social"]);
+        let cmd = parse_cmd(&["graph", "ontology", "status", "social"]);
         assert_eq!(
             cmd,
             Command::GraphOntologyStatus {
@@ -2094,7 +2098,7 @@ mod tests {
 
     #[test]
     fn graph_ontology_summary() {
-        let cmd = parse_cmd(&["graph", "ontology-summary", "social"]);
+        let cmd = parse_cmd(&["graph", "ontology", "summary", "social"]);
         assert_eq!(
             cmd,
             Command::GraphOntologySummary {
@@ -2106,7 +2110,7 @@ mod tests {
 
     #[test]
     fn graph_nodes_by_type() {
-        let cmd = parse_cmd(&["graph", "nodes-by-type", "social", "Person"]);
+        let cmd = parse_cmd(&["graph", "list-nodes", "social", "--type", "Person"]);
         assert_eq!(
             cmd,
             Command::GraphNodesByType {
