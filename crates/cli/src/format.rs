@@ -385,6 +385,13 @@ fn format_raw(output: &Output) -> String {
         Output::ConfigValue(Some(v)) => v.clone(),
         Output::GraphAnalyticsU64(result) => serde_json::to_string(&result).unwrap_or_default(),
         Output::GraphAnalyticsF64(result) => serde_json::to_string(&result).unwrap_or_default(),
+        Output::GraphPage {
+            items,
+            next_cursor,
+        } => {
+            let page = serde_json::json!({ "items": items, "next_cursor": next_cursor });
+            serde_json::to_string(&page).unwrap_or_default()
+        }
     }
 }
 
@@ -841,6 +848,16 @@ fn format_human(output: &Output) -> String {
                 result.result.len(),
                 serde_json::to_string_pretty(&result).unwrap_or_default()
             )
+        }
+        Output::GraphPage {
+            items,
+            next_cursor,
+        } => {
+            let cursor_info = match next_cursor {
+                Some(c) => format!("  (next_cursor: {})", c),
+                None => "  (last page)".to_string(),
+            };
+            format!("{} item(s){}\n{}", items.len(), cursor_info, items.join("\n"))
         }
     }
 }
