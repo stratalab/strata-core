@@ -648,13 +648,11 @@ impl HnswGraph {
         self.nodes.insert(id, node);
 
         // First node
-        if self.entry_point.is_none() {
+        let Some(entry_id) = self.entry_point else {
             self.entry_point = Some(id);
             self.max_level = level;
             return;
-        }
-
-        let entry_id = self.entry_point.unwrap();
+        };
 
         // Paper lines 4-6: greedy search from top to level+1
         let mut current_entry = entry_id;
@@ -1164,6 +1162,8 @@ pub(crate) struct CompactHnswGraph {
     pub(crate) node_count: usize,
     pub(crate) entry_point: Option<VectorId>,
     pub(crate) max_level: usize,
+    /// Held to keep advisory shared lock for the struct lifetime (mmap-backed graphs only)
+    pub(crate) _lock_file: Option<std::fs::File>,
 }
 
 impl CompactHnswGraph {
@@ -1292,6 +1292,7 @@ impl CompactHnswGraph {
             node_count,
             entry_point: graph.entry_point,
             max_level: graph.max_level,
+            _lock_file: None,
         }
     }
 
@@ -2448,6 +2449,7 @@ mod tests {
             node_count,
             entry_point: Some(VectorId::new(100)),
             max_level: 0,
+            _lock_file: None,
         };
 
         // get_node should work with offset

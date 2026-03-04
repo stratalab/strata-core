@@ -88,6 +88,8 @@ pub(crate) fn write_graph_file(path: &Path, graph: &CompactHnswGraph) -> Result<
     // Write to temp file then rename for atomicity
     let temp_path = path.with_extension("hgr.tmp");
     let mut file = File::create(&temp_path).map_err(|e| VectorError::Io(e.to_string()))?;
+    fs2::FileExt::lock_exclusive(&file)
+        .map_err(|e| VectorError::Io(format!("failed to lock {}: {e}", temp_path.display())))?;
 
     // Header (48 bytes)
     file.write_all(MAGIC)
@@ -179,6 +181,8 @@ pub(crate) fn open_graph_file(
     vector_config: VectorConfig,
 ) -> Result<CompactHnswGraph, VectorError> {
     let file = File::open(path).map_err(|e| VectorError::Io(e.to_string()))?;
+    fs2::FileExt::lock_shared(&file)
+        .map_err(|e| VectorError::Io(format!("failed to lock {}: {e}", path.display())))?;
     // SAFETY: File is opened read-only; mmap is treated as immutable.
     let mmap = unsafe { Mmap::map(&file) }.map_err(|e| VectorError::Io(e.to_string()))?;
 
@@ -314,6 +318,7 @@ pub(crate) fn open_graph_file(
         node_count: actual_node_count,
         entry_point,
         max_level,
+        _lock_file: Some(file),
     })
 }
 
@@ -434,6 +439,7 @@ mod tests {
             node_count: 0,
             entry_point: None,
             max_level: 0,
+            _lock_file: None,
         };
 
         write_graph_file(&path, &graph).unwrap();
@@ -584,6 +590,7 @@ mod tests {
             node_count,
             entry_point: Some(VectorId::new(42)),
             max_level: 0,
+            _lock_file: None,
         };
 
         write_graph_file(&path, &graph).unwrap();

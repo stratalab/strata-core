@@ -41,7 +41,7 @@ use strata_core::contract::{Timestamp, Version, Versioned};
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
 use strata_core::EntityRef;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Statistics from vector recovery
 #[derive(Debug, Default, Clone)]
@@ -82,6 +82,19 @@ impl Default for VectorBackendState {
             backends: RwLock::new(BTreeMap::new()),
         }
     }
+}
+
+/// Validate that a query vector contains only finite f32 values.
+///
+/// NaN and Infinity values corrupt distance calculations and produce
+/// meaningless results. Rejecting them early gives a clear error message.
+fn validate_query_values(values: &[f32]) -> VectorResult<()> {
+    if values.iter().any(|v| !v.is_finite()) {
+        return Err(VectorError::InvalidEmbedding {
+            reason: "query vector contains NaN or infinite values".into(),
+        });
+    }
+    Ok(())
 }
 
 /// Vector storage and search primitive
@@ -857,6 +870,9 @@ impl VectorStore {
             return Ok(Vec::new());
         }
 
+        // Reject NaN/Infinity in query vector
+        validate_query_values(query)?;
+
         // Ensure collection is loaded
         self.ensure_collection_loaded(branch_id, space, collection)?;
 
@@ -1003,6 +1019,9 @@ impl VectorStore {
         filter: Option<MetadataFilter>,
         as_of_ts: u64,
     ) -> VectorResult<Vec<VectorMatch>> {
+        // Reject NaN/Infinity in query vector
+        validate_query_values(query)?;
+
         // Ensure collection is loaded
         self.ensure_collection_loaded(branch_id, space, collection)?;
 
@@ -1014,13 +1033,6 @@ impl VectorStore {
             return Err(VectorError::DimensionMismatch {
                 expected: config.dimension,
                 got: query.len(),
-            });
-        }
-
-        // Validate query values
-        if query.iter().any(|v| v.is_nan() || v.is_infinite()) {
-            return Err(VectorError::InvalidEmbedding {
-                reason: "query contains NaN or Infinity values".to_string(),
             });
         }
 
@@ -1109,6 +1121,18 @@ impl VectorStore {
 
     /// Initialize the index backend for a collection
     fn init_backend(&self, id: &CollectionId, config: &VectorConfig) -> Result<(), VectorError> {
+        let backend = self.create_backend(id, config)?;
+        let state = self.state()?;
+        state.backends.write().insert(id.clone(), backend);
+        Ok(())
+    }
+
+    /// Create and configure an index backend without inserting it into the map.
+    fn create_backend(
+        &self,
+        id: &CollectionId,
+        config: &VectorConfig,
+    ) -> Result<Box<dyn VectorIndexBackend>, VectorError> {
         let mut backend = self.backend_factory().create(config);
 
         // Set flush_path so the tiered heap can flush overlays during fresh
@@ -1118,14 +1142,22 @@ impl VectorStore {
         if !data_dir.as_os_str().is_empty() {
             let vec_path = super::recovery::mmap_path(data_dir, id.branch_id, &id.name);
             if let Some(parent) = vec_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    warn!(
+                        "failed to create vector data directory {}: {e}",
+                        parent.display()
+                    );
+                }
             }
-            let _ = backend.flush_heap_to_disk_if_needed(&vec_path);
+            if let Err(e) = backend.flush_heap_to_disk_if_needed(&vec_path) {
+                warn!(
+                    "failed to flush heap to disk at {}: {e}",
+                    vec_path.display()
+                );
+            }
         }
 
-        let state = self.state()?;
-        state.backends.write().insert(id.clone(), backend);
-        Ok(())
+        Ok(backend)
     }
 
     /// Get collection config (required version that errors if not found)
@@ -1376,6 +1408,10 @@ impl VectorStore {
     ///
     /// If the collection exists in KV but not in memory (after recovery),
     /// this loads it and initializes the backend.
+    ///
+    /// Uses double-checked locking to avoid TOCTOU races: the read-lock fast
+    /// path avoids contention in the common case, while the write-lock slow
+    /// path re-checks to prevent duplicate initialization.
     pub(crate) fn ensure_collection_loaded(
         &self,
         branch_id: BranchId,
@@ -1383,27 +1419,27 @@ impl VectorStore {
         name: &str,
     ) -> VectorResult<()> {
         let collection_id = CollectionId::new(branch_id, name);
+        let state = self.state()?;
 
-        // Already loaded?
-        {
-            let state = self.state()?;
-            if state.backends.read().contains_key(&collection_id) {
-                return Ok(());
-            }
+        // Fast path: read lock check
+        if state.backends.read().contains_key(&collection_id) {
+            return Ok(());
         }
 
-        // Load from KV
+        // Slow path: load config and create backend outside lock
         let config = self
             .load_collection_config(branch_id, space, name)?
             .ok_or_else(|| VectorError::CollectionNotFound {
                 name: name.to_string(),
             })?;
+        let backend = self.create_backend(&collection_id, &config)?;
 
-        // Initialize backend
-        self.init_backend(&collection_id, &config)?;
-
-        // Note: Loading vectors into backend happens during recovery
-
+        // Double-check under write lock: another thread may have loaded it
+        let mut backends = state.backends.write();
+        if backends.contains_key(&collection_id) {
+            return Ok(());
+        }
+        backends.insert(collection_id, backend);
         Ok(())
     }
 
@@ -1716,6 +1752,9 @@ impl VectorStore {
             return Ok(Vec::new());
         }
 
+        // Reject NaN/Infinity in query vector
+        validate_query_values(query)?;
+
         // Ensure collection is loaded
         self.ensure_collection_loaded(branch_id, space, collection)?;
 
@@ -1820,6 +1859,9 @@ impl VectorStore {
         if k == 0 {
             return Ok(Vec::new());
         }
+
+        // Reject NaN/Infinity in query vector
+        validate_query_values(query)?;
 
         // Ensure collection is loaded
         self.ensure_collection_loaded(branch_id, space, collection)?;
@@ -3913,5 +3955,150 @@ mod tests {
                 .unwrap(),
             2
         );
+    }
+
+    // ========================================
+    // V-22: NaN/Infinity query validation
+    // ========================================
+
+    #[test]
+    fn test_search_nan_query_returns_error() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::for_minilm();
+        store
+            .create_collection(branch_id, "default", "test_nan", config)
+            .unwrap();
+
+        // Insert a valid vector
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test_nan",
+                "k1",
+                &vec![1.0; 384],
+                None,
+            )
+            .unwrap();
+
+        // Search with NaN at first position should fail
+        let mut nan_query = vec![0.0; 384];
+        nan_query[0] = f32::NAN;
+        let result = store.search(branch_id, "default", "test_nan", &nan_query, 5, None);
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, VectorError::InvalidEmbedding { .. }),
+            "expected InvalidEmbedding for NaN at [0], got: {err}"
+        );
+
+        // Search with NaN at last position — verify full scan
+        let mut nan_last = vec![1.0; 384];
+        nan_last[383] = f32::NAN;
+        let result = store.search(branch_id, "default", "test_nan", &nan_last, 5, None);
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, VectorError::InvalidEmbedding { .. }),
+            "expected InvalidEmbedding for NaN at [383], got: {err}"
+        );
+
+        // Search with Infinity should also fail
+        let mut inf_query = vec![0.0; 384];
+        inf_query[0] = f32::INFINITY;
+        let result = store.search(branch_id, "default", "test_nan", &inf_query, 5, None);
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, VectorError::InvalidEmbedding { .. }),
+            "expected InvalidEmbedding for +Inf, got: {err}"
+        );
+
+        // Search with NEG_INFINITY should also fail
+        let mut neg_inf_query = vec![0.0; 384];
+        neg_inf_query[0] = f32::NEG_INFINITY;
+        let result = store.search(branch_id, "default", "test_nan", &neg_inf_query, 5, None);
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, VectorError::InvalidEmbedding { .. }),
+            "expected InvalidEmbedding for -Inf, got: {err}"
+        );
+
+        // All-NaN vector should fail
+        let all_nan = vec![f32::NAN; 384];
+        let result = store.search(branch_id, "default", "test_nan", &all_nan, 5, None);
+        assert!(
+            matches!(result, Err(VectorError::InvalidEmbedding { .. })),
+            "expected InvalidEmbedding for all-NaN"
+        );
+
+        // Valid search should still work
+        let valid_query = vec![1.0; 384];
+        let result = store.search(branch_id, "default", "test_nan", &valid_query, 5, None);
+        assert!(result.is_ok());
+
+        // k=0 with NaN should return empty (short-circuit before validation)
+        let result = store.search(branch_id, "default", "test_nan", &nan_query, 0, None);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    // ========================================
+    // V-16: Concurrent ensure_collection_loaded
+    // ========================================
+
+    #[test]
+    fn test_concurrent_ensure_collection_loaded() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::for_minilm();
+        store
+            .create_collection(branch_id, "default", "concurrent_test", config)
+            .unwrap();
+
+        // Insert a vector so the collection has data
+        store
+            .insert(
+                branch_id,
+                "default",
+                "concurrent_test",
+                "k1",
+                &vec![1.0; 384],
+                None,
+            )
+            .unwrap();
+
+        // Evict from memory to force re-loading
+        {
+            let state = store.state().unwrap();
+            let collection_id = CollectionId::new(branch_id, "concurrent_test");
+            state.backends.write().remove(&collection_id);
+        }
+
+        // Spawn multiple threads calling ensure_collection_loaded simultaneously
+        let store = Arc::new(store);
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                std::thread::spawn(move || {
+                    store.ensure_collection_loaded(branch_id, "default", "concurrent_test")
+                })
+            })
+            .collect();
+
+        // All threads should succeed without panic
+        for handle in handles {
+            let result = handle.join().expect("thread should not panic");
+            assert!(
+                result.is_ok(),
+                "ensure_collection_loaded failed: {:?}",
+                result.err()
+            );
+        }
+
+        // Verify exactly one backend exists
+        let state = store.state().unwrap();
+        let collection_id = CollectionId::new(branch_id, "concurrent_test");
+        assert!(state.backends.read().contains_key(&collection_id));
     }
 }
