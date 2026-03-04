@@ -1241,6 +1241,12 @@ impl Executor {
                 })?;
                 crate::handlers::graph::graph_list_object_types(&self.primitives, branch, graph)
             }
+            Command::GraphListOntologyTypes { branch, graph } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                crate::handlers::graph::graph_list_ontology_types(&self.primitives, branch, graph)
+            }
             Command::GraphDeleteObjectType {
                 branch,
                 graph,

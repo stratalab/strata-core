@@ -864,10 +864,18 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
         }
         "list-nodes" => {
             let graph = m.get_one::<String>("graph").unwrap().clone();
-            Ok(CliAction::Execute(Command::GraphListNodes {
-                branch: branch(state),
-                graph,
-            }))
+            if let Some(object_type) = m.get_one::<String>("type").cloned() {
+                Ok(CliAction::Execute(Command::GraphNodesByType {
+                    branch: branch(state),
+                    graph,
+                    object_type,
+                }))
+            } else {
+                Ok(CliAction::Execute(Command::GraphListNodes {
+                    branch: branch(state),
+                    graph,
+                }))
+            }
         }
         // Edges
         "add-edge" => {
@@ -998,182 +1006,190 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                 direction,
             }))
         }
-        // Ontology — Object Types
-        "define-object-type" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            let definition = if let Some(file_path) = m.get_one::<String>("file") {
-                read_json_from_source(file_path)?
-            } else {
-                let raw = m.get_one::<String>("json").unwrap();
-                parse_json_value(raw)?
-            };
-            Ok(CliAction::Execute(Command::GraphDefineObjectType {
-                branch: branch(state),
-                graph,
-                definition,
-            }))
+        // Ontology (nested)
+        "ontology" => {
+            let (onto_sub, onto_m) = m.subcommand().ok_or("No ontology subcommand")?;
+            match onto_sub {
+                "define" => {
+                    let graph = onto_m.get_one::<String>("graph").unwrap().clone();
+                    let definition = if let Some(file_path) = onto_m.get_one::<String>("file") {
+                        read_json_from_source(file_path)?
+                    } else {
+                        let raw = onto_m.get_one::<String>("json").unwrap();
+                        parse_json_value(raw)?
+                    };
+                    // Auto-detect: if JSON has "source" and "target" keys, it's a link type
+                    let is_link = match &definition {
+                        Value::Object(map) => {
+                            map.contains_key("source") && map.contains_key("target")
+                        }
+                        _ => false,
+                    };
+                    if is_link {
+                        Ok(CliAction::Execute(Command::GraphDefineLinkType {
+                            branch: branch(state),
+                            graph,
+                            definition,
+                        }))
+                    } else {
+                        Ok(CliAction::Execute(Command::GraphDefineObjectType {
+                            branch: branch(state),
+                            graph,
+                            definition,
+                        }))
+                    }
+                }
+                "get" => {
+                    let graph = onto_m.get_one::<String>("graph").unwrap().clone();
+                    let name = onto_m.get_one::<String>("name").unwrap().clone();
+                    let kind = onto_m.get_one::<String>("kind").map(|s| s.as_str());
+                    match kind {
+                        Some("link") => Ok(CliAction::Execute(Command::GraphGetLinkType {
+                            branch: branch(state),
+                            graph,
+                            name,
+                        })),
+                        _ => Ok(CliAction::Execute(Command::GraphGetObjectType {
+                            branch: branch(state),
+                            graph,
+                            name,
+                        })),
+                    }
+                }
+                "list" => {
+                    let graph = onto_m.get_one::<String>("graph").unwrap().clone();
+                    let kind = onto_m.get_one::<String>("kind").map(|s| s.as_str());
+                    match kind {
+                        Some("object") => Ok(CliAction::Execute(Command::GraphListObjectTypes {
+                            branch: branch(state),
+                            graph,
+                        })),
+                        Some("link") => Ok(CliAction::Execute(Command::GraphListLinkTypes {
+                            branch: branch(state),
+                            graph,
+                        })),
+                        None => Ok(CliAction::Execute(Command::GraphListOntologyTypes {
+                            branch: branch(state),
+                            graph,
+                        })),
+                        Some(other) => Err(format!(
+                            "Invalid --kind '{}'. Use 'object' or 'link'.",
+                            other
+                        )),
+                    }
+                }
+                "delete" => {
+                    let graph = onto_m.get_one::<String>("graph").unwrap().clone();
+                    let name = onto_m.get_one::<String>("name").unwrap().clone();
+                    let kind = onto_m.get_one::<String>("kind").map(|s| s.as_str());
+                    match kind {
+                        Some("link") => Ok(CliAction::Execute(Command::GraphDeleteLinkType {
+                            branch: branch(state),
+                            graph,
+                            name,
+                        })),
+                        _ => Ok(CliAction::Execute(Command::GraphDeleteObjectType {
+                            branch: branch(state),
+                            graph,
+                            name,
+                        })),
+                    }
+                }
+                "freeze" => {
+                    let graph = onto_m.get_one::<String>("graph").unwrap().clone();
+                    Ok(CliAction::Execute(Command::GraphFreezeOntology {
+                        branch: branch(state),
+                        graph,
+                    }))
+                }
+                "status" => {
+                    let graph = onto_m.get_one::<String>("graph").unwrap().clone();
+                    Ok(CliAction::Execute(Command::GraphOntologyStatus {
+                        branch: branch(state),
+                        graph,
+                    }))
+                }
+                "summary" => {
+                    let graph = onto_m.get_one::<String>("graph").unwrap().clone();
+                    Ok(CliAction::Execute(Command::GraphOntologySummary {
+                        branch: branch(state),
+                        graph,
+                    }))
+                }
+                other => Err(format!("Unknown ontology subcommand: {}", other)),
+            }
         }
-        "get-object-type" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            let name = m.get_one::<String>("name").unwrap().clone();
-            Ok(CliAction::Execute(Command::GraphGetObjectType {
-                branch: branch(state),
-                graph,
-                name,
-            }))
-        }
-        "list-object-types" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            Ok(CliAction::Execute(Command::GraphListObjectTypes {
-                branch: branch(state),
-                graph,
-            }))
-        }
-        "delete-object-type" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            let name = m.get_one::<String>("name").unwrap().clone();
-            Ok(CliAction::Execute(Command::GraphDeleteObjectType {
-                branch: branch(state),
-                graph,
-                name,
-            }))
-        }
-        // Ontology — Link Types
-        "define-link-type" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            let definition = if let Some(file_path) = m.get_one::<String>("file") {
-                read_json_from_source(file_path)?
-            } else {
-                let raw = m.get_one::<String>("json").unwrap();
-                parse_json_value(raw)?
-            };
-            Ok(CliAction::Execute(Command::GraphDefineLinkType {
-                branch: branch(state),
-                graph,
-                definition,
-            }))
-        }
-        "get-link-type" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            let name = m.get_one::<String>("name").unwrap().clone();
-            Ok(CliAction::Execute(Command::GraphGetLinkType {
-                branch: branch(state),
-                graph,
-                name,
-            }))
-        }
-        "list-link-types" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            Ok(CliAction::Execute(Command::GraphListLinkTypes {
-                branch: branch(state),
-                graph,
-            }))
-        }
-        "delete-link-type" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            let name = m.get_one::<String>("name").unwrap().clone();
-            Ok(CliAction::Execute(Command::GraphDeleteLinkType {
-                branch: branch(state),
-                graph,
-                name,
-            }))
-        }
-        // Ontology — Management
-        "freeze-ontology" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            Ok(CliAction::Execute(Command::GraphFreezeOntology {
-                branch: branch(state),
-                graph,
-            }))
-        }
-        "ontology-status" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            Ok(CliAction::Execute(Command::GraphOntologyStatus {
-                branch: branch(state),
-                graph,
-            }))
-        }
-        "ontology-summary" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            Ok(CliAction::Execute(Command::GraphOntologySummary {
-                branch: branch(state),
-                graph,
-            }))
-        }
-        "nodes-by-type" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            let object_type = m.get_one::<String>("object-type").unwrap().clone();
-            Ok(CliAction::Execute(Command::GraphNodesByType {
-                branch: branch(state),
-                graph,
-                object_type,
-            }))
-        }
-        // Analytics
-        "wcc" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            Ok(CliAction::Execute(Command::GraphWcc {
-                branch: branch(state),
-                graph,
-            }))
-        }
-        "cdlp" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            let max_iterations = m
-                .get_one::<String>("max-iterations")
-                .unwrap()
-                .parse::<usize>()
-                .map_err(|e| format!("Invalid max-iterations: {}", e))?;
-            let direction = m.get_one::<String>("direction").cloned();
-            Ok(CliAction::Execute(Command::GraphCdlp {
-                branch: branch(state),
-                graph,
-                max_iterations,
-                direction,
-            }))
-        }
-        "pagerank" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            let damping = m
-                .get_one::<String>("damping")
-                .map(|s| s.parse::<f64>())
-                .transpose()
-                .map_err(|e| format!("Invalid damping: {}", e))?;
-            let max_iterations = m
-                .get_one::<String>("max-iterations")
-                .map(|s| s.parse::<usize>())
-                .transpose()
-                .map_err(|e| format!("Invalid max-iterations: {}", e))?;
-            let tolerance = m
-                .get_one::<String>("tolerance")
-                .map(|s| s.parse::<f64>())
-                .transpose()
-                .map_err(|e| format!("Invalid tolerance: {}", e))?;
-            Ok(CliAction::Execute(Command::GraphPagerank {
-                branch: branch(state),
-                graph,
-                damping,
-                max_iterations,
-                tolerance,
-            }))
-        }
-        "lcc" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            Ok(CliAction::Execute(Command::GraphLcc {
-                branch: branch(state),
-                graph,
-            }))
-        }
-        "sssp" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            let source = m.get_one::<String>("source").unwrap().clone();
-            let direction = m.get_one::<String>("direction").cloned();
-            Ok(CliAction::Execute(Command::GraphSssp {
-                branch: branch(state),
-                graph,
-                source,
-                direction,
-            }))
+        // Analytics (nested)
+        "analytics" => {
+            let (alg_sub, alg_m) = m.subcommand().ok_or("No analytics subcommand")?;
+            match alg_sub {
+                "wcc" => {
+                    let graph = alg_m.get_one::<String>("graph").unwrap().clone();
+                    Ok(CliAction::Execute(Command::GraphWcc {
+                        branch: branch(state),
+                        graph,
+                    }))
+                }
+                "cdlp" => {
+                    let graph = alg_m.get_one::<String>("graph").unwrap().clone();
+                    let max_iterations = alg_m
+                        .get_one::<String>("max-iterations")
+                        .unwrap()
+                        .parse::<usize>()
+                        .map_err(|e| format!("Invalid max-iterations: {}", e))?;
+                    let direction = alg_m.get_one::<String>("direction").cloned();
+                    Ok(CliAction::Execute(Command::GraphCdlp {
+                        branch: branch(state),
+                        graph,
+                        max_iterations,
+                        direction,
+                    }))
+                }
+                "pagerank" => {
+                    let graph = alg_m.get_one::<String>("graph").unwrap().clone();
+                    let damping = alg_m
+                        .get_one::<String>("damping")
+                        .map(|s| s.parse::<f64>())
+                        .transpose()
+                        .map_err(|e| format!("Invalid damping: {}", e))?;
+                    let max_iterations = alg_m
+                        .get_one::<String>("max-iterations")
+                        .map(|s| s.parse::<usize>())
+                        .transpose()
+                        .map_err(|e| format!("Invalid max-iterations: {}", e))?;
+                    let tolerance = alg_m
+                        .get_one::<String>("tolerance")
+                        .map(|s| s.parse::<f64>())
+                        .transpose()
+                        .map_err(|e| format!("Invalid tolerance: {}", e))?;
+                    Ok(CliAction::Execute(Command::GraphPagerank {
+                        branch: branch(state),
+                        graph,
+                        damping,
+                        max_iterations,
+                        tolerance,
+                    }))
+                }
+                "lcc" => {
+                    let graph = alg_m.get_one::<String>("graph").unwrap().clone();
+                    Ok(CliAction::Execute(Command::GraphLcc {
+                        branch: branch(state),
+                        graph,
+                    }))
+                }
+                "sssp" => {
+                    let graph = alg_m.get_one::<String>("graph").unwrap().clone();
+                    let source = alg_m.get_one::<String>("source").unwrap().clone();
+                    let direction = alg_m.get_one::<String>("direction").cloned();
+                    Ok(CliAction::Execute(Command::GraphSssp {
+                        branch: branch(state),
+                        graph,
+                        source,
+                        direction,
+                    }))
+                }
+                other => Err(format!("Unknown analytics subcommand: {}", other)),
+            }
         }
         other => Err(format!("Unknown graph subcommand: {}", other)),
     }

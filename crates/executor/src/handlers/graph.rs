@@ -518,6 +518,21 @@ pub fn graph_ontology_summary(
     }
 }
 
+/// Handle GraphListOntologyTypes command — lists both object and link types.
+pub fn graph_list_ontology_types(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    let mut names = convert_result(p.graph.list_object_types(core_branch, &graph))?;
+    let link_names = convert_result(p.graph.list_link_types(core_branch, &graph))?;
+    names.extend(link_names);
+    names.sort();
+    names.dedup();
+    Ok(Output::Keys(names))
+}
+
 /// Handle GraphNodesByType command.
 pub fn graph_nodes_by_type(
     p: &Arc<Primitives>,
