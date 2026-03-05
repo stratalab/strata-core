@@ -54,10 +54,10 @@ mod command;
 mod convert;
 mod error;
 mod executor;
-pub(crate) mod suggest;
 pub(crate) mod json;
 mod output;
 mod session;
+pub(crate) mod suggest;
 mod types;
 
 // Handler modules

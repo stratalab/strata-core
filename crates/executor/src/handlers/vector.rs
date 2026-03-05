@@ -306,7 +306,8 @@ pub fn vector_collection_stats(
         .into_iter()
         .find(|c| c.name == collection)
         .ok_or_else(|| {
-            let hint = crate::suggest::format_hint("collections", &collection_names, &collection, 2);
+            let hint =
+                crate::suggest::format_hint("collections", &collection_names, &collection, 2);
             crate::Error::CollectionNotFound {
                 collection: collection.clone(),
                 hint,

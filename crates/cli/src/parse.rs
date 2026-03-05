@@ -122,7 +122,8 @@ pub fn check_meta_command(line: &str) -> Option<MetaCommand> {
 
 /// Build an actionable error message for an unknown subcommand, with "did you mean?" suggestion.
 fn unknown_subcommand(category: &str, input: &str, valid: &[&str]) -> String {
-    let best = valid.iter()
+    let best = valid
+        .iter()
         .filter_map(|c| {
             let d = strsim::levenshtein(&input.to_ascii_lowercase(), &c.to_ascii_lowercase());
             (d <= 2 && d > 0).then_some((*c, d))
@@ -135,7 +136,10 @@ fn unknown_subcommand(category: &str, input: &str, valid: &[&str]) -> String {
         format!("Unknown {} subcommand \"{}\"", category, input)
     };
     match best {
-        Some((s, _)) => format!("{}. Did you mean \"{}\"?\nValid options: {}", prefix, s, options),
+        Some((s, _)) => format!(
+            "{}. Did you mean \"{}\"?\nValid options: {}",
+            prefix, s, options
+        ),
         None => format!("{}.\nValid options: {}", prefix, options),
     }
 }
@@ -171,7 +175,36 @@ pub fn matches_to_action(matches: &ArgMatches, state: &SessionState) -> Result<C
         "generate" => parse_generate(sub_matches),
         "tokenize" => parse_tokenize(sub_matches),
         "detokenize" => parse_detokenize(sub_matches),
-        other => Err(unknown_subcommand("", other, &["kv", "json", "event", "state", "vector", "graph", "branch", "space", "begin", "commit", "rollback", "txn", "ping", "info", "flush", "compact", "search", "config", "configure-model", "embed", "models", "generate", "tokenize", "detokenize"])),
+        other => Err(unknown_subcommand(
+            "",
+            other,
+            &[
+                "kv",
+                "json",
+                "event",
+                "state",
+                "vector",
+                "graph",
+                "branch",
+                "space",
+                "begin",
+                "commit",
+                "rollback",
+                "txn",
+                "ping",
+                "info",
+                "flush",
+                "compact",
+                "search",
+                "config",
+                "configure-model",
+                "embed",
+                "models",
+                "generate",
+                "tokenize",
+                "detokenize",
+            ],
+        )),
     }
 }
 
@@ -385,7 +418,11 @@ fn parse_kv(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, Str
                 as_of: None,
             }))
         }
-        other => Err(unknown_subcommand("kv", other, &["put", "get", "del", "list", "history"])),
+        other => Err(unknown_subcommand(
+            "kv",
+            other,
+            &["put", "get", "del", "list", "history"],
+        )),
     }
 }
 
@@ -485,7 +522,11 @@ fn parse_json(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, S
                 as_of: None,
             }))
         }
-        other => Err(unknown_subcommand("json", other, &["set", "get", "del", "list", "history"])),
+        other => Err(unknown_subcommand(
+            "json",
+            other,
+            &["set", "get", "del", "list", "history"],
+        )),
     }
 }
 
@@ -551,7 +592,11 @@ fn parse_event(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
             branch: branch(state),
             space: space(state),
         })),
-        other => Err(unknown_subcommand("event", other, &["append", "get", "list", "len"])),
+        other => Err(unknown_subcommand(
+            "event",
+            other,
+            &["append", "get", "list", "len"],
+        )),
     }
 }
 
@@ -669,7 +714,11 @@ fn parse_state(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                 as_of: None,
             }))
         }
-        other => Err(unknown_subcommand("state", other, &["set", "get", "del", "init", "cas", "list", "history"])),
+        other => Err(unknown_subcommand(
+            "state",
+            other,
+            &["set", "get", "del", "init", "cas", "list", "history"],
+        )),
     }
 }
 
@@ -682,7 +731,11 @@ fn parse_metric(s: &str) -> Result<DistanceMetric, String> {
         "cosine" => Ok(DistanceMetric::Cosine),
         "euclidean" => Ok(DistanceMetric::Euclidean),
         "dotproduct" | "dot_product" | "dot" => Ok(DistanceMetric::DotProduct),
-        other => Err(unknown_subcommand("metric", other, &["cosine", "euclidean", "dotproduct"])),
+        other => Err(unknown_subcommand(
+            "metric",
+            other,
+            &["cosine", "euclidean", "dotproduct"],
+        )),
     }
 }
 
@@ -804,7 +857,21 @@ fn parse_vector_cmd(matches: &ArgMatches, state: &SessionState) -> Result<CliAct
                 entries,
             }))
         }
-        other => Err(unknown_subcommand("vector", other, &["upsert", "get", "del", "search", "create", "drop", "collections", "stats", "batch-upsert"])),
+        other => Err(unknown_subcommand(
+            "vector",
+            other,
+            &[
+                "upsert",
+                "get",
+                "del",
+                "search",
+                "create",
+                "drop",
+                "collections",
+                "stats",
+                "batch-upsert",
+            ],
+        )),
     }
 }
 
@@ -1133,7 +1200,13 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                         graph,
                     }))
                 }
-                other => Err(unknown_subcommand("ontology", other, &["define", "get", "list", "delete", "freeze", "status", "summary"])),
+                other => Err(unknown_subcommand(
+                    "ontology",
+                    other,
+                    &[
+                        "define", "get", "list", "delete", "freeze", "status", "summary",
+                    ],
+                )),
             }
         }
         // Analytics (nested)
@@ -1205,10 +1278,34 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                         direction,
                     }))
                 }
-                other => Err(unknown_subcommand("analytics", other, &["wcc", "cdlp", "pagerank", "lcc", "sssp"])),
+                other => Err(unknown_subcommand(
+                    "analytics",
+                    other,
+                    &["wcc", "cdlp", "pagerank", "lcc", "sssp"],
+                )),
             }
         }
-        other => Err(unknown_subcommand("graph", other, &["create", "delete", "list", "info", "add-node", "get-node", "remove-node", "list-nodes", "add-edge", "remove-edge", "neighbors", "bulk-insert", "bfs", "ontology", "analytics"])),
+        other => Err(unknown_subcommand(
+            "graph",
+            other,
+            &[
+                "create",
+                "delete",
+                "list",
+                "info",
+                "add-node",
+                "get-node",
+                "remove-node",
+                "list-nodes",
+                "add-edge",
+                "remove-edge",
+                "neighbors",
+                "bulk-insert",
+                "bfs",
+                "ontology",
+                "analytics",
+            ],
+        )),
     }
 }
 
@@ -1269,10 +1366,15 @@ fn parse_branch(matches: &ArgMatches, _state: &SessionState) -> Result<CliAction
             let source = m.get_one::<String>("source").unwrap().clone();
             let strategy = match m.get_one::<String>("strategy").map(|s| s.as_str()) {
                 Some("strict") => MergeStrategy::Strict,
-                Some("lww") | Some("last-writer-wins") | Some("last_writer_wins") | None => MergeStrategy::LastWriterWins,
-                Some(other) => return Err(format!(
-                    "Unknown merge strategy \"{}\". Valid options: lww, strict", other
-                )),
+                Some("lww") | Some("last-writer-wins") | Some("last_writer_wins") | None => {
+                    MergeStrategy::LastWriterWins
+                }
+                Some(other) => {
+                    return Err(format!(
+                        "Unknown merge strategy \"{}\". Valid options: lww, strict",
+                        other
+                    ))
+                }
             };
             Ok(CliAction::BranchOp(BranchOp::Merge { source, strategy }))
         }
@@ -1292,7 +1394,14 @@ fn parse_branch(matches: &ArgMatches, _state: &SessionState) -> Result<CliAction
             let path = m.get_one::<String>("path").unwrap().clone();
             Ok(CliAction::Execute(Command::BranchBundleValidate { path }))
         }
-        other => Err(unknown_subcommand("branch", other, &["create", "info", "list", "exists", "del", "fork", "diff", "merge", "export", "import", "validate"])),
+        other => Err(unknown_subcommand(
+            "branch",
+            other,
+            &[
+                "create", "info", "list", "exists", "del", "fork", "diff", "merge", "export",
+                "import", "validate",
+            ],
+        )),
     }
 }
 
@@ -1329,7 +1438,11 @@ fn parse_space(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                 space: name,
             }))
         }
-        other => Err(unknown_subcommand("space", other, &["list", "create", "del", "exists"])),
+        other => Err(unknown_subcommand(
+            "space",
+            other,
+            &["list", "create", "del", "exists"],
+        )),
     }
 }
 
@@ -1421,7 +1534,11 @@ fn parse_models(matches: &ArgMatches) -> Result<CliAction, String> {
             let name = m.get_one::<String>("name").unwrap().clone();
             Ok(CliAction::Execute(Command::ModelsPull { name }))
         }
-        other => Err(unknown_subcommand("models", other, &["list", "local", "pull"])),
+        other => Err(unknown_subcommand(
+            "models",
+            other,
+            &["list", "local", "pull"],
+        )),
     }
 }
 

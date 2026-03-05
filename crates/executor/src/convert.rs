@@ -17,16 +17,26 @@ impl From<StrataError> for Error {
             StrataError::NotFound { entity_ref } => {
                 let entity_str = entity_ref.to_string();
                 match &entity_ref {
-                    EntityRef::Kv { .. } | EntityRef::Json { .. } => {
-                        Error::KeyNotFound { key: entity_str, hint: None }
-                    }
-                    EntityRef::Branch { .. } => Error::BranchNotFound { branch: entity_str, hint: None },
+                    EntityRef::Kv { .. } | EntityRef::Json { .. } => Error::KeyNotFound {
+                        key: entity_str,
+                        hint: None,
+                    },
+                    EntityRef::Branch { .. } => Error::BranchNotFound {
+                        branch: entity_str,
+                        hint: None,
+                    },
                     EntityRef::Vector { .. } => Error::CollectionNotFound {
                         collection: entity_str,
                         hint: None,
                     },
-                    EntityRef::Event { .. } => Error::StreamNotFound { stream: entity_str, hint: None },
-                    EntityRef::State { .. } => Error::CellNotFound { cell: entity_str, hint: None },
+                    EntityRef::Event { .. } => Error::StreamNotFound {
+                        stream: entity_str,
+                        hint: None,
+                    },
+                    EntityRef::State { .. } => Error::CellNotFound {
+                        cell: entity_str,
+                        hint: None,
+                    },
                 }
             }
 
@@ -73,7 +83,10 @@ impl From<StrataError> for Error {
                 reason: format!("Invalid operation on {}: {}", entity_ref, reason),
             },
 
-            StrataError::InvalidInput { message } => Error::InvalidInput { reason: message, hint: None },
+            StrataError::InvalidInput { message } => Error::InvalidInput {
+                reason: message,
+                hint: None,
+            },
 
             // Constraint errors
             StrataError::DimensionMismatch { expected, got } => Error::DimensionMismatch {

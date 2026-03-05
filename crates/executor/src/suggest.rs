@@ -6,7 +6,11 @@ const MAX_DISPLAY_CANDIDATES: usize = 10;
 /// Find the closest match to `input` among `candidates` using Levenshtein distance.
 ///
 /// Returns `None` if no candidate is within `max_distance` edits.
-pub(crate) fn did_you_mean(input: &str, candidates: &[String], max_distance: usize) -> Option<String> {
+pub(crate) fn did_you_mean(
+    input: &str,
+    candidates: &[String],
+    max_distance: usize,
+) -> Option<String> {
     let input_lower = input.to_lowercase();
     candidates
         .iter()
@@ -128,7 +132,10 @@ mod tests {
         assert!(hint.contains("and 15 more"), "hint = {}", hint);
         assert!(hint.contains("branch-0"));
         assert!(hint.contains("branch-9"));
-        assert!(!hint.contains("branch-10"), "should not show 11th candidate");
+        assert!(
+            !hint.contains("branch-10"),
+            "should not show 11th candidate"
+        );
     }
 
     #[test]
@@ -149,10 +156,7 @@ mod tests {
             None, // exact match after lowercasing → distance 0
         );
         // One edit away
-        assert_eq!(
-            did_you_mean("ärge", &candidates, 2),
-            Some("Ärger".into()),
-        );
+        assert_eq!(did_you_mean("ärge", &candidates, 2), Some("Ärger".into()),);
     }
 
     #[test]
@@ -188,7 +192,11 @@ mod tests {
             hint: None,
         };
         let json = serde_json::to_string(&err).unwrap();
-        assert!(!json.contains("hint"), "hint: None should be omitted: {}", json);
+        assert!(
+            !json.contains("hint"),
+            "hint: None should be omitted: {}",
+            json
+        );
     }
 
     #[test]
