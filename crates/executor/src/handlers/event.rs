@@ -7,25 +7,9 @@ use std::sync::Arc;
 use crate::bridge::{self, validate_value, Primitives};
 use crate::convert::convert_result;
 use crate::types::{BranchId, VersionedValue};
-use crate::{Error, Output, Result};
+use crate::{Output, Result};
 
-/// Validate that a branch exists before performing a write operation (#951).
-///
-/// The default branch is always allowed (it is implicit and not stored in BranchIndex).
-/// For all other branches, checks `BranchIndex::exists()` and returns
-/// `Error::BranchNotFound` if the branch does not exist.
-fn require_branch_exists(p: &Arc<Primitives>, branch: &BranchId) -> Result<()> {
-    if branch.is_default() {
-        return Ok(());
-    }
-    let exists = convert_result(p.branch.exists(branch.as_str()))?;
-    if !exists {
-        return Err(Error::BranchNotFound {
-            branch: branch.as_str().to_string(),
-        });
-    }
-    Ok(())
-}
+use super::require_branch_exists;
 
 // =============================================================================
 // Individual Handlers (4 MVP)

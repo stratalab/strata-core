@@ -281,6 +281,7 @@ impl Strata {
             Output::Bool(true) => Ok(()),
             Output::Bool(false) => Err(Error::BranchNotFound {
                 branch: "default".to_string(),
+                hint: None,
             }),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchExists".into(),
@@ -383,6 +384,7 @@ impl Strata {
         if !self.branches().exists(branch_name)? {
             return Err(Error::BranchNotFound {
                 branch: branch_name.to_string(),
+                hint: None,
             });
         }
 
@@ -505,7 +507,8 @@ impl Strata {
     /// All subsequent data operations will use this space.
     /// The "default" space always exists. Other spaces are created on first use.
     pub fn set_space(&mut self, space: &str) -> Result<()> {
-        strata_core::validate_space_name(space).map_err(|reason| Error::InvalidInput { reason })?;
+        strata_core::validate_space_name(space)
+            .map_err(|reason| Error::InvalidInput { reason, hint: None })?;
         self.current_space = space.to_string();
         Ok(())
     }

@@ -106,6 +106,7 @@ impl Session {
                 Err(Error::InvalidInput {
                     reason: "Vector write operations are not supported inside a transaction"
                         .to_string(),
+                    hint: None,
                 })
             }
 
@@ -117,6 +118,7 @@ impl Session {
                 Err(Error::InvalidInput {
                     reason: "Branch create/delete operations are not supported inside a transaction"
                         .to_string(),
+                    hint: None,
                 })
             }
 

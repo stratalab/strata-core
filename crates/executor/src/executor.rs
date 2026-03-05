@@ -219,6 +219,7 @@ impl Executor {
             Command::TimeRange { branch } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::vector::time_range(&self.primitives, branch)
             }
@@ -232,6 +233,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 self.ensure_space_registered(&branch, &space)?;
@@ -244,6 +246,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 self.ensure_space_registered(&branch, &space)?;
@@ -257,6 +260,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 if let Some(ts) = as_of {
@@ -268,6 +272,7 @@ impl Executor {
             Command::KvDelete { branch, space, key } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 self.ensure_space_registered(&branch, &space)?;
@@ -283,6 +288,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 if let Some(ts) = as_of {
@@ -308,6 +314,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::kv::kv_getv(&self.primitives, branch, space, key)
@@ -323,6 +330,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 self.ensure_space_registered(&branch, &space)?;
@@ -335,6 +343,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 self.ensure_space_registered(&branch, &space)?;
@@ -347,6 +356,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::json::json_batch_get(&self.primitives, branch, space, entries)
@@ -358,6 +368,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 self.ensure_space_registered(&branch, &space)?;
@@ -372,6 +383,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 if let Some(ts) = as_of {
@@ -397,6 +409,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::json::json_getv(&self.primitives, branch, space, key)
@@ -409,6 +422,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 self.ensure_space_registered(&branch, &space)?;
@@ -424,6 +438,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 if let Some(ts) = as_of {
@@ -448,6 +463,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 self.ensure_space_registered(&branch, &space)?;
@@ -461,6 +477,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 self.ensure_space_registered(&branch, &space)?;
@@ -480,6 +497,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 if let Some(ts) = as_of {
@@ -504,6 +522,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 if let Some(ts) = as_of {
@@ -528,6 +547,7 @@ impl Executor {
             Command::EventLen { branch, space } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::event::event_len(&self.primitives, branch, space)
@@ -541,6 +561,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 self.ensure_space_registered(&branch, &space)?;
@@ -554,6 +575,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 self.ensure_space_registered(&branch, &space)?;
@@ -567,6 +589,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 if let Some(ts) = as_of {
@@ -585,6 +608,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::state::state_getv(&self.primitives, branch, space, cell)
@@ -598,6 +622,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 self.ensure_space_registered(&branch, &space)?;
@@ -618,6 +643,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 self.ensure_space_registered(&branch, &space)?;
@@ -630,6 +656,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 self.ensure_space_registered(&branch, &space)?;
@@ -643,6 +670,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 if let Some(ts) = as_of {
@@ -669,6 +697,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 self.ensure_space_registered(&branch, &space)?;
@@ -691,6 +720,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 if let Some(ts) = as_of {
@@ -720,6 +750,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 self.ensure_space_registered(&branch, &space)?;
@@ -743,6 +774,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 if let Some(ts) = as_of {
@@ -779,6 +811,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 self.ensure_space_registered(&branch, &space)?;
@@ -798,6 +831,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 self.ensure_space_registered(&branch, &space)?;
@@ -811,6 +845,7 @@ impl Executor {
             Command::VectorListCollections { branch, space } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::vector::vector_list_collections(&self.primitives, branch, space)
@@ -822,6 +857,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::vector::vector_collection_stats(
@@ -839,6 +875,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 self.ensure_space_registered(&branch, &space)?;
@@ -896,6 +933,7 @@ impl Executor {
             Command::RetentionApply { branch } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let branch_id = crate::bridge::to_core_branch_id(&branch)?;
                 // Use the current version as the safe GC boundary:
@@ -995,6 +1033,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::search::search(&self.primitives, branch, space, search)
@@ -1004,12 +1043,14 @@ impl Executor {
             Command::SpaceList { branch } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::space::space_list(&self.primitives, branch)
             }
             Command::SpaceCreate { branch, space } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::space::space_create(&self.primitives, branch, space)
             }
@@ -1020,12 +1061,14 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::space::space_delete(&self.primitives, branch, space, force)
             }
             Command::SpaceExists { branch, space } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::space::space_exists(&self.primitives, branch, space)
             }
@@ -1038,6 +1081,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_create(
                     &self.primitives,
@@ -1049,18 +1093,21 @@ impl Executor {
             Command::GraphDelete { branch, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_delete(&self.primitives, branch, graph)
             }
             Command::GraphList { branch } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_list(&self.primitives, branch)
             }
             Command::GraphGetMeta { branch, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_get_meta(&self.primitives, branch, graph)
             }
@@ -1074,6 +1121,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_add_node(
                     &self.primitives,
@@ -1092,6 +1140,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_get_node(&self.primitives, branch, graph, node_id)
             }
@@ -1102,12 +1151,14 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_remove_node(&self.primitives, branch, graph, node_id)
             }
             Command::GraphListNodes { branch, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_list_nodes(&self.primitives, branch, graph)
             }
@@ -1119,6 +1170,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_list_nodes_paginated(
                     &self.primitives,
@@ -1139,6 +1191,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_add_edge(
                     &self.primitives,
@@ -1160,6 +1213,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_remove_edge(
                     &self.primitives,
@@ -1179,6 +1233,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_neighbors(
                     &self.primitives,
@@ -1198,6 +1253,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_bulk_insert(
                     &self.primitives,
@@ -1219,6 +1275,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_bfs(
                     &self.primitives,
@@ -1240,6 +1297,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_define_object_type(
                     &self.primitives,
@@ -1255,18 +1313,21 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_get_object_type(&self.primitives, branch, graph, name)
             }
             Command::GraphListObjectTypes { branch, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_list_object_types(&self.primitives, branch, graph)
             }
             Command::GraphListOntologyTypes { branch, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_list_ontology_types(&self.primitives, branch, graph)
             }
@@ -1277,6 +1338,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_delete_object_type(
                     &self.primitives,
@@ -1292,6 +1354,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_define_link_type(
                     &self.primitives,
@@ -1307,12 +1370,14 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_get_link_type(&self.primitives, branch, graph, name)
             }
             Command::GraphListLinkTypes { branch, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_list_link_types(&self.primitives, branch, graph)
             }
@@ -1323,6 +1388,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_delete_link_type(
                     &self.primitives,
@@ -1334,18 +1400,21 @@ impl Executor {
             Command::GraphFreezeOntology { branch, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_freeze_ontology(&self.primitives, branch, graph)
             }
             Command::GraphOntologyStatus { branch, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_ontology_status(&self.primitives, branch, graph)
             }
             Command::GraphOntologySummary { branch, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_ontology_summary(&self.primitives, branch, graph)
             }
@@ -1356,6 +1425,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_nodes_by_type(
                     &self.primitives,
@@ -1369,6 +1439,7 @@ impl Executor {
             Command::GraphWcc { branch, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_wcc(&self.primitives, branch, graph)
             }
@@ -1380,6 +1451,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_cdlp(
                     &self.primitives,
@@ -1398,6 +1470,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_pagerank(
                     &self.primitives,
@@ -1411,6 +1484,7 @@ impl Executor {
             Command::GraphLcc { branch, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_lcc(&self.primitives, branch, graph)
             }
@@ -1422,6 +1496,7 @@ impl Executor {
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
                 })?;
                 crate::handlers::graph::graph_sssp(
                     &self.primitives,

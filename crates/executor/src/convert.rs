@@ -17,20 +17,32 @@ impl From<StrataError> for Error {
             StrataError::NotFound { entity_ref } => {
                 let entity_str = entity_ref.to_string();
                 match &entity_ref {
-                    EntityRef::Kv { .. } | EntityRef::Json { .. } => {
-                        Error::KeyNotFound { key: entity_str }
-                    }
-                    EntityRef::Branch { .. } => Error::BranchNotFound { branch: entity_str },
+                    EntityRef::Kv { .. } | EntityRef::Json { .. } => Error::KeyNotFound {
+                        key: entity_str,
+                        hint: None,
+                    },
+                    EntityRef::Branch { .. } => Error::BranchNotFound {
+                        branch: entity_str,
+                        hint: None,
+                    },
                     EntityRef::Vector { .. } => Error::CollectionNotFound {
                         collection: entity_str,
+                        hint: None,
                     },
-                    EntityRef::Event { .. } => Error::StreamNotFound { stream: entity_str },
-                    EntityRef::State { .. } => Error::CellNotFound { cell: entity_str },
+                    EntityRef::Event { .. } => Error::StreamNotFound {
+                        stream: entity_str,
+                        hint: None,
+                    },
+                    EntityRef::State { .. } => Error::CellNotFound {
+                        cell: entity_str,
+                        hint: None,
+                    },
                 }
             }
 
             StrataError::BranchNotFound { branch_id } => Error::BranchNotFound {
                 branch: branch_id.to_string(),
+                hint: None,
             },
 
             // Type errors
@@ -71,7 +83,10 @@ impl From<StrataError> for Error {
                 reason: format!("Invalid operation on {}: {}", entity_ref, reason),
             },
 
-            StrataError::InvalidInput { message } => Error::InvalidInput { reason: message },
+            StrataError::InvalidInput { message } => Error::InvalidInput {
+                reason: message,
+                hint: None,
+            },
 
             // Constraint errors
             StrataError::DimensionMismatch { expected, got } => Error::DimensionMismatch {
@@ -165,7 +180,7 @@ mod tests {
         ));
         let converted: Error = err.into();
         match converted {
-            Error::KeyNotFound { key } => assert!(key.contains("mykey")),
+            Error::KeyNotFound { key, .. } => assert!(key.contains("mykey")),
             _ => panic!("Expected KeyNotFound"),
         }
     }

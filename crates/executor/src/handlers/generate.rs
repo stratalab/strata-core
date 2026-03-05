@@ -26,6 +26,7 @@ pub fn generate(
     if prompt.is_empty() {
         return Err(Error::InvalidInput {
             reason: "Prompt must not be empty".to_string(),
+            hint: None,
         });
     }
 
@@ -52,6 +53,7 @@ pub fn generate(
                     "Unknown provider: {:?}. Valid providers: local, anthropic, openai, google",
                     cfg.provider
                 ),
+                hint: None,
             })?;
 
         // Resolve model name: use the command-supplied model, or fall back to default_model
@@ -66,6 +68,7 @@ pub fn generate(
                 reason: "No model specified and no default_model configured. \
                      Use: CONFIGURE SET default_model \"model-name\""
                     .to_string(),
+                hint: None,
             });
         }
 
@@ -85,6 +88,7 @@ pub fn generate(
                      Use: CONFIGURE SET {} \"your-api-key\"",
                     provider_kind, key_name
                 ),
+                hint: None,
             }
         })?;
 
