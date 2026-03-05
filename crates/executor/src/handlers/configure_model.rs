@@ -22,7 +22,7 @@ pub fn configure_model(
         cfg.model = Some(ModelConfig {
             endpoint,
             model,
-            api_key,
+            api_key: api_key.map(strata_security::SensitiveString::from),
             timeout_ms: timeout_ms.unwrap_or(5000),
         });
     })

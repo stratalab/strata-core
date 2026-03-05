@@ -5,6 +5,10 @@
 
 #![warn(missing_docs)]
 
+mod sensitive;
+
+pub use sensitive::SensitiveString;
+
 use serde::{Deserialize, Serialize};
 
 /// Controls whether the database allows writes or is read-only.

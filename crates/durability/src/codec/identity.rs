@@ -39,6 +39,10 @@ impl StorageCodec for IdentityCodec {
     fn codec_id(&self) -> &str {
         "identity"
     }
+
+    fn clone_box(&self) -> Box<dyn StorageCodec> {
+        Box::new(IdentityCodec)
+    }
 }
 
 #[cfg(test)]

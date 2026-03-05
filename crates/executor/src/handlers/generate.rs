@@ -92,7 +92,7 @@ pub fn generate(
             }
         })?;
 
-        GenerateModelState::create_cloud_engine(provider_kind, api_key, &resolved_model)
+        GenerateModelState::create_cloud_engine(provider_kind, api_key.into_inner(), &resolved_model)
             .map_err(|e| Error::Internal { reason: e })?
     };
 

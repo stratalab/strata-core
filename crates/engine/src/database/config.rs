@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use strata_core::{StrataError, StrataResult};
 use strata_durability::wal::DurabilityMode;
+use strata_security::SensitiveString;
 
 // ============================================================================
 // Shadow Collection Names
@@ -38,7 +39,7 @@ pub struct ModelConfig {
     pub model: String,
     /// Optional API key for authenticated endpoints
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
+    pub api_key: Option<SensitiveString>,
     /// Request timeout in milliseconds (default: 5000)
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
@@ -134,13 +135,13 @@ pub struct StrataConfig {
     pub default_model: Option<String>,
     /// Anthropic (Claude) API key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anthropic_api_key: Option<String>,
+    pub anthropic_api_key: Option<SensitiveString>,
     /// OpenAI (GPT) API key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub openai_api_key: Option<String>,
+    pub openai_api_key: Option<SensitiveString>,
     /// Google (Gemini) API key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub google_api_key: Option<String>,
+    pub google_api_key: Option<SensitiveString>,
     /// Storage layer resource limits.
     #[serde(default)]
     pub storage: StorageConfig,
@@ -411,7 +412,7 @@ mod tests {
             model: Some(ModelConfig {
                 endpoint: "http://localhost:11434/v1".to_string(),
                 model: "qwen3:1.7b".to_string(),
-                api_key: Some("sk-test".to_string()),
+                api_key: Some(SensitiveString::from("sk-test")),
                 timeout_ms: 3000,
             }),
             ..StrataConfig::default()
@@ -425,7 +426,7 @@ mod tests {
         let model = parsed.model.unwrap();
         assert_eq!(model.endpoint, "http://localhost:11434/v1");
         assert_eq!(model.model, "qwen3:1.7b");
-        assert_eq!(model.api_key, Some("sk-test".to_string()));
+        assert_eq!(model.api_key.as_deref(), Some("sk-test"));
         assert_eq!(model.timeout_ms, 3000);
     }
 
@@ -567,7 +568,7 @@ auto_embed = false
         let config = StrataConfig {
             provider: "anthropic".to_string(),
             default_model: Some("claude-sonnet-4-20250514".to_string()),
-            anthropic_api_key: Some("sk-ant-test-key".to_string()),
+            anthropic_api_key: Some(SensitiveString::from("sk-ant-test-key")),
             ..StrataConfig::default()
         };
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -587,9 +588,9 @@ auto_embed = false
         let config = StrataConfig {
             provider: "openai".to_string(),
             default_model: Some("gpt-4".to_string()),
-            anthropic_api_key: Some("sk-ant-key".to_string()),
-            openai_api_key: Some("sk-openai-key".to_string()),
-            google_api_key: Some("AIza-key".to_string()),
+            anthropic_api_key: Some(SensitiveString::from("sk-ant-key")),
+            openai_api_key: Some(SensitiveString::from("sk-openai-key")),
+            google_api_key: Some(SensitiveString::from("AIza-key")),
             ..StrataConfig::default()
         };
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -694,7 +695,7 @@ auto_embed = true
         let config = StrataConfig {
             provider: "google".to_string(),
             default_model: Some("gemini-pro".to_string()),
-            google_api_key: Some("AIza-test".to_string()),
+            google_api_key: Some(SensitiveString::from("AIza-test")),
             ..StrataConfig::default()
         };
         config.write_to_file(&path).unwrap();
