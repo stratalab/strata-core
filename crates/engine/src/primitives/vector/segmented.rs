@@ -304,7 +304,17 @@ impl SegmentedHnswBackend {
         let mut live_count = 0;
 
         // Insert each vector into the graph, using global heap for distance computation
-        for &id in &ids {
+        let total = ids.len();
+        let log_interval = (total / 10).max(1);
+
+        for (i, &id) in ids.iter().enumerate() {
+            if i > 0 && i % log_interval == 0 {
+                tracing::info!(
+                    target: "strata::vector",
+                    processed = i, total, pct = i * 100 / total,
+                    "Sealing active buffer"
+                );
+            }
             if let Some(embedding) = self.heap.get(id) {
                 let embedding = embedding.to_vec();
                 let created_at = timestamps.get(&id).map(|t| t.0).unwrap_or(0);
@@ -1078,7 +1088,18 @@ impl VectorIndexBackend for SegmentedHnswBackend {
                     let mut graph = HnswGraph::new(&self.vector_config, self.config.hnsw.clone());
                     let mut live_count = 0;
 
-                    for &id in chunk {
+                    let chunk_len = chunk.len();
+                    let log_interval = (chunk_len / 10).max(1);
+
+                    for (i, &id) in chunk.iter().enumerate() {
+                        if i > 0 && i % log_interval == 0 {
+                            tracing::info!(
+                                target: "strata::vector",
+                                processed = i, total = chunk_len, pct = i * 100 / chunk_len,
+                                segment_id = self.next_segment_id,
+                                "Rebuilding index segment"
+                            );
+                        }
                         if let Some(embedding) = self.heap.get(id) {
                             let embedding = embedding.to_vec();
                             let created_at = all_timestamps.get(&id).map(|t| t.0).unwrap_or(0);
@@ -1179,7 +1200,18 @@ impl VectorIndexBackend for SegmentedHnswBackend {
         let mut live_count = 0;
 
         // Insert all live vectors from the global heap (sorted by VectorId for determinism)
-        for id in self.heap.ids() {
+        let all_ids: Vec<VectorId> = self.heap.ids().collect();
+        let total = all_ids.len();
+        let log_interval = (total / 10).max(1);
+
+        for (i, id) in all_ids.into_iter().enumerate() {
+            if i > 0 && i % log_interval == 0 {
+                tracing::info!(
+                    target: "strata::vector",
+                    processed = i, total, pct = i * 100 / total,
+                    "Compacting segments"
+                );
+            }
             if let Some(emb) = self.heap.get(id) {
                 let emb = emb.to_vec();
                 let created_at = timestamps.get(&id).copied().unwrap_or(0);
