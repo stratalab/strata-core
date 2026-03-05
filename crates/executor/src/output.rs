@@ -90,6 +90,9 @@ pub enum Output {
     /// Per-item results for batch operations (positionally maps to input entries)
     BatchResults(Vec<BatchItemResult>),
 
+    /// Per-item results for batch get operations (includes values)
+    BatchGetResults(Vec<BatchGetItemResult>),
+
     // ==================== Branch-specific ====================
     /// Optional versioned branch info (for branch_get which may not find a branch)
     MaybeBranchInfo(Option<VersionedBranchInfo>),

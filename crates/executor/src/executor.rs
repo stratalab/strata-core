@@ -340,6 +340,29 @@ impl Executor {
                 self.ensure_space_registered(&branch, &space)?;
                 crate::handlers::json::json_batch_set(&self.primitives, branch, space, entries)
             }
+            Command::JsonBatchGet {
+                branch,
+                space,
+                entries,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::json::json_batch_get(&self.primitives, branch, space, entries)
+            }
+            Command::JsonBatchDelete {
+                branch,
+                space,
+                entries,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                self.ensure_space_registered(&branch, &space)?;
+                crate::handlers::json::json_batch_delete(&self.primitives, branch, space, entries)
+            }
             Command::JsonGet {
                 branch,
                 space,

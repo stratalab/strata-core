@@ -259,6 +259,41 @@ pub struct BatchJsonEntry {
     pub value: Value,
 }
 
+/// Entry for batch JSON get operations.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatchJsonGetEntry {
+    /// Document key.
+    pub key: String,
+    /// JSON path within the document.
+    pub path: String,
+}
+
+/// Entry for batch JSON delete operations.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatchJsonDeleteEntry {
+    /// Document key.
+    pub key: String,
+    /// JSON path within the document.
+    pub path: String,
+}
+
+/// Per-item result for batch get operations (includes value, not just version).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatchGetItemResult {
+    /// The retrieved value, if found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+    /// Version of the retrieved value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<u64>,
+    /// Timestamp of the retrieved value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<u64>,
+    /// Error message if the item failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Per-item result for batch operations.
 ///
 /// Positionally maps to input entries: `results[i]` corresponds to `entries[i]`.

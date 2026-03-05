@@ -743,3 +743,131 @@ fn test_output_durability_counters() {
         strata_engine::WalCounters::default(),
     ));
 }
+
+// =============================================================================
+// JSON Batch Get/Delete Serialization Tests
+// =============================================================================
+
+#[test]
+fn test_command_json_batch_get() {
+    test_command_round_trip(Command::JsonBatchGet {
+        branch: Some(BranchId::from("default")),
+        space: None,
+        entries: vec![
+            BatchJsonGetEntry {
+                key: "doc1".to_string(),
+                path: ".name".to_string(),
+            },
+            BatchJsonGetEntry {
+                key: "doc2".to_string(),
+                path: "".to_string(),
+            },
+        ],
+    });
+}
+
+#[test]
+fn test_command_json_batch_get_empty() {
+    test_command_round_trip(Command::JsonBatchGet {
+        branch: None,
+        space: None,
+        entries: vec![],
+    });
+}
+
+#[test]
+fn test_command_json_batch_delete() {
+    test_command_round_trip(Command::JsonBatchDelete {
+        branch: Some(BranchId::from("default")),
+        space: Some("custom".to_string()),
+        entries: vec![
+            BatchJsonDeleteEntry {
+                key: "doc1".to_string(),
+                path: "".to_string(),
+            },
+            BatchJsonDeleteEntry {
+                key: "doc2".to_string(),
+                path: ".field".to_string(),
+            },
+        ],
+    });
+}
+
+#[test]
+fn test_output_batch_get_results() {
+    // Found item
+    test_output_round_trip(Output::BatchGetResults(vec![BatchGetItemResult {
+        value: Some(Value::String("hello".to_string())),
+        version: Some(3),
+        timestamp: Some(1000),
+        error: None,
+    }]));
+
+    // Not found item (all None, no error)
+    test_output_round_trip(Output::BatchGetResults(vec![BatchGetItemResult {
+        value: None,
+        version: None,
+        timestamp: None,
+        error: None,
+    }]));
+
+    // Error item
+    test_output_round_trip(Output::BatchGetResults(vec![BatchGetItemResult {
+        value: None,
+        version: None,
+        timestamp: None,
+        error: Some("invalid key".to_string()),
+    }]));
+
+    // Mixed results
+    test_output_round_trip(Output::BatchGetResults(vec![
+        BatchGetItemResult {
+            value: Some(Value::Int(42)),
+            version: Some(1),
+            timestamp: Some(500),
+            error: None,
+        },
+        BatchGetItemResult {
+            value: None,
+            version: None,
+            timestamp: None,
+            error: None,
+        },
+        BatchGetItemResult {
+            value: None,
+            version: None,
+            timestamp: None,
+            error: Some("bad key".to_string()),
+        },
+    ]));
+
+    // Empty
+    test_output_round_trip(Output::BatchGetResults(vec![]));
+}
+
+#[test]
+fn test_output_batch_get_results_skip_serializing_none() {
+    // Verify skip_serializing_if = "Option::is_none" works: None fields
+    // should be absent in JSON (not "value": null)
+    let result = BatchGetItemResult {
+        value: None,
+        version: None,
+        timestamp: None,
+        error: None,
+    };
+    let json = serde_json::to_string(&result).unwrap();
+    assert_eq!(json, "{}");
+
+    // Found item should only have non-None fields
+    let result = BatchGetItemResult {
+        value: Some(Value::Int(1)),
+        version: Some(5),
+        timestamp: None,
+        error: None,
+    };
+    let json = serde_json::to_string(&result).unwrap();
+    assert!(!json.contains("timestamp"));
+    assert!(!json.contains("error"));
+    assert!(json.contains("value"));
+    assert!(json.contains("version"));
+}

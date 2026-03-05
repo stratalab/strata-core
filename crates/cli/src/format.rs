@@ -338,6 +338,15 @@ fn format_raw(output: &Output) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
+        Output::BatchGetResults(results) => results
+            .iter()
+            .map(|r| match (&r.error, &r.value) {
+                (Some(e), _) => format!("ERR:{}", e),
+                (_, Some(v)) => format_value_raw(v),
+                _ => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
         Output::Embedding(vec) => vec
             .iter()
             .map(|v| v.to_string())
@@ -715,6 +724,25 @@ fn format_human(output: &Output) -> String {
                         (Some(v), _) => format!("{}) OK (v{})", i + 1, v),
                         (_, Some(e)) => format!("{}) ERR: {}", i + 1, e),
                         _ => format!("{}) ERR", i + 1),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+        Output::BatchGetResults(results) => {
+            if results.is_empty() {
+                "(empty list)".to_string()
+            } else {
+                results
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| match (&r.error, &r.value) {
+                        (Some(e), _) => format!("{}) ERR: {}", i + 1, e),
+                        (_, Some(v)) => {
+                            let ver = r.version.map(|v| format!(" (v{})", v)).unwrap_or_default();
+                            format!("{}) {}{}", i + 1, format_value_human(v), ver)
+                        }
+                        _ => format!("{}) (not found)", i + 1),
                     })
                     .collect::<Vec<_>>()
                     .join("\n")
