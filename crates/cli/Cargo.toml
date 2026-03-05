@@ -24,3 +24,4 @@ clap = { version = "4", features = ["string"] }
 rustyline = { version = "15", features = ["with-file-history"] }
 shlex = "1"
 serde_json = { workspace = true }
+strsim = { workspace = true }

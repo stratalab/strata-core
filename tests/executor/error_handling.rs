@@ -26,7 +26,7 @@ fn vector_upsert_to_nonexistent_collection_behavior() {
     // Vector auto-create was removed (#923) - upsert to nonexistent collection
     // should now fail with CollectionNotFound
     match result {
-        Err(Error::CollectionNotFound { collection }) => {
+        Err(Error::CollectionNotFound { collection, .. }) => {
             assert!(
                 collection.contains("nonexistent"),
                 "Error should reference 'nonexistent', got: {}",
@@ -54,7 +54,7 @@ fn vector_search_in_nonexistent_collection_fails() {
     });
 
     match result {
-        Err(Error::CollectionNotFound { collection }) => {
+        Err(Error::CollectionNotFound { collection, .. }) => {
             assert!(
                 collection.contains("nonexistent"),
                 "Collection error should reference 'nonexistent', got: {}",
@@ -163,7 +163,7 @@ fn branch_duplicate_id_fails() {
                 branch
             );
         }
-        Err(Error::InvalidInput { reason }) => {
+        Err(Error::InvalidInput { reason, .. }) => {
             assert!(
                 reason.contains("unique-branch"),
                 "InvalidInput error should reference 'unique-branch', got: {}",

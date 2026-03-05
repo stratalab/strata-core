@@ -19,7 +19,7 @@ pub fn space_list(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
 
 /// Handle SpaceCreate command.
 pub fn space_create(p: &Arc<Primitives>, branch: BranchId, space: String) -> Result<Output> {
-    validate_space_name(&space).map_err(|reason| Error::InvalidInput { reason })?;
+    validate_space_name(&space).map_err(|reason| Error::InvalidInput { reason, hint: None })?;
     let core_branch_id = to_core_branch_id(&branch)?;
     convert_result(p.space.register(core_branch_id, &space))?;
     Ok(Output::Unit)

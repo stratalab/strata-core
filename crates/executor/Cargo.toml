@@ -46,6 +46,9 @@ uuid = { workspace = true }
 # Datetime parsing
 chrono = { workspace = true }
 
+# String similarity
+strsim = { workspace = true }
+
 # Logging
 tracing = { workspace = true }
 

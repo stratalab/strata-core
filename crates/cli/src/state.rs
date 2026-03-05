@@ -90,6 +90,7 @@ impl SessionState {
         if !exists {
             return Err(Error::BranchNotFound {
                 branch: name.to_string(),
+                hint: None,
             });
         }
         self.branch = name.to_string();

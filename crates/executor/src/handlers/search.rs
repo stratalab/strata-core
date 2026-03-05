@@ -29,11 +29,13 @@ const MIN_RERANK_CANDIDATES: usize = 3;
 fn parse_iso8601_to_micros(s: &str) -> Result<u64> {
     let dt = DateTime::parse_from_rfc3339(s).map_err(|e| Error::InvalidInput {
         reason: format!("Invalid ISO 8601 datetime '{}': {}", s, e),
+        hint: None,
     })?;
     let micros = dt.timestamp_micros();
     if micros < 0 {
         return Err(Error::InvalidInput {
             reason: format!("Datetime '{}' is before Unix epoch", s),
+            hint: None,
         });
     }
     Ok(micros as u64)
@@ -46,6 +48,7 @@ fn parse_time_range(input: &TimeRangeInput) -> Result<(u64, u64)> {
     if start > end {
         return Err(Error::InvalidInput {
             reason: "time_range.start must be <= time_range.end".into(),
+            hint: None,
         });
     }
     Ok((start, end))

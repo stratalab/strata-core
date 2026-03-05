@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// match executor.execute(cmd) {
 ///     Ok(output) => { /* handle success */ }
-///     Err(Error::KeyNotFound { key }) => {
+///     Err(Error::KeyNotFound { key, .. }) => {
 ///         println!("Key '{}' not found", key);
 ///     }
 ///     Err(e) => {
@@ -45,45 +45,63 @@ use serde::{Deserialize, Serialize};
 pub enum Error {
     // ==================== Not Found ====================
     /// Key not found in KV store
-    #[error("key not found: {key}")]
+    #[error("key not found: {key}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
     KeyNotFound {
         /// The missing key.
         key: String,
+        /// Optional actionable hint (e.g. "Did you mean ...?").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
     },
 
     /// Branch not found
-    #[error("branch not found: {branch}")]
+    #[error("branch not found: {branch}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
     BranchNotFound {
         /// The missing branch identifier.
         branch: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
     },
 
     /// Vector collection not found
-    #[error("collection not found: {collection}")]
+    #[error("collection not found: {collection}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
     CollectionNotFound {
         /// The missing collection name.
         collection: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
     },
 
     /// Event stream not found
-    #[error("stream not found: {stream}")]
+    #[error("stream not found: {stream}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
     StreamNotFound {
         /// The missing stream name.
         stream: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
     },
 
     /// State cell not found
-    #[error("cell not found: {cell}")]
+    #[error("cell not found: {cell}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
     CellNotFound {
         /// The missing cell name.
         cell: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
     },
 
     /// JSON document not found
-    #[error("document not found: {key}")]
+    #[error("document not found: {key}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
     DocumentNotFound {
         /// The missing document key.
         key: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
     },
 
     // ==================== Type Errors ====================
@@ -112,10 +130,13 @@ pub enum Error {
     },
 
     /// Invalid input
-    #[error("invalid input: {reason}")]
+    #[error("invalid input: {reason}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
     InvalidInput {
         /// Description of the validation failure.
         reason: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
     },
 
     // ==================== Concurrency Errors ====================

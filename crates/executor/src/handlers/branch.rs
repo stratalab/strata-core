@@ -45,26 +45,31 @@ fn validate_branch_name(name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(Error::InvalidInput {
             reason: "Branch name must not be empty".to_string(),
+            hint: None,
         });
     }
     if name.trim().is_empty() {
         return Err(Error::InvalidInput {
             reason: "Branch name must not be whitespace-only".to_string(),
+            hint: None,
         });
     }
     if name.contains('\0') {
         return Err(Error::InvalidInput {
             reason: "Branch name must not contain NUL bytes".to_string(),
+            hint: None,
         });
     }
     if name.chars().any(|c| c.is_control()) {
         return Err(Error::InvalidInput {
             reason: "Branch name must not contain control characters".to_string(),
+            hint: None,
         });
     }
     if name.len() > 255 {
         return Err(Error::InvalidInput {
             reason: "Branch name must not exceed 255 bytes".to_string(),
+            hint: None,
         });
     }
     Ok(())

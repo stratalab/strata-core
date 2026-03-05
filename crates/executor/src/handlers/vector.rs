@@ -301,11 +301,16 @@ pub fn vector_collection_stats(
 
     let collections =
         convert_vector_result(p.vector.list_collections(branch_id, &space), branch_id)?;
+    let collection_names: Vec<String> = collections.iter().map(|c| c.name.clone()).collect();
     let info = collections
         .into_iter()
         .find(|c| c.name == collection)
-        .ok_or_else(|| crate::Error::CollectionNotFound {
-            collection: collection.clone(),
+        .ok_or_else(|| {
+            let hint = crate::suggest::format_hint("collections", &collection_names, &collection, 2);
+            crate::Error::CollectionNotFound {
+                collection: collection.clone(),
+                hint,
+            }
         })?;
 
     let (index_type, memory_bytes) = p

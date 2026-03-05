@@ -24,6 +24,7 @@ fn parse_direction(s: Option<&str>) -> Result<Direction> {
                 "Invalid direction '{}'. Must be 'outgoing', 'incoming', or 'both'.",
                 other
             ),
+            hint: None,
         }),
     }
 }
@@ -39,6 +40,7 @@ fn parse_cascade_policy(s: Option<&str>) -> Result<CascadePolicy> {
                 "Invalid cascade_policy '{}'. Must be 'cascade', 'detach', or 'ignore'.",
                 other
             ),
+            hint: None,
         }),
     }
 }
@@ -362,6 +364,7 @@ pub fn graph_define_object_type(
     let json = crate::bridge::value_to_serde_json_public(definition)?;
     let def: ObjectTypeDef = serde_json::from_value(json).map_err(|e| Error::InvalidInput {
         reason: format!("Invalid object type definition: {}", e),
+        hint: None,
     })?;
     convert_result(p.graph.define_object_type(core_branch, &graph, def))?;
     Ok(Output::Unit)
@@ -421,6 +424,7 @@ pub fn graph_define_link_type(
     let json = crate::bridge::value_to_serde_json_public(definition)?;
     let def: LinkTypeDef = serde_json::from_value(json).map_err(|e| Error::InvalidInput {
         reason: format!("Invalid link type definition: {}", e),
+        hint: None,
     })?;
     convert_result(p.graph.define_link_type(core_branch, &graph, def))?;
     Ok(Output::Unit)

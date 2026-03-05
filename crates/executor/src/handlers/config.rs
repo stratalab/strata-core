@@ -63,6 +63,7 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
                 key.trim(),
                 KNOWN_KEYS.join(", ")
             ),
+            hint: None,
         });
     }
 
@@ -73,6 +74,7 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
             return Err(Error::InvalidInput {
                 reason: "Provider cannot be empty. Valid values: local, anthropic, openai, google"
                     .to_string(),
+                hint: None,
             });
         }
         let valid_providers = ["local", "anthropic", "openai", "google"];
@@ -83,6 +85,7 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
                     value.trim(),
                     valid_providers.join(", ")
                 ),
+                hint: None,
             });
         }
     }
@@ -94,6 +97,7 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
         if v.is_empty() {
             return Err(Error::InvalidInput {
                 reason: "embed_model cannot be empty. Valid models: miniLM, nomic-embed, bge-m3, gemma-embed".to_string(),
+                hint: None,
             });
         }
         let canonical = match v.as_str() {
@@ -107,6 +111,7 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
                         "Unknown embed_model: {:?}. Valid models: miniLM, nomic-embed, bge-m3, gemma-embed",
                         value.trim()
                     ),
+                    hint: None,
                 });
             }
         };
@@ -128,6 +133,7 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
                     "Invalid durability mode: {:?}. Valid values: standard, always, cache",
                     value.trim()
                 ),
+                hint: None,
             });
         }
     }
@@ -141,6 +147,7 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
                     "Invalid auto_embed value: {:?}. Expected \"true\" or \"false\"",
                     value.trim()
                 ),
+                hint: None,
             });
         }
     }
@@ -152,10 +159,12 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
                 "Invalid bm25_k1 value: {:?}. Expected a positive number",
                 value.trim()
             ),
+            hint: None,
         })?;
         if !v.is_finite() || v <= 0.0 {
             return Err(Error::InvalidInput {
                 reason: "bm25_k1 must be a finite number greater than 0".to_string(),
+                hint: None,
             });
         }
     }
@@ -167,10 +176,12 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
                 "Invalid bm25_b value: {:?}. Expected a number between 0 and 1",
                 value.trim()
             ),
+            hint: None,
         })?;
         if !v.is_finite() || !(0.0..=1.0).contains(&v) {
             return Err(Error::InvalidInput {
                 reason: "bm25_b must be a finite number between 0 and 1 (inclusive)".to_string(),
+                hint: None,
             });
         }
     }
@@ -182,10 +193,12 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
                 "Invalid embed_batch_size value: {:?}. Expected a positive integer",
                 value.trim()
             ),
+            hint: None,
         })?;
         if v == 0 {
             return Err(Error::InvalidInput {
                 reason: "embed_batch_size must be greater than 0".to_string(),
+                hint: None,
             });
         }
     }
@@ -197,6 +210,7 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
                 "Invalid model_timeout_ms value: {:?}. Expected a positive integer",
                 value.trim()
             ),
+            hint: None,
         })?;
     }
 
@@ -285,6 +299,7 @@ pub fn configure_get_key(p: &Arc<Primitives>, key: String) -> Result<Output> {
                 key.trim(),
                 KNOWN_KEYS.join(", ")
             ),
+            hint: None,
         });
     }
 
