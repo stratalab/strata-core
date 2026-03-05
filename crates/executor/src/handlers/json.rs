@@ -11,7 +11,7 @@ use crate::bridge::{
     value_to_json, Primitives,
 };
 use crate::convert::convert_result;
-use crate::types::{BranchId, VersionedValue};
+use crate::types::{BatchGetItemResult, BatchItemResult, BranchId, VersionedValue};
 use crate::{Error, Output, Result};
 
 /// Validate that a branch exists before performing a write operation (#951).
@@ -307,6 +307,181 @@ pub fn json_batch_set(
     for (j, orig_idx) in orig_indices.iter().enumerate() {
         if results[*orig_idx].version.is_some() {
             embed_full_doc(p, branch_id, &space, &keys[j]);
+        }
+    }
+
+    Ok(Output::BatchResults(results))
+}
+
+/// Handle JsonBatchGet command.
+///
+/// Loops over entries, calling `get_versioned()` for each. No engine batch
+/// method needed since reads are independent.
+pub fn json_batch_get(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    entries: Vec<crate::types::BatchJsonGetEntry>,
+) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+
+    if entries.is_empty() {
+        return Ok(Output::BatchGetResults(Vec::new()));
+    }
+
+    let n = entries.len();
+    let mut results: Vec<BatchGetItemResult> = Vec::with_capacity(n);
+
+    for entry in entries {
+        // Validate key
+        if let Err(e) = validate_key(&entry.key) {
+            results.push(BatchGetItemResult {
+                value: None,
+                version: None,
+                timestamp: None,
+                error: Some(e.to_string()),
+            });
+            continue;
+        }
+        // Parse path
+        let json_path = match parse_path(&entry.path) {
+            Ok(p) => p,
+            Err(e) => {
+                results.push(BatchGetItemResult {
+                    value: None,
+                    version: None,
+                    timestamp: None,
+                    error: Some(e.to_string()),
+                });
+                continue;
+            }
+        };
+        // Get from engine
+        match convert_result(
+            p.json
+                .get_versioned(&branch_id, &space, &entry.key, &json_path),
+        ) {
+            Ok(Some(versioned)) => match convert_result(json_to_value(versioned.value)) {
+                Ok(value) => {
+                    results.push(BatchGetItemResult {
+                        value: Some(value),
+                        version: Some(extract_version(&versioned.version)),
+                        timestamp: Some(versioned.timestamp.into()),
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    results.push(BatchGetItemResult {
+                        value: None,
+                        version: None,
+                        timestamp: None,
+                        error: Some(e.to_string()),
+                    });
+                }
+            },
+            Ok(None) => {
+                results.push(BatchGetItemResult {
+                    value: None,
+                    version: None,
+                    timestamp: None,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                results.push(BatchGetItemResult {
+                    value: None,
+                    version: None,
+                    timestamp: None,
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    Ok(Output::BatchGetResults(results))
+}
+
+/// Handle JsonBatchDelete command.
+///
+/// Loops over entries. Root path deletes destroy the entire document;
+/// non-root deletes remove at the specified path. Reuses `BatchItemResult`
+/// with `version` as count (1=deleted, 0=not found).
+pub fn json_batch_delete(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    entries: Vec<crate::types::BatchJsonDeleteEntry>,
+) -> Result<Output> {
+    require_branch_exists(p, &branch)?;
+    let branch_id = to_core_branch_id(&branch)?;
+
+    if entries.is_empty() {
+        return Ok(Output::BatchResults(Vec::new()));
+    }
+
+    let n = entries.len();
+    let mut results: Vec<BatchItemResult> = vec![
+        BatchItemResult {
+            version: None,
+            error: None,
+        };
+        n
+    ];
+
+    for (i, entry) in entries.into_iter().enumerate() {
+        if let Err(e) = validate_key(&entry.key) {
+            results[i].error = Some(e.to_string());
+            continue;
+        }
+        let json_path = match parse_path(&entry.path) {
+            Ok(p) => p,
+            Err(e) => {
+                results[i].error = Some(e.to_string());
+                continue;
+            }
+        };
+
+        if json_path.is_root() {
+            // Root delete — destroy entire document
+            match convert_result(p.json.destroy(&branch_id, &space, &entry.key)) {
+                Ok(deleted) => {
+                    results[i].version = Some(if deleted { 1 } else { 0 });
+                    if deleted {
+                        super::embed_hook::maybe_remove_embedding(
+                            p,
+                            branch_id,
+                            &space,
+                            super::embed_hook::SHADOW_JSON,
+                            &entry.key,
+                        );
+                    }
+                }
+                Err(e) => results[i].error = Some(e.to_string()),
+            }
+        } else {
+            // Non-root — delete at path
+            // Match single json_delete behavior: call without convert_result,
+            // then match on error variants directly.
+            match p
+                .json
+                .delete_at_path(&branch_id, &space, &entry.key, &json_path)
+            {
+                Ok(_version) => {
+                    results[i].version = Some(1);
+                    embed_full_doc(p, branch_id, &space, &entry.key);
+                }
+                Err(e) => {
+                    let err = crate::Error::from(e);
+                    match err {
+                        crate::Error::InvalidPath { .. } | crate::Error::InvalidInput { .. } => {
+                            results[i].version = Some(0);
+                        }
+                        other => {
+                            results[i].error = Some(other.to_string());
+                        }
+                    }
+                }
+            }
         }
     }
 

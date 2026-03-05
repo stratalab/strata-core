@@ -242,6 +242,32 @@ pub enum Command {
         entries: Vec<BatchJsonEntry>,
     },
 
+    /// Batch get multiple JSON document values.
+    /// Returns: `Output::BatchGetResults`
+    JsonBatchGet {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// JSON entries to get.
+        entries: Vec<BatchJsonGetEntry>,
+    },
+
+    /// Batch delete multiple JSON documents or paths.
+    /// Returns: `Output::BatchResults`
+    JsonBatchDelete {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// JSON entries to delete.
+        entries: Vec<BatchJsonDeleteEntry>,
+    },
+
     /// List JSON documents with cursor-based pagination.
     /// Returns: `Output::JsonListResult`
     JsonList {
@@ -1421,6 +1447,7 @@ impl Command {
                 | Command::KvDelete { .. }
                 | Command::JsonSet { .. }
                 | Command::JsonBatchSet { .. }
+                | Command::JsonBatchDelete { .. }
                 | Command::JsonDelete { .. }
                 | Command::EventAppend { .. }
                 | Command::EventBatchAppend { .. }
@@ -1481,6 +1508,8 @@ impl Command {
             Command::KvGetv { .. } => "KvGetv",
             Command::JsonSet { .. } => "JsonSet",
             Command::JsonBatchSet { .. } => "JsonBatchSet",
+            Command::JsonBatchGet { .. } => "JsonBatchGet",
+            Command::JsonBatchDelete { .. } => "JsonBatchDelete",
             Command::JsonGet { .. } => "JsonGet",
             Command::JsonDelete { .. } => "JsonDelete",
             Command::JsonGetv { .. } => "JsonGetv",
@@ -1619,6 +1648,8 @@ impl Command {
             // JSON
             | Command::JsonSet { branch, space, .. }
             | Command::JsonBatchSet { branch, space, .. }
+            | Command::JsonBatchGet { branch, space, .. }
+            | Command::JsonBatchDelete { branch, space, .. }
             | Command::JsonGet { branch, space, .. }
             | Command::JsonGetv { branch, space, .. }
             | Command::JsonDelete { branch, space, .. }
