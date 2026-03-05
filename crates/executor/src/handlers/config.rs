@@ -319,7 +319,10 @@ pub fn configure_get_key(p: &Arc<Primitives>, key: String) -> Result<Output> {
         "embed_batch_size" => cfg.embed_batch_size.map(|v| v.to_string()),
         "model_endpoint" => cfg.model.as_ref().map(|m| m.endpoint.clone()),
         "model_name" => cfg.model.as_ref().map(|m| m.model.clone()),
-        "model_api_key" => cfg.model.as_ref().and_then(|m| m.api_key.as_deref().map(mask_api_key)),
+        "model_api_key" => cfg
+            .model
+            .as_ref()
+            .and_then(|m| m.api_key.as_deref().map(mask_api_key)),
         "model_timeout_ms" => cfg.model.as_ref().map(|m| m.timeout_ms.to_string()),
         _ => unreachable!(),
     };

@@ -51,15 +51,14 @@ pub fn get_codec(codec_id: &str) -> Result<Box<dyn StorageCodec>, CodecError> {
     match codec_id {
         "identity" => Ok(Box::new(IdentityCodec)),
         "aes-gcm-256" => {
-            let hex = std::env::var("STRATA_ENCRYPTION_KEY").map_err(|_| {
-                CodecError::DecodeError {
+            let hex =
+                std::env::var("STRATA_ENCRYPTION_KEY").map_err(|_| CodecError::DecodeError {
                     detail: "STRATA_ENCRYPTION_KEY environment variable not set. \
                              Set it to a 64 hex-character (32-byte) key."
                         .to_string(),
                     codec_id: "aes-gcm-256".to_string(),
                     data_len: 0,
-                }
-            })?;
+                })?;
             let key = AesGcmCodec::key_from_hex(&hex)?;
             Ok(Box::new(AesGcmCodec::new(key)))
         }

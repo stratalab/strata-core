@@ -1301,7 +1301,10 @@ fn config_get_returns_real_values_while_configure_get_key_masks() {
     match full {
         Output::Config(cfg) => {
             // Deref through SensitiveString gives the actual value
-            assert_eq!(cfg.anthropic_api_key.as_deref(), Some("sk-ant-secret-key-12345"));
+            assert_eq!(
+                cfg.anthropic_api_key.as_deref(),
+                Some("sk-ant-secret-key-12345")
+            );
         }
         _ => panic!("Expected Config output"),
     }
