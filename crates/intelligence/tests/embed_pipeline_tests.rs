@@ -112,7 +112,7 @@ fn test_embed_model_state_default_then_load() {
     );
 
     // Trigger a load. On CI without model files this returns Err, which is fine.
-    let result = state.get_or_load(std::path::Path::new("/unused"));
+    let result = state.get_or_load(std::path::Path::new("/unused"), "miniLM");
 
     // After load attempt, embedding_dim should be consistent with the result.
     match &result {
@@ -147,7 +147,7 @@ fn test_embed_model_state_concurrent_get_or_load() {
     for _ in 0..4 {
         let s = Arc::clone(&state);
         handles.push(std::thread::spawn(move || {
-            s.get_or_load(std::path::Path::new("/unused"))
+            s.get_or_load(std::path::Path::new("/unused"), "miniLM")
         }));
     }
 
@@ -229,7 +229,7 @@ fn test_extract_object_then_embed_produces_valid_vector() {
 fn test_embed_model_state_produces_same_result_as_direct_engine() {
     let state = EmbedModelState::default();
     let engine_via_state = state
-        .get_or_load(std::path::Path::new("/unused"))
+        .get_or_load(std::path::Path::new("/unused"), "miniLM")
         .expect("load via state failed");
 
     let engine_direct =

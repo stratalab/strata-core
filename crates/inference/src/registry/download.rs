@@ -7,6 +7,8 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
+use sha2::{Digest, Sha256};
+
 use crate::error::InferenceError;
 
 /// Download a file from a HuggingFace repository to the local models directory.
@@ -20,19 +22,23 @@ pub fn download_hf_file(
     models_dir: &Path,
     progress: &dyn Fn(u64, u64),
 ) -> Result<(), InferenceError> {
-    download_hf_file_with_size(hf_repo, hf_file, models_dir, progress, 0)
+    download_hf_file_with_size(hf_repo, hf_file, models_dir, progress, 0, None)
 }
 
 /// Download a file from a HuggingFace repository with an expected size for validation.
 ///
 /// If `expected_size` is non-zero and the server reports a content-length that
 /// differs by more than 2x, the download is aborted as a safety check.
+///
+/// If `sha256` is `Some(hex_hash)`, the downloaded file is verified against the
+/// expected SHA-256 digest after completion. On mismatch the file is deleted.
 pub fn download_hf_file_with_size(
     hf_repo: &str,
     hf_file: &str,
     models_dir: &Path,
     progress: &dyn Fn(u64, u64),
     expected_size: u64,
+    sha256: Option<&str>,
 ) -> Result<(), InferenceError> {
     let dest = models_dir.join(hf_file);
 
@@ -157,6 +163,37 @@ pub fn download_hf_file_with_size(
             "Download size mismatch: expected {} bytes, got {}",
             total_bytes, downloaded
         )));
+    }
+
+    // Verify SHA-256 hash before rename (so concurrent processes never see
+    // an unverified file at the final destination).
+    if let Some(expected_hash) = sha256 {
+        let mut hasher = Sha256::new();
+        let mut f = fs::File::open(&temp_path).map_err(|e| {
+            InferenceError::Registry(format!(
+                "Failed to open temp file for hash verification: {}",
+                e
+            ))
+        })?;
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = std::io::Read::read(&mut f, &mut buf).map_err(|e| {
+                InferenceError::Registry(format!("Hash verification read error: {}", e))
+            })?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        let actual_hash = format!("{:x}", hasher.finalize());
+
+        if actual_hash != expected_hash {
+            let _ = fs::remove_file(&temp_path);
+            return Err(InferenceError::Registry(format!(
+                "SHA-256 hash mismatch for '{}': expected {}, got {}",
+                hf_file, expected_hash, actual_hash
+            )));
+        }
     }
 
     // Atomic-ish rename to final location

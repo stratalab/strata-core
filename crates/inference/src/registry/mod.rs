@@ -51,6 +51,9 @@ pub struct QuantVariant {
     pub hf_file: &'static str,
     /// Approximate file size in bytes.
     pub size_bytes: u64,
+    /// Expected SHA-256 hash of the downloaded file (hex-encoded, lowercase).
+    /// When `Some`, the download is verified after completion.
+    pub sha256: Option<&'static str>,
 }
 
 /// A model entry in the static catalog.
@@ -229,6 +232,7 @@ impl ModelRegistry {
             &self.models_dir,
             &cb,
             variant.size_bytes,
+            variant.sha256,
         )?;
 
         Ok(self.models_dir.join(variant.hf_file))
