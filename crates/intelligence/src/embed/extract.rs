@@ -36,10 +36,7 @@ pub fn extract_text_checked(value: &Value) -> Result<Option<String>, String> {
     };
 
     if truncated.get() {
-        Err(format!(
-            "depth limit exceeded (max depth {})",
-            MAX_DEPTH
-        ))
+        Err(format!("depth limit exceeded (max depth {})", MAX_DEPTH))
     } else {
         Ok(text)
     }
@@ -335,10 +332,7 @@ mod tests {
         for _ in 0..20 {
             deep = Value::array(vec![deep]);
         }
-        let mixed = Value::array(vec![
-            Value::String("shallow".into()),
-            deep,
-        ]);
+        let mixed = Value::array(vec![Value::String("shallow".into()), deep]);
 
         // extract_text preserves partial results (backward compat)
         let text = extract_text(&mixed);
@@ -363,10 +357,7 @@ mod tests {
         for _ in 0..15 {
             value = Value::array(vec![value]);
         }
-        assert_eq!(
-            extract_text_checked(&value),
-            Ok(Some("within".into())),
-        );
+        assert_eq!(extract_text_checked(&value), Ok(Some("within".into())),);
     }
 
     #[test]
