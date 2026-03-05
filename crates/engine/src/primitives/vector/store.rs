@@ -1019,6 +1019,13 @@ impl VectorStore {
         filter: Option<MetadataFilter>,
         as_of_ts: u64,
     ) -> VectorResult<Vec<VectorMatch>> {
+        let start = std::time::Instant::now();
+
+        // k=0 returns empty
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+
         // Reject NaN/Infinity in query vector
         validate_query_values(query)?;
 
@@ -1036,43 +1043,95 @@ impl VectorStore {
             });
         }
 
-        // Search backend with temporal filtering
-        let fetch_k = if filter.is_some() { k * 4 } else { k };
-        let state = self.state()?;
-        let backends = state.backends.read();
-        let backend =
-            backends
-                .get(&collection_id)
-                .ok_or_else(|| VectorError::CollectionNotFound {
-                    name: collection.to_string(),
-                })?;
+        let mut matches = Vec::with_capacity(k);
 
-        let candidates = backend.search_at(query, fetch_k, as_of_ts);
-        drop(backends);
+        if filter.is_none() {
+            // No filter — fetch exactly k
+            let state = self.state()?;
+            let backends = state.backends.read();
+            let backend =
+                backends
+                    .get(&collection_id)
+                    .ok_or_else(|| VectorError::CollectionNotFound {
+                        name: collection.to_string(),
+                    })?;
+            let candidates = backend.search_at(query, k, as_of_ts);
+            drop(backends);
 
-        // Resolve keys and metadata from historical records
-        let mut matches = Vec::new();
-        for (vector_id, score) in candidates {
-            // Find the key for this vector_id by scanning KV at timestamp
-            if let Some((key, metadata)) =
-                self.find_vector_key_metadata_at(branch_id, space, collection, vector_id, as_of_ts)?
-            {
-                // Apply metadata filter
-                if let Some(ref f) = filter {
-                    if !f.matches(&metadata) {
-                        continue;
+            for (vector_id, score) in candidates {
+                if let Some((key, metadata)) = self.find_vector_key_metadata_at(
+                    branch_id, space, collection, vector_id, as_of_ts,
+                )? {
+                    matches.push(VectorMatch {
+                        key,
+                        score,
+                        metadata,
+                    });
+                }
+            }
+        } else {
+            // Filter active — adaptive over-fetch [3, 6, 12]
+            let multipliers = [3, 6, 12];
+            let state = self.state()?;
+            let backends = state.backends.read();
+            let backend =
+                backends
+                    .get(&collection_id)
+                    .ok_or_else(|| VectorError::CollectionNotFound {
+                        name: collection.to_string(),
+                    })?;
+            let collection_size = backend.len();
+
+            for &mult in &multipliers {
+                let fetch_k = (k * mult).min(collection_size);
+                if fetch_k == 0 {
+                    break;
+                }
+
+                let candidates = backend.search_at(query, fetch_k, as_of_ts);
+
+                matches.clear();
+                for (vector_id, score) in candidates {
+                    if let Some((key, metadata)) = self.find_vector_key_metadata_at(
+                        branch_id, space, collection, vector_id, as_of_ts,
+                    )? {
+                        if let Some(ref f) = filter {
+                            if !f.matches(&metadata) {
+                                continue;
+                            }
+                        }
+                        matches.push(VectorMatch {
+                            key,
+                            score,
+                            metadata,
+                        });
+                        if matches.len() >= k {
+                            break;
+                        }
                     }
                 }
-                matches.push(VectorMatch {
-                    key,
-                    score,
-                    metadata,
-                });
-                if matches.len() >= k {
+
+                // If we have enough results or searched all vectors, stop
+                if matches.len() >= k || fetch_k >= collection_size {
                     break;
                 }
             }
+            drop(backends);
         }
+
+        // Apply facade-level tie-breaking (score desc, key asc)
+        // This satisfies Invariant R5
+        matches.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.key.cmp(&b.key))
+        });
+        matches.truncate(k);
+
+        debug!(target: "strata::vector", collection, k, results = matches.len(),
+               duration_us = start.elapsed().as_micros() as u64,
+               as_of_ts, branch_id = %branch_id, "Temporal search completed");
 
         Ok(matches)
     }
@@ -4100,5 +4159,338 @@ mod tests {
         let state = store.state().unwrap();
         let collection_id = CollectionId::new(branch_id, "concurrent_test");
         assert!(state.backends.read().contains_key(&collection_id));
+    }
+
+    // ========================================
+    // V-21: Adaptive temporal search over-fetch
+    // ========================================
+
+    #[test]
+    fn test_search_at_adaptive_overfetch() {
+        // Test that the adaptive [3, 6, 12] retry finds matching vectors even
+        // when they're ranked far from the query (beyond what a single 3x fetch
+        // would return). We place 20 "common" vectors very close to the query
+        // and 2 "rare" vectors far away. With k=2, the first pass fetches 6
+        // candidates (all common). The retry at 12x (24, capped to 22) fetches
+        // the whole collection and finds both rare vectors.
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        // 20 common vectors tightly clustered near query [1, 0, 0]
+        for i in 0..20 {
+            let noise = (i as f32) * 0.001;
+            store
+                .insert(
+                    branch_id,
+                    "default",
+                    "test",
+                    &format!("common_{i:02}"),
+                    &[1.0 - noise, noise, 0.0],
+                    Some(serde_json::json!({"type": "common"})),
+                )
+                .unwrap();
+        }
+
+        // 2 rare vectors far from query (nearly orthogonal)
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "rare_a",
+                &[0.0, 1.0, 0.0],
+                Some(serde_json::json!({"type": "rare"})),
+            )
+            .unwrap();
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "rare_b",
+                &[0.0, 0.0, 1.0],
+                Some(serde_json::json!({"type": "rare"})),
+            )
+            .unwrap();
+
+        // k=2: first pass 3x=6 fetches top-6 (all common), second pass 6x=12
+        // fetches top-12 (still all common most likely), third pass 12x=24
+        // capped to 22 fetches everything — finds the 2 rare vectors.
+        let filter = MetadataFilter::new().eq("type", "rare");
+        let results = store
+            .search_at(
+                branch_id,
+                "default",
+                "test",
+                &[1.0, 0.0, 0.0],
+                2,
+                Some(filter),
+                u64::MAX,
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        for result in &results {
+            let meta = result.metadata.as_ref().unwrap();
+            assert_eq!(meta.get("type").unwrap().as_str().unwrap(), "rare");
+        }
+        // Also verify scores: rare_a [0,1,0] has higher cosine with [1,0,0]
+        // than rare_b [0,0,1] (both are 0.0 for cosine of orthogonal vectors,
+        // but tie-breaking by key: "rare_a" < "rare_b")
+        assert_eq!(results[0].key, "rare_a");
+        assert_eq!(results[1].key, "rare_b");
+    }
+
+    #[test]
+    fn test_search_at_adaptive_overfetch_filter_with_temporal() {
+        // Exercise the combined filter + temporal path: insert vectors at
+        // different wall-clock times, search at a timestamp that excludes
+        // later vectors, with a metadata filter active.
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        // Insert first batch (will have earlier created_at timestamps)
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "early_match",
+                &[1.0, 0.0, 0.0],
+                Some(serde_json::json!({"category": "target"})),
+            )
+            .unwrap();
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "early_other",
+                &[0.9, 0.1, 0.0],
+                Some(serde_json::json!({"category": "other"})),
+            )
+            .unwrap();
+
+        // Capture a timestamp between early and late inserts
+        let mid_ts = now_micros();
+
+        // Small sleep to ensure late inserts get strictly later timestamps
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Insert second batch (will have later created_at timestamps)
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "late_match",
+                &[0.95, 0.05, 0.0],
+                Some(serde_json::json!({"category": "target"})),
+            )
+            .unwrap();
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "late_other",
+                &[0.8, 0.2, 0.0],
+                Some(serde_json::json!({"category": "other"})),
+            )
+            .unwrap();
+
+        // Search at mid_ts with filter: should only find "early_match"
+        // (late_match exists but was inserted after mid_ts)
+        let filter = MetadataFilter::new().eq("category", "target");
+        let results = store
+            .search_at(
+                branch_id,
+                "default",
+                "test",
+                &[1.0, 0.0, 0.0],
+                10,
+                Some(filter),
+                mid_ts,
+            )
+            .unwrap();
+
+        assert_eq!(
+            results.len(),
+            1,
+            "only early_match should be visible at mid_ts"
+        );
+        assert_eq!(results[0].key, "early_match");
+
+        // Verify that searching at u64::MAX returns both matches
+        let filter2 = MetadataFilter::new().eq("category", "target");
+        let results_all = store
+            .search_at(
+                branch_id,
+                "default",
+                "test",
+                &[1.0, 0.0, 0.0],
+                10,
+                Some(filter2),
+                u64::MAX,
+            )
+            .unwrap();
+        assert_eq!(results_all.len(), 2);
+    }
+
+    #[test]
+    fn test_search_at_k_zero_returns_empty() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+        store
+            .insert(branch_id, "default", "test", "a", &[1.0, 0.0, 0.0], None)
+            .unwrap();
+
+        // k=0 with no filter
+        let results = store
+            .search_at(
+                branch_id,
+                "default",
+                "test",
+                &[1.0, 0.0, 0.0],
+                0,
+                None,
+                u64::MAX,
+            )
+            .unwrap();
+        assert!(results.is_empty());
+
+        // k=0 with filter (should also short-circuit before filter evaluation)
+        let filter = MetadataFilter::new().eq("type", "anything");
+        let results = store
+            .search_at(
+                branch_id,
+                "default",
+                "test",
+                &[1.0, 0.0, 0.0],
+                0,
+                Some(filter),
+                u64::MAX,
+            )
+            .unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_search_at_tie_breaking() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        // Insert vectors with identical embeddings — same score when queried.
+        // Insert in non-alphabetical order to verify sort isn't just insertion order.
+        store
+            .insert(branch_id, "default", "test", "c", &[1.0, 0.0, 0.0], None)
+            .unwrap();
+        store
+            .insert(branch_id, "default", "test", "a", &[1.0, 0.0, 0.0], None)
+            .unwrap();
+        store
+            .insert(branch_id, "default", "test", "b", &[1.0, 0.0, 0.0], None)
+            .unwrap();
+
+        // No-filter path: R5 tie-breaking (score desc, key asc)
+        let results = store
+            .search_at(
+                branch_id,
+                "default",
+                "test",
+                &[1.0, 0.0, 0.0],
+                3,
+                None,
+                u64::MAX,
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].key, "a");
+        assert_eq!(results[1].key, "b");
+        assert_eq!(results[2].key, "c");
+    }
+
+    #[test]
+    fn test_search_at_tie_breaking_with_filter() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        // Insert vectors with identical embeddings, all matching the filter.
+        // This tests R5 tie-breaking through the filter path (adaptive over-fetch).
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "z",
+                &[1.0, 0.0, 0.0],
+                Some(serde_json::json!({"group": "A"})),
+            )
+            .unwrap();
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "m",
+                &[1.0, 0.0, 0.0],
+                Some(serde_json::json!({"group": "A"})),
+            )
+            .unwrap();
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "a",
+                &[1.0, 0.0, 0.0],
+                Some(serde_json::json!({"group": "A"})),
+            )
+            .unwrap();
+
+        let filter = MetadataFilter::new().eq("group", "A");
+        let results = store
+            .search_at(
+                branch_id,
+                "default",
+                "test",
+                &[1.0, 0.0, 0.0],
+                3,
+                Some(filter),
+                u64::MAX,
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        // R5: score desc (all equal), key asc — even through the filter path
+        assert_eq!(results[0].key, "a");
+        assert_eq!(results[1].key, "m");
+        assert_eq!(results[2].key, "z");
     }
 }
