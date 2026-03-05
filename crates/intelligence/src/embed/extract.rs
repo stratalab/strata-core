@@ -18,8 +18,8 @@ const MAX_DEPTH: usize = 16;
 /// - `Ok(None)` for values with no extractable text (Null, Bytes, empty string, etc.)
 /// - `Err("depth limit exceeded: ...")` when recursion was truncated due to MAX_DEPTH
 ///
-/// When truncation occurs, any text from shallower branches is still included in
-/// the error message. The `Err` signals that the extraction is incomplete.
+/// When truncation occurs, any partial text from shallower branches is discarded.
+/// Use [`extract_text`] instead if you want best-effort partial results.
 pub fn extract_text_checked(value: &Value) -> Result<Option<String>, String> {
     let truncated = Cell::new(false);
     let text = extract_text_inner(value, 0, &truncated);
