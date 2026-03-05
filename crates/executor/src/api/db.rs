@@ -167,6 +167,34 @@ impl Strata {
         }
     }
 
+    /// Embed a single text string into a vector.
+    ///
+    /// Returns the embedding vector produced by the configured model.
+    pub fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        match self.executor.execute(Command::Embed {
+            text: text.to_string(),
+        })? {
+            Output::Embedding(vec) => Ok(vec),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for Embed".into(),
+            }),
+        }
+    }
+
+    /// Embed a batch of text strings into vectors.
+    ///
+    /// Returns one embedding vector per input text.
+    pub fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        match self.executor.execute(Command::EmbedBatch {
+            texts: texts.iter().map(|s| s.to_string()).collect(),
+        })? {
+            Output::Embeddings(vecs) => Ok(vecs),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for EmbedBatch".into(),
+            }),
+        }
+    }
+
     /// Get a snapshot of the embedding pipeline status.
     pub fn embed_status(&self) -> Result<EmbedStatusInfo> {
         match self.executor.execute(Command::EmbedStatus)? {
