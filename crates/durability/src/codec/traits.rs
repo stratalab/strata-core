@@ -33,6 +33,12 @@ pub trait StorageCodec: Send + Sync {
     /// This is stored in the MANIFEST to ensure the correct codec
     /// is used when reopening a database.
     fn codec_id(&self) -> &str;
+
+    /// Clone this codec into a new boxed trait object.
+    ///
+    /// This preserves internal state (e.g., encryption keys) that
+    /// would be lost by reconstructing from `codec_id()` alone.
+    fn clone_box(&self) -> Box<dyn StorageCodec>;
 }
 
 /// Codec errors.

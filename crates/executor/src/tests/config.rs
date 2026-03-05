@@ -60,10 +60,10 @@ fn configure_set_and_get_default_model() {
 fn configure_set_and_get_api_keys() {
     let executor = create_test_executor();
 
-    for (key, value) in [
-        ("anthropic_api_key", "sk-ant-test-123"),
-        ("openai_api_key", "sk-test-456"),
-        ("google_api_key", "AIza-test-789"),
+    for (key, value, masked) in [
+        ("anthropic_api_key", "sk-ant-test-123", "sk-a***"),
+        ("openai_api_key", "sk-test-456", "sk-t***"),
+        ("google_api_key", "AIza-test-789", "AIza***"),
     ] {
         executor
             .execute(Command::ConfigureSet {
@@ -75,7 +75,7 @@ fn configure_set_and_get_api_keys() {
         let result = executor
             .execute(Command::ConfigureGetKey { key: key.into() })
             .unwrap();
-        assert_eq!(result, Output::ConfigValue(Some(value.into())));
+        assert_eq!(result, Output::ConfigValue(Some(masked.into())));
     }
 }
 
@@ -416,7 +416,7 @@ fn configure_set_visible_in_full_config() {
     match result {
         Output::Config(cfg) => {
             assert_eq!(cfg.provider, "openai");
-            assert_eq!(cfg.openai_api_key, Some("sk-test".into()));
+            assert_eq!(cfg.openai_api_key.as_deref(), Some("sk-test"));
         }
         _ => panic!("Expected Config output"),
     }
@@ -1189,7 +1189,7 @@ fn configure_set_model_api_key() {
             key: "model_api_key".into(),
         })
         .unwrap();
-    assert_eq!(result, Output::ConfigValue(Some("sk-test-key".into())));
+    assert_eq!(result, Output::ConfigValue(Some("sk-t***".into())));
 }
 
 #[test]
@@ -1279,6 +1279,94 @@ fn configure_set_model_fields_visible_in_full_config() {
         }
         _ => panic!("Expected Config output"),
     }
+}
+
+// =============================================================================
+// CONFIG GET (full config) vs CONFIGURE GET key (masked)
+// =============================================================================
+
+#[test]
+fn config_get_returns_real_values_while_configure_get_key_masks() {
+    let executor = create_test_executor();
+
+    executor
+        .execute(Command::ConfigureSet {
+            key: "anthropic_api_key".into(),
+            value: "sk-ant-secret-key-12345".into(),
+        })
+        .unwrap();
+
+    // CONFIG GET returns the full StrataConfig with real SensitiveString values
+    let full = executor.execute(Command::ConfigGet).unwrap();
+    match full {
+        Output::Config(cfg) => {
+            // Deref through SensitiveString gives the actual value
+            assert_eq!(
+                cfg.anthropic_api_key.as_deref(),
+                Some("sk-ant-secret-key-12345")
+            );
+        }
+        _ => panic!("Expected Config output"),
+    }
+
+    // CONFIGURE GET key returns a masked string
+    let masked = executor
+        .execute(Command::ConfigureGetKey {
+            key: "anthropic_api_key".into(),
+        })
+        .unwrap();
+    assert_eq!(masked, Output::ConfigValue(Some("sk-a***".into())));
+}
+
+// =============================================================================
+// mask_api_key edge cases (via CONFIGURE GET key)
+// =============================================================================
+
+#[test]
+fn configure_get_key_masks_short_api_keys() {
+    let executor = create_test_executor();
+
+    // 1-char key → masked as "***"
+    executor
+        .execute(Command::ConfigureSet {
+            key: "openai_api_key".into(),
+            value: "x".into(),
+        })
+        .unwrap();
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "openai_api_key".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(Some("***".into())));
+
+    // Exactly 4 chars → still masked as "***" (not enough to reveal)
+    executor
+        .execute(Command::ConfigureSet {
+            key: "openai_api_key".into(),
+            value: "abcd".into(),
+        })
+        .unwrap();
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "openai_api_key".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(Some("***".into())));
+
+    // 5 chars → shows first 4 + "***"
+    executor
+        .execute(Command::ConfigureSet {
+            key: "openai_api_key".into(),
+            value: "abcde".into(),
+        })
+        .unwrap();
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "openai_api_key".into(),
+        })
+        .unwrap();
+    assert_eq!(result, Output::ConfigValue(Some("abcd***".into())));
 }
 
 // =============================================================================

@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::bridge::Primitives;
 use crate::{Error, Output, Result};
+use strata_security::SensitiveString;
 
 /// Handle ConfigGet command: return the current database configuration.
 pub fn config_get(p: &Arc<Primitives>) -> Result<Output> {
@@ -247,7 +248,7 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
             match key_lower.as_str() {
                 "model_endpoint" => model.endpoint = value.clone(),
                 "model_name" => model.model = value.clone(),
-                "model_api_key" => model.api_key = Some(value.clone()),
+                "model_api_key" => model.api_key = Some(SensitiveString::from(value.clone())),
                 "model_timeout_ms" => {
                     model.timeout_ms = value.trim().parse().unwrap_or(5000);
                 }
@@ -261,9 +262,9 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
     p.db.update_config(|cfg| match key_lower.as_str() {
         "provider" => cfg.provider = value.clone(),
         "default_model" => cfg.default_model = Some(value.clone()),
-        "anthropic_api_key" => cfg.anthropic_api_key = Some(value.clone()),
-        "openai_api_key" => cfg.openai_api_key = Some(value.clone()),
-        "google_api_key" => cfg.google_api_key = Some(value.clone()),
+        "anthropic_api_key" => cfg.anthropic_api_key = Some(SensitiveString::from(value.clone())),
+        "openai_api_key" => cfg.openai_api_key = Some(SensitiveString::from(value.clone())),
+        "google_api_key" => cfg.google_api_key = Some(SensitiveString::from(value.clone())),
         "embed_model" => {
             cfg.embed_model = canonical_embed_model
                 .clone()
@@ -307,9 +308,9 @@ pub fn configure_get_key(p: &Arc<Primitives>, key: String) -> Result<Output> {
     let value = match key_lower.as_str() {
         "provider" => Some(cfg.provider.clone()),
         "default_model" => cfg.default_model.clone(),
-        "anthropic_api_key" => cfg.anthropic_api_key.clone(),
-        "openai_api_key" => cfg.openai_api_key.clone(),
-        "google_api_key" => cfg.google_api_key.clone(),
+        "anthropic_api_key" => cfg.anthropic_api_key.as_deref().map(mask_api_key),
+        "openai_api_key" => cfg.openai_api_key.as_deref().map(mask_api_key),
+        "google_api_key" => cfg.google_api_key.as_deref().map(mask_api_key),
         "embed_model" => Some(cfg.embed_model.clone()),
         "durability" => Some(cfg.durability.clone()),
         "auto_embed" => Some(cfg.auto_embed.to_string()),
@@ -318,10 +319,23 @@ pub fn configure_get_key(p: &Arc<Primitives>, key: String) -> Result<Output> {
         "embed_batch_size" => cfg.embed_batch_size.map(|v| v.to_string()),
         "model_endpoint" => cfg.model.as_ref().map(|m| m.endpoint.clone()),
         "model_name" => cfg.model.as_ref().map(|m| m.model.clone()),
-        "model_api_key" => cfg.model.as_ref().and_then(|m| m.api_key.clone()),
+        "model_api_key" => cfg
+            .model
+            .as_ref()
+            .and_then(|m| m.api_key.as_deref().map(mask_api_key)),
         "model_timeout_ms" => cfg.model.as_ref().map(|m| m.timeout_ms.to_string()),
         _ => unreachable!(),
     };
 
     Ok(Output::ConfigValue(value))
+}
+
+/// Mask an API key for display: show first 4 characters + "***".
+fn mask_api_key(key: &str) -> String {
+    if key.chars().count() <= 4 {
+        "***".to_string()
+    } else {
+        let prefix: String = key.chars().take(4).collect();
+        format!("{}***", prefix)
+    }
 }

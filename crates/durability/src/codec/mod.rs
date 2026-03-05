@@ -27,9 +27,11 @@
 //! assert_eq!(data.as_slice(), decoded.as_slice());
 //! ```
 
+mod aes_gcm;
 mod identity;
 mod traits;
 
+pub use aes_gcm::AesGcmCodec;
 pub use identity::IdentityCodec;
 pub use traits::{CodecError, StorageCodec};
 
@@ -48,6 +50,18 @@ pub use traits::{CodecError, StorageCodec};
 pub fn get_codec(codec_id: &str) -> Result<Box<dyn StorageCodec>, CodecError> {
     match codec_id {
         "identity" => Ok(Box::new(IdentityCodec)),
+        "aes-gcm-256" => {
+            let hex =
+                std::env::var("STRATA_ENCRYPTION_KEY").map_err(|_| CodecError::DecodeError {
+                    detail: "STRATA_ENCRYPTION_KEY environment variable not set. \
+                             Set it to a 64 hex-character (32-byte) key."
+                        .to_string(),
+                    codec_id: "aes-gcm-256".to_string(),
+                    data_len: 0,
+                })?;
+            let key = AesGcmCodec::key_from_hex(&hex)?;
+            Ok(Box::new(AesGcmCodec::new(key)))
+        }
         _ => Err(CodecError::UnknownCodec(codec_id.to_string())),
     }
 }
@@ -66,5 +80,48 @@ mod tests {
     fn test_get_unknown_codec() {
         let result = get_codec("unknown");
         assert!(matches!(result, Err(CodecError::UnknownCodec(_))));
+    }
+
+    #[test]
+    fn test_get_aes_gcm_codec_without_env_var() {
+        // Ensure the env var is unset for this test
+        std::env::remove_var("STRATA_ENCRYPTION_KEY");
+        let result = get_codec("aes-gcm-256");
+        match result {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("STRATA_ENCRYPTION_KEY"),
+                    "Error should mention the env var: {}",
+                    msg
+                );
+            }
+            Ok(_) => panic!("Expected error when env var is not set"),
+        }
+    }
+
+    #[test]
+    fn test_get_aes_gcm_codec_with_valid_env_var() {
+        let hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        std::env::set_var("STRATA_ENCRYPTION_KEY", hex);
+        let result = get_codec("aes-gcm-256");
+        // Clean up immediately
+        std::env::remove_var("STRATA_ENCRYPTION_KEY");
+        let codec = result.expect("Should create codec from valid env var");
+        assert_eq!(codec.codec_id(), "aes-gcm-256");
+
+        // Verify it actually works
+        let data = b"roundtrip via get_codec";
+        let encoded = codec.encode(data);
+        let decoded = codec.decode(&encoded).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_get_aes_gcm_codec_with_invalid_env_var() {
+        std::env::set_var("STRATA_ENCRYPTION_KEY", "too-short");
+        let result = get_codec("aes-gcm-256");
+        std::env::remove_var("STRATA_ENCRYPTION_KEY");
+        assert!(result.is_err());
     }
 }
