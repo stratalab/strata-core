@@ -1,5 +1,7 @@
 //! Value → embeddable text extraction.
 
+use std::cell::Cell;
+
 use strata_core::Value;
 
 /// Maximum text length sent to the tokenizer (≈256 tokens).
@@ -8,28 +10,61 @@ const MAX_TEXT_LEN: usize = 1024;
 /// Maximum recursion depth for nested Array/Object values.
 const MAX_DEPTH: usize = 16;
 
+/// Extract embeddable text from a Value, with error reporting for depth-limit
+/// truncation.
+///
+/// Returns:
+/// - `Ok(Some(text))` for successful extraction with text
+/// - `Ok(None)` for values with no extractable text (Null, Bytes, empty string, etc.)
+/// - `Err("depth limit exceeded: ...")` when recursion was truncated due to MAX_DEPTH
+///
+/// When truncation occurs, any text from shallower branches is still included in
+/// the error message. The `Err` signals that the extraction is incomplete.
+pub fn extract_text_checked(value: &Value) -> Result<Option<String>, String> {
+    let truncated = Cell::new(false);
+    let text = extract_text_inner(value, 0, &truncated);
+
+    let text = match text {
+        Some(t) if t.len() > MAX_TEXT_LEN => {
+            let mut end = MAX_TEXT_LEN;
+            while end > 0 && !t.is_char_boundary(end) {
+                end -= 1;
+            }
+            Some(t[..end].to_string())
+        }
+        other => other,
+    };
+
+    if truncated.get() {
+        Err(format!("depth limit exceeded (max depth {})", MAX_DEPTH))
+    } else {
+        Ok(text)
+    }
+}
+
 /// Extract embeddable text from a Value.
 ///
 /// Returns `None` for values that are not meaningful to embed (Null, Bytes).
 /// Nested structures are traversed up to `MAX_DEPTH` levels to prevent
 /// stack overflow on pathologically deep documents.
 pub fn extract_text(value: &Value) -> Option<String> {
-    let text = extract_text_inner(value, 0)?;
+    // Best-effort: ignore depth-limit truncation, return whatever text was found.
+    let truncated = Cell::new(false);
+    let text = extract_text_inner(value, 0, &truncated);
 
-    if text.len() > MAX_TEXT_LEN {
-        // Find the last char boundary at or before MAX_TEXT_LEN to avoid
-        // panicking on multi-byte UTF-8 characters.
-        let mut end = MAX_TEXT_LEN;
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
+    match text {
+        Some(t) if t.len() > MAX_TEXT_LEN => {
+            let mut end = MAX_TEXT_LEN;
+            while end > 0 && !t.is_char_boundary(end) {
+                end -= 1;
+            }
+            Some(t[..end].to_string())
         }
-        Some(text[..end].to_string())
-    } else {
-        Some(text)
+        other => other,
     }
 }
 
-fn extract_text_inner(value: &Value, depth: usize) -> Option<String> {
+fn extract_text_inner(value: &Value, depth: usize, truncated: &Cell<bool>) -> Option<String> {
     match value {
         Value::String(s) => {
             if s.is_empty() {
@@ -44,11 +79,12 @@ fn extract_text_inner(value: &Value, depth: usize) -> Option<String> {
         Value::Bytes(_) => None,
         Value::Array(arr) => {
             if depth >= MAX_DEPTH {
+                truncated.set(true);
                 return None;
             }
             let parts: Vec<String> = arr
                 .iter()
-                .filter_map(|v| extract_text_inner(v, depth + 1))
+                .filter_map(|v| extract_text_inner(v, depth + 1, truncated))
                 .collect();
             if parts.is_empty() {
                 return None;
@@ -57,6 +93,7 @@ fn extract_text_inner(value: &Value, depth: usize) -> Option<String> {
         }
         Value::Object(map) => {
             if depth >= MAX_DEPTH {
+                truncated.set(true);
                 return None;
             }
             let mut parts: Vec<String> = Vec::new();
@@ -64,7 +101,7 @@ fn extract_text_inner(value: &Value, depth: usize) -> Option<String> {
             let mut keys: Vec<&String> = map.keys().collect();
             keys.sort();
             for key in keys {
-                if let Some(val_text) = extract_text_inner(&map[key], depth + 1) {
+                if let Some(val_text) = extract_text_inner(&map[key], depth + 1, truncated) {
                     parts.push(format!("{}: {}", key, val_text));
                 }
             }
@@ -251,5 +288,99 @@ mod tests {
         assert!(text.contains("1"));
         assert!(text.contains("two"));
         assert!(text.contains("nested: true"));
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_text_checked tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_text_checked_depth_limit_returns_err() {
+        // Build a deeply nested structure exceeding MAX_DEPTH (20 levels)
+        let mut value = Value::String("deep".into());
+        for _ in 0..20 {
+            value = Value::array(vec![value]);
+        }
+        let result = extract_text_checked(&value);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("depth limit"),
+            "error should mention depth limit, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_extract_text_checked_normal_returns_ok_some() {
+        let result = extract_text_checked(&Value::String("text".into()));
+        assert_eq!(result, Ok(Some("text".to_string())));
+    }
+
+    #[test]
+    fn test_extract_text_checked_null_returns_ok_none() {
+        let result = extract_text_checked(&Value::Null);
+        assert_eq!(result, Ok(None));
+    }
+
+    #[test]
+    fn test_shallow_text_preserved_when_deep_branch_truncated() {
+        // Array with a shallow string and a deeply nested branch.
+        // extract_text should return the shallow text (best-effort),
+        // while extract_text_checked should return Err (truncation detected).
+        let mut deep = Value::String("unreachable".into());
+        for _ in 0..20 {
+            deep = Value::array(vec![deep]);
+        }
+        let mixed = Value::array(vec![Value::String("shallow".into()), deep]);
+
+        // extract_text preserves partial results (backward compat)
+        let text = extract_text(&mixed);
+        assert_eq!(
+            text,
+            Some("shallow".into()),
+            "extract_text should return shallow text even when a deep branch is truncated"
+        );
+
+        // extract_text_checked signals truncation
+        let checked = extract_text_checked(&mixed);
+        assert!(
+            checked.is_err(),
+            "extract_text_checked should return Err when any branch hit depth limit"
+        );
+    }
+
+    #[test]
+    fn test_checked_at_exact_limit_is_ok() {
+        // 15 levels of wrapping → depth 15 is a String, within MAX_DEPTH=16.
+        let mut value = Value::String("within".into());
+        for _ in 0..15 {
+            value = Value::array(vec![value]);
+        }
+        assert_eq!(extract_text_checked(&value), Ok(Some("within".into())),);
+    }
+
+    #[test]
+    fn test_checked_truncation_in_object_value() {
+        // Object where one value is too deep, another is shallow.
+        let mut deep = Value::String("hidden".into());
+        for _ in 0..20 {
+            deep = Value::array(vec![deep]);
+        }
+        let mut map = HashMap::new();
+        map.insert("shallow".to_string(), Value::String("visible".into()));
+        map.insert("deep".to_string(), deep);
+        let obj = Value::object(map);
+
+        // extract_text returns partial text
+        let text = extract_text(&obj).unwrap();
+        assert!(
+            text.contains("shallow: visible"),
+            "shallow key should be present: {}",
+            text
+        );
+
+        // extract_text_checked signals truncation
+        assert!(extract_text_checked(&obj).is_err());
     }
 }

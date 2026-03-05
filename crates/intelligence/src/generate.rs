@@ -11,6 +11,10 @@ use std::sync::{Arc, Mutex};
 
 use strata_inference::{GenerationEngine, ProviderKind};
 
+/// Maximum number of generation models kept in the cache.
+/// When exceeded, a non-current entry is evicted (LRU-ish, pick-any).
+const MAX_CACHED_MODELS: usize = 4;
+
 /// Cached generation engine entry (success or error).
 ///
 /// This type is public so that `get_or_load` can return `Arc<Mutex<CachedEngine>>`,
@@ -65,7 +69,23 @@ impl GenerateModelState {
         // Double-checked insert: another thread may have loaded the same model
         let mut map = self.engines.lock().unwrap_or_else(|e| e.into_inner());
         let entry = map.entry(name.to_string()).or_insert(entry);
-        Ok(Arc::clone(entry))
+        let result = Arc::clone(entry);
+
+        // Evict if over capacity
+        if map.len() > MAX_CACHED_MODELS {
+            // Find any key that isn't the one we just loaded
+            if let Some(evict_key) = map.keys().find(|k| k.as_str() != name).cloned() {
+                tracing::warn!(
+                    model = %evict_key,
+                    cached = map.len(),
+                    limit = MAX_CACHED_MODELS,
+                    "Evicting cached generation model to stay within limit"
+                );
+                map.remove(&evict_key);
+            }
+        }
+
+        Ok(result)
     }
 
     /// Create a cloud generation engine without caching.
@@ -426,6 +446,82 @@ mod tests {
         assert!(
             err.contains("my-model"),
             "error should contain model: {err}"
+        );
+    }
+
+    #[test]
+    fn test_eviction_at_max_capacity() {
+        let state = GenerateModelState::default();
+        // Load exactly MAX_CACHED_MODELS models — no eviction yet.
+        for i in 0..MAX_CACHED_MODELS {
+            let _ = state.get_or_load(&format!("evict-model-{}", i));
+        }
+        assert_eq!(
+            state.loaded_models().len(),
+            MAX_CACHED_MODELS,
+            "Should have exactly MAX_CACHED_MODELS before overflow"
+        );
+
+        // Load one more — triggers eviction.
+        let _ = state.get_or_load("evict-model-overflow");
+        let models = state.loaded_models();
+        assert_eq!(
+            models.len(),
+            MAX_CACHED_MODELS,
+            "Cache should stay at MAX_CACHED_MODELS after eviction, got {}",
+            models.len()
+        );
+
+        // The overflow model should definitely be present (never self-evicts).
+        assert!(
+            models.contains(&"evict-model-overflow".to_string()),
+            "newly loaded model should be in cache: {:?}",
+            models
+        );
+
+        // Exactly one of the original models should have been evicted.
+        let original_count = (0..MAX_CACHED_MODELS)
+            .filter(|i| models.contains(&format!("evict-model-{}", i)))
+            .count();
+        assert_eq!(
+            original_count,
+            MAX_CACHED_MODELS - 1,
+            "exactly one original model should be evicted"
+        );
+    }
+
+    #[test]
+    fn test_eviction_multiple_overflows() {
+        let state = GenerateModelState::default();
+        // Load well beyond capacity.
+        for i in 0..(MAX_CACHED_MODELS + 5) {
+            let _ = state.get_or_load(&format!("multi-evict-{}", i));
+        }
+        // Cache should never exceed MAX_CACHED_MODELS.
+        assert_eq!(
+            state.loaded_models().len(),
+            MAX_CACHED_MODELS,
+            "Cache should stay bounded after many loads"
+        );
+        // The most recent model should always be present.
+        assert!(state
+            .loaded_models()
+            .contains(&format!("multi-evict-{}", MAX_CACHED_MODELS + 4)));
+    }
+
+    #[test]
+    fn test_reloading_cached_model_does_not_evict() {
+        let state = GenerateModelState::default();
+        // Fill to capacity.
+        for i in 0..MAX_CACHED_MODELS {
+            let _ = state.get_or_load(&format!("no-evict-{}", i));
+        }
+        // Reloading an existing model should hit the fast path, no eviction.
+        let _ = state.get_or_load("no-evict-0");
+        assert_eq!(
+            state.loaded_models().len(),
+            MAX_CACHED_MODELS,
+            "reloading existing model should not change cache size"
         );
     }
 

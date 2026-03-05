@@ -129,8 +129,8 @@ fn test_embed_model_state_caches_across_calls() {
     let state = EmbedModelState::default();
     let dir = std::path::Path::new("/unused");
 
-    let arc1 = state.get_or_load(dir).expect("first load");
-    let arc2 = state.get_or_load(dir).expect("second load");
+    let arc1 = state.get_or_load(dir, "miniLM").expect("first load");
+    let arc2 = state.get_or_load(dir, "miniLM").expect("second load");
 
     // Same Arc (pointer equality) — engine was only loaded once.
     assert!(
@@ -147,7 +147,7 @@ fn test_embed_model_state_dim_after_load() {
     assert!(state.embedding_dim().is_none());
 
     let engine = state
-        .get_or_load(std::path::Path::new("/unused"))
+        .get_or_load(std::path::Path::new("/unused"), "miniLM")
         .expect("load failed");
 
     // After load, dim should match what the engine reports.
