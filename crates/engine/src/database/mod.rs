@@ -3577,9 +3577,7 @@ mod tests {
             let total_ops = (num_threads * OPS_PER_THREAD) as f64;
             let throughput = total_ops / elapsed.as_secs_f64();
 
-            eprintln!(
-                "  {num_threads:>2} threads: {throughput:>10.0} ops/s ({elapsed:?})"
-            );
+            eprintln!("  {num_threads:>2} threads: {throughput:>10.0} ops/s ({elapsed:?})");
 
             if num_threads == 1 {
                 baseline_throughput = throughput;
@@ -3705,8 +3703,7 @@ mod tests {
         let db = Database::open(temp_dir.path().join("gc_race")).unwrap();
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
-        let writers_remaining =
-            std::sync::atomic::AtomicUsize::new(NUM_WRITERS);
+        let writers_remaining = std::sync::atomic::AtomicUsize::new(NUM_WRITERS);
 
         const NUM_WRITERS: usize = 4;
         const WRITES_PER_THREAD: usize = 1_000;
