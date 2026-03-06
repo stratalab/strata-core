@@ -229,16 +229,6 @@ impl TransactionManager {
             return Ok(self.version.load(Ordering::Acquire));
         }
 
-        // Acquire per-branch commit lock to prevent TOCTOU race between validation and apply
-        // This ensures no other transaction on the same branch can modify storage between
-        // our validation check and our apply_writes call.
-        // Transactions on different branches can proceed in parallel.
-        let branch_lock = self
-            .commit_locks
-            .entry(txn.branch_id)
-            .or_insert_with(|| Mutex::new(()));
-        let _commit_guard = branch_lock.lock();
-
         // Step 1: Validate and mark committed (in-memory)
         // This performs: Active → Validating → Committed
         // Or: Active → Validating → Aborted (if conflicts detected)
@@ -249,6 +239,7 @@ impl TransactionManager {
             && txn.json_writes().is_empty();
 
         if can_skip_validation {
+            // Blind writes: no reads → no TOCTOU risk → skip per-branch lock
             if !txn.is_active() {
                 return Err(CommitError::InvalidState(format!(
                     "Cannot commit transaction {} from {:?} state - must be Active",
@@ -257,6 +248,12 @@ impl TransactionManager {
             }
             txn.status = TransactionStatus::Committed;
         } else {
+            // Read-write transactions: need lock for TOCTOU prevention
+            let branch_lock = self
+                .commit_locks
+                .entry(txn.branch_id)
+                .or_insert_with(|| Mutex::new(()));
+            let _commit_guard = branch_lock.lock();
             txn.commit(store)?;
             tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, "Validation passed");
         }
@@ -356,13 +353,6 @@ impl TransactionManager {
             return Ok(self.version.load(Ordering::Acquire));
         }
 
-        // Acquire per-branch commit lock (TOCTOU prevention)
-        let branch_lock = self
-            .commit_locks
-            .entry(txn.branch_id)
-            .or_insert_with(|| Mutex::new(()));
-        let _commit_guard = branch_lock.lock();
-
         // Step 1: Validate and mark committed (no WAL lock held)
         let can_skip_validation = txn.read_set.is_empty()
             && txn.cas_set.is_empty()
@@ -370,6 +360,7 @@ impl TransactionManager {
             && txn.json_writes().is_empty();
 
         if can_skip_validation {
+            // Blind writes: no reads → no TOCTOU risk → skip per-branch lock
             if !txn.is_active() {
                 return Err(CommitError::InvalidState(format!(
                     "Cannot commit transaction {} from {:?} state - must be Active",
@@ -378,6 +369,12 @@ impl TransactionManager {
             }
             txn.status = TransactionStatus::Committed;
         } else {
+            // Read-write transactions: need lock for TOCTOU prevention
+            let branch_lock = self
+                .commit_locks
+                .entry(txn.branch_id)
+                .or_insert_with(|| Mutex::new(()));
+            let _commit_guard = branch_lock.lock();
             txn.commit(store)?;
             tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, "Validation passed");
         }
@@ -526,13 +523,6 @@ impl TransactionManager {
             return Ok(version);
         }
 
-        // Acquire per-branch commit lock
-        let branch_lock = self
-            .commit_locks
-            .entry(txn.branch_id)
-            .or_insert_with(|| Mutex::new(()));
-        let _commit_guard = branch_lock.lock();
-
         // Validate
         let can_skip_validation = txn.read_set.is_empty()
             && txn.cas_set.is_empty()
@@ -540,6 +530,7 @@ impl TransactionManager {
             && txn.json_writes().is_empty();
 
         if can_skip_validation {
+            // Blind writes: no reads → no TOCTOU risk → skip per-branch lock
             if !txn.is_active() {
                 return Err(CommitError::InvalidState(format!(
                     "Cannot commit transaction {} from {:?} state - must be Active",
@@ -548,6 +539,12 @@ impl TransactionManager {
             }
             txn.status = TransactionStatus::Committed;
         } else {
+            // Read-write transactions: need lock for TOCTOU prevention
+            let branch_lock = self
+                .commit_locks
+                .entry(txn.branch_id)
+                .or_insert_with(|| Mutex::new(()));
+            let _commit_guard = branch_lock.lock();
             txn.commit(store)?;
         }
 

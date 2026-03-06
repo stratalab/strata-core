@@ -22,6 +22,14 @@ pub trait StorageCodec: Send + Sync {
     /// For IdentityCodec, this is a no-op.
     fn encode(&self, data: &[u8]) -> Vec<u8>;
 
+    /// Encode bytes for storage, returning a `Cow` to avoid allocation
+    /// when the codec is a no-op (e.g., `IdentityCodec`).
+    ///
+    /// The default delegates to `encode()`. Override for zero-copy codecs.
+    fn encode_cow<'a>(&self, data: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
+        std::borrow::Cow::Owned(self.encode(data))
+    }
+
     /// Decode bytes from storage.
     ///
     /// Reverses the encode operation. Returns an error if the data
@@ -90,6 +98,18 @@ mod tests {
 
     // Test that trait is object-safe
     fn _accepts_box_dyn_codec(_codec: Box<dyn StorageCodec>) {}
+
+    #[test]
+    fn test_encode_cow_matches_encode_via_trait_object() {
+        // encode_cow through a trait object must return the same bytes as encode
+        let codec: Box<dyn StorageCodec> = Box::new(IdentityCodec);
+        let data = b"test data for cow";
+
+        let encoded = codec.encode(data);
+        let cow = codec.encode_cow(data);
+
+        assert_eq!(&*cow, &*encoded);
+    }
 
     #[test]
     fn test_codec_trait_object_safe() {

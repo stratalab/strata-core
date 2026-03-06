@@ -32,6 +32,10 @@ impl StorageCodec for IdentityCodec {
         data.to_vec()
     }
 
+    fn encode_cow<'a>(&self, data: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
+        std::borrow::Cow::Borrowed(data)
+    }
+
     fn decode(&self, data: &[u8]) -> Result<Vec<u8>, CodecError> {
         Ok(data.to_vec())
     }
@@ -102,6 +106,27 @@ mod tests {
     fn test_codec_id() {
         let codec = IdentityCodec;
         assert_eq!(codec.codec_id(), "identity");
+    }
+
+    #[test]
+    fn test_identity_encode_cow_borrows() {
+        let codec = IdentityCodec;
+        let data = vec![1, 2, 3, 4, 5];
+        let cow = codec.encode_cow(&data);
+
+        // Must be Borrowed (zero-copy)
+        assert!(matches!(cow, std::borrow::Cow::Borrowed(_)));
+        // Content must match encode()
+        assert_eq!(&*cow, &*codec.encode(&data));
+    }
+
+    #[test]
+    fn test_identity_encode_cow_empty() {
+        let codec = IdentityCodec;
+        let data: Vec<u8> = vec![];
+        let cow = codec.encode_cow(&data);
+        assert!(matches!(cow, std::borrow::Cow::Borrowed(_)));
+        assert!(cow.is_empty());
     }
 
     #[test]

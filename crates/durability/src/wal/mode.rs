@@ -19,7 +19,7 @@ pub enum DurabilityMode {
     /// In-memory cache — all data lost on crash (fastest mode)
     ///
     /// Bypasses WAL entirely. No fsync, no file I/O.
-    /// Target latency: <3µs for engine/put_direct.
+    /// Target latency: <3µs for blind writes.
     /// Use case: Tests, caches, ephemeral data, development.
     ///
     /// # Performance

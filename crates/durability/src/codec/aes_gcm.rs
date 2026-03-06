@@ -207,6 +207,18 @@ mod tests {
     }
 
     #[test]
+    fn encode_cow_default_roundtrips() {
+        // AesGcmCodec inherits the default encode_cow (Cow::Owned via encode()).
+        // Verify it produces decodable output.
+        let codec = AesGcmCodec::new(test_key());
+        let data = b"cow roundtrip test";
+        let cow = codec.encode_cow(data);
+        assert!(matches!(cow, std::borrow::Cow::Owned(_)));
+        let decoded = codec.decode(&cow).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
     fn key_from_hex_valid() {
         let hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
         let key = AesGcmCodec::key_from_hex(hex).unwrap();

@@ -594,8 +594,27 @@ impl ShardedStore {
     #[inline]
     pub fn put(&self, key: Key, value: StoredValue, mode: WriteMode) -> StrataResult<()> {
         let branch_id = key.namespace.branch_id;
-        self.ensure_branch_limit(branch_id)?;
-        let mut shard = self.shards.entry(branch_id).or_default();
+        let max = self.max_branches.load(Ordering::Relaxed);
+
+        // Snapshot len() before entry() to avoid deadlock: DashMap::len()
+        // acquires read locks on all shards, which would deadlock if we
+        // already hold the write lock via entry().
+        let current_len = if max > 0 { self.shards.len() } else { 0 };
+
+        let mut shard = match self.shards.entry(branch_id) {
+            dashmap::mapref::entry::Entry::Occupied(e) => e.into_ref(),
+            dashmap::mapref::entry::Entry::Vacant(e) => {
+                // Only check limit for NEW branches (rare path)
+                if max > 0 && current_len >= max {
+                    return Err(StrataError::capacity_exceeded(
+                        "branches",
+                        max,
+                        current_len + 1,
+                    ));
+                }
+                e.insert(Shard::default())
+            }
+        };
 
         let new_expiry = value.expiry_timestamp();
 

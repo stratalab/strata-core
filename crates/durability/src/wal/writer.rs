@@ -264,8 +264,8 @@ impl WalWriter {
             .as_mut()
             .expect("Segment should exist for non-Cache mode");
 
-        // Encode through codec (identity codec: memcpy only)
-        let encoded = self.codec.encode(record_bytes);
+        // Encode through codec (identity codec: zero-copy borrow)
+        let encoded = self.codec.encode_cow(record_bytes);
 
         // Check if we need to rotate before writing
         if segment.size() + encoded.len() as u64 > self.config.segment_size {
