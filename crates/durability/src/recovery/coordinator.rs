@@ -145,7 +145,7 @@ impl RecoveryCoordinator {
 
         // Load snapshot if exists
         if let Some(snapshot_path) = &plan.snapshot_path {
-            let snapshot_reader = SnapshotReader::new(clone_codec(self.codec.as_ref())?);
+            let snapshot_reader = SnapshotReader::new(clone_codec(self.codec.as_ref()));
             let loaded = snapshot_reader.load(snapshot_path)?;
 
             // D-5: Validate watermark consistency between MANIFEST and snapshot
@@ -170,7 +170,7 @@ impl RecoveryCoordinator {
         }
 
         // Replay WAL using effective watermark (conservative — replays extra rather than skipping)
-        let replayer = WalReplayer::new(plan.wal_dir.clone(), clone_codec(self.codec.as_ref())?);
+        let replayer = WalReplayer::new(plan.wal_dir.clone(), clone_codec(self.codec.as_ref()));
         let replay_stats = replayer.replay_after(effective_watermark, |record| {
             on_record(record).map_err(|e| WalReplayError::Apply(e.to_string()))
         })?;
@@ -204,7 +204,7 @@ impl RecoveryCoordinator {
             return Ok(0);
         }
 
-        let reader = crate::wal::WalReader::new(clone_codec(self.codec.as_ref())?);
+        let reader = crate::wal::WalReader::new(clone_codec(self.codec.as_ref()));
         let segments = reader.list_segments(&wal_dir)?;
         let mut rebuilt = 0usize;
 
@@ -266,7 +266,7 @@ impl RecoveryCoordinator {
     /// - In Always mode, committed transactions are fsynced
     /// - In Standard mode, some data loss is expected on crash
     pub fn truncate_partial_records(&self, wal_dir: &Path) -> Result<u64, RecoveryError> {
-        let reader = crate::wal::WalReader::new(clone_codec(self.codec.as_ref())?);
+        let reader = crate::wal::WalReader::new(clone_codec(self.codec.as_ref()));
 
         // Get all segments
         let segments = reader.list_segments(wal_dir)?;
@@ -384,9 +384,9 @@ impl RecoveryError {
     }
 }
 
-/// Helper to clone a boxed codec
-fn clone_codec(codec: &dyn StorageCodec) -> Result<Box<dyn StorageCodec>, CodecError> {
-    crate::codec::get_codec(codec.codec_id())
+/// Clone a boxed codec, preserving internal state (e.g., encryption keys).
+fn clone_codec(codec: &dyn StorageCodec) -> Box<dyn StorageCodec> {
+    codec.clone_box()
 }
 
 #[cfg(test)]
