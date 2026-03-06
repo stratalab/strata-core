@@ -145,15 +145,17 @@ impl KVStore {
         };
 
         let storage_key = self.key_for(branch_id, space, key);
-        // Direct blind write — no transaction needed for single-key put
-        let commit_version = self.db.put_direct(storage_key, value)?;
+        let branch_id = *branch_id;
+        let ((), commit_version) = self
+            .db
+            .transaction_with_version(branch_id, |txn| txn.put(storage_key, value))?;
 
         // Post-commit: update inverted index for BM25 search (zero overhead when disabled)
         if let Some(text) = text_for_index {
             let index = self.db.extension::<crate::search::InvertedIndex>()?;
             if index.is_enabled() {
                 let entity_ref = crate::search::EntityRef::Kv {
-                    branch_id: *branch_id,
+                    branch_id,
                     key: key.to_string(),
                 };
                 index.index_document(&entity_ref, &text, None);

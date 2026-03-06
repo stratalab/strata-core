@@ -732,92 +732,6 @@ impl Database {
         self.storage.get_value_direct(key)
     }
 
-    /// Direct single-key blind write bypassing the full transaction machinery.
-    ///
-    /// Allocates a version, optionally writes to WAL, and applies directly
-    /// to storage. No snapshot, no validation, no pool acquire/release.
-    ///
-    /// Safe for single-key puts where snapshot isolation isn't needed
-    /// (blind writes with no read-before-write).
-    ///
-    /// Falls back to the full transaction path in multi-process mode,
-    /// which requires coordinated version allocation via the WAL file lock.
-    pub(crate) fn put_direct(
-        &self,
-        key: Key,
-        value: strata_core::value::Value,
-    ) -> StrataResult<u64> {
-        self.check_accepting()?;
-
-        // Multi-process mode requires coordinated version allocation;
-        // fall back to the full transaction path.
-        if self.multi_process {
-            use strata_core::value::Value;
-            let branch_id = key.namespace.branch_id;
-            let val: Value = value;
-            let ((), version) =
-                self.transaction_with_version(branch_id, |txn| txn.put(key, val))?;
-            return Ok(version);
-        }
-
-        let txn_id = self.coordinator.next_txn_id()?;
-        // No record_start — put_direct is a blind write with no read set,
-        // so it doesn't need MVCC active-transaction tracking.
-
-        let commit_version = self.coordinator.allocate_commit_version()?;
-
-        // WAL write (if needed for durability)
-        if self.durability_mode.requires_wal() {
-            match self.wal_writer.as_ref() {
-                Some(wal_arc) => {
-                    use strata_concurrency::TransactionPayload;
-                    use strata_durability::format::WalRecord;
-                    use strata_durability::now_micros;
-
-                    let timestamp = now_micros();
-                    let payload = TransactionPayload {
-                        version: commit_version,
-                        puts: vec![(key.clone(), value.clone())],
-                        deletes: vec![],
-                    };
-                    let record = WalRecord::new(
-                        txn_id,
-                        *key.namespace.branch_id.as_bytes(),
-                        timestamp,
-                        payload.to_bytes(),
-                    );
-
-                    // Pre-serialize outside the lock: moves CRC computation
-                    // and two Vec allocations out of the critical section.
-                    let record_bytes = record.to_bytes();
-
-                    let mut wal = wal_arc.lock();
-                    if let Err(e) = wal.append_pre_serialized(&record_bytes, txn_id, timestamp) {
-                        return Err(StrataError::storage(format!(
-                            "WAL write failed in put_direct: {}",
-                            e
-                        )));
-                    }
-                }
-                None => {
-                    return Err(StrataError::storage(
-                        "WAL required by durability mode but writer is unavailable".to_string(),
-                    ));
-                }
-            }
-        }
-
-        // Apply directly to storage
-        use strata_core::traits::Storage;
-        self.storage
-            .put_with_version(key, value, commit_version, None)?;
-
-        // No record_commit — skipping avoids 5 atomic RMW ops per write.
-        // put_direct has no snapshot to protect, so GC safe version tracking
-        // is unnecessary.
-        Ok(commit_version)
-    }
-
     /// Get version history for a key directly from storage.
     ///
     /// History reads bypass the transaction layer because they are
@@ -3523,6 +3437,15 @@ mod tests {
         assert!(db.storage().get(&key2).unwrap().is_some(), "txn2 data lost");
     }
 
+    /// Helper: blind-write a single key via transaction_with_version.
+    fn blind_write(db: &Database, key: Key, value: Value) -> u64 {
+        let branch_id = key.namespace.branch_id;
+        let ((), version) = db
+            .transaction_with_version(branch_id, |txn| txn.put(key, value))
+            .expect("blind write failed");
+        version
+    }
+
     #[test]
     fn test_put_direct_contention_scaling() {
         const OPS_PER_THREAD: usize = 10_000;
@@ -3557,8 +3480,7 @@ mod tests {
                         barrier.wait();
                         for i in 0..OPS_PER_THREAD {
                             let key = Key::new_kv(ns.clone(), format!("k{i}"));
-                            db.put_direct(key, Value::Int(i as i64))
-                                .expect("put_direct failed");
+                            blind_write(db, key, Value::Int(i as i64));
                         }
                     });
                 }
@@ -3601,23 +3523,19 @@ mod tests {
                 let stored = db.storage().get(&key).unwrap();
                 assert!(
                     stored.is_some(),
-                    "put_direct data missing: thread={t}, key=k{i}"
+                    "blind write data missing: thread={t}, key=k{i}"
                 );
                 assert_eq!(
                     stored.unwrap().value,
                     Value::Int(i as i64),
-                    "put_direct data corrupted: thread={t}, key=k{i}"
+                    "blind write data corrupted: thread={t}, key=k{i}"
                 );
             }
         }
     }
 
-    /// Verify that put_direct writes are visible to concurrent snapshot
+    /// Verify that blind writes are visible to concurrent snapshot
     /// readers and that GC correctly respects active reader snapshots.
-    ///
-    /// This tests the key invariant after removing record_start/record_commit
-    /// from put_direct: readers protect themselves via their own record_start,
-    /// so GC cannot advance past an active reader's snapshot version.
     #[test]
     fn test_put_direct_gc_safety_with_concurrent_reader() {
         let temp_dir = TempDir::new().unwrap();
@@ -3626,25 +3544,20 @@ mod tests {
         let ns = create_test_namespace(branch_id);
         let key = Key::new_kv(ns.clone(), "gc_target");
 
-        // Write initial value via put_direct
-        let v1 = db
-            .put_direct(key.clone(), Value::Int(1))
-            .expect("put_direct v1");
+        // Write initial value
+        let v1 = blind_write(&db, key.clone(), Value::Int(1));
 
-        // Write v2 via put_direct (creates a version chain: v1 → v2)
-        let v2 = db
-            .put_direct(key.clone(), Value::Int(2))
-            .expect("put_direct v2");
+        // Write v2 (creates a version chain: v1 -> v2)
+        let v2 = blind_write(&db, key.clone(), Value::Int(2));
         assert!(v2 > v1, "versions must be monotonically increasing");
 
         // Start a snapshot reader that pins the version at v2
         let reader_txn = db.begin_transaction(branch_id).unwrap();
         let pinned_version = reader_txn.start_version;
 
-        // Write more versions via put_direct while reader holds its snapshot
+        // Write more versions while reader holds its snapshot
         for i in 3..=10 {
-            db.put_direct(key.clone(), Value::Int(i))
-                .expect("put_direct vi");
+            blind_write(&db, key.clone(), Value::Int(i));
         }
 
         // GC safe point must not advance past the reader's pinned version
@@ -3686,7 +3599,7 @@ mod tests {
         assert_eq!(final_val.value, Value::Int(10));
     }
 
-    /// Verify put_direct concurrent with GC under thread contention.
+    /// Verify blind writes concurrent with GC under thread contention.
     /// Writers and GC race — no panics, no data loss on latest version.
     #[test]
     fn test_put_direct_concurrent_gc_no_data_loss() {
@@ -3700,7 +3613,7 @@ mod tests {
         const WRITES_PER_THREAD: usize = 1_000;
 
         std::thread::scope(|s| {
-            // Spawn writer threads using put_direct
+            // Spawn writer threads
             for t in 0..NUM_WRITERS {
                 let db = &db;
                 let ns = ns.clone();
@@ -3708,8 +3621,7 @@ mod tests {
                 s.spawn(move || {
                     for i in 0..WRITES_PER_THREAD {
                         let key = Key::new_kv(ns.clone(), format!("w{t}_k{i}"));
-                        db.put_direct(key, Value::Int(i as i64))
-                            .expect("put_direct in gc race");
+                        blind_write(db, key, Value::Int(i as i64));
                     }
                     remaining.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
                 });
