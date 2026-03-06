@@ -229,17 +229,24 @@ impl TransactionManager {
             return Ok(self.version.load(Ordering::Acquire));
         }
 
-        // Step 1: Validate and mark committed (in-memory)
-        // This performs: Active → Validating → Committed
-        // Or: Active → Validating → Aborted (if conflicts detected)
-        // Skip validation for blind writes (no reads, no CAS, no JSON snapshots/writes)
+        // Step 1: Acquire per-branch commit lock and validate.
+        //
+        // The lock MUST be held from validation through version allocation
+        // and apply_writes — otherwise a concurrent transaction could validate
+        // against stale state (TOCTOU).
+        let branch_lock = self
+            .commit_locks
+            .entry(txn.branch_id)
+            .or_insert_with(|| Mutex::new(()));
+        let _commit_guard = branch_lock.lock();
+
+        // Skip OCC validation for blind writes (no reads, no CAS, no JSON snapshots)
         let can_skip_validation = txn.read_set.is_empty()
             && txn.cas_set.is_empty()
             && txn.json_snapshot_versions().map_or(true, |v| v.is_empty())
             && txn.json_writes().is_empty();
 
         if can_skip_validation {
-            // Blind writes: no reads → no TOCTOU risk → skip per-branch lock
             if !txn.is_active() {
                 return Err(CommitError::InvalidState(format!(
                     "Cannot commit transaction {} from {:?} state - must be Active",
@@ -248,12 +255,6 @@ impl TransactionManager {
             }
             txn.status = TransactionStatus::Committed;
         } else {
-            // Read-write transactions: need lock for TOCTOU prevention
-            let branch_lock = self
-                .commit_locks
-                .entry(txn.branch_id)
-                .or_insert_with(|| Mutex::new(()));
-            let _commit_guard = branch_lock.lock();
             txn.commit(store)?;
             tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, "Validation passed");
         }
@@ -353,23 +354,15 @@ impl TransactionManager {
             return Ok(self.version.load(Ordering::Acquire));
         }
 
-        // Step 1: Validate and mark committed (no WAL lock held)
+        // Step 1: Check if this is a blind write (no reads, no CAS, no JSON snapshots)
         let can_skip_validation = txn.read_set.is_empty()
             && txn.cas_set.is_empty()
             && txn.json_snapshot_versions().map_or(true, |v| v.is_empty())
             && txn.json_writes().is_empty();
 
-        if can_skip_validation {
-            // Blind writes: no reads → no TOCTOU risk → skip per-branch lock
-            if !txn.is_active() {
-                return Err(CommitError::InvalidState(format!(
-                    "Cannot commit transaction {} from {:?} state - must be Active",
-                    txn.txn_id, txn.status
-                )));
-            }
-            txn.status = TransactionStatus::Committed;
-        } else {
-            // Read-write transactions: need lock for TOCTOU prevention
+        // Read-write transactions: acquire per-branch lock and hold it through
+        // validation + version alloc + WAL + apply (prevents TOCTOU).
+        if !can_skip_validation {
             let branch_lock = self
                 .commit_locks
                 .entry(txn.branch_id)
@@ -377,12 +370,73 @@ impl TransactionManager {
             let _commit_guard = branch_lock.lock();
             txn.commit(store)?;
             tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, "Validation passed");
+
+            // Version alloc + WAL + apply all under the per-branch lock
+            let commit_version = self.allocate_version()?;
+
+            let has_mutations = !txn.is_read_only() || !txn.json_writes().is_empty();
+            if has_mutations {
+                if let Some(wal_arc) = wal_arc {
+                    let payload = TransactionPayload::from_transaction(txn, commit_version);
+                    let timestamp = now_micros();
+                    let record = WalRecord::new(
+                        txn.txn_id,
+                        *txn.branch_id.as_bytes(),
+                        timestamp,
+                        payload.to_bytes(),
+                    );
+                    let record_bytes = record.to_bytes();
+                    {
+                        let mut wal = wal_arc.lock();
+                        if let Err(e) =
+                            wal.append_pre_serialized(&record_bytes, txn.txn_id, timestamp)
+                        {
+                            txn.status = TransactionStatus::Aborted {
+                                reason: format!("WAL write failed: {}", e),
+                            };
+                            return Err(CommitError::WALError(e.to_string()));
+                        }
+                    }
+                    tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, commit_version, "WAL durable");
+                }
+            }
+
+            if let Err(e) = txn.apply_writes(store, commit_version) {
+                if wal_arc.is_some() {
+                    tracing::error!(
+                        target: "strata::txn",
+                        txn_id = txn.txn_id,
+                        commit_version = commit_version,
+                        error = %e,
+                        "Storage application failed after WAL commit - will be recovered on restart"
+                    );
+                } else {
+                    txn.status = TransactionStatus::Aborted {
+                        reason: format!("Storage application failed: {}", e),
+                    };
+                    return Err(CommitError::WALError(format!(
+                        "Storage application failed (no WAL): {}",
+                        e
+                    )));
+                }
+            }
+
+            return Ok(commit_version);
         }
 
-        // Step 2: Allocate commit version (no WAL lock held)
+        // Blind write fast path: no per-branch lock needed.
+        // No reads → no TOCTOU risk. Blind writes are commutative — concurrent
+        // writers to the same key create distinct versions; highest version wins.
+        if !txn.is_active() {
+            return Err(CommitError::InvalidState(format!(
+                "Cannot commit transaction {} from {:?} state - must be Active",
+                txn.txn_id, txn.status
+            )));
+        }
+        txn.status = TransactionStatus::Committed;
+
         let commit_version = self.allocate_version()?;
 
-        // Step 3: Write to WAL — narrow lock scope
         let has_mutations = !txn.is_read_only() || !txn.json_writes().is_empty();
         if has_mutations {
             if let Some(wal_arc) = wal_arc {
@@ -394,11 +448,7 @@ impl TransactionManager {
                     timestamp,
                     payload.to_bytes(),
                 );
-
-                // Pre-serialize outside WAL lock (CRC + allocations)
                 let record_bytes = record.to_bytes();
-
-                // Narrow WAL lock: held only for the append I/O
                 {
                     let mut wal = wal_arc.lock();
                     if let Err(e) = wal.append_pre_serialized(&record_bytes, txn.txn_id, timestamp)
@@ -409,13 +459,10 @@ impl TransactionManager {
                         return Err(CommitError::WALError(e.to_string()));
                     }
                 }
-                // WAL lock released
-
                 tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, commit_version, "WAL durable");
             }
         }
 
-        // Step 4: Apply to storage (no WAL lock held)
         if let Err(e) = txn.apply_writes(store, commit_version) {
             if wal_arc.is_some() {
                 tracing::error!(
@@ -523,14 +570,20 @@ impl TransactionManager {
             return Ok(version);
         }
 
-        // Validate
+        // Acquire per-branch lock — must be held through validation + apply.
+        let branch_lock = self
+            .commit_locks
+            .entry(txn.branch_id)
+            .or_insert_with(|| Mutex::new(()));
+        let _commit_guard = branch_lock.lock();
+
+        // Skip OCC validation for blind writes (no reads, no CAS, no JSON snapshots)
         let can_skip_validation = txn.read_set.is_empty()
             && txn.cas_set.is_empty()
             && txn.json_snapshot_versions().map_or(true, |v| v.is_empty())
             && txn.json_writes().is_empty();
 
         if can_skip_validation {
-            // Blind writes: no reads → no TOCTOU risk → skip per-branch lock
             if !txn.is_active() {
                 return Err(CommitError::InvalidState(format!(
                     "Cannot commit transaction {} from {:?} state - must be Active",
@@ -539,12 +592,6 @@ impl TransactionManager {
             }
             txn.status = TransactionStatus::Committed;
         } else {
-            // Read-write transactions: need lock for TOCTOU prevention
-            let branch_lock = self
-                .commit_locks
-                .entry(txn.branch_id)
-                .or_insert_with(|| Mutex::new(()));
-            let _commit_guard = branch_lock.lock();
             txn.commit(store)?;
         }
 
