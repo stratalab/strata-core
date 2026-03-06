@@ -226,7 +226,7 @@ impl<'a> Drop for ActiveTaskGuard<'a> {
         let prev_active = self
             .inner
             .active_tasks
-            .fetch_sub(1, AtomicOrdering::Release);
+            .fetch_sub(1, AtomicOrdering::AcqRel);
         self.inner
             .tasks_completed
             .fetch_add(1, AtomicOrdering::Relaxed);

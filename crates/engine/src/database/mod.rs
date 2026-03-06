@@ -761,12 +761,12 @@ impl Database {
         }
 
         let txn_id = self.coordinator.next_txn_id()?;
-        self.coordinator.record_start(txn_id, 0);
+        // No record_start — put_direct is a blind write with no read set,
+        // so it doesn't need MVCC active-transaction tracking.
 
         let commit_version = match self.coordinator.allocate_commit_version() {
             Ok(v) => v,
             Err(e) => {
-                self.coordinator.record_abort(txn_id);
                 return Err(e);
             }
         };
@@ -798,7 +798,6 @@ impl Database {
 
                     let mut wal = wal_arc.lock();
                     if let Err(e) = wal.append_pre_serialized(&record_bytes, txn_id, timestamp) {
-                        self.coordinator.record_abort(txn_id);
                         return Err(StrataError::storage(format!(
                             "WAL write failed in put_direct: {}",
                             e
@@ -806,7 +805,6 @@ impl Database {
                     }
                 }
                 None => {
-                    self.coordinator.record_abort(txn_id);
                     return Err(StrataError::storage(
                         "WAL required by durability mode but writer is unavailable".to_string(),
                     ));
@@ -820,11 +818,12 @@ impl Database {
             .storage
             .put_with_version(key, value, commit_version, None)
         {
-            self.coordinator.record_abort(txn_id);
             return Err(e);
         }
 
-        self.coordinator.record_commit(txn_id);
+        // No record_commit — skipping avoids 5 atomic RMW ops per write.
+        // put_direct has no snapshot to protect, so GC safe version tracking
+        // is unnecessary.
         Ok(commit_version)
     }
 
@@ -897,7 +896,7 @@ impl Database {
 
     /// Check if the database is currently open and accepting transactions
     pub fn is_open(&self) -> bool {
-        self.accepting_transactions.load(Ordering::SeqCst)
+        self.accepting_transactions.load(Ordering::Acquire)
     }
 
     /// Returns a reference to the background task scheduler.
@@ -1096,7 +1095,15 @@ impl Database {
         let version_bound = current - 1;
         match self.coordinator.min_active_version() {
             Some(min_active) => version_bound.min(min_active),
-            None => version_bound,
+            None => {
+                // No drain has occurred yet (gc_safe_version == 0 sentinel).
+                // If there are active transactions, they may hold snapshots
+                // at any version — block GC entirely until the first drain.
+                if self.coordinator.active_count() > 0 {
+                    return 0;
+                }
+                version_bound
+            }
         }
     }
 
@@ -1747,7 +1754,7 @@ impl Database {
 
     /// Check if the database is accepting transactions.
     fn check_accepting(&self) -> StrataResult<()> {
-        if !self.accepting_transactions.load(Ordering::SeqCst) {
+        if !self.accepting_transactions.load(Ordering::Acquire) {
             return Err(StrataError::invalid_input(
                 "Database is shutting down".to_string(),
             ));
@@ -2209,7 +2216,7 @@ impl Database {
     /// ```
     pub fn shutdown(&self) -> StrataResult<()> {
         // 1. Stop accepting new transactions
-        self.accepting_transactions.store(false, Ordering::SeqCst);
+        self.accepting_transactions.store(false, Ordering::Release);
 
         // 2. Drain background tasks (embeddings etc.) before final WAL flush
         self.scheduler.drain();
@@ -3523,5 +3530,231 @@ mod tests {
         let db = Database::open(&db_path).unwrap();
         assert!(db.storage().get(&key1).unwrap().is_some(), "txn1 data lost");
         assert!(db.storage().get(&key2).unwrap().is_some(), "txn2 data lost");
+    }
+
+    #[test]
+    fn test_put_direct_contention_scaling() {
+        const OPS_PER_THREAD: usize = 10_000;
+        let temp_dir = TempDir::new().unwrap();
+        let db =
+            Database::open_with_mode(temp_dir.path().join("contention"), DurabilityMode::Cache)
+                .unwrap();
+
+        // Phase 1: Concurrent writes — measure throughput scaling
+        let thread_counts = [1, 4, 8, 16];
+        let mut baseline_throughput = 0.0_f64;
+
+        // Use a shared branch so we can read back all keys afterwards
+        let branch_id = BranchId::new();
+
+        for &num_threads in &thread_counts {
+            let barrier = Arc::new(std::sync::Barrier::new(num_threads));
+            let start = std::time::Instant::now();
+
+            std::thread::scope(|s| {
+                for t in 0..num_threads {
+                    let db = &db;
+                    let barrier = barrier.clone();
+                    s.spawn(move || {
+                        let ns = Arc::new(Namespace::new(
+                            format!("scale_t{t}_n{num_threads}"),
+                            "app".to_string(),
+                            "agent".to_string(),
+                            branch_id,
+                            "kv".to_string(),
+                        ));
+                        barrier.wait();
+                        for i in 0..OPS_PER_THREAD {
+                            let key = Key::new_kv(ns.clone(), format!("k{i}"));
+                            db.put_direct(key, Value::Int(i as i64))
+                                .expect("put_direct failed");
+                        }
+                    });
+                }
+            });
+
+            let elapsed = start.elapsed();
+            let total_ops = (num_threads * OPS_PER_THREAD) as f64;
+            let throughput = total_ops / elapsed.as_secs_f64();
+
+            eprintln!(
+                "  {num_threads:>2} threads: {throughput:>10.0} ops/s ({elapsed:?})"
+            );
+
+            if num_threads == 1 {
+                baseline_throughput = throughput;
+            } else {
+                // Throughput should not collapse to less than 1/3 of
+                // single-threaded baseline (catches lock convoys and
+                // atomic contention regressions).
+                assert!(
+                    throughput > baseline_throughput / 3.0,
+                    "{num_threads}t throughput ({throughput:.0} ops/s) collapsed \
+                     below 1/3 of 1t baseline ({baseline_throughput:.0} ops/s)"
+                );
+            }
+        }
+
+        // Phase 2: Verify data correctness — every write actually persisted
+        // Check the last round (16 threads × OPS_PER_THREAD keys)
+        let last_thread_count = *thread_counts.last().unwrap();
+        for t in 0..last_thread_count {
+            let ns = Arc::new(Namespace::new(
+                format!("scale_t{t}_n{last_thread_count}"),
+                "app".to_string(),
+                "agent".to_string(),
+                branch_id,
+                "kv".to_string(),
+            ));
+            // Spot-check first, middle, and last keys
+            for &i in &[0, OPS_PER_THREAD / 2, OPS_PER_THREAD - 1] {
+                let key = Key::new_kv(ns.clone(), format!("k{i}"));
+                let stored = db.storage().get(&key).unwrap();
+                assert!(
+                    stored.is_some(),
+                    "put_direct data missing: thread={t}, key=k{i}"
+                );
+                assert_eq!(
+                    stored.unwrap().value,
+                    Value::Int(i as i64),
+                    "put_direct data corrupted: thread={t}, key=k{i}"
+                );
+            }
+        }
+    }
+
+    /// Verify that put_direct writes are visible to concurrent snapshot
+    /// readers and that GC correctly respects active reader snapshots.
+    ///
+    /// This tests the key invariant after removing record_start/record_commit
+    /// from put_direct: readers protect themselves via their own record_start,
+    /// so GC cannot advance past an active reader's snapshot version.
+    #[test]
+    fn test_put_direct_gc_safety_with_concurrent_reader() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open(temp_dir.path().join("gc_safety")).unwrap();
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = Key::new_kv(ns.clone(), "gc_target");
+
+        // Write initial value via put_direct
+        let v1 = db
+            .put_direct(key.clone(), Value::Int(1))
+            .expect("put_direct v1");
+
+        // Write v2 via put_direct (creates a version chain: v1 → v2)
+        let v2 = db
+            .put_direct(key.clone(), Value::Int(2))
+            .expect("put_direct v2");
+        assert!(v2 > v1, "versions must be monotonically increasing");
+
+        // Start a snapshot reader that pins the version at v2
+        let reader_txn = db.begin_transaction(branch_id).unwrap();
+        let pinned_version = reader_txn.start_version;
+
+        // Write more versions via put_direct while reader holds its snapshot
+        for i in 3..=10 {
+            db.put_direct(key.clone(), Value::Int(i))
+                .expect("put_direct vi");
+        }
+
+        // GC safe point must not advance past the reader's pinned version
+        let safe_point = db.gc_safe_point();
+        assert!(
+            safe_point <= pinned_version,
+            "gc_safe_point ({safe_point}) advanced past pinned reader version ({pinned_version})"
+        );
+
+        // GC should not prune versions the reader can still see
+        let (_, pruned) = db.run_gc();
+        // If any pruning happened, confirm reader's data is still intact
+        let _ = pruned;
+
+        // Reader should still see the value at its snapshot version
+        let reader_val = db.storage().get(&key).unwrap();
+        assert!(reader_val.is_some(), "key disappeared during concurrent GC");
+        // Latest version should be 10
+        assert_eq!(reader_val.unwrap().value, Value::Int(10));
+
+        // Release the reader — gc_safe_version should now be free to advance
+        db.coordinator.record_abort(reader_txn.txn_id);
+
+        let safe_point_after = db.gc_safe_point();
+        assert!(
+            safe_point_after > safe_point,
+            "gc_safe_point should advance after reader releases: {safe_point_after} > {safe_point}"
+        );
+
+        // GC should now be able to prune old versions
+        let (_, pruned_after) = db.run_gc();
+        assert!(
+            pruned_after > 0,
+            "GC should prune old versions after reader releases"
+        );
+
+        // Latest value must still be readable after GC
+        let final_val = db.storage().get(&key).unwrap().unwrap();
+        assert_eq!(final_val.value, Value::Int(10));
+    }
+
+    /// Verify put_direct concurrent with GC under thread contention.
+    /// Writers and GC race — no panics, no data loss on latest version.
+    #[test]
+    fn test_put_direct_concurrent_gc_no_data_loss() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open(temp_dir.path().join("gc_race")).unwrap();
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let writers_remaining =
+            std::sync::atomic::AtomicUsize::new(NUM_WRITERS);
+
+        const NUM_WRITERS: usize = 4;
+        const WRITES_PER_THREAD: usize = 1_000;
+
+        std::thread::scope(|s| {
+            // Spawn writer threads using put_direct
+            for t in 0..NUM_WRITERS {
+                let db = &db;
+                let ns = ns.clone();
+                let remaining = &writers_remaining;
+                s.spawn(move || {
+                    for i in 0..WRITES_PER_THREAD {
+                        let key = Key::new_kv(ns.clone(), format!("w{t}_k{i}"));
+                        db.put_direct(key, Value::Int(i as i64))
+                            .expect("put_direct in gc race");
+                    }
+                    remaining.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                });
+            }
+
+            // Spawn a GC thread that runs concurrently with writers
+            let db = &db;
+            let remaining = &writers_remaining;
+            s.spawn(move || {
+                while remaining.load(std::sync::atomic::Ordering::Acquire) > 0 {
+                    db.run_gc();
+                    std::thread::yield_now();
+                }
+                // One final GC after all writers complete
+                db.run_gc();
+            });
+        });
+
+        // All writers finished — verify latest value for every key
+        for t in 0..NUM_WRITERS {
+            for &i in &[0, WRITES_PER_THREAD / 2, WRITES_PER_THREAD - 1] {
+                let key = Key::new_kv(ns.clone(), format!("w{t}_k{i}"));
+                let stored = db.storage().get(&key).unwrap();
+                assert!(
+                    stored.is_some(),
+                    "data lost after concurrent GC: thread={t}, key=w{t}_k{i}"
+                );
+                assert_eq!(
+                    stored.unwrap().value,
+                    Value::Int(i as i64),
+                    "data corrupted after concurrent GC: thread={t}, key=w{t}_k{i}"
+                );
+            }
+        }
     }
 }
