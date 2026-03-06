@@ -764,12 +764,7 @@ impl Database {
         // No record_start — put_direct is a blind write with no read set,
         // so it doesn't need MVCC active-transaction tracking.
 
-        let commit_version = match self.coordinator.allocate_commit_version() {
-            Ok(v) => v,
-            Err(e) => {
-                return Err(e);
-            }
-        };
+        let commit_version = self.coordinator.allocate_commit_version()?;
 
         // WAL write (if needed for durability)
         if self.durability_mode.requires_wal() {
@@ -814,12 +809,8 @@ impl Database {
 
         // Apply directly to storage
         use strata_core::traits::Storage;
-        if let Err(e) = self
-            .storage
-            .put_with_version(key, value, commit_version, None)
-        {
-            return Err(e);
-        }
+        self.storage
+            .put_with_version(key, value, commit_version, None)?;
 
         // No record_commit — skipping avoids 5 atomic RMW ops per write.
         // put_direct has no snapshot to protect, so GC safe version tracking
