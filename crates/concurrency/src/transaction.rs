@@ -797,7 +797,14 @@ impl TransactionContext {
         self.read_only = read_only;
     }
 
-    /// Check if this transaction is in per-transaction read-only mode.
+    /// Check if this transaction was explicitly set to read-only mode.
+    ///
+    /// This reflects the **configured mode** set via [`set_read_only`](Self::set_read_only),
+    /// not whether the transaction has actually performed writes. When `true`, writes are
+    /// rejected at the API level and read-set tracking is skipped for memory savings.
+    ///
+    /// See also [`is_read_only`](Self::is_read_only) which checks whether the transaction
+    /// has *actually* performed any mutations (regardless of mode).
     pub fn is_read_only_mode(&self) -> bool {
         self.read_only
     }
@@ -1480,11 +1487,15 @@ impl TransactionContext {
         !self.write_set.is_empty() || !self.delete_set.is_empty() || !self.cas_set.is_empty()
     }
 
-    /// Check if transaction is read-only
+    /// Check if this transaction has performed no mutations.
     ///
-    /// A read-only transaction has reads but no writes, deletes, or CAS ops.
-    /// Read-only transactions always commit successfully (no conflicts possible
-    /// since they don't modify anything).
+    /// Returns `true` when the write set, delete set, and CAS set are all empty,
+    /// meaning the transaction has only performed reads. Such transactions always
+    /// commit successfully since they cannot conflict.
+    ///
+    /// This is a **behavioral query** — it reflects what the transaction has done,
+    /// not how it was configured. See [`is_read_only_mode`](Self::is_read_only_mode)
+    /// for the configured mode flag.
     pub fn is_read_only(&self) -> bool {
         self.write_set.is_empty() && self.delete_set.is_empty() && self.cas_set.is_empty()
     }

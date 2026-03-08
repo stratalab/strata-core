@@ -121,7 +121,7 @@ stratadb (root)
 - `Strata` — the main user-facing API with typed methods
 - `Session` — stateful transaction support
 - `Executor` — command dispatcher
-- `Command` — all operations as enum variants (47 commands across 11 categories)
+- `Command` — all operations as enum variants (114 commands across core + graph + intelligence categories)
 - `Output` — all results as enum variants
 - `Error` — structured error type
 - Re-exports `Value` from strata-core

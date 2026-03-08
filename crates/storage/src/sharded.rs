@@ -558,25 +558,6 @@ impl ShardedStore {
     // Use `Storage::get()` trait method instead of an inherent method
     // to ensure consistent behavior across all callers.
 
-    /// Check if adding a new branch would exceed the configured limit.
-    ///
-    /// Fast path: `max == 0` (unlimited) or branch already exists.
-    #[inline]
-    fn ensure_branch_limit(&self, branch_id: BranchId) -> StrataResult<()> {
-        let max = self.max_branches.load(Ordering::Relaxed);
-        if max == 0 || self.shards.contains_key(&branch_id) {
-            return Ok(());
-        }
-        if self.shards.len() >= max {
-            return Err(StrataError::capacity_exceeded(
-                "branches",
-                max,
-                self.shards.len() + 1,
-            ));
-        }
-        Ok(())
-    }
-
     /// Put a value for a key (adds to version chain for MVCC)
     ///
     /// Sharded write - only locks this branch's shard.
@@ -820,14 +801,26 @@ impl ShardedStore {
                 .push(key);
         }
 
-        // Pre-check branch limits before applying any writes
-        for branch_id in branch_ops.keys() {
-            self.ensure_branch_limit(*branch_id)?;
-        }
+        // Branch limit — snapshot len() before entry() to avoid deadlock,
+        // matching the same pattern used in put().
+        let max = self.max_branches.load(Ordering::Relaxed);
+        let current_len = if max > 0 { self.shards.len() } else { 0 };
 
         // Apply atomically per branch (hold shard lock for entire branch batch)
         for (branch_id, (branch_writes, branch_deletes)) in branch_ops {
-            let mut shard = self.shards.entry(branch_id).or_default();
+            let mut shard = match self.shards.entry(branch_id) {
+                dashmap::mapref::entry::Entry::Occupied(e) => e.into_ref(),
+                dashmap::mapref::entry::Entry::Vacant(e) => {
+                    if max > 0 && current_len >= max {
+                        return Err(StrataError::capacity_exceeded(
+                            "branches",
+                            max,
+                            current_len + 1,
+                        ));
+                    }
+                    e.insert(Shard::default())
+                }
+            };
             // Split borrows to avoid redundant hash lookups
             let shard = &mut *shard;
 
