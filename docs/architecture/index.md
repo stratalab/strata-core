@@ -77,3 +77,4 @@ The `Strata` struct is a thin wrapper around an `Executor`. Primitives don't hol
 - [Storage Engine](storage-engine.md) — ShardedStore, MVCC, key structure
 - [Durability and Recovery](durability-and-recovery.md) — WAL, snapshots, recovery flow
 - [Concurrency Model](concurrency-model.md) — OCC lifecycle, conflict detection
+- [Architecture Book](book/00-system-map.md) — internal, evidence-linked layer-by-layer reference

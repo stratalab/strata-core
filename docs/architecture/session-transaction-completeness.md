@@ -1,5 +1,11 @@
 # Session Transaction Completeness Audit
 
+> Status note (March 6, 2026): this document is a historical audit snapshot.
+> Parts of section 2 are stale relative to current code, especially `Flush`,
+> `Compact`, and `RetentionApply` behavior. See
+> `docs/internal/architecture-audit/api-semantics-drift-report.md` for the
+> current evidence-based matrix.
+
 ## 1. How Session Routing Works
 
 ```

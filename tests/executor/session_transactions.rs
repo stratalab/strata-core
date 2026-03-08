@@ -325,6 +325,46 @@ fn rollback_discards_state_writes() {
     ));
 }
 
+#[test]
+fn rollback_discards_state_set_writes() {
+    let db = create_db();
+    let mut session = Session::new(db.clone());
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    // Regression guard: StateSet must remain in transaction scope.
+    session
+        .execute(Command::StateSet {
+            branch: None,
+            space: None,
+            cell: "rollback_state_set_cell".into(),
+            value: Value::String("txn-only".into()),
+        })
+        .unwrap();
+
+    session.execute(Command::TxnRollback).unwrap();
+
+    let executor = strata_executor::Executor::new(db);
+    let output = executor
+        .execute(Command::StateGet {
+            branch: None,
+            space: None,
+            cell: "rollback_state_set_cell".into(),
+            as_of: None,
+        })
+        .unwrap();
+
+    assert!(matches!(
+        output,
+        Output::MaybeVersioned(None) | Output::Maybe(None)
+    ));
+}
+
 // ============================================================================
 // Commit Makes Writes Visible
 // ============================================================================

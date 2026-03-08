@@ -21,7 +21,6 @@ pub mod error;
 pub mod limits; // Size limits for keys, values, and vectors
 pub mod primitive_ext; // extension trait for primitives to integrate with storage/durability
 pub mod primitives; // primitive types (Event, State, Vector, JSON types)
-pub mod search_types; // search types (EntityRef/PrimitiveType re-exports only; types moved to engine)
 pub mod traits;
 pub mod types;
 pub mod value;
