@@ -80,9 +80,6 @@ fn test_crash_after_begin_and_write() {
 
     let branch_id = BranchId::new();
     let ns = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     );
@@ -133,9 +130,6 @@ fn test_crash_after_commit_always_mode() {
 
     let branch_id = BranchId::new();
     let ns = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     );
@@ -197,9 +191,6 @@ fn test_crash_standard_mode_may_lose_recent() {
 
     let branch_id = BranchId::new();
     let ns = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     );
@@ -265,9 +256,6 @@ fn test_multiple_incomplete_transactions() {
 
     let branch_id = BranchId::new();
     let ns = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     );
@@ -329,9 +317,6 @@ fn test_mixed_committed_and_incomplete() {
 
     let branch_id = BranchId::new();
     let ns = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     );
@@ -467,9 +452,6 @@ fn test_recovery_after_clean_shutdown() {
 
     let branch_id = BranchId::new();
     let ns = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     );
@@ -538,9 +520,6 @@ fn test_recovery_with_large_wal() {
 
     let branch_id = BranchId::new();
     let ns = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     );
@@ -612,9 +591,6 @@ fn test_crash_with_aborted_transaction() {
 
     let branch_id = BranchId::new();
     let ns = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     );
@@ -667,9 +643,6 @@ fn test_crash_multi_write_transaction() {
 
     let branch_id = BranchId::new();
     let ns = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     );
@@ -728,9 +701,6 @@ fn test_crash_with_delete_operation() {
 
     let branch_id = BranchId::new();
     let ns = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     );
@@ -818,16 +788,10 @@ fn test_crash_interleaved_branch_ids() {
     let branch_id2 = BranchId::new();
 
     let ns1 = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id1,
         "default".to_string(),
     );
     let ns2 = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id2,
         "default".to_string(),
     );

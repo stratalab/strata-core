@@ -86,9 +86,6 @@ mod tests {
     fn test_ns() -> Arc<Namespace> {
         let branch_id = BranchId::new();
         Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
             branch_id,
             "default".to_string(),
         ))

@@ -32,9 +32,6 @@ fn test_database_lifecycle() {
 
     let branch_id = BranchId::new();
     let ns = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     );
@@ -164,9 +161,6 @@ fn test_crash_recovery() {
 
     let branch_id = BranchId::new();
     let ns = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     );
@@ -254,16 +248,10 @@ fn test_multiple_branch_ids() {
     let branch_id2 = BranchId::new();
 
     let ns1 = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id1,
         "default".to_string(),
     );
     let ns2 = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id2,
         "default".to_string(),
     );
@@ -358,9 +346,6 @@ fn test_delete_operations() {
 
     let branch_id = BranchId::new();
     let ns = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     );
@@ -437,9 +422,6 @@ fn test_durability_modes() {
 
     let branch_id = BranchId::new();
     let ns = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     );
@@ -543,9 +525,6 @@ fn test_large_transaction() {
 
     let branch_id = BranchId::new();
     let ns = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     );
@@ -611,9 +590,6 @@ fn test_aborted_transaction_discarded() {
 
     let branch_id = BranchId::new();
     let ns = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     );
@@ -727,9 +703,6 @@ fn test_multiple_crash_cycles_with_high_level_api() {
 
     let branch_id = BranchId::new();
     let ns = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     );
@@ -792,9 +765,6 @@ fn test_twenty_sequential_puts_recover() {
 
     let branch_id = BranchId::new();
     let ns = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     );

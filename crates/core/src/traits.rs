@@ -512,9 +512,6 @@ mod tests {
 
     fn test_ns() -> Arc<Namespace> {
         Arc::new(Namespace::new(
-            "test".into(),
-            "app".into(),
-            "agent".into(),
             BranchId::new(),
             "default".into(),
         ))
@@ -744,16 +741,10 @@ mod tests {
         let branch1 = BranchId::new();
         let branch2 = BranchId::new();
         let ns1 = Arc::new(Namespace::new(
-            "t".into(),
-            "a".into(),
-            "g".into(),
             branch1,
             "default".into(),
         ));
         let ns2 = Arc::new(Namespace::new(
-            "t".into(),
-            "a".into(),
-            "g".into(),
             branch2,
             "default".into(),
         ));

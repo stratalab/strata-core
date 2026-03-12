@@ -46,9 +46,6 @@ fn test_issue_594_toctou_race_condition() {
 
     let branch_id = BranchId::new();
     let ns = Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     );

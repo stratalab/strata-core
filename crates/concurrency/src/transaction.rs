@@ -1796,9 +1796,6 @@ mod tests {
 
     fn test_namespace() -> Arc<Namespace> {
         Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
             BranchId::new(),
             "default".to_string(),
         ))

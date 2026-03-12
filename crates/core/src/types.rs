@@ -58,20 +58,15 @@ impl fmt::Display for BranchId {
     }
 }
 
-/// Hierarchical namespace: tenant → app → agent → branch → space
+/// Namespace: branch + space isolation
 ///
-/// Namespaces provide multi-tenant isolation and hierarchical organization
-/// of data. The hierarchy enables efficient querying and access control.
+/// Namespaces provide branch-level and space-level isolation of data.
+/// Branch isolation is the primary mechanism; spaces provide organizational
+/// grouping within a branch.
 ///
-/// Format: "tenant/app/agent/branch_id/space"
+/// Format: "branch_id/space"
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Namespace {
-    /// Tenant identifier (top-level isolation)
-    pub tenant: String,
-    /// Application identifier
-    pub app: String,
-    /// Agent identifier
-    pub agent: String,
     /// Branch identifier
     pub branch_id: BranchId,
     /// Space identifier (organizational namespace within a branch)
@@ -84,113 +79,44 @@ fn default_space_name() -> String {
 }
 
 impl Namespace {
-    /// Create a new namespace
-    pub fn new(
-        tenant: String,
-        app: String,
-        agent: String,
-        branch_id: BranchId,
-        space: String,
-    ) -> Self {
-        debug_assert!(!tenant.is_empty(), "Namespace tenant must not be empty");
-        debug_assert!(!app.is_empty(), "Namespace app must not be empty");
-        debug_assert!(!agent.is_empty(), "Namespace agent must not be empty");
+    /// Create a new namespace with the given branch and space
+    pub fn new(branch_id: BranchId, space: String) -> Self {
         debug_assert!(!space.is_empty(), "Namespace space must not be empty");
-        Self {
-            tenant,
-            app,
-            agent,
-            branch_id,
-            space,
-        }
+        Self { branch_id, space }
     }
 
-    /// Create a new namespace with validation
+    /// Create a namespace for a branch with default space
     ///
-    /// Returns an error if any string field is empty. Use this at API boundaries
-    /// where input validation is required. For internal use where inputs are
-    /// known-valid, prefer `new()` which uses `debug_assert!`.
-    pub fn try_new(
-        tenant: String,
-        app: String,
-        agent: String,
-        branch_id: BranchId,
-        space: String,
-    ) -> Result<Self, crate::error::StrataError> {
-        if tenant.is_empty() {
-            return Err(crate::error::StrataError::invalid_input(
-                "Namespace tenant must not be empty",
-            ));
-        }
-        if app.is_empty() {
-            return Err(crate::error::StrataError::invalid_input(
-                "Namespace app must not be empty",
-            ));
-        }
-        if agent.is_empty() {
-            return Err(crate::error::StrataError::invalid_input(
-                "Namespace agent must not be empty",
-            ));
-        }
-        if space.is_empty() {
-            return Err(crate::error::StrataError::invalid_input(
-                "Namespace space must not be empty",
-            ));
-        }
-        Ok(Self {
-            tenant,
-            app,
-            agent,
-            branch_id,
-            space,
-        })
-    }
-
-    /// Create a namespace for a branch with default tenant/app/agent/space
-    ///
-    /// This is a convenience method for primitives that only need
-    /// branch-level isolation. Uses "default" for tenant, app, agent, and space.
+    /// Uses "default" for space. This is the most common constructor.
     pub fn for_branch(branch_id: BranchId) -> Self {
-        Self::new(
-            "default".to_string(),
-            "default".to_string(),
-            "default".to_string(),
+        Self {
             branch_id,
-            "default".to_string(),
-        )
+            space: "default".to_string(),
+        }
     }
 
-    /// Create a namespace for a branch and space with default tenant/app/agent
+    /// Create a namespace for a branch and space
     pub fn for_branch_space(branch_id: BranchId, space: &str) -> Self {
-        Self::new(
-            "default".to_string(),
-            "default".to_string(),
-            "default".to_string(),
+        Self {
             branch_id,
-            space.to_string(),
-        )
+            space: space.to_string(),
+        }
     }
 }
 
 impl fmt::Display for Namespace {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}/{}/{}/{}/{}",
-            self.tenant, self.app, self.agent, self.branch_id, self.space
-        )
+        write!(f, "{}/{}", self.branch_id, self.space)
     }
 }
 
 // Ord implementation for BTreeMap key ordering
-// Orders by: tenant → app → agent → branch_id → space
+// Orders by: branch_id → space
 impl Ord for Namespace {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.tenant
-            .cmp(&other.tenant)
-            .then(self.app.cmp(&other.app))
-            .then(self.agent.cmp(&other.agent))
-            .then(self.branch_id.0.cmp(&other.branch_id.0))
+        self.branch_id
+            .0
+            .cmp(&other.branch_id.0)
             .then(self.space.cmp(&other.space))
     }
 }
@@ -297,8 +223,7 @@ impl TypeTag {
 /// use std::sync::Arc;
 ///
 /// let branch_id = BranchId::new();
-/// let ns = Arc::new(Namespace::new("tenant".to_string(), "app".to_string(),
-///                         "agent".to_string(), branch_id, "default".to_string()));
+/// let ns = Arc::new(Namespace::for_branch(branch_id));
 ///
 /// // Create a KV key
 /// let key = Key::new_kv(ns.clone(), "session_state");
@@ -313,7 +238,7 @@ impl TypeTag {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Key {
-    /// Namespace (tenant/app/agent/branch hierarchy)
+    /// Namespace (branch/space hierarchy)
     /// Wrapped in Arc for memory-efficient sharing — all keys in the same
     /// namespace (e.g., all graph edges on a branch) share a single allocation.
     pub namespace: Arc<Namespace>,
@@ -525,7 +450,7 @@ impl Key {
     /// # use strata_core::{Key, Namespace, BranchId};
     /// # use std::sync::Arc;
     /// # let branch_id = BranchId::new();
-    /// # let ns = Arc::new(Namespace::new("t".to_string(), "a".to_string(), "ag".to_string(), branch_id, "default".to_string()));
+    /// # let ns = Arc::new(Namespace::for_branch(branch_id));
     /// let prefix = Key::new_kv(ns.clone(), "user:");
     /// let key = Key::new_kv(ns.clone(), "user:alice");
     /// assert!(key.starts_with(&prefix));
@@ -775,36 +700,20 @@ mod tests {
     #[test]
     fn test_namespace_construction() {
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
-            "acme".to_string(),
-            "chatbot".to_string(),
-            "agent-42".to_string(),
-            branch_id,
-            "default".to_string(),
-        );
-
-        assert_eq!(ns.tenant, "acme");
-        assert_eq!(ns.app, "chatbot");
-        assert_eq!(ns.agent, "agent-42");
+        let ns = Namespace::new(branch_id, "myspace".to_string());
         assert_eq!(ns.branch_id, branch_id);
+        assert_eq!(ns.space, "myspace");
     }
 
     #[test]
     fn test_namespace_display_format() {
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
-            "acme".to_string(),
-            "chatbot".to_string(),
-            "agent-42".to_string(),
-            branch_id,
-            "default".to_string(),
-        );
-
+        let ns = Namespace::new(branch_id, "default".to_string());
         let display_str = format!("{}", ns);
-        let expected = format!("acme/chatbot/agent-42/{}/default", branch_id);
+        let expected = format!("{}/default", branch_id);
         assert_eq!(
             display_str, expected,
-            "Namespace should format as tenant/app/agent/branch_id/space"
+            "Namespace should format as branch_id/space"
         );
     }
 
@@ -813,29 +722,9 @@ mod tests {
         let branch_id1 = BranchId::new();
         let branch_id2 = BranchId::new();
 
-        let ns1 = Namespace::new(
-            "acme".to_string(),
-            "chatbot".to_string(),
-            "agent-42".to_string(),
-            branch_id1,
-            "default".to_string(),
-        );
-
-        let ns2 = Namespace::new(
-            "acme".to_string(),
-            "chatbot".to_string(),
-            "agent-42".to_string(),
-            branch_id1,
-            "default".to_string(),
-        );
-
-        let ns3 = Namespace::new(
-            "acme".to_string(),
-            "chatbot".to_string(),
-            "agent-42".to_string(),
-            branch_id2,
-            "default".to_string(),
-        );
+        let ns1 = Namespace::for_branch(branch_id1);
+        let ns2 = Namespace::for_branch(branch_id1);
+        let ns3 = Namespace::for_branch(branch_id2);
 
         assert_eq!(ns1, ns2, "Namespaces with same values should be equal");
         assert_ne!(
@@ -848,10 +737,8 @@ mod tests {
     fn test_namespace_for_branch() {
         let branch_id = BranchId::new();
         let ns = Namespace::for_branch(branch_id);
-        assert_eq!(ns.tenant, "default");
-        assert_eq!(ns.app, "default");
-        assert_eq!(ns.agent, "default");
         assert_eq!(ns.branch_id, branch_id);
+        assert_eq!(ns.space, "default");
     }
 
     #[test]
@@ -864,131 +751,16 @@ mod tests {
         );
     }
 
-    // ========================================
-    // Namespace::try_new Tests
-    // ========================================
-
     #[test]
-    fn test_namespace_try_new_valid() {
+    fn test_namespace_for_branch_space() {
         let branch_id = BranchId::new();
-        let result = Namespace::try_new(
-            "acme".to_string(),
-            "myapp".to_string(),
-            "agent-1".to_string(),
-            branch_id,
-            "production".to_string(),
-        );
-        assert!(result.is_ok(), "All non-empty strings should succeed");
-        let ns = result.unwrap();
-        assert_eq!(ns.tenant, "acme");
-        assert_eq!(ns.app, "myapp");
-        assert_eq!(ns.agent, "agent-1");
+        let ns = Namespace::for_branch_space(branch_id, "custom");
         assert_eq!(ns.branch_id, branch_id);
-        assert_eq!(ns.space, "production");
-    }
-
-    #[test]
-    fn test_namespace_try_new_empty_tenant() {
-        let branch_id = BranchId::new();
-        let result = Namespace::try_new(
-            "".to_string(),
-            "myapp".to_string(),
-            "agent-1".to_string(),
-            branch_id,
-            "default".to_string(),
-        );
-        assert!(result.is_err(), "Empty tenant should fail");
-        let err = format!("{}", result.unwrap_err());
-        assert!(
-            err.contains("tenant"),
-            "Error should mention 'tenant', got: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_namespace_try_new_empty_app() {
-        let branch_id = BranchId::new();
-        let result = Namespace::try_new(
-            "acme".to_string(),
-            "".to_string(),
-            "agent-1".to_string(),
-            branch_id,
-            "default".to_string(),
-        );
-        assert!(result.is_err(), "Empty app should fail");
-        let err = format!("{}", result.unwrap_err());
-        assert!(
-            err.contains("app"),
-            "Error should mention 'app', got: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_namespace_try_new_empty_agent() {
-        let branch_id = BranchId::new();
-        let result = Namespace::try_new(
-            "acme".to_string(),
-            "myapp".to_string(),
-            "".to_string(),
-            branch_id,
-            "default".to_string(),
-        );
-        assert!(result.is_err(), "Empty agent should fail");
-        let err = format!("{}", result.unwrap_err());
-        assert!(
-            err.contains("agent"),
-            "Error should mention 'agent', got: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_namespace_try_new_empty_space() {
-        let branch_id = BranchId::new();
-        let result = Namespace::try_new(
-            "acme".to_string(),
-            "myapp".to_string(),
-            "agent-1".to_string(),
-            branch_id,
-            "".to_string(),
-        );
-        assert!(result.is_err(), "Empty space should fail");
-        let err = format!("{}", result.unwrap_err());
-        assert!(
-            err.contains("space"),
-            "Error should mention 'space', got: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_namespace_try_new_multiple_empty() {
-        let branch_id = BranchId::new();
-        let result = Namespace::try_new(
-            "".to_string(),
-            "".to_string(),
-            "".to_string(),
-            branch_id,
-            "".to_string(),
-        );
-        assert!(result.is_err(), "Multiple empty fields should fail");
-        let err = format!("{}", result.unwrap_err());
-        // At least one empty field should be reported
-        assert!(
-            err.contains("tenant")
-                || err.contains("app")
-                || err.contains("agent")
-                || err.contains("space"),
-            "Error should mention at least one empty field, got: {}",
-            err
-        );
+        assert_eq!(ns.space, "custom");
     }
 
     #[test]
     fn test_namespace_ordering_is_total() {
-        // Verify Ord is consistent with PartialOrd
         let branch_id = BranchId::new();
         let ns1 = Namespace::for_branch(branch_id);
         let ns2 = Namespace::for_branch(branch_id);
@@ -997,58 +769,15 @@ mod tests {
     }
 
     #[test]
-    fn test_namespace_with_special_characters() {
-        let branch_id = BranchId::new();
-        let ns = Namespace::new(
-            "tenant-1".to_string(),
-            "my_app".to_string(),
-            "agent.42".to_string(),
-            branch_id,
-            "default".to_string(),
-        );
-
-        let display = format!("{}", ns);
-        assert!(display.contains("tenant-1"));
-        assert!(display.contains("my_app"));
-        assert!(display.contains("agent.42"));
-    }
-
-    #[test]
     #[cfg(debug_assertions)]
-    fn test_namespace_with_empty_strings() {
+    fn test_namespace_empty_space_panics_in_debug() {
         let branch_id = BranchId::new();
-        // In debug mode, empty tenant triggers debug_assert panic
-        let result = std::panic::catch_unwind(|| {
-            Namespace::new(
-                "".to_string(),
-                "".to_string(),
-                "".to_string(),
-                branch_id,
-                "default".to_string(),
-            )
-        });
+        let result =
+            std::panic::catch_unwind(|| Namespace::new(branch_id, "".to_string()));
         assert!(
             result.is_err(),
-            "Empty namespace components should panic in debug mode"
+            "Empty space should panic in debug mode"
         );
-    }
-
-    #[test]
-    #[cfg(not(debug_assertions))]
-    fn test_namespace_with_empty_strings() {
-        let branch_id = BranchId::new();
-        let ns = Namespace::new(
-            "".to_string(),
-            "".to_string(),
-            "".to_string(),
-            branch_id,
-            "default".to_string(),
-        );
-
-        // Should still construct, even if semantically invalid
-        assert_eq!(ns.tenant, "");
-        assert_eq!(ns.app, "");
-        assert_eq!(ns.agent, "");
     }
 
     #[test]
@@ -1056,65 +785,22 @@ mod tests {
         let branch1 = BranchId::new();
         let branch2 = BranchId::new();
 
-        let ns1 = Namespace::new(
-            "tenant1".to_string(),
-            "app1".to_string(),
-            "agent1".to_string(),
-            branch1,
-            "default".to_string(),
-        );
-        let ns2 = Namespace::new(
-            "tenant1".to_string(),
-            "app1".to_string(),
-            "agent1".to_string(),
-            branch2,
-            "default".to_string(),
-        );
-        let ns3 = Namespace::new(
-            "tenant2".to_string(),
-            "app1".to_string(),
-            "agent1".to_string(),
-            branch1,
-            "default".to_string(),
-        );
-        let ns4 = Namespace::new(
-            "tenant1".to_string(),
-            "app2".to_string(),
-            "agent1".to_string(),
-            branch1,
-            "default".to_string(),
-        );
-        let ns5 = Namespace::new(
-            "tenant1".to_string(),
-            "app1".to_string(),
-            "agent2".to_string(),
-            branch1,
-            "default".to_string(),
-        );
+        let ns1 = Namespace::new(branch1, "aaa".to_string());
+        let ns2 = Namespace::new(branch1, "zzz".to_string());
+        let ns3 = Namespace::new(branch2, "aaa".to_string());
 
-        // Same tenant/app/agent, different branch_id - order depends on UUID
-        assert_ne!(ns1, ns2);
+        // Same branch, different space — order by space
+        assert!(ns1 < ns2, "space 'aaa' should be less than 'zzz'");
 
-        // Different tenant should sort differently
-        assert!(ns1 < ns3, "tenant1 should be less than tenant2");
-
-        // Different app within same tenant
-        assert!(ns1 < ns4, "app1 should be less than app2");
-
-        // Different agent within same tenant/app
-        assert!(ns5 > ns1, "agent2 should be greater than agent1");
+        // Different branch — order by branch_id first
+        // (exact ordering depends on UUID values, just verify they're not equal)
+        assert_ne!(ns1, ns3);
     }
 
     #[test]
     fn test_namespace_serialization() {
         let branch_id = BranchId::new();
-        let ns = Namespace::new(
-            "acme".to_string(),
-            "myapp".to_string(),
-            "agent-42".to_string(),
-            branch_id,
-            "default".to_string(),
-        );
+        let ns = Namespace::new(branch_id, "production".to_string());
 
         let json = serde_json::to_string(&ns).unwrap();
         let ns2: Namespace = serde_json::from_str(&json).unwrap();
@@ -1127,39 +813,17 @@ mod tests {
         use std::collections::BTreeMap;
 
         let branch1 = BranchId::new();
-        let branch2 = BranchId::new();
 
-        let ns1 = Namespace::new(
-            "acme".to_string(),
-            "app1".to_string(),
-            "agent1".to_string(),
-            branch1,
-            "default".to_string(),
-        );
-        let ns2 = Namespace::new(
-            "acme".to_string(),
-            "app1".to_string(),
-            "agent2".to_string(),
-            branch2,
-            "default".to_string(),
-        );
-        let ns3 = Namespace::new(
-            "acme".to_string(),
-            "app2".to_string(),
-            "agent1".to_string(),
-            branch1,
-            "default".to_string(),
-        );
+        let ns1 = Namespace::new(branch1, "alpha".to_string());
+        let ns2 = Namespace::new(branch1, "beta".to_string());
+        let ns3 = Namespace::new(branch1, "gamma".to_string());
 
         let mut map = BTreeMap::new();
         map.insert(ns3.clone(), "value3");
         map.insert(ns1.clone(), "value1");
         map.insert(ns2.clone(), "value2");
 
-        // Collect keys in order
         let keys: Vec<_> = map.keys().cloned().collect();
-
-        // Should be ordered: ns1 (app1/agent1) < ns2 (app1/agent2) < ns3 (app2/agent1)
         assert_eq!(keys[0], ns1);
         assert_eq!(keys[1], ns2);
         assert_eq!(keys[2], ns3);
@@ -1362,13 +1026,7 @@ mod tests {
     #[test]
     fn test_key_construction() {
         let branch_id = BranchId::new();
-        let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
-            branch_id,
-            "default".to_string(),
-        ));
+        let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
 
         // Test generic constructor
         let key = Key::new(ns.clone(), TypeTag::KV, b"mykey".to_vec());
@@ -1380,13 +1038,7 @@ mod tests {
     #[test]
     fn test_key_helpers() {
         let branch_id = BranchId::new();
-        let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
-            branch_id,
-            "default".to_string(),
-        ));
+        let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
 
         // Test KV helper
         let kv_key = Key::new_kv(ns.clone(), "mykey");
@@ -1415,13 +1067,7 @@ mod tests {
     #[test]
     fn test_new_event_meta() {
         let branch_id = BranchId::new();
-        let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
-            branch_id,
-            "default".to_string(),
-        ));
+        let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
 
         let key = Key::new_event_meta(ns);
         assert_eq!(key.type_tag, TypeTag::Event);
@@ -1431,13 +1077,7 @@ mod tests {
     #[test]
     fn test_new_branch_index() {
         let branch_id = BranchId::new();
-        let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
-            branch_id,
-            "default".to_string(),
-        ));
+        let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
 
         // Test by-status index
         let key = Key::new_branch_index(ns.clone(), "status", "Active", "branch-123");
@@ -1458,13 +1098,7 @@ mod tests {
     #[test]
     fn test_user_key_string() {
         let branch_id = BranchId::new();
-        let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
-            branch_id,
-            "default".to_string(),
-        ));
+        let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
 
         // Valid UTF-8
         let key = Key::new_kv(ns.clone(), "hello-world");
@@ -1478,13 +1112,7 @@ mod tests {
     #[test]
     fn test_event_keys_sort_by_sequence() {
         let branch_id = BranchId::new();
-        let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
-            branch_id,
-            "default".to_string(),
-        ));
+        let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
 
         let key1 = Key::new_event(ns.clone(), 1);
         let key2 = Key::new_event(ns.clone(), 10);
@@ -1498,20 +1126,8 @@ mod tests {
     #[test]
     fn test_keys_with_same_inputs_are_equal() {
         let branch_id = BranchId::new();
-        let ns1 = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
-            branch_id,
-            "default".to_string(),
-        ));
-        let ns2 = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
-            branch_id,
-            "default".to_string(),
-        ));
+        let ns1 = Arc::new(Namespace::new(branch_id, "default".to_string()));
+        let ns2 = Arc::new(Namespace::new(branch_id, "default".to_string()));
 
         let key1 = Key::new_kv(ns1, "same-key");
         let key2 = Key::new_kv(ns2, "same-key");
@@ -1524,20 +1140,8 @@ mod tests {
 
         let branch1 = BranchId::new();
 
-        let ns1 = Arc::new(Namespace::new(
-            "tenant1".to_string(),
-            "app1".to_string(),
-            "agent1".to_string(),
-            branch1,
-            "default".to_string(),
-        ));
-        let ns2 = Arc::new(Namespace::new(
-            "tenant2".to_string(),
-            "app1".to_string(),
-            "agent1".to_string(),
-            branch1,
-            "default".to_string(),
-        ));
+        let ns1 = Arc::new(Namespace::new(branch1, "alpha".to_string()));
+        let ns2 = Arc::new(Namespace::new(branch1, "beta".to_string()));
 
         // Test ordering: namespace → type_tag → user_key
         let key1 = Key::new_kv(ns1.clone(), b"aaa");
@@ -1551,7 +1155,7 @@ mod tests {
         // Same namespace, different type (KV < Event)
         assert!(key1 < key3, "TypeTag::KV should be < TypeTag::Event");
 
-        // Different namespace (tenant1 < tenant2)
+        // Different namespace (space 'alpha' < 'beta')
         assert!(key1 < key4, "ns1 should be < ns2");
 
         // Test BTreeMap ordering
@@ -1563,7 +1167,7 @@ mod tests {
 
         let keys: Vec<_> = map.keys().cloned().collect();
 
-        // Expected order: key1 (ns1/KV/aaa) < key2 (ns1/KV/zzz) < key3 (ns1/Event/1) < key4 (ns2/KV/aaa)
+        // Expected order: key1 (alpha/KV/aaa) < key2 (alpha/KV/zzz) < key3 (alpha/Event/1) < key4 (beta/KV/aaa)
         assert_eq!(keys[0], key1);
         assert_eq!(keys[1], key2);
         assert_eq!(keys[2], key3);
@@ -1573,20 +1177,8 @@ mod tests {
     #[test]
     fn test_key_ordering_components() {
         let branch_id = BranchId::new();
-        let ns1 = Arc::new(Namespace::new(
-            "a".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
-            branch_id,
-            "default".to_string(),
-        ));
-        let ns2 = Arc::new(Namespace::new(
-            "b".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
-            branch_id,
-            "default".to_string(),
-        ));
+        let ns1 = Arc::new(Namespace::new(branch_id, "aaa".to_string()));
+        let ns2 = Arc::new(Namespace::new(branch_id, "zzz".to_string()));
 
         let key1 = Key::new(ns1.clone(), TypeTag::KV, b"key1".to_vec());
         let key2 = Key::new(ns1.clone(), TypeTag::Event, b"key1".to_vec());
@@ -1612,13 +1204,7 @@ mod tests {
     #[test]
     fn test_key_prefix_matching() {
         let branch_id = BranchId::new();
-        let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
-            branch_id,
-            "default".to_string(),
-        ));
+        let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
 
         let prefix = Key::new_kv(ns.clone(), b"user:");
         let key1 = Key::new_kv(ns.clone(), b"user:alice");
@@ -1652,13 +1238,7 @@ mod tests {
     #[test]
     fn test_key_prefix_matching_empty() {
         let branch_id = BranchId::new();
-        let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
-            branch_id,
-            "default".to_string(),
-        ));
+        let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
 
         // Empty prefix should match all keys of same namespace and type
         let prefix = Key::new_kv(ns.clone(), b"");
@@ -1678,13 +1258,7 @@ mod tests {
     #[test]
     fn test_key_serialization() {
         let branch_id = BranchId::new();
-        let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
-            branch_id,
-            "default".to_string(),
-        ));
+        let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
         let key = Key::new_kv(ns, "testkey");
 
         // Test JSON roundtrip
@@ -1696,13 +1270,7 @@ mod tests {
     #[test]
     fn test_key_equality() {
         let branch_id = BranchId::new();
-        let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
-            branch_id,
-            "default".to_string(),
-        ));
+        let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
 
         let key1 = Key::new_kv(ns.clone(), "mykey");
         let key2 = Key::new_kv(ns.clone(), "mykey");
@@ -1818,13 +1386,7 @@ mod tests {
         use std::collections::HashSet;
 
         let branch_id = BranchId::new();
-        let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
-            branch_id,
-            "default".to_string(),
-        ));
+        let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
 
         let key1 = Key::new_kv(ns.clone(), "key1");
         let key2 = Key::new_kv(ns.clone(), "key2");
@@ -1841,13 +1403,7 @@ mod tests {
     #[test]
     fn test_key_binary_user_key() {
         let branch_id = BranchId::new();
-        let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
-            branch_id,
-            "default".to_string(),
-        ));
+        let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
 
         // Test with binary data (not UTF-8)
         let binary_data = vec![0u8, 1, 2, 255, 254, 253];

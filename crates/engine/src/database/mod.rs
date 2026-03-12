@@ -2280,9 +2280,6 @@ mod tests {
 
         let branch_id = BranchId::new();
         let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
             branch_id,
             "default".to_string(),
         ));
@@ -2325,9 +2322,6 @@ mod tests {
 
         let branch_id = BranchId::new();
         let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
             branch_id,
             "default".to_string(),
         ));
@@ -2374,9 +2368,6 @@ mod tests {
 
         let branch_id = BranchId::new();
         let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
             branch_id,
             "default".to_string(),
         ));
@@ -2483,9 +2474,6 @@ mod tests {
 
     fn create_test_namespace(branch_id: BranchId) -> Arc<Namespace> {
         Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
             branch_id,
             "default".to_string(),
         ))
@@ -3471,9 +3459,6 @@ mod tests {
                     let barrier = barrier.clone();
                     s.spawn(move || {
                         let ns = Arc::new(Namespace::new(
-                            format!("scale_t{t}_n{num_threads}"),
-                            "app".to_string(),
-                            "agent".to_string(),
                             branch_id,
                             "kv".to_string(),
                         ));
@@ -3511,9 +3496,6 @@ mod tests {
         let last_thread_count = *thread_counts.last().unwrap();
         for t in 0..last_thread_count {
             let ns = Arc::new(Namespace::new(
-                format!("scale_t{t}_n{last_thread_count}"),
-                "app".to_string(),
-                "agent".to_string(),
                 branch_id,
                 "kv".to_string(),
             ));

@@ -2310,9 +2310,6 @@ mod tests {
     fn create_test_key(branch_id: BranchId, name: &str) -> Key {
         use strata_core::types::Namespace;
         let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
             branch_id,
             "default".to_string(),
         ));
@@ -2595,9 +2592,6 @@ mod tests {
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
         let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
             branch_id,
             "default".to_string(),
         ));
@@ -2637,9 +2631,6 @@ mod tests {
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
         let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
             branch_id,
             "default".to_string(),
         ));
@@ -2665,9 +2656,6 @@ mod tests {
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
         let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
             branch_id,
             "default".to_string(),
         ));
@@ -2717,9 +2705,6 @@ mod tests {
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
         let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
             branch_id,
             "default".to_string(),
         ));
@@ -2824,9 +2809,6 @@ mod tests {
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
         let ns = Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
             branch_id,
             "default".to_string(),
         ));
@@ -5078,9 +5060,6 @@ mod tests {
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
         let ns = Arc::new(strata_core::types::Namespace::new(
-            "t".to_string(),
-            "a".to_string(),
-            "g".to_string(),
             branch_id,
             "default".to_string(),
         ));
@@ -5132,9 +5111,6 @@ mod tests {
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
         let ns = Arc::new(strata_core::types::Namespace::new(
-            "t".to_string(),
-            "a".to_string(),
-            "g".to_string(),
             branch_id,
             "default".to_string(),
         ));
@@ -5165,9 +5141,6 @@ mod tests {
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
         let ns = Arc::new(strata_core::types::Namespace::new(
-            "t".to_string(),
-            "a".to_string(),
-            "g".to_string(),
             branch_id,
             "default".to_string(),
         ));
@@ -5208,9 +5181,6 @@ mod tests {
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
         let ns = Arc::new(strata_core::types::Namespace::new(
-            "t".to_string(),
-            "a".to_string(),
-            "g".to_string(),
             branch_id,
             "default".to_string(),
         ));
@@ -5268,9 +5238,6 @@ mod tests {
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
         let ns = Arc::new(strata_core::types::Namespace::new(
-            "t".to_string(),
-            "a".to_string(),
-            "g".to_string(),
             branch_id,
             "default".to_string(),
         ));
@@ -5316,9 +5283,6 @@ mod tests {
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
         let ns = Arc::new(strata_core::types::Namespace::new(
-            "t".to_string(),
-            "a".to_string(),
-            "g".to_string(),
             branch_id,
             "default".to_string(),
         ));
@@ -5384,9 +5348,6 @@ mod tests {
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
         let ns = Arc::new(strata_core::types::Namespace::new(
-            "t".to_string(),
-            "a".to_string(),
-            "g".to_string(),
             branch_id,
             "default".to_string(),
         ));
@@ -5437,9 +5398,6 @@ mod tests {
         let store = ShardedStore::new();
         let branch_id = BranchId::new();
         let ns = Arc::new(strata_core::types::Namespace::new(
-            "t".to_string(),
-            "a".to_string(),
-            "g".to_string(),
             branch_id,
             "default".to_string(),
         ));
@@ -5537,9 +5495,6 @@ mod tests {
         use strata_core::types::Namespace;
         let branch_id = BranchId::from_bytes([1u8; 16]);
         let ns = Arc::new(Namespace::new(
-            "t".to_string(),
-            "a".to_string(),
-            "g".to_string(),
             branch_id,
             "default".to_string(),
         ));

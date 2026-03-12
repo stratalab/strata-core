@@ -159,9 +159,6 @@ mod tests {
 
     fn create_test_namespace() -> Arc<Namespace> {
         Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
             BranchId::new(),
             "default".to_string(),
         ))
@@ -281,9 +278,6 @@ mod tests {
 
         // Create key with different namespace
         let other_ns = Arc::new(Namespace::new(
-            "other_tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
             BranchId::new(),
             "default".to_string(),
         ));
@@ -344,9 +338,6 @@ mod tests {
         let (snapshot, _) = create_populated_snapshot();
 
         let other_ns = Arc::new(Namespace::new(
-            "other_tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
             BranchId::new(),
             "default".to_string(),
         ));

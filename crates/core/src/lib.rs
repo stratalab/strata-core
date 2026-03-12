@@ -2,7 +2,7 @@
 //!
 //! This crate defines the foundational types used throughout the system:
 //! - BranchId: Unique identifier for agent branches
-//! - Namespace: Hierarchical namespace (tenant/app/agent/branch)
+//! - Namespace: Branch and space isolation (branch_id/space)
 //! - Key: Composite key with type tagging
 //! - TypeTag: Discriminates between primitive types
 //! - Value: Unified value enum for all data types
