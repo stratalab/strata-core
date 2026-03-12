@@ -62,6 +62,11 @@ pub struct StorageConfig {
     /// Maximum entries in a single transaction's write buffer. Default: 500_000. Set to 0 for unlimited.
     #[serde(default = "default_max_write_buffer_entries")]
     pub max_write_buffer_entries: usize,
+    /// Maximum versions to retain per key. Default: 0 (unlimited).
+    /// When set, standard MVCC writes (WriteMode::Append) will prune
+    /// versions exceeding this limit. Explicit KeepLast(n) overrides.
+    #[serde(default)]
+    pub max_versions_per_key: usize,
 }
 
 fn default_max_branches() -> usize {
@@ -77,6 +82,7 @@ impl Default for StorageConfig {
         Self {
             max_branches: default_max_branches(),
             max_write_buffer_entries: default_max_write_buffer_entries(),
+            max_versions_per_key: 0,
         }
     }
 }
@@ -266,6 +272,7 @@ auto_embed = false
 # [storage]
 # max_branches = 1024
 # max_write_buffer_entries = 500000
+# max_versions_per_key = 0    # 0 = unlimited; set to e.g. 100 to cap MVCC history
 "#
     }
 
@@ -780,6 +787,7 @@ auto_embed = false
         let config = StrataConfig::default();
         assert_eq!(config.storage.max_branches, 1024);
         assert_eq!(config.storage.max_write_buffer_entries, 500_000);
+        assert_eq!(config.storage.max_versions_per_key, 0);
     }
 
     #[test]
@@ -792,6 +800,16 @@ auto_embed = false
         let config: StrataConfig = toml::from_str(old_toml).unwrap();
         assert_eq!(config.storage.max_branches, 1024);
         assert_eq!(config.storage.max_write_buffer_entries, 500_000);
+        assert_eq!(config.storage.max_versions_per_key, 0);
+    }
+
+    #[test]
+    fn test_max_versions_per_key_default_zero() {
+        let config = StrataConfig::default();
+        assert_eq!(
+            config.storage.max_versions_per_key, 0,
+            "default must be 0 (unlimited) for backward compat"
+        );
     }
 
     // -----------------------------------------------------------------------

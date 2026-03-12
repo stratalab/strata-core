@@ -608,6 +608,7 @@ impl Database {
         // Apply storage resource limits from config
         let storage = Arc::new(result.storage);
         storage.set_max_branches(cfg.storage.max_branches);
+        storage.set_max_versions_per_key(cfg.storage.max_versions_per_key);
 
         let db = Arc::new(Self {
             data_dir: canonical_path.clone(),
@@ -676,6 +677,7 @@ impl Database {
         // Create fresh storage with branch limit from default config
         let storage = ShardedStore::new();
         storage.set_max_branches(cfg.storage.max_branches);
+        storage.set_max_versions_per_key(cfg.storage.max_versions_per_key);
 
         // Create coordinator starting at version 1 (no recovery needed), with write buffer limit
         let mut coordinator = TransactionCoordinator::new(1);

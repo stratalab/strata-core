@@ -458,12 +458,12 @@ pub struct TransactionContext {
     /// saving memory on large scan workloads.
     read_only: bool,
 
-    /// Keys that should use `WriteMode::Replace` at commit time.
+    /// Per-key write mode overrides. Keys not present use WriteMode::Append.
     ///
-    /// Keys in this set will overwrite all previous versions instead of
-    /// appending a new MVCC version. Used for internal data like graph
+    /// Keys in this map will use the specified WriteMode at commit time
+    /// instead of the default Append. Used for internal data like graph
     /// adjacency lists where version history wastes memory.
-    replace_keys: HashSet<Key>,
+    key_write_modes: HashMap<Key, WriteMode>,
 }
 
 impl TransactionContext {
@@ -508,7 +508,7 @@ impl TransactionContext {
             start_time: Instant::now(),
             max_write_entries: 0,
             read_only: false,
-            replace_keys: HashSet::new(),
+            key_write_modes: HashMap::new(),
         }
     }
 
@@ -555,7 +555,7 @@ impl TransactionContext {
             start_time: Instant::now(),
             max_write_entries: 0,
             read_only: false,
-            replace_keys: HashSet::new(),
+            key_write_modes: HashMap::new(),
         }
     }
 
@@ -881,12 +881,13 @@ impl TransactionContext {
 
     /// Buffer a write that will replace (not append) at commit time.
     ///
-    /// Same as `put()`, but marks this key for `WriteMode::Replace` so the
+    /// Same as `put()`, but marks this key for `WriteMode::KeepLast(1)` so the
     /// storage layer overwrites all previous versions instead of accumulating
     /// a new MVCC version. Use for internal data (e.g., graph adjacency lists)
     /// where version history is not needed and would waste memory.
     pub fn put_replace(&mut self, key: Key, value: Value) -> StrataResult<()> {
-        self.replace_keys.insert(key.clone());
+        self.key_write_modes
+            .insert(key.clone(), WriteMode::KeepLast(1));
         self.put(key, value)
     }
 
@@ -929,6 +930,8 @@ impl TransactionContext {
 
         // Remove from write_set if previously written in this txn
         self.write_set.remove(&key);
+        // Clean up any write mode override for this key
+        self.key_write_modes.remove(&key);
 
         // Add to delete_set
         self.delete_set.insert(key);
@@ -1429,11 +1432,10 @@ impl TransactionContext {
 
         // Apply puts from write_set — drain to avoid cloning keys and values
         for (key, value) in self.write_set.drain() {
-            let mode = if self.replace_keys.contains(&key) {
-                WriteMode::Replace
-            } else {
-                WriteMode::Append
-            };
+            let mode = self
+                .key_write_modes
+                .remove(&key)
+                .unwrap_or(WriteMode::Append);
             store.put_with_version_mode(key, value, commit_version, None, mode)?;
             result.puts_applied += 1;
         }
@@ -1566,6 +1568,7 @@ impl TransactionContext {
         self.write_set.clear();
         self.delete_set.clear();
         self.cas_set.clear();
+        self.key_write_modes.clear();
 
         // Reclaim memory if a large transaction inflated capacity beyond threshold.
         // Normal workloads (< 4096 entries) keep their allocations intact.
@@ -1578,6 +1581,9 @@ impl TransactionContext {
         }
         if self.delete_set.capacity() > SHRINK_THRESHOLD {
             self.delete_set.shrink_to(SHRINK_THRESHOLD / 2);
+        }
+        if self.key_write_modes.capacity() > SHRINK_THRESHOLD {
+            self.key_write_modes.shrink_to(SHRINK_THRESHOLD / 2);
         }
 
         // Clear event state (deallocate, since event ops are rare)
@@ -2041,6 +2047,125 @@ mod tests {
 
         // Capacity should be preserved (not shrunk)
         assert_eq!(txn.write_set.capacity(), cap_before);
+    }
+
+    // ========================================================================
+    // KeepLast / key_write_modes Tests (Issue #1389)
+    // ========================================================================
+
+    #[test]
+    fn test_reset_clears_key_write_modes() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let store = empty_store();
+        let mut txn = TransactionContext::new(1, branch_id, 100);
+
+        // Mark some keys for replace
+        txn.put_replace(test_key(&ns, "adj1"), Value::Int(1))
+            .unwrap();
+        txn.put_replace(test_key(&ns, "adj2"), Value::Int(2))
+            .unwrap();
+        assert_eq!(txn.key_write_modes.len(), 2);
+
+        // Reset should clear key_write_modes
+        txn.reset(2, branch_id, Some(store.clone()));
+        assert!(txn.key_write_modes.is_empty());
+
+        // After reset, a normal put should NOT use KeepLast — verify no stale leak
+        let key = test_key(&ns, "adj1"); // same key name as before
+        txn.put(key.clone(), Value::Int(99)).unwrap();
+        assert!(
+            txn.key_write_modes.get(&key).is_none(),
+            "normal put after reset should not inherit stale KeepLast mode"
+        );
+    }
+
+    #[test]
+    fn test_put_replace_uses_keep_last() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let mut txn = TransactionContext::new(1, branch_id, 100);
+
+        let key = test_key(&ns, "graph_adj");
+        txn.put_replace(key.clone(), Value::Int(42)).unwrap();
+
+        assert_eq!(txn.key_write_modes.get(&key), Some(&WriteMode::KeepLast(1)));
+        // Verify the value is also in write_set
+        assert_eq!(txn.write_set.get(&key), Some(&Value::Int(42)));
+    }
+
+    #[test]
+    fn test_delete_cleans_up_key_write_modes() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let mut txn = TransactionContext::new(1, branch_id, 100);
+
+        let key = test_key(&ns, "adj_to_delete");
+        txn.put_replace(key.clone(), Value::Int(1)).unwrap();
+        assert!(txn.key_write_modes.contains_key(&key));
+
+        // Delete should clean up the write mode entry
+        txn.delete(key.clone()).unwrap();
+        assert!(
+            !txn.key_write_modes.contains_key(&key),
+            "delete should remove orphaned key_write_modes entry"
+        );
+        assert!(!txn.write_set.contains_key(&key));
+        assert!(txn.delete_set.contains(&key));
+    }
+
+    #[test]
+    fn test_apply_writes_with_keep_last_mode() {
+        use strata_core::traits::Storage;
+
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let store = empty_store();
+
+        // First: write 3 versions of a key to storage (simulating prior commits)
+        let key = test_key(&ns, "adj_list");
+        for v in 1..=3u64 {
+            store
+                .put_with_version_mode(
+                    key.clone(),
+                    Value::Int(v as i64),
+                    v,
+                    None,
+                    WriteMode::Append,
+                )
+                .unwrap();
+        }
+        store.set_version(3);
+
+        // Verify 3 versions exist
+        let history = Storage::get_history(&*store, &key, None, None).unwrap();
+        assert_eq!(history.len(), 3);
+
+        // Now create a transaction that uses put_replace
+        let mut txn = TransactionContext::with_store(1, branch_id, store.clone());
+        txn.put_replace(key.clone(), Value::Int(99)).unwrap();
+
+        // Force status to Committed for apply_writes
+        txn.status = TransactionStatus::Committed;
+
+        let result = txn.apply_writes(&*store, 4).unwrap();
+        assert_eq!(result.puts_applied, 1);
+
+        // The KeepLast(1) mode should have pruned old versions
+        let latest = Storage::get_versioned(&*store, &key, u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.value, Value::Int(99));
+        assert_eq!(latest.version.as_u64(), 4);
+
+        // Only 1 version should remain (the KeepLast(1) write)
+        let history_after = Storage::get_history(&*store, &key, None, None).unwrap();
+        assert_eq!(
+            history_after.len(),
+            1,
+            "KeepLast(1) should leave exactly 1 version, got {}",
+            history_after.len()
+        );
     }
 
     // ========================================================================

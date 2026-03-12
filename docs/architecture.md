@@ -400,8 +400,9 @@ most recent version. This is the common case for application reads.
 ```rust
 pub fn put(&mut self, value: StoredValue, mode: WriteMode) {
     match mode {
-        WriteMode::Append  => self.push(value),            // Add version
-        WriteMode::Replace => self.replace_latest(value),  // Drop history
+        WriteMode::Append     => self.push(value),            // Add version
+        WriteMode::KeepLast(1) => self.replace_latest(value), // Drop history
+        WriteMode::KeepLast(n) => { self.push(value); self.truncate_to(n); }
     }
 }
 ```
@@ -1115,7 +1116,7 @@ ensures all VectorStore instances share the same in-memory HNSW backends.
 pub struct GraphStore { db: Arc<Database> }
 ```
 
-Property graph overlay on KV storage. Uses `WriteMode::Replace` for adjacency
+Property graph overlay on KV storage. Uses `WriteMode::KeepLast(1)` for adjacency
 lists (no history needed). Operations: `create_graph`, `add_node`, `add_edge`,
 `remove_node`, `remove_edge`, `neighbors`, `list_graphs`.
 
