@@ -19,6 +19,7 @@
 //! | P5 | Deterministic | Same inputs = Same view |
 //! | P6 | Idempotent | Running twice produces identical view |
 
+use crate::contract::Timestamp;
 use crate::types::BranchId;
 use serde::{Deserialize, Serialize};
 
@@ -89,9 +90,9 @@ pub struct BranchMetadata {
     /// Current status
     pub status: BranchStatus,
     /// When branch started (microseconds since epoch)
-    pub started_at: u64,
+    pub started_at: Timestamp,
     /// When branch ended (if completed)
-    pub ended_at: Option<u64>,
+    pub ended_at: Option<Timestamp>,
     /// Number of events in this branch
     pub event_count: u64,
     /// WAL offset where branch began
@@ -102,7 +103,7 @@ pub struct BranchMetadata {
 
 impl BranchMetadata {
     /// Create metadata for a new branch
-    pub fn new(branch_id: BranchId, started_at: u64, begin_wal_offset: u64) -> Self {
+    pub fn new(branch_id: BranchId, started_at: Timestamp, begin_wal_offset: u64) -> Self {
         BranchMetadata {
             branch_id,
             status: BranchStatus::Active,
@@ -115,7 +116,7 @@ impl BranchMetadata {
     }
 
     /// Mark branch as completed
-    pub fn complete(&mut self, ended_at: u64, end_wal_offset: u64) {
+    pub fn complete(&mut self, ended_at: Timestamp, end_wal_offset: u64) {
         self.status = BranchStatus::Completed;
         self.ended_at = Some(ended_at);
         self.end_wal_offset = Some(end_wal_offset);
@@ -128,7 +129,7 @@ impl BranchMetadata {
 
     /// Duration in microseconds (if completed)
     pub fn duration_micros(&self) -> Option<u64> {
-        self.ended_at.map(|e| e.saturating_sub(self.started_at))
+        self.ended_at.map(|e| e.as_micros().saturating_sub(self.started_at.as_micros()))
     }
 
     /// Increment event count
@@ -189,12 +190,12 @@ mod tests {
     #[test]
     fn test_branch_status_transitions() {
         let branch_id = BranchId::new();
-        let mut meta = BranchMetadata::new(branch_id, 1000, 0);
+        let mut meta = BranchMetadata::new(branch_id, Timestamp::from(1000), 0);
         assert_eq!(meta.status, BranchStatus::Active);
         assert!(meta.status.is_active());
         assert!(meta.status.exists());
 
-        meta.complete(2000, 100);
+        meta.complete(Timestamp::from(2000), 100);
         assert_eq!(meta.status, BranchStatus::Completed);
         assert!(meta.status.is_completed());
         assert_eq!(meta.duration_micros(), Some(1000));
@@ -204,7 +205,7 @@ mod tests {
     #[test]
     fn test_branch_status_orphaned() {
         let branch_id = BranchId::new();
-        let mut meta = BranchMetadata::new(branch_id, 1000, 0);
+        let mut meta = BranchMetadata::new(branch_id, Timestamp::from(1000), 0);
         assert_eq!(meta.status, BranchStatus::Active);
 
         meta.mark_orphaned();
@@ -239,7 +240,7 @@ mod tests {
     #[test]
     fn test_branch_metadata_serialization() {
         let branch_id = BranchId::new();
-        let meta = BranchMetadata::new(branch_id, 1000, 50);
+        let meta = BranchMetadata::new(branch_id, Timestamp::from(1000), 50);
 
         let json = serde_json::to_string(&meta).unwrap();
         let restored: BranchMetadata = serde_json::from_str(&json).unwrap();
@@ -265,7 +266,7 @@ mod tests {
     #[test]
     fn test_branch_metadata_event_count() {
         let branch_id = BranchId::new();
-        let mut meta = BranchMetadata::new(branch_id, 1000, 0);
+        let mut meta = BranchMetadata::new(branch_id, Timestamp::from(1000), 0);
         assert_eq!(meta.event_count, 0);
 
         meta.increment_event_count();
@@ -278,7 +279,7 @@ mod tests {
     #[test]
     fn test_branch_metadata_duration_active() {
         let branch_id = BranchId::new();
-        let meta = BranchMetadata::new(branch_id, 1000, 0);
+        let meta = BranchMetadata::new(branch_id, Timestamp::from(1000), 0);
         // Active branch has no duration
         assert!(meta.duration_micros().is_none());
     }
@@ -318,21 +319,21 @@ mod tests {
     #[test]
     fn test_branch_metadata_double_completion() {
         let branch_id = BranchId::new();
-        let mut meta = BranchMetadata::new(branch_id, 1000, 0);
-        meta.complete(2000, 100);
+        let mut meta = BranchMetadata::new(branch_id, Timestamp::from(1000), 0);
+        meta.complete(Timestamp::from(2000), 100);
         assert_eq!(meta.status, BranchStatus::Completed);
 
         // Complete again with different values - should overwrite
-        meta.complete(3000, 200);
-        assert_eq!(meta.ended_at, Some(3000));
+        meta.complete(Timestamp::from(3000), 200);
+        assert_eq!(meta.ended_at, Some(Timestamp::from(3000)));
         assert_eq!(meta.end_wal_offset, Some(200));
     }
 
     #[test]
     fn test_branch_metadata_orphaned_after_completed() {
         let branch_id = BranchId::new();
-        let mut meta = BranchMetadata::new(branch_id, 1000, 0);
-        meta.complete(2000, 100);
+        let mut meta = BranchMetadata::new(branch_id, Timestamp::from(1000), 0);
+        meta.complete(Timestamp::from(2000), 100);
         meta.mark_orphaned();
         // Status transitions are unconditional - design decision
         assert_eq!(meta.status, BranchStatus::Orphaned);
@@ -341,8 +342,8 @@ mod tests {
     #[test]
     fn test_branch_metadata_ended_before_started() {
         let branch_id = BranchId::new();
-        let mut meta = BranchMetadata::new(branch_id, 2000, 0);
-        meta.complete(1000, 50);
+        let mut meta = BranchMetadata::new(branch_id, Timestamp::from(2000), 0);
+        meta.complete(Timestamp::from(1000), 50);
         // duration_micros uses saturating_sub, so negative durations become 0
         assert_eq!(meta.duration_micros(), Some(0));
     }

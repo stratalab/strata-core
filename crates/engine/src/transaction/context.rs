@@ -125,7 +125,7 @@ impl<'a> Transaction<'a> {
             event.sequence,
             &event.event_type,
             &event.payload,
-            event.timestamp,
+            event.timestamp.as_micros(),
             &event.prev_hash,
         )
     }
@@ -251,7 +251,7 @@ impl<'a> TransactionOps for Transaction<'a> {
 
     fn event_append(&mut self, event_type: &str, payload: Value) -> Result<Version, StrataError> {
         let sequence = self.next_sequence();
-        let timestamp = Timestamp::now().as_micros();
+        let timestamp = Timestamp::now();
         let prev_hash = self.last_hash;
 
         // Create the event

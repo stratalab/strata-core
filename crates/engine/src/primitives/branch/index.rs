@@ -102,11 +102,11 @@ pub struct BranchMetadata {
     /// Current status
     pub status: BranchStatus,
     /// Creation timestamp (microseconds since epoch)
-    pub created_at: u64,
+    pub created_at: Timestamp,
     /// Last update timestamp (microseconds since epoch)
-    pub updated_at: u64,
+    pub updated_at: Timestamp,
     /// Completion timestamp (post-MVP)
-    pub completed_at: Option<u64>,
+    pub completed_at: Option<Timestamp>,
     /// Error message if failed (post-MVP)
     pub error: Option<String>,
     /// Internal version counter
@@ -140,19 +140,12 @@ impl BranchMetadata {
     pub fn into_versioned(self) -> Versioned<BranchMetadata> {
         let version = self.version;
         let timestamp = self.updated_at;
-        Versioned::with_timestamp(
-            self,
-            Version::counter(version),
-            Timestamp::from_micros(timestamp),
-        )
+        Versioned::with_timestamp(self, Version::counter(version), timestamp)
     }
 
     /// Get current timestamp in microseconds
-    fn now() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as u64
+    fn now() -> Timestamp {
+        Timestamp::now()
     }
 }
 

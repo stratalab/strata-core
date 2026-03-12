@@ -598,7 +598,7 @@ mod tests {
     fn test_state_creation() {
         let state = State::new(Value::Int(42));
         assert_eq!(state.version, Version::counter(1));
-        assert!(state.updated_at > 0);
+        assert!(state.updated_at > strata_core::contract::Timestamp::EPOCH);
         assert_eq!(state.value, Value::Int(42));
     }
 

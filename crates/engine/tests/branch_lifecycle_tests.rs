@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 use strata_core::branch_types::{BranchMetadata, BranchStatus};
+use strata_core::contract::Timestamp;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
 use strata_core::PrimitiveType;
@@ -52,7 +53,7 @@ fn test_branch_status_values() {
 #[test]
 fn test_branch_metadata_lifecycle() {
     let branch_id = BranchId::new();
-    let started_at = 1000000u64;
+    let started_at = Timestamp::from(1000000u64);
     let begin_offset = 0u64;
 
     // Create new metadata
@@ -72,7 +73,7 @@ fn test_branch_metadata_lifecycle() {
     assert_eq!(meta.event_count, 2);
 
     // Complete the branch
-    let ended_at = 2000000u64;
+    let ended_at = Timestamp::from(2000000u64);
     let end_offset = 500u64;
     meta.complete(ended_at, end_offset);
 
@@ -85,7 +86,7 @@ fn test_branch_metadata_lifecycle() {
 #[test]
 fn test_branch_metadata_orphaned() {
     let branch_id = BranchId::new();
-    let mut meta = BranchMetadata::new(branch_id, 1000, 0);
+    let mut meta = BranchMetadata::new(branch_id, Timestamp::from(1000), 0);
 
     meta.mark_orphaned();
 
@@ -102,7 +103,7 @@ fn test_branch_index_basic_operations() {
     let mut index = BranchIndex::new();
 
     let branch_id = BranchId::new();
-    let meta = BranchMetadata::new(branch_id, 1000, 0);
+    let meta = BranchMetadata::new(branch_id, Timestamp::from(1000), 0);
 
     // Insert branch
     index.insert(branch_id, meta);
@@ -120,7 +121,7 @@ fn test_branch_index_event_tracking() {
     let mut index = BranchIndex::new();
 
     let branch_id = BranchId::new();
-    let meta = BranchMetadata::new(branch_id, 1000, 0);
+    let meta = BranchMetadata::new(branch_id, Timestamp::from(1000), 0);
     index.insert(branch_id, meta);
 
     // Record events
@@ -146,9 +147,9 @@ fn test_branch_index_multiple_branches() {
     let branch2 = BranchId::new();
     let branch3 = BranchId::new();
 
-    index.insert(branch1, BranchMetadata::new(branch1, 1000, 0));
-    index.insert(branch2, BranchMetadata::new(branch2, 2000, 100));
-    index.insert(branch3, BranchMetadata::new(branch3, 3000, 200));
+    index.insert(branch1, BranchMetadata::new(branch1, Timestamp::from(1000), 0));
+    index.insert(branch2, BranchMetadata::new(branch2, Timestamp::from(2000), 100));
+    index.insert(branch3, BranchMetadata::new(branch3, Timestamp::from(3000), 200));
 
     // Record events for different branches
     index.record_event(branch1, 10);
@@ -412,8 +413,8 @@ fn test_orphaned_branch_detection_basic() {
     let branch2 = BranchId::new();
 
     // Create two active branches
-    index.insert(branch1, BranchMetadata::new(branch1, 1000, 0));
-    index.insert(branch2, BranchMetadata::new(branch2, 2000, 100));
+    index.insert(branch1, BranchMetadata::new(branch1, Timestamp::from(1000), 0));
+    index.insert(branch2, BranchMetadata::new(branch2, Timestamp::from(2000), 100));
 
     // Find active branches (potential orphans after crash)
     let active = index.find_active();
@@ -435,17 +436,17 @@ fn test_orphaned_branch_detection_mixed_states() {
     let active_branch2 = BranchId::new();
 
     // Create branches with different states
-    let mut completed_meta = BranchMetadata::new(completed_branch, 1000, 0);
-    completed_meta.complete(2000, 100);
+    let mut completed_meta = BranchMetadata::new(completed_branch, Timestamp::from(1000), 0);
+    completed_meta.complete(Timestamp::from(2000), 100);
     index.insert(completed_branch, completed_meta);
 
     index.insert(
         active_branch1,
-        BranchMetadata::new(active_branch1, 3000, 200),
+        BranchMetadata::new(active_branch1, Timestamp::from(3000), 200),
     );
     index.insert(
         active_branch2,
-        BranchMetadata::new(active_branch2, 4000, 300),
+        BranchMetadata::new(active_branch2, Timestamp::from(4000), 300),
     );
 
     // Only active branches should be detected
@@ -471,19 +472,19 @@ fn test_count_by_status() {
     // Create branches with different states
     for _ in 0..3 {
         let branch_id = BranchId::new();
-        index.insert(branch_id, BranchMetadata::new(branch_id, 1000, 0));
+        index.insert(branch_id, BranchMetadata::new(branch_id, Timestamp::from(1000), 0));
     }
 
     for _ in 0..2 {
         let branch_id = BranchId::new();
-        let mut meta = BranchMetadata::new(branch_id, 1000, 0);
-        meta.complete(2000, 100);
+        let mut meta = BranchMetadata::new(branch_id, Timestamp::from(1000), 0);
+        meta.complete(Timestamp::from(2000), 100);
         index.insert(branch_id, meta);
     }
 
     for _ in 0..1 {
         let branch_id = BranchId::new();
-        let mut meta = BranchMetadata::new(branch_id, 1000, 0);
+        let mut meta = BranchMetadata::new(branch_id, Timestamp::from(1000), 0);
         meta.mark_orphaned();
         index.insert(branch_id, meta);
     }

@@ -337,16 +337,13 @@ impl EventLog {
 
                 // Compute event hash using current hash version
                 let sequence = meta.next_sequence;
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_micros() as u64;
+                let timestamp = Timestamp::now();
 
                 let hash = compute_event_hash(
                     sequence,
                     &event_type_owned,
                     &payload,
-                    timestamp,
+                    timestamp.as_micros(),
                     &meta.head_hash,
                 );
 
@@ -370,11 +367,11 @@ impl EventLog {
 
                 // Update stream metadata
                 match meta.streams.get_mut(&event_type_owned) {
-                    Some(stream_meta) => stream_meta.update(sequence, timestamp),
+                    Some(stream_meta) => stream_meta.update(sequence, timestamp.as_micros()),
                     None => {
                         meta.streams.insert(
                             event_type_owned.clone(),
-                            StreamMeta::new(sequence, timestamp),
+                            StreamMeta::new(sequence, timestamp.as_micros()),
                         );
                     }
                 }
@@ -474,16 +471,13 @@ impl EventLog {
                 for &i in &valid_indices {
                     let (event_type, payload) = &entries[i];
                     let sequence = meta.next_sequence;
-                    let timestamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_micros() as u64;
+                    let timestamp = Timestamp::now();
 
                     let hash = compute_event_hash(
                         sequence,
                         event_type,
                         payload,
-                        timestamp,
+                        timestamp.as_micros(),
                         &meta.head_hash,
                     );
 
@@ -506,10 +500,10 @@ impl EventLog {
 
                     // Update stream metadata
                     match meta.streams.get_mut(event_type) {
-                        Some(stream_meta) => stream_meta.update(sequence, timestamp),
+                        Some(stream_meta) => stream_meta.update(sequence, timestamp.as_micros()),
                         None => {
                             meta.streams
-                                .insert(event_type.clone(), StreamMeta::new(sequence, timestamp));
+                                .insert(event_type.clone(), StreamMeta::new(sequence, timestamp.as_micros()));
                         }
                     }
 
@@ -581,7 +575,7 @@ impl EventLog {
                     Ok(Some(Versioned::with_timestamp(
                         event.clone(),
                         Version::Sequence(sequence),
-                        Timestamp::from_micros(event.timestamp),
+                        event.timestamp,
                     )))
                 }
                 None => Ok(None),
@@ -647,7 +641,7 @@ impl EventLog {
                             results.push(Versioned::with_timestamp(
                                 event.clone(),
                                 Version::Sequence(seq),
-                                Timestamp::from_micros(event.timestamp),
+                                event.timestamp,
                             ));
 
                             if limit.is_some_and(|l| results.len() >= l) {
@@ -680,7 +674,7 @@ impl EventLog {
                         filtered.push(Versioned::with_timestamp(
                             event.clone(),
                             Version::Sequence(seq),
-                            Timestamp::from_micros(event.timestamp),
+                            event.timestamp,
                         ));
 
                         if limit.is_some_and(|l| filtered.len() >= l) {
@@ -723,7 +717,7 @@ impl EventLog {
                 let event: Event = from_stored_value(&vv.value)
                     .map_err(|e| strata_core::StrataError::serialization(e.to_string()))?;
                 // Filter by event's own timestamp (when the event was appended)
-                if event.timestamp <= as_of_ts {
+                if event.timestamp.as_micros() <= as_of_ts {
                     if let Some(et) = event_type {
                         if event.event_type == et {
                             events.push(event);
@@ -773,12 +767,9 @@ impl EventLogExt for TransactionContext {
 
         // Compute event hash using current hash version
         let sequence = meta.next_sequence;
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as u64;
+        let timestamp = Timestamp::now();
 
-        let hash = compute_event_hash(sequence, event_type, &payload, timestamp, &meta.head_hash);
+        let hash = compute_event_hash(sequence, event_type, &payload, timestamp.as_micros(), &meta.head_hash);
 
         // Build event
         let event = Event {
@@ -801,10 +792,10 @@ impl EventLogExt for TransactionContext {
         // Update stream metadata
         let event_type_owned = event_type.to_string();
         match meta.streams.get_mut(&event_type_owned) {
-            Some(stream_meta) => stream_meta.update(sequence, timestamp),
+            Some(stream_meta) => stream_meta.update(sequence, timestamp.as_micros()),
             None => {
                 meta.streams
-                    .insert(event_type_owned, StreamMeta::new(sequence, timestamp));
+                    .insert(event_type_owned, StreamMeta::new(sequence, timestamp.as_micros()));
             }
         }
 
@@ -858,7 +849,7 @@ mod tests {
             sequence: 42,
             event_type: "test".to_string(),
             payload: payload_with("data", Value::String("test".into())),
-            timestamp: 1234567890,
+            timestamp: Timestamp::from(1234567890),
             prev_hash: [0u8; 32],
             hash: [1u8; 32],
         };

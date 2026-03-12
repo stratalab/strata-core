@@ -81,7 +81,7 @@ impl Limits {
     /// if it exceeds the maximum.
     ///
     /// Note: This only validates length. For full key validation including
-    /// NUL bytes and reserved prefixes, use `validate_key()` from the `key` module.
+    /// NUL bytes and reserved prefixes, see `validate_key_with_limits()` in the executor bridge.
     pub fn validate_key_length(&self, key: &str) -> Result<(), LimitError> {
         let len = key.len();
         if len > self.max_key_bytes {

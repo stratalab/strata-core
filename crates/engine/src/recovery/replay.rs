@@ -511,6 +511,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use strata_core::types::Namespace;
+    use strata_core::Timestamp;
 
     fn test_namespace() -> Arc<Namespace> {
         Arc::new(Namespace::for_branch(BranchId::new()))
@@ -528,7 +529,7 @@ mod tests {
     fn test_branch_index_insert_and_get() {
         let mut index = BranchIndex::new();
         let branch_id = BranchId::new();
-        let metadata = BranchMetadata::new(branch_id, 1000, 0);
+        let metadata = BranchMetadata::new(branch_id, Timestamp::from(1000), 0);
 
         index.insert(branch_id, metadata.clone());
 
@@ -547,7 +548,7 @@ mod tests {
         assert_eq!(index.status(branch_id), BranchStatus::NotFound);
 
         // Insert branch
-        let metadata = BranchMetadata::new(branch_id, 1000, 0);
+        let metadata = BranchMetadata::new(branch_id, Timestamp::from(1000), 0);
         index.insert(branch_id, metadata);
 
         assert_eq!(index.status(branch_id), BranchStatus::Active);
@@ -557,7 +558,7 @@ mod tests {
     fn test_branch_index_record_event() {
         let mut index = BranchIndex::new();
         let branch_id = BranchId::new();
-        let metadata = BranchMetadata::new(branch_id, 1000, 0);
+        let metadata = BranchMetadata::new(branch_id, Timestamp::from(1000), 0);
 
         index.insert(branch_id, metadata);
         index.record_event(branch_id, 100);
@@ -579,12 +580,12 @@ mod tests {
         let run2 = BranchId::new();
         let run3 = BranchId::new();
 
-        index.insert(run1, BranchMetadata::new(run1, 1000, 0));
-        index.insert(run2, BranchMetadata::new(run2, 2000, 100));
-        index.insert(run3, BranchMetadata::new(run3, 3000, 200));
+        index.insert(run1, BranchMetadata::new(run1, Timestamp::from(1000), 0));
+        index.insert(run2, BranchMetadata::new(run2, Timestamp::from(2000), 100));
+        index.insert(run3, BranchMetadata::new(run3, Timestamp::from(3000), 200));
 
         // Complete branch2
-        index.get_mut(run2).unwrap().complete(2500, 150);
+        index.get_mut(run2).unwrap().complete(Timestamp::from(2500), 150);
 
         let active = index.find_active();
         assert_eq!(active.len(), 2);
@@ -600,8 +601,8 @@ mod tests {
         let run1 = BranchId::new();
         let run2 = BranchId::new();
 
-        index.insert(run1, BranchMetadata::new(run1, 1000, 0));
-        index.insert(run2, BranchMetadata::new(run2, 2000, 100));
+        index.insert(run1, BranchMetadata::new(run1, Timestamp::from(1000), 0));
+        index.insert(run2, BranchMetadata::new(run2, Timestamp::from(2000), 100));
 
         index.mark_orphaned(&[run1]);
 
@@ -763,12 +764,12 @@ mod tests {
         let run2 = BranchId::new();
         let run3 = BranchId::new();
 
-        index.insert(run1, BranchMetadata::new(run1, 1000, 0));
-        index.insert(run2, BranchMetadata::new(run2, 2000, 100));
-        index.insert(run3, BranchMetadata::new(run3, 3000, 200));
+        index.insert(run1, BranchMetadata::new(run1, Timestamp::from(1000), 0));
+        index.insert(run2, BranchMetadata::new(run2, Timestamp::from(2000), 100));
+        index.insert(run3, BranchMetadata::new(run3, Timestamp::from(3000), 200));
 
         // Complete branch2 properly
-        index.get_mut(run2).unwrap().complete(2500, 150);
+        index.get_mut(run2).unwrap().complete(Timestamp::from(2500), 150);
 
         // Simulate crash - run1 and run3 are still active
         let active = index.find_active();
@@ -790,13 +791,13 @@ mod tests {
         // Create runs with different states
         for _ in 0..3 {
             let branch_id = BranchId::new();
-            index.insert(branch_id, BranchMetadata::new(branch_id, 1000, 0));
+            index.insert(branch_id, BranchMetadata::new(branch_id, Timestamp::from(1000), 0));
         }
 
         for _ in 0..2 {
             let branch_id = BranchId::new();
-            let mut meta = BranchMetadata::new(branch_id, 1000, 0);
-            meta.complete(2000, 100);
+            let mut meta = BranchMetadata::new(branch_id, Timestamp::from(1000), 0);
+            meta.complete(Timestamp::from(2000), 100);
             index.insert(branch_id, meta);
         }
 
@@ -1031,9 +1032,9 @@ mod tests {
         let run2 = BranchId::new();
         let run3 = BranchId::new();
 
-        index.insert(run1, BranchMetadata::new(run1, 1000, 0));
-        index.insert(run2, BranchMetadata::new(run2, 2000, 100));
-        index.insert(run3, BranchMetadata::new(run3, 3000, 200));
+        index.insert(run1, BranchMetadata::new(run1, Timestamp::from(1000), 0));
+        index.insert(run2, BranchMetadata::new(run2, Timestamp::from(2000), 100));
+        index.insert(run3, BranchMetadata::new(run3, Timestamp::from(3000), 200));
 
         let ids = index.list_branch_ids();
         assert_eq!(ids.len(), 3);

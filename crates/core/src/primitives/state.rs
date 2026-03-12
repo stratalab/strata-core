@@ -2,6 +2,7 @@
 //!
 //! These types define the structure of versioned state cells.
 
+use crate::contract::Timestamp;
 use crate::contract::Version;
 use crate::value::Value;
 use serde::{Deserialize, Serialize};
@@ -19,7 +20,7 @@ pub struct State {
     /// Version (Counter-based for CAS operations)
     pub version: Version,
     /// Last update timestamp (microseconds since epoch)
-    pub updated_at: u64,
+    pub updated_at: Timestamp,
 }
 
 impl State {
@@ -42,11 +43,8 @@ impl State {
     }
 
     /// Get current timestamp in microseconds
-    pub fn now() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as u64
+    pub fn now() -> Timestamp {
+        Timestamp::now()
     }
 }
 
@@ -59,7 +57,7 @@ mod tests {
         let state = State::new(Value::Int(42));
         assert_eq!(state.value, Value::Int(42));
         assert_eq!(state.version, Version::counter(1));
-        assert!(state.updated_at > 0);
+        assert!(state.updated_at > Timestamp::EPOCH);
     }
 
     #[test]
@@ -67,7 +65,7 @@ mod tests {
         let state = State::with_version(Value::String("hello".to_string()), Version::counter(5));
         assert_eq!(state.value, Value::String("hello".to_string()));
         assert_eq!(state.version, Version::counter(5));
-        assert!(state.updated_at > 0);
+        assert!(state.updated_at > Timestamp::EPOCH);
     }
 
     #[test]
@@ -76,12 +74,12 @@ mod tests {
         let s1 = State {
             value: Value::Int(1),
             version: Version::counter(1),
-            updated_at: 1000,
+            updated_at: Timestamp::from(1000),
         };
         let s2 = State {
             value: Value::Int(1),
             version: Version::counter(1),
-            updated_at: 1000,
+            updated_at: Timestamp::from(1000),
         };
         assert_eq!(s1, s2);
     }
@@ -91,12 +89,12 @@ mod tests {
         let s1 = State {
             value: Value::Int(1),
             version: Version::counter(1),
-            updated_at: 1000,
+            updated_at: Timestamp::from(1000),
         };
         let s2 = State {
             value: Value::Int(2),
             version: Version::counter(1),
-            updated_at: 1000,
+            updated_at: Timestamp::from(1000),
         };
         assert_ne!(s1, s2);
     }
@@ -114,7 +112,7 @@ mod tests {
         let state = State {
             value: Value::Int(99),
             version: Version::counter(3),
-            updated_at: 1_700_000_000,
+            updated_at: Timestamp::from(1_700_000_000),
         };
 
         let json = serde_json::to_string(&state).unwrap();
@@ -142,12 +140,12 @@ mod tests {
         let s1 = State {
             value: Value::Int(1),
             version: Version::counter(1),
-            updated_at: 1000,
+            updated_at: Timestamp::from(1000),
         };
         let s2 = State {
             value: Value::Int(1),
             version: Version::counter(2),
-            updated_at: 1000,
+            updated_at: Timestamp::from(1000),
         };
         assert_ne!(s1, s2);
     }
@@ -157,12 +155,12 @@ mod tests {
         let s1 = State {
             value: Value::Int(1),
             version: Version::counter(1),
-            updated_at: 1000,
+            updated_at: Timestamp::from(1000),
         };
         let s2 = State {
             value: Value::Int(1),
             version: Version::counter(1),
-            updated_at: 2000,
+            updated_at: Timestamp::from(2000),
         };
         assert_ne!(s1, s2);
     }
@@ -188,15 +186,9 @@ mod tests {
 
     #[test]
     fn test_state_now_returns_reasonable_timestamp() {
-        let before = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as u64;
+        let before = Timestamp::now();
         let now = State::now();
-        let after = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as u64;
+        let after = Timestamp::now();
         assert!(now >= before);
         assert!(now <= after);
     }
