@@ -608,6 +608,7 @@ impl Database {
         // Apply storage resource limits from config
         let storage = Arc::new(result.storage);
         storage.set_max_branches(cfg.storage.max_branches);
+        storage.set_max_versions_per_key(cfg.storage.max_versions_per_key);
 
         let db = Arc::new(Self {
             data_dir: canonical_path.clone(),
@@ -676,6 +677,7 @@ impl Database {
         // Create fresh storage with branch limit from default config
         let storage = ShardedStore::new();
         storage.set_max_branches(cfg.storage.max_branches);
+        storage.set_max_versions_per_key(cfg.storage.max_versions_per_key);
 
         // Create coordinator starting at version 1 (no recovery needed), with write buffer limit
         let mut coordinator = TransactionCoordinator::new(1);
@@ -1853,8 +1855,7 @@ impl Database {
         let snapshot_version = self.storage.version();
         self.coordinator.record_start(txn_id, snapshot_version);
 
-        let mut txn =
-            TransactionPool::acquire(txn_id, branch_id, Some(Arc::clone(&self.storage)));
+        let mut txn = TransactionPool::acquire(txn_id, branch_id, Some(Arc::clone(&self.storage)));
         txn.set_max_write_entries(self.coordinator.max_write_buffer_entries());
         Ok(txn)
     }
@@ -2279,10 +2280,7 @@ mod tests {
         let db_path = temp_dir.path().join("db");
 
         let branch_id = BranchId::new();
-        let ns = Arc::new(Namespace::new(
-            branch_id,
-            "default".to_string(),
-        ));
+        let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
 
         // Write directly to segmented WAL (simulating a crash recovery scenario)
         {
@@ -2306,7 +2304,11 @@ mod tests {
 
         // Storage should have data from WAL
         let key1 = Key::new_kv(ns, "key1");
-        let val = db.storage().get_versioned(&key1, u64::MAX).unwrap().unwrap();
+        let val = db
+            .storage()
+            .get_versioned(&key1, u64::MAX)
+            .unwrap()
+            .unwrap();
 
         if let Value::Bytes(bytes) = val.value {
             assert_eq!(bytes, b"value1");
@@ -2321,10 +2323,7 @@ mod tests {
         let db_path = temp_dir.path().join("db");
 
         let branch_id = BranchId::new();
-        let ns = Arc::new(Namespace::new(
-            branch_id,
-            "default".to_string(),
-        ));
+        let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
 
         // Open database, write via transaction, close
         {
@@ -2367,10 +2366,7 @@ mod tests {
         let db_path = temp_dir.path().join("db");
 
         let branch_id = BranchId::new();
-        let ns = Arc::new(Namespace::new(
-            branch_id,
-            "default".to_string(),
-        ));
+        let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
 
         // Write one valid record, then append garbage to simulate crash
         {
@@ -2473,10 +2469,7 @@ mod tests {
     // ========================================================================
 
     fn create_test_namespace(branch_id: BranchId) -> Arc<Namespace> {
-        Arc::new(Namespace::new(
-            branch_id,
-            "default".to_string(),
-        ))
+        Arc::new(Namespace::new(branch_id, "default".to_string()))
     }
 
     #[test]
@@ -2569,7 +2562,11 @@ mod tests {
         assert!(result.is_err());
 
         // Data should NOT be committed
-        assert!(db.storage().get_versioned(&key, u64::MAX).unwrap().is_none());
+        assert!(db
+            .storage()
+            .get_versioned(&key, u64::MAX)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -3155,7 +3152,10 @@ mod tests {
         let db = Database::open_with_config(&db_path, cfg).unwrap();
         let key = Key::new_kv(ns, "important_data");
         assert!(
-            db.storage().get_versioned(&key, u64::MAX).unwrap().is_none(),
+            db.storage()
+                .get_versioned(&key, u64::MAX)
+                .unwrap()
+                .is_none(),
             "Valid data before corruption should be lost in lossy mode"
         );
         assert_eq!(db.storage().current_version(), 0);
@@ -3421,8 +3421,20 @@ mod tests {
         // Both transactions' data should be persisted
         drop(db);
         let db = Database::open(&db_path).unwrap();
-        assert!(db.storage().get_versioned(&key1, u64::MAX).unwrap().is_some(), "txn1 data lost");
-        assert!(db.storage().get_versioned(&key2, u64::MAX).unwrap().is_some(), "txn2 data lost");
+        assert!(
+            db.storage()
+                .get_versioned(&key1, u64::MAX)
+                .unwrap()
+                .is_some(),
+            "txn1 data lost"
+        );
+        assert!(
+            db.storage()
+                .get_versioned(&key2, u64::MAX)
+                .unwrap()
+                .is_some(),
+            "txn2 data lost"
+        );
     }
 
     /// Helper: blind-write a single key via transaction_with_version.
@@ -3458,10 +3470,7 @@ mod tests {
                     let db = &db;
                     let barrier = barrier.clone();
                     s.spawn(move || {
-                        let ns = Arc::new(Namespace::new(
-                            branch_id,
-                            "kv".to_string(),
-                        ));
+                        let ns = Arc::new(Namespace::new(branch_id, "kv".to_string()));
                         barrier.wait();
                         for i in 0..OPS_PER_THREAD {
                             let key = Key::new_kv(ns.clone(), format!("k{i}"));
@@ -3495,10 +3504,7 @@ mod tests {
         // Check the last round (16 threads × OPS_PER_THREAD keys)
         let last_thread_count = *thread_counts.last().unwrap();
         for t in 0..last_thread_count {
-            let ns = Arc::new(Namespace::new(
-                branch_id,
-                "kv".to_string(),
-            ));
+            let ns = Arc::new(Namespace::new(branch_id, "kv".to_string()));
             // Spot-check first, middle, and last keys
             for &i in &[0, OPS_PER_THREAD / 2, OPS_PER_THREAD - 1] {
                 let key = Key::new_kv(ns.clone(), format!("k{i}"));
