@@ -1850,11 +1850,11 @@ impl Database {
     /// ```
     pub fn begin_transaction(&self, branch_id: BranchId) -> StrataResult<TransactionContext> {
         let txn_id = self.coordinator.next_txn_id()?;
-        let snapshot = self.storage.create_snapshot();
-        let snapshot_version = snapshot.version();
+        let snapshot_version = self.storage.version();
         self.coordinator.record_start(txn_id, snapshot_version);
 
-        let mut txn = TransactionPool::acquire(txn_id, branch_id, Some(Box::new(snapshot)));
+        let mut txn =
+            TransactionPool::acquire(txn_id, branch_id, Some(Arc::clone(&self.storage)));
         txn.set_max_write_entries(self.coordinator.max_write_buffer_entries());
         Ok(txn)
     }

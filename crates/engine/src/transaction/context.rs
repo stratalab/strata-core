@@ -683,7 +683,7 @@ impl<'a> TransactionOps for Transaction<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_concurrency::snapshot::ClonedSnapshotView;
+    use strata_storage::ShardedStore;
 
     fn create_test_namespace() -> Arc<Namespace> {
         let branch_id = BranchId::new();
@@ -694,8 +694,8 @@ mod tests {
     }
 
     fn create_test_context(ns: &Namespace) -> TransactionContext {
-        let snapshot = Box::new(ClonedSnapshotView::empty(100));
-        TransactionContext::with_snapshot(1, ns.branch_id, snapshot)
+        let store = Arc::new(ShardedStore::new());
+        TransactionContext::with_store(1, ns.branch_id, store)
     }
 
     // =========================================================================

@@ -418,10 +418,10 @@ pub struct BranchMemoryStats {
 ///
 /// ```text
 /// use strata_storage::ShardedStore;
-/// use std::sync::Arc;
+/// use strata_core::traits::Storage;
 ///
-/// let store = Arc::new(ShardedStore::new());
-/// let snapshot = store.snapshot();
+/// let store = ShardedStore::new();
+/// let value = store.get_versioned(&key, store.version());
 /// ```
 pub struct ShardedStore {
     /// Per-branch shards using DashMap
@@ -1185,70 +1185,6 @@ impl ShardedStore {
         self.shards.remove(branch_id).is_some()
     }
 
-    // ========================================================================
-    // Snapshot Acquisition
-    // ========================================================================
-
-    /// Create a snapshot of the current store state
-    ///
-    /// FAST PATH: This is O(1) and < 500ns!
-    ///
-    /// Snapshot acquisition is:
-    /// - Allocation-free (Arc reference count bump only)
-    /// - Lock-free (atomic version load)
-    /// - O(1) (no data structure scanning)
-    ///
-    /// The snapshot captures the current version and holds an Arc reference
-    /// to the store, allowing reads at the captured version point.
-    ///
-    /// # Performance Contract
-    ///
-    /// - Must complete in < 500ns (RED FLAG if > 2µs)
-    /// - Only operations: Arc::clone + atomic load
-    ///
-    /// # Example
-    ///
-    /// ```text
-    /// use std::sync::Arc;
-    /// use strata_storage::ShardedStore;
-    ///
-    /// let store = Arc::new(ShardedStore::new());
-    /// let snapshot = store.snapshot();
-    ///
-    /// // Reads through snapshot see store state at snapshot time
-    /// let value = snapshot.get(&key);
-    /// ```
-    #[inline]
-    pub fn snapshot(self: &Arc<Self>) -> ShardedSnapshot {
-        ShardedSnapshot {
-            version: self.version.load(Ordering::Acquire),
-            store: Arc::clone(self),
-        }
-    }
-
-    /// Create a snapshot - API compatibility method
-    ///
-    /// This method provides API compatibility with `UnifiedStore::create_snapshot()`.
-    /// It returns the same `ShardedSnapshot` as `snapshot()` but with a name that
-    /// matches the legacy API.
-    ///
-    /// # Performance
-    ///
-    /// Same as `snapshot()` - O(1), < 500ns, allocation-free.
-    ///
-    /// # Example
-    ///
-    /// ```text
-    /// use std::sync::Arc;
-    /// use strata_storage::ShardedStore;
-    ///
-    /// let store = Arc::new(ShardedStore::new());
-    /// let snapshot = store.create_snapshot();  // Same as store.snapshot()
-    /// ```
-    #[inline]
-    pub fn create_snapshot(self: &Arc<Self>) -> ShardedSnapshot {
-        self.snapshot()
-    }
 }
 
 impl Default for ShardedStore {
@@ -1263,227 +1199,6 @@ impl std::fmt::Debug for ShardedStore {
             .field("shard_count", &self.shard_count())
             .field("version", &self.version())
             .field("total_entries", &self.total_entries())
-            .finish()
-    }
-}
-
-// ============================================================================
-// ShardedSnapshot
-// ============================================================================
-
-/// Lightweight snapshot view for MVCC reads
-///
-/// ShardedSnapshot is a thin wrapper that captures:
-/// - The version number at snapshot time
-/// - An Arc reference to the underlying store
-///
-/// All reads delegate to `store.get_versioned(key, version)`, which walks
-/// the version chain to find the correct value. This provides:
-/// - O(1) snapshot creation (just capture version + Arc clone)
-/// - O(1) snapshot cloning (derive Clone)
-/// - No unbounded memory growth (no per-snapshot cache)
-/// - MVCC isolation via the store's version chain
-///
-/// # Performance
-///
-/// Snapshot acquisition is O(1) and < 500ns:
-/// - Arc::clone: ~20-30ns (atomic increment)
-/// - Atomic load: ~1-5ns
-/// - Total: well under 500ns
-///
-/// # Thread Safety
-///
-/// ShardedSnapshot is Send + Sync since it only holds Arc<ShardedStore>.
-/// Multiple snapshots can exist concurrently without blocking.
-#[derive(Clone)]
-pub struct ShardedSnapshot {
-    /// Version captured at snapshot time
-    version: u64,
-    /// Reference to the underlying store
-    store: Arc<ShardedStore>,
-}
-
-impl ShardedSnapshot {
-    /// Get the snapshot version
-    ///
-    /// This is the version of the store at the time the snapshot was created.
-    #[inline]
-    pub fn version(&self) -> u64 {
-        self.version
-    }
-
-    // NOTE: `get()` is provided by the SnapshotView trait implementation,
-    // which includes proper MVCC version filtering and TTL expiration checks.
-    // Use `SnapshotView::get()` directly instead of an inherent method.
-
-    /// Check if a key exists at or before the snapshot version
-    #[inline]
-    pub fn contains(&self, key: &Key) -> bool {
-        // Use the SnapshotView trait method for proper version filtering
-        use strata_core::traits::SnapshotView;
-        SnapshotView::get(self, key).ok().flatten().is_some()
-    }
-
-    /// List all entries for a branch at snapshot version
-    ///
-    /// Returns entries as they existed at the snapshot version,
-    /// filtering out expired values and tombstones.
-    /// Results are sorted by key (BTreeSet iteration order).
-    pub fn list_branch(&self, branch_id: &BranchId) -> Vec<(Key, VersionedValue)> {
-        self.store
-            .shards
-            .get_mut(branch_id)
-            .map(|mut shard| {
-                shard.ensure_ordered_keys();
-                shard
-                    .ordered_keys
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .filter_map(|k| {
-                        shard.data.get(k).and_then(|chain| {
-                            chain.get_at_version(self.version).and_then(|sv| {
-                                if !sv.is_expired() && !sv.is_tombstone() {
-                                    Some(((**k).clone(), sv.versioned()))
-                                } else {
-                                    None
-                                }
-                            })
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// List entries matching a prefix at snapshot version
-    ///
-    /// Returns entries as they existed at the snapshot version,
-    /// filtering out expired values and tombstones.
-    /// Uses BTreeSet range scan for O(log n + k) performance.
-    pub fn list_by_prefix(&self, prefix: &Key) -> Vec<(Key, VersionedValue)> {
-        let branch_id = prefix.namespace.branch_id;
-        self.store
-            .shards
-            .get_mut(&branch_id)
-            .map(|mut shard| {
-                shard.ensure_ordered_keys();
-                shard
-                    .ordered_keys
-                    .as_ref()
-                    .unwrap()
-                    .range::<Key, _>(prefix..)
-                    .take_while(|k| k.starts_with(prefix))
-                    .filter_map(|k| {
-                        shard.data.get(k).and_then(|chain| {
-                            chain.get_at_version(self.version).and_then(|sv| {
-                                if !sv.is_expired() && !sv.is_tombstone() {
-                                    Some(((**k).clone(), sv.versioned()))
-                                } else {
-                                    None
-                                }
-                            })
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// List entries of a specific type at snapshot version
-    ///
-    /// Returns entries as they existed at the snapshot version,
-    /// filtering out expired values and tombstones.
-    /// Results are sorted by key (BTreeSet iteration order).
-    pub fn list_by_type(
-        &self,
-        branch_id: &BranchId,
-        type_tag: strata_core::types::TypeTag,
-    ) -> Vec<(Key, VersionedValue)> {
-        self.store
-            .shards
-            .get_mut(branch_id)
-            .map(|mut shard| {
-                shard.ensure_ordered_keys();
-                shard
-                    .ordered_keys
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .filter(|k| k.type_tag == type_tag)
-                    .filter_map(|k| {
-                        shard.data.get(k).and_then(|chain| {
-                            chain.get_at_version(self.version).and_then(|sv| {
-                                if !sv.is_expired() && !sv.is_tombstone() {
-                                    Some(((**k).clone(), sv.versioned()))
-                                } else {
-                                    None
-                                }
-                            })
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Get count of entries for a branch at snapshot version
-    ///
-    /// Counts only entries that existed at the snapshot version
-    /// (excludes tombstones and expired values).
-    pub fn branch_entry_count(&self, branch_id: &BranchId) -> usize {
-        self.store
-            .shards
-            .get(branch_id)
-            .map(|shard| {
-                shard
-                    .data
-                    .iter()
-                    .filter(|(_, chain)| {
-                        chain
-                            .get_at_version(self.version)
-                            .is_some_and(|sv| !sv.is_expired() && !sv.is_tombstone())
-                    })
-                    .count()
-            })
-            .unwrap_or(0)
-    }
-
-    /// Get total entries across all branches at snapshot version
-    ///
-    /// Counts only entries that existed at the snapshot version
-    /// (excludes tombstones and expired values).
-    pub fn total_entries(&self) -> usize {
-        self.store
-            .shards
-            .iter()
-            .map(|entry| {
-                entry
-                    .value()
-                    .data
-                    .iter()
-                    .filter(|(_, chain)| {
-                        chain
-                            .get_at_version(self.version)
-                            .is_some_and(|sv| !sv.is_expired() && !sv.is_tombstone())
-                    })
-                    .count()
-            })
-            .sum()
-    }
-
-    /// Get number of branches (shards)
-    pub fn shard_count(&self) -> usize {
-        self.store.shard_count()
-    }
-}
-
-impl std::fmt::Debug for ShardedSnapshot {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ShardedSnapshot")
-            .field("version", &self.version)
-            .field("shard_count", &self.store.shard_count())
-            .field("total_entries", &self.store.total_entries())
             .finish()
     }
 }
@@ -1635,81 +1350,6 @@ impl Storage for ShardedStore {
                 })
             })
         }))
-    }
-}
-
-// ============================================================================
-// SnapshotView Trait Implementation
-// ============================================================================
-
-use strata_core::traits::SnapshotView;
-
-impl SnapshotView for ShardedSnapshot {
-    /// Get value from snapshot with MVCC version filtering
-    ///
-    /// Delegates to `store.get_versioned(key, version)` which walks the
-    /// version chain to find the correct value at the snapshot version.
-    fn get(&self, key: &Key) -> StrataResult<Option<VersionedValue>> {
-        // Delegate to Storage::get_versioned for MVCC lookup
-        Storage::get_versioned(&*self.store, key, self.version)
-    }
-
-    /// Scan keys with prefix from snapshot
-    ///
-    /// Uses BTreeSet range scan for O(log n + k) performance.
-    /// Returns all matching keys at or before snapshot version.
-    fn scan_prefix(&self, prefix: &Key) -> StrataResult<Vec<(Key, VersionedValue)>> {
-        let branch_id = prefix.namespace.branch_id;
-        Ok(self
-            .store
-            .shards
-            .get_mut(&branch_id)
-            .map(|mut shard| {
-                shard.ensure_ordered_keys();
-                shard
-                    .ordered_keys
-                    .as_ref()
-                    .unwrap()
-                    .range::<Key, _>(prefix..)
-                    .take_while(|k| k.starts_with(prefix))
-                    .filter_map(|k| {
-                        shard.data.get(k).and_then(|chain| {
-                            chain.get_at_version(self.version).and_then(|sv| {
-                                if !sv.is_expired() && !sv.is_tombstone() {
-                                    Some(((**k).clone(), sv.versioned()))
-                                } else {
-                                    None
-                                }
-                            })
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default())
-    }
-
-    /// Get just the value and raw version, skipping VersionedValue construction.
-    ///
-    /// Avoids `Version::Txn` enum construction — returns raw `u64` directly
-    /// from the `StoredValue`. Used by the transaction read path.
-    fn get_value_and_version(&self, key: &Key) -> StrataResult<Option<(Value, u64)>> {
-        let branch_id = key.namespace.branch_id;
-        Ok(self.store.shards.get(&branch_id).and_then(|shard| {
-            shard.data.get(key).and_then(|chain| {
-                chain.get_at_version(self.version).and_then(|sv| {
-                    if !sv.is_expired() && !sv.is_tombstone() {
-                        Some((sv.value().clone(), sv.version_raw()))
-                    } else {
-                        None
-                    }
-                })
-            })
-        }))
-    }
-
-    /// Get snapshot version
-    fn version(&self) -> u64 {
-        self.version
     }
 }
 
@@ -2716,41 +2356,14 @@ mod tests {
     }
 
     // ========================================================================
-    // Snapshot Acquisition Tests
+    // Version-Based Read Tests (replaces Snapshot Acquisition Tests)
     // ========================================================================
 
     #[test]
-    fn test_snapshot_creation() {
-        let store = Arc::new(ShardedStore::new());
-        let snapshot = store.snapshot();
-
-        assert_eq!(snapshot.version(), 0);
-        assert_eq!(snapshot.shard_count(), 0);
-    }
-
-    #[test]
-    fn test_snapshot_captures_version() {
-        let store = Arc::new(ShardedStore::new());
-
-        // Increment version
-        store.next_version();
-        store.next_version();
-        store.next_version();
-
-        let snapshot = store.snapshot();
-        assert_eq!(snapshot.version(), 3);
-
-        // Further increments don't affect snapshot
-        store.next_version();
-        assert_eq!(snapshot.version(), 3);
-        assert_eq!(store.version(), 4);
-    }
-
-    #[test]
-    fn test_snapshot_read_operations() {
+    fn test_version_based_read_operations() {
         use strata_core::value::Value;
 
-        let store = Arc::new(ShardedStore::new());
+        let store = ShardedStore::new();
         let branch_id = BranchId::new();
 
         // Put some data (version=1)
@@ -2762,66 +2375,30 @@ mod tests {
                 WriteMode::Append,
             )
             .unwrap();
-        // Update store version so snapshot can see data at version 1
+        // Update store version so reads can see data at version 1
         store.set_version(1);
 
-        // Create snapshot (will capture version=1)
-        let snapshot = store.snapshot();
+        let v = store.version();
 
-        // Read through snapshot (SnapshotView returns Result<Option<...>>)
-        let value = snapshot.get(&key).unwrap();
+        // Read through get_versioned with captured version
+        let value = store.get_versioned(&key, v).unwrap();
         assert!(value.is_some());
         assert_eq!(value.unwrap().value, Value::Int(42));
 
         // contains works
-        assert!(snapshot.contains(&key));
+        assert!(store.get_versioned(&key, v).unwrap().is_some());
     }
 
     #[test]
-    fn test_snapshot_list_operations() {
+    fn test_version_capture_for_mvcc() {
         use strata_core::value::Value;
 
-        let store = Arc::new(ShardedStore::new());
+        let store = ShardedStore::new();
         let branch_id = BranchId::new();
 
-        // Put some data at version 1
-        for i in 0..5 {
-            let key = create_test_key(branch_id, &format!("key{}", i));
-            store
-                .put(
-                    key,
-                    create_stored_value(Value::Int(i), 1),
-                    WriteMode::Append,
-                )
-                .unwrap();
-        }
-
-        // Advance store version to 1 so snapshot will see the data
-        store.next_version();
-        let snapshot = store.snapshot();
-        assert_eq!(snapshot.version(), 1);
-
-        // list_branch works - sees data at version 1
-        let results = snapshot.list_branch(&branch_id);
-        assert_eq!(results.len(), 5);
-
-        // branch_entry_count works
-        assert_eq!(snapshot.branch_entry_count(&branch_id), 5);
-
-        // total_entries works
-        assert_eq!(snapshot.total_entries(), 5);
-    }
-
-    #[test]
-    fn test_snapshot_multiple_concurrent() {
-        use strata_core::value::Value;
-
-        let store = Arc::new(ShardedStore::new());
-        let branch_id = BranchId::new();
-
-        // Create first snapshot at version 0
-        let snap1 = store.snapshot();
-        assert_eq!(snap1.version(), 0);
+        // Capture version before writes
+        let v0 = store.version();
+        assert_eq!(v0, 0);
 
         // Add data and increment version
         let key1 = create_test_key(branch_id, "key1");
@@ -2834,9 +2411,8 @@ mod tests {
             .unwrap();
         store.next_version();
 
-        // Create second snapshot at version 1
-        let snap2 = store.snapshot();
-        assert_eq!(snap2.version(), 1);
+        let v1 = store.version();
+        assert_eq!(v1, 1);
 
         // Add more data
         let key2 = create_test_key(branch_id, "key2");
@@ -2849,65 +2425,47 @@ mod tests {
             .unwrap();
         store.next_version();
 
-        // Create third snapshot at version 2
-        let snap3 = store.snapshot();
-        assert_eq!(snap3.version(), 2);
+        let v2 = store.version();
+        assert_eq!(v2, 2);
 
-        // All snapshots retain their version
-        assert_eq!(snap1.version(), 0);
-        assert_eq!(snap2.version(), 1);
-        assert_eq!(snap3.version(), 2);
+        // Captured versions enable MVCC reads at different points in time
+        // v0: nothing visible
+        assert!(store.get_versioned(&key1, v0).unwrap().is_none());
+        assert!(store.get_versioned(&key2, v0).unwrap().is_none());
 
-        // Note: Current implementation doesn't do MVCC filtering,
-        // so all snapshots see current data. This test verifies
-        // version capture is working correctly.
+        // v1: key1 visible, key2 not yet
+        assert!(store.get_versioned(&key1, v1).unwrap().is_some());
+        assert!(store.get_versioned(&key2, v1).unwrap().is_none());
+
+        // v2: both visible
+        assert!(store.get_versioned(&key1, v2).unwrap().is_some());
+        assert!(store.get_versioned(&key2, v2).unwrap().is_some());
     }
 
     #[test]
-    fn test_snapshot_clone() {
-        let store = Arc::new(ShardedStore::new());
-        store.next_version();
-
-        let snapshot = store.snapshot();
-        let cloned = snapshot.clone();
-
-        assert_eq!(snapshot.version(), cloned.version());
-    }
-
-    #[test]
-    fn test_snapshot_debug() {
-        let store = Arc::new(ShardedStore::new());
-        let snapshot = store.snapshot();
-
-        let debug_str = format!("{:?}", snapshot);
-        assert!(debug_str.contains("ShardedSnapshot"));
-        assert!(debug_str.contains("version"));
-    }
-
-    #[test]
-    fn test_snapshot_thread_safety() {
+    fn test_version_thread_safety_with_reads() {
         use std::thread;
 
         let store = Arc::new(ShardedStore::new());
 
-        // Spawn threads that create snapshots concurrently
+        // Spawn threads that capture versions and increment concurrently
         let handles: Vec<_> = (0..10)
             .map(|_| {
                 let store = Arc::clone(&store);
                 thread::spawn(move || {
-                    // Create snapshot
-                    let snapshot = store.snapshot();
+                    // Capture version
+                    let v1 = store.version();
 
                     // Increment version
                     store.next_version();
 
-                    // Create another snapshot
-                    let snapshot2 = store.snapshot();
+                    // Capture again
+                    let v2 = store.version();
 
-                    // Second snapshot should have higher or equal version
-                    assert!(snapshot2.version() >= snapshot.version());
+                    // Second version should be higher or equal
+                    assert!(v2 >= v1);
 
-                    (snapshot.version(), snapshot2.version())
+                    (v1, v2)
                 })
             })
             .collect();
@@ -2919,42 +2477,6 @@ mod tests {
 
         // Final version should be 10 (each thread incremented once)
         assert_eq!(store.version(), 10);
-    }
-
-    #[test]
-    fn test_snapshot_fast_path() {
-        use std::time::Instant;
-
-        let store = Arc::new(ShardedStore::new());
-
-        // Add some data to make it more realistic
-        let branch_id = BranchId::new();
-        for i in 0..1000 {
-            let key = create_test_key(branch_id, &format!("key{}", i));
-            store.put(
-                key,
-                create_stored_value(strata_core::value::Value::Int(i), 1),
-                WriteMode::Append,
-            );
-        }
-
-        // Measure snapshot creation time
-        let iterations = 10000;
-        let start = Instant::now();
-        for _ in 0..iterations {
-            let _snapshot = store.snapshot();
-        }
-        let elapsed = start.elapsed();
-        let avg_ns = elapsed.as_nanos() / iterations as u128;
-
-        // Should be well under 500ns
-        // Note: In debug mode it might be slightly higher, but should still be fast
-        println!("Snapshot acquisition avg: {}ns", avg_ns);
-        assert!(
-            avg_ns < 5000, // 5µs max in debug mode
-            "Snapshot too slow: {}ns (target: <500ns in release)",
-            avg_ns
-        );
     }
 
     // ========================================================================
@@ -3262,55 +2784,52 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_view_trait() {
-        use strata_core::traits::{SnapshotView, Storage};
+    fn test_versioned_read_mvcc_filtering() {
+        use strata_core::traits::Storage;
         use strata_core::types::Namespace;
         use strata_core::value::Value;
 
-        let store = Arc::new(ShardedStore::new());
+        let store = ShardedStore::new();
         let branch_id = BranchId::new();
         let ns = Arc::new(Namespace::for_branch(branch_id));
 
         // Put at version 1
         let key1 = Key::new_kv(ns.clone(), "key1");
-        Storage::put_with_version_mode(&*store, key1.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
+        Storage::put_with_version_mode(&store, key1.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
 
-        // Create snapshot at version 1
-        let snapshot = store.snapshot();
-        assert_eq!(SnapshotView::version(&snapshot), 1);
+        // Capture version at 1
+        let v = store.version();
+        assert_eq!(v, 1);
 
         // Put at version 2
         let key2 = Key::new_kv(ns.clone(), "key2");
-        Storage::put_with_version_mode(&*store, key2.clone(), Value::Int(2), 2, None, WriteMode::Append).unwrap();
+        Storage::put_with_version_mode(&store, key2.clone(), Value::Int(2), 2, None, WriteMode::Append).unwrap();
 
-        // Snapshot should only see key1 (version 1) via MVCC filtering
-        let snap_key1 = SnapshotView::get(&snapshot, &key1).unwrap();
-        assert!(snap_key1.is_some());
+        // Reading at captured version 1 should only see key1 via MVCC filtering
+        let read_key1 = store.get_versioned(&key1, v).unwrap();
+        assert!(read_key1.is_some());
 
-        // key2 has version 2, but snapshot is at version 1
-        // It will be visible since we're reading from shared storage
-        // but won't pass version filter
-        let snap_key2 = SnapshotView::get(&snapshot, &key2).unwrap();
-        // Note: key2 has version 2, snapshot version is 1, so it should be None
+        // key2 has version 2, but we're reading at version 1
+        let read_key2 = store.get_versioned(&key2, v).unwrap();
         assert!(
-            snap_key2.is_none(),
+            read_key2.is_none(),
             "key2 should not be visible at version 1"
         );
     }
 
     #[test]
-    fn test_snapshot_view_scan_prefix() {
-        use strata_core::traits::{SnapshotView, Storage};
+    fn test_versioned_scan_prefix_mvcc() {
+        use strata_core::traits::Storage;
         use strata_core::types::Namespace;
         use strata_core::value::Value;
 
-        let store = Arc::new(ShardedStore::new());
+        let store = ShardedStore::new();
         let branch_id = BranchId::new();
         let ns = Arc::new(Namespace::for_branch(branch_id));
 
-        // Put two keys at version 1
+        // Put two keys at version 1 and 2
         Storage::put_with_version_mode(
-            &*store,
+            &store,
             Key::new_kv(ns.clone(), "user:alice"),
             Value::Int(1),
             1,
@@ -3319,7 +2838,7 @@ mod tests {
         )
         .unwrap();
         Storage::put_with_version_mode(
-            &*store,
+            &store,
             Key::new_kv(ns.clone(), "user:bob"),
             Value::Int(2),
             2,
@@ -3328,11 +2847,12 @@ mod tests {
         )
         .unwrap();
 
-        let snapshot = store.snapshot();
+        // Capture version before third write
+        let v = store.version();
 
         // Put another key at version 3
         Storage::put_with_version_mode(
-            &*store,
+            &store,
             Key::new_kv(ns.clone(), "user:charlie"),
             Value::Int(3),
             3,
@@ -3341,14 +2861,14 @@ mod tests {
         )
         .unwrap();
 
-        // Scan prefix via snapshot - should only see 2 keys at snapshot version
+        // Scan prefix at captured version - should only see 2 keys
         let prefix = Key::new_kv(ns.clone(), "user:");
-        let results = SnapshotView::scan_prefix(&snapshot, &prefix).unwrap();
+        let results = Storage::scan_prefix(&store, &prefix, v).unwrap();
 
         assert_eq!(
             results.len(),
             2,
-            "Snapshot should only see keys at version <= 2"
+            "Should only see keys at version <= 2"
         );
     }
 
@@ -3647,74 +3167,73 @@ mod tests {
     // These tests probe edge cases and potential bugs.
     // ========================================================================
 
-    /// MVCC delete with tombstones preserves snapshot isolation
+    /// MVCC delete with tombstones preserves version-based isolation
     ///
     /// Delete now creates a tombstone at a new version instead of removing all versions.
-    /// This ensures snapshots taken before the delete can still see the value.
+    /// This ensures reads at an earlier version can still see the value.
     #[test]
     fn test_delete_uses_tombstone_preserving_mvcc() {
-        use strata_core::traits::{SnapshotView, Storage};
+        use strata_core::traits::Storage;
         use strata_core::value::Value;
 
-        let store = Arc::new(ShardedStore::new());
+        let store = ShardedStore::new();
         let branch_id = BranchId::new();
         let key = create_test_key(branch_id, "mvcc_uncached");
 
         // Put a value at version 1
-        Storage::put_with_version_mode(&*store, key.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
+        Storage::put_with_version_mode(&store, key.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
 
-        // Create a snapshot at version 1 - but DON'T read the key yet
-        let snapshot = store.snapshot();
-        assert_eq!(snapshot.version(), 1);
+        // Capture version at 1
+        let v = store.version();
+        assert_eq!(v, 1);
 
-        // Delete the key BEFORE the snapshot reads it
-        // This creates a tombstone at version 2
-        Storage::delete_with_version(&*store, &key, 2).unwrap();
+        // Delete the key — creates a tombstone at version 2
+        Storage::delete_with_version(&store, &key, 2).unwrap();
 
-        // Now read from snapshot - it should see version 1 (before the tombstone)
-        let result = SnapshotView::get(&snapshot, &key).unwrap();
+        // Read at captured version 1 — should see value before the tombstone
+        let result = store.get_versioned(&key, v).unwrap();
 
-        // FIX VERIFIED: The snapshot sees the value at version 1 because
+        // FIX VERIFIED: Reading at version 1 sees the value because
         // delete() creates a tombstone at version 2, leaving version 1 intact.
         assert!(
             result.is_some(),
-            "Snapshot should see value at version 1 - tombstone is at version 2"
+            "Read at version 1 should see value - tombstone is at version 2"
         );
         assert_eq!(
             result.unwrap().value,
             Value::Int(100),
-            "Snapshot should see the original value"
+            "Should see the original value"
         );
     }
 
-    /// Verify snapshot cache provides isolation for pre-read keys
+    /// Verify version-based MVCC provides isolation for reads
     ///
-    /// If a snapshot reads a key BEFORE it's deleted, the cached value
-    /// provides isolation and the snapshot continues to see the value.
+    /// Reading at a captured version before a delete still sees the value,
+    /// because the tombstone has a higher version number.
     #[test]
-    fn test_snapshot_cache_provides_isolation_for_cached_reads() {
-        use strata_core::traits::{SnapshotView, Storage};
+    fn test_versioned_read_provides_isolation_across_deletes() {
+        use strata_core::traits::Storage;
         use strata_core::value::Value;
 
-        let store = Arc::new(ShardedStore::new());
+        let store = ShardedStore::new();
         let branch_id = BranchId::new();
         let key = create_test_key(branch_id, "cached_test");
 
         // Put a value at version 1
-        Storage::put_with_version_mode(&*store, key.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
+        Storage::put_with_version_mode(&store, key.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
 
-        // Create snapshot and READ the key (this caches it)
-        let snapshot = store.snapshot();
-        let before = SnapshotView::get(&snapshot, &key).unwrap();
+        // Capture version and read the key
+        let v = store.version();
+        let before = store.get_versioned(&key, v).unwrap();
         assert!(before.is_some());
         assert_eq!(before.unwrap().value, Value::Int(100));
 
         // Delete the key
-        Storage::delete_with_version(&*store, &key, 2).unwrap();
+        Storage::delete_with_version(&store, &key, 2).unwrap();
 
-        // Snapshot should still see the cached value
-        let after = SnapshotView::get(&snapshot, &key).unwrap();
-        assert!(after.is_some(), "Cached value should survive delete");
+        // Reading at captured version should still see the value
+        let after = store.get_versioned(&key, v).unwrap();
+        assert!(after.is_some(), "Value at version 1 should survive delete at version 2");
         assert_eq!(after.unwrap().value, Value::Int(100));
     }
 
@@ -3785,19 +3304,18 @@ mod tests {
         );
     }
 
-    /// SAFETY: Concurrent snapshot reads during store modifications
+    /// SAFETY: Concurrent versioned reads during store modifications
     ///
-    /// Snapshots hold an `Arc<ShardedStore>` and a captured version `u64`.
-    /// Reads delegate to `get_versioned()`, which acquires a DashMap read
-    /// lock and walks the version chain for entries <= snapshot version.
-    /// New versions are only prepended (push_front) and old versions are
-    /// never mutated in place, so concurrent writes cannot corrupt a
-    /// snapshot read. DashMap's per-shard RwLock ensures structural safety.
+    /// `get_versioned()` acquires a DashMap read lock and walks the version
+    /// chain for entries <= the specified version. New versions are only
+    /// prepended (push_front) and old versions are never mutated in place,
+    /// so concurrent writes cannot corrupt a versioned read. DashMap's
+    /// per-shard RwLock ensures structural safety.
     #[test]
-    fn test_snapshot_isolation_under_concurrent_writes() {
+    fn test_versioned_read_isolation_under_concurrent_writes() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::thread;
-        use strata_core::traits::{SnapshotView, Storage};
+        use strata_core::traits::Storage;
         use strata_core::value::Value;
 
         let store = Arc::new(ShardedStore::new());
@@ -3809,9 +3327,8 @@ mod tests {
             Storage::put_with_version_mode(&*store, key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
         }
 
-        // Take snapshot
-        let snapshot = store.snapshot();
-        let snapshot_version = snapshot.version();
+        // Capture version for MVCC reads
+        let read_version = store.version();
 
         // Flag to stop writers
         let stop = Arc::new(AtomicBool::new(false));
@@ -3838,27 +3355,26 @@ mod tests {
             })
             .collect();
 
-        // Read from snapshot while writes are happening
-        // Snapshot should see consistent values at snapshot_version
+        // Read at captured version while writes are happening
         for _ in 0..100 {
             for i in 0..10 {
                 let key = create_test_key(branch_id, &format!("key{}", i));
-                let result = SnapshotView::get(&snapshot, &key).unwrap();
+                let result = store.get_versioned(&key, read_version).unwrap();
 
-                // Snapshot should see SOME value (the one at or before snapshot version)
+                // Should see SOME value (the one at or before captured version)
                 assert!(
                     result.is_some(),
-                    "Snapshot lost visibility to key{} during concurrent writes",
+                    "Lost visibility to key{} during concurrent writes",
                     i
                 );
 
-                // The version should be <= snapshot_version
+                // The version should be <= captured version
                 let version = result.as_ref().unwrap().version.as_u64();
                 assert!(
-                    version <= snapshot_version,
-                    "Snapshot saw version {} but snapshot is at {} - MVCC violation",
+                    version <= read_version,
+                    "Saw version {} but reading at {} - MVCC violation",
                     version,
-                    snapshot_version
+                    read_version
                 );
             }
         }
@@ -3870,18 +3386,16 @@ mod tests {
         }
     }
 
-    /// SAFETY: Snapshot cache race condition (not applicable)
+    /// SAFETY: Concurrent get_versioned access from multiple threads
     ///
-    /// `ShardedSnapshot` has no cache. It stores only a version `u64` and
-    /// an `Arc<ShardedStore>`, delegating every `get()` call directly to
-    /// `Storage::get_versioned()`. There is no check-then-populate pattern,
-    /// so no race condition is possible. Multiple threads calling `get()`
-    /// concurrently each acquire independent DashMap read locks.
+    /// `get_versioned()` only acquires DashMap read locks. Multiple threads
+    /// calling it concurrently each acquire independent read locks, so there
+    /// is no contention or race condition.
     #[test]
-    fn test_snapshot_cache_concurrent_access() {
+    fn test_concurrent_versioned_reads() {
         use std::sync::Barrier;
         use std::thread;
-        use strata_core::traits::{SnapshotView, Storage};
+        use strata_core::traits::Storage;
         use strata_core::value::Value;
 
         let store = Arc::new(ShardedStore::new());
@@ -3891,23 +3405,23 @@ mod tests {
         // Put a value
         Storage::put_with_version_mode(&*store, key.clone(), Value::Int(42), 1, None, WriteMode::Append).unwrap();
 
-        // Create snapshot
-        let snapshot = Arc::new(store.snapshot());
+        // Capture version for reads
+        let read_version = store.version();
 
-        // Use barrier to ensure all threads hit get() simultaneously
+        // Use barrier to ensure all threads hit get_versioned() simultaneously
         let num_threads = 10;
         let barrier = Arc::new(Barrier::new(num_threads));
 
         let handles: Vec<_> = (0..num_threads)
             .map(|_| {
-                let snapshot = Arc::clone(&snapshot);
+                let store = Arc::clone(&store);
                 let key = key.clone();
                 let barrier = Arc::clone(&barrier);
 
                 thread::spawn(move || {
                     barrier.wait();
-                    // All threads try to get() at the same time
-                    let result = SnapshotView::get(&*snapshot, &key).unwrap();
+                    // All threads try to get_versioned() at the same time
+                    let result = store.get_versioned(&key, read_version).unwrap();
                     result.map(|v| v.value.clone())
                 })
             })
@@ -3916,12 +3430,12 @@ mod tests {
         // Collect results
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
-        // All threads should see the same value (cache is consistent)
+        // All threads should see the same value
         for result in &results {
             assert_eq!(
                 *result,
                 Some(Value::Int(42)),
-                "Snapshot cache returned inconsistent value under concurrent access"
+                "get_versioned returned inconsistent value under concurrent access"
             );
         }
     }
@@ -4124,7 +3638,7 @@ mod tests {
 
     /// SAFETY: Scan operations with expired TTL values
     ///
-    /// Both `Storage::scan_prefix` and `SnapshotView::scan_prefix` explicitly
+    /// `Storage::scan_prefix` explicitly
     /// check `!sv.is_expired() && !sv.is_tombstone()` before including a
     /// value in results. Expired TTL values are correctly filtered out.
     #[test]
@@ -4261,17 +3775,17 @@ mod tests {
 
     #[test]
     fn test_prefix_scan_with_tombstones() {
-        use strata_core::traits::{SnapshotView, Storage};
+        use strata_core::traits::Storage;
         use strata_core::types::Namespace;
         use strata_core::value::Value;
 
-        let store = Arc::new(ShardedStore::new());
+        let store = ShardedStore::new();
         let branch_id = BranchId::new();
         let ns = Arc::new(Namespace::for_branch(branch_id));
 
         // Insert 3 keys at version 1, 2, 3
         Storage::put_with_version_mode(
-            &*store,
+            &store,
             Key::new_kv(ns.clone(), "item:a"),
             Value::Int(1),
             1,
@@ -4280,7 +3794,7 @@ mod tests {
         )
         .unwrap();
         Storage::put_with_version_mode(
-            &*store,
+            &store,
             Key::new_kv(ns.clone(), "item:b"),
             Value::Int(2),
             2,
@@ -4289,7 +3803,7 @@ mod tests {
         )
         .unwrap();
         Storage::put_with_version_mode(
-            &*store,
+            &store,
             Key::new_kv(ns.clone(), "item:c"),
             Value::Int(3),
             3,
@@ -4298,28 +3812,28 @@ mod tests {
         )
         .unwrap();
 
-        // Take snapshot before delete (version = 3)
-        let snap_before = store.snapshot();
+        // Capture version before delete (version = 3)
+        let v_before = store.version();
 
         // Delete item:b (tombstone at version 4)
-        Storage::delete_with_version(&*store, &Key::new_kv(ns.clone(), "item:b"), 4).unwrap();
+        Storage::delete_with_version(&store, &Key::new_kv(ns.clone(), "item:b"), 4).unwrap();
 
-        // Take snapshot after delete (version = 4)
-        let snap_after = store.snapshot();
+        // Capture version after delete (version = 4)
+        let v_after = store.version();
 
         let prefix = Key::new_kv(ns.clone(), "item:");
 
-        // Snapshot before delete should see all 3
-        let results_before = SnapshotView::scan_prefix(&snap_before, &prefix).unwrap();
+        // Reading at version before delete should see all 3
+        let results_before = Storage::scan_prefix(&store, &prefix, v_before).unwrap();
         assert_eq!(
             results_before.len(),
             3,
-            "Pre-delete snapshot sees all 3 items"
+            "Pre-delete version sees all 3 items"
         );
 
-        // Snapshot after delete should see 2 (item:b is tombstoned)
-        let results_after = SnapshotView::scan_prefix(&snap_after, &prefix).unwrap();
-        assert_eq!(results_after.len(), 2, "Post-delete snapshot sees 2 items");
+        // Reading at version after delete should see 2 (item:b is tombstoned)
+        let results_after = Storage::scan_prefix(&store, &prefix, v_after).unwrap();
+        assert_eq!(results_after.len(), 2, "Post-delete version sees 2 items");
         let keys_after: Vec<_> = results_after
             .iter()
             .map(|(k, _)| k.user_key_string().unwrap())

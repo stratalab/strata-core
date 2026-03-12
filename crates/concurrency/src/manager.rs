@@ -759,12 +759,10 @@ mod tests {
         let key2 = create_test_key(&ns2, "key2");
 
         // Prepare transactions
-        let snapshot1 = store.snapshot();
-        let mut txn1 = TransactionContext::with_snapshot(1, branch_id1, Box::new(snapshot1));
+        let mut txn1 = TransactionContext::with_store(1, branch_id1, Arc::clone(&store));
         txn1.put(key1.clone(), Value::Int(1)).unwrap();
 
-        let snapshot2 = store.snapshot();
-        let mut txn2 = TransactionContext::with_snapshot(2, branch_id2, Box::new(snapshot2));
+        let mut txn2 = TransactionContext::with_store(2, branch_id2, Arc::clone(&store));
         txn2.put(key2.clone(), Value::Int(2)).unwrap();
 
         // Commit both in parallel threads
@@ -816,8 +814,7 @@ mod tests {
 
         // Commit first transaction
         {
-            let snapshot = store.snapshot();
-            let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+            let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
             txn.put(key1.clone(), Value::Int(100)).unwrap();
             let v = manager
                 .commit(&mut txn, store.as_ref(), Some(&mut wal))
@@ -827,8 +824,7 @@ mod tests {
 
         // Commit second transaction on same branch
         {
-            let snapshot = store.snapshot();
-            let mut txn = TransactionContext::with_snapshot(2, branch_id, Box::new(snapshot));
+            let mut txn = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
             txn.put(key2.clone(), Value::Int(200)).unwrap();
             let v = manager
                 .commit(&mut txn, store.as_ref(), Some(&mut wal))
@@ -868,9 +864,8 @@ mod tests {
                 let ns = create_test_namespace(branch_id);
                 let key = create_test_key(&ns, &format!("key_{}", i));
 
-                let snapshot = store_clone.snapshot();
                 let mut txn =
-                    TransactionContext::with_snapshot(i as u64 + 1, branch_id, Box::new(snapshot));
+                    TransactionContext::with_store(i as u64 + 1, branch_id, Arc::clone(&store_clone));
                 txn.put(key, Value::Int(i as i64)).unwrap();
 
                 let mut guard = wal_clone.lock();
@@ -910,8 +905,7 @@ mod tests {
 
         // Setup: Create initial data with alice and bob
         {
-            let snapshot = store.snapshot();
-            let mut setup_txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+            let mut setup_txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
             setup_txn.put(key_alice.clone(), Value::Int(100)).unwrap();
             setup_txn.put(key_bob.clone(), Value::Int(200)).unwrap();
             manager
@@ -920,8 +914,7 @@ mod tests {
         }
 
         // T1: Delete alice (blind), then scan
-        let snapshot1 = store.snapshot();
-        let mut txn1 = TransactionContext::with_snapshot(2, branch_id, Box::new(snapshot1));
+        let mut txn1 = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
         txn1.delete(key_alice.clone()).unwrap(); // Blind delete
         let scan_result = txn1.scan_prefix(&prefix).unwrap();
 
@@ -931,8 +924,7 @@ mod tests {
 
         // T2: Update alice and commit first
         {
-            let snapshot2 = store.snapshot();
-            let mut txn2 = TransactionContext::with_snapshot(3, branch_id, Box::new(snapshot2));
+            let mut txn2 = TransactionContext::with_store(3, branch_id, Arc::clone(&store));
             // T2 reads alice first (creates read_set entry)
             let _ = txn2.get(&key_alice).unwrap();
             txn2.put(key_alice.clone(), Value::Int(999)).unwrap();
@@ -974,8 +966,7 @@ mod tests {
 
         // Setup: Create alice
         {
-            let snapshot = store.snapshot();
-            let mut setup_txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+            let mut setup_txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
             setup_txn.put(key_alice.clone(), Value::Int(100)).unwrap();
             manager
                 .commit(&mut setup_txn, store.as_ref(), Some(&mut wal))
@@ -983,14 +974,12 @@ mod tests {
         }
 
         // T1: Blind delete alice (no read, no scan)
-        let snapshot1 = store.snapshot();
-        let mut txn1 = TransactionContext::with_snapshot(2, branch_id, Box::new(snapshot1));
+        let mut txn1 = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
         txn1.delete(key_alice.clone()).unwrap(); // Blind delete - no read_set entry
 
         // T2: Update alice and commit first
         {
-            let snapshot2 = store.snapshot();
-            let mut txn2 = TransactionContext::with_snapshot(3, branch_id, Box::new(snapshot2));
+            let mut txn2 = TransactionContext::with_store(3, branch_id, Arc::clone(&store));
             let _ = txn2.get(&key_alice).unwrap();
             txn2.put(key_alice.clone(), Value::Int(999)).unwrap();
             manager
@@ -1026,8 +1015,7 @@ mod tests {
         let v_before = manager.current_version();
 
         // Read-only transaction (just reads, no writes)
-        let snapshot = store.snapshot();
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
         // No operations — pure read-only
         let result = manager.commit(&mut txn, store.as_ref(), None);
         assert!(result.is_ok());
@@ -1049,13 +1037,11 @@ mod tests {
         let store2 = Arc::clone(&store);
 
         let h1 = std::thread::spawn(move || {
-            let snapshot = store1.snapshot();
-            let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+            let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store1));
             manager1.commit(&mut txn, store1.as_ref(), None)
         });
         let h2 = std::thread::spawn(move || {
-            let snapshot = store2.snapshot();
-            let mut txn = TransactionContext::with_snapshot(2, branch_id, Box::new(snapshot));
+            let mut txn = TransactionContext::with_store(2, branch_id, Arc::clone(&store2));
             manager2.commit(&mut txn, store2.as_ref(), None)
         });
 
@@ -1074,8 +1060,7 @@ mod tests {
 
         let v_before = manager.current_version();
 
-        let snapshot = store.snapshot();
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
         // No KV writes, but has json_writes → not fast-pathed
         use strata_core::primitives::json::{JsonPatch, JsonPath};
         txn.record_json_write(
@@ -1097,8 +1082,7 @@ mod tests {
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
 
-        let snapshot = store.snapshot();
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
         txn.mark_aborted("test".to_string()).unwrap();
 
         let result = manager.commit(&mut txn, store.as_ref(), None);
@@ -1125,8 +1109,7 @@ mod tests {
         let key = create_test_key(&ns, "blind");
 
         // Blind write: put with no prior read
-        let snapshot = store.snapshot();
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
         txn.put(key.clone(), Value::Int(42)).unwrap();
         assert!(txn.read_set.is_empty()); // Confirms it's a blind write
 
@@ -1150,8 +1133,7 @@ mod tests {
 
         // Setup: store initial value
         {
-            let snapshot = store.snapshot();
-            let mut setup = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+            let mut setup = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
             setup.put(key.clone(), Value::Int(1)).unwrap();
             manager
                 .commit(&mut setup, store.as_ref(), Some(&mut wal))
@@ -1159,16 +1141,14 @@ mod tests {
         }
 
         // T1: read then write (not a blind write)
-        let snapshot = store.snapshot();
-        let mut txn = TransactionContext::with_snapshot(2, branch_id, Box::new(snapshot));
+        let mut txn = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
         let _ = txn.get(&key).unwrap();
         txn.put(key.clone(), Value::Int(2)).unwrap();
         assert!(!txn.read_set.is_empty()); // Has reads → goes through validation
 
         // Concurrent update
         {
-            let snapshot2 = store.snapshot();
-            let mut txn2 = TransactionContext::with_snapshot(3, branch_id, Box::new(snapshot2));
+            let mut txn2 = TransactionContext::with_store(3, branch_id, Arc::clone(&store));
             txn2.put(key.clone(), Value::Int(99)).unwrap();
             manager
                 .commit(&mut txn2, store.as_ref(), Some(&mut wal))
@@ -1192,8 +1172,7 @@ mod tests {
         let key = create_test_key(&ns, "cas_key");
 
         // CAS operation → not a blind write, should validate
-        let snapshot = store.snapshot();
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
         txn.cas(key.clone(), 0, Value::Int(1)).unwrap();
         assert!(!txn.cas_set.is_empty());
 
@@ -1214,8 +1193,7 @@ mod tests {
 
         // Has json_snapshot_versions → should go through full validation path
         // Use version 0 (key doesn't exist) so validation passes
-        let snapshot = store.snapshot();
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
         txn.put(key.clone(), Value::Int(1)).unwrap();
         txn.record_json_snapshot_version(key.clone(), 0);
 
@@ -1242,8 +1220,7 @@ mod tests {
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "arc_basic");
 
-        let snapshot = store.snapshot();
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
         txn.put(key.clone(), Value::Int(42)).unwrap();
 
         let v = manager
@@ -1280,8 +1257,7 @@ mod tests {
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "no_wal");
 
-        let snapshot = store.snapshot();
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
         txn.put(key.clone(), Value::Int(7)).unwrap();
 
         let v = manager
@@ -1315,9 +1291,8 @@ mod tests {
                 let ns = create_test_namespace(branch_id);
                 let key = create_test_key(&ns, &format!("key_{}", i));
 
-                let snapshot = s.snapshot();
                 let mut txn =
-                    TransactionContext::with_snapshot(i as u64 + 1, branch_id, Box::new(snapshot));
+                    TransactionContext::with_store(i as u64 + 1, branch_id, Arc::clone(&s));
                 txn.put(key, Value::Int(i as i64)).unwrap();
 
                 m.commit_with_wal_arc(&mut txn, s.as_ref(), Some(&w))
@@ -1360,8 +1335,7 @@ mod tests {
 
         // Setup: store initial value (WAL record #1)
         {
-            let snapshot = store.snapshot();
-            let mut setup = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+            let mut setup = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
             setup.put(key.clone(), Value::Int(1)).unwrap();
             manager
                 .commit_with_wal_arc(&mut setup, store.as_ref(), Some(&wal))
@@ -1369,15 +1343,13 @@ mod tests {
         }
 
         // T1: read-modify-write (will conflict)
-        let snapshot = store.snapshot();
-        let mut txn1 = TransactionContext::with_snapshot(2, branch_id, Box::new(snapshot));
+        let mut txn1 = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
         let _ = txn1.get(&key).unwrap(); // Creates read_set entry
         txn1.put(key.clone(), Value::Int(10)).unwrap();
 
         // T2: concurrent blind write, commits first (WAL record #2)
         {
-            let snapshot2 = store.snapshot();
-            let mut txn2 = TransactionContext::with_snapshot(3, branch_id, Box::new(snapshot2));
+            let mut txn2 = TransactionContext::with_store(3, branch_id, Arc::clone(&store));
             txn2.put(key.clone(), Value::Int(99)).unwrap();
             manager
                 .commit_with_wal_arc(&mut txn2, store.as_ref(), Some(&wal))
@@ -1419,8 +1391,7 @@ mod tests {
         let v_before = manager.current_version();
 
         // Read-only transaction: no writes
-        let snapshot = store.snapshot();
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
         let result = manager.commit_with_wal_arc(&mut txn, store.as_ref(), Some(&wal));
         assert!(result.is_ok());
 
@@ -1448,8 +1419,7 @@ mod tests {
 
         let v_before = manager.current_version();
 
-        let snapshot = store.snapshot();
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
         // No KV writes, but has json_writes → not fast-pathed
         use strata_core::primitives::json::{JsonPatch, JsonPath};
         txn.record_json_write(
@@ -1487,8 +1457,7 @@ mod tests {
 
         // Setup: write key_a and key_b
         {
-            let snapshot = store.snapshot();
-            let mut setup = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+            let mut setup = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
             setup.put(key_a.clone(), Value::Int(10)).unwrap();
             setup.put(key_b.clone(), Value::Int(20)).unwrap();
             manager
@@ -1498,8 +1467,7 @@ mod tests {
 
         // Transaction: delete key_a, update key_b, insert key_c
         {
-            let snapshot = store.snapshot();
-            let mut txn = TransactionContext::with_snapshot(2, branch_id, Box::new(snapshot));
+            let mut txn = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
             txn.delete(key_a.clone()).unwrap();
             txn.put(key_b.clone(), Value::Int(200)).unwrap();
             txn.put(key_c.clone(), Value::Bytes(b"hello".to_vec()))
@@ -1552,8 +1520,7 @@ mod tests {
         let key2 = create_test_key(&ns, "seq2");
 
         {
-            let snapshot = store.snapshot();
-            let mut txn = TransactionContext::with_snapshot(1, branch_id, Box::new(snapshot));
+            let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
             txn.put(key1.clone(), Value::Int(100)).unwrap();
             let v = manager
                 .commit_with_wal_arc(&mut txn, store.as_ref(), Some(&wal))
@@ -1562,8 +1529,7 @@ mod tests {
         }
 
         {
-            let snapshot = store.snapshot();
-            let mut txn = TransactionContext::with_snapshot(2, branch_id, Box::new(snapshot));
+            let mut txn = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
             txn.put(key2.clone(), Value::Int(200)).unwrap();
             let v = manager
                 .commit_with_wal_arc(&mut txn, store.as_ref(), Some(&wal))

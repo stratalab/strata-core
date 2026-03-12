@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use strata_core::traits::{SnapshotView, Storage, WriteMode};
+use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
@@ -174,17 +174,17 @@ fn tombstone_preserves_snapshot_isolation() {
     // Put a value
     store.put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
 
-    // Take snapshot BEFORE delete
-    let snapshot = store.snapshot();
+    // Capture version BEFORE delete
+    let version = store.version();
 
     // Delete the key (creates tombstone)
     store.delete_with_version(&key, 2).unwrap();
 
-    // Snapshot should still see the value
-    let result = SnapshotView::get(&snapshot, &key).unwrap();
+    // Reading at captured version should still see the value
+    let result = store.get_versioned(&key, version).unwrap();
     assert!(
         result.is_some(),
-        "Snapshot should see value before tombstone"
+        "Should see value before tombstone at captured version"
     );
     assert_eq!(result.unwrap().value, Value::Int(100));
 

@@ -150,11 +150,9 @@ impl TransactionCoordinator {
         self.active_count.fetch_add(1, Ordering::Relaxed);
         self.total_started.fetch_add(1, Ordering::Relaxed);
 
-        let snapshot = storage.create_snapshot();
-
         debug!(target: "strata::txn", branch_id = %branch_id, "Transaction started");
 
-        let mut txn = TransactionContext::with_snapshot(txn_id, branch_id, Box::new(snapshot));
+        let mut txn = TransactionContext::with_store(txn_id, branch_id, Arc::clone(storage));
         txn.set_max_write_entries(self.max_write_buffer_entries);
         Ok(txn)
     }

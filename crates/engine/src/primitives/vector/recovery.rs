@@ -61,7 +61,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
     use super::{CollectionId, IndexBackendFactory, VectorBackendState, VectorConfig, VectorId};
     use crate::primitives::vector::heap::VectorHeap;
     use std::sync::Arc;
-    use strata_core::traits::SnapshotView;
+    use strata_core::traits::Storage;
     use strata_core::types::{Key, Namespace};
     use strata_core::value::Value;
 
@@ -74,7 +74,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
     let state = db.extension::<VectorBackendState>()?;
     let factory = IndexBackendFactory::default();
 
-    let snapshot = db.storage().create_snapshot();
+    let snapshot_version = db.storage().version();
     let mut stats = super::RecoveryStats::default();
     let data_dir = db.data_dir();
     let use_mmap = !data_dir.as_os_str().is_empty();
@@ -85,7 +85,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
 
         // Scan for vector config entries in this run
         let config_prefix = Key::new_vector_config_prefix(ns.clone());
-        let config_entries = match snapshot.scan_prefix(&config_prefix) {
+        let config_entries = match db.storage().scan_prefix(&config_prefix, snapshot_version) {
             Ok(entries) => entries,
             Err(e) => {
                 tracing::warn!(
@@ -183,7 +183,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
             // Scan KV for vector entries
             // -----------------------------------------------------------
             let vector_prefix = Key::new_vector(ns.clone(), &collection_name, "");
-            let vector_entries = match snapshot.scan_prefix(&vector_prefix) {
+            let vector_entries = match db.storage().scan_prefix(&vector_prefix, snapshot_version) {
                 Ok(entries) => entries,
                 Err(e) => {
                     tracing::warn!(

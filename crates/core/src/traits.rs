@@ -1,7 +1,7 @@
-//! Core traits for storage and snapshot abstraction
+//! Core traits for storage abstraction
 //!
-//! This module defines the Storage and SnapshotView traits that enable
-//! swapping implementations without breaking upper layers.
+//! This module defines the Storage trait that enables swapping
+//! implementations without breaking upper layers.
 
 use std::time::Duration;
 
@@ -185,73 +185,6 @@ pub trait Storage: Send + Sync {
     }
 }
 
-/// Snapshot view abstraction for snapshot isolation
-///
-/// Provides a **frozen, read-only** view of storage at a specific version.
-/// All reads through a snapshot return data as it existed at `version()`,
-/// regardless of concurrent writes to the underlying storage.
-///
-/// ## Thread Safety
-///
-/// All implementations **must** be `Send + Sync`. A snapshot may be created
-/// on one thread and read from another.
-///
-/// ## Consistency Guarantees
-///
-/// - `get()` returns the latest value written at or before `version()`.
-/// - `scan_prefix()` returns a consistent set of key-value pairs — all
-///   visible at `version()`, none written after.
-/// - The snapshot is **immutable**: repeated reads of the same key always
-///   return the same result (or `None` if the key didn't exist at that version).
-///
-/// ## Lifetime
-///
-/// Snapshots may hold references to shared state (e.g., an `Arc` to the
-/// underlying storage). Dropping a snapshot releases these references.
-/// Long-lived snapshots may prevent garbage collection of old versions
-/// in compacting storage implementations.
-pub trait SnapshotView: Send + Sync {
-    /// Get value from snapshot
-    ///
-    /// Returns value as it existed at snapshot version.
-    /// Returns None if key didn't exist at that version.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the storage operation fails.
-    fn get(&self, key: &Key) -> StrataResult<Option<VersionedValue>>;
-
-    /// Scan keys with prefix from snapshot
-    ///
-    /// Returns all matching keys as they existed at snapshot version.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the storage operation fails.
-    fn scan_prefix(&self, prefix: &Key) -> StrataResult<Vec<(Key, VersionedValue)>>;
-
-    /// Get just the value and raw version for a key.
-    ///
-    /// Returns `(Value, u64)` without constructing a full `VersionedValue`.
-    /// Used by the transaction read path where only the value and version
-    /// number are needed (for conflict detection).
-    ///
-    /// Default implementation delegates to `get()` and destructures.
-    /// Implementations can override for efficiency (e.g., skipping
-    /// `Version::Txn` enum construction).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the storage operation fails.
-    fn get_value_and_version(&self, key: &Key) -> StrataResult<Option<(Value, u64)>> {
-        Ok(self.get(key)?.map(|vv| (vv.value, vv.version.as_u64())))
-    }
-
-    /// Get snapshot version
-    ///
-    /// Returns the version this snapshot was created at.
-    fn version(&self) -> u64;
-}
 
 #[cfg(test)]
 mod tests {
@@ -371,51 +304,6 @@ mod tests {
         }
     }
 
-    /// A minimal SnapshotView for testing.
-    struct MockSnapshot {
-        data: BTreeMap<Key, VersionedValue>,
-        snap_version: u64,
-    }
-
-    impl MockSnapshot {
-        fn from_storage(storage: &MockStorage, version: u64) -> Self {
-            let data = storage.data.read().unwrap();
-            let mut snap = BTreeMap::new();
-            for (k, versions) in data.iter() {
-                if let Some(v) = versions
-                    .iter()
-                    .rev()
-                    .find(|v| v.version().as_u64() <= version)
-                {
-                    snap.insert(k.clone(), v.clone());
-                }
-            }
-            MockSnapshot {
-                data: snap,
-                snap_version: version,
-            }
-        }
-    }
-
-    impl SnapshotView for MockSnapshot {
-        fn get(&self, key: &Key) -> StrataResult<Option<VersionedValue>> {
-            Ok(self.data.get(key).cloned())
-        }
-
-        fn scan_prefix(&self, prefix: &Key) -> StrataResult<Vec<(Key, VersionedValue)>> {
-            Ok(self
-                .data
-                .iter()
-                .filter(|(k, _)| k.starts_with(prefix))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect())
-        }
-
-        fn version(&self) -> u64 {
-            self.snap_version
-        }
-    }
-
     fn test_ns() -> Arc<Namespace> {
         Arc::new(Namespace::new(
             BranchId::new(),
@@ -439,16 +327,6 @@ mod tests {
         let _ = accepts_storage as fn(&dyn Storage);
         assert_send::<Box<dyn Storage>>();
         assert_sync::<Box<dyn Storage>>();
-    }
-
-    #[test]
-    fn snapshot_view_is_object_safe_and_send_sync() {
-        fn accepts_snapshot(_: &dyn SnapshotView) {}
-        fn assert_send<T: Send>() {}
-        fn assert_sync<T: Sync>() {}
-        let _ = accepts_snapshot as fn(&dyn SnapshotView);
-        assert_send::<Box<dyn SnapshotView>>();
-        assert_sync::<Box<dyn SnapshotView>>();
     }
 
     // ====================================================================
@@ -619,60 +497,6 @@ mod tests {
 
         store.delete_with_version(&key, 2).unwrap();
         assert!(store.get_versioned(&key, u64::MAX).unwrap().is_none());
-    }
-
-    // ====================================================================
-    // SnapshotView behavioral tests
-    // ====================================================================
-
-    #[test]
-    fn snapshot_captures_point_in_time_state() {
-        let store = MockStorage::new();
-        let ns = test_ns();
-        let key = test_key(&ns, "snap");
-
-        seed(&store, key.clone(), Value::Int(1), 1);
-        let snap = MockSnapshot::from_storage(&store, 1);
-
-        // Write after snapshot
-        seed(&store, key.clone(), Value::Int(2), 2);
-
-        // Snapshot should still see old value
-        let result = snap.get(&key).unwrap().unwrap();
-        assert_eq!(result.value, Value::Int(1));
-
-        // Live storage should see new value
-        let result = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
-        assert_eq!(result.value, Value::Int(2));
-    }
-
-    #[test]
-    fn snapshot_version_returns_creation_version() {
-        let store = MockStorage::new();
-        let ns = test_ns();
-        seed(&store, test_key(&ns, "x"), Value::Int(1), 1);
-        let snap = MockSnapshot::from_storage(&store, 1);
-        assert_eq!(snap.version(), 1);
-    }
-
-    #[test]
-    fn snapshot_get_nonexistent_returns_none() {
-        let store = MockStorage::new();
-        let snap = MockSnapshot::from_storage(&store, 0);
-        let ns = test_ns();
-        assert!(snap.get(&test_key(&ns, "missing")).unwrap().is_none());
-    }
-
-    #[test]
-    fn snapshot_does_not_see_writes_after_version() {
-        let store = MockStorage::new();
-        let ns = test_ns();
-        let key = test_key(&ns, "invisible");
-
-        let snap = MockSnapshot::from_storage(&store, 0);
-        seed(&store, key.clone(), Value::Int(1), 1);
-
-        assert!(snap.get(&key).unwrap().is_none());
     }
 
     // ====================================================================

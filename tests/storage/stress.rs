@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use strata_core::traits::{SnapshotView, Storage, WriteMode};
+use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
@@ -114,23 +114,23 @@ fn stress_rapid_snapshot_creation() {
     }
 
     let start = Instant::now();
-    let mut snapshots = Vec::new();
+    let mut versions = Vec::new();
 
     for _ in 0..100_000 {
-        snapshots.push(store.snapshot());
+        versions.push(store.version());
     }
 
     let elapsed = start.elapsed();
     println!(
-        "100K snapshots in {:?} ({:.0} snapshots/sec)",
+        "100K version captures in {:?} ({:.0} captures/sec)",
         elapsed,
         100_000.0 / elapsed.as_secs_f64()
     );
 
-    // Verify snapshots work
-    for snapshot in snapshots.iter().take(100) {
+    // Verify versioned reads work
+    for version in versions.iter().take(100) {
         let key = create_test_key(branch_id, "key_0");
-        let result = SnapshotView::get(snapshot, &key).unwrap();
+        let result = store.get_versioned(&key, *version).unwrap();
         assert_eq!(result.unwrap().value, Value::Int(0));
     }
 }

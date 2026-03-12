@@ -145,7 +145,7 @@ impl JsonDoc {
 /// JsonStore does NOT own storage. It is a facade that:
 /// - Uses `Arc<Database>` for all operations
 /// - Stores documents via `Key::new_json()` in ShardedStore
-/// - Uses SnapshotView for fast path reads
+/// - Uses MVCC versioned reads for fast path
 /// - Participates in cross-primitive transactions
 ///
 /// # Example

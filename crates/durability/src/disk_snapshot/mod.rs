@@ -24,8 +24,8 @@
 //!
 //! # Note
 //!
-//! This is distinct from the in-memory `ClonedSnapshotView` which provides
-//! transaction isolation views. This module handles persistence to disk.
+//! This is distinct from the in-memory MVCC snapshot isolation (version-bounded
+//! reads from ShardedStore). This module handles persistence to disk.
 
 pub mod checkpoint;
 pub mod reader;

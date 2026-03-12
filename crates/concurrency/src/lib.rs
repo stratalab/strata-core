@@ -4,7 +4,7 @@
 //! - TransactionContext: Read/write set tracking
 //! - TransactionManager: Atomic commit coordination
 //! - RecoveryCoordinator: Database recovery from WAL
-//! - Snapshot isolation via ClonedSnapshotView
+//! - Snapshot isolation via ShardedStore + start_version bound
 //! - Conflict detection at commit time
 //! - Compare-and-swap (CAS) operations
 //! - WAL integration for durability
@@ -17,15 +17,10 @@ pub(crate) mod conflict;
 pub mod manager;
 pub mod payload;
 pub mod recovery;
-pub mod snapshot;
 pub mod transaction;
 pub mod validation;
 
 pub use manager::TransactionManager;
 pub use payload::TransactionPayload;
 pub use recovery::{RecoveryCoordinator, RecoveryResult, RecoveryStats};
-pub use snapshot::ClonedSnapshotView;
 pub use transaction::{CommitError, JsonStoreExt, TransactionContext, TransactionStatus};
-
-// Re-export the SnapshotView trait from core for convenience
-pub use strata_core::traits::SnapshotView;

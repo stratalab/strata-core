@@ -299,15 +299,15 @@ impl VectorStore {
         branch_id: BranchId,
         space: &str,
     ) -> VectorResult<Vec<CollectionInfo>> {
-        use strata_core::traits::SnapshotView;
+        use strata_core::traits::Storage;
 
         let namespace = self.namespace_for(branch_id, space);
         let prefix = Key::new_vector_config_prefix(namespace);
 
-        // Read from snapshot for consistency
-        let snapshot = self.db.storage().create_snapshot();
-        let entries = snapshot
-            .scan_prefix(&prefix)
+        // Read at current version for consistency
+        let version = self.db.storage().version();
+        let entries = self.db.storage()
+            .scan_prefix(&prefix, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
         let mut collections = Vec::new();
@@ -354,13 +354,13 @@ impl VectorStore {
         space: &str,
         name: &str,
     ) -> VectorResult<bool> {
-        use strata_core::traits::SnapshotView;
+        use strata_core::traits::Storage;
 
         let config_key = Key::new_vector_config(self.namespace_for(branch_id, space), name);
-        let snapshot = self.db.storage().create_snapshot();
+        let version = self.db.storage().version();
 
-        Ok(snapshot
-            .get(&config_key)
+        Ok(self.db.storage()
+            .get_versioned(&config_key, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?
             .is_some())
     }
@@ -374,11 +374,11 @@ impl VectorStore {
     ) -> VectorResult<Option<Versioned<CollectionInfo>>> {
         let config_key = Key::new_vector_config(self.namespace_for(branch_id, space), name);
 
-        use strata_core::traits::SnapshotView;
-        let snapshot = self.db.storage().create_snapshot();
+        use strata_core::traits::Storage;
+        let version = self.db.storage().version();
 
-        let Some(versioned_value) = snapshot
-            .get(&config_key)
+        let Some(versioned_value) = self.db.storage()
+            .get_versioned(&config_key, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?
         else {
             return Ok(None);
@@ -567,10 +567,10 @@ impl VectorStore {
         let kv_key = Key::new_vector(self.namespace_for(branch_id, space), collection, key);
 
         // Get record from KV with version info
-        use strata_core::traits::SnapshotView;
-        let snapshot = self.db.storage().create_snapshot();
-        let Some(versioned_value) = snapshot
-            .get(&kv_key)
+        use strata_core::traits::Storage;
+        let version = self.db.storage().version();
+        let Some(versioned_value) = self.db.storage()
+            .get_versioned(&kv_key, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?
         else {
             return Ok(None);
@@ -1234,11 +1234,11 @@ impl VectorStore {
 
     /// Get a vector record by KV key
     fn get_vector_record_by_key(&self, key: &Key) -> VectorResult<Option<VectorRecord>> {
-        use strata_core::traits::SnapshotView;
+        use strata_core::traits::Storage;
 
-        let snapshot = self.db.storage().create_snapshot();
-        let Some(versioned) = snapshot
-            .get(key)
+        let version = self.db.storage().version();
+        let Some(versioned) = self.db.storage()
+            .get_versioned(key, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?
         else {
             return Ok(None);
@@ -1265,14 +1265,14 @@ impl VectorStore {
         collection: &str,
         target_id: VectorId,
     ) -> VectorResult<(String, Option<JsonValue>)> {
-        use strata_core::traits::SnapshotView;
+        use strata_core::traits::Storage;
 
         let namespace = self.namespace_for(branch_id, space);
         let prefix = Key::vector_collection_prefix(namespace, collection);
 
-        let snapshot = self.db.storage().create_snapshot();
-        let entries = snapshot
-            .scan_prefix(&prefix)
+        let version = self.db.storage().version();
+        let entries = self.db.storage()
+            .scan_prefix(&prefix, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
         for (key, versioned) in entries {
@@ -1325,14 +1325,14 @@ impl VectorStore {
         Option<strata_core::EntityRef>,
         u64,
     )> {
-        use strata_core::traits::SnapshotView;
+        use strata_core::traits::Storage;
 
         let namespace = self.namespace_for(branch_id, space);
         let prefix = Key::vector_collection_prefix(namespace, collection);
 
-        let snapshot = self.db.storage().create_snapshot();
-        let entries = snapshot
-            .scan_prefix(&prefix)
+        let version = self.db.storage().version();
+        let entries = self.db.storage()
+            .scan_prefix(&prefix, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
         for (key, versioned) in entries {
@@ -1387,13 +1387,13 @@ impl VectorStore {
         drop(backends);
 
         // Backend not loaded - count from KV
-        use strata_core::traits::SnapshotView;
+        use strata_core::traits::Storage;
         let namespace = self.namespace_for(branch_id, space);
         let prefix = Key::vector_collection_prefix(namespace, name);
 
-        let snapshot = self.db.storage().create_snapshot();
-        let entries = snapshot
-            .scan_prefix(&prefix)
+        let version = self.db.storage().version();
+        let entries = self.db.storage()
+            .scan_prefix(&prefix, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
         Ok(entries.len())
@@ -1401,15 +1401,15 @@ impl VectorStore {
 
     /// Delete all vectors in a collection
     fn delete_all_vectors(&self, branch_id: BranchId, space: &str, name: &str) -> VectorResult<()> {
-        use strata_core::traits::SnapshotView;
+        use strata_core::traits::Storage;
 
         let namespace = self.namespace_for(branch_id, space);
         let prefix = Key::vector_collection_prefix(namespace, name);
 
         // Scan all vector keys in this collection
-        let snapshot = self.db.storage().create_snapshot();
-        let entries = snapshot
-            .scan_prefix(&prefix)
+        let version = self.db.storage().version();
+        let entries = self.db.storage()
+            .scan_prefix(&prefix, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
         let keys: Vec<Key> = entries.into_iter().map(|(key, _)| key).collect();
@@ -1437,13 +1437,13 @@ impl VectorStore {
         space: &str,
         name: &str,
     ) -> VectorResult<Option<VectorConfig>> {
-        use strata_core::traits::SnapshotView;
+        use strata_core::traits::Storage;
 
         let config_key = Key::new_vector_config(self.namespace_for(branch_id, space), name);
-        let snapshot = self.db.storage().create_snapshot();
+        let version = self.db.storage().version();
 
-        let Some(versioned_value) = snapshot
-            .get(&config_key)
+        let Some(versioned_value) = self.db.storage()
+            .get_versioned(&config_key, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?
         else {
             return Ok(None);
@@ -2075,11 +2075,11 @@ impl VectorStore {
         branch_id: BranchId,
         source_branch_id: Option<BranchId>,
     ) -> VectorResult<()> {
-        use strata_core::traits::SnapshotView;
+        use strata_core::traits::Storage;
 
         let state = self.state()?;
         let factory = self.backend_factory();
-        let snapshot = self.db.storage().create_snapshot();
+        let version = self.db.storage().version();
 
         // Get all spaces for this branch (SpaceIndex.list always includes "default")
         let space_index = crate::SpaceIndex::new(self.db.clone());
@@ -2095,7 +2095,7 @@ impl VectorStore {
 
             // Scan for vector config entries in this space
             let config_prefix = Key::new_vector_config_prefix(ns.clone());
-            let config_entries = match snapshot.scan_prefix(&config_prefix) {
+            let config_entries = match self.db.storage().scan_prefix(&config_prefix, version) {
                 Ok(entries) => entries,
                 Err(e) => {
                     tracing::warn!(
@@ -2160,7 +2160,7 @@ impl VectorStore {
                     if let Some(src_bid) = source_branch_id {
                         let src_ns = Arc::new(Namespace::for_branch_space(src_bid, space));
                         let src_prefix = Key::new_vector(src_ns, &collection_name, "");
-                        if let Ok(src_entries) = snapshot.scan_prefix(&src_prefix) {
+                        if let Ok(src_entries) = self.db.storage().scan_prefix(&src_prefix, version) {
                             src_entries
                                 .iter()
                                 .filter_map(|(k, vv)| {
@@ -2185,7 +2185,7 @@ impl VectorStore {
 
                 // Scan all vector entries in this collection
                 let vector_prefix = Key::new_vector(ns.clone(), &collection_name, "");
-                let vector_entries = match snapshot.scan_prefix(&vector_prefix) {
+                let vector_entries = match self.db.storage().scan_prefix(&vector_prefix, version) {
                     Ok(entries) => entries,
                     Err(e) => {
                         tracing::warn!(
