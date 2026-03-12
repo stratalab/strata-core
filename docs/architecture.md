@@ -177,8 +177,8 @@ pub enum TypeTag {
 ```
 
 **Frozen enum.** Values are burned into on-disk WAL format. The `repr(u8)` ensures
-direct byte encoding. Extension point for new primitive types is
-`PrimitiveStorageExt`, not additional `TypeTag` variants.
+direct byte encoding. New primitive types require a new `TypeTag` variant and
+corresponding WAL/snapshot handling.
 
 ### 2.4 BranchId
 
@@ -300,38 +300,6 @@ Precision: 1 microsecond. Range: ~584,554 years. Constructed via `Timestamp::now
 
 `Conflict` is the only retryable error. Application code should retry the
 transaction from scratch on conflict.
-
-### 2.10 PrimitiveStorageExt
-
-```rust
-// crates/core/src/primitive_ext.rs:88
-pub trait PrimitiveStorageExt: Send + Sync {
-    fn primitive_type_id(&self) -> u8;
-    fn wal_entry_types(&self) -> &'static [u8];
-    fn snapshot_serialize(&self) -> Result<Vec<u8>, ...>;
-    fn snapshot_deserialize(&mut self, data: &[u8]) -> Result<(), ...>;
-    fn apply_wal_entry(&mut self, entry_type: u8, payload: &[u8]) -> Result<(), ...>;
-    fn primitive_name(&self) -> &'static str;
-    fn rebuild_indexes(&mut self) -> Result<(), ...>;
-}
-```
-
-This is the extension point for new primitive types. Each primitive self-registers
-its WAL entry types and snapshot format. No changes to WAL/Snapshot infrastructure
-are needed when adding a new primitive.
-
-**WAL entry type ranges** (frozen allocations):
-
-| Range | Primitive |
-|-------|-----------|
-| `0x00-0x0F` | Core |
-| `0x10-0x1F` | KV |
-| `0x20-0x2F` | JSON |
-| `0x30-0x3F` | Event |
-| `0x40-0x4F` | State |
-| `0x60-0x6F` | Branch |
-| `0x70-0x7F` | Vector (reserved) |
-| `0x80-0xFF` | Future |
 
 ---
 
