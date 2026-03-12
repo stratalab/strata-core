@@ -13,17 +13,10 @@
 #![warn(clippy::all)]
 
 pub mod index;
-pub mod primitive_ext;
-pub mod registry;
 pub mod sharded;
 pub mod stored_value;
 pub mod ttl;
 
 pub use index::{BranchIndex, TypeIndex};
-pub use primitive_ext::{
-    is_future_wal_type, is_vector_wal_type, primitive_for_wal_type, primitive_type_ids, wal_ranges,
-    PrimitiveExtError, PrimitiveStorageExt,
-};
-pub use registry::PrimitiveRegistry;
 pub use sharded::{BranchMemoryStats, Shard, ShardedStore, StorageMemoryStats};
 pub use ttl::TTLIndex;

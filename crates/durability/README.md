@@ -146,9 +146,8 @@ Writes and reads snapshot files with CRC32 integrity checking.
 - `read_header()` - Read just the header
 - `read_envelope()` - Read complete snapshot
 
-**SnapshotSerializable trait** (deprecated):
+**SnapshotSerializable trait**:
 - Primitives implement this to serialize/deserialize for snapshots
-- Now superseded by `PrimitiveStorageExt` in storage crate
 
 **Helper functions**:
 - `serialize_all_primitives()` - Collect all primitives into sections
