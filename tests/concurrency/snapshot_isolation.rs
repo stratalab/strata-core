@@ -324,3 +324,77 @@ fn empty_store_scan_returns_empty() {
     let results = Storage::scan_prefix(&store, &prefix, 0).unwrap();
     assert!(results.is_empty());
 }
+
+// ============================================================================
+// TransactionContext Snapshot Isolation
+// ============================================================================
+
+/// Core MVCC invariant: a transaction must not see writes that occur after
+/// it began, even when reading the same key multiple times through the
+/// TransactionContext API.
+#[test]
+fn transaction_context_ignores_concurrent_store_writes() {
+    let store = Arc::new(ShardedStore::new());
+    let branch_id = BranchId::new();
+    let key = create_test_key(branch_id, "isolation");
+
+    // Write initial value at version 1
+    store
+        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .unwrap();
+
+    // Begin transaction — captures start_version
+    let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+    assert_eq!(txn.start_version, 1);
+
+    // First read through transaction sees initial value
+    let read1 = txn.get(&key).unwrap();
+    assert_eq!(read1, Some(Value::Int(100)));
+
+    // Concurrent write to the SAME key at a higher version
+    store
+        .put_with_version_mode(key.clone(), Value::Int(999), 2, None, WriteMode::Append)
+        .unwrap();
+
+    // Second read through transaction MUST still see the old value
+    let read2 = txn.get(&key).unwrap();
+    assert_eq!(
+        read2,
+        Some(Value::Int(100)),
+        "Transaction must not see writes after start_version"
+    );
+}
+
+/// Verify that scan_prefix through TransactionContext also respects the
+/// snapshot version boundary.
+#[test]
+fn transaction_context_scan_ignores_concurrent_writes() {
+    let store = Arc::new(ShardedStore::new());
+    let branch_id = BranchId::new();
+    let ns = Arc::new(Namespace::for_branch(branch_id));
+
+    // Write two keys at version 1
+    let key_a = Key::new_kv(ns.clone(), "scan_a");
+    let key_b = Key::new_kv(ns.clone(), "scan_b");
+    store
+        .put_with_version_mode(key_a.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .unwrap();
+    store
+        .put_with_version_mode(key_b.clone(), Value::Int(2), 1, None, WriteMode::Append)
+        .unwrap();
+
+    // Begin transaction
+    let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+
+    // Concurrent write: add a third key at version 2
+    let key_c = Key::new_kv(ns.clone(), "scan_c");
+    store
+        .put_with_version_mode(key_c, Value::Int(3), 2, None, WriteMode::Append)
+        .unwrap();
+
+    // Scan through transaction should only see keys at version <= 1
+    let prefix = Key::new_kv(ns, "scan_");
+    let results = txn.scan_prefix(&prefix).unwrap();
+
+    assert_eq!(results.len(), 2, "Scan must not include key written after start_version");
+}
