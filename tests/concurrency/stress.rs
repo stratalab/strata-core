@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use strata_concurrency::manager::TransactionManager;
 use strata_concurrency::transaction::TransactionContext;
 use strata_concurrency::validation::validate_transaction;
-use strata_core::traits::Storage;
+use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
@@ -32,7 +32,7 @@ fn stress_concurrent_read_write() {
     // Pre-populate
     for i in 0..100 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
-        Storage::put(&*store, key, Value::Int(i), None).unwrap();
+        store.put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
     }
 
     let barrier = Arc::new(Barrier::new(16));
@@ -56,7 +56,7 @@ fn stress_concurrent_read_write() {
 
                     loop {
                         // Read-modify-write with retry
-                        let current = Storage::get(&*store, &key).unwrap().unwrap();
+                        let current = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
                         let version = current.version.as_u64();
 
                         let txn_id = manager.next_txn_id().unwrap();
@@ -67,11 +67,13 @@ fn stress_concurrent_read_write() {
 
                         let result = validate_transaction(&txn, &*store);
                         if result.unwrap().is_valid() {
-                            Storage::put(
-                                &*store,
+                            let commit_ver = manager.allocate_version().unwrap();
+                            store.put_with_version_mode(
                                 key.clone(),
                                 Value::Int((thread_id * 1000 + iter) as i64),
+                                commit_ver,
                                 None,
+                                WriteMode::Append,
                             )
                             .unwrap();
                             commits.fetch_add(1, Ordering::Relaxed);
@@ -111,15 +113,16 @@ fn stress_transaction_throughput() {
     let branch_id = BranchId::new();
 
     let key = create_test_key(branch_id, "counter");
-    Storage::put(&*store, key.clone(), Value::Int(0), None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(0), 1, None, WriteMode::Append).unwrap();
 
     let duration = Duration::from_secs(5);
     let start = Instant::now();
     let mut commits = 0u64;
     let mut conflicts = 0u64;
+    let mut next_version = 2u64;
 
     while start.elapsed() < duration {
-        let current = Storage::get(&*store, &key).unwrap().unwrap();
+        let current = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
         let version = current.version.as_u64();
 
         let txn_id = manager.next_txn_id().unwrap();
@@ -133,7 +136,8 @@ fn stress_transaction_throughput() {
         let result = validate_transaction(&txn, &*store);
         if result.unwrap().is_valid() {
             if let Value::Int(v) = current.value {
-                Storage::put(&*store, key.clone(), Value::Int(v + 1), None).unwrap();
+                store.put_with_version_mode(key.clone(), Value::Int(v + 1), next_version, None, WriteMode::Append).unwrap();
+                next_version += 1;
             }
             commits += 1;
         } else {
@@ -221,7 +225,8 @@ fn stress_many_branches() {
 
                     let result = validate_transaction(&txn, &*store);
                     if result.unwrap().is_valid() {
-                        Storage::put(&*store, key.clone(), Value::Int(i), None).unwrap();
+                        let commit_ver = manager.allocate_version().unwrap();
+                        store.put_with_version_mode(key.clone(), Value::Int(i), commit_ver, None, WriteMode::Append).unwrap();
                         commits.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -249,8 +254,8 @@ fn stress_long_running_transaction() {
     let key = create_test_key(branch_id, "contested");
 
     // Initial value
-    Storage::put(&*store, key.clone(), Value::Int(0), None).unwrap();
-    let initial_version = Storage::get(&*store, &key)
+    store.put_with_version_mode(key.clone(), Value::Int(0), 1, None, WriteMode::Append).unwrap();
+    let initial_version = store.get_versioned(&key, u64::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -265,7 +270,7 @@ fn stress_long_running_transaction() {
     let key_clone = key.clone();
     let writer = thread::spawn(move || {
         for i in 1..=100 {
-            Storage::put(&*store_clone, key_clone.clone(), Value::Int(i), None).unwrap();
+            store_clone.put_with_version_mode(key_clone.clone(), Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
             thread::sleep(Duration::from_millis(1));
         }
     });
@@ -297,7 +302,7 @@ fn stress_sustained_workload() {
     // Pre-populate
     for i in 0..50 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
-        Storage::put(&*store, key, Value::Int(i), None).unwrap();
+        store.put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
     }
 
     let duration = Duration::from_secs(10);
@@ -323,7 +328,7 @@ fn stress_sustained_workload() {
 
                     if ops.load(Ordering::Relaxed) % 3 == 0 {
                         // Write
-                        let current = Storage::get(&*store, &key).unwrap().unwrap();
+                        let current = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
                         let version = current.version.as_u64();
 
                         let txn_id = manager.next_txn_id().unwrap();
@@ -334,11 +339,12 @@ fn stress_sustained_workload() {
 
                         let result = validate_transaction(&txn, &*store);
                         if result.unwrap().is_valid() {
-                            Storage::put(&*store, key, Value::Int(thread_id as i64), None).unwrap();
+                            let commit_ver = manager.allocate_version().unwrap();
+                            store.put_with_version_mode(key, Value::Int(thread_id as i64), commit_ver, None, WriteMode::Append).unwrap();
                         }
                     } else {
                         // Read
-                        let _ = Storage::get(&*store, &key);
+                        let _ = store.get_versioned(&key, u64::MAX);
                     }
 
                     ops.fetch_add(1, Ordering::Relaxed);

@@ -11,7 +11,7 @@ use std::thread;
 use strata_concurrency::manager::TransactionManager;
 use strata_concurrency::transaction::TransactionContext;
 use strata_concurrency::validation::validate_transaction;
-use strata_core::traits::Storage;
+use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
@@ -45,7 +45,7 @@ fn parallel_commits_different_runs_no_contention() {
                 let key = create_test_key(branch_id, "data");
 
                 // Setup initial value
-                Storage::put(&*store, key.clone(), Value::Int(0), None).unwrap();
+                store.put_with_version_mode(key.clone(), Value::Int(0), 1, None, WriteMode::Append).unwrap();
 
                 barrier.wait();
 
@@ -59,7 +59,7 @@ fn parallel_commits_different_runs_no_contention() {
                     );
 
                     // Read and write
-                    let v = Storage::get(&*store, &key)
+                    let v = store.get_versioned(&key, u64::MAX)
                         .unwrap()
                         .unwrap()
                         .version
@@ -70,7 +70,8 @@ fn parallel_commits_different_runs_no_contention() {
                     // Validate
                     let result = validate_transaction(&txn, &*store);
                     if result.unwrap().is_valid() {
-                        Storage::put(&*store, key.clone(), Value::Int(i), None).unwrap();
+                        let commit_ver = manager.allocate_version().unwrap();
+                        store.put_with_version_mode(key.clone(), Value::Int(i), commit_ver, None, WriteMode::Append).unwrap();
                         commits.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -96,12 +97,12 @@ fn different_branches_have_independent_namespaces() {
     let key2 = create_test_key(branch2, "shared_name");
 
     // Write different values to same logical name in different branches
-    Storage::put(&*store, key1.clone(), Value::Int(100), None).unwrap();
-    Storage::put(&*store, key2.clone(), Value::Int(200), None).unwrap();
+    store.put_with_version_mode(key1.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
+    store.put_with_version_mode(key2.clone(), Value::Int(200), 1, None, WriteMode::Append).unwrap();
 
     // They should be independent
-    let val1 = Storage::get(&*store, &key1).unwrap().unwrap().value;
-    let val2 = Storage::get(&*store, &key2).unwrap().unwrap().value;
+    let val1 = store.get_versioned(&key1, u64::MAX).unwrap().unwrap().value;
+    let val2 = store.get_versioned(&key2, u64::MAX).unwrap().unwrap().value;
 
     assert_eq!(val1, Value::Int(100));
     assert_eq!(val2, Value::Int(200));
@@ -119,7 +120,7 @@ fn high_contention_single_key() {
     let key = create_test_key(branch_id, "contested");
 
     // Initial value
-    Storage::put(&*store, key.clone(), Value::Int(0), None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(0), 1, None, WriteMode::Append).unwrap();
 
     let barrier = Arc::new(Barrier::new(8));
     let commits = Arc::new(AtomicU64::new(0));
@@ -140,7 +141,7 @@ fn high_contention_single_key() {
                 for i in 0..10 {
                     loop {
                         // Read current value
-                        let current = Storage::get(&*store, &key).unwrap().unwrap();
+                        let current = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
                         let read_version = current.version.as_u64();
 
                         // Create transaction
@@ -153,11 +154,13 @@ fn high_contention_single_key() {
                         // Validate
                         let result = validate_transaction(&txn, &*store);
                         if result.unwrap().is_valid() {
-                            Storage::put(
-                                &*store,
+                            let commit_ver = manager.allocate_version().unwrap();
+                            store.put_with_version_mode(
                                 key.clone(),
                                 Value::Int((thread_id * 100 + i) as i64),
+                                commit_ver,
                                 None,
+                                WriteMode::Append,
                             )
                             .unwrap();
                             commits.fetch_add(1, Ordering::Relaxed);
@@ -197,15 +200,15 @@ fn interleaved_disjoint_operations_both_commit() {
     let key_b = create_test_key(branch_id, "B");
 
     // Initial values
-    Storage::put(&*store, key_a.clone(), Value::Int(1), None).unwrap();
-    Storage::put(&*store, key_b.clone(), Value::Int(2), None).unwrap();
+    store.put_with_version_mode(key_a.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
+    store.put_with_version_mode(key_b.clone(), Value::Int(2), 2, None, WriteMode::Append).unwrap();
 
-    let va = Storage::get(&*store, &key_a)
+    let va = store.get_versioned(&key_a, u64::MAX)
         .unwrap()
         .unwrap()
         .version
         .as_u64();
-    let vb = Storage::get(&*store, &key_b)
+    let vb = store.get_versioned(&key_b, u64::MAX)
         .unwrap()
         .unwrap()
         .version

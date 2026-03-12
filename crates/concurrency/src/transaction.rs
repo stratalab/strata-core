@@ -1450,7 +1450,13 @@ impl TransactionContext {
         // Apply CAS operations from cas_set — drain to avoid cloning
         // Note: CAS validation already passed in commit(), so we just apply the new values
         for cas_op in self.cas_set.drain(..) {
-            store.put_with_version(cas_op.key, cas_op.new_value, commit_version, None)?;
+            store.put_with_version_mode(
+                cas_op.key,
+                cas_op.new_value,
+                commit_version,
+                None,
+                WriteMode::Append,
+            )?;
             result.cas_applied += 1;
         }
 

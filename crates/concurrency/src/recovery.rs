@@ -17,7 +17,7 @@
 use crate::payload::TransactionPayload;
 use crate::TransactionManager;
 use std::path::PathBuf;
-use strata_core::traits::Storage;
+use strata_core::traits::{Storage, WriteMode};
 use strata_core::StrataResult;
 use strata_durability::codec::IdentityCodec;
 use strata_durability::wal::WalReader;
@@ -108,7 +108,13 @@ impl RecoveryCoordinator {
 
             // Apply puts
             for (key, value) in &payload.puts {
-                storage.put_with_version(key.clone(), value.clone(), payload.version, None)?;
+                storage.put_with_version_mode(
+                    key.clone(),
+                    value.clone(),
+                    payload.version,
+                    None,
+                    WriteMode::Append,
+                )?;
                 stats.writes_applied += 1;
             }
 
@@ -337,7 +343,7 @@ mod tests {
         assert_eq!(result.stats.final_version, 100);
         assert_eq!(result.txn_manager.current_version(), 100);
 
-        let stored = result.storage.get(&key).unwrap().unwrap();
+        let stored = result.storage.get_versioned(&key, u64::MAX).unwrap().unwrap();
         assert_eq!(stored.value, Value::Int(42));
         assert_eq!(stored.version.as_u64(), 100);
     }
@@ -385,19 +391,19 @@ mod tests {
 
         let key1 = Key::new_kv(ns.clone(), "key1");
         assert_eq!(
-            result.storage.get(&key1).unwrap().unwrap().version.as_u64(),
+            result.storage.get_versioned(&key1, u64::MAX).unwrap().unwrap().version.as_u64(),
             100
         );
 
         let key2 = Key::new_kv(ns.clone(), "key2");
         assert_eq!(
-            result.storage.get(&key2).unwrap().unwrap().version.as_u64(),
+            result.storage.get_versioned(&key2, u64::MAX).unwrap().unwrap().version.as_u64(),
             100
         );
 
         let key3 = Key::new_kv(ns.clone(), "key3");
         assert_eq!(
-            result.storage.get(&key3).unwrap().unwrap().version.as_u64(),
+            result.storage.get_versioned(&key3, u64::MAX).unwrap().unwrap().version.as_u64(),
             200
         );
     }
@@ -439,8 +445,8 @@ mod tests {
 
         for i in 1..=5u64 {
             let key = Key::new_kv(ns.clone(), format!("key{}", i));
-            let v1 = result1.storage.get(&key).unwrap().unwrap();
-            let v2 = result2.storage.get(&key).unwrap().unwrap();
+            let v1 = result1.storage.get_versioned(&key, u64::MAX).unwrap().unwrap();
+            let v2 = result2.storage.get_versioned(&key, u64::MAX).unwrap().unwrap();
             assert_eq!(v1.value, v2.value);
             assert_eq!(v1.version, v2.version);
         }
@@ -477,7 +483,7 @@ mod tests {
         assert_eq!(result.stats.deletes_applied, 1);
 
         // Key should be deleted
-        assert!(result.storage.get(&key).unwrap().is_none());
+        assert!(result.storage.get_versioned(&key, u64::MAX).unwrap().is_none());
     }
 
     #[test]
@@ -570,7 +576,7 @@ mod tests {
 
         let stored = result
             .storage
-            .get(&Key::new_kv(ns, "durable_key"))
+            .get_versioned(&Key::new_kv(ns, "durable_key"), u64::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(stored.value, Value::String("must_exist".to_string()));
@@ -614,7 +620,7 @@ mod tests {
         assert_eq!(result.stats.txns_replayed, 1);
         let stored = result
             .storage
-            .get(&Key::new_kv(ns, "valid"))
+            .get_versioned(&Key::new_kv(ns, "valid"), u64::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(stored.value, Value::Int(42));
@@ -652,12 +658,12 @@ mod tests {
 
         let v1 = result1
             .storage
-            .get(&Key::new_kv(ns.clone(), "key"))
+            .get_versioned(&Key::new_kv(ns.clone(), "key"), u64::MAX)
             .unwrap()
             .unwrap();
         let v2 = result2
             .storage
-            .get(&Key::new_kv(ns, "key"))
+            .get_versioned(&Key::new_kv(ns, "key"), u64::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(v1.value, v2.value);
@@ -725,7 +731,7 @@ mod tests {
 
         for i in 1..=10u64 {
             let key = Key::new_kv(ns.clone(), format!("key{}", i));
-            let stored = result.storage.get(&key).unwrap().unwrap();
+            let stored = result.storage.get_versioned(&key, u64::MAX).unwrap().unwrap();
             assert_eq!(stored.value, Value::Int(i as i64 * 10));
             assert_eq!(stored.version.as_u64(), i);
         }
@@ -803,7 +809,7 @@ mod tests {
         // key1 should be "updated" at version 2
         let key1 = result
             .storage
-            .get(&Key::new_kv(ns.clone(), "key1"))
+            .get_versioned(&Key::new_kv(ns.clone(), "key1"), u64::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(key1.value, Value::String("updated".to_string()));
@@ -812,14 +818,14 @@ mod tests {
         // key2 should be deleted
         assert!(result
             .storage
-            .get(&Key::new_kv(ns.clone(), "key2"))
+            .get_versioned(&Key::new_kv(ns.clone(), "key2"), u64::MAX)
             .unwrap()
             .is_none());
 
         // key3 should exist
         let key3 = result
             .storage
-            .get(&Key::new_kv(ns.clone(), "key3"))
+            .get_versioned(&Key::new_kv(ns.clone(), "key3"), u64::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(key3.value, Value::Int(42));
@@ -853,7 +859,7 @@ mod tests {
 
         let counter = result
             .storage
-            .get(&Key::new_kv(ns, "counter"))
+            .get_versioned(&Key::new_kv(ns, "counter"), u64::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(counter.value, Value::Int(300));
@@ -922,7 +928,7 @@ mod tests {
 
         for i in [1, 50, 100] {
             let key = Key::new_kv(ns.clone(), format!("key_{}", i));
-            let stored = result.storage.get(&key).unwrap().unwrap();
+            let stored = result.storage.get_versioned(&key, u64::MAX).unwrap().unwrap();
             assert_eq!(stored.value, Value::Int(i as i64));
         }
     }

@@ -578,9 +578,9 @@ impl ShardedStore {
     // Get/Put/Delete Operations
     // ========================================================================
 
-    // NOTE: `get()` is provided by the Storage trait implementation,
+    // NOTE: `get_versioned()` is provided by the Storage trait implementation,
     // which includes proper TTL expiration checks.
-    // Use `Storage::get()` trait method instead of an inherent method
+    // Use `Storage::get_versioned()` trait method instead of an inherent method
     // to ensure consistent behavior across all callers.
 
     /// Put a value for a key (adds to version chain for MVCC)
@@ -657,46 +657,11 @@ impl ShardedStore {
         Ok(())
     }
 
-    /// Delete a key by adding a tombstone
-    ///
-    /// MVCC-safe delete: adds a tombstone (Value::Null) at a new version
-    /// instead of removing all versions. This preserves old versions for
-    /// snapshots that may still need them.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - Key to delete (contains BranchId)
-    ///
-    /// # Returns
-    /// The previous value if it existed and wasn't already deleted
-    #[inline]
-    pub fn delete(&self, key: &Key) -> StrataResult<Option<VersionedValue>> {
-        let delete_version = self.next_version();
-
-        // Get the previous value before adding tombstone
-        let previous = self.shards.get(&key.namespace.branch_id).and_then(|shard| {
-            shard.data.get(key).and_then(|chain| {
-                chain.latest().and_then(|sv| {
-                    if sv.is_tombstone() {
-                        None
-                    } else {
-                        Some(sv.versioned())
-                    }
-                })
-            })
-        });
-
-        let tombstone = StoredValue::tombstone(Version::txn(delete_version));
-        self.put(key.clone(), tombstone, WriteMode::Append)?;
-
-        Ok(previous)
-    }
-
     /// Delete a key with a specific version (for batched deletes)
     ///
-    /// Adds a tombstone at the specified version. Old versions are preserved
-    /// for MVCC snapshot isolation. Does not return the previous value —
-    /// all production callers discard it.
+    /// MVCC-safe delete: adds a tombstone at the specified version instead
+    /// of removing all versions. This preserves old versions for snapshots
+    /// that may still need them.
     #[inline]
     pub fn delete_with_version(&self, key: &Key, version: u64) -> StrataResult<()> {
         let tombstone = StoredValue::tombstone(Version::txn(version));
@@ -1532,28 +1497,10 @@ use strata_core::traits::Storage;
 use strata_core::value::Value;
 
 impl Storage for ShardedStore {
-    /// Get current value for key (latest version)
-    ///
-    /// Returns None if key doesn't exist, is expired, or is a tombstone.
-    fn get(&self, key: &Key) -> StrataResult<Option<VersionedValue>> {
-        let branch_id = key.namespace.branch_id;
-        Ok(self.shards.get(&branch_id).and_then(|shard| {
-            shard.data.get(key).and_then(|chain| {
-                chain.latest().and_then(|sv| {
-                    // Filter out expired values and tombstones
-                    if !sv.is_expired() && !sv.is_tombstone() {
-                        Some(sv.versioned())
-                    } else {
-                        None
-                    }
-                })
-            })
-        }))
-    }
-
     /// Get value at or before specified version (for snapshot isolation)
     ///
     /// Returns the value if version <= max_version, not expired, and not a tombstone.
+    /// Pass `u64::MAX` to get the latest version unconditionally.
     fn get_versioned(&self, key: &Key, max_version: u64) -> StrataResult<Option<VersionedValue>> {
         let branch_id = key.namespace.branch_id;
         Ok(self.shards.get(&branch_id).and_then(|shard| {
@@ -1598,26 +1545,6 @@ impl Storage for ShardedStore {
         Ok(result)
     }
 
-    /// Put key-value pair with optional TTL
-    ///
-    /// Allocates a new version and returns it.
-    fn put(&self, key: Key, value: Value, ttl: Option<Duration>) -> StrataResult<u64> {
-        let version = self.next_version();
-        let stored = StoredValue::new(value, Version::txn(version), ttl);
-
-        // Use the inherent put method which handles version chain
-        ShardedStore::put(self, key, stored, WriteMode::Append)?;
-
-        Ok(version)
-    }
-
-    /// Delete key
-    ///
-    /// Returns the latest version's value if it existed.
-    fn delete(&self, key: &Key) -> StrataResult<Option<VersionedValue>> {
-        ShardedStore::delete(self, key)
-    }
-
     /// Scan keys with given prefix at or before max_version
     ///
     /// Uses BTreeSet range scan for O(log n + k) performance.
@@ -1655,55 +1582,9 @@ impl Storage for ShardedStore {
             .unwrap_or_default())
     }
 
-    /// Scan all keys for a given branch_id at or before max_version
-    ///
-    /// Returns all entries for the branch, filtered by version.
-    fn scan_by_branch(
-        &self,
-        branch_id: BranchId,
-        max_version: u64,
-    ) -> StrataResult<Vec<(Key, VersionedValue)>> {
-        Ok(self
-            .shards
-            .get(&branch_id)
-            .map(|shard| {
-                let mut results: Vec<_> = shard
-                    .data
-                    .iter()
-                    .filter_map(|(k, chain)| {
-                        chain.get_at_version(max_version).and_then(|sv| {
-                            // Filter out expired values and tombstones
-                            if !sv.is_expired() && !sv.is_tombstone() {
-                                Some(((**k).clone(), sv.versioned()))
-                            } else {
-                                None
-                            }
-                        })
-                    })
-                    .collect();
-
-                results.sort_by(|(a, _), (b, _)| a.cmp(b));
-                results
-            })
-            .unwrap_or_default())
-    }
-
     /// Get current global version
     fn current_version(&self) -> u64 {
         self.version.load(Ordering::Acquire)
-    }
-
-    /// Put a value with a specific version
-    ///
-    /// Used by transaction commit to apply writes with the commit version.
-    fn put_with_version(
-        &self,
-        key: Key,
-        value: Value,
-        version: u64,
-        ttl: Option<Duration>,
-    ) -> StrataResult<()> {
-        self.put_with_version_mode(key, value, version, ttl, WriteMode::Append)
     }
 
     fn put_with_version_mode(
@@ -2332,8 +2213,8 @@ mod tests {
         // Put
         store.put(key.clone(), value, WriteMode::Append).unwrap();
 
-        // Get (Storage trait returns Result<Option<...>>)
-        let retrieved = store.get(&key).unwrap();
+        // Get via get_versioned (Storage trait)
+        let retrieved = store.get_versioned(&key, u64::MAX).unwrap();
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().value, Value::Int(42));
     }
@@ -2344,7 +2225,7 @@ mod tests {
         let branch_id = BranchId::new();
         let key = create_test_key(branch_id, "nonexistent");
 
-        assert!(store.get(&key).unwrap().is_none());
+        assert!(store.get_versioned(&key, u64::MAX).unwrap().is_none());
     }
 
     #[test]
@@ -2357,12 +2238,11 @@ mod tests {
         let value = create_stored_value(Value::Int(42), 1);
 
         store.put(key.clone(), value, WriteMode::Append).unwrap();
-        assert!(store.get(&key).unwrap().is_some());
+        assert!(store.get_versioned(&key, u64::MAX).unwrap().is_some());
 
-        // Delete
-        let deleted = store.delete(&key).unwrap();
-        assert!(deleted.is_some());
-        assert!(store.get(&key).unwrap().is_none());
+        // Delete with version tombstone
+        store.delete_with_version(&key, 2).unwrap();
+        assert!(store.get_versioned(&key, u64::MAX).unwrap().is_none());
     }
 
     #[test]
@@ -2371,7 +2251,9 @@ mod tests {
         let branch_id = BranchId::new();
         let key = create_test_key(branch_id, "nonexistent");
 
-        assert!(store.delete(&key).unwrap().is_none());
+        // delete_with_version on a nonexistent key just creates a tombstone
+        store.delete_with_version(&key, 1).unwrap();
+        assert!(store.get_versioned(&key, u64::MAX).unwrap().is_none());
     }
 
     #[test]
@@ -2411,7 +2293,7 @@ mod tests {
             )
             .unwrap();
 
-        let retrieved = store.get(&key).unwrap().unwrap();
+        let retrieved = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
         assert_eq!(retrieved.value, Value::Int(2));
         assert_eq!(retrieved.version, Version::txn(2));
     }
@@ -2443,8 +2325,8 @@ mod tests {
             .unwrap();
 
         // Different branches, same key name, different values
-        assert_eq!(store.get(&key1).unwrap().unwrap().value, Value::Int(1));
-        assert_eq!(store.get(&key2).unwrap().unwrap().value, Value::Int(2));
+        assert_eq!(store.get_versioned(&key1, u64::MAX).unwrap().unwrap().value, Value::Int(1));
+        assert_eq!(store.get_versioned(&key2, u64::MAX).unwrap().unwrap().value, Value::Int(2));
         assert_eq!(store.shard_count(), 2);
     }
 
@@ -2474,10 +2356,10 @@ mod tests {
 
         store.apply_batch(writes, deletes, 2).unwrap();
 
-        assert_eq!(store.get(&key1).unwrap().unwrap().value, Value::Int(1));
-        assert_eq!(store.get(&key1).unwrap().unwrap().version, Version::txn(2));
-        assert_eq!(store.get(&key2).unwrap().unwrap().value, Value::Int(2));
-        assert!(store.get(&key3).unwrap().is_none());
+        assert_eq!(store.get_versioned(&key1, u64::MAX).unwrap().unwrap().value, Value::Int(1));
+        assert_eq!(store.get_versioned(&key1, u64::MAX).unwrap().unwrap().version, Version::txn(2));
+        assert_eq!(store.get_versioned(&key2, u64::MAX).unwrap().unwrap().value, Value::Int(2));
+        assert!(store.get_versioned(&key3, u64::MAX).unwrap().is_none());
     }
 
     #[test]
@@ -3091,11 +2973,10 @@ mod tests {
         let key = Key::new_kv(ns, "test_key");
 
         // Put via Storage trait
-        let version = Storage::put(&store, key.clone(), Value::Int(42), None).unwrap();
-        assert_eq!(version, 1);
+        Storage::put_with_version_mode(&store, key.clone(), Value::Int(42), 1, None, WriteMode::Append).unwrap();
 
         // Get via Storage trait
-        let result = Storage::get(&store, &key).unwrap();
+        let result = Storage::get_versioned(&store, &key, u64::MAX).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().value, Value::Int(42));
     }
@@ -3112,7 +2993,7 @@ mod tests {
         let key = Key::new_kv(ns, "test_key");
 
         // Put with version 1
-        Storage::put(&store, key.clone(), Value::Int(42), None).unwrap();
+        Storage::put_with_version_mode(&store, key.clone(), Value::Int(42), 1, None, WriteMode::Append).unwrap();
 
         // Get with max_version 1 - should return value
         let result = Storage::get_versioned(&store, &key, 1).unwrap();
@@ -3134,13 +3015,12 @@ mod tests {
         let ns = Arc::new(Namespace::for_branch(branch_id));
         let key = Key::new_kv(ns, "test_key");
 
-        Storage::put(&store, key.clone(), Value::Int(42), None).unwrap();
-        assert!(Storage::get(&store, &key).unwrap().is_some());
+        Storage::put_with_version_mode(&store, key.clone(), Value::Int(42), 1, None, WriteMode::Append).unwrap();
+        assert!(Storage::get_versioned(&store, &key, u64::MAX).unwrap().is_some());
 
         // Delete via Storage trait
-        let deleted = Storage::delete(&store, &key).unwrap();
-        assert!(deleted.is_some());
-        assert!(Storage::get(&store, &key).unwrap().is_none());
+        Storage::delete_with_version(&store, &key, 2).unwrap();
+        assert!(Storage::get_versioned(&store, &key, u64::MAX).unwrap().is_none());
     }
 
     #[test]
@@ -3154,25 +3034,31 @@ mod tests {
         let ns = Arc::new(Namespace::for_branch(branch_id));
 
         // Insert keys with different prefixes
-        Storage::put(
+        Storage::put_with_version_mode(
             &store,
             Key::new_kv(ns.clone(), "user:alice"),
             Value::Int(1),
+            1,
             None,
+            WriteMode::Append,
         )
         .unwrap();
-        Storage::put(
+        Storage::put_with_version_mode(
             &store,
             Key::new_kv(ns.clone(), "user:bob"),
             Value::Int(2),
+            2,
             None,
+            WriteMode::Append,
         )
         .unwrap();
-        Storage::put(
+        Storage::put_with_version_mode(
             &store,
             Key::new_kv(ns.clone(), "config:timeout"),
             Value::Int(3),
+            3,
             None,
+            WriteMode::Append,
         )
         .unwrap();
 
@@ -3181,51 +3067,6 @@ mod tests {
         let results = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
 
         assert_eq!(results.len(), 2);
-    }
-
-    #[test]
-    fn test_storage_trait_scan_by_branch() {
-        use strata_core::traits::Storage;
-        use strata_core::types::Namespace;
-        use strata_core::value::Value;
-
-        let store = ShardedStore::new();
-        let branch1 = BranchId::new();
-        let branch2 = BranchId::new();
-
-        // Insert data for two branches
-        let ns1 = Arc::new(Namespace::for_branch(branch1));
-        let ns2 = Arc::new(Namespace::for_branch(branch2));
-
-        Storage::put(
-            &store,
-            Key::new_kv(ns1.clone(), "key1"),
-            Value::Int(1),
-            None,
-        )
-        .unwrap();
-        Storage::put(
-            &store,
-            Key::new_kv(ns1.clone(), "key2"),
-            Value::Int(2),
-            None,
-        )
-        .unwrap();
-        Storage::put(
-            &store,
-            Key::new_kv(ns2.clone(), "key1"),
-            Value::Int(3),
-            None,
-        )
-        .unwrap();
-
-        // Scan branch1
-        let results = Storage::scan_by_branch(&store, branch1, u64::MAX).unwrap();
-        assert_eq!(results.len(), 2);
-
-        // Scan branch2
-        let results = Storage::scan_by_branch(&store, branch2, u64::MAX).unwrap();
-        assert_eq!(results.len(), 1);
     }
 
     #[test]
@@ -3240,10 +3081,10 @@ mod tests {
         let key = Key::new_kv(ns, "test_key");
 
         // Put with specific version 42
-        Storage::put_with_version(&store, key.clone(), Value::Int(100), 42, None).unwrap();
+        Storage::put_with_version_mode(&store, key.clone(), Value::Int(100), 42, None, WriteMode::Append).unwrap();
 
         // Verify version is 42
-        let result = Storage::get(&store, &key).unwrap().unwrap();
+        let result = Storage::get_versioned(&store, &key, u64::MAX).unwrap().unwrap();
         assert_eq!(result.version, Version::txn(42));
 
         // current_version should be updated
@@ -3262,14 +3103,14 @@ mod tests {
         let key = Key::new_kv(ns, "versioned_delete");
 
         // Put a value
-        Storage::put(&*store, key.clone(), Value::Int(42), None).unwrap();
-        assert!(Storage::get(&*store, &key).unwrap().is_some());
+        Storage::put_with_version_mode(&*store, key.clone(), Value::Int(42), 1, None, WriteMode::Append).unwrap();
+        assert!(Storage::get_versioned(&*store, &key, u64::MAX).unwrap().is_some());
 
         // Delete with specific version
         Storage::delete_with_version(&*store, &key, 100).unwrap();
 
         // Key should no longer be visible
-        assert!(Storage::get(&*store, &key).unwrap().is_none());
+        assert!(Storage::get_versioned(&*store, &key, u64::MAX).unwrap().is_none());
 
         // Global version should be updated
         assert!(Storage::current_version(&*store) >= 100);
@@ -3304,11 +3145,13 @@ mod tests {
         let key = Key::new_kv(ns, "version_check");
 
         // Put a value — version 1
-        Storage::put(
+        Storage::put_with_version_mode(
             &store,
             key.clone(),
             Value::String("hello".to_string()),
+            1,
             None,
+            WriteMode::Append,
         )
         .unwrap();
 
@@ -3317,7 +3160,7 @@ mod tests {
         assert_eq!(version, Some(1));
 
         // Should match what get() returns
-        let full = Storage::get(&store, &key).unwrap().unwrap();
+        let full = Storage::get_versioned(&store, &key, u64::MAX).unwrap().unwrap();
         assert_eq!(version.unwrap(), full.version.as_u64());
     }
 
@@ -3345,12 +3188,12 @@ mod tests {
         let ns = Arc::new(Namespace::for_branch(branch_id));
         let key = Key::new_kv(ns, "to_delete");
 
-        Storage::put(&store, key.clone(), Value::Int(1), None).unwrap();
-        Storage::delete(&store, &key).unwrap();
+        Storage::put_with_version_mode(&store, key.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
+        Storage::delete_with_version(&store, &key, 2).unwrap();
 
         // get_version_only should return None for tombstoned key (same as get())
         assert_eq!(Storage::get_version_only(&store, &key).unwrap(), None);
-        assert!(Storage::get(&store, &key).unwrap().is_none());
+        assert!(Storage::get_versioned(&store, &key, u64::MAX).unwrap().is_none());
     }
 
     #[test]
@@ -3376,7 +3219,7 @@ mod tests {
 
         // get_version_only should return None for expired key (same as get())
         assert_eq!(Storage::get_version_only(&store, &key).unwrap(), None);
-        assert!(Storage::get(&store, &key).unwrap().is_none());
+        assert!(Storage::get_versioned(&store, &key, u64::MAX).unwrap().is_none());
     }
 
     #[test]
@@ -3392,18 +3235,18 @@ mod tests {
         // Write multiple keys with different versions
         for i in 0..5 {
             let key = Key::new_kv(ns.clone(), &format!("key{}", i));
-            Storage::put(&store, key, Value::Int(i), None).unwrap();
+            Storage::put_with_version_mode(&store, key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
         }
 
-        // Verify get_version_only matches get() for all keys
+        // Verify get_version_only matches get_versioned() for all keys
         for i in 0..5 {
             let key = Key::new_kv(ns.clone(), &format!("key{}", i));
             let version_only = Storage::get_version_only(&store, &key).unwrap();
-            let full_get = Storage::get(&store, &key).unwrap();
+            let full_get = Storage::get_versioned(&store, &key, u64::MAX).unwrap();
             assert_eq!(
                 version_only,
                 full_get.map(|vv| vv.version.as_u64()),
-                "get_version_only must match get() for key{}",
+                "get_version_only must match get_versioned() for key{}",
                 i
             );
         }
@@ -3412,7 +3255,7 @@ mod tests {
         let missing = Key::new_kv(ns, "nonexistent");
         assert_eq!(
             Storage::get_version_only(&store, &missing).unwrap(),
-            Storage::get(&store, &missing)
+            Storage::get_versioned(&store, &missing, u64::MAX)
                 .unwrap()
                 .map(|vv| vv.version.as_u64())
         );
@@ -3430,7 +3273,7 @@ mod tests {
 
         // Put at version 1
         let key1 = Key::new_kv(ns.clone(), "key1");
-        Storage::put(&*store, key1.clone(), Value::Int(1), None).unwrap();
+        Storage::put_with_version_mode(&*store, key1.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
 
         // Create snapshot at version 1
         let snapshot = store.snapshot();
@@ -3438,7 +3281,7 @@ mod tests {
 
         // Put at version 2
         let key2 = Key::new_kv(ns.clone(), "key2");
-        Storage::put(&*store, key2.clone(), Value::Int(2), None).unwrap();
+        Storage::put_with_version_mode(&*store, key2.clone(), Value::Int(2), 2, None, WriteMode::Append).unwrap();
 
         // Snapshot should only see key1 (version 1) via MVCC filtering
         let snap_key1 = SnapshotView::get(&snapshot, &key1).unwrap();
@@ -3466,29 +3309,35 @@ mod tests {
         let ns = Arc::new(Namespace::for_branch(branch_id));
 
         // Put two keys at version 1
-        Storage::put(
+        Storage::put_with_version_mode(
             &*store,
             Key::new_kv(ns.clone(), "user:alice"),
             Value::Int(1),
+            1,
             None,
+            WriteMode::Append,
         )
         .unwrap();
-        Storage::put(
+        Storage::put_with_version_mode(
             &*store,
             Key::new_kv(ns.clone(), "user:bob"),
             Value::Int(2),
+            2,
             None,
+            WriteMode::Append,
         )
         .unwrap();
 
         let snapshot = store.snapshot();
 
         // Put another key at version 3
-        Storage::put(
+        Storage::put_with_version_mode(
             &*store,
             Key::new_kv(ns.clone(), "user:charlie"),
             Value::Int(3),
+            3,
             None,
+            WriteMode::Append,
         )
         .unwrap();
 
@@ -3733,9 +3582,9 @@ mod tests {
         let key = Key::new_kv(ns.clone(), "test-key");
 
         // Put multiple versions of the same key
-        Storage::put_with_version(&store, key.clone(), Value::Int(1), 1, None).unwrap();
-        Storage::put_with_version(&store, key.clone(), Value::Int(2), 2, None).unwrap();
-        Storage::put_with_version(&store, key.clone(), Value::Int(3), 3, None).unwrap();
+        Storage::put_with_version_mode(&store, key.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
+        Storage::put_with_version_mode(&store, key.clone(), Value::Int(2), 2, None, WriteMode::Append).unwrap();
+        Storage::put_with_version_mode(&store, key.clone(), Value::Int(3), 3, None, WriteMode::Append).unwrap();
 
         // Get full history
         let history = Storage::get_history(&store, &key, None, None).unwrap();
@@ -3758,7 +3607,7 @@ mod tests {
 
         // Put 5 versions
         for i in 1..=5 {
-            Storage::put_with_version(&store, key.clone(), Value::Int(i), i as u64, None).unwrap();
+            Storage::put_with_version_mode(&store, key.clone(), Value::Int(i), i as u64, None, WriteMode::Append).unwrap();
         }
 
         // Page 1: Get first 2
@@ -3812,7 +3661,7 @@ mod tests {
         let key = create_test_key(branch_id, "mvcc_uncached");
 
         // Put a value at version 1
-        Storage::put(&*store, key.clone(), Value::Int(100), None).unwrap();
+        Storage::put_with_version_mode(&*store, key.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
 
         // Create a snapshot at version 1 - but DON'T read the key yet
         let snapshot = store.snapshot();
@@ -3820,7 +3669,7 @@ mod tests {
 
         // Delete the key BEFORE the snapshot reads it
         // This creates a tombstone at version 2
-        Storage::delete(&*store, &key).unwrap();
+        Storage::delete_with_version(&*store, &key, 2).unwrap();
 
         // Now read from snapshot - it should see version 1 (before the tombstone)
         let result = SnapshotView::get(&snapshot, &key).unwrap();
@@ -3852,7 +3701,7 @@ mod tests {
         let key = create_test_key(branch_id, "cached_test");
 
         // Put a value at version 1
-        Storage::put(&*store, key.clone(), Value::Int(100), None).unwrap();
+        Storage::put_with_version_mode(&*store, key.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
 
         // Create snapshot and READ the key (this caches it)
         let snapshot = store.snapshot();
@@ -3861,7 +3710,7 @@ mod tests {
         assert_eq!(before.unwrap().value, Value::Int(100));
 
         // Delete the key
-        Storage::delete(&*store, &key).unwrap();
+        Storage::delete_with_version(&*store, &key, 2).unwrap();
 
         // Snapshot should still see the cached value
         let after = SnapshotView::get(&snapshot, &key).unwrap();
@@ -3957,7 +3806,7 @@ mod tests {
         // Put initial values
         for i in 0..10 {
             let key = create_test_key(branch_id, &format!("key{}", i));
-            Storage::put(&*store, key, Value::Int(i), None).unwrap();
+            Storage::put_with_version_mode(&*store, key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
         }
 
         // Take snapshot
@@ -3978,7 +3827,7 @@ mod tests {
                         for i in 0..10 {
                             let key = create_test_key(branch_id, &format!("key{}", i));
                             let _ =
-                                Storage::put(&*store, key, Value::Int(t * 1000 + counter), None);
+                                Storage::put_with_version_mode(&*store, key, Value::Int(t * 1000 + counter), 11 + counter as u64, None, WriteMode::Append);
                         }
                         counter += 1;
                         if counter > 100 {
@@ -4040,7 +3889,7 @@ mod tests {
         let key = create_test_key(branch_id, "cached_key");
 
         // Put a value
-        Storage::put(&*store, key.clone(), Value::Int(42), None).unwrap();
+        Storage::put_with_version_mode(&*store, key.clone(), Value::Int(42), 1, None, WriteMode::Append).unwrap();
 
         // Create snapshot
         let snapshot = Arc::new(store.snapshot());
@@ -4098,7 +3947,7 @@ mod tests {
 
         // Build up a version chain with many versions
         for i in 1..=100 {
-            Storage::put_with_version(&*store, key.clone(), Value::Int(i), i as u64, None).unwrap();
+            Storage::put_with_version_mode(&*store, key.clone(), Value::Int(i), i as u64, None, WriteMode::Append).unwrap();
         }
 
         // Verify all versions exist
@@ -4146,12 +3995,13 @@ mod tests {
             thread::spawn(move || {
                 let mut version = 101;
                 while !stop.load(Ordering::Relaxed) && version < 200 {
-                    Storage::put_with_version(
+                    Storage::put_with_version_mode(
                         &*store,
                         key.clone(),
                         Value::Int(version),
                         version as u64,
                         None,
+                        WriteMode::Append,
                     )
                     .unwrap();
                     version += 1;
@@ -4207,7 +4057,7 @@ mod tests {
 
         // All keys should be written with same version
         for (i, key) in keys.iter().enumerate() {
-            let result = Storage::get(&store, key).unwrap();
+            let result = Storage::get_versioned(&store, key, u64::MAX).unwrap();
             assert!(result.is_some(), "Key {} should exist after batch", i);
             let vv = result.unwrap();
             assert_eq!(vv.version.as_u64(), 1, "All keys should have version 1");
@@ -4266,12 +4116,10 @@ mod tests {
         let key = create_test_key(branch_id, "never_existed");
 
         // Delete should not panic
-        let result = Storage::delete(&store, &key).unwrap();
-        assert!(result.is_none(), "Delete of nonexistent key returns None");
+        Storage::delete_with_version(&store, &key, 1).unwrap();
 
         // Multiple deletes should be safe
-        let result2 = Storage::delete(&store, &key).unwrap();
-        assert!(result2.is_none());
+        Storage::delete_with_version(&store, &key, 2).unwrap();
     }
 
     /// SAFETY: Scan operations with expired TTL values
@@ -4292,7 +4140,7 @@ mod tests {
 
         // Non-expired key
         let key1 = Key::new_kv(ns.clone(), "fresh");
-        Storage::put(&store, key1.clone(), Value::Int(1), None).unwrap();
+        Storage::put_with_version_mode(&store, key1.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
 
         // "Expired" key - we'll simulate by using internal API
         let key2 = Key::new_kv(ns.clone(), "expired");
@@ -4336,19 +4184,19 @@ mod tests {
         // Insert keys
         for i in 0..20 {
             let key = create_test_key(branch_id, &format!("key_{:03}", i));
-            Storage::put(&store, key, Value::Int(i), None).unwrap();
+            Storage::put_with_version_mode(&store, key, Value::Int(i), 1, None, WriteMode::Append).unwrap();
         }
 
         // Overwrite some keys (should not duplicate in BTreeSet)
         for i in 0..10 {
             let key = create_test_key(branch_id, &format!("key_{:03}", i));
-            Storage::put(&store, key, Value::Int(i + 100), None).unwrap();
+            Storage::put_with_version_mode(&store, key, Value::Int(i + 100), 2, None, WriteMode::Append).unwrap();
         }
 
         // Delete some keys (tombstone — key stays in both structures)
         for i in 15..20 {
             let key = create_test_key(branch_id, &format!("key_{:03}", i));
-            Storage::delete(&store, &key).unwrap();
+            Storage::delete_with_version(&store, &key, 3).unwrap();
         }
 
         // Ensure ordered_keys is rebuilt lazily, then verify consistency
@@ -4393,7 +4241,7 @@ mod tests {
             "user:charlie",
         ];
         for name in &names {
-            Storage::put(&store, Key::new_kv(ns.clone(), name), Value::Int(1), None).unwrap();
+            Storage::put_with_version_mode(&store, Key::new_kv(ns.clone(), name), Value::Int(1), 1, None, WriteMode::Append).unwrap();
         }
 
         let prefix = Key::new_kv(ns.clone(), "user:");
@@ -4422,25 +4270,31 @@ mod tests {
         let ns = Arc::new(Namespace::for_branch(branch_id));
 
         // Insert 3 keys at version 1, 2, 3
-        Storage::put(
+        Storage::put_with_version_mode(
             &*store,
             Key::new_kv(ns.clone(), "item:a"),
             Value::Int(1),
+            1,
             None,
+            WriteMode::Append,
         )
         .unwrap();
-        Storage::put(
+        Storage::put_with_version_mode(
             &*store,
             Key::new_kv(ns.clone(), "item:b"),
             Value::Int(2),
+            2,
             None,
+            WriteMode::Append,
         )
         .unwrap();
-        Storage::put(
+        Storage::put_with_version_mode(
             &*store,
             Key::new_kv(ns.clone(), "item:c"),
             Value::Int(3),
+            3,
             None,
+            WriteMode::Append,
         )
         .unwrap();
 
@@ -4448,7 +4302,7 @@ mod tests {
         let snap_before = store.snapshot();
 
         // Delete item:b (tombstone at version 4)
-        Storage::delete(&*store, &Key::new_kv(ns.clone(), "item:b")).unwrap();
+        Storage::delete_with_version(&*store, &Key::new_kv(ns.clone(), "item:b"), 4).unwrap();
 
         // Take snapshot after delete (version = 4)
         let snap_after = store.snapshot();
@@ -4486,18 +4340,22 @@ mod tests {
 
         // Insert 5000 keys with prefix "alpha:" and 5000 with prefix "beta:"
         for i in 0..5000 {
-            Storage::put(
+            Storage::put_with_version_mode(
                 &store,
                 Key::new_kv(ns.clone(), format!("alpha:{:05}", i)),
                 Value::Int(i),
+                1,
                 None,
+                WriteMode::Append,
             )
             .unwrap();
-            Storage::put(
+            Storage::put_with_version_mode(
                 &store,
                 Key::new_kv(ns.clone(), format!("beta:{:05}", i)),
                 Value::Int(i),
+                2,
                 None,
+                WriteMode::Append,
             )
             .unwrap();
         }
@@ -4539,7 +4397,7 @@ mod tests {
         assert!(store.get_direct(&key).is_none());
 
         // Insert a value
-        Storage::put(&store, key.clone(), Value::Int(42), None).unwrap();
+        Storage::put_with_version_mode(&store, key.clone(), Value::Int(42), 1, None, WriteMode::Append).unwrap();
 
         // Should return the latest value
         let result = store.get_direct(&key);
@@ -4556,11 +4414,11 @@ mod tests {
         let branch_id = BranchId::new();
         let key = create_test_key(branch_id, "tombstone_key");
 
-        Storage::put(&store, key.clone(), Value::Int(1), None).unwrap();
+        Storage::put_with_version_mode(&store, key.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
         assert!(store.get_direct(&key).is_some());
 
         // Delete creates a tombstone
-        Storage::delete(&store, &key).unwrap();
+        Storage::delete_with_version(&store, &key, 2).unwrap();
         assert!(
             store.get_direct(&key).is_none(),
             "get_direct must filter tombstones"
@@ -4602,9 +4460,9 @@ mod tests {
         let key = create_test_key(branch_id, "multi_version");
 
         // Insert multiple versions
-        Storage::put(&store, key.clone(), Value::Int(1), None).unwrap();
-        Storage::put(&store, key.clone(), Value::Int(2), None).unwrap();
-        Storage::put(&store, key.clone(), Value::Int(3), None).unwrap();
+        Storage::put_with_version_mode(&store, key.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
+        Storage::put_with_version_mode(&store, key.clone(), Value::Int(2), 2, None, WriteMode::Append).unwrap();
+        Storage::put_with_version_mode(&store, key.clone(), Value::Int(3), 3, None, WriteMode::Append).unwrap();
 
         let result = store.get_direct(&key).unwrap();
         assert_eq!(
@@ -4624,9 +4482,9 @@ mod tests {
         let ns = Arc::new(strata_core::types::Namespace::for_branch(branch_id));
 
         // Insert keys — ordered_keys starts as None (never built yet)
-        Storage::put(&store, Key::new_kv(ns.clone(), "c"), Value::Int(3), None).unwrap();
-        Storage::put(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), None).unwrap();
-        Storage::put(&store, Key::new_kv(ns.clone(), "b"), Value::Int(2), None).unwrap();
+        Storage::put_with_version_mode(&store, Key::new_kv(ns.clone(), "c"), Value::Int(3), 1, None, WriteMode::Append).unwrap();
+        Storage::put_with_version_mode(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), 2, None, WriteMode::Append).unwrap();
+        Storage::put_with_version_mode(&store, Key::new_kv(ns.clone(), "b"), Value::Int(2), 3, None, WriteMode::Append).unwrap();
 
         // ordered_keys should be None (not yet built)
         {
@@ -4663,7 +4521,7 @@ mod tests {
         }
 
         // Insert a NEW key — should be incrementally added to ordered_keys
-        Storage::put(&store, Key::new_kv(ns.clone(), "aa"), Value::Int(4), None).unwrap();
+        Storage::put_with_version_mode(&store, Key::new_kv(ns.clone(), "aa"), Value::Int(4), 4, None, WriteMode::Append).unwrap();
         {
             let shard = store.shards.get(&branch_id).unwrap();
             assert!(
@@ -4691,7 +4549,7 @@ mod tests {
         let ns = Arc::new(strata_core::types::Namespace::for_branch(branch_id));
 
         // Insert initial key
-        Storage::put(&store, Key::new_kv(ns.clone(), "k"), Value::Int(1), None).unwrap();
+        Storage::put_with_version_mode(&store, Key::new_kv(ns.clone(), "k"), Value::Int(1), 1, None, WriteMode::Append).unwrap();
 
         // Force a rebuild by scanning
         let prefix = Key::new_kv(ns.clone(), "");
@@ -4704,7 +4562,7 @@ mod tests {
         }
 
         // Update EXISTING key — should NOT invalidate ordered_keys
-        Storage::put(&store, Key::new_kv(ns.clone(), "k"), Value::Int(2), None).unwrap();
+        Storage::put_with_version_mode(&store, Key::new_kv(ns.clone(), "k"), Value::Int(2), 2, None, WriteMode::Append).unwrap();
         {
             let shard = store.shards.get(&branch_id).unwrap();
             assert!(
@@ -4728,11 +4586,13 @@ mod tests {
 
         // Seed with initial keys
         for i in 0..10 {
-            Storage::put(
+            Storage::put_with_version_mode(
                 &store,
                 Key::new_kv(ns.clone(), &format!("key_{:03}", i)),
                 Value::Int(i),
+                1,
                 None,
+                WriteMode::Append,
             )
             .unwrap();
         }
@@ -4749,11 +4609,13 @@ mod tests {
         // Interleaved insert-scan pattern (simulates Workload E)
         for i in 10..20 {
             // Insert a new key
-            Storage::put(
+            Storage::put_with_version_mode(
                 &store,
                 Key::new_kv(ns.clone(), &format!("key_{:03}", i)),
                 Value::Int(i),
+                2,
                 None,
+                WriteMode::Append,
             )
             .unwrap();
 
@@ -4798,15 +4660,15 @@ mod tests {
         let ns = Arc::new(strata_core::types::Namespace::for_branch(branch_id));
 
         // Insert initial keys and build ordered_keys via scan
-        Storage::put(&store, Key::new_kv(ns.clone(), "b"), Value::Int(1), None).unwrap();
-        Storage::put(&store, Key::new_kv(ns.clone(), "d"), Value::Int(2), None).unwrap();
+        Storage::put_with_version_mode(&store, Key::new_kv(ns.clone(), "b"), Value::Int(1), 1, None, WriteMode::Append).unwrap();
+        Storage::put_with_version_mode(&store, Key::new_kv(ns.clone(), "d"), Value::Int(2), 2, None, WriteMode::Append).unwrap();
         let prefix = Key::new_kv(ns.clone(), "");
         let _ = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
 
         // Incrementally insert new keys
-        Storage::put(&store, Key::new_kv(ns.clone(), "a"), Value::Int(3), None).unwrap();
-        Storage::put(&store, Key::new_kv(ns.clone(), "c"), Value::Int(4), None).unwrap();
-        Storage::put(&store, Key::new_kv(ns.clone(), "e"), Value::Int(5), None).unwrap();
+        Storage::put_with_version_mode(&store, Key::new_kv(ns.clone(), "a"), Value::Int(3), 3, None, WriteMode::Append).unwrap();
+        Storage::put_with_version_mode(&store, Key::new_kv(ns.clone(), "c"), Value::Int(4), 4, None, WriteMode::Append).unwrap();
+        Storage::put_with_version_mode(&store, Key::new_kv(ns.clone(), "e"), Value::Int(5), 5, None, WriteMode::Append).unwrap();
 
         // Verify BTreeSet matches data keys exactly
         {
@@ -4847,8 +4709,8 @@ mod tests {
         let ns = Arc::new(strata_core::types::Namespace::for_branch(branch_id));
 
         // Insert initial keys and build ordered_keys via scan
-        Storage::put(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), None).unwrap();
-        Storage::put(&store, Key::new_kv(ns.clone(), "c"), Value::Int(2), None).unwrap();
+        Storage::put_with_version_mode(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), 1, None, WriteMode::Append).unwrap();
+        Storage::put_with_version_mode(&store, Key::new_kv(ns.clone(), "c"), Value::Int(2), 2, None, WriteMode::Append).unwrap();
         let prefix = Key::new_kv(ns.clone(), "");
         let _ = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
         {
@@ -4898,7 +4760,7 @@ mod tests {
         let ns = Arc::new(strata_core::types::Namespace::for_branch(branch_id));
 
         // Insert initial key and build ordered_keys via scan
-        Storage::put(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), None).unwrap();
+        Storage::put_with_version_mode(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), 1, None, WriteMode::Append).unwrap();
         let prefix = Key::new_kv(ns.clone(), "");
         let _ = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
         {
@@ -4938,7 +4800,7 @@ mod tests {
         let ns = Arc::new(strata_core::types::Namespace::for_branch(branch_id));
 
         // Insert initial key and build ordered_keys via scan
-        Storage::put(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), None).unwrap();
+        Storage::put_with_version_mode(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), 1, None, WriteMode::Append).unwrap();
         let prefix = Key::new_kv(ns.clone(), "");
         let _ = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
         {
@@ -4948,7 +4810,7 @@ mod tests {
 
         // Delete a key that doesn't exist — creates tombstone via put()
         let nonexistent = Key::new_kv(ns.clone(), "z");
-        Storage::delete(&store, &nonexistent).unwrap();
+        Storage::delete_with_version(&store, &nonexistent, 2).unwrap();
 
         // ordered_keys must remain Some and include the tombstone key
         {
@@ -4978,9 +4840,9 @@ mod tests {
         let ns = Arc::new(strata_core::types::Namespace::for_branch(branch_id));
 
         // Insert initial keys and build ordered_keys
-        Storage::put(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), None).unwrap();
-        Storage::put(&store, Key::new_kv(ns.clone(), "c"), Value::Int(2), None).unwrap();
-        Storage::put(&store, Key::new_kv(ns.clone(), "e"), Value::Int(3), None).unwrap();
+        Storage::put_with_version_mode(&store, Key::new_kv(ns.clone(), "a"), Value::Int(1), 1, None, WriteMode::Append).unwrap();
+        Storage::put_with_version_mode(&store, Key::new_kv(ns.clone(), "c"), Value::Int(2), 2, None, WriteMode::Append).unwrap();
+        Storage::put_with_version_mode(&store, Key::new_kv(ns.clone(), "e"), Value::Int(3), 3, None, WriteMode::Append).unwrap();
         let prefix = Key::new_kv(ns.clone(), "");
         let _ = Storage::scan_prefix(&store, &prefix, u64::MAX).unwrap();
 
@@ -5403,19 +5265,31 @@ mod tests {
         ));
 
         // Insert keys: alpha (live), beta (will be tombstoned), gamma (live)
-        Storage::put(
+        Storage::put_with_version_mode(
             &store,
             Key::new_kv(ns.clone(), "alpha"),
             Value::Int(1),
+            1,
             None,
+            WriteMode::Append,
         )
         .unwrap();
-        Storage::put(&store, Key::new_kv(ns.clone(), "beta"), Value::Int(2), None).unwrap();
-        Storage::put(
+        Storage::put_with_version_mode(
+            &store,
+            Key::new_kv(ns.clone(), "beta"),
+            Value::Int(2),
+            2,
+            None,
+            WriteMode::Append,
+        )
+        .unwrap();
+        Storage::put_with_version_mode(
             &store,
             Key::new_kv(ns.clone(), "gamma"),
             Value::Int(3),
+            3,
             None,
+            WriteMode::Append,
         )
         .unwrap();
 
@@ -6015,15 +5889,15 @@ mod tests {
             )
             .unwrap();
 
-        // delete() on an existing branch is fine
-        store.delete(&key1).unwrap();
+        // delete_with_version() on an existing branch is fine
+        store.delete_with_version(&key1, 2).unwrap();
 
-        // delete() on a NEW branch should be rejected — delete inserts a
+        // delete_with_version() on a NEW branch should be rejected — delete inserts a
         // tombstone, which creates the shard if it doesn't exist.
         let b2 = BranchId::new();
         let key2 = create_test_key(b2, "phantom");
-        let result = store.delete(&key2);
-        // delete() calls put() internally, which checks the branch limit
+        let result = store.delete_with_version(&key2, 3);
+        // delete_with_version() calls put() internally, which checks the branch limit
         assert!(result.is_err());
     }
 
@@ -6035,13 +5909,15 @@ mod tests {
         let store = ShardedStore::with_limits(1);
         let b1 = BranchId::new();
         let key1 = create_test_key(b1, "k1");
-        // Storage::put via trait
-        Storage::put(&store, key1, Value::Int(1), None).unwrap();
+        // Storage::put_with_version_mode via trait
+        Storage::put_with_version_mode(&store, key1, Value::Int(1), 1, None, WriteMode::Append)
+            .unwrap();
 
         // Second branch via trait should fail
         let b2 = BranchId::new();
         let key2 = create_test_key(b2, "k2");
-        let err = Storage::put(&store, key2, Value::Int(2), None).unwrap_err();
+        let err = Storage::put_with_version_mode(&store, key2, Value::Int(2), 1, None, WriteMode::Append)
+            .unwrap_err();
         assert!(format!("{}", err).contains("branches"));
     }
 }

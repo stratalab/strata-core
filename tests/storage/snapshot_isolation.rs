@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Instant;
-use strata_core::traits::{SnapshotView, Storage};
+use strata_core::traits::{SnapshotView, Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
@@ -31,7 +31,7 @@ fn snapshot_captures_current_version() {
     let key = create_test_key(branch_id, "capture");
 
     // Put value
-    Storage::put(&*store, key.clone(), Value::Int(42), None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append).unwrap();
 
     // Take snapshot
     let snapshot = store.snapshot();
@@ -50,7 +50,7 @@ fn snapshot_acquisition_is_fast() {
     // Populate store with data
     for i in 0..1000 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
-        Storage::put(&*store, key, Value::Int(i), None).unwrap();
+        store.put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
     }
 
     // Measure snapshot acquisition time
@@ -76,15 +76,15 @@ fn multiple_snapshots_independent() {
     let key = create_test_key(branch_id, "multi_snap");
 
     // Initial value
-    Storage::put(&*store, key.clone(), Value::Int(1), None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
     let snap1 = store.snapshot();
 
     // Update value
-    Storage::put(&*store, key.clone(), Value::Int(2), None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(2), 2, None, WriteMode::Append).unwrap();
     let snap2 = store.snapshot();
 
     // Update again
-    Storage::put(&*store, key.clone(), Value::Int(3), None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(3), 3, None, WriteMode::Append).unwrap();
     let snap3 = store.snapshot();
 
     // Each snapshot sees its version
@@ -113,21 +113,21 @@ fn snapshot_ignores_concurrent_writes() {
     let key = create_test_key(branch_id, "concurrent");
 
     // Initial value
-    Storage::put(&*store, key.clone(), Value::Int(100), None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
 
     // Take snapshot
     let snapshot = store.snapshot();
 
     // Modify after snapshot
-    Storage::put(&*store, key.clone(), Value::Int(200), None).unwrap();
-    Storage::put(&*store, key.clone(), Value::Int(300), None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(200), 2, None, WriteMode::Append).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(300), 3, None, WriteMode::Append).unwrap();
 
     // Snapshot should still see original value
     let result = SnapshotView::get(&snapshot, &key).unwrap();
     assert_eq!(result.unwrap().value, Value::Int(100));
 
     // Current store sees latest
-    let current = Storage::get(&*store, &key).unwrap();
+    let current = store.get_versioned(&key, u64::MAX).unwrap();
     assert_eq!(current.unwrap().value, Value::Int(300));
 }
 
@@ -138,13 +138,13 @@ fn snapshot_sees_pre_delete_value() {
     let key = create_test_key(branch_id, "pre_delete");
 
     // Put value
-    Storage::put(&*store, key.clone(), Value::Int(42), None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append).unwrap();
 
     // Take snapshot
     let snapshot = store.snapshot();
 
     // Delete after snapshot
-    Storage::delete(&*store, &key).unwrap();
+    store.delete_with_version(&key, 2).unwrap();
 
     // Snapshot should still see value
     let result = SnapshotView::get(&snapshot, &key).unwrap();
@@ -152,7 +152,7 @@ fn snapshot_sees_pre_delete_value() {
     assert_eq!(result.unwrap().value, Value::Int(42));
 
     // Current should not see value
-    let current = Storage::get(&*store, &key).unwrap();
+    let current = store.get_versioned(&key, u64::MAX).unwrap();
     assert!(current.is_none());
 }
 
@@ -162,7 +162,7 @@ fn repeated_reads_return_same_value() {
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "repeated");
 
-    Storage::put(&*store, key.clone(), Value::Int(42), None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append).unwrap();
 
     let snapshot = store.snapshot();
 
@@ -184,15 +184,15 @@ fn multi_key_consistency_within_snapshot() {
     let key_a = create_test_key(branch_id, "balance_a");
     let key_b = create_test_key(branch_id, "balance_b");
 
-    Storage::put(&*store, key_a.clone(), Value::Int(100), None).unwrap();
-    Storage::put(&*store, key_b.clone(), Value::Int(200), None).unwrap();
+    store.put_with_version_mode(key_a.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
+    store.put_with_version_mode(key_b.clone(), Value::Int(200), 2, None, WriteMode::Append).unwrap();
 
     // Take snapshot
     let snapshot = store.snapshot();
 
     // Transfer in current store
-    Storage::put(&*store, key_a.clone(), Value::Int(50), None).unwrap();
-    Storage::put(&*store, key_b.clone(), Value::Int(250), None).unwrap();
+    store.put_with_version_mode(key_a.clone(), Value::Int(50), 3, None, WriteMode::Append).unwrap();
+    store.put_with_version_mode(key_b.clone(), Value::Int(250), 4, None, WriteMode::Append).unwrap();
 
     // Snapshot should see consistent pre-transfer state
     let a = SnapshotView::get(&snapshot, &key_a).unwrap().unwrap().value;
@@ -218,7 +218,7 @@ fn concurrent_readers_dont_block() {
     // Populate
     for i in 0..100 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
-        Storage::put(&*store, key, Value::Int(i), None).unwrap();
+        store.put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
     }
 
     let snapshot = store.snapshot();
@@ -255,7 +255,7 @@ fn snapshot_survives_store_modifications() {
     // Initial population
     for i in 0..10 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
-        Storage::put(&*store, key, Value::Int(i), None).unwrap();
+        store.put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
     }
 
     let snapshot = store.snapshot();
@@ -269,7 +269,8 @@ fn snapshot_survives_store_modifications() {
         while !stop_clone.load(Ordering::Relaxed) {
             for i in 0..10 {
                 let key = create_test_key(branch_id, &format!("key_{}", i));
-                let _ = Storage::put(&*store_clone, key, Value::Int(counter), None);
+                let version = store_clone.next_version();
+                let _ = store_clone.put_with_version_mode(key, Value::Int(counter), version, None, WriteMode::Append);
             }
             counter += 1;
             if counter > 100 {
@@ -302,7 +303,7 @@ fn snapshot_cache_provides_isolation() {
     let key = create_test_key(branch_id, "cached");
 
     // Put value
-    Storage::put(&*store, key.clone(), Value::Int(100), None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
 
     // Take snapshot and read (caches the value)
     let snapshot = store.snapshot();
@@ -310,7 +311,7 @@ fn snapshot_cache_provides_isolation() {
     assert_eq!(first_read.unwrap().value, Value::Int(100));
 
     // Delete in store
-    Storage::delete(&*store, &key).unwrap();
+    store.delete_with_version(&key, 2).unwrap();
 
     // Snapshot should still see cached value
     let second_read = SnapshotView::get(&snapshot, &key).unwrap();
@@ -331,7 +332,7 @@ fn snapshot_scan_sees_consistent_state() {
     // Put values with common prefix
     for i in 0..10 {
         let key = Key::new_kv(ns.clone(), &format!("prefix_{}", i));
-        Storage::put(&*store, key, Value::Int(i), None).unwrap();
+        store.put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
     }
 
     let snapshot = store.snapshot();
@@ -339,7 +340,7 @@ fn snapshot_scan_sees_consistent_state() {
     // Modify after snapshot
     for i in 0..10 {
         let key = Key::new_kv(ns.clone(), &format!("prefix_{}", i));
-        Storage::put(&*store, key, Value::Int(i + 100), None).unwrap();
+        store.put_with_version_mode(key, Value::Int(i + 100), (i + 11) as u64, None, WriteMode::Append).unwrap();
     }
 
     // Scan should see original values
@@ -363,7 +364,7 @@ fn snapshot_list_sees_all_keys() {
     // Put 5 values
     for i in 0..5 {
         let key = Key::new_kv(ns.clone(), &format!("list_key_{}", i));
-        Storage::put(&*store, key, Value::Int(i), None).unwrap();
+        store.put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
     }
 
     let snapshot = store.snapshot();
@@ -371,7 +372,7 @@ fn snapshot_list_sees_all_keys() {
     // Delete some in store
     for i in 0..3 {
         let key = Key::new_kv(ns.clone(), &format!("list_key_{}", i));
-        Storage::delete(&*store, &key).unwrap();
+        store.delete_with_version(&key, (i + 6) as u64).unwrap();
     }
 
     // Snapshot scan should still see all 5

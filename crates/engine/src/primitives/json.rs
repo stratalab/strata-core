@@ -327,7 +327,7 @@ impl JsonStore {
 
         let key = self.key_for(branch_id, space, doc_id);
         use strata_core::Storage;
-        match self.db.storage().get(&key)? {
+        match self.db.storage().get_versioned(&key, u64::MAX)? {
             Some(vv) => {
                 let doc = Self::deserialize_doc(&vv.value)?;
                 match get_at_path(&doc.value, path).cloned() {

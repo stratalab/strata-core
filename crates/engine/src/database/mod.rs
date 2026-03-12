@@ -1128,7 +1128,7 @@ impl Database {
                 for key in &payload.deletes {
                     if key.type_tag == TypeTag::Vector {
                         use strata_core::traits::Storage;
-                        if let Ok(Some(vv)) = Storage::get(self.storage.as_ref(), key) {
+                        if let Ok(Some(vv)) = self.storage.get_versioned(key, u64::MAX) {
                             if let strata_core::value::Value::Bytes(ref bytes) = vv.value {
                                 if let Ok(record) =
                                     crate::primitives::vector::types::VectorRecord::from_bytes(
@@ -1145,13 +1145,13 @@ impl Database {
 
             // Apply puts
             for (key, value) in &payload.puts {
-                use strata_core::traits::Storage;
-                Storage::put_with_version(
-                    self.storage.as_ref(),
+                use strata_core::traits::{Storage, WriteMode};
+                self.storage.put_with_version_mode(
                     key.clone(),
                     value.clone(),
                     payload.version,
                     None,
+                    WriteMode::Append,
                 )?;
             }
 
@@ -2306,7 +2306,7 @@ mod tests {
 
         // Storage should have data from WAL
         let key1 = Key::new_kv(ns, "key1");
-        let val = db.storage().get(&key1).unwrap().unwrap();
+        let val = db.storage().get_versioned(&key1, u64::MAX).unwrap().unwrap();
 
         if let Value::Bytes(bytes) = val.value {
             assert_eq!(bytes, b"value1");
@@ -2348,7 +2348,7 @@ mod tests {
 
             // Data should be restored from WAL
             let key = Key::new_kv(ns, "persistent");
-            let val = db.storage().get(&key).unwrap().unwrap();
+            let val = db.storage().get_versioned(&key, u64::MAX).unwrap().unwrap();
 
             if let Value::Bytes(bytes) = val.value {
                 assert_eq!(bytes, b"data");
@@ -2400,7 +2400,7 @@ mod tests {
 
         // Valid transaction should be present
         let key = Key::new_kv(ns.clone(), "valid");
-        let val = db.storage().get(&key).unwrap().unwrap();
+        let val = db.storage().get_versioned(&key, u64::MAX).unwrap().unwrap();
         assert_eq!(val.value, Value::Int(42));
     }
 
@@ -2497,7 +2497,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify data was committed
-        let stored = db.storage().get(&key).unwrap().unwrap();
+        let stored = db.storage().get_versioned(&key, u64::MAX).unwrap().unwrap();
         assert_eq!(stored.value, Value::Int(42));
     }
 
@@ -2569,7 +2569,7 @@ mod tests {
         assert!(result.is_err());
 
         // Data should NOT be committed
-        assert!(db.storage().get(&key).unwrap().is_none());
+        assert!(db.storage().get_versioned(&key, u64::MAX).unwrap().is_none());
     }
 
     #[test]
@@ -2589,7 +2589,7 @@ mod tests {
         db.commit_transaction(&mut txn).unwrap();
 
         // Verify committed
-        let stored = db.storage().get(&key).unwrap().unwrap();
+        let stored = db.storage().get_versioned(&key, u64::MAX).unwrap().unwrap();
         assert_eq!(stored.value, Value::Int(123));
     }
 
@@ -2993,7 +2993,7 @@ mod tests {
         assert!(pruned > 0, "should have pruned at least 1 old version");
 
         // Latest value should still be readable
-        let stored = db.storage().get(&key).unwrap().unwrap();
+        let stored = db.storage().get_versioned(&key, u64::MAX).unwrap().unwrap();
         assert_eq!(stored.value, Value::Int(3));
     }
 
@@ -3036,7 +3036,7 @@ mod tests {
         assert_eq!(expired, 0, "no TTL entries to expire");
 
         // Data should still be readable
-        let stored = db.storage().get(&key).unwrap().unwrap();
+        let stored = db.storage().get_versioned(&key, u64::MAX).unwrap().unwrap();
         assert_eq!(stored.value, Value::Int(2));
 
         let _ = pruned; // suppress unused warning
@@ -3155,7 +3155,7 @@ mod tests {
         let db = Database::open_with_config(&db_path, cfg).unwrap();
         let key = Key::new_kv(ns, "important_data");
         assert!(
-            db.storage().get(&key).unwrap().is_none(),
+            db.storage().get_versioned(&key, u64::MAX).unwrap().is_none(),
             "Valid data before corruption should be lost in lossy mode"
         );
         assert_eq!(db.storage().current_version(), 0);
@@ -3231,7 +3231,7 @@ mod tests {
 
         // Re-open and verify data was persisted
         let db = Database::open(&db_path).unwrap();
-        let val = db.storage().get(&key).unwrap();
+        let val = db.storage().get_versioned(&key, u64::MAX).unwrap();
         assert!(
             val.is_some(),
             "Data should be recoverable after shutdown (flush thread final sync + explicit flush)"
@@ -3305,7 +3305,7 @@ mod tests {
         // Re-open and verify committed data was persisted
         drop(db);
         let db = Database::open(&db_path).unwrap();
-        let val = db.storage().get(&key).unwrap();
+        let val = db.storage().get_versioned(&key, u64::MAX).unwrap();
         assert!(
             val.is_some(),
             "Transaction committed during shutdown drain should be persisted"
@@ -3353,7 +3353,7 @@ mod tests {
         // Re-open and verify persistence
         drop(db);
         let db = Database::open(&db_path).unwrap();
-        let val = db.storage().get(&key).unwrap();
+        let val = db.storage().get_versioned(&key, u64::MAX).unwrap();
         assert!(val.is_some(), "Data committed before shutdown must persist");
     }
 
@@ -3421,8 +3421,8 @@ mod tests {
         // Both transactions' data should be persisted
         drop(db);
         let db = Database::open(&db_path).unwrap();
-        assert!(db.storage().get(&key1).unwrap().is_some(), "txn1 data lost");
-        assert!(db.storage().get(&key2).unwrap().is_some(), "txn2 data lost");
+        assert!(db.storage().get_versioned(&key1, u64::MAX).unwrap().is_some(), "txn1 data lost");
+        assert!(db.storage().get_versioned(&key2, u64::MAX).unwrap().is_some(), "txn2 data lost");
     }
 
     /// Helper: blind-write a single key via transaction_with_version.
@@ -3502,7 +3502,7 @@ mod tests {
             // Spot-check first, middle, and last keys
             for &i in &[0, OPS_PER_THREAD / 2, OPS_PER_THREAD - 1] {
                 let key = Key::new_kv(ns.clone(), format!("k{i}"));
-                let stored = db.storage().get(&key).unwrap();
+                let stored = db.storage().get_versioned(&key, u64::MAX).unwrap();
                 assert!(
                     stored.is_some(),
                     "blind write data missing: thread={t}, key=k{i}"
@@ -3555,7 +3555,7 @@ mod tests {
         let _ = pruned;
 
         // Reader should still see the value at its snapshot version
-        let reader_val = db.storage().get(&key).unwrap();
+        let reader_val = db.storage().get_versioned(&key, u64::MAX).unwrap();
         assert!(reader_val.is_some(), "key disappeared during concurrent GC");
         // Latest version should be 10
         assert_eq!(reader_val.unwrap().value, Value::Int(10));
@@ -3577,7 +3577,7 @@ mod tests {
         );
 
         // Latest value must still be readable after GC
-        let final_val = db.storage().get(&key).unwrap().unwrap();
+        let final_val = db.storage().get_versioned(&key, u64::MAX).unwrap().unwrap();
         assert_eq!(final_val.value, Value::Int(10));
     }
 
@@ -3626,7 +3626,7 @@ mod tests {
         for t in 0..NUM_WRITERS {
             for &i in &[0, WRITES_PER_THREAD / 2, WRITES_PER_THREAD - 1] {
                 let key = Key::new_kv(ns.clone(), format!("w{t}_k{i}"));
-                let stored = db.storage().get(&key).unwrap();
+                let stored = db.storage().get_versioned(&key, u64::MAX).unwrap();
                 assert!(
                     stored.is_some(),
                     "data lost after concurrent GC: thread={t}, key=w{t}_k{i}"

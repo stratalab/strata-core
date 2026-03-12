@@ -795,8 +795,8 @@ mod tests {
         assert_ne!(v1, v2); // Versions must be unique
 
         // Both keys should be in storage
-        assert!(store.get(&key1).unwrap().is_some());
-        assert!(store.get(&key2).unwrap().is_some());
+        assert!(store.get_versioned(&key1, u64::MAX).unwrap().is_some());
+        assert!(store.get_versioned(&key2, u64::MAX).unwrap().is_some());
     }
 
     #[test]
@@ -837,11 +837,11 @@ mod tests {
         }
 
         // Both values should be present with correct versions
-        let v1 = store.get(&key1).unwrap().unwrap();
+        let v1 = store.get_versioned(&key1, u64::MAX).unwrap().unwrap();
         assert_eq!(v1.value, Value::Int(100));
         assert_eq!(v1.version.as_u64(), 1);
 
-        let v2 = store.get(&key2).unwrap().unwrap();
+        let v2 = store.get_versioned(&key2, u64::MAX).unwrap().unwrap();
         assert_eq!(v2.value, Value::Int(200));
         assert_eq!(v2.version.as_u64(), 2);
     }
@@ -951,7 +951,7 @@ mod tests {
         );
 
         // T2's update should be preserved
-        let final_value = store.get(&key_alice).unwrap().unwrap();
+        let final_value = store.get_versioned(&key_alice, u64::MAX).unwrap().unwrap();
         assert_eq!(
             final_value.value,
             Value::Int(999),
@@ -1006,7 +1006,7 @@ mod tests {
         );
 
         // T1's delete overwrites T2's update - this is expected for blind writes
-        let final_value = store.get(&key_alice).unwrap();
+        let final_value = store.get_versioned(&key_alice, u64::MAX).unwrap();
         assert!(
             final_value.is_none(),
             "Blind delete should succeed, removing alice"
@@ -1133,7 +1133,7 @@ mod tests {
         let result = manager.commit(&mut txn, store.as_ref(), Some(&mut wal));
         assert!(result.is_ok());
 
-        let stored = store.get(&key).unwrap().unwrap();
+        let stored = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
         assert_eq!(stored.value, Value::Int(42));
     }
 
@@ -1252,7 +1252,7 @@ mod tests {
         assert_eq!(v, 1);
 
         // Verify in-memory storage
-        let stored = store.get(&key).unwrap().unwrap();
+        let stored = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
         assert_eq!(stored.value, Value::Int(42));
         assert_eq!(stored.version.as_u64(), 1);
 
@@ -1267,7 +1267,7 @@ mod tests {
         assert_eq!(result.stats.writes_applied, 1);
 
         // Recovered storage should contain the committed value
-        let recovered = result.storage.get(&key).unwrap().unwrap();
+        let recovered = result.storage.get_versioned(&key, u64::MAX).unwrap().unwrap();
         assert_eq!(recovered.value, Value::Int(42));
         assert_eq!(recovered.version.as_u64(), 1);
     }
@@ -1289,7 +1289,7 @@ mod tests {
             .unwrap();
         assert_eq!(v, 1);
 
-        let stored = store.get(&key).unwrap().unwrap();
+        let stored = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
         assert_eq!(stored.value, Value::Int(7));
     }
 
@@ -1389,7 +1389,7 @@ mod tests {
         assert!(result.is_err(), "Should detect read-write conflict");
 
         // T2's value should be preserved in storage
-        let stored = store.get(&key).unwrap().unwrap();
+        let stored = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
         assert_eq!(stored.value, Value::Int(99));
 
         // KEY ASSERTION: WAL should contain exactly 2 records (setup + T2).
@@ -1403,7 +1403,7 @@ mod tests {
         );
 
         // Recovered value should be T2's write
-        let recovered = result.storage.get(&key).unwrap().unwrap();
+        let recovered = result.storage.get_versioned(&key, u64::MAX).unwrap().unwrap();
         assert_eq!(recovered.value, Value::Int(99));
     }
 
@@ -1510,10 +1510,10 @@ mod tests {
         }
 
         // Verify in-memory state
-        assert!(store.get(&key_a).unwrap().is_none());
-        assert_eq!(store.get(&key_b).unwrap().unwrap().value, Value::Int(200));
+        assert!(store.get_versioned(&key_a, u64::MAX).unwrap().is_none());
+        assert_eq!(store.get_versioned(&key_b, u64::MAX).unwrap().unwrap().value, Value::Int(200));
         assert_eq!(
-            store.get(&key_c).unwrap().unwrap().value,
+            store.get_versioned(&key_c, u64::MAX).unwrap().unwrap().value,
             Value::Bytes(b"hello".to_vec())
         );
 
@@ -1524,15 +1524,15 @@ mod tests {
         assert_eq!(result.stats.txns_replayed, 2);
 
         // key_a: was written in txn1 then deleted in txn2
-        assert!(result.storage.get(&key_a).unwrap().is_none());
+        assert!(result.storage.get_versioned(&key_a, u64::MAX).unwrap().is_none());
         // key_b: updated from 20 → 200
         assert_eq!(
-            result.storage.get(&key_b).unwrap().unwrap().value,
+            result.storage.get_versioned(&key_b, u64::MAX).unwrap().unwrap().value,
             Value::Int(200)
         );
         // key_c: newly inserted
         assert_eq!(
-            result.storage.get(&key_c).unwrap().unwrap().value,
+            result.storage.get_versioned(&key_c, u64::MAX).unwrap().unwrap().value,
             Value::Bytes(b"hello".to_vec())
         );
     }
@@ -1572,11 +1572,11 @@ mod tests {
         }
 
         // Both values present with correct versions
-        let v1 = store.get(&key1).unwrap().unwrap();
+        let v1 = store.get_versioned(&key1, u64::MAX).unwrap().unwrap();
         assert_eq!(v1.value, Value::Int(100));
         assert_eq!(v1.version.as_u64(), 1);
 
-        let v2 = store.get(&key2).unwrap().unwrap();
+        let v2 = store.get_versioned(&key2, u64::MAX).unwrap().unwrap();
         assert_eq!(v2.value, Value::Int(200));
         assert_eq!(v2.version.as_u64(), 2);
     }

@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use strata_core::traits::{SnapshotView, Storage};
+use strata_core::traits::{SnapshotView, Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
@@ -31,9 +31,9 @@ fn version_chain_stores_newest_first() {
     let key = create_test_key(branch_id, "versioned");
 
     // Put multiple versions
-    Storage::put(&store, key.clone(), Value::Int(1), None).unwrap();
-    Storage::put(&store, key.clone(), Value::Int(2), None).unwrap();
-    Storage::put(&store, key.clone(), Value::Int(3), None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(2), 2, None, WriteMode::Append).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(3), 3, None, WriteMode::Append).unwrap();
 
     // Get history - should be newest first
     let history = Storage::get_history(&store, &key, None, None).unwrap();
@@ -50,9 +50,9 @@ fn get_at_version_returns_value_lte_version() {
     let key = create_test_key(branch_id, "versioned");
 
     // Put values at versions 1, 2, 3
-    Storage::put_with_version(&store, key.clone(), Value::Int(10), 1, None).unwrap();
-    Storage::put_with_version(&store, key.clone(), Value::Int(20), 2, None).unwrap();
-    Storage::put_with_version(&store, key.clone(), Value::Int(30), 3, None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(10), 1, None, WriteMode::Append).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(20), 2, None, WriteMode::Append).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(30), 3, None, WriteMode::Append).unwrap();
 
     // Get at version 2 - should return value 20
     let result = Storage::get_versioned(&store, &key, 2).unwrap();
@@ -72,7 +72,7 @@ fn get_at_version_before_first_returns_none() {
     let key = create_test_key(branch_id, "versioned");
 
     // Put value at version 5
-    Storage::put_with_version(&store, key.clone(), Value::Int(50), 5, None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(50), 5, None, WriteMode::Append).unwrap();
 
     // Get at version 1 (before first) - should return None
     let result = Storage::get_versioned(&store, &key, 1).unwrap();
@@ -90,7 +90,7 @@ fn version_chain_preserves_all_versions() {
 
     // Put 10 versions
     for i in 1..=10 {
-        Storage::put(&store, key.clone(), Value::Int(i), None).unwrap();
+        store.put_with_version_mode(key.clone(), Value::Int(i), i as u64, None, WriteMode::Append).unwrap();
     }
 
     // All 10 should be in history
@@ -117,13 +117,13 @@ fn expired_values_filtered_at_read_time() {
 
     // Put value with very short TTL
     let ttl = Some(Duration::from_millis(1));
-    Storage::put(&store, key.clone(), Value::Int(42), ttl).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(42), 1, ttl, WriteMode::Append).unwrap();
 
     // Wait for expiration
     thread::sleep(Duration::from_millis(10));
 
     // Should not be returned (expired)
-    let result = Storage::get(&store, &key).unwrap();
+    let result = store.get_versioned(&key, u64::MAX).unwrap();
     assert!(result.is_none(), "Expired value should not be returned");
 }
 
@@ -135,10 +135,10 @@ fn non_expired_values_returned() {
 
     // Put value with long TTL
     let ttl = Some(Duration::from_secs(3600)); // 1 hour
-    Storage::put(&store, key.clone(), Value::Int(42), ttl).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(42), 1, ttl, WriteMode::Append).unwrap();
 
     // Should be returned (not expired)
-    let result = Storage::get(&store, &key).unwrap();
+    let result = store.get_versioned(&key, u64::MAX).unwrap();
     assert!(result.is_some(), "Non-expired value should be returned");
     assert_eq!(result.unwrap().value, Value::Int(42));
 }
@@ -150,10 +150,10 @@ fn no_ttl_never_expires() {
     let key = create_test_key(branch_id, "no_ttl");
 
     // Put value without TTL
-    Storage::put(&store, key.clone(), Value::Int(42), None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append).unwrap();
 
     // Should always be returned
-    let result = Storage::get(&store, &key).unwrap();
+    let result = store.get_versioned(&key, u64::MAX).unwrap();
     assert_eq!(
         result.unwrap().value,
         Value::Int(42),
@@ -172,13 +172,13 @@ fn tombstone_preserves_snapshot_isolation() {
     let key = create_test_key(branch_id, "tombstone_iso");
 
     // Put a value
-    Storage::put(&*store, key.clone(), Value::Int(100), None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
 
     // Take snapshot BEFORE delete
     let snapshot = store.snapshot();
 
     // Delete the key (creates tombstone)
-    Storage::delete(&*store, &key).unwrap();
+    store.delete_with_version(&key, 2).unwrap();
 
     // Snapshot should still see the value
     let result = SnapshotView::get(&snapshot, &key).unwrap();
@@ -189,7 +189,7 @@ fn tombstone_preserves_snapshot_isolation() {
     assert_eq!(result.unwrap().value, Value::Int(100));
 
     // Current store should not see the value
-    let current = Storage::get(&*store, &key).unwrap();
+    let current = store.get_versioned(&key, u64::MAX).unwrap();
     assert!(current.is_none(), "Current should not see deleted value");
 }
 
@@ -200,11 +200,11 @@ fn tombstone_not_returned_to_user() {
     let key = create_test_key(branch_id, "tombstone_hidden");
 
     // Put and delete
-    Storage::put(&store, key.clone(), Value::Int(42), None).unwrap();
-    Storage::delete(&store, &key).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append).unwrap();
+    store.delete_with_version(&key, 2).unwrap();
 
     // Get should return None, not the tombstone
-    let result = Storage::get(&store, &key).unwrap();
+    let result = store.get_versioned(&key, u64::MAX).unwrap();
     assert!(result.is_none(), "Tombstone should not be returned");
 }
 
@@ -215,7 +215,7 @@ fn delete_nonexistent_key_succeeds() {
     let key = create_test_key(branch_id, "never_existed");
 
     // Delete should succeed even for nonexistent key
-    let result = Storage::delete(&store, &key);
+    let result = store.delete_with_version(&key, 1);
     assert!(result.is_ok(), "Delete of nonexistent key should succeed");
 }
 
@@ -305,7 +305,7 @@ fn history_pagination_works() {
 
     // Put 5 versions
     for i in 1..=5 {
-        Storage::put_with_version(&store, key.clone(), Value::Int(i), i as u64, None).unwrap();
+        store.put_with_version_mode(key.clone(), Value::Int(i), i as u64, None, WriteMode::Append).unwrap();
     }
 
     // Page 1: first 2

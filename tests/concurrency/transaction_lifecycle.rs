@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use strata_concurrency::transaction::TransactionContext;
 use strata_concurrency::validation::validate_transaction;
-use strata_core::traits::Storage;
+use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
@@ -46,10 +46,10 @@ fn begin_commit_makes_writes_permanent() {
     assert!(txn.is_committed());
 
     // Apply write (simulating what manager does)
-    Storage::put(&*store, key.clone(), Value::Int(42), None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append).unwrap();
 
     // Value should be visible
-    let stored = Storage::get(&*store, &key).unwrap();
+    let stored = store.get_versioned(&key, u64::MAX).unwrap();
     assert!(stored.is_some());
     assert_eq!(stored.unwrap().value, Value::Int(42));
 }
@@ -90,7 +90,7 @@ fn begin_abort_discards_writes() {
     assert!(txn.is_aborted());
 
     // Write should NOT be in store
-    let stored = Storage::get(&*store, &key).unwrap();
+    let stored = store.get_versioned(&key, u64::MAX).unwrap();
     assert!(
         stored.is_none(),
         "Aborted transaction writes should not be visible"
@@ -120,8 +120,8 @@ fn validation_failure_leads_to_abort() {
     let key = create_test_key(branch_id, "conflict");
 
     // Initial value
-    Storage::put(&*store, key.clone(), Value::Int(1), None).unwrap();
-    let version = Storage::get(&*store, &key)
+    store.put_with_version_mode(key.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
+    let version = store.get_versioned(&key, u64::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -133,7 +133,7 @@ fn validation_failure_leads_to_abort() {
     txn.write_set.insert(key.clone(), Value::Int(10));
 
     // Concurrent modification
-    Storage::put(&*store, key.clone(), Value::Int(2), None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(2), 2, None, WriteMode::Append).unwrap();
 
     // Validate - should fail
     txn.mark_validating().unwrap();
@@ -248,8 +248,8 @@ fn read_modify_write_workflow() {
     let key = create_test_key(branch_id, "rmw");
 
     // Initial value
-    Storage::put(&*store, key.clone(), Value::Int(100), None).unwrap();
-    let version = Storage::get(&*store, &key)
+    store.put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
+    let version = store.get_versioned(&key, u64::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -259,7 +259,7 @@ fn read_modify_write_workflow() {
     let mut txn = TransactionContext::new(1, branch_id, version);
 
     // Read (track in read_set)
-    let current = Storage::get(&*store, &key).unwrap().unwrap();
+    let current = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
     txn.read_set.insert(key.clone(), current.version.as_u64());
 
     // Modify
@@ -275,10 +275,10 @@ fn read_modify_write_workflow() {
     txn.mark_committed().unwrap();
 
     // Apply
-    Storage::put(&*store, key.clone(), Value::Int(110), None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(110), 2, None, WriteMode::Append).unwrap();
 
     // Verify
-    let final_value = Storage::get(&*store, &key).unwrap().unwrap().value;
+    let final_value = store.get_versioned(&key, u64::MAX).unwrap().unwrap().value;
     assert_eq!(final_value, Value::Int(110));
 }
 
@@ -292,16 +292,16 @@ fn multi_key_transaction_workflow() {
     let key3 = create_test_key(branch_id, "k3");
 
     // Initial values
-    Storage::put(&*store, key1.clone(), Value::Int(1), None).unwrap();
-    Storage::put(&*store, key2.clone(), Value::Int(2), None).unwrap();
+    store.put_with_version_mode(key1.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
+    store.put_with_version_mode(key2.clone(), Value::Int(2), 2, None, WriteMode::Append).unwrap();
     // key3 doesn't exist
 
-    let v1 = Storage::get(&*store, &key1)
+    let v1 = store.get_versioned(&key1, u64::MAX)
         .unwrap()
         .unwrap()
         .version
         .as_u64();
-    let v2 = Storage::get(&*store, &key2)
+    let v2 = store.get_versioned(&key2, u64::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -322,16 +322,16 @@ fn multi_key_transaction_workflow() {
     txn.mark_committed().unwrap();
 
     // Apply all writes
-    Storage::put(&*store, key2.clone(), Value::Int(20), None).unwrap();
-    Storage::put(&*store, key3.clone(), Value::Int(3), None).unwrap();
+    store.put_with_version_mode(key2.clone(), Value::Int(20), 3, None, WriteMode::Append).unwrap();
+    store.put_with_version_mode(key3.clone(), Value::Int(3), 4, None, WriteMode::Append).unwrap();
 
     // Verify
     assert_eq!(
-        Storage::get(&*store, &key2).unwrap().unwrap().value,
+        store.get_versioned(&key2, u64::MAX).unwrap().unwrap().value,
         Value::Int(20)
     );
     assert_eq!(
-        Storage::get(&*store, &key3).unwrap().unwrap().value,
+        store.get_versioned(&key3, u64::MAX).unwrap().unwrap().value,
         Value::Int(3)
     );
 }
@@ -343,8 +343,8 @@ fn delete_workflow() {
     let key = create_test_key(branch_id, "to_delete");
 
     // Initial value
-    Storage::put(&*store, key.clone(), Value::Int(42), None).unwrap();
-    let version = Storage::get(&*store, &key)
+    store.put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append).unwrap();
+    let version = store.get_versioned(&key, u64::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -363,10 +363,10 @@ fn delete_workflow() {
     txn.mark_committed().unwrap();
 
     // Apply delete
-    Storage::delete(&*store, &key).unwrap();
+    store.delete_with_version(&key, 2).unwrap();
 
     // Verify deleted
-    assert!(Storage::get(&*store, &key).unwrap().is_none());
+    assert!(store.get_versioned(&key, u64::MAX).unwrap().is_none());
 }
 
 // ============================================================================
@@ -394,10 +394,10 @@ fn many_sequential_transactions() {
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "sequential");
 
-    Storage::put(&*store, key.clone(), Value::Int(0), None).unwrap();
+    store.put_with_version_mode(key.clone(), Value::Int(0), 1, None, WriteMode::Append).unwrap();
 
     for i in 1..=10 {
-        let version = Storage::get(&*store, &key)
+        let version = store.get_versioned(&key, u64::MAX)
             .unwrap()
             .unwrap()
             .version
@@ -416,10 +416,10 @@ fn many_sequential_transactions() {
         );
 
         txn.mark_committed().unwrap();
-        Storage::put(&*store, key.clone(), Value::Int(i), None).unwrap();
+        store.put_with_version_mode(key.clone(), Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
     }
 
     // Final value should be 10
-    let final_value = Storage::get(&*store, &key).unwrap().unwrap().value;
+    let final_value = store.get_versioned(&key, u64::MAX).unwrap().unwrap().value;
     assert_eq!(final_value, Value::Int(10));
 }

@@ -159,7 +159,7 @@ impl StateCell {
     ) -> StrataResult<Option<Versioned<Value>>> {
         let key = self.key_for(branch_id, space, name);
         use strata_core::Storage;
-        match self.db.storage().get(&key)? {
+        match self.db.storage().get_versioned(&key, u64::MAX)? {
             Some(vv) => {
                 let state: State = from_stored_value(&vv.value)
                     .map_err(|e| strata_core::StrataError::serialization(e.to_string()))?;

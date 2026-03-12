@@ -710,7 +710,7 @@ impl EventLog {
         use strata_core::Storage;
         let ns = self.namespace_for(branch_id, space);
         let meta_key = Key::new_event_meta(ns.clone());
-        let meta: EventLogMeta = match self.db.storage().get(&meta_key)? {
+        let meta: EventLogMeta = match self.db.storage().get_versioned(&meta_key, u64::MAX)? {
             Some(vv) => from_stored_value(&vv.value).unwrap_or_else(|_| EventLogMeta::default()),
             None => return Ok(Vec::new()),
         };

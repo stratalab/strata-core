@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::contract::VersionedValue;
 use crate::error::StrataResult;
-use crate::types::{BranchId, Key};
+use crate::types::Key;
 use crate::value::Value;
 
 /// Controls how a write interacts with existing versions of a key.
@@ -38,12 +38,12 @@ pub enum WriteMode {
 ///
 /// ## Visibility Semantics
 ///
-/// A successful `put()` **happens-before** any subsequent `get()` on the same
-/// key within the same thread. Cross-thread visibility is guaranteed by the
-/// `Send + Sync` bounds — implementations must use internal synchronization
-/// (e.g., `RwLock`, atomics, or lock-free structures) to ensure that a `put()`
-/// on thread A is visible to a `get()` on thread B that starts after the `put()`
-/// returns.
+/// A successful `put_with_version_mode()` **happens-before** any subsequent
+/// `get_versioned()` on the same key within the same thread. Cross-thread
+/// visibility is guaranteed by the `Send + Sync` bounds — implementations
+/// must use internal synchronization (e.g., `RwLock`, atomics, or lock-free
+/// structures) to ensure that a write on thread A is visible to a read on
+/// thread B that starts after the write returns.
 ///
 /// ## Snapshot Consistency
 ///
@@ -63,23 +63,15 @@ pub enum WriteMode {
 ///
 /// ## Implementors
 ///
-/// Implementors **should** validate size limits in `put()` and `put_with_version()`
+/// Implementors **should** validate size limits in `put_with_version_mode()`
 /// using [`crate::limits::Limits`]. This enforcement is planned for the storage
 /// epic (#1306) but is not yet required by this trait.
 pub trait Storage: Send + Sync {
-    /// Get current value for key (latest version)
-    ///
-    /// Returns None if key doesn't exist or is expired.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the storage operation fails.
-    fn get(&self, key: &Key) -> StrataResult<Option<VersionedValue>>;
-
     /// Get value at or before specified version (for snapshot isolation)
     ///
     /// This enables creating snapshots without cloning the entire store.
-    /// Returns the latest version <= max_version.
+    /// Returns the latest version <= max_version. Pass `u64::MAX` to get the
+    /// latest version unconditionally.
     ///
     /// # Errors
     ///
@@ -110,29 +102,6 @@ pub trait Storage: Send + Sync {
         before_version: Option<u64>,
     ) -> StrataResult<Vec<VersionedValue>>;
 
-    /// Put key-value pair with optional TTL
-    ///
-    /// Returns the version assigned to this write.
-    /// Version is monotonically increasing and assigned by the storage layer.
-    ///
-    /// After a successful return, the written value is immediately visible
-    /// to `get()` calls on the same or any other thread.
-    ///
-    /// # Errors
-    ///
-    /// - `StorageError` — I/O or backend failure
-    /// - Future: `ConstraintViolation` when limit enforcement is added (#1306)
-    fn put(&self, key: Key, value: Value, ttl: Option<Duration>) -> StrataResult<u64>;
-
-    /// Delete key
-    ///
-    /// Returns the deleted value if it existed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the storage operation fails.
-    fn delete(&self, key: &Key) -> StrataResult<Option<VersionedValue>>;
-
     /// Scan keys with given prefix at or before max_version
     ///
     /// Results are sorted by key order (namespace → type_tag → user_key).
@@ -147,60 +116,33 @@ pub trait Storage: Send + Sync {
         max_version: u64,
     ) -> StrataResult<Vec<(Key, VersionedValue)>>;
 
-    /// Scan all keys for a given branch_id at or before max_version
-    ///
-    /// Critical for replay: fetch all writes for a specific branch.
-    /// Results are sorted by key order.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the storage operation fails.
-    fn scan_by_branch(
-        &self,
-        branch_id: BranchId,
-        max_version: u64,
-    ) -> StrataResult<Vec<(Key, VersionedValue)>>;
-
     /// Get current global version
     ///
     /// Returns the highest version assigned so far.
     /// Used for creating snapshots at current version.
     fn current_version(&self) -> u64;
 
-    /// Put a value with a specific version
+    /// Put a value with a specific version and write mode.
     ///
     /// Used by transaction commit to apply writes with the commit version.
-    /// Unlike `put()`, this does NOT allocate a new version - it uses the
-    /// provided version directly.
+    /// Does NOT allocate a new version — uses the provided version directly.
     ///
     /// Per spec Section 6.1: All keys in a transaction get the same commit version.
+    ///
+    /// Write modes:
+    /// - `Append`: standard MVCC (adds version to chain, preserves history)
+    /// - `Replace`: overwrites all previous versions (single-version)
     ///
     /// # Arguments
     /// * `key` - The key to write
     /// * `value` - The value to write
     /// * `version` - The exact version to assign to this write
     /// * `ttl` - Optional time-to-live for the value
+    /// * `mode` - How this write interacts with existing versions
     ///
     /// # Errors
     ///
     /// Returns an error if the storage operation fails.
-    fn put_with_version(
-        &self,
-        key: Key,
-        value: Value,
-        version: u64,
-        ttl: Option<Duration>,
-    ) -> StrataResult<()>;
-
-    /// Put a value with a specific version and write mode.
-    ///
-    /// Same as `put_with_version`, but respects `WriteMode`:
-    /// - `Append`: standard MVCC (adds version to chain)
-    /// - `Replace`: overwrites all previous versions (single-version)
-    ///
-    /// Default implementation ignores the mode and delegates to `put_with_version`.
-    /// Backends that support single-version writes (e.g., ShardedStore) should
-    /// override for memory efficiency.
     fn put_with_version_mode(
         &self,
         key: Key,
@@ -208,10 +150,7 @@ pub trait Storage: Send + Sync {
         version: u64,
         ttl: Option<Duration>,
         mode: WriteMode,
-    ) -> StrataResult<()> {
-        let _ = mode; // default ignores mode
-        self.put_with_version(key, value, version, ttl)
-    }
+    ) -> StrataResult<()>;
 
     /// Delete a key with a specific version (creates tombstone)
     ///
@@ -232,14 +171,17 @@ pub trait Storage: Send + Sync {
     /// Returns the raw version as `u64` without constructing a `VersionedValue`.
     /// Used by validation paths that only need version comparison.
     ///
-    /// Default implementation delegates to `get()` and extracts the version.
-    /// Implementations can override for efficiency (e.g., skipping Value clone).
+    /// Default implementation delegates to `get_versioned(key, u64::MAX)` and
+    /// extracts the version. Implementations can override for efficiency
+    /// (e.g., skipping Value clone).
     ///
     /// # Errors
     ///
     /// Returns an error if the storage operation fails.
     fn get_version_only(&self, key: &Key) -> StrataResult<Option<u64>> {
-        Ok(self.get(key)?.map(|vv| vv.version.as_u64()))
+        Ok(self
+            .get_versioned(key, u64::MAX)?
+            .map(|vv| vv.version.as_u64()))
     }
 }
 
@@ -316,7 +258,7 @@ mod tests {
     use super::*;
     use crate::contract::{Timestamp, Version, Versioned};
     use crate::error::StrataError;
-    use crate::types::Namespace;
+    use crate::types::{BranchId, Namespace};
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::sync::{
@@ -344,11 +286,6 @@ mod tests {
     }
 
     impl Storage for MockStorage {
-        fn get(&self, key: &Key) -> StrataResult<Option<VersionedValue>> {
-            let data = self.data.read().unwrap();
-            Ok(data.get(key).and_then(|versions| versions.last().cloned()))
-        }
-
         fn get_versioned(
             &self,
             key: &Key,
@@ -386,19 +323,6 @@ mod tests {
             Ok(result)
         }
 
-        fn put(&self, key: Key, value: Value, _ttl: Option<Duration>) -> StrataResult<u64> {
-            let ver = self.version.fetch_add(1, Ordering::SeqCst) + 1;
-            let versioned = Versioned::with_timestamp(value, Version::txn(ver), Timestamp::now());
-            let mut data = self.data.write().unwrap();
-            data.entry(key).or_default().push(versioned);
-            Ok(ver)
-        }
-
-        fn delete(&self, key: &Key) -> StrataResult<Option<VersionedValue>> {
-            let mut data = self.data.write().unwrap();
-            Ok(data.remove(key).and_then(|v| v.last().cloned()))
-        }
-
         fn scan_prefix(
             &self,
             prefix: &Key,
@@ -420,47 +344,29 @@ mod tests {
             Ok(result)
         }
 
-        fn scan_by_branch(
-            &self,
-            branch_id: BranchId,
-            max_version: u64,
-        ) -> StrataResult<Vec<(Key, VersionedValue)>> {
-            let data = self.data.read().unwrap();
-            let mut result = vec![];
-            for (k, versions) in data.iter() {
-                if k.namespace.branch_id == branch_id {
-                    if let Some(v) = versions
-                        .iter()
-                        .rev()
-                        .find(|v| v.version().as_u64() <= max_version)
-                    {
-                        result.push((k.clone(), v.clone()));
-                    }
-                }
-            }
-            Ok(result)
-        }
-
         fn current_version(&self) -> u64 {
             self.version.load(Ordering::SeqCst)
         }
 
-        fn put_with_version(
+        fn put_with_version_mode(
             &self,
             key: Key,
             value: Value,
             version: u64,
             _ttl: Option<Duration>,
+            _mode: WriteMode,
         ) -> StrataResult<()> {
             let versioned =
                 Versioned::with_timestamp(value, Version::txn(version), Timestamp::now());
             let mut data = self.data.write().unwrap();
             data.entry(key).or_default().push(versioned);
+            self.version.fetch_max(version, Ordering::SeqCst);
             Ok(())
         }
 
         fn delete_with_version(&self, key: &Key, _version: u64) -> StrataResult<()> {
-            self.delete(key)?;
+            let mut data = self.data.write().unwrap();
+            data.remove(key);
             Ok(())
         }
     }
@@ -549,12 +455,19 @@ mod tests {
     // Storage behavioral tests
     // ====================================================================
 
+    /// Helper: seed a value via put_with_version_mode (the only write method)
+    fn seed(store: &MockStorage, key: Key, value: Value, version: u64) {
+        store
+            .put_with_version_mode(key, value, version, None, WriteMode::Append)
+            .unwrap();
+    }
+
     #[test]
-    fn storage_get_nonexistent_returns_none() {
+    fn storage_get_versioned_nonexistent_returns_none() {
         let store = MockStorage::new();
         let ns = test_ns();
         let key = test_key(&ns, "missing");
-        assert!(store.get(&key).unwrap().is_none());
+        assert!(store.get_versioned(&key, u64::MAX).unwrap().is_none());
     }
 
     #[test]
@@ -562,44 +475,10 @@ mod tests {
         let store = MockStorage::new();
         let ns = test_ns();
         let key = test_key(&ns, "hello");
-        let ver = store.put(key.clone(), Value::Int(42), None).unwrap();
-        assert!(ver > 0);
+        seed(&store, key.clone(), Value::Int(42), 1);
 
-        let result = store.get(&key).unwrap().unwrap();
+        let result = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
         assert_eq!(result.value, Value::Int(42));
-    }
-
-    #[test]
-    fn storage_put_increments_version_monotonically() {
-        let store = MockStorage::new();
-        let ns = test_ns();
-        let v1 = store.put(test_key(&ns, "a"), Value::Int(1), None).unwrap();
-        let v2 = store.put(test_key(&ns, "b"), Value::Int(2), None).unwrap();
-        let v3 = store.put(test_key(&ns, "c"), Value::Int(3), None).unwrap();
-        assert!(v1 < v2);
-        assert!(v2 < v3);
-    }
-
-    #[test]
-    fn storage_delete_removes_key() {
-        let store = MockStorage::new();
-        let ns = test_ns();
-        let key = test_key(&ns, "deleteme");
-        store.put(key.clone(), Value::Int(1), None).unwrap();
-
-        let deleted = store.delete(&key).unwrap();
-        assert!(deleted.is_some());
-        assert_eq!(deleted.unwrap().value, Value::Int(1));
-
-        assert!(store.get(&key).unwrap().is_none());
-    }
-
-    #[test]
-    fn storage_delete_nonexistent_returns_none() {
-        let store = MockStorage::new();
-        let ns = test_ns();
-        let key = test_key(&ns, "never_existed");
-        assert!(store.delete(&key).unwrap().is_none());
     }
 
     #[test]
@@ -608,12 +487,16 @@ mod tests {
         let ns = test_ns();
         let key = test_key(&ns, "versioned");
 
-        let v1 = store.put(key.clone(), Value::Int(1), None).unwrap();
-        let _v2 = store.put(key.clone(), Value::Int(2), None).unwrap();
+        seed(&store, key.clone(), Value::Int(1), 1);
+        seed(&store, key.clone(), Value::Int(2), 2);
 
         // Reading at v1 should see the first write
-        let result = store.get_versioned(&key, v1).unwrap().unwrap();
+        let result = store.get_versioned(&key, 1).unwrap().unwrap();
         assert_eq!(result.value, Value::Int(1));
+
+        // Reading at u64::MAX should see the latest write
+        let result = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
+        assert_eq!(result.value, Value::Int(2));
     }
 
     #[test]
@@ -621,7 +504,7 @@ mod tests {
         let store = MockStorage::new();
         let ns = test_ns();
         let key = test_key(&ns, "v");
-        store.put(key.clone(), Value::Int(1), None).unwrap();
+        seed(&store, key.clone(), Value::Int(1), 1);
 
         // Version 0 is before any write
         assert!(store.get_versioned(&key, 0).unwrap().is_none());
@@ -633,9 +516,9 @@ mod tests {
         let ns = test_ns();
         let key = test_key(&ns, "history");
 
-        store.put(key.clone(), Value::Int(1), None).unwrap();
-        store.put(key.clone(), Value::Int(2), None).unwrap();
-        store.put(key.clone(), Value::Int(3), None).unwrap();
+        seed(&store, key.clone(), Value::Int(1), 1);
+        seed(&store, key.clone(), Value::Int(2), 2);
+        seed(&store, key.clone(), Value::Int(3), 3);
 
         let history = store.get_history(&key, None, None).unwrap();
         assert_eq!(history.len(), 3);
@@ -651,8 +534,8 @@ mod tests {
         let ns = test_ns();
         let key = test_key(&ns, "limited");
 
-        for i in 0..10 {
-            store.put(key.clone(), Value::Int(i), None).unwrap();
+        for i in 1..=10 {
+            seed(&store, key.clone(), Value::Int(i), i as u64);
         }
 
         let history = store.get_history(&key, Some(3), None).unwrap();
@@ -673,17 +556,17 @@ mod tests {
         let ns = test_ns();
         let key = test_key(&ns, "paginate");
 
-        let v1 = store.put(key.clone(), Value::Int(1), None).unwrap();
-        let v2 = store.put(key.clone(), Value::Int(2), None).unwrap();
-        let _v3 = store.put(key.clone(), Value::Int(3), None).unwrap();
+        seed(&store, key.clone(), Value::Int(1), 1);
+        seed(&store, key.clone(), Value::Int(2), 2);
+        seed(&store, key.clone(), Value::Int(3), 3);
 
         // Get history before v3 (should return v2 and v1)
-        let history = store.get_history(&key, None, Some(v2 + 1)).unwrap();
+        let history = store.get_history(&key, None, Some(3)).unwrap();
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].value, Value::Int(2));
 
         // Get history before v2 (should return only v1)
-        let history = store.get_history(&key, None, Some(v1 + 1)).unwrap();
+        let history = store.get_history(&key, None, Some(2)).unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].value, Value::Int(1));
     }
@@ -698,20 +581,18 @@ mod tests {
     fn storage_current_version_advances_with_puts() {
         let store = MockStorage::new();
         let ns = test_ns();
-        store.put(test_key(&ns, "a"), Value::Int(1), None).unwrap();
-        assert!(store.current_version() > 0);
+        seed(&store, test_key(&ns, "a"), Value::Int(1), 5);
+        assert!(store.current_version() >= 5);
     }
 
     #[test]
-    fn storage_put_with_version_uses_explicit_version() {
+    fn storage_put_with_version_mode_uses_explicit_version() {
         let store = MockStorage::new();
         let ns = test_ns();
         let key = test_key(&ns, "explicit");
-        store
-            .put_with_version(key.clone(), Value::Int(99), 42, None)
-            .unwrap();
+        seed(&store, key.clone(), Value::Int(99), 42);
 
-        let result = store.get(&key).unwrap().unwrap();
+        let result = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
         assert_eq!(result.value, Value::Int(99));
         assert_eq!(result.version().as_u64(), 42);
     }
@@ -721,44 +602,23 @@ mod tests {
         let store = MockStorage::new();
         let ns = test_ns();
         let prefix = Key::new_kv(ns.clone(), "user/");
-        store
-            .put(Key::new_kv(ns.clone(), "user/alice"), Value::Int(1), None)
-            .unwrap();
-        store
-            .put(Key::new_kv(ns.clone(), "user/bob"), Value::Int(2), None)
-            .unwrap();
-        store
-            .put(Key::new_kv(ns.clone(), "config/x"), Value::Int(3), None)
-            .unwrap();
+        seed(&store, Key::new_kv(ns.clone(), "user/alice"), Value::Int(1), 1);
+        seed(&store, Key::new_kv(ns.clone(), "user/bob"), Value::Int(2), 2);
+        seed(&store, Key::new_kv(ns.clone(), "config/x"), Value::Int(3), 3);
 
         let results = store.scan_prefix(&prefix, u64::MAX).unwrap();
         assert_eq!(results.len(), 2);
     }
 
     #[test]
-    fn storage_scan_by_branch_isolates_branches() {
+    fn storage_delete_with_version_removes_key() {
         let store = MockStorage::new();
-        let branch1 = BranchId::new();
-        let branch2 = BranchId::new();
-        let ns1 = Arc::new(Namespace::new(
-            branch1,
-            "default".into(),
-        ));
-        let ns2 = Arc::new(Namespace::new(
-            branch2,
-            "default".into(),
-        ));
+        let ns = test_ns();
+        let key = test_key(&ns, "deleteme");
+        seed(&store, key.clone(), Value::Int(1), 1);
 
-        store
-            .put(Key::new_kv(ns1.clone(), "k1"), Value::Int(1), None)
-            .unwrap();
-        store
-            .put(Key::new_kv(ns2.clone(), "k2"), Value::Int(2), None)
-            .unwrap();
-
-        let results = store.scan_by_branch(branch1, u64::MAX).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].1.value, Value::Int(1));
+        store.delete_with_version(&key, 2).unwrap();
+        assert!(store.get_versioned(&key, u64::MAX).unwrap().is_none());
     }
 
     // ====================================================================
@@ -771,18 +631,18 @@ mod tests {
         let ns = test_ns();
         let key = test_key(&ns, "snap");
 
-        let v1 = store.put(key.clone(), Value::Int(1), None).unwrap();
-        let snap = MockSnapshot::from_storage(&store, v1);
+        seed(&store, key.clone(), Value::Int(1), 1);
+        let snap = MockSnapshot::from_storage(&store, 1);
 
         // Write after snapshot
-        store.put(key.clone(), Value::Int(2), None).unwrap();
+        seed(&store, key.clone(), Value::Int(2), 2);
 
         // Snapshot should still see old value
         let result = snap.get(&key).unwrap().unwrap();
         assert_eq!(result.value, Value::Int(1));
 
         // Live storage should see new value
-        let result = store.get(&key).unwrap().unwrap();
+        let result = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
         assert_eq!(result.value, Value::Int(2));
     }
 
@@ -790,9 +650,9 @@ mod tests {
     fn snapshot_version_returns_creation_version() {
         let store = MockStorage::new();
         let ns = test_ns();
-        let v = store.put(test_key(&ns, "x"), Value::Int(1), None).unwrap();
-        let snap = MockSnapshot::from_storage(&store, v);
-        assert_eq!(snap.version(), v);
+        seed(&store, test_key(&ns, "x"), Value::Int(1), 1);
+        let snap = MockSnapshot::from_storage(&store, 1);
+        assert_eq!(snap.version(), 1);
     }
 
     #[test]
@@ -810,7 +670,7 @@ mod tests {
         let key = test_key(&ns, "invisible");
 
         let snap = MockSnapshot::from_storage(&store, 0);
-        store.put(key.clone(), Value::Int(1), None).unwrap();
+        seed(&store, key.clone(), Value::Int(1), 1);
 
         assert!(snap.get(&key).unwrap().is_none());
     }
@@ -823,9 +683,6 @@ mod tests {
     struct FailingStorage;
 
     impl Storage for FailingStorage {
-        fn get(&self, _: &Key) -> StrataResult<Option<VersionedValue>> {
-            Err(StrataError::storage("disk read failed"))
-        }
         fn get_versioned(&self, _: &Key, _: u64) -> StrataResult<Option<VersionedValue>> {
             Err(StrataError::storage("disk read failed"))
         }
@@ -837,27 +694,19 @@ mod tests {
         ) -> StrataResult<Vec<VersionedValue>> {
             Err(StrataError::storage("disk read failed"))
         }
-        fn put(&self, _: Key, _: Value, _: Option<Duration>) -> StrataResult<u64> {
-            Err(StrataError::storage("disk write failed"))
-        }
-        fn delete(&self, _: &Key) -> StrataResult<Option<VersionedValue>> {
-            Err(StrataError::storage("disk write failed"))
-        }
         fn scan_prefix(&self, _: &Key, _: u64) -> StrataResult<Vec<(Key, VersionedValue)>> {
-            Err(StrataError::storage("disk read failed"))
-        }
-        fn scan_by_branch(&self, _: BranchId, _: u64) -> StrataResult<Vec<(Key, VersionedValue)>> {
             Err(StrataError::storage("disk read failed"))
         }
         fn current_version(&self) -> u64 {
             0
         }
-        fn put_with_version(
+        fn put_with_version_mode(
             &self,
             _: Key,
             _: Value,
             _: u64,
             _: Option<Duration>,
+            _: WriteMode,
         ) -> StrataResult<()> {
             Err(StrataError::storage("disk write failed"))
         }
@@ -872,15 +721,11 @@ mod tests {
         let ns = test_ns();
         let key = test_key(&ns, "k");
 
-        assert!(store.get(&key).is_err());
-        assert!(store.put(key.clone(), Value::Null, None).is_err());
-        assert!(store.delete(&key).is_err());
-        assert!(store.get_versioned(&key, 0).is_err());
+        assert!(store.get_versioned(&key, u64::MAX).is_err());
         assert!(store.get_history(&key, None, None).is_err());
         assert!(store.scan_prefix(&key, 0).is_err());
-        assert!(store.scan_by_branch(BranchId::new(), 0).is_err());
         assert!(store
-            .put_with_version(key.clone(), Value::Null, 1, None)
+            .put_with_version_mode(key.clone(), Value::Null, 1, None, WriteMode::Append)
             .is_err());
         assert!(store.delete_with_version(&key, 1).is_err());
     }
@@ -891,10 +736,12 @@ mod tests {
         let ns = test_ns();
         let key = test_key(&ns, "k");
 
-        let err = store.get(&key).unwrap_err();
+        let err = store.get_versioned(&key, u64::MAX).unwrap_err();
         assert!(err.is_storage_error());
 
-        let err = store.put(key, Value::Null, None).unwrap_err();
+        let err = store
+            .put_with_version_mode(key, Value::Null, 1, None, WriteMode::Append)
+            .unwrap_err();
         assert!(err.is_storage_error());
     }
 }
