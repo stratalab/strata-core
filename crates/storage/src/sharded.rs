@@ -105,10 +105,14 @@ impl VersionChain {
         }
     }
 
-    /// Add a new version (must be newer than existing versions)
+    /// Add a new version, maintaining descending version order.
     ///
-    /// Promotes Single → Multi on second version, then O(1) push_front.
-    #[inline]
+    /// Promotes Single → Multi on second version. Uses sorted insertion
+    /// to guarantee the newest-first invariant even if callers push
+    /// versions out of order (e.g., concurrent blind writes where version
+    /// allocation and shard-lock acquisition are not atomic).
+    ///
+    /// O(n) worst case, but n (chain length between GC cycles) is typically 1–5.
     pub fn push(&mut self, value: StoredValue) {
         match &mut self.versions {
             VersionStorage::Single(_) => {
@@ -118,8 +122,14 @@ impl VersionChain {
                 match old {
                     VersionStorage::Single(old_value) => {
                         let mut deque = VecDeque::with_capacity(2);
-                        deque.push_back(old_value);
-                        deque.push_front(value);
+                        // Insert in descending version order
+                        if value.version_raw() >= old_value.version_raw() {
+                            deque.push_back(value);
+                            deque.push_back(old_value);
+                        } else {
+                            deque.push_back(old_value);
+                            deque.push_back(value);
+                        }
                         self.versions = VersionStorage::Multi(deque);
                     }
                     VersionStorage::Multi(_) => {
@@ -128,7 +138,22 @@ impl VersionChain {
                 }
             }
             VersionStorage::Multi(deque) => {
-                deque.push_front(value);
+                // Fast path: value is newest (common case)
+                if deque.is_empty()
+                    || value.version_raw() >= deque.front().unwrap().version_raw()
+                {
+                    deque.push_front(value);
+                } else {
+                    // Sorted insertion: find position to maintain descending order.
+                    // Walk from front (newest) to back (oldest); insert before the
+                    // first entry with a smaller version.
+                    let version = value.version_raw();
+                    let pos = deque
+                        .iter()
+                        .position(|sv| sv.version_raw() < version)
+                        .unwrap_or(deque.len());
+                    deque.insert(pos, value);
+                }
             }
         }
     }
@@ -2029,6 +2054,107 @@ mod tests {
 
         // before_version=3 → 5 < 3 is false → empty
         assert!(chain.history(None, Some(3)).is_empty());
+    }
+
+    // ========================================================================
+    // VersionChain: Out-of-Order Push (Issue #1383)
+    // ========================================================================
+
+    #[test]
+    fn test_version_chain_push_out_of_order_single_to_multi() {
+        // Simulate: v5 allocated first, v3 pushed first (Single→Multi promotion)
+        let mut chain = VersionChain::new(make_sv(5));
+        chain.push(make_sv(3)); // older version pushed after newer
+        // Must be stored descending: [5, 3]
+        assert_eq!(chain.latest().unwrap().version(), Version::txn(5));
+        assert_eq!(chain.get_at_version(4).unwrap().version(), Version::txn(3));
+        assert_eq!(chain.version_count(), 2);
+    }
+
+    #[test]
+    fn test_version_chain_push_out_of_order_multi() {
+        // Simulate concurrent blind writes: versions allocated 5,6,7 but
+        // pushed in order 6, 7, 5
+        let mut chain = VersionChain::new(make_sv(1));
+        chain.push(make_sv(6));
+        chain.push(make_sv(7));
+        chain.push(make_sv(5)); // out of order
+        // Must be stored descending: [7, 6, 5, 1]
+        assert_eq!(chain.latest().unwrap().version(), Version::txn(7));
+        assert_eq!(chain.get_at_version(6).unwrap().version(), Version::txn(6));
+        assert_eq!(chain.get_at_version(5).unwrap().version(), Version::txn(5));
+        assert_eq!(chain.get_at_version(1).unwrap().version(), Version::txn(1));
+        assert_eq!(chain.version_count(), 4);
+    }
+
+    #[test]
+    fn test_version_chain_push_out_of_order_oldest_last() {
+        // Push newest first, then middle, then oldest
+        let mut chain = VersionChain::new(make_sv(10));
+        chain.push(make_sv(5));
+        chain.push(make_sv(1));
+        // Must be descending: [10, 5, 1]
+        assert_eq!(chain.latest().unwrap().version(), Version::txn(10));
+        let h = chain.history(None, None);
+        assert_eq!(h.len(), 3);
+        assert_eq!(h[0].version(), Version::txn(10));
+        assert_eq!(h[1].version(), Version::txn(5));
+        assert_eq!(h[2].version(), Version::txn(1));
+    }
+
+    #[test]
+    fn test_version_chain_push_out_of_order_middle_insert() {
+        let mut chain = VersionChain::new(make_sv(1));
+        chain.push(make_sv(10));
+        chain.push(make_sv(5)); // should go between 10 and 1
+        // Must be descending: [10, 5, 1]
+        let h = chain.history(None, None);
+        assert_eq!(h.len(), 3);
+        assert_eq!(h[0].version(), Version::txn(10));
+        assert_eq!(h[1].version(), Version::txn(5));
+        assert_eq!(h[2].version(), Version::txn(1));
+    }
+
+    #[test]
+    fn test_version_chain_push_duplicate_version() {
+        // Same version pushed twice (shouldn't happen in practice, but be safe)
+        let mut chain = VersionChain::new(make_sv(1));
+        chain.push(make_sv(5));
+        chain.push(make_sv(5));
+        assert_eq!(chain.version_count(), 3);
+        assert_eq!(chain.latest().unwrap().version(), Version::txn(5));
+    }
+
+    #[test]
+    fn test_version_chain_gc_after_out_of_order_push() {
+        // Ensure GC works correctly on a chain that was built out of order
+        let mut chain = VersionChain::new(make_sv(1));
+        chain.push(make_sv(10));
+        chain.push(make_sv(5)); // out of order → sorted to [10, 5, 1]
+        // GC versions < 6 → prune 5 and 1
+        let pruned = chain.gc(6);
+        assert_eq!(pruned, 2);
+        assert_eq!(chain.version_count(), 1);
+        assert_eq!(chain.latest().unwrap().version(), Version::txn(10));
+    }
+
+    #[test]
+    fn test_version_chain_get_at_version_after_out_of_order_push() {
+        // The bug from #1383: without sorted insertion, get_at_version returns stale data
+        let mut chain = VersionChain::new(make_sv(1));
+        // Simulate: thread B gets v6, thread A gets v5, thread B pushes first, then A
+        chain.push(make_sv(6));
+        chain.push(make_sv(5)); // out of order
+
+        // get_at_version(100) must return v6 (newest), not v5
+        assert_eq!(
+            chain.get_at_version(100).unwrap().version(),
+            Version::txn(6)
+        );
+        // latest() must return v6
+        assert_eq!(chain.latest().unwrap().version(), Version::txn(6));
+        // get_at_version(5) must return v5
+        assert_eq!(chain.get_at_version(5).unwrap().version(), Version::txn(5));
     }
 
     // ========================================================================
