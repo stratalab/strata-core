@@ -60,6 +60,14 @@ pub fn build_cli() -> Command {
                 .action(clap::ArgAction::SetTrue)
                 .global(true),
         )
+        .arg(
+            Arg::new("follower")
+                .long("follower")
+                .help("Open as read-only follower (no lock, can read while primary is running)")
+                .action(clap::ArgAction::SetTrue)
+                .conflicts_with("cache")
+                .global(true),
+        )
         .subcommand(build_kv())
         .subcommand(build_json())
         .subcommand(build_event())
