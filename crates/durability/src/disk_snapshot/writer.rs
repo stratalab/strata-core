@@ -163,6 +163,7 @@ impl SnapshotWriter {
     }
 
     /// Check if a temporary file exists for a given snapshot ID
+    #[cfg(test)]
     pub fn temp_file_exists(&self, snapshot_id: u64) -> bool {
         let temp_path = self
             .snapshots_dir

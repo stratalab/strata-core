@@ -368,9 +368,8 @@ impl Writeset {
                 Ok((EntityRef::State { branch_id, name }, cursor))
             }
             0x04 => {
-                // TraceStore was removed - skip over the trace_id string for backwards compatibility
-                let (_trace_id, _consumed) = Self::read_string(&bytes[cursor..])?;
-                Err(WritesetError::InvalidEntityRef) // Trace entities no longer supported
+                // TraceStore was removed — tag 0x04 is no longer supported
+                Err(WritesetError::InvalidEntityRef)
             }
             primitive_tags::BRANCH => Ok((EntityRef::Branch { branch_id }, cursor)),
             primitive_tags::JSON => {

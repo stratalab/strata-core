@@ -163,6 +163,7 @@ impl SnapshotReader {
     }
 
     /// Get the codec used by this reader
+    #[cfg(test)]
     pub fn codec(&self) -> &dyn StorageCodec {
         self.codec.as_ref()
     }
@@ -193,16 +194,19 @@ impl LoadedSnapshot {
     }
 
     /// Get the creation timestamp
+    #[cfg(test)]
     pub fn created_at(&self) -> u64 {
         self.header.created_at
     }
 
     /// Get the database UUID
+    #[cfg(test)]
     pub fn database_uuid(&self) -> [u8; 16] {
         self.header.database_uuid
     }
 
     /// Find a section by primitive type
+    #[cfg(test)]
     pub fn find_section(&self, primitive_type: u8) -> Option<&LoadedSection> {
         self.sections
             .iter()
@@ -210,6 +214,7 @@ impl LoadedSnapshot {
     }
 
     /// Get all section types present
+    #[cfg(test)]
     pub fn section_types(&self) -> Vec<u8> {
         self.sections.iter().map(|s| s.primitive_type).collect()
     }
@@ -226,6 +231,7 @@ pub struct LoadedSection {
 
 impl LoadedSection {
     /// Get the primitive type name
+    #[cfg(test)]
     pub fn primitive_name(&self) -> &'static str {
         primitive_tags::tag_name(self.primitive_type)
     }

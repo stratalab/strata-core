@@ -324,6 +324,7 @@ impl TombstoneIndex {
     }
 
     /// Get all tombstones for a branch
+    #[cfg(test)]
     pub fn get_by_branch(&self, branch_id: &[u8; 16]) -> Vec<&Tombstone> {
         self.tombstones
             .iter()
@@ -333,6 +334,7 @@ impl TombstoneIndex {
     }
 
     /// Get tombstones by reason
+    #[cfg(test)]
     pub fn get_by_reason(&self, reason: TombstoneReason) -> Vec<&Tombstone> {
         self.tombstones
             .values()

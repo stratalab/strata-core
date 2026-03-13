@@ -56,7 +56,7 @@ The `BackgroundScheduler` already exists and is general-purpose — auto-embeddi
 
 **2. WAL Segments (CRITICAL)**
 
-`WalOnlyCompactor::compact()` in `crates/durability/src/compaction/wal_only.rs` removes segments covered by the snapshot watermark. `CompactMode::WALOnly` is the safe mode (preserves all version history); `CompactMode::Full` also applies retention policy. The compaction module header explicitly states: "Compaction is **user-triggered**: No background compaction" (`compaction/mod.rs:16`). Exposed via `Database::compact()` but never auto-called.
+`WalOnlyCompactor::compact()` in `crates/durability/src/compaction/wal_only.rs` removes segments covered by the snapshot watermark. `CompactMode::WALOnly` preserves all version history. The compaction module header explicitly states: "Compaction is **user-triggered**: No background compaction" (`compaction/mod.rs:16`). Exposed via `Database::compact()` but never auto-called.
 
 **3. Tombstones (HIGH)**
 
@@ -199,7 +199,7 @@ safe_point = min(safe_point, min_live_snapshot_version)
 |------|------|---------|-------------|
 | `auto_compact` | `bool` | `true` | Enable automatic compaction |
 | `compact_threshold_mb` | `u64` | `256` | Trigger compaction when WAL exceeds this size |
-| `compact_mode` | `String` | `"wal_only"` | Default compaction mode (`"wal_only"` or `"full"`) |
+| `compact_mode` | `String` | `"wal_only"` | Default compaction mode (`"wal_only"`) |
 
 **Default justification:** 256 MB is between SQLite's conservative 4 MB (1000 × 4 KB pages) and PostgreSQL's 1 GB `max_wal_size`. DuckDB uses 16 MB but targets embedded analytics. 256 MB balances disk usage against compaction frequency for a general-purpose database.
 

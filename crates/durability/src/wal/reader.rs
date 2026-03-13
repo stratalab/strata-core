@@ -185,6 +185,7 @@ impl WalReader {
     /// Read records from a segment, filtering by transaction ID.
     ///
     /// Only returns records with txn_id > watermark (for recovery after snapshot).
+    #[cfg(test)]
     pub fn read_segment_after_watermark(
         &self,
         wal_dir: &Path,
@@ -288,6 +289,7 @@ impl WalReader {
     }
 
     /// Get the highest transaction ID in a segment.
+    #[cfg(test)]
     pub fn max_txn_id_in_segment(
         &self,
         wal_dir: &Path,
@@ -307,7 +309,8 @@ impl WalReader {
     ///
     /// For each segment, attempts to load its `.meta` file. Missing or corrupted
     /// metadata is returned as `None` (with a warning logged).
-    pub fn list_segments_with_metadata(
+    #[cfg(test)]
+    fn list_segments_with_metadata(
         &self,
         wal_dir: &Path,
     ) -> Result<Vec<(u64, Option<SegmentMeta>)>, WalReaderError> {
@@ -351,6 +354,7 @@ impl WalReader {
     ///
     /// A segment is included if `min_ts <= target_ts <= max_ts`.
     /// Segments without metadata are conservatively included.
+    #[cfg(test)]
     pub fn find_segments_for_timestamp(
         &self,
         wal_dir: &Path,
@@ -371,6 +375,7 @@ impl WalReader {
     ///
     /// A segment is included if its range overlaps: `seg.min_ts <= max_ts && seg.max_ts >= min_ts`.
     /// Segments without metadata are conservatively included.
+    #[cfg(test)]
     pub fn find_segments_for_timestamp_range(
         &self,
         wal_dir: &Path,
@@ -394,6 +399,7 @@ impl WalReader {
     /// least one record at or before the target). This is the key API for
     /// time-travel state reconstruction.
     /// Segments without metadata are conservatively included.
+    #[cfg(test)]
     pub fn find_segments_before_timestamp(
         &self,
         wal_dir: &Path,

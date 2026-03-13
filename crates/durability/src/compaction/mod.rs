@@ -8,9 +8,6 @@
 //! - **WALOnly**: Safely removes WAL segments covered by snapshot watermark.
 //!   All version history is preserved.
 //!
-//! - **Full**: Removes WAL segments AND applies retention policy to remove
-//!   old versions. Version IDs never change.
-//!
 //! # Key Invariants
 //!
 //! - Compaction is **user-triggered**: No background compaction
@@ -21,13 +18,8 @@
 //! # Example
 //!
 //! ```text
-//! // Compact WAL only (safe mode)
 //! let info = database.compact(CompactMode::WALOnly)?;
 //! println!("Reclaimed {} bytes", info.reclaimed_bytes);
-//!
-//! // Full compaction with retention enforcement
-//! let info = database.compact(CompactMode::Full)?;
-//! println!("Removed {} versions", info.versions_removed);
 //! ```
 
 pub mod tombstone;
@@ -43,15 +35,9 @@ pub use wal_only::WalOnlyCompactor;
 pub enum CompactMode {
     /// Remove WAL segments covered by snapshot
     ///
-    /// Safest mode. Only removes WAL segments whose transactions
+    /// Only removes WAL segments whose transactions
     /// are fully captured in a snapshot. All version history preserved.
     WALOnly,
-
-    /// Full compaction: WAL + retention policy enforcement
-    ///
-    /// Removes WAL segments AND applies retention policy to remove
-    /// old versions. Version IDs never change.
-    Full,
 }
 
 impl CompactMode {
@@ -59,13 +45,7 @@ impl CompactMode {
     pub fn name(&self) -> &'static str {
         match self {
             CompactMode::WALOnly => "wal_only",
-            CompactMode::Full => "full",
         }
-    }
-
-    /// Check if this mode applies retention policies
-    pub fn applies_retention(&self) -> bool {
-        matches!(self, CompactMode::Full)
     }
 }
 
@@ -89,9 +69,6 @@ pub struct CompactInfo {
     /// Number of WAL segments removed
     pub wal_segments_removed: usize,
 
-    /// Number of versions removed (Full mode only)
-    pub versions_removed: usize,
-
     /// Snapshot watermark used for compaction (transaction ID)
     pub snapshot_watermark: Option<u64>,
 
@@ -109,7 +86,6 @@ impl CompactInfo {
             mode,
             reclaimed_bytes: 0,
             wal_segments_removed: 0,
-            versions_removed: 0,
             snapshot_watermark: None,
             duration_ms: 0,
             timestamp: 0,
@@ -118,18 +94,14 @@ impl CompactInfo {
 
     /// Check if any compaction actually occurred
     pub fn did_compact(&self) -> bool {
-        self.wal_segments_removed > 0 || self.versions_removed > 0
+        self.wal_segments_removed > 0
     }
 
     /// Get a summary string for logging
     pub fn summary(&self) -> String {
         format!(
-            "mode={}, segments_removed={}, versions_removed={}, bytes_reclaimed={}, duration_ms={}",
-            self.mode,
-            self.wal_segments_removed,
-            self.versions_removed,
-            self.reclaimed_bytes,
-            self.duration_ms
+            "mode={}, segments_removed={}, bytes_reclaimed={}, duration_ms={}",
+            self.mode, self.wal_segments_removed, self.reclaimed_bytes, self.duration_ms
         )
     }
 }
@@ -160,10 +132,6 @@ pub enum CompactionError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// Retention policy error
-    #[error("Retention error: {0}")]
-    Retention(String),
-
     /// MANIFEST error during compaction
     #[error("Manifest error: {0}")]
     Manifest(String),
@@ -174,11 +142,6 @@ pub enum CompactionError {
 }
 
 impl CompactionError {
-    /// Create a new retention error
-    pub fn retention(msg: impl Into<String>) -> Self {
-        CompactionError::Retention(msg.into())
-    }
-
     /// Create a new manifest error
     pub fn manifest(msg: impl Into<String>) -> Self {
         CompactionError::Manifest(msg.into())
@@ -197,19 +160,11 @@ mod tests {
     #[test]
     fn test_compact_mode_name() {
         assert_eq!(CompactMode::WALOnly.name(), "wal_only");
-        assert_eq!(CompactMode::Full.name(), "full");
-    }
-
-    #[test]
-    fn test_compact_mode_applies_retention() {
-        assert!(!CompactMode::WALOnly.applies_retention());
-        assert!(CompactMode::Full.applies_retention());
     }
 
     #[test]
     fn test_compact_mode_display() {
         assert_eq!(format!("{}", CompactMode::WALOnly), "wal_only");
-        assert_eq!(format!("{}", CompactMode::Full), "full");
     }
 
     #[test]
@@ -219,7 +174,6 @@ mod tests {
         assert_eq!(info.mode, CompactMode::WALOnly);
         assert_eq!(info.reclaimed_bytes, 0);
         assert_eq!(info.wal_segments_removed, 0);
-        assert_eq!(info.versions_removed, 0);
         assert_eq!(info.snapshot_watermark, None);
         assert_eq!(info.duration_ms, 0);
         assert_eq!(info.timestamp, 0);
@@ -232,24 +186,18 @@ mod tests {
 
         info.wal_segments_removed = 1;
         assert!(info.did_compact());
-
-        info.wal_segments_removed = 0;
-        info.versions_removed = 1;
-        assert!(info.did_compact());
     }
 
     #[test]
     fn test_compact_info_summary() {
-        let mut info = CompactInfo::new(CompactMode::Full);
+        let mut info = CompactInfo::new(CompactMode::WALOnly);
         info.wal_segments_removed = 5;
-        info.versions_removed = 100;
         info.reclaimed_bytes = 1024;
         info.duration_ms = 250;
 
         let summary = info.summary();
-        assert!(summary.contains("mode=full"));
+        assert!(summary.contains("mode=wal_only"));
         assert!(summary.contains("segments_removed=5"));
-        assert!(summary.contains("versions_removed=100"));
         assert!(summary.contains("bytes_reclaimed=1024"));
         assert!(summary.contains("duration_ms=250"));
     }
@@ -267,16 +215,10 @@ mod tests {
 
         let err = CompactionError::AlreadyInProgress;
         assert!(err.to_string().contains("already in progress"));
-
-        let err = CompactionError::Retention("policy error".to_string());
-        assert!(err.to_string().contains("policy error"));
     }
 
     #[test]
     fn test_compaction_error_helpers() {
-        let err = CompactionError::retention("test retention");
-        assert!(matches!(err, CompactionError::Retention(_)));
-
         let err = CompactionError::manifest("test manifest");
         assert!(matches!(err, CompactionError::Manifest(_)));
 
@@ -297,10 +239,8 @@ mod tests {
 
         let mut set = HashSet::new();
         set.insert(CompactMode::WALOnly);
-        set.insert(CompactMode::Full);
 
         assert!(set.contains(&CompactMode::WALOnly));
-        assert!(set.contains(&CompactMode::Full));
-        assert_eq!(set.len(), 2);
+        assert_eq!(set.len(), 1);
     }
 }
