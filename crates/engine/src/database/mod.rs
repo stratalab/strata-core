@@ -504,7 +504,7 @@ impl Database {
         let db = Arc::new(Self {
             data_dir: canonical_path,
             storage,
-            wal_writer: None,           // No WAL writer — read-only
+            wal_writer: None, // No WAL writer — read-only
             persistence_mode: PersistenceMode::Disk,
             coordinator,
             durability_mode: DurabilityMode::Cache, // Irrelevant for follower
@@ -514,7 +514,7 @@ impl Database {
             flush_shutdown: Arc::new(AtomicBool::new(false)),
             flush_handle: ParkingMutex::new(None), // No flush thread
             scheduler: BackgroundScheduler::new(2, 4096),
-            _lock_file: None,           // No lock acquired
+            _lock_file: None, // No lock acquired
             wal_dir,
             wal_watermark,
             follower: true,
@@ -2132,9 +2132,7 @@ impl Drop for Database {
         }
 
         // Remove from registry if we're disk-backed
-        if self.persistence_mode == PersistenceMode::Disk
-            && !self.data_dir.as_os_str().is_empty()
-        {
+        if self.persistence_mode == PersistenceMode::Disk && !self.data_dir.as_os_str().is_empty() {
             let mut registry = OPEN_DATABASES.lock();
             registry.remove(&self.data_dir);
         }

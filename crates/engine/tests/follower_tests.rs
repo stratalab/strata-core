@@ -37,7 +37,9 @@ fn primary_del(db: &Database, branch: BranchId, key: &str) {
 /// Helper: read a key-value pair via a read-only transaction.
 fn read_kv(db: &Database, branch: BranchId, key: &str) -> Option<String> {
     let k = Key::new_kv(ns(branch), key);
-    let mut txn = db.begin_read_only_transaction(branch).expect("begin_read_only_transaction");
+    let mut txn = db
+        .begin_read_only_transaction(branch)
+        .expect("begin_read_only_transaction");
     match txn.get(&k) {
         Ok(Some(Value::String(s))) => Some(s),
         Ok(Some(other)) => Some(format!("{:?}", other)),
@@ -83,7 +85,10 @@ fn test_follower_sees_primary_data() {
 
     // Follower opens and should see ALL the data via WAL recovery
     let follower = Database::open_follower(dir.path()).unwrap();
-    assert_eq!(read_kv(&follower, branch, "greeting").as_deref(), Some("hello"));
+    assert_eq!(
+        read_kv(&follower, branch, "greeting").as_deref(),
+        Some("hello")
+    );
     assert_eq!(read_kv(&follower, branch, "count").as_deref(), Some("42"));
     // Non-existent key should return None
     assert_eq!(read_kv(&follower, branch, "missing"), None);
@@ -120,7 +125,10 @@ fn test_follower_refresh_sees_new_data() {
 
     // Second refresh with no new data returns 0
     let applied2 = follower.refresh().unwrap();
-    assert_eq!(applied2, 0, "refresh with no new WAL records should return 0");
+    assert_eq!(
+        applied2, 0,
+        "refresh with no new WAL records should return 0"
+    );
 }
 
 #[test]
@@ -133,7 +141,10 @@ fn test_follower_refresh_sees_updates_to_existing_keys() {
     primary.flush().unwrap();
 
     let follower = Database::open_follower(dir.path()).unwrap();
-    assert_eq!(read_kv(&follower, branch, "key").as_deref(), Some("original"));
+    assert_eq!(
+        read_kv(&follower, branch, "key").as_deref(),
+        Some("original")
+    );
 
     // Primary UPDATES the same key
     primary_put(&primary, branch, "key", "updated");
@@ -205,7 +216,10 @@ fn test_follower_multiple_refreshes() {
     for i in 0..5 {
         let key = format!("round_{}", i);
         let val = format!("value_{}", i);
-        assert_eq!(read_kv(&follower, branch, &key).as_deref(), Some(val.as_str()));
+        assert_eq!(
+            read_kv(&follower, branch, &key).as_deref(),
+            Some(val.as_str())
+        );
     }
 }
 
@@ -234,7 +248,10 @@ fn test_follower_rejects_writes() {
         txn.put(k.clone(), Value::String("new_value".to_string()))?;
         Ok(())
     });
-    assert!(result.is_err(), "Writes should be rejected in follower mode");
+    assert!(
+        result.is_err(),
+        "Writes should be rejected in follower mode"
+    );
 
     let err_msg = format!("{}", result.unwrap_err());
     assert!(
@@ -274,10 +291,7 @@ fn test_follower_on_nonexistent_path() {
     let nonexistent = dir.path().join("does_not_exist");
 
     let result = Database::open_follower(&nonexistent);
-    assert!(
-        result.is_err(),
-        "Follower should fail on nonexistent path"
-    );
+    assert!(result.is_err(), "Follower should fail on nonexistent path");
 }
 
 #[test]
@@ -311,14 +325,20 @@ fn test_follower_multiple_followers() {
 
     // Only f1 refreshes
     f1.refresh().unwrap();
-    assert_eq!(read_kv(&f1, branch, "new_key").as_deref(), Some("new_value"));
+    assert_eq!(
+        read_kv(&f1, branch, "new_key").as_deref(),
+        Some("new_value")
+    );
     // f2 and f3 don't see it yet
     assert_eq!(read_kv(&f2, branch, "new_key"), None);
     assert_eq!(read_kv(&f3, branch, "new_key"), None);
 
     // Now f2 refreshes
     f2.refresh().unwrap();
-    assert_eq!(read_kv(&f2, branch, "new_key").as_deref(), Some("new_value"));
+    assert_eq!(
+        read_kv(&f2, branch, "new_key").as_deref(),
+        Some("new_value")
+    );
     assert_eq!(read_kv(&f3, branch, "new_key"), None);
 }
 

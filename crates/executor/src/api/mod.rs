@@ -142,14 +142,12 @@ impl Strata {
             let config_path = data_dir.join(strata_engine::database::config::CONFIG_FILE_NAME);
             strata_engine::database::config::StrataConfig::write_default_if_missing(&config_path)
                 .map_err(|e| Error::Internal {
-                    reason: format!("Failed to write default config: {}", e),
+                reason: format!("Failed to write default config: {}", e),
+            })?;
+            let cfg = strata_engine::database::config::StrataConfig::from_file(&config_path)
+                .map_err(|e| Error::Internal {
+                    reason: format!("Failed to read config: {}", e),
                 })?;
-            let cfg =
-                strata_engine::database::config::StrataConfig::from_file(&config_path).map_err(
-                    |e| Error::Internal {
-                        reason: format!("Failed to read config: {}", e),
-                    },
-                )?;
 
             Database::open_with_config(&data_dir, cfg).map_err(|e| Error::Internal {
                 reason: format!("Failed to open database: {}", e),
