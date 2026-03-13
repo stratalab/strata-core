@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::codec::StorageCodec;
 use crate::disk_snapshot::{SnapshotSection, SnapshotWriter};
 use crate::format::primitives::SnapshotSerializer;
-use crate::format::snapshot::primitive_tags;
+use crate::format::primitive_tags;
 use crate::format::watermark::{CheckpointInfo, SnapshotWatermark};
 
 /// Checkpoint coordinator

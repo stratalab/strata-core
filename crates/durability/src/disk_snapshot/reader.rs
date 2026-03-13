@@ -7,8 +7,9 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 
 use crate::codec::{CodecError, StorageCodec};
+use crate::format::primitive_tags;
 use crate::format::snapshot::{
-    primitive_tags, SectionHeader, SnapshotHeader, SNAPSHOT_HEADER_SIZE, SNAPSHOT_MAGIC,
+    SectionHeader, SnapshotHeader, SNAPSHOT_HEADER_SIZE, SNAPSHOT_MAGIC,
 };
 
 /// Snapshot reader for recovery

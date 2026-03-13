@@ -12,6 +12,7 @@
 //! - `snapshot`: Snapshot file format (added in Epic 71)
 
 pub mod manifest;
+pub mod primitive_tags;
 pub mod primitives;
 pub mod segment_meta;
 pub mod snapshot;
@@ -20,9 +21,9 @@ pub mod watermark;
 pub mod writeset;
 
 pub use snapshot::{
-    find_latest_snapshot, list_snapshots, parse_snapshot_id, primitive_tags, snapshot_path,
-    SectionHeader, SnapshotHeader, SnapshotHeaderError, SNAPSHOT_FORMAT_VERSION,
-    SNAPSHOT_HEADER_SIZE, SNAPSHOT_MAGIC,
+    find_latest_snapshot, list_snapshots, parse_snapshot_id, snapshot_path, SectionHeader,
+    SnapshotHeader, SnapshotHeaderError, SNAPSHOT_FORMAT_VERSION, SNAPSHOT_HEADER_SIZE,
+    SNAPSHOT_MAGIC,
 };
 pub use wal_record::{
     SegmentHeader, WalRecord, WalRecordError, WalSegment, SEGMENT_FORMAT_VERSION,
