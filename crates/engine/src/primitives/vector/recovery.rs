@@ -78,6 +78,8 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
     let mut stats = super::RecoveryStats::default();
     let data_dir = db.data_dir();
     let use_mmap = !data_dir.as_os_str().is_empty();
+    // Followers must never write to the primary's data directory.
+    let can_write_disk = use_mmap && !db.is_follower();
 
     // Iterate all branch_ids in storage
     for branch_id in db.storage().branch_ids() {
@@ -304,7 +306,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
             // segments ensures all vectors benefit from O(log n) search.
             backend.seal_remaining_active();
 
-            if use_mmap {
+            if can_write_disk {
                 let gdir = super::graph_dir(data_dir, cid.branch_id, &cid.name);
                 let _ = backend.freeze_graphs_to_disk(&gdir);
             }
@@ -314,7 +316,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
     // -----------------------------------------------------------
     // Freeze heaps to mmap cache & configure flush paths
     // -----------------------------------------------------------
-    if use_mmap {
+    if can_write_disk {
         let mut backends = state.backends.write();
         for (cid, backend) in backends.iter_mut() {
             let vec_path = mmap_path(data_dir, cid.branch_id, &cid.name);
