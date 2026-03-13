@@ -627,9 +627,7 @@ mod tests {
         assert_eq!(truncated, 50);
 
         // Verify file was actually truncated
-        let result = crate::wal::WalReader::new()
-            .read_all(&wal_dir)
-            .unwrap();
+        let result = crate::wal::WalReader::new().read_all(&wal_dir).unwrap();
         assert!(result.truncate_info.is_none()); // No more truncation needed
         assert_eq!(result.records.len(), 3);
     }

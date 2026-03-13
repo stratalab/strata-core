@@ -52,10 +52,7 @@ mod tests {
     use strata_core::types::{BranchId, Key, Namespace};
 
     fn test_key(doc: &str) -> Key {
-        Key::new_json(
-            Arc::new(Namespace::for_branch(BranchId::new())),
-            doc,
-        )
+        Key::new_json(Arc::new(Namespace::for_branch(BranchId::new())), doc)
     }
 
     #[test]
@@ -99,7 +96,11 @@ mod tests {
 
         // Verify actual field values, not just pattern match
         match &conflicts[0] {
-            ConflictType::JsonPathWriteWriteConflict { key: k, path1, path2 } => {
+            ConflictType::JsonPathWriteWriteConflict {
+                key: k,
+                path1,
+                path2,
+            } => {
                 assert_eq!(*k, key);
                 assert_eq!(path1.to_string(), "foo");
                 assert_eq!(path2.to_string(), "foo.bar");

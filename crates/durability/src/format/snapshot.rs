@@ -183,7 +183,6 @@ impl SectionHeader {
     }
 }
 
-
 /// Generate snapshot file path
 ///
 /// Snapshots are named `snap-NNNNNN.chk` where NNNNNN is zero-padded.

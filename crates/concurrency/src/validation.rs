@@ -318,9 +318,7 @@ pub fn validate_json_set<S: Storage>(
 ///
 /// # Returns
 /// ValidationResult with any path conflicts found
-pub fn validate_json_paths(
-    json_writes: &[crate::transaction::JsonPatchEntry],
-) -> ValidationResult {
+pub fn validate_json_paths(json_writes: &[crate::transaction::JsonPatchEntry]) -> ValidationResult {
     use crate::conflict::check_write_write_conflicts;
 
     let mut result = ValidationResult::ok();
