@@ -9,7 +9,6 @@
 //! - Binary on-disk formats (segmented WAL, snapshots, manifest)
 //! - Storage codec abstraction (encryption/compression extension point)
 //! - WAL segment compaction
-//! - Crash testing infrastructure
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
@@ -23,7 +22,6 @@ pub mod database; // Database handle, config, paths (DatabaseHandle, DatabaseCon
 pub mod disk_snapshot; // Crash-safe snapshot I/O and checkpoint coordination
 pub mod format; // Binary on-disk formats (WAL segments, snapshots, manifest, writesets)
 pub mod recovery; // WAL replay logic
-pub mod testing; // Crash test harness and reference model
 pub mod wal; // WAL segment types, durability modes
 
 // === Utilities ===
@@ -118,12 +116,6 @@ pub use format::{
 pub use compaction::{
     CompactInfo, CompactMode, CompactionError, Tombstone, TombstoneError, TombstoneIndex,
     TombstoneReason, WalOnlyCompactor,
-};
-
-// Testing utilities
-pub use testing::{
-    CrashConfig, CrashPoint, CrashTestError, CrashTestResult, CrashType, DataState, Operation,
-    ReferenceModel, StateMismatch, VerificationResult,
 };
 
 // Database lifecycle
