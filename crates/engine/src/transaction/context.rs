@@ -687,10 +687,7 @@ mod tests {
 
     fn create_test_namespace() -> Arc<Namespace> {
         let branch_id = BranchId::new();
-        Arc::new(Namespace::new(
-            branch_id,
-            "default".to_string(),
-        ))
+        Arc::new(Namespace::new(branch_id, "default".to_string()))
     }
 
     fn create_test_context(ns: &Namespace) -> TransactionContext {

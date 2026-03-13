@@ -667,10 +667,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn create_test_namespace(branch_id: BranchId) -> Arc<Namespace> {
-        Arc::new(Namespace::new(
-            branch_id,
-            "default".to_string(),
-        ))
+        Arc::new(Namespace::new(branch_id, "default".to_string()))
     }
 
     fn create_test_key(ns: &Arc<Namespace>, name: &str) -> Key {
@@ -864,8 +861,11 @@ mod tests {
                 let ns = create_test_namespace(branch_id);
                 let key = create_test_key(&ns, &format!("key_{}", i));
 
-                let mut txn =
-                    TransactionContext::with_store(i as u64 + 1, branch_id, Arc::clone(&store_clone));
+                let mut txn = TransactionContext::with_store(
+                    i as u64 + 1,
+                    branch_id,
+                    Arc::clone(&store_clone),
+                );
                 txn.put(key, Value::Int(i as i64)).unwrap();
 
                 let mut guard = wal_clone.lock();
@@ -1244,7 +1244,11 @@ mod tests {
         assert_eq!(result.stats.writes_applied, 1);
 
         // Recovered storage should contain the committed value
-        let recovered = result.storage.get_versioned(&key, u64::MAX).unwrap().unwrap();
+        let recovered = result
+            .storage
+            .get_versioned(&key, u64::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(recovered.value, Value::Int(42));
         assert_eq!(recovered.version.as_u64(), 1);
     }
@@ -1375,7 +1379,11 @@ mod tests {
         );
 
         // Recovered value should be T2's write
-        let recovered = result.storage.get_versioned(&key, u64::MAX).unwrap().unwrap();
+        let recovered = result
+            .storage
+            .get_versioned(&key, u64::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(recovered.value, Value::Int(99));
     }
 
@@ -1479,9 +1487,20 @@ mod tests {
 
         // Verify in-memory state
         assert!(store.get_versioned(&key_a, u64::MAX).unwrap().is_none());
-        assert_eq!(store.get_versioned(&key_b, u64::MAX).unwrap().unwrap().value, Value::Int(200));
         assert_eq!(
-            store.get_versioned(&key_c, u64::MAX).unwrap().unwrap().value,
+            store
+                .get_versioned(&key_b, u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(200)
+        );
+        assert_eq!(
+            store
+                .get_versioned(&key_c, u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             Value::Bytes(b"hello".to_vec())
         );
 
@@ -1492,15 +1511,29 @@ mod tests {
         assert_eq!(result.stats.txns_replayed, 2);
 
         // key_a: was written in txn1 then deleted in txn2
-        assert!(result.storage.get_versioned(&key_a, u64::MAX).unwrap().is_none());
+        assert!(result
+            .storage
+            .get_versioned(&key_a, u64::MAX)
+            .unwrap()
+            .is_none());
         // key_b: updated from 20 → 200
         assert_eq!(
-            result.storage.get_versioned(&key_b, u64::MAX).unwrap().unwrap().value,
+            result
+                .storage
+                .get_versioned(&key_b, u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             Value::Int(200)
         );
         // key_c: newly inserted
         assert_eq!(
-            result.storage.get_versioned(&key_c, u64::MAX).unwrap().unwrap().value,
+            result
+                .storage
+                .get_versioned(&key_c, u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             Value::Bytes(b"hello".to_vec())
         );
     }

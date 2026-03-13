@@ -244,10 +244,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn create_test_namespace(branch_id: BranchId) -> Arc<Namespace> {
-        Arc::new(Namespace::new(
-            branch_id,
-            "default".to_string(),
-        ))
+        Arc::new(Namespace::new(branch_id, "default".to_string()))
     }
 
     fn create_test_wal(dir: &std::path::Path) -> WalWriter {
@@ -343,7 +340,11 @@ mod tests {
         assert_eq!(result.stats.final_version, 100);
         assert_eq!(result.txn_manager.current_version(), 100);
 
-        let stored = result.storage.get_versioned(&key, u64::MAX).unwrap().unwrap();
+        let stored = result
+            .storage
+            .get_versioned(&key, u64::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(stored.value, Value::Int(42));
         assert_eq!(stored.version.as_u64(), 100);
     }
@@ -391,19 +392,37 @@ mod tests {
 
         let key1 = Key::new_kv(ns.clone(), "key1");
         assert_eq!(
-            result.storage.get_versioned(&key1, u64::MAX).unwrap().unwrap().version.as_u64(),
+            result
+                .storage
+                .get_versioned(&key1, u64::MAX)
+                .unwrap()
+                .unwrap()
+                .version
+                .as_u64(),
             100
         );
 
         let key2 = Key::new_kv(ns.clone(), "key2");
         assert_eq!(
-            result.storage.get_versioned(&key2, u64::MAX).unwrap().unwrap().version.as_u64(),
+            result
+                .storage
+                .get_versioned(&key2, u64::MAX)
+                .unwrap()
+                .unwrap()
+                .version
+                .as_u64(),
             100
         );
 
         let key3 = Key::new_kv(ns.clone(), "key3");
         assert_eq!(
-            result.storage.get_versioned(&key3, u64::MAX).unwrap().unwrap().version.as_u64(),
+            result
+                .storage
+                .get_versioned(&key3, u64::MAX)
+                .unwrap()
+                .unwrap()
+                .version
+                .as_u64(),
             200
         );
     }
@@ -445,8 +464,16 @@ mod tests {
 
         for i in 1..=5u64 {
             let key = Key::new_kv(ns.clone(), format!("key{}", i));
-            let v1 = result1.storage.get_versioned(&key, u64::MAX).unwrap().unwrap();
-            let v2 = result2.storage.get_versioned(&key, u64::MAX).unwrap().unwrap();
+            let v1 = result1
+                .storage
+                .get_versioned(&key, u64::MAX)
+                .unwrap()
+                .unwrap();
+            let v2 = result2
+                .storage
+                .get_versioned(&key, u64::MAX)
+                .unwrap()
+                .unwrap();
             assert_eq!(v1.value, v2.value);
             assert_eq!(v1.version, v2.version);
         }
@@ -483,7 +510,11 @@ mod tests {
         assert_eq!(result.stats.deletes_applied, 1);
 
         // Key should be deleted
-        assert!(result.storage.get_versioned(&key, u64::MAX).unwrap().is_none());
+        assert!(result
+            .storage
+            .get_versioned(&key, u64::MAX)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -731,7 +762,11 @@ mod tests {
 
         for i in 1..=10u64 {
             let key = Key::new_kv(ns.clone(), format!("key{}", i));
-            let stored = result.storage.get_versioned(&key, u64::MAX).unwrap().unwrap();
+            let stored = result
+                .storage
+                .get_versioned(&key, u64::MAX)
+                .unwrap()
+                .unwrap();
             assert_eq!(stored.value, Value::Int(i as i64 * 10));
             assert_eq!(stored.version.as_u64(), i);
         }
@@ -928,7 +963,11 @@ mod tests {
 
         for i in [1, 50, 100] {
             let key = Key::new_kv(ns.clone(), format!("key_{}", i));
-            let stored = result.storage.get_versioned(&key, u64::MAX).unwrap().unwrap();
+            let stored = result
+                .storage
+                .get_versioned(&key, u64::MAX)
+                .unwrap()
+                .unwrap();
             assert_eq!(stored.value, Value::Int(i as i64));
         }
     }

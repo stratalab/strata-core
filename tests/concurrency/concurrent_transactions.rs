@@ -45,7 +45,9 @@ fn parallel_commits_different_runs_no_contention() {
                 let key = create_test_key(branch_id, "data");
 
                 // Setup initial value
-                store.put_with_version_mode(key.clone(), Value::Int(0), 1, None, WriteMode::Append).unwrap();
+                store
+                    .put_with_version_mode(key.clone(), Value::Int(0), 1, None, WriteMode::Append)
+                    .unwrap();
 
                 barrier.wait();
 
@@ -59,7 +61,8 @@ fn parallel_commits_different_runs_no_contention() {
                     );
 
                     // Read and write
-                    let v = store.get_versioned(&key, u64::MAX)
+                    let v = store
+                        .get_versioned(&key, u64::MAX)
                         .unwrap()
                         .unwrap()
                         .version
@@ -71,7 +74,15 @@ fn parallel_commits_different_runs_no_contention() {
                     let result = validate_transaction(&txn, &*store);
                     if result.unwrap().is_valid() {
                         let commit_ver = manager.allocate_version().unwrap();
-                        store.put_with_version_mode(key.clone(), Value::Int(i), commit_ver, None, WriteMode::Append).unwrap();
+                        store
+                            .put_with_version_mode(
+                                key.clone(),
+                                Value::Int(i),
+                                commit_ver,
+                                None,
+                                WriteMode::Append,
+                            )
+                            .unwrap();
                         commits.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -97,8 +108,12 @@ fn different_branches_have_independent_namespaces() {
     let key2 = create_test_key(branch2, "shared_name");
 
     // Write different values to same logical name in different branches
-    store.put_with_version_mode(key1.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
-    store.put_with_version_mode(key2.clone(), Value::Int(200), 1, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key1.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .unwrap();
+    store
+        .put_with_version_mode(key2.clone(), Value::Int(200), 1, None, WriteMode::Append)
+        .unwrap();
 
     // They should be independent
     let val1 = store.get_versioned(&key1, u64::MAX).unwrap().unwrap().value;
@@ -120,7 +135,9 @@ fn high_contention_single_key() {
     let key = create_test_key(branch_id, "contested");
 
     // Initial value
-    store.put_with_version_mode(key.clone(), Value::Int(0), 1, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(0), 1, None, WriteMode::Append)
+        .unwrap();
 
     let barrier = Arc::new(Barrier::new(8));
     let commits = Arc::new(AtomicU64::new(0));
@@ -155,14 +172,15 @@ fn high_contention_single_key() {
                         let result = validate_transaction(&txn, &*store);
                         if result.unwrap().is_valid() {
                             let commit_ver = manager.allocate_version().unwrap();
-                            store.put_with_version_mode(
-                                key.clone(),
-                                Value::Int((thread_id * 100 + i) as i64),
-                                commit_ver,
-                                None,
-                                WriteMode::Append,
-                            )
-                            .unwrap();
+                            store
+                                .put_with_version_mode(
+                                    key.clone(),
+                                    Value::Int((thread_id * 100 + i) as i64),
+                                    commit_ver,
+                                    None,
+                                    WriteMode::Append,
+                                )
+                                .unwrap();
                             commits.fetch_add(1, Ordering::Relaxed);
                             break;
                         } else {
@@ -200,15 +218,21 @@ fn interleaved_disjoint_operations_both_commit() {
     let key_b = create_test_key(branch_id, "B");
 
     // Initial values
-    store.put_with_version_mode(key_a.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
-    store.put_with_version_mode(key_b.clone(), Value::Int(2), 2, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key_a.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .unwrap();
+    store
+        .put_with_version_mode(key_b.clone(), Value::Int(2), 2, None, WriteMode::Append)
+        .unwrap();
 
-    let va = store.get_versioned(&key_a, u64::MAX)
+    let va = store
+        .get_versioned(&key_a, u64::MAX)
         .unwrap()
         .unwrap()
         .version
         .as_u64();
-    let vb = store.get_versioned(&key_b, u64::MAX)
+    let vb = store
+        .get_versioned(&key_b, u64::MAX)
         .unwrap()
         .unwrap()
         .version

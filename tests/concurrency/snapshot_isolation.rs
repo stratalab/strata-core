@@ -396,5 +396,9 @@ fn transaction_context_scan_ignores_concurrent_writes() {
     let prefix = Key::new_kv(ns, "scan_");
     let results = txn.scan_prefix(&prefix).unwrap();
 
-    assert_eq!(results.len(), 2, "Scan must not include key written after start_version");
+    assert_eq!(
+        results.len(),
+        2,
+        "Scan must not include key written after start_version"
+    );
 }

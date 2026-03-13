@@ -107,7 +107,12 @@ pub fn export_branch_with_options(
         name: branch_meta.name.clone(),
         state: branch_meta.status.as_str().to_lowercase(),
         created_at: format_micros(branch_meta.created_at.as_micros()),
-        closed_at: format_micros(branch_meta.completed_at.unwrap_or(branch_meta.updated_at).as_micros()),
+        closed_at: format_micros(
+            branch_meta
+                .completed_at
+                .unwrap_or(branch_meta.updated_at)
+                .as_micros(),
+        ),
         parent_branch_id: branch_meta.parent_branch.clone(),
         error: branch_meta.error.clone(),
     };

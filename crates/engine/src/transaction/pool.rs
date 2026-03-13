@@ -167,10 +167,7 @@ mod tests {
     use strata_core::value::Value;
 
     fn create_test_namespace() -> Arc<Namespace> {
-        Arc::new(Namespace::new(
-            BranchId::new(),
-            "default".to_string(),
-        ))
+        Arc::new(Namespace::new(BranchId::new(), "default".to_string()))
     }
 
     fn create_test_key(ns: &Arc<Namespace>, user_key: &[u8]) -> strata_core::types::Key {

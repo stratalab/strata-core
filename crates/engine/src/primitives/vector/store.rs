@@ -306,7 +306,9 @@ impl VectorStore {
 
         // Read at current version for consistency
         let version = self.db.storage().version();
-        let entries = self.db.storage()
+        let entries = self
+            .db
+            .storage()
             .scan_prefix(&prefix, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
@@ -359,7 +361,9 @@ impl VectorStore {
         let config_key = Key::new_vector_config(self.namespace_for(branch_id, space), name);
         let version = self.db.storage().version();
 
-        Ok(self.db.storage()
+        Ok(self
+            .db
+            .storage()
             .get_versioned(&config_key, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?
             .is_some())
@@ -377,7 +381,9 @@ impl VectorStore {
         use strata_core::traits::Storage;
         let version = self.db.storage().version();
 
-        let Some(versioned_value) = self.db.storage()
+        let Some(versioned_value) = self
+            .db
+            .storage()
             .get_versioned(&config_key, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?
         else {
@@ -569,7 +575,9 @@ impl VectorStore {
         // Get record from KV with version info
         use strata_core::traits::Storage;
         let version = self.db.storage().version();
-        let Some(versioned_value) = self.db.storage()
+        let Some(versioned_value) = self
+            .db
+            .storage()
             .get_versioned(&kv_key, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?
         else {
@@ -1237,7 +1245,9 @@ impl VectorStore {
         use strata_core::traits::Storage;
 
         let version = self.db.storage().version();
-        let Some(versioned) = self.db.storage()
+        let Some(versioned) = self
+            .db
+            .storage()
             .get_versioned(key, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?
         else {
@@ -1271,7 +1281,9 @@ impl VectorStore {
         let prefix = Key::vector_collection_prefix(namespace, collection);
 
         let version = self.db.storage().version();
-        let entries = self.db.storage()
+        let entries = self
+            .db
+            .storage()
             .scan_prefix(&prefix, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
@@ -1331,7 +1343,9 @@ impl VectorStore {
         let prefix = Key::vector_collection_prefix(namespace, collection);
 
         let version = self.db.storage().version();
-        let entries = self.db.storage()
+        let entries = self
+            .db
+            .storage()
             .scan_prefix(&prefix, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
@@ -1392,7 +1406,9 @@ impl VectorStore {
         let prefix = Key::vector_collection_prefix(namespace, name);
 
         let version = self.db.storage().version();
-        let entries = self.db.storage()
+        let entries = self
+            .db
+            .storage()
             .scan_prefix(&prefix, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
@@ -1408,7 +1424,9 @@ impl VectorStore {
 
         // Scan all vector keys in this collection
         let version = self.db.storage().version();
-        let entries = self.db.storage()
+        let entries = self
+            .db
+            .storage()
             .scan_prefix(&prefix, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
@@ -1442,7 +1460,9 @@ impl VectorStore {
         let config_key = Key::new_vector_config(self.namespace_for(branch_id, space), name);
         let version = self.db.storage().version();
 
-        let Some(versioned_value) = self.db.storage()
+        let Some(versioned_value) = self
+            .db
+            .storage()
             .get_versioned(&config_key, version)
             .map_err(|e| VectorError::Storage(e.to_string()))?
         else {
@@ -2156,29 +2176,30 @@ impl VectorStore {
                 // If we have a source branch, build a map from user_key → VectorId
                 // for the source collection. This lets us determine which backend
                 // to read from when VectorIds collide between source and target.
-                let source_key_to_vid: BTreeMap<Vec<u8>, u64> =
-                    if let Some(src_bid) = source_branch_id {
-                        let src_ns = Arc::new(Namespace::for_branch_space(src_bid, space));
-                        let src_prefix = Key::new_vector(src_ns, &collection_name, "");
-                        if let Ok(src_entries) = self.db.storage().scan_prefix(&src_prefix, version) {
-                            src_entries
-                                .iter()
-                                .filter_map(|(k, vv)| {
-                                    if let Value::Bytes(b) = &vv.value {
-                                        VectorRecord::from_bytes(b)
-                                            .ok()
-                                            .map(|r| (k.user_key.to_vec(), r.vector_id))
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect()
-                        } else {
-                            BTreeMap::new()
-                        }
+                let source_key_to_vid: BTreeMap<Vec<u8>, u64> = if let Some(src_bid) =
+                    source_branch_id
+                {
+                    let src_ns = Arc::new(Namespace::for_branch_space(src_bid, space));
+                    let src_prefix = Key::new_vector(src_ns, &collection_name, "");
+                    if let Ok(src_entries) = self.db.storage().scan_prefix(&src_prefix, version) {
+                        src_entries
+                            .iter()
+                            .filter_map(|(k, vv)| {
+                                if let Value::Bytes(b) = &vv.value {
+                                    VectorRecord::from_bytes(b)
+                                        .ok()
+                                        .map(|r| (k.user_key.to_vec(), r.vector_id))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
                     } else {
                         BTreeMap::new()
-                    };
+                    }
+                } else {
+                    BTreeMap::new()
+                };
 
                 // Create fresh backend
                 let mut backend = factory.create(&config);

@@ -15,10 +15,7 @@ use strata_engine::{Database, TransactionPool, MAX_POOL_SIZE};
 use tempfile::TempDir;
 
 fn create_ns(branch_id: BranchId) -> Arc<Namespace> {
-    Arc::new(Namespace::new(
-        branch_id,
-        "default".to_string(),
-    ))
+    Arc::new(Namespace::new(branch_id, "default".to_string()))
 }
 
 fn create_key(ns: &Arc<Namespace>, user_key: &str) -> Key {

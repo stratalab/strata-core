@@ -585,7 +585,10 @@ mod tests {
         index.insert(run3, BranchMetadata::new(run3, Timestamp::from(3000), 200));
 
         // Complete branch2
-        index.get_mut(run2).unwrap().complete(Timestamp::from(2500), 150);
+        index
+            .get_mut(run2)
+            .unwrap()
+            .complete(Timestamp::from(2500), 150);
 
         let active = index.find_active();
         assert_eq!(active.len(), 2);
@@ -769,7 +772,10 @@ mod tests {
         index.insert(run3, BranchMetadata::new(run3, Timestamp::from(3000), 200));
 
         // Complete branch2 properly
-        index.get_mut(run2).unwrap().complete(Timestamp::from(2500), 150);
+        index
+            .get_mut(run2)
+            .unwrap()
+            .complete(Timestamp::from(2500), 150);
 
         // Simulate crash - run1 and run3 are still active
         let active = index.find_active();
@@ -791,7 +797,10 @@ mod tests {
         // Create runs with different states
         for _ in 0..3 {
             let branch_id = BranchId::new();
-            index.insert(branch_id, BranchMetadata::new(branch_id, Timestamp::from(1000), 0));
+            index.insert(
+                branch_id,
+                BranchMetadata::new(branch_id, Timestamp::from(1000), 0),
+            );
         }
 
         for _ in 0..2 {

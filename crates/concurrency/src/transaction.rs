@@ -8,16 +8,16 @@
 
 use crate::validation::{validate_transaction, ValidationResult};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use strata_core::primitives::json::{get_at_path, JsonPatch, JsonPath, JsonValue};
-use std::sync::Arc;
 use strata_core::traits::{Storage, WriteMode};
-use strata_storage::ShardedStore;
 use strata_core::types::{BranchId, Key};
 use strata_core::value::Value;
 use strata_core::StrataError;
 use strata_core::StrataResult;
 use strata_core::{Version, Versioned, VersionedValue};
+use strata_storage::ShardedStore;
 
 /// Error type for commit failures
 ///
@@ -535,11 +535,7 @@ impl TransactionContext {
     /// let txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
     /// assert!(txn.is_active());
     /// ```
-    pub fn with_store(
-        txn_id: u64,
-        branch_id: BranchId,
-        store: Arc<ShardedStore>,
-    ) -> Self {
+    pub fn with_store(txn_id: u64, branch_id: BranchId, store: Arc<ShardedStore>) -> Self {
         let start_version = store.version();
         TransactionContext {
             txn_id,
@@ -1554,12 +1550,7 @@ impl TransactionContext {
     /// let store = Arc::new(ShardedStore::new());
     /// ctx.reset(2, new_branch_id, Some(store));
     /// ```
-    pub fn reset(
-        &mut self,
-        txn_id: u64,
-        branch_id: BranchId,
-        store: Option<Arc<ShardedStore>>,
-    ) {
+    pub fn reset(&mut self, txn_id: u64, branch_id: BranchId, store: Option<Arc<ShardedStore>>) {
         // Update identity
         self.txn_id = txn_id;
         self.branch_id = branch_id;
@@ -1801,10 +1792,7 @@ mod tests {
     use strata_core::value::Value;
 
     fn test_namespace() -> Arc<Namespace> {
-        Arc::new(Namespace::new(
-            BranchId::new(),
-            "default".to_string(),
-        ))
+        Arc::new(Namespace::new(BranchId::new(), "default".to_string()))
     }
 
     fn test_key(ns: &Arc<Namespace>, name: &str) -> Key {

@@ -129,7 +129,8 @@ impl BranchMetadata {
 
     /// Duration in microseconds (if completed)
     pub fn duration_micros(&self) -> Option<u64> {
-        self.ended_at.map(|e| e.as_micros().saturating_sub(self.started_at.as_micros()))
+        self.ended_at
+            .map(|e| e.as_micros().saturating_sub(self.started_at.as_micros()))
     }
 
     /// Increment event count

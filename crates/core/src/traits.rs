@@ -185,7 +185,6 @@ pub trait Storage: Send + Sync {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,10 +304,7 @@ mod tests {
     }
 
     fn test_ns() -> Arc<Namespace> {
-        Arc::new(Namespace::new(
-            BranchId::new(),
-            "default".into(),
-        ))
+        Arc::new(Namespace::new(BranchId::new(), "default".into()))
     }
 
     fn test_key(ns: &Arc<Namespace>, name: &str) -> Key {
@@ -480,9 +476,24 @@ mod tests {
         let store = MockStorage::new();
         let ns = test_ns();
         let prefix = Key::new_kv(ns.clone(), "user/");
-        seed(&store, Key::new_kv(ns.clone(), "user/alice"), Value::Int(1), 1);
-        seed(&store, Key::new_kv(ns.clone(), "user/bob"), Value::Int(2), 2);
-        seed(&store, Key::new_kv(ns.clone(), "config/x"), Value::Int(3), 3);
+        seed(
+            &store,
+            Key::new_kv(ns.clone(), "user/alice"),
+            Value::Int(1),
+            1,
+        );
+        seed(
+            &store,
+            Key::new_kv(ns.clone(), "user/bob"),
+            Value::Int(2),
+            2,
+        );
+        seed(
+            &store,
+            Key::new_kv(ns.clone(), "config/x"),
+            Value::Int(3),
+            3,
+        );
 
         let results = store.scan_prefix(&prefix, u64::MAX).unwrap();
         assert_eq!(results.len(), 2);

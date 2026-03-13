@@ -772,12 +772,8 @@ mod tests {
     #[cfg(debug_assertions)]
     fn test_namespace_empty_space_panics_in_debug() {
         let branch_id = BranchId::new();
-        let result =
-            std::panic::catch_unwind(|| Namespace::new(branch_id, "".to_string()));
-        assert!(
-            result.is_err(),
-            "Empty space should panic in debug mode"
-        );
+        let result = std::panic::catch_unwind(|| Namespace::new(branch_id, "".to_string()));
+        assert!(result.is_err(), "Empty space should panic in debug mode");
     }
 
     #[test]

@@ -31,8 +31,11 @@ fn cas_succeeds_when_version_matches() {
     let key = create_test_key(branch_id, "cas_ok");
 
     // Initial value
-    store.put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
-    let version = store.get_versioned(&key, u64::MAX)
+    store
+        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .unwrap();
+    let version = store
+        .get_versioned(&key, u64::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -82,11 +85,16 @@ fn cas_fails_when_version_stale() {
     let key = create_test_key(branch_id, "cas_stale");
 
     // Create at version 1
-    store.put_with_version_mode(key.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .unwrap();
 
     // Update to version 2
-    store.put_with_version_mode(key.clone(), Value::Int(2), 2, None, WriteMode::Append).unwrap();
-    let current_version = store.get_versioned(&key, u64::MAX)
+    store
+        .put_with_version_mode(key.clone(), Value::Int(2), 2, None, WriteMode::Append)
+        .unwrap();
+    let current_version = store
+        .get_versioned(&key, u64::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -122,7 +130,9 @@ fn cas_create_fails_when_key_exists() {
     let key = create_test_key(branch_id, "cas_exists");
 
     // Key exists
-    store.put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .unwrap();
 
     // CAS with expected_version=0 (expects key doesn't exist)
     let cas_set = vec![CASOperation {
@@ -142,8 +152,11 @@ fn cas_fails_when_key_deleted() {
     let key = create_test_key(branch_id, "cas_deleted");
 
     // Create and delete
-    store.put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
-    let version = store.get_versioned(&key, u64::MAX)
+    store
+        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .unwrap();
+    let version = store
+        .get_versioned(&key, u64::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -192,14 +205,20 @@ fn cas_validated_separately_from_reads() {
     let cas_key = create_test_key(branch_id, "cas_key");
 
     // Setup
-    store.put_with_version_mode(read_key.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
-    let read_version = store.get_versioned(&read_key, u64::MAX)
+    store
+        .put_with_version_mode(read_key.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .unwrap();
+    let read_version = store
+        .get_versioned(&read_key, u64::MAX)
         .unwrap()
         .unwrap()
         .version
         .as_u64();
-    store.put_with_version_mode(cas_key.clone(), Value::Int(2), 2, None, WriteMode::Append).unwrap();
-    let cas_version = store.get_versioned(&cas_key, u64::MAX)
+    store
+        .put_with_version_mode(cas_key.clone(), Value::Int(2), 2, None, WriteMode::Append)
+        .unwrap();
+    let cas_version = store
+        .get_versioned(&cas_key, u64::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -215,7 +234,9 @@ fn cas_validated_separately_from_reads() {
     });
 
     // Modify read_key only
-    store.put_with_version_mode(read_key.clone(), Value::Int(10), 3, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(read_key.clone(), Value::Int(10), 3, None, WriteMode::Append)
+        .unwrap();
 
     // Validation should fail on read_key (ReadWriteConflict), not on CAS
     let result = validate_transaction(&txn, &*store).unwrap();
@@ -245,8 +266,17 @@ fn multiple_cas_all_succeed() {
     let keys: Vec<_> = (0..3)
         .map(|i| {
             let key = create_test_key(branch_id, &format!("cas_{}", i));
-            store.put_with_version_mode(key.clone(), Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
-            let v = store.get_versioned(&key, u64::MAX)
+            store
+                .put_with_version_mode(
+                    key.clone(),
+                    Value::Int(i),
+                    (i + 1) as u64,
+                    None,
+                    WriteMode::Append,
+                )
+                .unwrap();
+            let v = store
+                .get_versioned(&key, u64::MAX)
                 .unwrap()
                 .unwrap()
                 .version
@@ -280,19 +310,29 @@ fn multiple_cas_one_fails() {
     let key2 = create_test_key(branch_id, "cas_2");
     let key3 = create_test_key(branch_id, "cas_3");
 
-    store.put_with_version_mode(key1.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
-    let v1 = store.get_versioned(&key1, u64::MAX)
+    store
+        .put_with_version_mode(key1.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .unwrap();
+    let v1 = store
+        .get_versioned(&key1, u64::MAX)
         .unwrap()
         .unwrap()
         .version
         .as_u64();
 
-    store.put_with_version_mode(key2.clone(), Value::Int(2), 2, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key2.clone(), Value::Int(2), 2, None, WriteMode::Append)
+        .unwrap();
     // Update key2 to make its version stale
-    store.put_with_version_mode(key2.clone(), Value::Int(20), 3, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key2.clone(), Value::Int(20), 3, None, WriteMode::Append)
+        .unwrap();
 
-    store.put_with_version_mode(key3.clone(), Value::Int(3), 4, None, WriteMode::Append).unwrap();
-    let v3 = store.get_versioned(&key3, u64::MAX)
+    store
+        .put_with_version_mode(key3.clone(), Value::Int(3), 4, None, WriteMode::Append)
+        .unwrap();
+    let v3 = store
+        .get_versioned(&key3, u64::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -333,8 +373,11 @@ fn cas_in_full_transaction() {
     let key = create_test_key(branch_id, "cas_txn");
 
     // Initial value
-    store.put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
-    let version = store.get_versioned(&key, u64::MAX)
+    store
+        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .unwrap();
+    let version = store
+        .get_versioned(&key, u64::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -360,8 +403,11 @@ fn cas_with_read_of_same_key() {
     let key = create_test_key(branch_id, "cas_read_same");
 
     // Initial value
-    store.put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
-    let version = store.get_versioned(&key, u64::MAX)
+    store
+        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .unwrap();
+    let version = store
+        .get_versioned(&key, u64::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -416,8 +462,12 @@ fn cas_conflict_reports_correct_key() {
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "conflict_key");
 
-    store.put_with_version_mode(key.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
-    store.put_with_version_mode(key.clone(), Value::Int(2), 2, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(2), 2, None, WriteMode::Append)
+        .unwrap();
 
     let cas_set = vec![CASOperation {
         key: key.clone(),

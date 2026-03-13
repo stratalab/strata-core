@@ -147,9 +147,18 @@ fn test_branch_index_multiple_branches() {
     let branch2 = BranchId::new();
     let branch3 = BranchId::new();
 
-    index.insert(branch1, BranchMetadata::new(branch1, Timestamp::from(1000), 0));
-    index.insert(branch2, BranchMetadata::new(branch2, Timestamp::from(2000), 100));
-    index.insert(branch3, BranchMetadata::new(branch3, Timestamp::from(3000), 200));
+    index.insert(
+        branch1,
+        BranchMetadata::new(branch1, Timestamp::from(1000), 0),
+    );
+    index.insert(
+        branch2,
+        BranchMetadata::new(branch2, Timestamp::from(2000), 100),
+    );
+    index.insert(
+        branch3,
+        BranchMetadata::new(branch3, Timestamp::from(3000), 200),
+    );
 
     // Record events for different branches
     index.record_event(branch1, 10);
@@ -413,8 +422,14 @@ fn test_orphaned_branch_detection_basic() {
     let branch2 = BranchId::new();
 
     // Create two active branches
-    index.insert(branch1, BranchMetadata::new(branch1, Timestamp::from(1000), 0));
-    index.insert(branch2, BranchMetadata::new(branch2, Timestamp::from(2000), 100));
+    index.insert(
+        branch1,
+        BranchMetadata::new(branch1, Timestamp::from(1000), 0),
+    );
+    index.insert(
+        branch2,
+        BranchMetadata::new(branch2, Timestamp::from(2000), 100),
+    );
 
     // Find active branches (potential orphans after crash)
     let active = index.find_active();
@@ -472,7 +487,10 @@ fn test_count_by_status() {
     // Create branches with different states
     for _ in 0..3 {
         let branch_id = BranchId::new();
-        index.insert(branch_id, BranchMetadata::new(branch_id, Timestamp::from(1000), 0));
+        index.insert(
+            branch_id,
+            BranchMetadata::new(branch_id, Timestamp::from(1000), 0),
+        );
     }
 
     for _ in 0..2 {

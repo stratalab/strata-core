@@ -32,7 +32,9 @@ fn stress_concurrent_read_write() {
     // Pre-populate
     for i in 0..100 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
-        store.put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append)
+            .unwrap();
     }
 
     let barrier = Arc::new(Barrier::new(16));
@@ -68,14 +70,15 @@ fn stress_concurrent_read_write() {
                         let result = validate_transaction(&txn, &*store);
                         if result.unwrap().is_valid() {
                             let commit_ver = manager.allocate_version().unwrap();
-                            store.put_with_version_mode(
-                                key.clone(),
-                                Value::Int((thread_id * 1000 + iter) as i64),
-                                commit_ver,
-                                None,
-                                WriteMode::Append,
-                            )
-                            .unwrap();
+                            store
+                                .put_with_version_mode(
+                                    key.clone(),
+                                    Value::Int((thread_id * 1000 + iter) as i64),
+                                    commit_ver,
+                                    None,
+                                    WriteMode::Append,
+                                )
+                                .unwrap();
                             commits.fetch_add(1, Ordering::Relaxed);
                             break;
                         } else {
@@ -113,7 +116,9 @@ fn stress_transaction_throughput() {
     let branch_id = BranchId::new();
 
     let key = create_test_key(branch_id, "counter");
-    store.put_with_version_mode(key.clone(), Value::Int(0), 1, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(0), 1, None, WriteMode::Append)
+        .unwrap();
 
     let duration = Duration::from_secs(5);
     let start = Instant::now();
@@ -136,7 +141,15 @@ fn stress_transaction_throughput() {
         let result = validate_transaction(&txn, &*store);
         if result.unwrap().is_valid() {
             if let Value::Int(v) = current.value {
-                store.put_with_version_mode(key.clone(), Value::Int(v + 1), next_version, None, WriteMode::Append).unwrap();
+                store
+                    .put_with_version_mode(
+                        key.clone(),
+                        Value::Int(v + 1),
+                        next_version,
+                        None,
+                        WriteMode::Append,
+                    )
+                    .unwrap();
                 next_version += 1;
             }
             commits += 1;
@@ -226,7 +239,15 @@ fn stress_many_branches() {
                     let result = validate_transaction(&txn, &*store);
                     if result.unwrap().is_valid() {
                         let commit_ver = manager.allocate_version().unwrap();
-                        store.put_with_version_mode(key.clone(), Value::Int(i), commit_ver, None, WriteMode::Append).unwrap();
+                        store
+                            .put_with_version_mode(
+                                key.clone(),
+                                Value::Int(i),
+                                commit_ver,
+                                None,
+                                WriteMode::Append,
+                            )
+                            .unwrap();
                         commits.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -254,8 +275,11 @@ fn stress_long_running_transaction() {
     let key = create_test_key(branch_id, "contested");
 
     // Initial value
-    store.put_with_version_mode(key.clone(), Value::Int(0), 1, None, WriteMode::Append).unwrap();
-    let initial_version = store.get_versioned(&key, u64::MAX)
+    store
+        .put_with_version_mode(key.clone(), Value::Int(0), 1, None, WriteMode::Append)
+        .unwrap();
+    let initial_version = store
+        .get_versioned(&key, u64::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -270,7 +294,15 @@ fn stress_long_running_transaction() {
     let key_clone = key.clone();
     let writer = thread::spawn(move || {
         for i in 1..=100 {
-            store_clone.put_with_version_mode(key_clone.clone(), Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
+            store_clone
+                .put_with_version_mode(
+                    key_clone.clone(),
+                    Value::Int(i),
+                    (i + 1) as u64,
+                    None,
+                    WriteMode::Append,
+                )
+                .unwrap();
             thread::sleep(Duration::from_millis(1));
         }
     });
@@ -302,7 +334,9 @@ fn stress_sustained_workload() {
     // Pre-populate
     for i in 0..50 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
-        store.put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append)
+            .unwrap();
     }
 
     let duration = Duration::from_secs(10);
@@ -340,7 +374,15 @@ fn stress_sustained_workload() {
                         let result = validate_transaction(&txn, &*store);
                         if result.unwrap().is_valid() {
                             let commit_ver = manager.allocate_version().unwrap();
-                            store.put_with_version_mode(key, Value::Int(thread_id as i64), commit_ver, None, WriteMode::Append).unwrap();
+                            store
+                                .put_with_version_mode(
+                                    key,
+                                    Value::Int(thread_id as i64),
+                                    commit_ver,
+                                    None,
+                                    WriteMode::Append,
+                                )
+                                .unwrap();
                         }
                     } else {
                         // Read

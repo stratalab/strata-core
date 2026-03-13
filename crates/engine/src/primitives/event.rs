@@ -502,8 +502,10 @@ impl EventLog {
                     match meta.streams.get_mut(event_type) {
                         Some(stream_meta) => stream_meta.update(sequence, timestamp.as_micros()),
                         None => {
-                            meta.streams
-                                .insert(event_type.clone(), StreamMeta::new(sequence, timestamp.as_micros()));
+                            meta.streams.insert(
+                                event_type.clone(),
+                                StreamMeta::new(sequence, timestamp.as_micros()),
+                            );
                         }
                     }
 
@@ -769,7 +771,13 @@ impl EventLogExt for TransactionContext {
         let sequence = meta.next_sequence;
         let timestamp = Timestamp::now();
 
-        let hash = compute_event_hash(sequence, event_type, &payload, timestamp.as_micros(), &meta.head_hash);
+        let hash = compute_event_hash(
+            sequence,
+            event_type,
+            &payload,
+            timestamp.as_micros(),
+            &meta.head_hash,
+        );
 
         // Build event
         let event = Event {
@@ -794,8 +802,10 @@ impl EventLogExt for TransactionContext {
         match meta.streams.get_mut(&event_type_owned) {
             Some(stream_meta) => stream_meta.update(sequence, timestamp.as_micros()),
             None => {
-                meta.streams
-                    .insert(event_type_owned, StreamMeta::new(sequence, timestamp.as_micros()));
+                meta.streams.insert(
+                    event_type_owned,
+                    StreamMeta::new(sequence, timestamp.as_micros()),
+                );
             }
         }
 

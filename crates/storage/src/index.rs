@@ -141,10 +141,7 @@ mod tests {
 
     /// Helper to create a test namespace
     fn test_namespace(branch_id: BranchId) -> Arc<Namespace> {
-        Arc::new(Namespace::new(
-            branch_id,
-            "default".to_string(),
-        ))
+        Arc::new(Namespace::new(branch_id, "default".to_string()))
     }
 
     // ========================================

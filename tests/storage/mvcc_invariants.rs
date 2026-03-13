@@ -31,9 +31,15 @@ fn version_chain_stores_newest_first() {
     let key = create_test_key(branch_id, "versioned");
 
     // Put multiple versions
-    store.put_with_version_mode(key.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
-    store.put_with_version_mode(key.clone(), Value::Int(2), 2, None, WriteMode::Append).unwrap();
-    store.put_with_version_mode(key.clone(), Value::Int(3), 3, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(2), 2, None, WriteMode::Append)
+        .unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(3), 3, None, WriteMode::Append)
+        .unwrap();
 
     // Get history - should be newest first
     let history = Storage::get_history(&store, &key, None, None).unwrap();
@@ -50,9 +56,15 @@ fn get_at_version_returns_value_lte_version() {
     let key = create_test_key(branch_id, "versioned");
 
     // Put values at versions 1, 2, 3
-    store.put_with_version_mode(key.clone(), Value::Int(10), 1, None, WriteMode::Append).unwrap();
-    store.put_with_version_mode(key.clone(), Value::Int(20), 2, None, WriteMode::Append).unwrap();
-    store.put_with_version_mode(key.clone(), Value::Int(30), 3, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(10), 1, None, WriteMode::Append)
+        .unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(20), 2, None, WriteMode::Append)
+        .unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(30), 3, None, WriteMode::Append)
+        .unwrap();
 
     // Get at version 2 - should return value 20
     let result = Storage::get_versioned(&store, &key, 2).unwrap();
@@ -72,7 +84,9 @@ fn get_at_version_before_first_returns_none() {
     let key = create_test_key(branch_id, "versioned");
 
     // Put value at version 5
-    store.put_with_version_mode(key.clone(), Value::Int(50), 5, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(50), 5, None, WriteMode::Append)
+        .unwrap();
 
     // Get at version 1 (before first) - should return None
     let result = Storage::get_versioned(&store, &key, 1).unwrap();
@@ -90,7 +104,15 @@ fn version_chain_preserves_all_versions() {
 
     // Put 10 versions
     for i in 1..=10 {
-        store.put_with_version_mode(key.clone(), Value::Int(i), i as u64, None, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(
+                key.clone(),
+                Value::Int(i),
+                i as u64,
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
     }
 
     // All 10 should be in history
@@ -117,7 +139,9 @@ fn expired_values_filtered_at_read_time() {
 
     // Put value with very short TTL
     let ttl = Some(Duration::from_millis(1));
-    store.put_with_version_mode(key.clone(), Value::Int(42), 1, ttl, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(42), 1, ttl, WriteMode::Append)
+        .unwrap();
 
     // Wait for expiration
     thread::sleep(Duration::from_millis(10));
@@ -135,7 +159,9 @@ fn non_expired_values_returned() {
 
     // Put value with long TTL
     let ttl = Some(Duration::from_secs(3600)); // 1 hour
-    store.put_with_version_mode(key.clone(), Value::Int(42), 1, ttl, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(42), 1, ttl, WriteMode::Append)
+        .unwrap();
 
     // Should be returned (not expired)
     let result = store.get_versioned(&key, u64::MAX).unwrap();
@@ -150,7 +176,9 @@ fn no_ttl_never_expires() {
     let key = create_test_key(branch_id, "no_ttl");
 
     // Put value without TTL
-    store.put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append)
+        .unwrap();
 
     // Should always be returned
     let result = store.get_versioned(&key, u64::MAX).unwrap();
@@ -172,7 +200,9 @@ fn tombstone_preserves_snapshot_isolation() {
     let key = create_test_key(branch_id, "tombstone_iso");
 
     // Put a value
-    store.put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .unwrap();
 
     // Capture version BEFORE delete
     let version = store.version();
@@ -200,7 +230,9 @@ fn tombstone_not_returned_to_user() {
     let key = create_test_key(branch_id, "tombstone_hidden");
 
     // Put and delete
-    store.put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append)
+        .unwrap();
     store.delete_with_version(&key, 2).unwrap();
 
     // Get should return None, not the tombstone
@@ -305,7 +337,15 @@ fn history_pagination_works() {
 
     // Put 5 versions
     for i in 1..=5 {
-        store.put_with_version_mode(key.clone(), Value::Int(i), i as u64, None, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(
+                key.clone(),
+                Value::Int(i),
+                i as u64,
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
     }
 
     // Page 1: first 2

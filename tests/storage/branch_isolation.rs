@@ -29,8 +29,12 @@ fn different_branches_have_separate_namespaces() {
     let key1 = create_test_key(branch1, "shared_name");
     let key2 = create_test_key(branch2, "shared_name");
 
-    store.put_with_version_mode(key1.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
-    store.put_with_version_mode(key2.clone(), Value::Int(200), 2, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key1.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .unwrap();
+    store
+        .put_with_version_mode(key2.clone(), Value::Int(200), 2, None, WriteMode::Append)
+        .unwrap();
 
     let val1 = store.get_versioned(&key1, u64::MAX).unwrap().unwrap().value;
     let val2 = store.get_versioned(&key2, u64::MAX).unwrap().unwrap().value;
@@ -50,9 +54,13 @@ fn clear_branch_only_affects_target_branch() {
     for i in 0..5 {
         let key1 = create_test_key(branch1, &format!("key_{}", i));
         let key2 = create_test_key(branch2, &format!("key_{}", i));
-        store.put_with_version_mode(key1, Value::Int(i), version, None, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(key1, Value::Int(i), version, None, WriteMode::Append)
+            .unwrap();
         version += 1;
-        store.put_with_version_mode(key2, Value::Int(i + 100), version, None, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(key2, Value::Int(i + 100), version, None, WriteMode::Append)
+            .unwrap();
         version += 1;
     }
 
@@ -83,8 +91,12 @@ fn delete_in_one_branch_doesnt_affect_other() {
     let key1 = create_test_key(branch1, "shared");
     let key2 = create_test_key(branch2, "shared");
 
-    store.put_with_version_mode(key1.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
-    store.put_with_version_mode(key2.clone(), Value::Int(2), 2, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key1.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .unwrap();
+    store
+        .put_with_version_mode(key2.clone(), Value::Int(2), 2, None, WriteMode::Append)
+        .unwrap();
 
     // Delete in branch1
     store.delete_with_version(&key1, 3).unwrap();
@@ -117,7 +129,9 @@ fn concurrent_writes_to_different_branches() {
                 for i in 0..keys_per_branch {
                     let key = create_test_key(branch_id, &format!("key_{}", i));
                     let version = store.next_version();
-                    store.put_with_version_mode(key, Value::Int(i), version, None, WriteMode::Append).unwrap();
+                    store
+                        .put_with_version_mode(key, Value::Int(i), version, None, WriteMode::Append)
+                        .unwrap();
                 }
                 branch_id
             })
@@ -147,7 +161,9 @@ fn concurrent_reads_and_writes_different_branches() {
     for i in 0..100 {
         let key = create_test_key(read_branch, &format!("key_{}", i));
         let version = store.next_version();
-        store.put_with_version_mode(key, Value::Int(i), version, None, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(key, Value::Int(i), version, None, WriteMode::Append)
+            .unwrap();
     }
 
     let store_read = Arc::clone(&store);
@@ -174,7 +190,9 @@ fn concurrent_reads_and_writes_different_branches() {
             for j in 0..10 {
                 let key = create_test_key(write_branch, &format!("key_{}", j));
                 let version = store_write.next_version();
-                store_write.put_with_version_mode(key, Value::Int(i), version, None, WriteMode::Append).unwrap();
+                store_write
+                    .put_with_version_mode(key, Value::Int(i), version, None, WriteMode::Append)
+                    .unwrap();
             }
         }
     });
@@ -201,9 +219,15 @@ fn branch_ids_lists_all_active_branches() {
     let key2 = create_test_key(branch2, "k");
     let key3 = create_test_key(branch3, "k");
 
-    store.put_with_version_mode(key1, Value::Int(1), 1, None, WriteMode::Append).unwrap();
-    store.put_with_version_mode(key2, Value::Int(2), 2, None, WriteMode::Append).unwrap();
-    store.put_with_version_mode(key3, Value::Int(3), 3, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key1, Value::Int(1), 1, None, WriteMode::Append)
+        .unwrap();
+    store
+        .put_with_version_mode(key2, Value::Int(2), 2, None, WriteMode::Append)
+        .unwrap();
+    store
+        .put_with_version_mode(key3, Value::Int(3), 3, None, WriteMode::Append)
+        .unwrap();
 
     let branches = store.branch_ids();
     assert_eq!(branches.len(), 3);
@@ -220,7 +244,9 @@ fn branch_entry_count() {
     // Put 10 keys
     for i in 0..10 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
-        store.put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append)
+            .unwrap();
     }
 
     let count = store.branch_entry_count(&branch_id);
@@ -236,7 +262,9 @@ fn list_branch_keys() {
     // Put 5 keys
     for i in 0..5 {
         let key = Key::new_kv(ns.clone(), &format!("key_{}", i));
-        store.put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append)
+            .unwrap();
     }
 
     let keys = store.list_branch(&branch_id);

@@ -32,7 +32,9 @@ fn stress_concurrent_writers_readers() {
     for i in 0..100 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
         let version = store.next_version();
-        store.put_with_version_mode(key, Value::Int(i), version, None, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(key, Value::Int(i), version, None, WriteMode::Append)
+            .unwrap();
     }
 
     // Spawn 4 writers
@@ -47,7 +49,13 @@ fn stress_concurrent_writers_readers() {
                     for i in 0..100 {
                         let key = create_test_key(branch_id, &format!("key_{}", i));
                         let version = store.next_version();
-                        let _ = store.put_with_version_mode(key, Value::Int(t * 10000 + counter), version, None, WriteMode::Append);
+                        let _ = store.put_with_version_mode(
+                            key,
+                            Value::Int(t * 10000 + counter),
+                            version,
+                            None,
+                            WriteMode::Append,
+                        );
                         writes.fetch_add(1, Ordering::Relaxed);
                     }
                     counter += 1;
@@ -110,7 +118,9 @@ fn stress_rapid_snapshot_creation() {
     for i in 0..1000 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
         let version = store.next_version();
-        store.put_with_version_mode(key, Value::Int(i), version, None, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(key, Value::Int(i), version, None, WriteMode::Append)
+            .unwrap();
     }
 
     let start = Instant::now();
@@ -147,7 +157,15 @@ fn stress_version_chain_growth() {
 
     // Create 100K versions of the same key
     for i in 0..100_000i64 {
-        store.put_with_version_mode(key.clone(), Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(
+                key.clone(),
+                Value::Int(i),
+                (i + 1) as u64,
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
     }
 
     let write_elapsed = start.elapsed();
@@ -180,7 +198,9 @@ fn stress_ttl_expiration_cleanup() {
     let ttl = Some(Duration::from_millis(100));
     for i in 0..10_000 {
         let key = create_test_key(branch_id, &format!("ttl_key_{}", i));
-        store.put_with_version_mode(key, Value::Int(i), (i + 1) as u64, ttl, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, ttl, WriteMode::Append)
+            .unwrap();
     }
 
     // Wait for expiration
@@ -217,7 +237,9 @@ fn stress_many_branches_concurrent() {
                 for i in 0..keys_per_branch {
                     let key = create_test_key(branch_id, &format!("key_{}", i));
                     let version = store.next_version();
-                    store.put_with_version_mode(key, Value::Int(i), version, None, WriteMode::Append).unwrap();
+                    store
+                        .put_with_version_mode(key, Value::Int(i), version, None, WriteMode::Append)
+                        .unwrap();
                 }
                 branch_id
             })
@@ -259,7 +281,15 @@ fn stress_sustained_throughput() {
 
     while start.elapsed() < duration {
         let key = create_test_key(branch_id, &format!("key_{}", ops % 1000));
-        store.put_with_version_mode(key.clone(), Value::Int(ops as i64), version, None, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(
+                key.clone(),
+                Value::Int(ops as i64),
+                version,
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
         version += 1;
         let _ = store.get_versioned(&key, u64::MAX);
         ops += 2; // put + get

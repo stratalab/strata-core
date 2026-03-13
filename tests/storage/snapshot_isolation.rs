@@ -31,7 +31,9 @@ fn snapshot_captures_current_version() {
     let key = create_test_key(branch_id, "capture");
 
     // Put value
-    store.put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append)
+        .unwrap();
 
     // Capture version as our "snapshot"
     let version = store.version();
@@ -50,7 +52,9 @@ fn snapshot_acquisition_is_fast() {
     // Populate store with data
     for i in 0..1000 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
-        store.put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append)
+            .unwrap();
     }
 
     // Measure version capture time (analogous to snapshot acquisition)
@@ -76,15 +80,21 @@ fn multiple_snapshots_independent() {
     let key = create_test_key(branch_id, "multi_snap");
 
     // Initial value
-    store.put_with_version_mode(key.clone(), Value::Int(1), 1, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .unwrap();
     let v1 = store.version();
 
     // Update value
-    store.put_with_version_mode(key.clone(), Value::Int(2), 2, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(2), 2, None, WriteMode::Append)
+        .unwrap();
     let v2 = store.version();
 
     // Update again
-    store.put_with_version_mode(key.clone(), Value::Int(3), 3, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(3), 3, None, WriteMode::Append)
+        .unwrap();
     let v3 = store.version();
 
     // Each version sees its value
@@ -113,14 +123,20 @@ fn snapshot_ignores_concurrent_writes() {
     let key = create_test_key(branch_id, "concurrent");
 
     // Initial value
-    store.put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .unwrap();
 
     // Capture version
     let version = store.version();
 
     // Modify after version capture
-    store.put_with_version_mode(key.clone(), Value::Int(200), 2, None, WriteMode::Append).unwrap();
-    store.put_with_version_mode(key.clone(), Value::Int(300), 3, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(200), 2, None, WriteMode::Append)
+        .unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(300), 3, None, WriteMode::Append)
+        .unwrap();
 
     // Reading at captured version should still see original value
     let result = store.get_versioned(&key, version).unwrap();
@@ -138,7 +154,9 @@ fn snapshot_sees_pre_delete_value() {
     let key = create_test_key(branch_id, "pre_delete");
 
     // Put value
-    store.put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append)
+        .unwrap();
 
     // Capture version
     let version = store.version();
@@ -148,7 +166,10 @@ fn snapshot_sees_pre_delete_value() {
 
     // Reading at captured version should still see value
     let result = store.get_versioned(&key, version).unwrap();
-    assert!(result.is_some(), "Should see pre-delete value at captured version");
+    assert!(
+        result.is_some(),
+        "Should see pre-delete value at captured version"
+    );
     assert_eq!(result.unwrap().value, Value::Int(42));
 
     // Current should not see value
@@ -162,7 +183,9 @@ fn repeated_reads_return_same_value() {
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "repeated");
 
-    store.put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append)
+        .unwrap();
 
     let version = store.version();
 
@@ -184,15 +207,23 @@ fn multi_key_consistency_within_snapshot() {
     let key_a = create_test_key(branch_id, "balance_a");
     let key_b = create_test_key(branch_id, "balance_b");
 
-    store.put_with_version_mode(key_a.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
-    store.put_with_version_mode(key_b.clone(), Value::Int(200), 2, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key_a.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .unwrap();
+    store
+        .put_with_version_mode(key_b.clone(), Value::Int(200), 2, None, WriteMode::Append)
+        .unwrap();
 
     // Capture version
     let version = store.version();
 
     // Transfer in current store
-    store.put_with_version_mode(key_a.clone(), Value::Int(50), 3, None, WriteMode::Append).unwrap();
-    store.put_with_version_mode(key_b.clone(), Value::Int(250), 4, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key_a.clone(), Value::Int(50), 3, None, WriteMode::Append)
+        .unwrap();
+    store
+        .put_with_version_mode(key_b.clone(), Value::Int(250), 4, None, WriteMode::Append)
+        .unwrap();
 
     // Reading at captured version should see consistent pre-transfer state
     let a = store.get_versioned(&key_a, version).unwrap().unwrap().value;
@@ -218,7 +249,9 @@ fn concurrent_readers_dont_block() {
     // Populate
     for i in 0..100 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
-        store.put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append)
+            .unwrap();
     }
 
     let version = store.version();
@@ -255,7 +288,9 @@ fn snapshot_survives_store_modifications() {
     // Initial population
     for i in 0..10 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
-        store.put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append)
+            .unwrap();
     }
 
     let version = store.version();
@@ -270,7 +305,13 @@ fn snapshot_survives_store_modifications() {
             for i in 0..10 {
                 let key = create_test_key(branch_id, &format!("key_{}", i));
                 let v = store_clone.next_version();
-                let _ = store_clone.put_with_version_mode(key, Value::Int(counter), v, None, WriteMode::Append);
+                let _ = store_clone.put_with_version_mode(
+                    key,
+                    Value::Int(counter),
+                    v,
+                    None,
+                    WriteMode::Append,
+                );
             }
             counter += 1;
             if counter > 100 {
@@ -287,7 +328,11 @@ fn snapshot_survives_store_modifications() {
             // Should see original value (0-9)
             let value = result.unwrap().value;
             if let Value::Int(v) = value {
-                assert!(v < 10, "Should see original values at captured version, got {}", v);
+                assert!(
+                    v < 10,
+                    "Should see original values at captured version, got {}",
+                    v
+                );
             }
         }
     }
@@ -303,7 +348,9 @@ fn versioned_read_provides_isolation() {
     let key = create_test_key(branch_id, "cached");
 
     // Put value
-    store.put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append).unwrap();
+    store
+        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .unwrap();
 
     // Capture version and read (verifies value exists)
     let version = store.version();
@@ -315,7 +362,10 @@ fn versioned_read_provides_isolation() {
 
     // Reading at captured version should still see value
     let second_read = store.get_versioned(&key, version).unwrap();
-    assert!(second_read.is_some(), "Value at captured version should survive delete");
+    assert!(
+        second_read.is_some(),
+        "Value at captured version should survive delete"
+    );
     assert_eq!(second_read.unwrap().value, Value::Int(100));
 }
 
@@ -332,7 +382,9 @@ fn snapshot_scan_sees_consistent_state() {
     // Put values with common prefix
     for i in 0..10 {
         let key = Key::new_kv(ns.clone(), &format!("prefix_{}", i));
-        store.put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append)
+            .unwrap();
     }
 
     let version = store.version();
@@ -340,7 +392,15 @@ fn snapshot_scan_sees_consistent_state() {
     // Modify after version capture
     for i in 0..10 {
         let key = Key::new_kv(ns.clone(), &format!("prefix_{}", i));
-        store.put_with_version_mode(key, Value::Int(i + 100), (i + 11) as u64, None, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(
+                key,
+                Value::Int(i + 100),
+                (i + 11) as u64,
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
     }
 
     // Scan at captured version should see original values
@@ -364,7 +424,9 @@ fn snapshot_list_sees_all_keys() {
     // Put 5 values
     for i in 0..5 {
         let key = Key::new_kv(ns.clone(), &format!("list_key_{}", i));
-        store.put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append)
+            .unwrap();
     }
 
     let version = store.version();
@@ -378,5 +440,9 @@ fn snapshot_list_sees_all_keys() {
     // Scan at captured version should still see all 5
     let prefix = Key::new_kv(ns.clone(), "list_key_");
     let results = Storage::scan_prefix(&*store, &prefix, version).unwrap();
-    assert_eq!(results.len(), 5, "Should see all 5 keys at captured version");
+    assert_eq!(
+        results.len(),
+        5,
+        "Should see all 5 keys at captured version"
+    );
 }
