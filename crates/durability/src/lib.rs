@@ -9,42 +9,39 @@
 //! - Binary on-disk formats (segmented WAL, snapshots, manifest)
 //! - Storage codec abstraction (encryption/compression extension point)
 //! - WAL segment compaction
-//! - Version retention policies
 //! - Crash testing infrastructure
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
-// === Existing modules ===
+// === Modules ===
 pub mod branch_bundle; // Portable execution artifacts (BranchBundle)
-pub mod recovery; // WAL replay logic
-pub mod snapshot; // Snapshot writer and serialization
-pub mod snapshot_types; // Snapshot envelope and header types
-pub mod wal; // WAL segment types, durability modes
-
-// === Modules moved from storage crate (Phase 1 consolidation) ===
 pub mod codec; // Storage codec abstraction (identity, future encryption/compression)
 pub mod compaction; // WAL segment cleanup and tombstone tracking
+pub mod coordination; // WAL file lock + counter file for multi-process access
+pub mod database; // Database handle, config, paths (DatabaseHandle, DatabaseConfig, etc.)
 pub mod disk_snapshot; // Crash-safe snapshot I/O and checkpoint coordination
 pub mod format; // Binary on-disk formats (WAL segments, snapshots, manifest, writesets)
-pub mod retention; // Version retention policies (KeepAll, KeepLast, KeepFor, Composite)
+pub mod recovery; // WAL replay logic
 pub mod testing; // Crash test harness and reference model
+pub mod wal; // WAL segment types, durability modes
 
-// === Multi-process WAL coordination ===
-pub mod coordination; // WAL file lock + counter file for multi-process access
+// === Utilities ===
 
-// === Phase 2: Database lifecycle coordination ===
-pub mod database; // Database handle, config, paths (DatabaseHandle, DatabaseConfig, etc.)
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Get current time in microseconds since Unix epoch.
+///
+/// Returns 0 if system clock is before Unix epoch (clock went backwards).
+pub fn now_micros() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
+}
 
 // === Re-exports ===
-pub use snapshot::{
-    deserialize_primitives, serialize_all_primitives, SnapshotReader, SnapshotSerializable,
-    SnapshotWriter,
-};
-pub use snapshot_types::{
-    now_micros, primitive_ids, PrimitiveSection, SnapshotEnvelope, SnapshotError, SnapshotHeader,
-    SnapshotInfo, SNAPSHOT_HEADER_SIZE, SNAPSHOT_MAGIC, SNAPSHOT_VERSION_1,
-};
+
 pub use wal::DurabilityMode;
 
 // BranchBundle types
@@ -56,16 +53,13 @@ pub use branch_bundle::{
     BRANCHBUNDLE_FORMAT_VERSION,
 };
 
-// === Re-exports from moved modules ===
-
 // Codec
 pub use codec::{get_codec, CodecError, IdentityCodec, StorageCodec};
 
 // Disk snapshot
 pub use disk_snapshot::{
     CheckpointCoordinator, CheckpointData, CheckpointError, LoadedSection, LoadedSnapshot,
-    SnapshotInfo as DiskSnapshotInfo, SnapshotReadError, SnapshotReader as DiskSnapshotReader,
-    SnapshotSection, SnapshotWriter as DiskSnapshotWriter,
+    SnapshotInfo, SnapshotReadError, SnapshotReader, SnapshotSection, SnapshotWriter,
 };
 
 // Format types
@@ -95,7 +89,7 @@ pub use format::{
     // Segment metadata
     SegmentMeta,
     SegmentMetaError,
-    SnapshotHeader as FormatSnapshotHeader,
+    SnapshotHeader,
     SnapshotHeaderError,
     SnapshotSerializer,
     SnapshotWatermark,
@@ -115,13 +109,10 @@ pub use format::{
     SEGMENT_HEADER_SIZE_V2,
     SEGMENT_MAGIC,
     SNAPSHOT_FORMAT_VERSION,
-    SNAPSHOT_HEADER_SIZE as FORMAT_SNAPSHOT_HEADER_SIZE,
-    SNAPSHOT_MAGIC as FORMAT_SNAPSHOT_MAGIC,
+    SNAPSHOT_HEADER_SIZE,
+    SNAPSHOT_MAGIC,
     WAL_RECORD_FORMAT_VERSION,
 };
-
-// Retention
-pub use retention::{CompositeBuilder, RetentionPolicy, RetentionPolicyError};
 
 // Compaction
 pub use compaction::{
@@ -135,19 +126,19 @@ pub use testing::{
     ReferenceModel, StateMismatch, VerificationResult,
 };
 
-// === Phase 2 re-exports: Database lifecycle ===
+// Database lifecycle
 pub use database::{
     ConfigError, DatabaseConfig, DatabaseHandle, DatabaseHandleError, DatabasePathError,
     DatabasePaths,
 };
 
-// WAL segmented types (new in Phase 2)
+// WAL segmented types
 pub use wal::{
     TruncateInfo, WalConfig, WalConfigError, WalCounters, WalDiskUsage, WalReader, WalReaderError,
     WalWriter,
 };
 
-// Recovery coordinator types (new in Phase 2)
+// Recovery coordinator types
 pub use recovery::{
     RecoveryCoordinator, RecoveryError, RecoveryPlan, RecoveryResult as SegmentedRecoveryResult,
     RecoverySnapshot,

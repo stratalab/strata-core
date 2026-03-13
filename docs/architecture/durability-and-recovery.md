@@ -50,45 +50,7 @@ Each WAL entry is encoded as:
 
 ## Snapshots
 
-Snapshots are periodic full-state captures written to disk.
-
-### Snapshot File Format
-
-```
-+---------------------------+
-| Magic: "INMEM_SNAP" (10B) |
-+---------------------------+
-| Format Version (4B)       |
-+---------------------------+
-| Timestamp (8B)            |
-+---------------------------+
-| WAL Offset (8B)           |
-+---------------------------+
-| Transaction Count (8B)    |
-+---------------------------+
-| Primitive Count (1B)      |
-+---------------------------+
-| Primitive Section 1       |
-|   Type ID (1B)            |
-|   Data Length (8B)         |
-|   Data (N bytes)           |
-+---------------------------+
-| ... more sections ...     |
-+---------------------------+
-| CRC32 (4B)                |
-+---------------------------+
-```
-
-### Primitive IDs
-
-| Primitive | ID |
-|-----------|----|
-| KV | 1 |
-| JSON | 2 |
-| Event | 3 |
-| State | 4 |
-| Branch | 6 |
-| Vector | 7 |
+Snapshots are periodic full-state captures written to disk via the `disk_snapshot/` module (magic: `SNAP`, 64-byte header, crash-safe write-fsync-rename pattern).
 
 ### Snapshot Benefits
 

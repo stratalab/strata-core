@@ -93,68 +93,6 @@ Replays WAL entries to restore database state after a crash.
 
 ---
 
-### Snapshot Files
-
-#### `snapshot_types.rs` - Snapshot Format Types
-
-Defines the binary format for snapshot files.
-
-**Snapshot file layout**:
-```
-+------------------+
-| Magic (10 bytes) |  "INMEM_SNAP"
-+------------------+
-| Version (4)      |  Format version (1)
-+------------------+
-| Timestamp (8)    |  Microseconds since epoch
-+------------------+
-| WAL Offset (8)   |  WAL position covered
-+------------------+
-| Tx Count (8)     |  Transactions included
-+------------------+
-| Primitive Count  |  Number of sections (1 byte)
-+------------------+
-| Primitive 1      |  Type (1) + Length (8) + Data
-+------------------+
-| ...              |
-+------------------+
-| CRC32 (4)        |  Checksum of everything above
-+------------------+
-```
-
-**Key types**:
-- `SnapshotEnvelope` - Complete parsed snapshot
-- `SnapshotHeader` - Header metadata
-- `PrimitiveSection` - Data for one primitive type
-- `SnapshotError` - Error types for snapshot operations
-
-**primitive_ids module** - Type IDs for each primitive:
-- KV=1, JSON=2, EVENT=3, STATE=4, RUN=6, VECTOR=7
-
----
-
-#### `snapshot.rs` - Snapshot Writer and Reader
-
-Writes and reads snapshot files with CRC32 integrity checking.
-
-**SnapshotWriter**:
-- `write()` - Write snapshot to file with CRC32
-- `write_atomic()` - Atomic write (temp file + rename)
-
-**SnapshotReader**:
-- `validate_checksum()` - Verify snapshot integrity
-- `read_header()` - Read just the header
-- `read_envelope()` - Read complete snapshot
-
-**SnapshotSerializable trait**:
-- Primitives implement this to serialize/deserialize for snapshots
-
-**Helper functions**:
-- `serialize_all_primitives()` - Collect all primitives into sections
-- `deserialize_primitives()` - Restore primitives from sections
-
----
-
 ### RunBundle Files (Portable Archives)
 
 RunBundle enables exporting a completed run as a portable `.runbundle.tar.zst` archive that can be imported into another database instance.
@@ -284,15 +222,6 @@ From `encoding`:
 From `recovery`:
 - `replay_wal`, `replay_wal_with_options`, `validate_transactions`
 - `ReplayOptions`, `ReplayProgress`, `ReplayStats`, `ValidationResult`, `ValidationWarning`
-
-From `snapshot`:
-- `SnapshotWriter`, `SnapshotReader`, `SnapshotSerializable`
-- `serialize_all_primitives`, `deserialize_primitives`
-
-From `snapshot_types`:
-- `SnapshotEnvelope`, `SnapshotHeader`, `SnapshotInfo`, `SnapshotError`
-- `PrimitiveSection`, `primitive_ids`, `now_micros`
-- Constants: `SNAPSHOT_MAGIC`, `SNAPSHOT_VERSION_1`, `SNAPSHOT_HEADER_SIZE`
 
 From `wal`:
 - `WAL`, `WALEntry`, `DurabilityMode`
