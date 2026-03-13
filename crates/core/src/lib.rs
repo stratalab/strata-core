@@ -2,12 +2,12 @@
 //!
 //! This crate defines the foundational types used throughout the system:
 //! - BranchId: Unique identifier for agent branches
-//! - Namespace: Hierarchical namespace (tenant/app/agent/branch)
+//! - Namespace: Branch and space isolation (branch_id/space)
 //! - Key: Composite key with type tagging
 //! - TypeTag: Discriminates between primitive types
 //! - Value: Unified value enum for all data types
 //! - Error: Error type hierarchy
-//! - Traits: Core trait definitions (Storage, SnapshotView)
+//! - Traits: Core trait definitions (Storage)
 //! - Primitive types: Event, State, JSON, Vector types (in `primitives` module)
 //! - Contract types: EntityRef, Versioned<T>, Version, Timestamp, PrimitiveType, BranchName
 
@@ -31,7 +31,7 @@ pub use error::{
     ConstraintReason, DetailValue, ErrorCode, ErrorDetails, StrataError, StrataResult,
 };
 pub use limits::{LimitError, Limits};
-pub use traits::{SnapshotView, Storage, WriteMode};
+pub use traits::{Storage, WriteMode};
 pub use types::{validate_space_name, BranchId, Key, Namespace, TypeTag};
 pub use value::Value;
 

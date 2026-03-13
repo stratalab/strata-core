@@ -159,7 +159,7 @@ impl StateCell {
     ) -> StrataResult<Option<Versioned<Value>>> {
         let key = self.key_for(branch_id, space, name);
         use strata_core::Storage;
-        match self.db.storage().get(&key)? {
+        match self.db.storage().get_versioned(&key, u64::MAX)? {
             Some(vv) => {
                 let state: State = from_stored_value(&vv.value)
                     .map_err(|e| strata_core::StrataError::serialization(e.to_string()))?;
@@ -598,7 +598,7 @@ mod tests {
     fn test_state_creation() {
         let state = State::new(Value::Int(42));
         assert_eq!(state.version, Version::counter(1));
-        assert!(state.updated_at > 0);
+        assert!(state.updated_at > strata_core::contract::Timestamp::EPOCH);
         assert_eq!(state.value, Value::Int(42));
     }
 

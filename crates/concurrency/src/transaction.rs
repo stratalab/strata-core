@@ -8,14 +8,16 @@
 
 use crate::validation::{validate_transaction, ValidationResult};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use strata_core::primitives::json::{get_at_path, JsonPatch, JsonPath, JsonValue};
-use strata_core::traits::{SnapshotView, Storage, WriteMode};
+use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{BranchId, Key};
 use strata_core::value::Value;
 use strata_core::StrataError;
 use strata_core::StrataResult;
 use strata_core::{Version, Versioned, VersionedValue};
+use strata_storage::ShardedStore;
 
 /// Error type for commit failures
 ///
@@ -355,7 +357,7 @@ pub trait JsonStoreExt {
 ///
 /// # Lifecycle
 ///
-/// 1. **BEGIN**: Create with `with_snapshot()`, status is `Active`
+/// 1. **BEGIN**: Create with `with_store()`, status is `Active`
 /// 2. **READ/WRITE**: Use `get()`, `put()`, `delete()`, `cas()`
 /// 3. **VALIDATE**: Call `mark_validating()`, check for conflicts
 /// 4. **COMMIT/ABORT**: Call `mark_committed()` or `mark_aborted()`
@@ -380,10 +382,10 @@ pub struct TransactionContext {
     /// All reads see data as of this version. Used for conflict detection.
     pub start_version: u64,
 
-    /// Snapshot view for this transaction
+    /// Backing store for snapshot reads
     ///
-    /// Provides consistent point-in-time view of storage.
-    snapshot: Option<Box<dyn SnapshotView>>,
+    /// Reads are bounded by `start_version` for MVCC isolation.
+    store: Option<Arc<ShardedStore>>,
 
     // Operation tracking
     /// Keys read and their versions (for validation)
@@ -470,7 +472,7 @@ impl TransactionContext {
     /// This constructor is primarily for testing or for transactions
     /// that don't need to read from storage.
     ///
-    /// For normal transactions, use `with_snapshot()`.
+    /// For normal transactions, use `with_store()`.
     ///
     /// # Arguments
     /// * `txn_id` - Unique transaction identifier
@@ -492,7 +494,7 @@ impl TransactionContext {
             txn_id,
             branch_id,
             start_version,
-            snapshot: None,
+            store: None,
             read_set: HashMap::new(),
             write_set: HashMap::new(),
             delete_set: HashSet::new(),
@@ -523,27 +525,23 @@ impl TransactionContext {
     /// # Example
     ///
     /// ```
-    /// use strata_concurrency::{TransactionContext, ClonedSnapshotView};
+    /// use strata_concurrency::TransactionContext;
     /// use strata_core::types::BranchId;
-    /// use std::collections::BTreeMap;
+    /// use strata_storage::ShardedStore;
+    /// use std::sync::Arc;
     ///
     /// let branch_id = BranchId::new();
-    /// let snapshot = Box::new(ClonedSnapshotView::empty(100));
-    /// let txn = TransactionContext::with_snapshot(1, branch_id, snapshot);
+    /// let store = Arc::new(ShardedStore::new());
+    /// let txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
     /// assert!(txn.is_active());
-    /// assert_eq!(txn.start_version, 100);
     /// ```
-    pub fn with_snapshot(
-        txn_id: u64,
-        branch_id: BranchId,
-        snapshot: Box<dyn SnapshotView>,
-    ) -> Self {
-        let start_version = snapshot.version();
+    pub fn with_store(txn_id: u64, branch_id: BranchId, store: Arc<ShardedStore>) -> Self {
+        let start_version = store.version();
         TransactionContext {
             txn_id,
             branch_id,
             start_version,
-            snapshot: Some(snapshot),
+            store: Some(store),
             read_set: HashMap::new(),
             write_set: HashMap::new(),
             delete_set: HashSet::new(),
@@ -613,23 +611,22 @@ impl TransactionContext {
         self.read_from_snapshot(key)
     }
 
-    /// Read from snapshot and track in read_set
+    /// Read from store and track in read_set
     ///
     /// This is the core read path that tracks reads for conflict detection.
-    /// Uses `get_value_and_version()` to skip full VersionedValue construction,
-    /// and moves the value instead of cloning.
+    /// Reads are bounded by `start_version` for MVCC isolation.
     fn read_from_snapshot(&mut self, key: &Key) -> StrataResult<Option<Value>> {
-        let snapshot = self.snapshot.as_ref().ok_or_else(|| {
-            StrataError::invalid_input("Transaction has no snapshot for reads".to_string())
+        let store = self.store.as_ref().ok_or_else(|| {
+            StrataError::invalid_input("Transaction has no store for reads".to_string())
         })?;
 
-        match snapshot.get_value_and_version(key)? {
-            Some((value, version)) => {
+        match store.get_versioned(key, self.start_version)? {
+            Some(vv) => {
                 // Key exists - track its version for conflict detection
                 if !self.read_only {
-                    self.read_set.insert(key.clone(), version);
+                    self.read_set.insert(key.clone(), vv.version.as_u64());
                 }
-                Ok(Some(value)) // already owned, no clone needed
+                Ok(Some(vv.value))
             }
             None => {
                 // Key doesn't exist - track with version 0
@@ -674,13 +671,13 @@ impl TransactionContext {
         self.get_versioned_from_snapshot(key)
     }
 
-    /// Read from snapshot preserving version metadata, and track in read_set
+    /// Read from store preserving version metadata, and track in read_set
     fn get_versioned_from_snapshot(&mut self, key: &Key) -> StrataResult<Option<VersionedValue>> {
-        let snapshot = self.snapshot.as_ref().ok_or_else(|| {
-            StrataError::invalid_input("Transaction has no snapshot for reads".to_string())
+        let store = self.store.as_ref().ok_or_else(|| {
+            StrataError::invalid_input("Transaction has no store for reads".to_string())
         })?;
 
-        let versioned = snapshot.get(key)?;
+        let versioned = store.get_versioned(key, self.start_version)?;
 
         // Track in read_set for conflict detection (skip in read-only mode)
         if !self.read_only {
@@ -736,12 +733,12 @@ impl TransactionContext {
     pub fn scan_prefix(&mut self, prefix: &Key) -> StrataResult<Vec<(Key, Value)>> {
         self.ensure_active()?;
 
-        let snapshot = self.snapshot.as_ref().ok_or_else(|| {
-            StrataError::invalid_input("Transaction has no snapshot for reads".to_string())
+        let store = self.store.as_ref().ok_or_else(|| {
+            StrataError::invalid_input("Transaction has no store for reads".to_string())
         })?;
 
-        // Get all matching keys from snapshot
-        let snapshot_results = snapshot.scan_prefix(prefix)?;
+        // Get all matching keys from store (bounded by start_version)
+        let snapshot_results = store.scan_prefix(prefix, self.start_version)?;
 
         // Build result set with read-your-writes using BTreeMap for sorted output
         let mut results: BTreeMap<Key, Value> = BTreeMap::new();
@@ -1450,7 +1447,13 @@ impl TransactionContext {
         // Apply CAS operations from cas_set — drain to avoid cloning
         // Note: CAS validation already passed in commit(), so we just apply the new values
         for cas_op in self.cas_set.drain(..) {
-            store.put_with_version(cas_op.key, cas_op.new_value, commit_version, None)?;
+            store.put_with_version_mode(
+                cas_op.key,
+                cas_op.new_value,
+                commit_version,
+                None,
+                WriteMode::Append,
+            )?;
             result.cas_applied += 1;
         }
 
@@ -1534,30 +1537,27 @@ impl TransactionContext {
     /// # Example
     ///
     /// ```no_run
-    /// # use strata_concurrency::{TransactionContext, ClonedSnapshotView};
+    /// # use strata_concurrency::TransactionContext;
     /// # use strata_core::types::BranchId;
+    /// # use strata_storage::ShardedStore;
+    /// # use std::sync::Arc;
     /// let branch_id = BranchId::default();
     /// let mut ctx = TransactionContext::new(1, branch_id, 100);
     /// // ... use the context ...
     ///
     /// // Reset for reuse - capacity is preserved!
     /// let new_branch_id = BranchId::default();
-    /// let new_snapshot = ClonedSnapshotView::empty(200);
-    /// ctx.reset(2, new_branch_id, Some(Box::new(new_snapshot)));
+    /// let store = Arc::new(ShardedStore::new());
+    /// ctx.reset(2, new_branch_id, Some(store));
     /// ```
-    pub fn reset(
-        &mut self,
-        txn_id: u64,
-        branch_id: BranchId,
-        snapshot: Option<Box<dyn SnapshotView>>,
-    ) {
+    pub fn reset(&mut self, txn_id: u64, branch_id: BranchId, store: Option<Arc<ShardedStore>>) {
         // Update identity
         self.txn_id = txn_id;
         self.branch_id = branch_id;
 
-        // Update snapshot and version
-        self.start_version = snapshot.as_ref().map(|s| s.version()).unwrap_or(0);
-        self.snapshot = snapshot;
+        // Update store and version
+        self.start_version = store.as_ref().map(|s| s.version()).unwrap_or(0);
+        self.store = store;
 
         // Clear collections but preserve capacity - this is the key optimization!
         // HashMap::clear() and HashSet::clear() keep the allocated buckets
@@ -1663,13 +1663,13 @@ impl JsonStoreExt for TransactionContext {
             }
         }
 
-        // Read from snapshot
-        let snapshot = self.snapshot.as_ref().ok_or_else(|| {
-            StrataError::invalid_input("Transaction has no snapshot for reads".to_string())
+        // Read from store
+        let store = self.store.as_ref().ok_or_else(|| {
+            StrataError::invalid_input("Transaction has no store for reads".to_string())
         })?;
 
-        // Get the document from snapshot
-        let versioned = snapshot.get(key)?;
+        // Get the document from store (bounded by start_version)
+        let versioned = store.get_versioned(key, self.start_version)?;
         let Some(vv) = versioned else {
             // Document doesn't exist
             return Ok(None);
@@ -1707,9 +1707,9 @@ impl JsonStoreExt for TransactionContext {
             .json_snapshot_versions()
             .map_or(true, |v| !v.contains_key(key))
         {
-            // Try to get the document version from snapshot
-            if let Some(snapshot) = &self.snapshot {
-                if let Ok(Some(vv)) = snapshot.get(key) {
+            // Try to get the document version from store
+            if let Some(store) = &self.store {
+                if let Ok(Some(vv)) = store.get_versioned(key, self.start_version) {
                     self.record_json_snapshot_version(key.clone(), vv.version.as_u64());
                 }
             }
@@ -1731,8 +1731,8 @@ impl JsonStoreExt for TransactionContext {
             .json_snapshot_versions()
             .map_or(true, |v| !v.contains_key(key))
         {
-            if let Some(snapshot) = &self.snapshot {
-                if let Ok(Some(vv)) = snapshot.get(key) {
+            if let Some(store) = &self.store {
+                if let Ok(Some(vv)) = store.get_versioned(key, self.start_version) {
                     self.record_json_snapshot_version(key.clone(), vv.version.as_u64());
                 }
             }
@@ -1776,45 +1776,41 @@ impl JsonStoreExt for TransactionContext {
             }
         }
 
-        // Fall back to snapshot
-        let snapshot = self.snapshot.as_ref().ok_or_else(|| {
-            StrataError::invalid_input("Transaction has no snapshot for reads".to_string())
+        // Fall back to store
+        let store = self.store.as_ref().ok_or_else(|| {
+            StrataError::invalid_input("Transaction has no store for reads".to_string())
         })?;
 
-        Ok(snapshot.get(key)?.is_some())
+        Ok(store.get_versioned(key, self.start_version)?.is_some())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ClonedSnapshotView;
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
     use strata_core::types::{BranchId, Namespace, TypeTag};
     use strata_core::value::Value;
 
     fn test_namespace() -> Arc<Namespace> {
-        Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
-            BranchId::new(),
-            "default".to_string(),
-        ))
+        Arc::new(Namespace::new(BranchId::new(), "default".to_string()))
     }
 
     fn test_key(ns: &Arc<Namespace>, name: &str) -> Key {
         Key::new(ns.clone(), TypeTag::KV, name.as_bytes().to_vec())
     }
 
-    fn snapshot_with_key(key: &Key, value: Value, version: u64) -> Box<dyn SnapshotView> {
-        let mut data = BTreeMap::new();
-        data.insert(
-            key.clone(),
-            VersionedValue::new(value, Version::txn(version)),
-        );
-        Box::new(ClonedSnapshotView::new(version, data))
+    /// Create a store with a single key-value at the given version.
+    fn store_with_key(key: &Key, value: Value, version: u64) -> Arc<ShardedStore> {
+        let store = Arc::new(ShardedStore::new());
+        store
+            .put_with_version_mode(key.clone(), value, version, None, WriteMode::Append)
+            .unwrap();
+        store
+    }
+
+    /// Create an empty store (no data).
+    fn empty_store() -> Arc<ShardedStore> {
+        Arc::new(ShardedStore::new())
     }
 
     #[test]
@@ -1822,14 +1818,13 @@ mod tests {
         let ns = test_namespace();
         let key = test_key(&ns, "k1");
         let branch_id = BranchId::new();
-        let snap = snapshot_with_key(&key, Value::Int(42), 5);
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, snap);
+        let store = store_with_key(&key, Value::Int(42), 5);
+        let mut txn = TransactionContext::with_store(1, branch_id, store);
 
         let result = txn.get_versioned(&key).unwrap();
         let vv = result.unwrap();
         assert_eq!(vv.value, Value::Int(42));
         assert_eq!(vv.version, Version::Txn(5));
-        // VersionedValue from snapshot preserves timestamp
     }
 
     #[test]
@@ -1837,8 +1832,8 @@ mod tests {
         let ns = test_namespace();
         let key = test_key(&ns, "k1");
         let branch_id = BranchId::new();
-        let snap = Box::new(ClonedSnapshotView::empty(0));
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, snap);
+        let store = empty_store();
+        let mut txn = TransactionContext::with_store(1, branch_id, store);
 
         txn.put(key.clone(), Value::String("written".into()))
             .unwrap();
@@ -1854,8 +1849,8 @@ mod tests {
         let ns = test_namespace();
         let key = test_key(&ns, "k1");
         let branch_id = BranchId::new();
-        let snap = snapshot_with_key(&key, Value::Int(42), 5);
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, snap);
+        let store = store_with_key(&key, Value::Int(42), 5);
+        let mut txn = TransactionContext::with_store(1, branch_id, store);
 
         txn.delete(key.clone()).unwrap();
 
@@ -1868,8 +1863,8 @@ mod tests {
         let ns = test_namespace();
         let key = test_key(&ns, "missing");
         let branch_id = BranchId::new();
-        let snap = Box::new(ClonedSnapshotView::empty(10));
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, snap);
+        let store = empty_store();
+        let mut txn = TransactionContext::with_store(1, branch_id, store);
 
         let result = txn.get_versioned(&key).unwrap();
         assert!(result.is_none());
@@ -1882,8 +1877,8 @@ mod tests {
         let ns = test_namespace();
         let key = test_key(&ns, "k1");
         let branch_id = BranchId::new();
-        let snap = snapshot_with_key(&key, Value::Int(7), 15);
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, snap);
+        let store = store_with_key(&key, Value::Int(7), 15);
+        let mut txn = TransactionContext::with_store(1, branch_id, store);
 
         let _ = txn.get_versioned(&key).unwrap();
         // Verify version tracked for conflict detection
@@ -1962,8 +1957,7 @@ mod tests {
         }
         assert!(txn.write_set.capacity() >= 5000);
 
-        let snap = Box::new(ClonedSnapshotView::empty(200));
-        txn.reset(2, branch_id, Some(snap));
+        txn.reset(2, branch_id, Some(empty_store()));
 
         // After reset, capacity should be shrunk below threshold
         assert!(
@@ -2043,8 +2037,7 @@ mod tests {
         }
         let cap_before = txn.write_set.capacity();
 
-        let snap = Box::new(ClonedSnapshotView::empty(200));
-        txn.reset(2, branch_id, Some(snap));
+        txn.reset(2, branch_id, Some(empty_store()));
 
         // Capacity should be preserved (not shrunk)
         assert_eq!(txn.write_set.capacity(), cap_before);
@@ -2058,18 +2051,9 @@ mod tests {
     fn test_read_only_skips_read_set() {
         let ns = test_namespace();
         let branch_id = BranchId::new();
-        let mut data = BTreeMap::new();
         let key = test_key(&ns, "k1");
-        data.insert(
-            key.clone(),
-            VersionedValue {
-                value: Value::Int(42),
-                version: Version::Txn(1),
-                timestamp: strata_core::Timestamp::from_micros(0),
-            },
-        );
-        let snapshot = Box::new(ClonedSnapshotView::new(1, data));
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, snapshot);
+        let store = store_with_key(&key, Value::Int(42), 1);
+        let mut txn = TransactionContext::with_store(1, branch_id, store);
         txn.set_read_only(true);
 
         // Read should succeed
@@ -2126,8 +2110,7 @@ mod tests {
         txn.set_read_only(true);
         assert!(txn.is_read_only_mode());
 
-        let snap = Box::new(ClonedSnapshotView::empty(100));
-        txn.reset(2, branch_id, Some(snap));
+        txn.reset(2, branch_id, Some(empty_store()));
         assert!(
             !txn.is_read_only_mode(),
             "read_only should be cleared after reset"
@@ -2143,17 +2126,8 @@ mod tests {
         let ns = test_namespace();
         let branch_id = BranchId::new();
         let key = test_key(&ns, "k1");
-        let mut data = BTreeMap::new();
-        data.insert(
-            key.clone(),
-            VersionedValue {
-                value: Value::Int(10),
-                version: Version::Txn(5),
-                timestamp: strata_core::Timestamp::from_micros(0),
-            },
-        );
-        let snapshot = Box::new(ClonedSnapshotView::new(5, data));
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, snapshot);
+        let store = store_with_key(&key, Value::Int(10), 5);
+        let mut txn = TransactionContext::with_store(1, branch_id, store);
 
         txn.cas_with_read(key.clone(), 5, Value::Int(20)).unwrap();
 
@@ -2169,9 +2143,8 @@ mod tests {
         let ns = test_namespace();
         let branch_id = BranchId::new();
         let key = test_key(&ns, "missing");
-        // Empty snapshot — key doesn't exist
-        let snapshot = Box::new(ClonedSnapshotView::new(1, BTreeMap::new()));
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, snapshot);
+        let store = empty_store();
+        let mut txn = TransactionContext::with_store(1, branch_id, store);
 
         txn.cas_with_read(key.clone(), 0, Value::Int(1)).unwrap();
 
@@ -2184,8 +2157,8 @@ mod tests {
     fn test_cas_with_read_rejects_read_only() {
         let ns = test_namespace();
         let branch_id = BranchId::new();
-        let snapshot = Box::new(ClonedSnapshotView::new(1, BTreeMap::new()));
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, snapshot);
+        let store = empty_store();
+        let mut txn = TransactionContext::with_store(1, branch_id, store);
         txn.set_read_only(true);
 
         let key = test_key(&ns, "k1");
@@ -2202,17 +2175,8 @@ mod tests {
         let ns = test_namespace();
         let branch_id = BranchId::new();
         let key = test_key(&ns, "k1");
-        let mut data = BTreeMap::new();
-        data.insert(
-            key.clone(),
-            VersionedValue {
-                value: Value::Int(42),
-                version: Version::Txn(7),
-                timestamp: strata_core::Timestamp::from_micros(0),
-            },
-        );
-        let snapshot = Box::new(ClonedSnapshotView::new(7, data));
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, snapshot);
+        let store = store_with_key(&key, Value::Int(42), 7);
+        let mut txn = TransactionContext::with_store(1, branch_id, store);
         txn.set_read_only(true);
 
         // get_versioned should return the value
@@ -2231,8 +2195,8 @@ mod tests {
     fn test_read_only_get_versioned_nonexistent_skips_read_set() {
         let ns = test_namespace();
         let branch_id = BranchId::new();
-        let snapshot = Box::new(ClonedSnapshotView::new(1, BTreeMap::new()));
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, snapshot);
+        let store = empty_store();
+        let mut txn = TransactionContext::with_store(1, branch_id, store);
         txn.set_read_only(true);
 
         let key = test_key(&ns, "missing");
@@ -2250,19 +2214,14 @@ mod tests {
     fn test_read_only_scan_prefix_skips_read_set() {
         let ns = test_namespace();
         let branch_id = BranchId::new();
-        let mut data = BTreeMap::new();
+        let store = Arc::new(ShardedStore::new());
         for i in 0..3 {
-            data.insert(
-                test_key(&ns, &format!("pfx:{}", i)),
-                VersionedValue {
-                    value: Value::Int(i as i64),
-                    version: Version::Txn(1),
-                    timestamp: strata_core::Timestamp::from_micros(0),
-                },
-            );
+            let key = test_key(&ns, &format!("pfx:{}", i));
+            store
+                .put_with_version_mode(key, Value::Int(i as i64), 1, None, WriteMode::Append)
+                .unwrap();
         }
-        let snapshot = Box::new(ClonedSnapshotView::new(1, data));
-        let mut txn = TransactionContext::with_snapshot(1, branch_id, snapshot);
+        let mut txn = TransactionContext::with_store(1, branch_id, store);
         txn.set_read_only(true);
 
         let prefix = test_key(&ns, "pfx:");

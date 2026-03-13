@@ -125,7 +125,7 @@ impl<'a> Transaction<'a> {
             event.sequence,
             &event.event_type,
             &event.payload,
-            event.timestamp,
+            event.timestamp.as_micros(),
             &event.prev_hash,
         )
     }
@@ -251,7 +251,7 @@ impl<'a> TransactionOps for Transaction<'a> {
 
     fn event_append(&mut self, event_type: &str, payload: Value) -> Result<Version, StrataError> {
         let sequence = self.next_sequence();
-        let timestamp = Timestamp::now().as_micros();
+        let timestamp = Timestamp::now();
         let prev_hash = self.last_hash;
 
         // Create the event
@@ -683,22 +683,16 @@ impl<'a> TransactionOps for Transaction<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_concurrency::snapshot::ClonedSnapshotView;
+    use strata_storage::ShardedStore;
 
     fn create_test_namespace() -> Arc<Namespace> {
         let branch_id = BranchId::new();
-        Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
-            branch_id,
-            "default".to_string(),
-        ))
+        Arc::new(Namespace::new(branch_id, "default".to_string()))
     }
 
     fn create_test_context(ns: &Namespace) -> TransactionContext {
-        let snapshot = Box::new(ClonedSnapshotView::empty(100));
-        TransactionContext::with_snapshot(1, ns.branch_id, snapshot)
+        let store = Arc::new(ShardedStore::new());
+        TransactionContext::with_store(1, ns.branch_id, store)
     }
 
     // =========================================================================

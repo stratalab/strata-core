@@ -14,9 +14,10 @@
 //! After warmup, the hot path has zero allocations.
 
 use std::cell::RefCell;
+use std::sync::Arc;
 use strata_concurrency::TransactionContext;
-use strata_core::traits::SnapshotView;
 use strata_core::types::BranchId;
+use strata_storage::ShardedStore;
 
 /// Maximum contexts per thread
 ///
@@ -38,7 +39,7 @@ thread_local! {
 ///
 /// ```text
 /// // Acquire a context (from pool or new allocation)
-/// let ctx = TransactionPool::acquire(1, branch_id, Some(snapshot));
+/// let ctx = TransactionPool::acquire(1, branch_id, Some(store));
 ///
 /// // ... use the context ...
 ///
@@ -57,26 +58,26 @@ impl TransactionPool {
     /// # Arguments
     /// * `txn_id` - Unique transaction identifier
     /// * `branch_id` - BranchId for namespace isolation
-    /// * `snapshot` - Optional snapshot for snapshot isolation
+    /// * `store` - Optional backing store for snapshot isolation
     ///
     /// # Returns
     /// * `TransactionContext` - Active transaction ready for operations
     pub fn acquire(
         txn_id: u64,
         branch_id: BranchId,
-        snapshot: Option<Box<dyn SnapshotView>>,
+        store: Option<Arc<ShardedStore>>,
     ) -> TransactionContext {
         TXN_POOL.with(|pool| {
             match pool.borrow_mut().pop() {
                 Some(mut ctx) => {
                     // Reuse existing allocation - key optimization!
-                    ctx.reset(txn_id, branch_id, snapshot);
+                    ctx.reset(txn_id, branch_id, store);
                     ctx
                 }
                 None => {
                     // Pool empty - allocate new
-                    match snapshot {
-                        Some(snap) => TransactionContext::with_snapshot(txn_id, branch_id, snap),
+                    match store {
+                        Some(s) => TransactionContext::with_store(txn_id, branch_id, s),
                         None => TransactionContext::new(txn_id, branch_id, 0),
                     }
                 }
@@ -161,20 +162,12 @@ impl TransactionPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
-    use strata_concurrency::snapshot::ClonedSnapshotView;
+    use strata_core::traits::{Storage, WriteMode};
     use strata_core::types::{Namespace, TypeTag};
     use strata_core::value::Value;
 
     fn create_test_namespace() -> Arc<Namespace> {
-        Arc::new(Namespace::new(
-            "tenant".to_string(),
-            "app".to_string(),
-            "agent".to_string(),
-            BranchId::new(),
-            "default".to_string(),
-        ))
+        Arc::new(Namespace::new(BranchId::new(), "default".to_string()))
     }
 
     fn create_test_key(ns: &Arc<Namespace>, user_key: &[u8]) -> strata_core::types::Key {
@@ -292,15 +285,18 @@ mod tests {
     }
 
     #[test]
-    fn test_acquire_with_snapshot() {
+    fn test_acquire_with_store() {
         TransactionPool::clear();
         let branch_id = BranchId::new();
 
-        // Create a snapshot
-        let snapshot_data = BTreeMap::new();
-        let snapshot = Box::new(ClonedSnapshotView::new(500, snapshot_data));
+        // Create a store with data at version 500
+        let store = Arc::new(ShardedStore::new());
+        let ns = create_test_namespace();
+        let key = create_test_key(&ns, b"test");
+        Storage::put_with_version_mode(&*store, key, Value::Int(1), 500, None, WriteMode::Append)
+            .unwrap();
 
-        let ctx = TransactionPool::acquire(1, branch_id, Some(snapshot));
+        let ctx = TransactionPool::acquire(1, branch_id, Some(store));
 
         assert_eq!(ctx.txn_id, 1);
         assert_eq!(ctx.branch_id, branch_id);

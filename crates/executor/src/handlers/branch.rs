@@ -21,8 +21,8 @@ fn metadata_to_branch_info(m: &BranchMetadata) -> BranchInfo {
     BranchInfo {
         id: BranchId::from(m.name.clone()),
         status: from_engine_branch_status(m.status),
-        created_at: m.created_at,
-        updated_at: m.updated_at,
+        created_at: m.created_at.as_micros(),
+        updated_at: m.updated_at.as_micros(),
         parent_id: None,
     }
 }
@@ -299,8 +299,8 @@ mod tests {
             branch_id: "some-uuid".to_string(),
             parent_branch: None,
             status: strata_engine::BranchStatus::Active,
-            created_at: 1000000,
-            updated_at: 2000000,
+            created_at: strata_core::contract::Timestamp::from(1000000u64),
+            updated_at: strata_core::contract::Timestamp::from(2000000u64),
             completed_at: None,
             error: None,
             version: 1,

@@ -5,21 +5,18 @@
 //! - Repeatable reads
 //! - Read-your-writes semantics
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
-use strata_concurrency::snapshot::ClonedSnapshotView;
 use strata_concurrency::transaction::TransactionContext;
-use strata_core::traits::SnapshotView;
+use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
-use strata_core::{BranchId, Versioned};
+use strata_core::BranchId;
+use strata_storage::sharded::ShardedStore;
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
     let ns = Arc::new(Namespace::for_branch(branch_id));
     Key::new_kv(ns, name)
 }
-
-type VersionedValue = Versioned<Value>;
 
 // ============================================================================
 // Point-in-Time Consistency
@@ -27,50 +24,47 @@ type VersionedValue = Versioned<Value>;
 
 #[test]
 fn snapshot_captures_state_at_creation() {
+    let store = Arc::new(ShardedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "captured");
 
-    let mut data = BTreeMap::new();
-    data.insert(
-        key.clone(),
-        VersionedValue::new(Value::Int(42), strata_core::Version::seq(1)),
-    );
+    store
+        .put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append)
+        .unwrap();
 
-    let snapshot = ClonedSnapshotView::new(1, data);
-
-    let result = SnapshotView::get(&snapshot, &key).unwrap();
+    let result = store.get_versioned(&key, 1).unwrap();
     assert!(result.is_some());
     assert_eq!(result.unwrap().value, Value::Int(42));
 }
 
 #[test]
 fn snapshot_is_immutable() {
+    let store = Arc::new(ShardedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "immutable");
 
-    let mut data = BTreeMap::new();
-    data.insert(
-        key.clone(),
-        VersionedValue::new(Value::Int(100), strata_core::Version::seq(1)),
-    );
+    store
+        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .unwrap();
 
-    let snapshot = ClonedSnapshotView::new(1, data.clone());
+    // Capture current version as our "snapshot"
+    let snapshot_version = store.version();
 
-    // Modify original data (simulating concurrent write)
-    data.insert(
-        key.clone(),
-        VersionedValue::new(Value::Int(200), strata_core::Version::seq(2)),
-    );
+    // Write a new version (simulating concurrent write)
+    store
+        .put_with_version_mode(key.clone(), Value::Int(200), 2, None, WriteMode::Append)
+        .unwrap();
 
-    // Snapshot should still see original value
-    let result = SnapshotView::get(&snapshot, &key).unwrap();
+    // Reading at snapshot version should still see original value
+    let result = store.get_versioned(&key, snapshot_version).unwrap();
     assert_eq!(result.unwrap().value, Value::Int(100));
 }
 
 #[test]
 fn snapshot_version_reflects_creation_time() {
-    let snapshot = ClonedSnapshotView::new(42, BTreeMap::new());
-    assert_eq!(snapshot.version(), 42);
+    let store = Arc::new(ShardedStore::new());
+    store.set_version(42);
+    assert_eq!(store.version(), 42);
 }
 
 // ============================================================================
@@ -79,21 +73,20 @@ fn snapshot_version_reflects_creation_time() {
 
 #[test]
 fn repeated_reads_return_same_value() {
+    let store = Arc::new(ShardedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "repeat");
 
-    let mut data = BTreeMap::new();
-    data.insert(
-        key.clone(),
-        VersionedValue::new(Value::Int(42), strata_core::Version::seq(1)),
-    );
+    store
+        .put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append)
+        .unwrap();
 
-    let snapshot = ClonedSnapshotView::new(1, data);
+    let version = store.version();
 
-    // Read multiple times
-    let read1 = SnapshotView::get(&snapshot, &key).unwrap();
-    let read2 = SnapshotView::get(&snapshot, &key).unwrap();
-    let read3 = SnapshotView::get(&snapshot, &key).unwrap();
+    // Read multiple times at the same version
+    let read1 = store.get_versioned(&key, version).unwrap();
+    let read2 = store.get_versioned(&key, version).unwrap();
+    let read3 = store.get_versioned(&key, version).unwrap();
 
     assert_eq!(read1, read2);
     assert_eq!(read2, read3);
@@ -101,13 +94,12 @@ fn repeated_reads_return_same_value() {
 
 #[test]
 fn missing_key_consistently_returns_none() {
+    let store = Arc::new(ShardedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "missing");
 
-    let snapshot = ClonedSnapshotView::new(1, BTreeMap::new());
-
-    let read1 = SnapshotView::get(&snapshot, &key).unwrap();
-    let read2 = SnapshotView::get(&snapshot, &key).unwrap();
+    let read1 = store.get_versioned(&key, 1).unwrap();
+    let read2 = store.get_versioned(&key, 1).unwrap();
 
     assert!(read1.is_none());
     assert!(read2.is_none());
@@ -171,42 +163,38 @@ fn write_then_delete_sees_delete() {
 
 #[test]
 fn snapshot_scan_prefix_returns_matching_keys() {
+    let store = Arc::new(ShardedStore::new());
     let branch_id = BranchId::new();
     let ns = Arc::new(Namespace::for_branch(branch_id));
 
-    let mut data = BTreeMap::new();
     for i in 0..10 {
         let key = Key::new_kv(ns.clone(), &format!("prefix_{}", i));
-        data.insert(
-            key,
-            VersionedValue::new(Value::Int(i), strata_core::Version::seq(1)),
-        );
+        store
+            .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append)
+            .unwrap();
     }
 
     // Add some non-matching keys
     let other_key = Key::new_kv(ns.clone(), "other_key");
-    data.insert(
-        other_key,
-        VersionedValue::new(Value::Int(999), strata_core::Version::seq(1)),
-    );
+    store
+        .put_with_version_mode(other_key, Value::Int(999), 11, None, WriteMode::Append)
+        .unwrap();
 
-    let snapshot = ClonedSnapshotView::new(1, data);
-
+    let version = store.version();
     let prefix = Key::new_kv(ns.clone(), "prefix_");
-    let results = SnapshotView::scan_prefix(&snapshot, &prefix).unwrap();
+    let results = Storage::scan_prefix(&*store, &prefix, version).unwrap();
 
     assert_eq!(results.len(), 10);
 }
 
 #[test]
 fn snapshot_scan_empty_prefix() {
+    let store = Arc::new(ShardedStore::new());
     let branch_id = BranchId::new();
     let ns = Arc::new(Namespace::for_branch(branch_id));
 
-    let snapshot = ClonedSnapshotView::new(1, BTreeMap::new());
-
     let prefix = Key::new_kv(ns.clone(), "anything");
-    let results = SnapshotView::scan_prefix(&snapshot, &prefix).unwrap();
+    let results = Storage::scan_prefix(&*store, &prefix, 1).unwrap();
 
     assert!(results.is_empty());
 }
@@ -216,50 +204,47 @@ fn snapshot_scan_empty_prefix() {
 // ============================================================================
 
 #[test]
-fn snapshot_can_be_shared_via_arc() {
+fn store_can_be_shared_via_arc() {
+    let store = Arc::new(ShardedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "shared");
 
-    let mut data = BTreeMap::new();
-    data.insert(
-        key.clone(),
-        VersionedValue::new(Value::Int(42), strata_core::Version::seq(1)),
-    );
+    store
+        .put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append)
+        .unwrap();
 
-    let snapshot = ClonedSnapshotView::new(1, data);
-    let snapshot = Arc::new(snapshot);
+    let version = store.version();
 
-    let result = SnapshotView::get(&*snapshot, &key).unwrap();
+    // Share via Arc clone
+    let store2 = Arc::clone(&store);
+    let result = store2.get_versioned(&key, version).unwrap();
     assert_eq!(result.unwrap().value, Value::Int(42));
 }
 
 #[test]
-fn cloned_snapshots_are_independent() {
+fn versioned_reads_are_independent() {
+    let store = Arc::new(ShardedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "independent");
 
-    let mut data = BTreeMap::new();
-    data.insert(
-        key.clone(),
-        VersionedValue::new(Value::Int(42), strata_core::Version::seq(1)),
-    );
+    store
+        .put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append)
+        .unwrap();
+    let version1 = store.version();
 
-    let snapshot1 = ClonedSnapshotView::new(1, data.clone());
+    // Write a new version
+    store
+        .put_with_version_mode(key.clone(), Value::Int(100), 2, None, WriteMode::Append)
+        .unwrap();
+    let version2 = store.version();
 
-    // Modify and create another snapshot
-    data.insert(
-        key.clone(),
-        VersionedValue::new(Value::Int(100), strata_core::Version::seq(2)),
-    );
-    let snapshot2 = ClonedSnapshotView::new(2, data);
-
-    // Both snapshots retain their values
+    // Both versions retain their values
     assert_eq!(
-        SnapshotView::get(&snapshot1, &key).unwrap().unwrap().value,
+        store.get_versioned(&key, version1).unwrap().unwrap().value,
         Value::Int(42)
     );
     assert_eq!(
-        SnapshotView::get(&snapshot2, &key).unwrap().unwrap().value,
+        store.get_versioned(&key, version2).unwrap().unwrap().value,
         Value::Int(100)
     );
 }
@@ -269,36 +254,35 @@ fn cloned_snapshots_are_independent() {
 // ============================================================================
 
 #[test]
-fn snapshot_is_send_and_sync() {
+fn sharded_store_is_send_and_sync() {
     fn assert_send<T: Send>() {}
     fn assert_sync<T: Sync>() {}
 
-    assert_send::<ClonedSnapshotView>();
-    assert_sync::<ClonedSnapshotView>();
+    assert_send::<ShardedStore>();
+    assert_sync::<ShardedStore>();
 }
 
 #[test]
 fn snapshot_concurrent_reads() {
     use std::thread;
 
+    let store = Arc::new(ShardedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "concurrent");
 
-    let mut data = BTreeMap::new();
-    data.insert(
-        key.clone(),
-        VersionedValue::new(Value::Int(42), strata_core::Version::seq(1)),
-    );
+    store
+        .put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append)
+        .unwrap();
 
-    let snapshot = Arc::new(ClonedSnapshotView::new(1, data));
+    let version = store.version();
 
     let handles: Vec<_> = (0..4)
         .map(|_| {
-            let snapshot = Arc::clone(&snapshot);
+            let store = Arc::clone(&store);
             let key = key.clone();
             thread::spawn(move || {
                 for _ in 0..1000 {
-                    let result = SnapshotView::get(&*snapshot, &key).unwrap();
+                    let result = store.get_versioned(&key, version).unwrap();
                     assert_eq!(result.unwrap().value, Value::Int(42));
                 }
             })
@@ -311,32 +295,110 @@ fn snapshot_concurrent_reads() {
 }
 
 // ============================================================================
-// Empty Snapshot
+// Empty Store
 // ============================================================================
 
 #[test]
-fn empty_snapshot_creation() {
-    let snapshot = ClonedSnapshotView::empty(0);
-    assert_eq!(snapshot.version(), 0);
+fn empty_store_creation() {
+    let store = ShardedStore::new();
+    assert_eq!(store.version(), 0);
 }
 
 #[test]
-fn empty_snapshot_get_returns_none() {
+fn empty_store_get_returns_none() {
+    let store = ShardedStore::new();
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "any");
 
-    let snapshot = ClonedSnapshotView::empty(0);
-    let result = SnapshotView::get(&snapshot, &key).unwrap();
+    let result = store.get_versioned(&key, 0).unwrap();
     assert!(result.is_none());
 }
 
 #[test]
-fn empty_snapshot_scan_returns_empty() {
+fn empty_store_scan_returns_empty() {
+    let store = ShardedStore::new();
     let branch_id = BranchId::new();
     let ns = Arc::new(Namespace::for_branch(branch_id));
     let prefix = Key::new_kv(ns, "any");
 
-    let snapshot = ClonedSnapshotView::empty(0);
-    let results = SnapshotView::scan_prefix(&snapshot, &prefix).unwrap();
+    let results = Storage::scan_prefix(&store, &prefix, 0).unwrap();
     assert!(results.is_empty());
+}
+
+// ============================================================================
+// TransactionContext Snapshot Isolation
+// ============================================================================
+
+/// Core MVCC invariant: a transaction must not see writes that occur after
+/// it began, even when reading the same key multiple times through the
+/// TransactionContext API.
+#[test]
+fn transaction_context_ignores_concurrent_store_writes() {
+    let store = Arc::new(ShardedStore::new());
+    let branch_id = BranchId::new();
+    let key = create_test_key(branch_id, "isolation");
+
+    // Write initial value at version 1
+    store
+        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .unwrap();
+
+    // Begin transaction — captures start_version
+    let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+    assert_eq!(txn.start_version, 1);
+
+    // First read through transaction sees initial value
+    let read1 = txn.get(&key).unwrap();
+    assert_eq!(read1, Some(Value::Int(100)));
+
+    // Concurrent write to the SAME key at a higher version
+    store
+        .put_with_version_mode(key.clone(), Value::Int(999), 2, None, WriteMode::Append)
+        .unwrap();
+
+    // Second read through transaction MUST still see the old value
+    let read2 = txn.get(&key).unwrap();
+    assert_eq!(
+        read2,
+        Some(Value::Int(100)),
+        "Transaction must not see writes after start_version"
+    );
+}
+
+/// Verify that scan_prefix through TransactionContext also respects the
+/// snapshot version boundary.
+#[test]
+fn transaction_context_scan_ignores_concurrent_writes() {
+    let store = Arc::new(ShardedStore::new());
+    let branch_id = BranchId::new();
+    let ns = Arc::new(Namespace::for_branch(branch_id));
+
+    // Write two keys at version 1
+    let key_a = Key::new_kv(ns.clone(), "scan_a");
+    let key_b = Key::new_kv(ns.clone(), "scan_b");
+    store
+        .put_with_version_mode(key_a.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .unwrap();
+    store
+        .put_with_version_mode(key_b.clone(), Value::Int(2), 1, None, WriteMode::Append)
+        .unwrap();
+
+    // Begin transaction
+    let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+
+    // Concurrent write: add a third key at version 2
+    let key_c = Key::new_kv(ns.clone(), "scan_c");
+    store
+        .put_with_version_mode(key_c, Value::Int(3), 2, None, WriteMode::Append)
+        .unwrap();
+
+    // Scan through transaction should only see keys at version <= 1
+    let prefix = Key::new_kv(ns, "scan_");
+    let results = txn.scan_prefix(&prefix).unwrap();
+
+    assert_eq!(
+        results.len(),
+        2,
+        "Scan must not include key written after start_version"
+    );
 }

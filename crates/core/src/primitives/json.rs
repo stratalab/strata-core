@@ -37,6 +37,10 @@ pub const MAX_DOCUMENT_SIZE: usize = 16 * 1024 * 1024; // 16 MB
 ///
 /// Prevents stack overflow during recursive operations like serialization,
 /// deserialization, and path traversal.
+///
+/// This is intentionally lower than `Limits::default().max_nesting_depth` (128)
+/// because `serde_json`'s default recursion limit is 128. Staying at 100
+/// ensures JSON strings at the limit can still be parsed by serde_json.
 pub const MAX_NESTING_DEPTH: usize = 100;
 
 /// Maximum path length in segments (256 segments)

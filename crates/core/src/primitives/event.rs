@@ -2,6 +2,7 @@
 //!
 //! These types define the structure of events in the append-only event log.
 
+use crate::contract::Timestamp;
 use crate::value::Value;
 use serde::{Deserialize, Serialize};
 
@@ -20,8 +21,8 @@ pub struct Event {
     pub event_type: String,
     /// Event payload (arbitrary data)
     pub payload: Value,
-    /// Timestamp when event was appended (microseconds since epoch)
-    pub timestamp: u64,
+    /// Timestamp when event was appended
+    pub timestamp: Timestamp,
     /// Hash of previous event (for chaining)
     pub prev_hash: [u8; 32],
     /// Hash of this event
@@ -75,7 +76,7 @@ mod tests {
             sequence: 1,
             event_type: "user.created".to_string(),
             payload: Value::Int(42),
-            timestamp: 1_000_000,
+            timestamp: Timestamp::from(1_000_000),
             prev_hash: [0u8; 32],
             hash: [1u8; 32],
         };
@@ -83,7 +84,7 @@ mod tests {
         assert_eq!(event.sequence, 1);
         assert_eq!(event.event_type, "user.created");
         assert_eq!(event.payload, Value::Int(42));
-        assert_eq!(event.timestamp, 1_000_000);
+        assert_eq!(event.timestamp, Timestamp::from(1_000_000));
         assert_eq!(event.prev_hash, [0u8; 32]);
         assert_eq!(event.hash, [1u8; 32]);
     }
@@ -94,7 +95,7 @@ mod tests {
             sequence: 1,
             event_type: "test".to_string(),
             payload: Value::Null,
-            timestamp: 100,
+            timestamp: Timestamp::from(100),
             prev_hash: [0u8; 32],
             hash: [1u8; 32],
         };
@@ -108,7 +109,7 @@ mod tests {
             sequence: 1,
             event_type: "test".to_string(),
             payload: Value::Null,
-            timestamp: 100,
+            timestamp: Timestamp::from(100),
             prev_hash: [0u8; 32],
             hash: [1u8; 32],
         };
@@ -123,7 +124,7 @@ mod tests {
             sequence: 1,
             event_type: "test".to_string(),
             payload: Value::String("data".to_string()),
-            timestamp: 100,
+            timestamp: Timestamp::from(100),
             prev_hash: [0u8; 32],
             hash: [1u8; 32],
         };
@@ -138,7 +139,7 @@ mod tests {
             sequence: 42,
             event_type: "order.placed".to_string(),
             payload: Value::String("order-123".to_string()),
-            timestamp: 1_700_000_000,
+            timestamp: Timestamp::from(1_700_000_000),
             prev_hash: [0xABu8; 32],
             hash: [0xCDu8; 32],
         };
@@ -179,7 +180,7 @@ mod tests {
             sequence: 0,
             event_type: "".to_string(),
             payload: Value::Null,
-            timestamp: 0,
+            timestamp: Timestamp::from(0),
             prev_hash: [0u8; 32],
             hash: [0u8; 32],
         };
@@ -192,7 +193,7 @@ mod tests {
             sequence: 1,
             event_type: "test".to_string(),
             payload: Value::Null,
-            timestamp: 100,
+            timestamp: Timestamp::from(100),
             prev_hash: [0u8; 32],
             hash: [1u8; 32],
         };
@@ -205,7 +206,7 @@ mod tests {
             sequence: 1,
             event_type: "t".to_string(),
             payload: Value::Null,
-            timestamp: 100,
+            timestamp: Timestamp::from(100),
             prev_hash: [0u8; 32],
             hash: [1u8; 32],
         };
@@ -220,7 +221,7 @@ mod tests {
             sequence: 1,
             event_type: "t".to_string(),
             payload: Value::Int(1),
-            timestamp: 100,
+            timestamp: Timestamp::from(100),
             prev_hash: [0u8; 32],
             hash: [1u8; 32],
         };
@@ -235,12 +236,12 @@ mod tests {
             sequence: 1,
             event_type: "t".to_string(),
             payload: Value::Null,
-            timestamp: 100,
+            timestamp: Timestamp::from(100),
             prev_hash: [0u8; 32],
             hash: [1u8; 32],
         };
         let mut e2 = e1.clone();
-        e2.timestamp = 200;
+        e2.timestamp = Timestamp::from(200);
         assert_ne!(e1, e2);
     }
 
@@ -250,7 +251,7 @@ mod tests {
             sequence: u64::MAX,
             event_type: "overflow".to_string(),
             payload: Value::Null,
-            timestamp: 0,
+            timestamp: Timestamp::from(0),
             prev_hash: [0u8; 32],
             hash: [0xFFu8; 32],
         };

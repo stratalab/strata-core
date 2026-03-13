@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use strata_core::traits::{SnapshotView, Storage};
+use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
@@ -31,7 +31,10 @@ fn stress_concurrent_writers_readers() {
     // Pre-populate
     for i in 0..100 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
-        Storage::put(&*store, key, Value::Int(i), None).unwrap();
+        let version = store.next_version();
+        store
+            .put_with_version_mode(key, Value::Int(i), version, None, WriteMode::Append)
+            .unwrap();
     }
 
     // Spawn 4 writers
@@ -45,7 +48,14 @@ fn stress_concurrent_writers_readers() {
                 while !stop.load(Ordering::Relaxed) {
                     for i in 0..100 {
                         let key = create_test_key(branch_id, &format!("key_{}", i));
-                        let _ = Storage::put(&*store, key, Value::Int(t * 10000 + counter), None);
+                        let version = store.next_version();
+                        let _ = store.put_with_version_mode(
+                            key,
+                            Value::Int(t * 10000 + counter),
+                            version,
+                            None,
+                            WriteMode::Append,
+                        );
                         writes.fetch_add(1, Ordering::Relaxed);
                     }
                     counter += 1;
@@ -67,7 +77,7 @@ fn stress_concurrent_writers_readers() {
                 while !stop.load(Ordering::Relaxed) {
                     for i in 0..100 {
                         let key = create_test_key(branch_id, &format!("key_{}", i));
-                        let _ = Storage::get(&*store, &key);
+                        let _ = store.get_versioned(&key, u64::MAX);
                         reads.fetch_add(1, Ordering::Relaxed);
                     }
                     if reads.load(Ordering::Relaxed) > 500_000 {
@@ -107,27 +117,30 @@ fn stress_rapid_snapshot_creation() {
     // Populate
     for i in 0..1000 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
-        Storage::put(&*store, key, Value::Int(i), None).unwrap();
+        let version = store.next_version();
+        store
+            .put_with_version_mode(key, Value::Int(i), version, None, WriteMode::Append)
+            .unwrap();
     }
 
     let start = Instant::now();
-    let mut snapshots = Vec::new();
+    let mut versions = Vec::new();
 
     for _ in 0..100_000 {
-        snapshots.push(store.snapshot());
+        versions.push(store.version());
     }
 
     let elapsed = start.elapsed();
     println!(
-        "100K snapshots in {:?} ({:.0} snapshots/sec)",
+        "100K version captures in {:?} ({:.0} captures/sec)",
         elapsed,
         100_000.0 / elapsed.as_secs_f64()
     );
 
-    // Verify snapshots work
-    for snapshot in snapshots.iter().take(100) {
+    // Verify versioned reads work
+    for version in versions.iter().take(100) {
         let key = create_test_key(branch_id, "key_0");
-        let result = SnapshotView::get(snapshot, &key).unwrap();
+        let result = store.get_versioned(&key, *version).unwrap();
         assert_eq!(result.unwrap().value, Value::Int(0));
     }
 }
@@ -144,7 +157,15 @@ fn stress_version_chain_growth() {
 
     // Create 100K versions of the same key
     for i in 0..100_000i64 {
-        Storage::put(&store, key.clone(), Value::Int(i), None).unwrap();
+        store
+            .put_with_version_mode(
+                key.clone(),
+                Value::Int(i),
+                (i + 1) as u64,
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
     }
 
     let write_elapsed = start.elapsed();
@@ -152,7 +173,7 @@ fn stress_version_chain_growth() {
     // Read latest
     let read_start = Instant::now();
     for _ in 0..10_000 {
-        let _ = Storage::get(&store, &key);
+        let _ = store.get_versioned(&key, u64::MAX);
     }
     let read_elapsed = read_start.elapsed();
 
@@ -177,7 +198,9 @@ fn stress_ttl_expiration_cleanup() {
     let ttl = Some(Duration::from_millis(100));
     for i in 0..10_000 {
         let key = create_test_key(branch_id, &format!("ttl_key_{}", i));
-        Storage::put(&store, key, Value::Int(i), ttl).unwrap();
+        store
+            .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, ttl, WriteMode::Append)
+            .unwrap();
     }
 
     // Wait for expiration
@@ -187,7 +210,7 @@ fn stress_ttl_expiration_cleanup() {
     let mut expired_count = 0;
     for i in 0..10_000 {
         let key = create_test_key(branch_id, &format!("ttl_key_{}", i));
-        if Storage::get(&store, &key).unwrap().is_none() {
+        if store.get_versioned(&key, u64::MAX).unwrap().is_none() {
             expired_count += 1;
         }
     }
@@ -213,7 +236,10 @@ fn stress_many_branches_concurrent() {
                 let branch_id = BranchId::new();
                 for i in 0..keys_per_branch {
                     let key = create_test_key(branch_id, &format!("key_{}", i));
-                    Storage::put(&*store, key, Value::Int(i), None).unwrap();
+                    let version = store.next_version();
+                    store
+                        .put_with_version_mode(key, Value::Int(i), version, None, WriteMode::Append)
+                        .unwrap();
                 }
                 branch_id
             })
@@ -229,7 +255,7 @@ fn stress_many_branches_concurrent() {
     for branch_id in branch_ids {
         for i in 0..keys_per_branch {
             let key = create_test_key(branch_id, &format!("key_{}", i));
-            let val = Storage::get(&*store, &key).unwrap();
+            let val = store.get_versioned(&key, u64::MAX).unwrap();
             assert_eq!(val.unwrap().value, Value::Int(i));
         }
     }
@@ -251,11 +277,21 @@ fn stress_sustained_throughput() {
     let duration = Duration::from_secs(5);
     let start = Instant::now();
     let mut ops = 0u64;
+    let mut version = 1u64;
 
     while start.elapsed() < duration {
         let key = create_test_key(branch_id, &format!("key_{}", ops % 1000));
-        Storage::put(&store, key.clone(), Value::Int(ops as i64), None).unwrap();
-        let _ = Storage::get(&store, &key);
+        store
+            .put_with_version_mode(
+                key.clone(),
+                Value::Int(ops as i64),
+                version,
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
+        version += 1;
+        let _ = store.get_versioned(&key, u64::MAX);
         ops += 2; // put + get
     }
 

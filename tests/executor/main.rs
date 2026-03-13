@@ -13,7 +13,6 @@ mod adversarial;
 mod branch_invariants;
 mod command_dispatch;
 mod error_handling;
-mod retention_contract;
 mod serialization;
 mod session_transactions;
 mod strata_api;

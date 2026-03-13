@@ -12,13 +12,7 @@ use strata_engine::Database;
 use tempfile::TempDir;
 
 fn create_ns(branch_id: BranchId) -> Arc<Namespace> {
-    Arc::new(Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
-        branch_id,
-        "default".to_string(),
-    ))
+    Arc::new(Namespace::new(branch_id, "default".to_string()))
 }
 
 // ============================================================================

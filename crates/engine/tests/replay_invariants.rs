@@ -21,13 +21,7 @@ use strata_engine::{diff_views, ReadOnlyView};
 
 /// Helper to create a test namespace
 fn test_namespace(branch_id: BranchId) -> Arc<Namespace> {
-    Arc::new(Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
-        branch_id,
-        "default".to_string(),
-    ))
+    Arc::new(Namespace::new(branch_id, "default".to_string()))
 }
 
 /// Helper to build a ReadOnlyView with specified KV entries

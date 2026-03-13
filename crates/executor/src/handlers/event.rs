@@ -66,7 +66,7 @@ pub fn event_get(
     let result = event.map(|e| VersionedValue {
         value: e.value.payload,
         version: bridge::extract_version(&e.version),
-        timestamp: strata_core::Timestamp::from_micros(e.value.timestamp).into(),
+        timestamp: e.value.timestamp.into(),
     });
 
     Ok(Output::MaybeVersioned(result))
@@ -88,11 +88,11 @@ pub fn event_get_at(
     let event = convert_result(p.event.get(&core_branch_id, &space, sequence))?;
 
     let result = event.and_then(|e| {
-        if e.value.timestamp <= as_of_ts {
+        if e.value.timestamp.as_micros() <= as_of_ts {
             Some(VersionedValue {
                 value: e.value.payload,
                 version: bridge::extract_version(&e.version),
-                timestamp: strata_core::Timestamp::from_micros(e.value.timestamp).into(),
+                timestamp: e.value.timestamp.into(),
             })
         } else {
             None // Event was appended after as_of_ts
@@ -125,7 +125,7 @@ pub fn event_get_by_type(
         .map(|e| VersionedValue {
             value: e.value.payload.clone(),
             version: bridge::extract_version(&e.version),
-            timestamp: strata_core::Timestamp::from_micros(e.value.timestamp).into(),
+            timestamp: e.value.timestamp.into(),
         })
         .collect();
 
@@ -152,11 +152,11 @@ pub fn event_get_by_type_at(
     // Filter events by timestamp
     let versioned: Vec<VersionedValue> = events
         .into_iter()
-        .filter(|e| e.value.timestamp <= as_of_ts)
+        .filter(|e| e.value.timestamp.as_micros() <= as_of_ts)
         .map(|e| VersionedValue {
             value: e.value.payload.clone(),
             version: bridge::extract_version(&e.version),
-            timestamp: strata_core::Timestamp::from_micros(e.value.timestamp).into(),
+            timestamp: e.value.timestamp.into(),
         })
         .collect();
 

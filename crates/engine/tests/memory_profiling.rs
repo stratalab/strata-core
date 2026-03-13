@@ -1,6 +1,6 @@
 //! Memory Usage Profiling Tests
 //!
-//! Documents ClonedSnapshotView memory overhead
+//! Documents snapshot isolation memory characteristics
 //! and TransactionContext footprint.
 
 use std::sync::Arc;
@@ -10,13 +10,7 @@ use strata_engine::Database;
 use tempfile::TempDir;
 
 fn create_ns(branch_id: BranchId) -> Arc<Namespace> {
-    Arc::new(Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
-        branch_id,
-        "default".to_string(),
-    ))
+    Arc::new(Namespace::new(branch_id, "default".to_string()))
 }
 
 /// Test: Memory grows with read-set size
@@ -167,10 +161,10 @@ fn test_large_value_memory() {
 fn document_memory_characteristics() {
     println!("\n=== Memory Characteristics ===\n");
 
-    println!("ClonedSnapshotView:");
-    println!("  - Creates full clone of BTreeMap at transaction start");
-    println!("  - Memory: O(data_size) per active transaction");
-    println!("  - Time: O(data_size) per snapshot creation");
+    println!("Snapshot Isolation (via ShardedStore + start_version):");
+    println!("  - O(1) snapshot creation (capture version + Arc clone)");
+    println!("  - Memory: O(1) per active transaction (no data cloning)");
+    println!("  - Version-bounded reads from live storage");
     println!();
 
     println!("TransactionContext:");
@@ -181,19 +175,13 @@ fn document_memory_characteristics() {
     println!();
 
     println!("Concurrent Transactions:");
-    println!("  - N concurrent transactions = N snapshots");
-    println!("  - Total memory: O(N * data_size)");
+    println!("  - N concurrent transactions share same store");
+    println!("  - Total memory: O(N * read_set_size)");
     println!();
 
     println!("Recommended Limits:");
     println!("  - Data size: < 100MB per BranchId");
     println!("  - Concurrent transactions: < 100 per BranchId");
     println!("  - Transaction duration: < 1 second");
-    println!();
-
-    println!("Future Optimization:");
-    println!("  - LazySnapshotView: O(1) snapshot creation");
-    println!("  - Version-bounded reads from live storage");
-    println!("  - No cloning overhead");
     println!();
 }

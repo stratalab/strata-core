@@ -38,9 +38,6 @@ fn ensure_recovery_registered() {
 
 fn create_ns(branch_id: BranchId) -> Namespace {
     Namespace::new(
-        "tenant".to_string(),
-        "app".to_string(),
-        "agent".to_string(),
         branch_id,
         "default".to_string(),
     )
