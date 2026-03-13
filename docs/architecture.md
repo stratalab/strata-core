@@ -825,7 +825,6 @@ that read the same keys will see version changes and be aborted.
 | `ReadWriteConflict` | Key version changed since read |
 | `CASConflict` | Expected version doesn't match current |
 | `JsonDocConflict` | JSON document version changed |
-| `JsonPathReadWriteConflict` | Overlapping JSON paths |
 | `JsonPathWriteWriteConflict` | Overlapping JSON write paths |
 
 ### 5.4 Write Skew

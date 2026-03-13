@@ -89,20 +89,6 @@ pub enum ConflictType {
         current_version: u64,
     },
 
-    /// JSON path read-write conflict: read and write paths overlap
-    ///
-    /// From M5 Epic 31: Region-based conflict detection.
-    /// Conflict occurs when a read at path X overlaps with a write at path Y.
-    /// Overlap means X is ancestor, descendant, or equal to Y.
-    JsonPathReadWriteConflict {
-        /// The key of the JSON document
-        key: Key,
-        /// The path that was read
-        read_path: strata_core::primitives::json::JsonPath,
-        /// The path that was written (overlaps with read_path)
-        write_path: strata_core::primitives::json::JsonPath,
-    },
-
     /// JSON path write-write conflict: two writes to overlapping paths
     ///
     /// From M5 Epic 31: Region-based conflict detection.
@@ -328,34 +314,22 @@ pub fn validate_json_set<S: Storage>(
 /// modify the same document.
 ///
 /// # Arguments
-/// * `json_reads` - JSON paths that were read during the transaction
 /// * `json_writes` - JSON patches to be applied
 ///
 /// # Returns
 /// ValidationResult with any path conflicts found
 pub fn validate_json_paths(
-    json_reads: &[crate::transaction::JsonPathRead],
     json_writes: &[crate::transaction::JsonPatchEntry],
 ) -> ValidationResult {
-    use crate::conflict::{check_write_write_conflicts, ConflictResult};
+    use crate::conflict::check_write_write_conflicts;
 
     let mut result = ValidationResult::ok();
 
     // Check for write-write conflicts (overlapping write paths)
     // This is a semantic error - the order of writes matters and the result is undefined
-    for conflict in check_write_write_conflicts(json_writes) {
-        if let ConflictResult::WriteWriteConflict { key, path1, path2 } = conflict {
-            result
-                .conflicts
-                .push(ConflictType::JsonPathWriteWriteConflict { key, path1, path2 });
-        }
-    }
-
-    // Note: We intentionally do NOT check read-write path conflicts here.
-    // Reading a path and then writing to it (or a parent/child path) is valid
-    // behavior within a single transaction. The document-level version check
-    // handles concurrent modification by other transactions.
-    let _ = json_reads; // Acknowledge the parameter
+    result
+        .conflicts
+        .extend(check_write_write_conflicts(json_writes));
 
     result
 }
@@ -412,7 +386,7 @@ pub fn validate_transaction<S: Storage>(
     result.merge(validate_json_set(txn.json_snapshot_versions(), store)?);
 
     // 4. Validate JSON paths (detects overlapping writes within transaction)
-    result.merge(validate_json_paths(txn.json_reads(), txn.json_writes()));
+    result.merge(validate_json_paths(txn.json_writes()));
 
     Ok(result)
 }

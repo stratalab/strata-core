@@ -8,7 +8,7 @@
 | executor | `Error` | 30 | Client-facing error. All handler/session operations return `Result<T>`. |
 | engine | `VectorError` | 16 | Vector-specific errors. Converted to `StrataError` via `From` impl. |
 | concurrency | `CommitError` | 4 | Transaction commit failures. Converted to `StrataError` via `From` impl. |
-| concurrency | `JsonConflictError` | 3 | JSON-level conflict details. Internal to `ValidationResult`, not exposed. |
+| concurrency | *(removed — conflicts use `ConflictType` directly)* | — | — |
 | concurrency | `PayloadError` | 1 | MessagePack deserialization. Internal, not exposed. |
 | durability | `BranchBundleError` | 14 | Bundle import/export errors. Converted to `StrataError::Storage` at engine boundary. |
 | durability | `RecoveryError` | 7+ | Database recovery errors. Not converted — fatal at startup. |

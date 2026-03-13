@@ -1053,13 +1053,6 @@ impl TransactionContext {
             || self.json_snapshot_versions.is_some()
     }
 
-    /// Get JSON path reads (immutable)
-    ///
-    /// Returns an empty slice if no JSON reads have been recorded.
-    pub fn json_reads(&self) -> &[JsonPathRead] {
-        self.json_reads.as_deref().unwrap_or(&[])
-    }
-
     /// Get JSON patch writes (immutable)
     ///
     /// Returns an empty slice if no JSON writes have been recorded.
