@@ -1084,9 +1084,7 @@ impl Database {
         let watermark = self.wal_watermark.load(std::sync::atomic::Ordering::SeqCst);
 
         // Read all WAL records after our watermark
-        let reader = strata_durability::wal::WalReader::new(Box::new(
-            strata_durability::codec::IdentityCodec,
-        ));
+        let reader = strata_durability::wal::WalReader::new();
         let records = reader
             .read_all_after_watermark(&self.wal_dir, watermark)
             .map_err(|e| StrataError::storage(format!("WAL refresh read failed: {}", e)))?;

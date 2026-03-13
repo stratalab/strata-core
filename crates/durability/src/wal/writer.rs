@@ -524,7 +524,7 @@ impl WalWriter {
     /// Returns `Some(meta)` on success, or `Some(empty_meta)` if the segment
     /// cannot be read (best-effort).
     fn rebuild_meta_for_segment(wal_dir: &Path, segment_number: u64) -> Option<SegmentMeta> {
-        let reader = WalReader::new(Box::new(crate::codec::IdentityCodec));
+        let reader = WalReader::new();
         match reader.read_segment(wal_dir, segment_number) {
             Ok((records, _, _, _)) => {
                 let mut meta = SegmentMeta::new_empty(segment_number);
@@ -857,7 +857,7 @@ mod tests {
         }
 
         // Read all records — should see all 10 in order
-        let reader = crate::wal::WalReader::new(Box::new(IdentityCodec));
+        let reader = crate::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
         let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id).collect();
         assert_eq!(ids, (1..=10).collect::<Vec<_>>());
@@ -883,7 +883,7 @@ mod tests {
         writer_a.append_and_flush(&make_record(3)).unwrap();
 
         // All 3 records should be readable
-        let reader = crate::wal::WalReader::new(Box::new(IdentityCodec));
+        let reader = crate::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
         let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id).collect();
         assert_eq!(ids, vec![1, 2, 3]);
@@ -942,7 +942,7 @@ mod tests {
             .unwrap();
 
         // All records should be readable
-        let reader = crate::wal::WalReader::new(Box::new(IdentityCodec));
+        let reader = crate::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
         assert!(
             result.records.len() >= 6,
@@ -972,7 +972,7 @@ mod tests {
         writer_a.reopen_if_needed().unwrap();
         writer_a.append_and_flush(&make_record(3)).unwrap();
 
-        let reader = crate::wal::WalReader::new(Box::new(IdentityCodec));
+        let reader = crate::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
         let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id).collect();
         assert_eq!(ids, vec![1, 2, 3]);
@@ -1028,7 +1028,7 @@ mod tests {
         writer.flush().unwrap();
 
         // Read back via WalReader
-        let reader = crate::wal::WalReader::new(Box::new(IdentityCodec));
+        let reader = crate::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
         assert_eq!(result.records.len(), 1);
         assert_eq!(result.records[0].txn_id, 42);
@@ -1059,7 +1059,7 @@ mod tests {
         writer2.flush().unwrap();
 
         // Read back both and compare
-        let reader = crate::wal::WalReader::new(Box::new(IdentityCodec));
+        let reader = crate::wal::WalReader::new();
         let result1 = reader.read_all(&wal_dir1).unwrap();
         let result2 = reader.read_all(&wal_dir2).unwrap();
 
@@ -1106,7 +1106,7 @@ mod tests {
 
         // All records should be readable
         writer.flush().unwrap();
-        let reader = crate::wal::WalReader::new(Box::new(IdentityCodec));
+        let reader = crate::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
         assert_eq!(result.records.len(), 10);
         for (i, rec) in result.records.iter().enumerate() {
@@ -1175,7 +1175,7 @@ mod tests {
 
         writer.flush().unwrap();
 
-        let reader = crate::wal::WalReader::new(Box::new(IdentityCodec));
+        let reader = crate::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
         let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id).collect();
         assert_eq!(ids, vec![1, 2, 3]);

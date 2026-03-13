@@ -2,7 +2,6 @@
 //!
 //! The reader handles reading WAL records from segments for recovery.
 
-use crate::codec::StorageCodec;
 use crate::format::segment_meta::SegmentMeta;
 use crate::format::{WalRecord, WalRecordError, WalSegment};
 use std::io::Read;
@@ -16,19 +15,13 @@ const MAX_RECOVERY_SCAN_WINDOW: usize = 8 * 1_024 * 1_024; // 8 MB
 /// WAL reader for iterating over records in segments.
 ///
 /// The reader can read individual segments or scan all segments in order.
-pub struct WalReader {
-    /// Storage codec for decoding.
-    ///
-    /// Currently the codec is stored for future use when codec-aware
-    /// decoding is implemented. The identity codec passes through unchanged.
-    #[allow(dead_code)]
-    codec: Box<dyn StorageCodec>,
-}
+#[derive(Default)]
+pub struct WalReader;
 
 impl WalReader {
     /// Create a new WAL reader.
-    pub fn new(codec: Box<dyn StorageCodec>) -> Self {
-        WalReader { codec }
+    pub fn new() -> Self {
+        WalReader
     }
 
     /// Read all records from a single segment.
@@ -496,7 +489,7 @@ pub enum WalReaderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::IdentityCodec;
+    use crate::codec::{IdentityCodec, StorageCodec};
     use crate::wal::config::WalConfig;
     use crate::wal::writer::WalWriter;
     use crate::wal::DurabilityMode;
@@ -532,7 +525,7 @@ mod tests {
         std::fs::create_dir_all(&wal_dir).unwrap();
         WalSegment::create(&wal_dir, 1, [1u8; 16]).unwrap();
 
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
         let (records, _, _, _) = reader.read_segment(&wal_dir, 1).unwrap();
 
         assert!(records.is_empty());
@@ -546,7 +539,7 @@ mod tests {
         let record = WalRecord::new(1, [1u8; 16], 12345, vec![1, 2, 3]);
         write_records(&wal_dir, &[record.clone()]);
 
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
         let (records, _, _, _) = reader.read_segment(&wal_dir, 1).unwrap();
 
         assert_eq!(records.len(), 1);
@@ -565,7 +558,7 @@ mod tests {
 
         write_records(&wal_dir, &records);
 
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
 
         assert_eq!(result.records.len(), 5);
@@ -585,7 +578,7 @@ mod tests {
 
         write_records(&wal_dir, &records);
 
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
         let filtered = reader.read_all_after_watermark(&wal_dir, 5).unwrap();
 
         assert_eq!(filtered.len(), 5);
@@ -603,7 +596,7 @@ mod tests {
         WalSegment::create(&wal_dir, 2, [1u8; 16]).unwrap();
         WalSegment::create(&wal_dir, 3, [1u8; 16]).unwrap();
 
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
         let segments = reader.list_segments(&wal_dir).unwrap();
 
         assert_eq!(segments, vec![1, 2, 3]);
@@ -620,7 +613,7 @@ mod tests {
 
         write_records(&wal_dir, &records);
 
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
         let max = reader.max_txn_id(&wal_dir).unwrap();
 
         assert_eq!(max, Some(10));
@@ -646,7 +639,7 @@ mod tests {
             .unwrap();
         file.write_all(&[0xFF; 10]).unwrap(); // Garbage bytes
 
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
 
         // Should still read valid records
@@ -759,7 +752,7 @@ mod tests {
         writer.close().unwrap();
 
         // There should be multiple segments with .meta files
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
         let segments_with_meta = reader.list_segments_with_metadata(&wal_dir).unwrap();
 
         // Multiple segments should exist (rotation happened)
@@ -786,7 +779,7 @@ mod tests {
         WalSegment::create(&wal_dir, 1, [1u8; 16]).unwrap();
         WalSegment::create(&wal_dir, 2, [1u8; 16]).unwrap();
 
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
         let result = reader.list_segments_with_metadata(&wal_dir).unwrap();
 
         assert_eq!(result.len(), 2);
@@ -803,7 +796,7 @@ mod tests {
         //   seg 1: ts 1000-2000, seg 2: ts 3000-4000, seg 3: ts 5000-6000
         create_segments_with_meta(&wal_dir);
 
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
 
         // Timestamp 1500 should match segment 1 (1000 <= 1500 <= 2000)
         let result = reader.find_segments_for_timestamp(&wal_dir, 1500).unwrap();
@@ -835,7 +828,7 @@ mod tests {
 
         create_segments_with_meta(&wal_dir);
 
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
 
         // Range covering all data
         let result = reader
@@ -869,7 +862,7 @@ mod tests {
 
         create_segments_with_meta(&wal_dir);
 
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
 
         // Before any timestamp: nothing
         let result = reader.find_segments_before_timestamp(&wal_dir, 0).unwrap();
@@ -905,7 +898,7 @@ mod tests {
         let meta_path = SegmentMeta::meta_path(&wal_dir, 2);
         std::fs::remove_file(&meta_path).unwrap();
 
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
 
         // Between segments: segment 2 (no meta) should be conservatively included
         let result = reader.find_segments_for_timestamp(&wal_dir, 2500).unwrap();
@@ -975,7 +968,7 @@ mod tests {
 
         // .meta should exist with correct values
         let seg_num = {
-            let reader = WalReader::new(make_codec());
+            let reader = WalReader::new();
             let segments = reader.list_segments(&wal_dir).unwrap();
             *segments.last().unwrap()
         };
@@ -1030,7 +1023,7 @@ mod tests {
         // 2 closed segments with .meta + 1 active without .meta
         create_segments_with_active(&wal_dir);
 
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
 
         // Verify precondition: segments 1,2 have .meta; segment 3 does not
         assert!(SegmentMeta::read_from_file(&wal_dir, 1).unwrap().is_some());
@@ -1077,7 +1070,7 @@ mod tests {
         let meta = SegmentMeta::read_from_file(&wal_dir, 1).unwrap().unwrap();
         assert_eq!(meta.max_txn_id, 2);
 
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
 
         // Watermark=2: segment 1 (max_txn_id=2 <= 2) should be SKIPPED via .meta.
         // If it were read, the corrupted data would cause an error or wrong results.
@@ -1112,7 +1105,7 @@ mod tests {
 
         create_segments_with_active(&wal_dir);
 
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
 
         // Watermark=3: segment 2 max_txn_id=4 > 3, so segment 2 is NOT skipped
         let filtered = reader.read_all_after_watermark(&wal_dir, 3).unwrap();
@@ -1139,7 +1132,7 @@ mod tests {
         write_records(&wal_dir, &records);
 
         // Remove .meta to simulate pre-D-7 / crash-before-flush scenario
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
         let segments = reader.list_segments(&wal_dir).unwrap();
         assert_eq!(segments.len(), 1);
         let meta_path = SegmentMeta::meta_path(&wal_dir, segments[0]);
@@ -1173,7 +1166,7 @@ mod tests {
         let meta_path = SegmentMeta::meta_path(&wal_dir, 1);
         std::fs::remove_file(&meta_path).unwrap();
 
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
 
         // Watermark=0: all records returned despite missing .meta
         let filtered = reader.read_all_after_watermark(&wal_dir, 0).unwrap();
@@ -1194,7 +1187,7 @@ mod tests {
         let wal_dir = dir.path().join("wal");
         std::fs::create_dir_all(&wal_dir).unwrap();
 
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
         let filtered = reader.read_all_after_watermark(&wal_dir, 0).unwrap();
         assert!(filtered.is_empty());
     }
@@ -1206,7 +1199,7 @@ mod tests {
 
         create_segments_with_active(&wal_dir);
 
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
 
         // Watermark=100: far above all records (max txn_id=6).
         // Closed segments skipped via meta, active segment read but all filtered.
@@ -1248,7 +1241,7 @@ mod tests {
         // close() writes .meta for the final segment too
         writer.close().unwrap();
 
-        let reader = WalReader::new(make_codec());
+        let reader = WalReader::new();
         let segments = reader.list_segments(&wal_dir).unwrap();
         assert!(
             segments.len() > 1,

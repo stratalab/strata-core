@@ -170,7 +170,7 @@ impl RecoveryCoordinator {
         }
 
         // Replay WAL using effective watermark (conservative — replays extra rather than skipping)
-        let replayer = WalReplayer::new(plan.wal_dir.clone(), clone_codec(self.codec.as_ref()));
+        let replayer = WalReplayer::new(plan.wal_dir.clone());
         let replay_stats = replayer.replay_after(effective_watermark, |record| {
             on_record(record).map_err(|e| WalReplayError::Apply(e.to_string()))
         })?;
@@ -204,7 +204,7 @@ impl RecoveryCoordinator {
             return Ok(0);
         }
 
-        let reader = crate::wal::WalReader::new(clone_codec(self.codec.as_ref()));
+        let reader = crate::wal::WalReader::new();
         let segments = reader.list_segments(&wal_dir)?;
         let mut rebuilt = 0usize;
 
@@ -266,7 +266,7 @@ impl RecoveryCoordinator {
     /// - In Always mode, committed transactions are fsynced
     /// - In Standard mode, some data loss is expected on crash
     pub fn truncate_partial_records(&self, wal_dir: &Path) -> Result<u64, RecoveryError> {
-        let reader = crate::wal::WalReader::new(clone_codec(self.codec.as_ref()));
+        let reader = crate::wal::WalReader::new();
 
         // Get all segments
         let segments = reader.list_segments(wal_dir)?;
@@ -627,7 +627,7 @@ mod tests {
         assert_eq!(truncated, 50);
 
         // Verify file was actually truncated
-        let result = crate::wal::WalReader::new(make_codec())
+        let result = crate::wal::WalReader::new()
             .read_all(&wal_dir)
             .unwrap();
         assert!(result.truncate_info.is_none()); // No more truncation needed

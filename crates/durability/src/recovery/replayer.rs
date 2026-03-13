@@ -12,7 +12,7 @@
 //! # Usage
 //!
 //! ```text
-//! let replayer = WalReplayer::new(wal_dir, codec);
+//! let replayer = WalReplayer::new(wal_dir);
 //! let stats = replayer.replay_after(Some(watermark), |record| {
 //!     // Apply record to your state
 //!     Ok(())
@@ -21,7 +21,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::codec::StorageCodec;
 use crate::format::WalRecord;
 use crate::wal::reader::{WalReadResult, WalReaderError};
 use crate::wal::WalReader;
@@ -36,10 +35,10 @@ pub struct WalReplayer {
 
 impl WalReplayer {
     /// Create a new WAL replayer
-    pub fn new(wal_dir: PathBuf, codec: Box<dyn StorageCodec>) -> Self {
+    pub fn new(wal_dir: PathBuf) -> Self {
         WalReplayer {
             wal_dir,
-            reader: WalReader::new(codec),
+            reader: WalReader::new(),
         }
     }
 
@@ -218,7 +217,7 @@ impl WalReplayError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::IdentityCodec;
+    use crate::codec::{IdentityCodec, StorageCodec};
     use crate::format::WalSegment;
     use crate::wal::{DurabilityMode, WalConfig, WalWriter};
     use tempfile::tempdir;
@@ -250,7 +249,7 @@ mod tests {
         let wal_dir = dir.path().join("wal");
         std::fs::create_dir_all(&wal_dir).unwrap();
 
-        let replayer = WalReplayer::new(wal_dir, make_codec());
+        let replayer = WalReplayer::new(wal_dir);
         let stats = replayer.replay_all(|_| Ok(())).unwrap();
 
         assert_eq!(stats.segments_read, 0);
@@ -269,7 +268,7 @@ mod tests {
 
         write_records(&wal_dir, &records);
 
-        let replayer = WalReplayer::new(wal_dir, make_codec());
+        let replayer = WalReplayer::new(wal_dir);
         let mut applied = Vec::new();
 
         let stats = replayer
@@ -296,7 +295,7 @@ mod tests {
 
         write_records(&wal_dir, &records);
 
-        let replayer = WalReplayer::new(wal_dir, make_codec());
+        let replayer = WalReplayer::new(wal_dir);
         let mut applied = Vec::new();
 
         let stats = replayer
@@ -326,7 +325,7 @@ mod tests {
         // Replay multiple times
         let mut results = Vec::new();
         for _ in 0..3 {
-            let replayer = WalReplayer::new(wal_dir.clone(), make_codec());
+            let replayer = WalReplayer::new(wal_dir.clone());
             let collected = replayer.collect_after_watermark(None).unwrap();
             results.push(collected);
         }
@@ -348,7 +347,7 @@ mod tests {
 
         // Use a simple counter to simulate applying
         let mut apply_count = 0;
-        let replayer = WalReplayer::new(wal_dir.clone(), make_codec());
+        let replayer = WalReplayer::new(wal_dir.clone());
 
         let stats1 = replayer
             .replay_all(|_| {
@@ -381,7 +380,7 @@ mod tests {
 
         write_records(&wal_dir, &records);
 
-        let replayer = WalReplayer::new(wal_dir, make_codec());
+        let replayer = WalReplayer::new(wal_dir);
         let mut count = 0;
 
         let result = replayer.replay_all(|record| {
@@ -408,7 +407,7 @@ mod tests {
 
         write_records(&wal_dir, &records);
 
-        let replayer = WalReplayer::new(wal_dir, make_codec());
+        let replayer = WalReplayer::new(wal_dir);
 
         // Watermark = 5 (all records)
         let stats = replayer.replay_after(Some(5), |_| Ok(())).unwrap();
@@ -416,7 +415,7 @@ mod tests {
         assert_eq!(stats.records_skipped, 5);
 
         // Watermark = 0 (no records)
-        let replayer2 = WalReplayer::new(dir.path().join("wal"), make_codec());
+        let replayer2 = WalReplayer::new(dir.path().join("wal"));
         let stats2 = replayer2.replay_after(Some(0), |_| Ok(())).unwrap();
         assert_eq!(stats2.records_applied, 5);
         assert_eq!(stats2.records_skipped, 0);
@@ -433,7 +432,7 @@ mod tests {
 
         write_records(&wal_dir, &records);
 
-        let replayer = WalReplayer::new(wal_dir, make_codec());
+        let replayer = WalReplayer::new(wal_dir);
         let collected = replayer.collect_after_watermark(Some(7)).unwrap();
 
         assert_eq!(collected.len(), 3);
@@ -453,7 +452,7 @@ mod tests {
 
         write_records(&wal_dir, &records);
 
-        let replayer = WalReplayer::new(wal_dir, make_codec());
+        let replayer = WalReplayer::new(wal_dir);
         let max = replayer.max_txn_id().unwrap();
 
         assert_eq!(max, Some(10));
@@ -498,7 +497,7 @@ mod tests {
         file.write_all(&[0xFF; 20]).unwrap();
 
         // Replay should still work for valid records
-        let replayer = WalReplayer::new(wal_dir, make_codec());
+        let replayer = WalReplayer::new(wal_dir);
         let mut applied = Vec::new();
 
         let stats = replayer
