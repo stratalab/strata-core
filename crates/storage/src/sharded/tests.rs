@@ -4061,7 +4061,11 @@ fn test_store_put_keep_last_3_prunes_oldest() {
 
     // Should have exactly 3 versions
     let history = store.get_history(&key, None, None).unwrap();
-    assert_eq!(history.len(), 3, "KeepLast(3) should keep exactly 3 versions");
+    assert_eq!(
+        history.len(),
+        3,
+        "KeepLast(3) should keep exactly 3 versions"
+    );
     assert_eq!(history[0].value, Value::Int(5)); // newest
     assert_eq!(history[1].value, Value::Int(4));
     assert_eq!(history[2].value, Value::Int(3)); // oldest kept
