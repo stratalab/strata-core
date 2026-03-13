@@ -31,7 +31,7 @@ mod aes_gcm;
 mod identity;
 mod traits;
 
-pub use aes_gcm::AesGcmCodec;
+use aes_gcm::AesGcmCodec;
 pub use identity::IdentityCodec;
 pub use traits::{CodecError, StorageCodec};
 

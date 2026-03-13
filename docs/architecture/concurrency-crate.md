@@ -282,7 +282,7 @@ Conservative document-level check: if any JSON document's version changed since 
 ### 3.4 Phase 4: JSON Path-Level Validation
 
 ```rust
-validate_json_paths(json_reads: &[JsonPathRead], json_writes: &[JsonPatchEntry]) → ValidationResult
+validate_json_paths(json_writes: &[JsonPatchEntry]) → ValidationResult
 ```
 
 Checks for **write-write path overlaps** within the same transaction (semantic error — undefined patch ordering). Uses `JsonPath::overlaps()` which checks ancestor/descendant/equal relationships.
@@ -312,31 +312,16 @@ Mitigation is the application's responsibility (use CAS, combine reads and write
 
 ## 4. Conflict Detection (`conflict.rs`)
 
-JSON-specific conflict infrastructure.
+Write-write conflict detection for JSON operations.
 
-### 4.1 ConflictResult Enum
+### 4.1 Write-Write Detection
 
-```rust
-enum ConflictResult {
-    NoConflict,
-    ReadWriteConflict { key, read_path, write_path },
-    WriteWriteConflict { key, path1, path2 },
-    VersionMismatch { key, expected, found },
-}
-```
-
-### 4.2 JsonConflictError
-
-Thiserror-derived error type with Display impl for all three conflict types. Implements `From<ConflictResult> for Option<JsonConflictError>`.
-
-### 4.3 Write-Write Detection
-
-`check_write_write_conflicts(writes)` — O(n²) pairwise comparison of all JSON patches within a transaction:
+`check_write_write_conflicts(writes) → Vec<ConflictType>` — O(n²) pairwise comparison of all JSON patches within a transaction:
 - Same document key?
 - Paths overlap (ancestor/descendant/equal)?
-- If both true → `WriteWriteConflict`
+- If both true → `JsonPathWriteWriteConflict`
 
-Different documents never conflict. Disjoint paths within the same document are fine.
+Returns `ConflictType` directly (no intermediate representation). Different documents never conflict. Disjoint paths within the same document are fine.
 
 ---
 

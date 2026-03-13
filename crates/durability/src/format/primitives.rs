@@ -11,6 +11,69 @@
 
 use crate::codec::StorageCodec;
 
+/// Cursor-based reader for length-prefixed binary snapshot data.
+///
+/// Centralizes bounds checking so deserialize methods focus on field order.
+struct CursorReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> CursorReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        CursorReader { data, pos: 0 }
+    }
+
+    fn ensure(&self, n: usize) -> Result<(), PrimitiveSerializeError> {
+        if self.pos + n > self.data.len() {
+            Err(PrimitiveSerializeError::UnexpectedEof)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn read_u32(&mut self) -> Result<u32, PrimitiveSerializeError> {
+        self.ensure(4)?;
+        let val = u32::from_le_bytes(self.data[self.pos..self.pos + 4].try_into().unwrap());
+        self.pos += 4;
+        Ok(val)
+    }
+
+    fn read_u64(&mut self) -> Result<u64, PrimitiveSerializeError> {
+        self.ensure(8)?;
+        let val = u64::from_le_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap());
+        self.pos += 8;
+        Ok(val)
+    }
+
+    fn read_f32(&mut self) -> Result<f32, PrimitiveSerializeError> {
+        self.ensure(4)?;
+        let val = f32::from_le_bytes(self.data[self.pos..self.pos + 4].try_into().unwrap());
+        self.pos += 4;
+        Ok(val)
+    }
+
+    fn read_exact(&mut self, n: usize) -> Result<&'a [u8], PrimitiveSerializeError> {
+        self.ensure(n)?;
+        let slice = &self.data[self.pos..self.pos + n];
+        self.pos += n;
+        Ok(slice)
+    }
+
+    /// Read a length-prefixed UTF-8 string (4-byte len + bytes).
+    fn read_string(&mut self) -> Result<String, PrimitiveSerializeError> {
+        let len = self.read_u32()? as usize;
+        let bytes = self.read_exact(len)?;
+        String::from_utf8(bytes.to_vec()).map_err(|_| PrimitiveSerializeError::InvalidUtf8)
+    }
+
+    /// Read a length-prefixed byte blob (4-byte len + bytes).
+    fn read_blob(&mut self) -> Result<&'a [u8], PrimitiveSerializeError> {
+        let len = self.read_u32()? as usize;
+        self.read_exact(len)
+    }
+}
+
 /// Snapshot entry for KV primitive
 ///
 /// Format: key_len(4) + key + value_len(4) + value + version(8) + timestamp(8)
@@ -154,56 +217,14 @@ impl SnapshotSerializer {
         &self,
         data: &[u8],
     ) -> Result<Vec<KvSnapshotEntry>, PrimitiveSerializeError> {
-        let mut cursor = 0;
-
-        if data.len() < 4 {
-            return Err(PrimitiveSerializeError::UnexpectedEof);
-        }
-
-        let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
-        cursor += 4;
-
+        let mut r = CursorReader::new(data);
+        let count = r.read_u32()? as usize;
         let mut entries = Vec::with_capacity(count);
-
         for _ in 0..count {
-            // Key
-            if cursor + 4 > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let key_len = u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4;
-
-            if cursor + key_len > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let key = String::from_utf8(data[cursor..cursor + key_len].to_vec())
-                .map_err(|_| PrimitiveSerializeError::InvalidUtf8)?;
-            cursor += key_len;
-
-            // Value
-            if cursor + 4 > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let value_len =
-                u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4;
-
-            if cursor + value_len > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let encoded_value = &data[cursor..cursor + value_len];
-            let value = self.codec.decode(encoded_value)?;
-            cursor += value_len;
-
-            // Version and timestamp
-            if cursor + 16 > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let version = u64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap());
-            cursor += 8;
-            let timestamp = u64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap());
-            cursor += 8;
-
+            let key = r.read_string()?;
+            let value = self.codec.decode(r.read_blob()?)?;
+            let version = r.read_u64()?;
+            let timestamp = r.read_u64()?;
             entries.push(KvSnapshotEntry {
                 key,
                 value,
@@ -211,7 +232,6 @@ impl SnapshotSerializer {
                 timestamp,
             });
         }
-
         Ok(entries)
     }
 
@@ -239,51 +259,19 @@ impl SnapshotSerializer {
         &self,
         data: &[u8],
     ) -> Result<Vec<EventSnapshotEntry>, PrimitiveSerializeError> {
-        let mut cursor = 0;
-
-        if data.len() < 4 {
-            return Err(PrimitiveSerializeError::UnexpectedEof);
-        }
-
-        let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
-        cursor += 4;
-
+        let mut r = CursorReader::new(data);
+        let count = r.read_u32()? as usize;
         let mut entries = Vec::with_capacity(count);
-
         for _ in 0..count {
-            if cursor + 8 > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let sequence = u64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap());
-            cursor += 8;
-
-            if cursor + 4 > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let payload_len =
-                u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4;
-
-            if cursor + payload_len > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let encoded_payload = &data[cursor..cursor + payload_len];
-            let payload = self.codec.decode(encoded_payload)?;
-            cursor += payload_len;
-
-            if cursor + 8 > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let timestamp = u64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap());
-            cursor += 8;
-
+            let sequence = r.read_u64()?;
+            let payload = self.codec.decode(r.read_blob()?)?;
+            let timestamp = r.read_u64()?;
             entries.push(EventSnapshotEntry {
                 sequence,
                 payload,
                 timestamp,
             });
         }
-
         Ok(entries)
     }
 
@@ -314,53 +302,14 @@ impl SnapshotSerializer {
         &self,
         data: &[u8],
     ) -> Result<Vec<StateSnapshotEntry>, PrimitiveSerializeError> {
-        let mut cursor = 0;
-
-        if data.len() < 4 {
-            return Err(PrimitiveSerializeError::UnexpectedEof);
-        }
-
-        let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
-        cursor += 4;
-
+        let mut r = CursorReader::new(data);
+        let count = r.read_u32()? as usize;
         let mut entries = Vec::with_capacity(count);
-
         for _ in 0..count {
-            if cursor + 4 > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let name_len =
-                u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4;
-
-            if cursor + name_len > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let name = String::from_utf8(data[cursor..cursor + name_len].to_vec())
-                .map_err(|_| PrimitiveSerializeError::InvalidUtf8)?;
-            cursor += name_len;
-
-            if cursor + 4 > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let value_len =
-                u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4;
-
-            if cursor + value_len > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let value = self.codec.decode(&data[cursor..cursor + value_len])?;
-            cursor += value_len;
-
-            if cursor + 16 > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let counter = u64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap());
-            cursor += 8;
-            let timestamp = u64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap());
-            cursor += 8;
-
+            let name = r.read_string()?;
+            let value = self.codec.decode(r.read_blob()?)?;
+            let counter = r.read_u64()?;
+            let timestamp = r.read_u64()?;
             entries.push(StateSnapshotEntry {
                 name,
                 value,
@@ -368,7 +317,6 @@ impl SnapshotSerializer {
                 timestamp,
             });
         }
-
         Ok(entries)
     }
 
@@ -400,61 +348,14 @@ impl SnapshotSerializer {
         &self,
         data: &[u8],
     ) -> Result<Vec<BranchSnapshotEntry>, PrimitiveSerializeError> {
-        let mut cursor = 0;
-
-        if data.len() < 4 {
-            return Err(PrimitiveSerializeError::UnexpectedEof);
-        }
-
-        let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
-        cursor += 4;
-
+        let mut r = CursorReader::new(data);
+        let count = r.read_u32()? as usize;
         let mut entries = Vec::with_capacity(count);
-
         for _ in 0..count {
-            // Run ID (16 bytes)
-            if cursor + 16 > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let branch_id: [u8; 16] = data[cursor..cursor + 16].try_into().unwrap();
-            cursor += 16;
-
-            // Name
-            if cursor + 4 > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let name_len =
-                u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4;
-
-            if cursor + name_len > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let name = String::from_utf8(data[cursor..cursor + name_len].to_vec())
-                .map_err(|_| PrimitiveSerializeError::InvalidUtf8)?;
-            cursor += name_len;
-
-            // Created at
-            if cursor + 8 > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let created_at = u64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap());
-            cursor += 8;
-
-            // Metadata
-            if cursor + 4 > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let metadata_len =
-                u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4;
-
-            if cursor + metadata_len > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let metadata = self.codec.decode(&data[cursor..cursor + metadata_len])?;
-            cursor += metadata_len;
-
+            let branch_id: [u8; 16] = r.read_exact(16)?.try_into().unwrap();
+            let name = r.read_string()?;
+            let created_at = r.read_u64()?;
+            let metadata = self.codec.decode(r.read_blob()?)?;
             entries.push(BranchSnapshotEntry {
                 branch_id,
                 name,
@@ -462,7 +363,6 @@ impl SnapshotSerializer {
                 metadata,
             });
         }
-
         Ok(entries)
     }
 
@@ -493,56 +393,14 @@ impl SnapshotSerializer {
         &self,
         data: &[u8],
     ) -> Result<Vec<JsonSnapshotEntry>, PrimitiveSerializeError> {
-        let mut cursor = 0;
-
-        if data.len() < 4 {
-            return Err(PrimitiveSerializeError::UnexpectedEof);
-        }
-
-        let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
-        cursor += 4;
-
+        let mut r = CursorReader::new(data);
+        let count = r.read_u32()? as usize;
         let mut entries = Vec::with_capacity(count);
-
         for _ in 0..count {
-            // Doc ID
-            if cursor + 4 > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let doc_id_len =
-                u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4;
-
-            if cursor + doc_id_len > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let doc_id = String::from_utf8(data[cursor..cursor + doc_id_len].to_vec())
-                .map_err(|_| PrimitiveSerializeError::InvalidUtf8)?;
-            cursor += doc_id_len;
-
-            // Content
-            if cursor + 4 > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let content_len =
-                u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4;
-
-            if cursor + content_len > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let content = self.codec.decode(&data[cursor..cursor + content_len])?;
-            cursor += content_len;
-
-            // Version and timestamp
-            if cursor + 16 > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let version = u64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap());
-            cursor += 8;
-            let timestamp = u64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap());
-            cursor += 8;
-
+            let doc_id = r.read_string()?;
+            let content = self.codec.decode(r.read_blob()?)?;
+            let version = r.read_u64()?;
+            let timestamp = r.read_u64()?;
             entries.push(JsonSnapshotEntry {
                 doc_id,
                 content,
@@ -550,7 +408,6 @@ impl SnapshotSerializer {
                 timestamp,
             });
         }
-
         Ok(entries)
     }
 
@@ -603,111 +460,25 @@ impl SnapshotSerializer {
         &self,
         data: &[u8],
     ) -> Result<Vec<VectorCollectionSnapshotEntry>, PrimitiveSerializeError> {
-        let mut cursor = 0;
-
-        if data.len() < 4 {
-            return Err(PrimitiveSerializeError::UnexpectedEof);
-        }
-
-        let collections_count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
-        cursor += 4;
-
+        let mut r = CursorReader::new(data);
+        let collections_count = r.read_u32()? as usize;
         let mut collections = Vec::with_capacity(collections_count);
 
         for _ in 0..collections_count {
-            // Collection name
-            if cursor + 4 > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let name_len =
-                u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4;
-
-            if cursor + name_len > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let name = String::from_utf8(data[cursor..cursor + name_len].to_vec())
-                .map_err(|_| PrimitiveSerializeError::InvalidUtf8)?;
-            cursor += name_len;
-
-            // Config
-            if cursor + 4 > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let config_len =
-                u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4;
-
-            if cursor + config_len > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let config = self.codec.decode(&data[cursor..cursor + config_len])?;
-            cursor += config_len;
-
-            // Vectors
-            if cursor + 4 > data.len() {
-                return Err(PrimitiveSerializeError::UnexpectedEof);
-            }
-            let vectors_count =
-                u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4;
+            let name = r.read_string()?;
+            let config = self.codec.decode(r.read_blob()?)?;
+            let vectors_count = r.read_u32()? as usize;
 
             let mut vectors = Vec::with_capacity(vectors_count);
             for _ in 0..vectors_count {
-                // Key
-                if cursor + 4 > data.len() {
-                    return Err(PrimitiveSerializeError::UnexpectedEof);
-                }
-                let key_len =
-                    u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
-                cursor += 4;
-
-                if cursor + key_len > data.len() {
-                    return Err(PrimitiveSerializeError::UnexpectedEof);
-                }
-                let key = String::from_utf8(data[cursor..cursor + key_len].to_vec())
-                    .map_err(|_| PrimitiveSerializeError::InvalidUtf8)?;
-                cursor += key_len;
-
-                // Vector ID
-                if cursor + 8 > data.len() {
-                    return Err(PrimitiveSerializeError::UnexpectedEof);
-                }
-                let vector_id = u64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap());
-                cursor += 8;
-
-                // Embedding
-                if cursor + 4 > data.len() {
-                    return Err(PrimitiveSerializeError::UnexpectedEof);
-                }
-                let dims =
-                    u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
-                cursor += 4;
-
-                if cursor + dims * 4 > data.len() {
-                    return Err(PrimitiveSerializeError::UnexpectedEof);
-                }
+                let key = r.read_string()?;
+                let vector_id = r.read_u64()?;
+                let dims = r.read_u32()? as usize;
                 let mut embedding = Vec::with_capacity(dims);
                 for _ in 0..dims {
-                    let value = f32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap());
-                    cursor += 4;
-                    embedding.push(value);
+                    embedding.push(r.read_f32()?);
                 }
-
-                // Metadata
-                if cursor + 4 > data.len() {
-                    return Err(PrimitiveSerializeError::UnexpectedEof);
-                }
-                let metadata_len =
-                    u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
-                cursor += 4;
-
-                if cursor + metadata_len > data.len() {
-                    return Err(PrimitiveSerializeError::UnexpectedEof);
-                }
-                let metadata = self.codec.decode(&data[cursor..cursor + metadata_len])?;
-                cursor += metadata_len;
-
+                let metadata = self.codec.decode(r.read_blob()?)?;
                 vectors.push(VectorSnapshotEntry {
                     key,
                     vector_id,

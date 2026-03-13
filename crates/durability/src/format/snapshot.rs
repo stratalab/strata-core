@@ -183,38 +183,6 @@ impl SectionHeader {
     }
 }
 
-/// Primitive type tags for snapshot sections
-pub mod primitive_tags {
-    /// Key-Value store
-    pub const KV: u8 = 0x01;
-    /// Event log
-    pub const EVENT: u8 = 0x02;
-    /// State cell
-    pub const STATE: u8 = 0x03;
-    /// Branch
-    pub const BRANCH: u8 = 0x05;
-    /// JSON document
-    pub const JSON: u8 = 0x06;
-    /// Vector embedding
-    pub const VECTOR: u8 = 0x07;
-
-    /// Get the tag name for display
-    pub fn tag_name(tag: u8) -> &'static str {
-        match tag {
-            KV => "KV",
-            EVENT => "Event",
-            STATE => "State",
-            BRANCH => "Branch",
-            JSON => "Json",
-            VECTOR => "Vector",
-            _ => "Unknown",
-        }
-    }
-
-    /// All valid primitive tags in order
-    pub const ALL_TAGS: [u8; 6] = [KV, EVENT, STATE, BRANCH, JSON, VECTOR];
-}
-
 /// Generate snapshot file path
 ///
 /// Snapshots are named `snap-NNNNNN.chk` where NNNNNN is zero-padded.
@@ -262,6 +230,7 @@ pub fn find_latest_snapshot(dir: &Path) -> std::io::Result<Option<(u64, PathBuf)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format::primitive_tags;
 
     #[test]
     fn test_snapshot_header_roundtrip() {

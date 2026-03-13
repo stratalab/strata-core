@@ -19,7 +19,6 @@ use crate::TransactionManager;
 use std::path::PathBuf;
 use strata_core::traits::{Storage, WriteMode};
 use strata_core::StrataResult;
-use strata_durability::codec::IdentityCodec;
 use strata_durability::wal::WalReader;
 use strata_storage::ShardedStore;
 
@@ -89,7 +88,7 @@ impl RecoveryCoordinator {
         }
 
         // Read all records from segmented WAL
-        let reader = WalReader::new(Box::new(IdentityCodec));
+        let reader = WalReader::new();
         let read_result = reader
             .read_all(&self.wal_dir)
             .map_err(|e| strata_core::StrataError::storage(format!("WAL read failed: {}", e)))?;

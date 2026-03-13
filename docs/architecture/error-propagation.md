@@ -8,11 +8,11 @@
 | executor | `Error` | 30 | Client-facing error. All handler/session operations return `Result<T>`. |
 | engine | `VectorError` | 16 | Vector-specific errors. Converted to `StrataError` via `From` impl. |
 | concurrency | `CommitError` | 4 | Transaction commit failures. Converted to `StrataError` via `From` impl. |
-| concurrency | `JsonConflictError` | 3 | JSON-level conflict details. Internal to `ValidationResult`, not exposed. |
+| concurrency | *(removed — conflicts use `ConflictType` directly)* | — | — |
 | concurrency | `PayloadError` | 1 | MessagePack deserialization. Internal, not exposed. |
 | durability | `BranchBundleError` | 14 | Bundle import/export errors. Converted to `StrataError::Storage` at engine boundary. |
 | durability | `RecoveryError` | 7+ | Database recovery errors. Not converted — fatal at startup. |
-| durability | `SnapshotError` | 6+ | Snapshot read errors. Internal to recovery. |
+| durability | `SnapshotReadError` | 11 | Disk snapshot read errors. Internal to recovery. |
 | durability | `CodecError` | 3 | Codec encode/decode errors. Converted to `StrataError::Serialization`. |
 
 **Total: ~105 error variants across 10 error types in 5 crates.**
@@ -130,7 +130,6 @@ PATH B: Session (transactional)
 
 | Location | Code | What's swallowed | Severity |
 |----------|------|------------------|----------|
-| `durability/src/snapshot.rs` | `let _ = std::fs::remove_file(...)` | File deletion errors during cleanup | Low — best-effort cleanup |
 | `durability/src/branch_bundle/writer.rs` | `let _ = std::fs::remove_file(...)` | Temp file removal | Low — cleanup |
 | `storage/src/sharded.rs` | Thread join result ignored | Thread join errors | Low — shutdown path |
 

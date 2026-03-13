@@ -24,19 +24,12 @@
 
 use strata_core::{BranchId, EntityRef};
 
+use super::primitive_tags;
+
 /// Mutation tag bytes
 const MUTATION_PUT: u8 = 0x01;
 const MUTATION_DELETE: u8 = 0x02;
 const MUTATION_APPEND: u8 = 0x03;
-
-/// EntityRef tag bytes
-const ENTITY_KV: u8 = 0x01;
-const ENTITY_EVENT: u8 = 0x02;
-const ENTITY_STATE: u8 = 0x03;
-// Note: ENTITY_TRACE (0x04) was removed - kept as reserved for backwards compatibility parsing
-const ENTITY_RUN: u8 = 0x05;
-const ENTITY_JSON: u8 = 0x06;
-const ENTITY_VECTOR: u8 = 0x07;
 
 /// A mutation within a transaction writeset.
 ///
@@ -292,7 +285,7 @@ impl Writeset {
     fn write_entity_ref(bytes: &mut Vec<u8>, entity_ref: &EntityRef) {
         match entity_ref {
             EntityRef::Kv { branch_id, key } => {
-                bytes.push(ENTITY_KV);
+                bytes.push(primitive_tags::KV);
                 bytes.extend_from_slice(branch_id.as_bytes());
                 Self::write_string(bytes, key);
             }
@@ -300,21 +293,21 @@ impl Writeset {
                 branch_id,
                 sequence,
             } => {
-                bytes.push(ENTITY_EVENT);
+                bytes.push(primitive_tags::EVENT);
                 bytes.extend_from_slice(branch_id.as_bytes());
                 bytes.extend_from_slice(&sequence.to_le_bytes());
             }
             EntityRef::State { branch_id, name } => {
-                bytes.push(ENTITY_STATE);
+                bytes.push(primitive_tags::STATE);
                 bytes.extend_from_slice(branch_id.as_bytes());
                 Self::write_string(bytes, name);
             }
             EntityRef::Branch { branch_id } => {
-                bytes.push(ENTITY_RUN);
+                bytes.push(primitive_tags::BRANCH);
                 bytes.extend_from_slice(branch_id.as_bytes());
             }
             EntityRef::Json { branch_id, doc_id } => {
-                bytes.push(ENTITY_JSON);
+                bytes.push(primitive_tags::JSON);
                 bytes.extend_from_slice(branch_id.as_bytes());
                 Self::write_string(bytes, doc_id);
             }
@@ -323,7 +316,7 @@ impl Writeset {
                 collection,
                 key,
             } => {
-                bytes.push(ENTITY_VECTOR);
+                bytes.push(primitive_tags::VECTOR);
                 bytes.extend_from_slice(branch_id.as_bytes());
                 Self::write_string(bytes, collection);
                 Self::write_string(bytes, key);
@@ -350,12 +343,12 @@ impl Writeset {
         cursor += 16;
 
         match tag {
-            ENTITY_KV => {
+            primitive_tags::KV => {
                 let (key, consumed) = Self::read_string(&bytes[cursor..])?;
                 cursor += consumed;
                 Ok((EntityRef::Kv { branch_id, key }, cursor))
             }
-            ENTITY_EVENT => {
+            primitive_tags::EVENT => {
                 if bytes.len() < cursor + 8 {
                     return Err(WritesetError::InsufficientData);
                 }
@@ -369,23 +362,22 @@ impl Writeset {
                     cursor,
                 ))
             }
-            ENTITY_STATE => {
+            primitive_tags::STATE => {
                 let (name, consumed) = Self::read_string(&bytes[cursor..])?;
                 cursor += consumed;
                 Ok((EntityRef::State { branch_id, name }, cursor))
             }
             0x04 => {
-                // TraceStore was removed - skip over the trace_id string for backwards compatibility
-                let (_trace_id, _consumed) = Self::read_string(&bytes[cursor..])?;
-                Err(WritesetError::InvalidEntityRef) // Trace entities no longer supported
+                // TraceStore was removed — tag 0x04 is no longer supported
+                Err(WritesetError::InvalidEntityRef)
             }
-            ENTITY_RUN => Ok((EntityRef::Branch { branch_id }, cursor)),
-            ENTITY_JSON => {
+            primitive_tags::BRANCH => Ok((EntityRef::Branch { branch_id }, cursor)),
+            primitive_tags::JSON => {
                 let (doc_id, consumed) = Self::read_string(&bytes[cursor..])?;
                 cursor += consumed;
                 Ok((EntityRef::Json { branch_id, doc_id }, cursor))
             }
-            ENTITY_VECTOR => {
+            primitive_tags::VECTOR => {
                 let (collection, consumed) = Self::read_string(&bytes[cursor..])?;
                 cursor += consumed;
                 let (key, consumed) = Self::read_string(&bytes[cursor..])?;
