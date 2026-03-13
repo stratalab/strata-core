@@ -13,16 +13,19 @@ use crate::value::Value;
 /// Controls how a write interacts with existing versions of a key.
 ///
 /// - `Append` (default): Standard MVCC — adds a new version, preserving history.
-/// - `Replace`: Overwrites the latest version, dropping all old versions.
-///   Use for internal data (e.g., graph adjacency lists) where multi-version
-///   history wastes memory without providing value.
+/// - `KeepLast(n)`: Keep at most `n` versions, pruning oldest after write.
+///   `KeepLast(1)` replaces the old `Replace` behavior (single-version).
+///   Use for internal data (e.g., graph adjacency lists) where unbounded
+///   version history wastes memory without providing value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WriteMode {
     /// Standard MVCC: push a new version onto the chain (keeps history)
     #[default]
     Append,
-    /// Single-version: replace the latest value, drop all old versions
-    Replace,
+    /// Keep at most N versions, pruning oldest after write.
+    /// `KeepLast(1)` replaces the old `Replace` behavior.
+    /// `KeepLast(n)` for n > 1 keeps bounded history.
+    KeepLast(usize),
 }
 
 /// Storage abstraction for unified backend
@@ -131,7 +134,7 @@ pub trait Storage: Send + Sync {
     ///
     /// Write modes:
     /// - `Append`: standard MVCC (adds version to chain, preserves history)
-    /// - `Replace`: overwrites all previous versions (single-version)
+    /// - `KeepLast(n)`: keep at most n versions, pruning oldest after write
     ///
     /// # Arguments
     /// * `key` - The key to write

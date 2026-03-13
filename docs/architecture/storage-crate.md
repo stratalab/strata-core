@@ -88,9 +88,9 @@ Most keys only ever have one version (especially graph edges, configs, metadata)
 | `history(limit, before)` | O(versions) | Paginated history, newest-first |
 | `is_dead()` | O(1) | Single tombstone/expired remaining — safe to remove |
 
-### WriteMode (to be replaced — see #1389)
+### WriteMode
 
-`WriteMode::Replace` drops all history and stores only the new value. Used by graph adjacency lists to avoid unbounded version chains. Will be replaced by `RetentionPolicy::KeepLast(1)`.
+`WriteMode::KeepLast(n)` keeps at most `n` versions, pruning oldest after write. `KeepLast(1)` drops all history and stores only the new value. Used by graph adjacency lists to avoid unbounded version chains. `ShardedStore::max_versions_per_key` provides a global default applied to `WriteMode::Append` writes.
 
 ---
 
@@ -441,6 +441,6 @@ Thread 1 (Branch A write)     Thread 2 (Branch B write)     Thread 3 (read)
 |-------|---------|
 | #1386 | 5 vestigial auto-versioning methods on Storage trait |
 | #1387 | SnapshotView trait unnecessary — ShardedSnapshot is the only production impl |
-| #1389 | WriteMode::Replace should be replaced by RetentionPolicy in VersionChain |
+| #1389 | ~~WriteMode::Replace~~ → Replaced by `WriteMode::KeepLast(usize)` |
 | #1390 | Namespace tenant/app/agent fields waste ~93 bytes per Key |
 | #1392 | ~~PrimitiveStorageExt + PrimitiveRegistry~~ — Removed (~950 lines of dead infrastructure) |
