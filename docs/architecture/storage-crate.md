@@ -11,8 +11,6 @@ crates/storage/src/
   stored_value.rs    631 lines   StoredValue (56-byte compact layout)
   index.rs           328 lines   BranchIndex, TypeIndex (secondary indices)
   ttl.rs             235 lines   TTLIndex (BTreeMap expiry index)
-  registry.rs        443 lines   PrimitiveRegistry (unused — see #1392)
-  primitive_ext.rs     6 lines   Re-export from core (unused — see #1392)
 ```
 
 Total: ~7,638 lines. `sharded.rs` is 78% of the crate.
@@ -445,4 +443,4 @@ Thread 1 (Branch A write)     Thread 2 (Branch B write)     Thread 3 (read)
 | #1387 | SnapshotView trait unnecessary — ShardedSnapshot is the only production impl |
 | #1389 | WriteMode::Replace should be replaced by RetentionPolicy in VersionChain |
 | #1390 | Namespace tenant/app/agent fields waste ~93 bytes per Key |
-| #1392 | PrimitiveStorageExt + PrimitiveRegistry are unused (~950 lines) |
+| #1392 | ~~PrimitiveStorageExt + PrimitiveRegistry~~ — Removed (~950 lines of dead infrastructure) |

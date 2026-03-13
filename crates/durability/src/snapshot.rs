@@ -36,36 +36,9 @@ use tracing::{debug, info, warn};
 
 /// Trait for primitives to implement snapshot serialization
 ///
-/// # Deprecation Notice
-///
-/// This trait is deprecated in favor of `PrimitiveStorageExt` from `strata_core`.
-/// New primitives should implement `PrimitiveStorageExt` directly.
-///
-/// A blanket implementation is provided that automatically implements
-/// `SnapshotSerializable` for all types that implement `PrimitiveStorageExt`.
-///
-/// ## Migration Guide
-///
-/// Instead of implementing `SnapshotSerializable`, implement `PrimitiveStorageExt`:
-///
-/// ```text
-/// use strata_core::PrimitiveStorageExt;
-///
-/// impl PrimitiveStorageExt for MyPrimitive {
-///     fn primitive_type_id(&self) -> u8 { ... }
-///     fn wal_entry_types(&self) -> &'static [u8] { ... }
-///     fn snapshot_serialize(&self) -> Result<Vec<u8>, PrimitiveExtError> { ... }
-///     fn snapshot_deserialize(&mut self, data: &[u8]) -> Result<(), PrimitiveExtError> { ... }
-///     fn apply_wal_entry(&mut self, entry_type: u8, payload: &[u8]) -> Result<(), PrimitiveExtError> { ... }
-///     fn primitive_name(&self) -> &'static str { ... }
-/// }
-/// ```
-///
-/// The blanket impl will make it automatically work with snapshot writer.
-#[deprecated(
-    since = "0.2.0",
-    note = "Use PrimitiveStorageExt from strata_core instead"
-)]
+/// Used internally by `serialize_all_primitives` and `deserialize_primitives`
+/// helper functions. The snapshot system's actual write path uses hardcoded
+/// per-primitive serialization in `CheckpointCoordinator`.
 pub trait SnapshotSerializable {
     /// Serialize primitive state for snapshot
     ///
@@ -81,24 +54,6 @@ pub trait SnapshotSerializable {
     ///
     /// Returns the primitive_ids::* constant for this primitive.
     fn primitive_type_id(&self) -> u8;
-}
-
-// Blanket implementation: PrimitiveStorageExt automatically implements SnapshotSerializable
-#[allow(deprecated)]
-impl<T: strata_core::PrimitiveStorageExt> SnapshotSerializable for T {
-    fn snapshot_serialize(&self) -> Result<Vec<u8>, SnapshotError> {
-        strata_core::PrimitiveStorageExt::snapshot_serialize(self)
-            .map_err(|e| SnapshotError::Serialize(e.to_string()))
-    }
-
-    fn snapshot_deserialize(&mut self, data: &[u8]) -> Result<(), SnapshotError> {
-        strata_core::PrimitiveStorageExt::snapshot_deserialize(self, data)
-            .map_err(|e| SnapshotError::Deserialize(e.to_string()))
-    }
-
-    fn primitive_type_id(&self) -> u8 {
-        strata_core::PrimitiveStorageExt::primitive_type_id(self)
-    }
 }
 
 // ============================================================================
@@ -417,13 +372,6 @@ impl SnapshotReader {
 /// Serialize all primitives for snapshot
 ///
 /// Helper function to collect all primitive sections into a vector.
-///
-/// # Note
-///
-/// This function accepts types that implement the deprecated `SnapshotSerializable` trait.
-/// New code should pass types implementing `PrimitiveStorageExt`, which automatically
-/// implement `SnapshotSerializable` via blanket implementation.
-#[allow(deprecated)]
 pub fn serialize_all_primitives<K, J, E, S, R>(
     kv: &K,
     json: &J,
@@ -466,7 +414,6 @@ where
 /// Deserialize primitives from snapshot sections
 ///
 /// Restores state to all primitives from snapshot sections.
-#[allow(deprecated)]
 pub fn deserialize_primitives<K, J, E, S, R>(
     sections: &[PrimitiveSection],
     kv: &mut K,

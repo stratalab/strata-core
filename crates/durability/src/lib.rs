@@ -12,8 +12,6 @@
 //! - Version retention policies
 //! - Crash testing infrastructure
 
-// Allow deprecated SnapshotSerializable usage (will be removed in future refactor)
-#![allow(deprecated)]
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
