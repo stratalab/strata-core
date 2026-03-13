@@ -2,7 +2,7 @@
 //!
 //! This module defines the foundational types:
 //! - BranchId: Unique identifier for agent branches
-//! - Namespace: Hierarchical namespace (tenant/app/agent/branch/space)
+//! - Namespace: Hierarchical namespace (branch_id/space)
 //! - TypeTag: Type discriminator for unified storage
 //! - Key: Composite key (namespace + type_tag + user_key)
 
