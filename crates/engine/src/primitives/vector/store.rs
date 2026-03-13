@@ -2459,7 +2459,6 @@ impl crate::search::Searchable for VectorStore {
     }
 }
 
-
 /// Get current time in microseconds since Unix epoch
 ///
 /// Returns 0 if system clock is before Unix epoch (clock went backwards).
