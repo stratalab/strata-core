@@ -269,12 +269,29 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
         });
     }
 
-    // Compute effective value for the response (normalized/masked as appropriate)
+    // Compute effective value for the response (normalized/masked as appropriate).
+    // Must match what ConfigureGetKey would return after the write.
     let effective = match key_lower.as_str() {
         "embed_model" => canonical_embed_model
             .clone()
             .unwrap_or_else(|| value.clone()),
         "anthropic_api_key" | "openai_api_key" | "google_api_key" => mask_api_key(&value),
+        "auto_embed" => value.trim().eq_ignore_ascii_case("true").to_string(),
+        "bm25_k1" => value
+            .trim()
+            .parse::<f32>()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|_| value.clone()),
+        "bm25_b" => value
+            .trim()
+            .parse::<f32>()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|_| value.clone()),
+        "embed_batch_size" => value
+            .trim()
+            .parse::<usize>()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|_| value.clone()),
         _ => value.clone(),
     };
 

@@ -632,6 +632,25 @@ fn test_output_search_results_with_stats() {
 }
 
 #[test]
+fn test_output_search_results_with_model_names() {
+    test_output_round_trip(Output::SearchResults {
+        hits: vec![],
+        stats: SearchStatsOutput {
+            elapsed_ms: 5.0,
+            candidates_considered: 50,
+            candidates_by_primitive: std::collections::HashMap::new(),
+            index_used: false,
+            truncated: false,
+            mode: "hybrid".to_string(),
+            expansion_used: true,
+            rerank_used: true,
+            expansion_model: Some("qwen3:1.7b".to_string()),
+            rerank_model: Some("qwen3:1.7b".to_string()),
+        },
+    });
+}
+
+#[test]
 fn test_output_config_set_result() {
     test_output_round_trip(Output::ConfigSetResult {
         key: "provider".to_string(),
