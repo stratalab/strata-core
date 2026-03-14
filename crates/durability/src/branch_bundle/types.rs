@@ -22,14 +22,6 @@ pub mod paths {
     pub const BRANCH: &str = "branchbundle/BRANCH.json";
     /// WAL entries file
     pub const WAL: &str = "branchbundle/WAL.branchlog";
-
-    // Post-MVP paths (reserved)
-    /// Index directory
-    pub const INDEX_DIR: &str = "branchbundle/INDEX";
-    /// Writeset index file
-    pub const WRITESET_INDEX: &str = "branchbundle/INDEX/writeset.bin";
-    /// Snapshot directory
-    pub const SNAPSHOT_DIR: &str = "branchbundle/SNAPSHOT";
 }
 
 /// Magic bytes for WAL.branchlog header

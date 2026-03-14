@@ -167,8 +167,9 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
         }
     }
 
-    // Freeze to disk for next startup (fast path)
-    if use_disk && docs_indexed > 0 {
+    // Freeze to disk for next startup (fast path).
+    // Followers must never write to the primary's data directory.
+    if use_disk && docs_indexed > 0 && !db.is_follower() {
         if let Err(e) = index.freeze_to_disk() {
             tracing::warn!(
                 target: "strata::search",

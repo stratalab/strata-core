@@ -163,6 +163,7 @@ impl SnapshotWriter {
     }
 
     /// Check if a temporary file exists for a given snapshot ID
+    #[cfg(test)]
     pub fn temp_file_exists(&self, snapshot_id: u64) -> bool {
         let temp_path = self
             .snapshots_dir
@@ -227,7 +228,7 @@ fn fsync_directory(dir_path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::codec::IdentityCodec;
-    use crate::format::snapshot::primitive_tags;
+    use crate::format::primitive_tags;
 
     fn test_uuid() -> [u8; 16] {
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]

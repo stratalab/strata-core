@@ -219,14 +219,14 @@ pub struct Database {
     /// Database is dropped, releasing the lock. None for ephemeral databases.
     _lock_file: Option<std::fs::File>,
 
-    /// WAL directory path (for multi-process refresh).
+    /// WAL directory path (for follower refresh).
     wal_dir: PathBuf,
 
-    /// Max txn_id applied to local storage from WAL (multi-process watermark).
+    /// Max txn_id applied to local storage from WAL (follower watermark).
     wal_watermark: AtomicU64,
 
-    /// Whether this database uses multi-process coordination.
-    multi_process: bool,
+    /// Whether this database is a read-only follower (no lock, no WAL writer).
+    follower: bool,
 }
 
 impl Database {
@@ -373,28 +373,13 @@ impl Database {
         durability_mode: DurabilityMode,
         cfg: StrataConfig,
     ) -> StrataResult<Arc<Self>> {
-        Self::open_internal(path, durability_mode, cfg, false)
-    }
-
-    /// Open database in multi-process mode with specific durability and config.
-    ///
-    /// When multi-process mode is enabled, the database uses a shared file lock
-    /// instead of an exclusive lock, allowing multiple processes to access the
-    /// same database directory concurrently. Commits are coordinated through
-    /// the WAL file lock.
-    pub fn open_multi_process<P: AsRef<Path>>(
-        path: P,
-        durability_mode: DurabilityMode,
-        cfg: StrataConfig,
-    ) -> StrataResult<Arc<Self>> {
-        Self::open_internal(path, durability_mode, cfg, true)
+        Self::open_internal(path, durability_mode, cfg)
     }
 
     fn open_internal<P: AsRef<Path>>(
         path: P,
         durability_mode: DurabilityMode,
         cfg: StrataConfig,
-        multi_process: bool,
     ) -> StrataResult<Arc<Self>> {
         // Create directory first so we can canonicalize the path
         let data_dir = path.as_ref().to_path_buf();
@@ -403,55 +388,16 @@ impl Database {
         // Canonicalize path for consistent registry keys
         let canonical_path = data_dir.canonicalize().map_err(StrataError::from)?;
 
-        if !multi_process {
-            // Single-process mode: use registry and exclusive lock
-            let mut registry = OPEN_DATABASES.lock();
+        // Single-process mode: use registry and exclusive lock
+        let mut registry = OPEN_DATABASES.lock();
 
-            if let Some(weak) = registry.get(&canonical_path) {
-                if let Some(db) = weak.upgrade() {
-                    info!(target: "strata::db", path = ?canonical_path, "Returning existing database instance");
-                    return Ok(db);
-                }
+        if let Some(weak) = registry.get(&canonical_path) {
+            if let Some(db) = weak.upgrade() {
+                info!(target: "strata::db", path = ?canonical_path, "Returning existing database instance");
+                return Ok(db);
             }
-
-            let lock_path = canonical_path.join(".lock");
-            let lock_file = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(&lock_path)
-                .map_err(|e| StrataError::storage(format!("failed to open lock file: {}", e)))?;
-            fs2::FileExt::try_lock_exclusive(&lock_file).map_err(|_| {
-                StrataError::storage(format!(
-                    "database at '{}' is already in use by another process",
-                    canonical_path.display()
-                ))
-            })?;
-
-            let db = Self::open_finish(
-                canonical_path.clone(),
-                durability_mode,
-                cfg,
-                multi_process,
-                Some(lock_file),
-            )?;
-
-            registry.insert(canonical_path, Arc::downgrade(&db));
-            drop(registry);
-
-            crate::primitives::vector::register_vector_recovery();
-            crate::search::register_search_recovery();
-            crate::recovery::recover_all_participants(&db)?;
-            let index = db.extension::<crate::search::InvertedIndex>()?;
-            if !index.is_enabled() {
-                index.enable();
-            }
-
-            return Ok(db);
         }
 
-        // Multi-process mode: shared lock, skip registry singleton
         let lock_path = canonical_path.join(".lock");
         let lock_file = std::fs::OpenOptions::new()
             .create(true)
@@ -460,16 +406,119 @@ impl Database {
             .write(true)
             .open(&lock_path)
             .map_err(|e| StrataError::storage(format!("failed to open lock file: {}", e)))?;
-        fs2::FileExt::lock_shared(&lock_file)
-            .map_err(|e| StrataError::storage(format!("failed to acquire shared lock: {}", e)))?;
+        fs2::FileExt::try_lock_exclusive(&lock_file).map_err(|_| {
+            StrataError::storage(format!(
+                "database at '{}' is already in use by another process",
+                canonical_path.display()
+            ))
+        })?;
 
         let db = Self::open_finish(
-            canonical_path,
+            canonical_path.clone(),
             durability_mode,
             cfg,
-            multi_process,
             Some(lock_file),
         )?;
+
+        registry.insert(canonical_path, Arc::downgrade(&db));
+        drop(registry);
+
+        crate::primitives::vector::register_vector_recovery();
+        crate::search::register_search_recovery();
+        crate::recovery::recover_all_participants(&db)?;
+        let index = db.extension::<crate::search::InvertedIndex>()?;
+        if !index.is_enabled() {
+            index.enable();
+        }
+
+        Ok(db)
+    }
+
+    /// Open a read-only follower of an existing database.
+    ///
+    /// The follower does not acquire any file lock, so it can open a database
+    /// that is already exclusively locked by another process. It replays the
+    /// WAL to build in-memory state and can `refresh()` to see new commits.
+    ///
+    /// All write operations will fail. The primary process retains full
+    /// performance (exclusive lock, deferred batching, all extensions).
+    ///
+    /// This is the recommended way to provide cross-process read access
+    /// (similar to RocksDB secondary instances).
+    pub fn open_follower<P: AsRef<Path>>(path: P) -> StrataResult<Arc<Self>> {
+        let data_dir = path.as_ref().to_path_buf();
+        let canonical_path = data_dir.canonicalize().map_err(StrataError::from)?;
+
+        let config_path = canonical_path.join(config::CONFIG_FILE_NAME);
+        let cfg = if config_path.exists() {
+            config::StrataConfig::from_file(&config_path)?
+        } else {
+            config::StrataConfig::default()
+        };
+
+        Self::open_follower_internal(canonical_path, cfg)
+    }
+
+    fn open_follower_internal(
+        canonical_path: PathBuf,
+        cfg: StrataConfig,
+    ) -> StrataResult<Arc<Self>> {
+        let wal_dir = canonical_path.join("wal");
+
+        // Recovery — purely read-only (no truncation, no file writes)
+        let recovery = RecoveryCoordinator::new(wal_dir.clone());
+        let result = match recovery.recover() {
+            Ok(result) => result,
+            Err(e) => {
+                if cfg.allow_lossy_recovery {
+                    warn!(target: "strata::db",
+                        error = %e,
+                        "Follower recovery failed — starting with empty state");
+                    strata_concurrency::RecoveryResult::empty()
+                } else {
+                    return Err(StrataError::corruption(format!(
+                        "WAL recovery failed in follower mode: {}. \
+                         Set allow_lossy_recovery=true to force open.",
+                        e
+                    )));
+                }
+            }
+        };
+
+        info!(target: "strata::db",
+            txns_replayed = result.stats.txns_replayed,
+            writes_applied = result.stats.writes_applied,
+            "Follower recovery complete");
+
+        let wal_watermark = AtomicU64::new(result.stats.max_txn_id);
+
+        let coordinator = TransactionCoordinator::from_recovery_with_limits(
+            &result,
+            cfg.storage.max_write_buffer_entries,
+        );
+
+        let storage = Arc::new(result.storage);
+        storage.set_max_branches(cfg.storage.max_branches);
+        storage.set_max_versions_per_key(cfg.storage.max_versions_per_key);
+
+        let db = Arc::new(Self {
+            data_dir: canonical_path,
+            storage,
+            wal_writer: None, // No WAL writer — read-only
+            persistence_mode: PersistenceMode::Disk,
+            coordinator,
+            durability_mode: DurabilityMode::Cache, // Irrelevant for follower
+            accepting_transactions: AtomicBool::new(true),
+            extensions: DashMap::new(),
+            config: parking_lot::RwLock::new(cfg),
+            flush_shutdown: Arc::new(AtomicBool::new(false)),
+            flush_handle: ParkingMutex::new(None), // No flush thread
+            scheduler: BackgroundScheduler::new(2, 4096),
+            _lock_file: None, // No lock acquired
+            wal_dir,
+            wal_watermark,
+            follower: true,
+        });
 
         crate::primitives::vector::register_vector_recovery();
         crate::search::register_search_recovery();
@@ -487,7 +536,6 @@ impl Database {
         canonical_path: PathBuf,
         durability_mode: DurabilityMode,
         cfg: StrataConfig,
-        multi_process: bool,
         lock_file: Option<std::fs::File>,
     ) -> StrataResult<Arc<Self>> {
         // Create WAL directory
@@ -535,32 +583,6 @@ impl Database {
         )?;
 
         let wal_watermark = AtomicU64::new(result.stats.max_txn_id);
-
-        // In multi-process mode, seed the counter file from recovery results.
-        // This ensures that if the counter file is missing (first multi-process open)
-        // or stale (crash between WAL write and counter update), the first coordinated
-        // commit will see correct starting values.
-        if multi_process {
-            use strata_durability::coordination::CounterFile;
-            let counter_file = CounterFile::new(&wal_dir);
-            let (cf_version, cf_txn_id) = counter_file
-                .read_or_default()
-                .map_err(|e| StrataError::storage(format!("Failed to read counter file: {}", e)))?;
-
-            // Only update if recovery found higher values (never go backward)
-            let recovered_version = result.stats.final_version;
-            let recovered_txn_id = result.stats.max_txn_id;
-            if recovered_version > cf_version || recovered_txn_id > cf_txn_id {
-                counter_file
-                    .write(
-                        recovered_version.max(cf_version),
-                        recovered_txn_id.max(cf_txn_id),
-                    )
-                    .map_err(|e| {
-                        StrataError::storage(format!("Failed to seed counter file: {}", e))
-                    })?;
-            }
-        }
 
         let wal_arc = Arc::new(ParkingMutex::new(wal_writer));
         let flush_shutdown = Arc::new(AtomicBool::new(false));
@@ -626,7 +648,7 @@ impl Database {
             _lock_file: lock_file,
             wal_dir,
             wal_watermark,
-            multi_process,
+            follower: false,
         });
 
         Ok(db)
@@ -699,7 +721,7 @@ impl Database {
             _lock_file: None, // No lock for ephemeral databases
             wal_dir: PathBuf::new(),
             wal_watermark: AtomicU64::new(0),
-            multi_process: false,
+            follower: false,
         });
 
         // Note: Ephemeral databases are NOT registered in the global registry
@@ -791,6 +813,11 @@ impl Database {
     /// Returns an empty path for ephemeral (cache) databases.
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    /// Returns `true` if this database was opened in read-only follower mode.
+    pub fn is_follower(&self) -> bool {
+        self.follower
     }
 
     /// Get current WAL counters snapshot.
@@ -1063,30 +1090,28 @@ impl Database {
     }
 
     // ========================================================================
-    // Multi-Process Refresh
+    // Follower Refresh
     // ========================================================================
 
-    /// Refresh local storage by tailing new WAL entries from other processes.
+    /// Refresh local storage by tailing new WAL entries from the primary.
     ///
-    /// In multi-process mode, other processes may have appended new WAL records
+    /// In follower mode, the primary process may have appended new WAL records
     /// since this instance last read the WAL. `refresh()` reads any new records
     /// and applies them to local in-memory storage, bringing this instance
     /// up-to-date with all committed writes.
     ///
     /// Returns the number of new records applied.
     ///
-    /// For non-multi-process databases, this is a no-op returning 0.
+    /// For non-follower databases, this is a no-op returning 0.
     pub fn refresh(&self) -> StrataResult<usize> {
-        if !self.multi_process || self.persistence_mode == PersistenceMode::Ephemeral {
+        if !self.follower || self.persistence_mode == PersistenceMode::Ephemeral {
             return Ok(0);
         }
 
         let watermark = self.wal_watermark.load(std::sync::atomic::Ordering::SeqCst);
 
         // Read all WAL records after our watermark
-        let reader = strata_durability::wal::WalReader::new(Box::new(
-            strata_durability::codec::IdentityCodec,
-        ));
+        let reader = strata_durability::wal::WalReader::new();
         let records = reader
             .read_all_after_watermark(&self.wal_dir, watermark)
             .map_err(|e| StrataError::storage(format!("WAL refresh read failed: {}", e)))?;
@@ -1382,7 +1407,7 @@ impl Database {
     ///
     /// See: `docs/architecture/STORAGE_DURABILITY_ARCHITECTURE.md` Section 6.3
     pub fn checkpoint(&self) -> StrataResult<()> {
-        if self.persistence_mode == PersistenceMode::Ephemeral {
+        if self.persistence_mode == PersistenceMode::Ephemeral || self.follower {
             return Ok(());
         }
 
@@ -1460,7 +1485,7 @@ impl Database {
     ///
     /// See: `docs/architecture/STORAGE_DURABILITY_ARCHITECTURE.md` Section 5.6
     pub fn compact(&self) -> StrataResult<()> {
-        if self.persistence_mode == PersistenceMode::Ephemeral {
+        if self.persistence_mode == PersistenceMode::Ephemeral || self.follower {
             return Ok(());
         }
 
@@ -1938,8 +1963,10 @@ impl Database {
         txn: &mut TransactionContext,
         durability: DurabilityMode,
     ) -> StrataResult<u64> {
-        if self.multi_process {
-            return self.commit_coordinated(txn, durability);
+        if self.follower {
+            return Err(StrataError::internal(
+                "cannot commit: database opened in follower mode (read-only)",
+            ));
         }
 
         let wal_arc = if durability.requires_wal() {
@@ -1950,107 +1977,6 @@ impl Database {
 
         self.coordinator
             .commit_with_wal_arc(txn, self.storage.as_ref(), wal_arc)
-    }
-
-    /// Coordinated commit for multi-process mode.
-    ///
-    /// Critical section (under WAL file lock):
-    /// 1. Refresh — tail new WAL entries into local storage
-    /// 2. Read counters — get (max_version, max_txn_id)
-    /// 3. Allocate — new_version = max_version + 1, new_txn_id = max_txn_id + 1
-    /// 4. Validate against refreshed storage (OCC re-validation)
-    /// 5. WAL append + flush
-    /// 6. Update counters
-    /// 7. Drop WAL file lock
-    /// 8. Apply to local storage + update watermark
-    fn commit_coordinated(
-        &self,
-        txn: &mut TransactionContext,
-        durability: DurabilityMode,
-    ) -> StrataResult<u64> {
-        use strata_durability::coordination::{CounterFile, WalFileLock};
-
-        // Read-only transactions skip coordination entirely
-        if txn.is_read_only() && txn.json_writes().is_empty() {
-            return self.coordinator.commit(txn, self.storage.as_ref(), None);
-        }
-
-        // Acquire WAL file lock with stale-lock recovery (blocks until available)
-        let _wal_lock = WalFileLock::acquire_with_stale_check(&self.wal_dir)
-            .map_err(|e| StrataError::storage(format!("Failed to acquire WAL file lock: {}", e)))?;
-
-        // Step 1: Refresh from WAL (apply other processes' writes)
-        self.refresh()?;
-
-        // Step 2: Read counters — take max of counter file and local state.
-        //
-        // The counter file may be stale if:
-        // - This is the first multi-process open (counter file doesn't exist yet)
-        // - A previous process crashed after WAL write but before counter update
-        // - The database was converted from single-process to multi-process mode
-        //
-        // The local coordinator already reflects WAL reality (from recovery + refresh),
-        // so we take the max to ensure we never allocate a duplicate version/txn_id.
-        let counter_file = CounterFile::new(&self.wal_dir);
-        let (cf_version, cf_txn_id) = counter_file
-            .read_or_default()
-            .map_err(|e| StrataError::storage(format!("Failed to read counter file: {}", e)))?;
-
-        let local_version = self.coordinator.current_version();
-        let local_max_txn_id = self.wal_watermark.load(std::sync::atomic::Ordering::SeqCst);
-
-        let max_version = cf_version.max(local_version);
-        let max_txn_id = cf_txn_id.max(local_max_txn_id);
-
-        // Step 3: Allocate new version and txn_id
-        let new_version = max_version + 1;
-        let new_txn_id = max_txn_id + 1;
-
-        // Override the transaction's txn_id with the globally-unique one
-        txn.txn_id = new_txn_id;
-
-        // Step 4: Validate + WAL append using commit_with_version
-        let needs_wal =
-            durability.requires_wal() && (!txn.is_read_only() || !txn.json_writes().is_empty());
-
-        let mut wal_guard = if needs_wal {
-            self.wal_writer.as_ref().map(|w| w.lock())
-        } else {
-            None
-        };
-
-        // If we have a WAL writer, ensure it sees the latest segment
-        if let Some(ref mut wal) = wal_guard {
-            wal.reopen_if_needed()
-                .map_err(|e| StrataError::storage(format!("WAL reopen failed: {}", e)))?;
-        }
-
-        let wal_ref = wal_guard.as_deref_mut();
-
-        // Use append_and_flush via commit_with_version to ensure immediate visibility
-        let commit_version = self.coordinator.commit_with_version(
-            txn,
-            self.storage.as_ref(),
-            wal_ref,
-            new_version,
-        )?;
-
-        // Flush WAL for cross-process visibility
-        if let Some(ref mut wal) = wal_guard {
-            wal.flush().map_err(StrataError::from)?;
-        }
-
-        // Step 5: Update counter file
-        counter_file
-            .write(new_version, new_txn_id)
-            .map_err(|e| StrataError::storage(format!("Failed to update counter file: {}", e)))?;
-
-        // Step 6: Update local watermark
-        self.wal_watermark
-            .store(new_txn_id, std::sync::atomic::Ordering::SeqCst);
-
-        // WAL file lock is dropped here (end of scope)
-        Ok(commit_version)
     }
 
     // ========================================================================
@@ -2124,6 +2050,11 @@ impl Database {
         // 1. Stop accepting new transactions
         self.accepting_transactions.store(false, Ordering::Release);
 
+        // Followers have no background threads, WAL writer, or freeze targets.
+        if self.follower {
+            return Ok(());
+        }
+
         // 2. Drain background tasks (embeddings etc.) before final WAL flush
         self.scheduler.drain();
 
@@ -2182,6 +2113,11 @@ impl Drop for Database {
             let _ = handle.join();
         }
 
+        // Followers are read-only — never write to the primary's data directory.
+        if self.follower {
+            return;
+        }
+
         // Final flush to persist any remaining data
         let _ = self.flush();
 
@@ -2195,12 +2131,8 @@ impl Drop for Database {
             tracing::warn!(target: "strata::db", error = %e, "Failed to freeze search index in drop");
         }
 
-        // Remove from registry if we're disk-backed (skip in multi-process mode:
-        // multi-process instances are not registered in the singleton registry).
-        if self.persistence_mode == PersistenceMode::Disk
-            && !self.data_dir.as_os_str().is_empty()
-            && !self.multi_process
-        {
+        // Remove from registry if we're disk-backed
+        if self.persistence_mode == PersistenceMode::Disk && !self.data_dir.as_os_str().is_empty() {
             let mut registry = OPEN_DATABASES.lock();
             registry.remove(&self.data_dir);
         }

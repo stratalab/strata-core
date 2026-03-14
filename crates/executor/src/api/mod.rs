@@ -127,36 +127,39 @@ impl Strata {
         ensure_vector_recovery();
 
         let data_dir = path.as_ref().to_path_buf();
-        std::fs::create_dir_all(&data_dir).map_err(|e| Error::Internal {
-            reason: format!("Failed to create data directory: {}", e),
-        })?;
 
-        // Read existing config (or defaults)
-        let config_path = data_dir.join(strata_engine::database::config::CONFIG_FILE_NAME);
-        strata_engine::database::config::StrataConfig::write_default_if_missing(&config_path)
-            .map_err(|e| Error::Internal {
-                reason: format!("Failed to write default config: {}", e),
-            })?;
-        let cfg = strata_engine::database::config::StrataConfig::from_file(&config_path).map_err(
-            |e| Error::Internal {
-                reason: format!("Failed to read config: {}", e),
-            },
-        )?;
-
-        let db = if opts.multi_process {
-            let mode = cfg.durability_mode().map_err(|e| Error::Internal {
-                reason: format!("Failed to parse durability mode: {}", e),
-            })?;
-            Database::open_multi_process(&data_dir, mode, cfg).map_err(|e| Error::Internal {
-                reason: format!("Failed to open database (multi-process): {}", e),
+        let db = if opts.follower {
+            // Follower mode: read-only, never write to the database directory
+            Database::open_follower(&data_dir).map_err(|e| Error::Internal {
+                reason: format!("Failed to open database (follower): {}", e),
             })?
         } else {
+            std::fs::create_dir_all(&data_dir).map_err(|e| Error::Internal {
+                reason: format!("Failed to create data directory: {}", e),
+            })?;
+
+            // Read existing config (or defaults)
+            let config_path = data_dir.join(strata_engine::database::config::CONFIG_FILE_NAME);
+            strata_engine::database::config::StrataConfig::write_default_if_missing(&config_path)
+                .map_err(|e| Error::Internal {
+                reason: format!("Failed to write default config: {}", e),
+            })?;
+            let cfg = strata_engine::database::config::StrataConfig::from_file(&config_path)
+                .map_err(|e| Error::Internal {
+                    reason: format!("Failed to read config: {}", e),
+                })?;
+
             Database::open_with_config(&data_dir, cfg).map_err(|e| Error::Internal {
                 reason: format!("Failed to open database: {}", e),
             })?
         };
 
-        let access_mode = opts.access_mode;
+        // Force ReadOnly for follower mode
+        let access_mode = if opts.follower {
+            AccessMode::ReadOnly
+        } else {
+            opts.access_mode
+        };
         let executor = Executor::new_with_mode(db, access_mode);
 
         match access_mode {

@@ -25,7 +25,7 @@ pub enum AccessMode {
 ///
 /// Configuration settings (durability, auto_embed, model, etc.) are managed
 /// via `CONFIG SET`/`CONFIG GET` and persisted in `strata.toml`. `OpenOptions`
-/// only controls access mode and multi-process coordination.
+/// only controls access mode and follower mode.
 ///
 /// ```ignore
 /// use strata_security::{OpenOptions, AccessMode};
@@ -37,14 +37,15 @@ pub enum AccessMode {
 pub struct OpenOptions {
     /// The access mode for the database.
     pub access_mode: AccessMode,
-    /// Enable multi-process coordination mode.
+    /// Open as a read-only follower of an existing primary instance.
     ///
-    /// When `true`, multiple processes can open the same database directory
-    /// concurrently. A shared file lock is used instead of an exclusive one,
-    /// and commits are coordinated through the WAL.
+    /// Followers do not acquire any file lock and can open a database
+    /// that is already exclusively locked by another process. All write
+    /// operations are rejected. Call `refresh()` to see new commits
+    /// from the primary.
     ///
-    /// Default: `false` (exclusive single-process access).
-    pub multi_process: bool,
+    /// Default: `false`.
+    pub follower: bool,
 }
 
 impl OpenOptions {
@@ -59,12 +60,14 @@ impl OpenOptions {
         self
     }
 
-    /// Enable multi-process coordination mode.
+    /// Open as a read-only follower of an existing primary instance.
     ///
-    /// When enabled, multiple processes can open the same database directory
-    /// concurrently. Commits are coordinated through the WAL file lock.
-    pub fn multi_process(mut self, enabled: bool) -> Self {
-        self.multi_process = enabled;
+    /// Followers do not acquire any file lock and can open a database
+    /// that is already exclusively locked by another process. All write
+    /// operations are rejected. Call `refresh()` to see new commits
+    /// from the primary.
+    pub fn follower(mut self, enabled: bool) -> Self {
+        self.follower = enabled;
         self
     }
 }
@@ -73,7 +76,7 @@ impl Default for OpenOptions {
     fn default() -> Self {
         Self {
             access_mode: AccessMode::ReadWrite,
-            multi_process: false,
+            follower: false,
         }
     }
 }
