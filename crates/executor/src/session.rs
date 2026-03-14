@@ -80,8 +80,14 @@ impl Session {
     /// Execute a command, routing through the active transaction when appropriate.
     pub fn execute(&mut self, mut cmd: Command) -> Result<Output> {
         if self.executor.access_mode() == AccessMode::ReadOnly && cmd.is_write() {
+            let hint = if self.db.is_follower() {
+                Some("This database is a read-only follower. Writes must go through the primary instance.".to_string())
+            } else {
+                Some("Database is in read-only mode.".to_string())
+            };
             return Err(Error::AccessDenied {
                 command: cmd.name().to_string(),
+                hint,
             });
         }
 
@@ -424,13 +430,19 @@ impl Session {
             Command::KvPut { key, value, .. } => {
                 let mut txn = Transaction::new(ctx, ns);
                 let version = txn.kv_put(&key, value).map_err(Error::from)?;
-                Ok(Output::Version(extract_version(&version)))
+                Ok(Output::WriteResult {
+                    key,
+                    version: extract_version(&version),
+                })
             }
             Command::KvDelete { key, .. } => {
                 let full_key = Key::new_kv(ns, &key);
                 let existed = ctx.exists(&full_key).map_err(Error::from)?;
                 ctx.delete(full_key).map_err(Error::from)?;
-                Ok(Output::Bool(existed))
+                Ok(Output::DeleteResult {
+                    key,
+                    deleted: existed,
+                })
             }
 
             // === State delete — via ctx ===
@@ -438,7 +450,10 @@ impl Session {
                 let full_key = Key::new_state(ns, &cell);
                 let existed = ctx.exists(&full_key).map_err(Error::from)?;
                 ctx.delete(full_key).map_err(Error::from)?;
-                Ok(Output::Bool(existed))
+                Ok(Output::DeleteResult {
+                    key: cell,
+                    deleted: existed,
+                })
             }
 
             // === Event operations — use Transaction for hash chaining ===
@@ -451,7 +466,10 @@ impl Session {
                 let version = txn
                     .event_append(&event_type, payload)
                     .map_err(Error::from)?;
-                Ok(Output::Version(extract_version(&version)))
+                Ok(Output::EventAppendResult {
+                    sequence: extract_version(&version),
+                    event_type,
+                })
             }
             Command::EventGet { sequence, .. } => {
                 let txn = Transaction::new(ctx, ns);
@@ -473,7 +491,10 @@ impl Session {
             Command::StateInit { cell, value, .. } => {
                 let mut txn = Transaction::new(ctx, ns);
                 let version = txn.state_init(&cell, value).map_err(Error::from)?;
-                Ok(Output::Version(extract_version(&version)))
+                Ok(Output::WriteResult {
+                    key: cell,
+                    version: extract_version(&version),
+                })
             }
             Command::StateCas {
                 cell,
@@ -487,7 +508,13 @@ impl Session {
                     None => strata_core::Version::Counter(0),
                 };
                 let version = txn.state_cas(&cell, expected, value).map_err(Error::from)?;
-                Ok(Output::MaybeVersion(Some(extract_version(&version))))
+                Ok(Output::StateCasResult {
+                    cell,
+                    success: true,
+                    version: Some(extract_version(&version)),
+                    current_value: None,
+                    current_version: None,
+                })
             }
             Command::StateSet { cell, value, .. } => {
                 // Construct key using the space-aware namespace (not StateCellExt
@@ -510,7 +537,10 @@ impl Session {
                         reason: e.to_string(),
                     })?;
                 ctx.put(full_key, serialized).map_err(Error::from)?;
-                Ok(Output::Version(extract_version(&new_version)))
+                Ok(Output::WriteResult {
+                    key: cell,
+                    version: extract_version(&new_version),
+                })
             }
 
             // === JSON writes — use Transaction ===
@@ -523,12 +553,15 @@ impl Session {
                 let version = txn
                     .json_set(&key, &json_path, json_value)
                     .map_err(Error::from)?;
-                Ok(Output::Version(extract_version(&version)))
+                Ok(Output::WriteResult {
+                    key,
+                    version: extract_version(&version),
+                })
             }
             Command::JsonDelete { key, .. } => {
                 let mut txn = Transaction::new(ctx, ns);
                 let deleted = txn.json_delete(&key).map_err(Error::from)?;
-                Ok(Output::Uint(if deleted { 1 } else { 0 }))
+                Ok(Output::DeleteResult { key, deleted })
             }
 
             // Commands not directly mapped to TransactionOps — delegate to executor.

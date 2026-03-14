@@ -35,7 +35,7 @@ impl Strata {
             key: key.to_string(),
             value: value.into(),
         })? {
-            Output::Version(v) => Ok(v),
+            Output::WriteResult { version, .. } => Ok(version),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for KvPut".into(),
             }),
@@ -73,7 +73,7 @@ impl Strata {
             space: self.space_id(),
             key: key.to_string(),
         })? {
-            Output::Bool(deleted) => Ok(deleted),
+            Output::DeleteResult { deleted, .. } => Ok(deleted),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for KvDelete".into(),
             }),

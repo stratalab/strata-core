@@ -1,4 +1,4 @@
-//! Database-level command handlers.
+//! Database-level command handlers (describe, ping, info, flush, compact).
 
 use std::sync::Arc;
 
@@ -52,16 +52,36 @@ pub fn describe(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
         });
 
     // -- JSON count --
-    let json_count =
-        convert_result(
-            p.json
-                .list(&branch_id, default_space, None, None, u32::MAX as usize),
-        )
-        .map(|result| result.doc_ids.len() as u64)
-        .unwrap_or_else(|e| {
-            warn!("describe: json list failed: {}", e);
-            0
-        });
+    // Count documents by paginating with a reasonable batch size.
+    // json.list() pre-allocates Vec::with_capacity(limit+1), so passing a
+    // huge limit (like u32::MAX) causes a multi-GB allocation that OOMs on CI.
+    let json_count = {
+        let mut total = 0u64;
+        let mut cursor: Option<String> = None;
+        loop {
+            match convert_result(p.json.list(
+                &branch_id,
+                default_space,
+                None,
+                cursor.as_deref(),
+                1000,
+            )) {
+                Ok(result) => {
+                    total += result.doc_ids.len() as u64;
+                    match result.next_cursor {
+                        Some(c) => cursor = Some(c),
+                        None => break,
+                    }
+                }
+                Err(e) => {
+                    warn!("describe: json list failed: {}", e);
+                    total = 0;
+                    break;
+                }
+            }
+        }
+        total
+    };
 
     // -- Event count --
     let event_count = convert_result(p.event.len(&branch_id, default_space)).unwrap_or_else(|e| {

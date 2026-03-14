@@ -13,7 +13,7 @@ use crate::bridge::{
 };
 use crate::convert::convert_result;
 use crate::types::BranchId;
-use crate::{Output, Result};
+use crate::{Error, Output, Result};
 
 use super::require_branch_exists;
 
@@ -26,7 +26,17 @@ pub fn kv_getv(
 ) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;
     convert_result(validate_key(&key))?;
-    let result = convert_result(p.kv.getv(&branch_id, &space, &key))?;
+    let result = convert_result(p.kv.getv(&branch_id, &space, &key)).map_err(|e| match e {
+        Error::KeyNotFound { key: k, hint: None } => Error::KeyNotFound {
+            key: k,
+            hint: Some(format!(
+                "On branch '{}', space '{}'. Use kv_list to see available keys.",
+                branch.as_str(),
+                space
+            )),
+        },
+        other => other,
+    })?;
     let mapped = result.map(|history| {
         history
             .into_versions()
@@ -58,6 +68,7 @@ pub fn kv_put(
     let text = super::embed_hook::extract_text(&value);
 
     let version = convert_result(p.kv.put(&branch_id, &space, &key, value))?;
+    let v = extract_version(&version);
 
     // Best-effort auto-embed after successful write
     if let Some(ref text) = text {
@@ -72,7 +83,7 @@ pub fn kv_put(
         );
     }
 
-    Ok(Output::Version(extract_version(&version)))
+    Ok(Output::WriteResult { key, version: v })
 }
 
 /// Handle KvGet command.
@@ -81,7 +92,18 @@ pub fn kv_put(
 pub fn kv_get(p: &Arc<Primitives>, branch: BranchId, space: String, key: String) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;
     convert_result(validate_key(&key))?;
-    let result = convert_result(p.kv.get_versioned(&branch_id, &space, &key))?;
+    let result =
+        convert_result(p.kv.get_versioned(&branch_id, &space, &key)).map_err(|e| match e {
+            Error::KeyNotFound { key: k, hint: None } => Error::KeyNotFound {
+                key: k,
+                hint: Some(format!(
+                    "On branch '{}', space '{}'. Use kv_list to see available keys.",
+                    branch.as_str(),
+                    space
+                )),
+            },
+            other => other,
+        })?;
     Ok(Output::MaybeVersioned(result.map(to_versioned_value)))
 }
 
@@ -95,7 +117,18 @@ pub fn kv_get_at(
 ) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;
     convert_result(validate_key(&key))?;
-    let result = convert_result(p.kv.get_at(&branch_id, &space, &key, as_of_ts))?;
+    let result =
+        convert_result(p.kv.get_at(&branch_id, &space, &key, as_of_ts)).map_err(|e| match e {
+            Error::KeyNotFound { key: k, hint: None } => Error::KeyNotFound {
+                key: k,
+                hint: Some(format!(
+                    "On branch '{}', space '{}'. Use kv_list to see available keys.",
+                    branch.as_str(),
+                    space
+                )),
+            },
+            other => other,
+        })?;
     Ok(Output::Maybe(result))
 }
 
@@ -122,7 +155,10 @@ pub fn kv_delete(
         );
     }
 
-    Ok(Output::Bool(existed))
+    Ok(Output::DeleteResult {
+        key,
+        deleted: existed,
+    })
 }
 
 /// Handle KvList command.
@@ -149,9 +185,16 @@ pub fn kv_list(
         } else {
             0
         };
-        let end_idx = std::cmp::min(start_idx + lim as usize, keys.len());
-        let page = keys[start_idx..end_idx].to_vec();
-        Ok(Output::Keys(page))
+        let fetch_end = std::cmp::min(start_idx + lim as usize + 1, keys.len());
+        let fetched = &keys[start_idx..fetch_end];
+        let has_more = fetched.len() > lim as usize;
+        let page: Vec<String> = fetched.iter().take(lim as usize).cloned().collect();
+        let next_cursor = if has_more { page.last().cloned() } else { None };
+        Ok(Output::KeysPage {
+            keys: page,
+            has_more,
+            cursor: next_cursor,
+        })
     } else {
         Ok(Output::Keys(keys))
     }

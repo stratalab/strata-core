@@ -104,6 +104,16 @@ pub enum Error {
         hint: Option<String>,
     },
 
+    /// Graph not found
+    #[error("graph not found: {graph}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
+    GraphNotFound {
+        /// The missing graph name.
+        graph: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
+    },
+
     // ==================== Type Errors ====================
     /// Wrong type for operation
     #[error("wrong type: expected {expected}, got {actual}")]
@@ -226,10 +236,13 @@ pub enum Error {
 
     // ==================== Access Control ====================
     /// Write command rejected because the database is read-only
-    #[error("access denied: {command} rejected — database is read-only")]
+    #[error("access denied: {command} rejected — database is read-only{}", hint.as_ref().map(|h| format!(". {}", h)).unwrap_or_default())]
     AccessDenied {
         /// Name of the rejected command.
         command: String,
+        /// Optional actionable hint (e.g. follower guidance).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
     },
 
     // ==================== Transaction Errors ====================

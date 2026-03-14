@@ -436,7 +436,7 @@ fn configure_set_blocked_in_read_only_mode() {
         value: "openai".into(),
     });
     match result {
-        Err(Error::AccessDenied { command }) => {
+        Err(Error::AccessDenied { command, .. }) => {
             assert_eq!(command, "ConfigureSet");
         }
         other => panic!("Expected AccessDenied, got {:?}", other),
@@ -1383,17 +1383,10 @@ fn unknown_key_error_lists_all_new_keys() {
     });
     let msg = result.unwrap_err().to_string();
 
-    for expected in [
-        "durability",
-        "auto_embed",
-        "bm25_k1",
-        "bm25_b",
-        "embed_batch_size",
-        "model_endpoint",
-        "model_name",
-        "model_api_key",
-        "model_timeout_ms",
-    ] {
+    // The first 10 keys are shown directly; the rest are behind "and N more".
+    // Verify that the visible keys include the ones within the display cap,
+    // and that the truncation marker accounts for the remaining keys.
+    for expected in ["durability", "auto_embed", "bm25_k1", "bm25_b"] {
         assert!(
             msg.contains(expected),
             "Error should list new key {:?}: {}",
@@ -1401,4 +1394,10 @@ fn unknown_key_error_lists_all_new_keys() {
             msg
         );
     }
+    // Keys beyond the 10-candidate display cap are summarised as "and N more"
+    assert!(
+        msg.contains("and 5 more"),
+        "Error should indicate truncated keys: {}",
+        msg
+    );
 }

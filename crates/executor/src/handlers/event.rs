@@ -50,7 +50,10 @@ pub fn event_append(
         );
     }
 
-    Ok(Output::Version(sequence))
+    Ok(Output::EventAppendResult {
+        sequence,
+        event_type,
+    })
 }
 
 /// Handle EventGet command.

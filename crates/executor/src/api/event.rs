@@ -19,7 +19,7 @@ impl Strata {
             event_type: event_type.to_string(),
             payload,
         })? {
-            Output::Version(v) => Ok(v),
+            Output::EventAppendResult { sequence, .. } => Ok(sequence),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for EventAppend".into(),
             }),

@@ -231,6 +231,33 @@ fn format_raw(output: &Output) -> String {
             .map(|vv| format_value_raw(&vv.value))
             .collect::<Vec<_>>()
             .join("\n"),
+        Output::WriteResult { version, .. } => version.to_string(),
+        Output::DeleteResult { deleted, .. } => {
+            if *deleted {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            }
+        }
+        Output::EventAppendResult { sequence, .. } => sequence.to_string(),
+        Output::VectorWriteResult { version, .. } => version.to_string(),
+        Output::VectorDeleteResult { deleted, .. } => {
+            if *deleted {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            }
+        }
+        Output::StateCasResult {
+            success, version, ..
+        } => {
+            if *success {
+                version.map(|v| v.to_string()).unwrap_or_default()
+            } else {
+                String::new()
+            }
+        }
+        Output::KeysPage { keys, .. } => keys.join("\n"),
         Output::Keys(keys) => keys.join("\n"),
         Output::JsonListResult { keys, .. } => keys.join("\n"),
         Output::VectorMatches(matches) => matches
@@ -482,14 +509,87 @@ fn format_human(output: &Output) -> String {
                     .join("\n")
             }
         }
-        Output::Keys(keys) => format_string_list(keys),
-        Output::JsonListResult { keys, cursor } => {
+        Output::WriteResult { key, version } => format!("(write) key={} version={}", key, version),
+        Output::DeleteResult { key, deleted } => {
+            format!("(delete) key={} deleted={}", key, deleted)
+        }
+        Output::EventAppendResult {
+            sequence,
+            event_type,
+        } => format!("(append) event_type={} sequence={}", event_type, sequence),
+        Output::VectorWriteResult {
+            collection,
+            key,
+            version,
+        } => format!(
+            "(write) collection={} key={} version={}",
+            collection, key, version
+        ),
+        Output::VectorDeleteResult {
+            collection,
+            key,
+            deleted,
+        } => format!(
+            "(delete) collection={} key={} deleted={}",
+            collection, key, deleted
+        ),
+        Output::StateCasResult {
+            cell,
+            success,
+            version,
+            current_value,
+            current_version,
+        } => {
+            if *success {
+                format!(
+                    "(cas) cell={} success version={}",
+                    cell,
+                    version.map(|v| v.to_string()).unwrap_or_default()
+                )
+            } else {
+                let cv = current_value
+                    .as_ref()
+                    .map(format_value_human)
+                    .unwrap_or_else(|| "(nil)".to_string());
+                format!(
+                    "(cas) cell={} conflict current_version={} current_value={}",
+                    cell,
+                    current_version.map(|v| v.to_string()).unwrap_or_default(),
+                    cv
+                )
+            }
+        }
+        Output::KeysPage {
+            keys,
+            has_more,
+            cursor,
+        } => {
             let mut out = format_string_list(keys);
-            if let Some(c) = cursor {
+            if *has_more {
                 if !out.is_empty() {
                     out.push('\n');
                 }
-                out.push_str(&format!("(cursor) {}", c));
+                out.push_str(&format!(
+                    "(has_more) cursor={}",
+                    cursor.as_deref().unwrap_or("")
+                ));
+            }
+            out
+        }
+        Output::Keys(keys) => format_string_list(keys),
+        Output::JsonListResult {
+            keys,
+            has_more,
+            cursor,
+        } => {
+            let mut out = format_string_list(keys);
+            if *has_more {
+                if let Some(c) = cursor {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(&format!("(has_more) cursor={}", c));
+                }
             }
             out
         }

@@ -62,7 +62,7 @@ impl Strata {
             path: path.to_string(),
             value: value.into(),
         })? {
-            Output::Version(v) => Ok(v),
+            Output::WriteResult { version, .. } => Ok(version),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for JsonSet".into(),
             }),
@@ -152,7 +152,7 @@ impl Strata {
             key: key.to_string(),
             path: path.to_string(),
         })? {
-            Output::Uint(count) => Ok(count),
+            Output::DeleteResult { deleted, .. } => Ok(if deleted { 1 } else { 0 }),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for JsonDelete".into(),
             }),
@@ -196,7 +196,7 @@ impl Strata {
             limit,
             as_of: None,
         })? {
-            Output::JsonListResult { keys, cursor } => Ok((keys, cursor)),
+            Output::JsonListResult { keys, cursor, .. } => Ok((keys, cursor)),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for JsonList".into(),
             }),

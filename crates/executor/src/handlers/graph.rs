@@ -13,6 +13,34 @@ use crate::convert::convert_result;
 use crate::types::BranchId;
 use crate::{Error, Output, Result};
 
+/// Enrich a graph error: if the error indicates the graph doesn't exist,
+/// convert it to `GraphNotFound` with fuzzy-match suggestions.
+fn enrich_graph_error(
+    p: &Primitives,
+    branch_id: strata_core::types::BranchId,
+    graph: &str,
+    err: Error,
+) -> Error {
+    match &err {
+        Error::ConstraintViolation { .. } | Error::InvalidInput { .. } | Error::Internal { .. } => {
+            // Check if this might be a "graph not found" scenario
+            let graphs = match p.graph.list_graphs(branch_id) {
+                Ok(g) => g,
+                Err(_) => return err,
+            };
+            if graphs.iter().all(|g| g != graph) {
+                let hint = crate::suggest::format_hint("graphs", &graphs, graph, 2);
+                return Error::GraphNotFound {
+                    graph: graph.to_string(),
+                    hint,
+                };
+            }
+            err
+        }
+        _ => err,
+    }
+}
+
 /// Parse a direction string to a Direction enum.
 fn parse_direction(s: Option<&str>) -> Result<Direction> {
     match s {
@@ -79,7 +107,8 @@ pub fn graph_list(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
 /// Handle GraphGetMeta command.
 pub fn graph_get_meta(p: &Arc<Primitives>, branch: BranchId, graph: String) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    let meta = convert_result(p.graph.get_graph_meta(core_branch, &graph))?;
+    let meta = convert_result(p.graph.get_graph_meta(core_branch, &graph))
+        .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
     match meta {
         Some(m) => {
             let json = serde_json::to_value(&m).map_err(|e| Error::Serialization {
@@ -115,7 +144,8 @@ pub fn graph_add_node(
         properties: props,
         object_type,
     };
-    convert_result(p.graph.add_node(core_branch, &graph, &node_id, data))?;
+    convert_result(p.graph.add_node(core_branch, &graph, &node_id, data))
+        .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
     Ok(Output::Unit)
 }
 
@@ -127,7 +157,8 @@ pub fn graph_get_node(
     node_id: String,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    let node = convert_result(p.graph.get_node(core_branch, &graph, &node_id))?;
+    let node = convert_result(p.graph.get_node(core_branch, &graph, &node_id))
+        .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
     match node {
         Some(data) => {
             let json = serde_json::to_value(&data).map_err(|e| Error::Serialization {
@@ -147,14 +178,16 @@ pub fn graph_remove_node(
     node_id: String,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    convert_result(p.graph.remove_node(core_branch, &graph, &node_id))?;
+    convert_result(p.graph.remove_node(core_branch, &graph, &node_id))
+        .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
     Ok(Output::Unit)
 }
 
 /// Handle GraphListNodes command.
 pub fn graph_list_nodes(p: &Arc<Primitives>, branch: BranchId, graph: String) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    let nodes = convert_result(p.graph.list_nodes(core_branch, &graph))?;
+    let nodes = convert_result(p.graph.list_nodes(core_branch, &graph))
+        .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
     Ok(Output::Keys(nodes))
 }
 
@@ -169,7 +202,8 @@ pub fn graph_list_nodes_paginated(
     use strata_engine::graph::types::PageRequest;
     let core_branch = to_core_branch_id(&branch)?;
     let page = PageRequest { limit, cursor };
-    let result = convert_result(p.graph.list_nodes_paginated(core_branch, &graph, page))?;
+    let result = convert_result(p.graph.list_nodes_paginated(core_branch, &graph, page))
+        .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
     Ok(Output::GraphPage {
         items: result.items,
         next_cursor: result.next_cursor,
@@ -203,7 +237,8 @@ pub fn graph_add_edge(
     convert_result(
         p.graph
             .add_edge(core_branch, &graph, &src, &dst, &edge_type, data),
-    )?;
+    )
+    .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
     Ok(Output::Unit)
 }
 
@@ -220,7 +255,8 @@ pub fn graph_remove_edge(
     convert_result(
         p.graph
             .remove_edge(core_branch, &graph, &src, &dst, &edge_type),
-    )?;
+    )
+    .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
     Ok(Output::Unit)
 }
 
@@ -235,13 +271,12 @@ pub fn graph_neighbors(
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
     let dir = parse_direction(direction.as_deref())?;
-    let neighbors = convert_result(p.graph.neighbors(
-        core_branch,
-        &graph,
-        &node_id,
-        dir,
-        edge_type.as_deref(),
-    ))?;
+    let neighbors =
+        convert_result(
+            p.graph
+                .neighbors(core_branch, &graph, &node_id, dir, edge_type.as_deref()),
+        )
+        .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
 
     let hits: Vec<crate::types::GraphNeighborHit> = neighbors
         .into_iter()
@@ -276,7 +311,8 @@ pub fn graph_bfs(
         direction: dir,
     };
 
-    let result = convert_result(p.graph.bfs(core_branch, &graph, &start, opts))?;
+    let result = convert_result(p.graph.bfs(core_branch, &graph, &start, opts))
+        .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
 
     Ok(Output::GraphBfs(crate::types::GraphBfsResult {
         visited: result.visited,

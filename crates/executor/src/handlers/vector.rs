@@ -94,7 +94,11 @@ pub fn vector_upsert(
             .insert(branch_id, &space, &collection, &key, &vector, json_metadata),
         branch_id,
     )?;
-    Ok(Output::Version(extract_version(&version)))
+    Ok(Output::VectorWriteResult {
+        collection,
+        key,
+        version: extract_version(&version),
+    })
 }
 
 /// Handle VectorGet command.
@@ -179,7 +183,11 @@ pub fn vector_delete(
         p.vector.delete(branch_id, &space, &collection, &key),
         branch_id,
     )?;
-    Ok(Output::Bool(existed))
+    Ok(Output::VectorDeleteResult {
+        collection,
+        key,
+        deleted: existed,
+    })
 }
 
 /// Handle VectorSearch command.
