@@ -191,10 +191,13 @@ fn test_execute_many_mixed_operations() {
         _ => panic!("Expected Maybe(Some(Int(10)))"),
     }
 
-    // Delete should return true (existed)
+    // Delete should return DeleteResult with deleted=true (existed)
     match &results[2] {
-        Ok(Output::Bool(deleted)) => assert!(*deleted),
-        _ => panic!("Expected Bool(true)"),
+        Ok(Output::DeleteResult { key, deleted }) => {
+            assert_eq!(key, "counter");
+            assert!(*deleted);
+        }
+        _ => panic!("Expected DeleteResult {{ deleted: true }}"),
     }
 
     // Get after delete should return None

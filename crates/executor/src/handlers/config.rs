@@ -58,13 +58,11 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
     let key_lower = key.trim().to_ascii_lowercase();
 
     if !KNOWN_KEYS.contains(&key_lower.as_str()) {
+        let candidates: Vec<String> = KNOWN_KEYS.iter().map(|s| s.to_string()).collect();
+        let hint = crate::suggest::format_hint("config keys", &candidates, key.trim(), 2);
         return Err(Error::InvalidInput {
-            reason: format!(
-                "Unknown configuration key: {:?}. Valid keys: {}",
-                key.trim(),
-                KNOWN_KEYS.join(", ")
-            ),
-            hint: None,
+            reason: format!("Unknown configuration key: {:?}", key.trim()),
+            hint,
         });
     }
 
@@ -294,13 +292,11 @@ pub fn configure_get_key(p: &Arc<Primitives>, key: String) -> Result<Output> {
     let key_lower = key.trim().to_ascii_lowercase();
 
     if !KNOWN_KEYS.contains(&key_lower.as_str()) {
+        let candidates: Vec<String> = KNOWN_KEYS.iter().map(|s| s.to_string()).collect();
+        let hint = crate::suggest::format_hint("config keys", &candidates, key.trim(), 2);
         return Err(Error::InvalidInput {
-            reason: format!(
-                "Unknown configuration key: {:?}. Valid keys: {}",
-                key.trim(),
-                KNOWN_KEYS.join(", ")
-            ),
-            hint: None,
+            reason: format!("Unknown configuration key: {:?}", key.trim()),
+            hint,
         });
     }
 

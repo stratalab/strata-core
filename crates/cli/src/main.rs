@@ -292,7 +292,9 @@ fn run_shell_mode(matches: &clap::ArgMatches, state: &mut SessionState, mode: Ou
                         all_keys.extend(keys);
                         break;
                     }
-                    Ok(Output::JsonListResult { keys, cursor: next }) => {
+                    Ok(Output::JsonListResult {
+                        keys, cursor: next, ..
+                    }) => {
                         all_keys.extend(keys);
                         if next.is_none() {
                             break;

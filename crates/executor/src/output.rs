@@ -64,12 +64,88 @@ pub enum Output {
     /// List of keys
     Keys(Vec<String>),
 
+    // ==================== Write Results ====================
+    /// Write acknowledgment — echoes key + version
+    WriteResult {
+        /// Key or cell that was written.
+        key: String,
+        /// Version number assigned to the write.
+        version: u64,
+    },
+
+    /// Delete acknowledgment — echoes key + whether it existed
+    DeleteResult {
+        /// Key or cell that was deleted.
+        key: String,
+        /// Whether the key existed before deletion.
+        deleted: bool,
+    },
+
+    /// Event append acknowledgment — echoes event type + sequence
+    EventAppendResult {
+        /// Sequence number assigned to the appended event.
+        sequence: u64,
+        /// Event type that was appended.
+        event_type: String,
+    },
+
+    /// Vector write acknowledgment — echoes collection + key + version
+    VectorWriteResult {
+        /// Collection name.
+        collection: String,
+        /// Key that was written.
+        key: String,
+        /// Version number assigned to the write.
+        version: u64,
+    },
+
+    /// Vector delete acknowledgment — echoes collection + key + existed
+    VectorDeleteResult {
+        /// Collection name.
+        collection: String,
+        /// Key that was deleted.
+        key: String,
+        /// Whether the key existed before deletion.
+        deleted: bool,
+    },
+
+    /// State CAS result — on success: version; on conflict: current value for retry
+    StateCasResult {
+        /// Cell name.
+        cell: String,
+        /// Whether the CAS operation succeeded.
+        success: bool,
+        /// Version number on success.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<u64>,
+        /// Current value on conflict (for retry).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        current_value: Option<Value>,
+        /// Current version on conflict (for retry).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        current_version: Option<u64>,
+    },
+
     // ==================== Scan Results ====================
+    /// Paginated key list with has_more indicator
+    KeysPage {
+        /// Keys in this page.
+        keys: Vec<String>,
+        /// Whether more results exist beyond this page.
+        has_more: bool,
+        /// Cursor for fetching the next page.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<String>,
+    },
+
     /// JSON list result with cursor
     JsonListResult {
         /// Matching document keys.
         keys: Vec<String>,
+        /// Whether more results exist beyond this page.
+        has_more: bool,
         /// Cursor for fetching the next page, if more results exist.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         cursor: Option<String>,
     },
 

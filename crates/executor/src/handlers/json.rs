@@ -12,7 +12,7 @@ use crate::bridge::{
 };
 use crate::convert::convert_result;
 use crate::types::{BatchGetItemResult, BatchItemResult, BranchId, VersionedValue};
-use crate::{Output, Result};
+use crate::{Error, Output, Result};
 
 use super::require_branch_exists;
 
@@ -25,7 +25,17 @@ pub fn json_getv(
 ) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;
     convert_result(validate_key(&key))?;
-    let result = convert_result(p.json.getv(&branch_id, &space, &key))?;
+    let result = convert_result(p.json.getv(&branch_id, &space, &key)).map_err(|e| match e {
+        Error::DocumentNotFound { key: k, hint: None } => Error::DocumentNotFound {
+            key: k,
+            hint: Some(format!(
+                "On branch '{}', space '{}'. Use json_list to see available documents.",
+                branch.as_str(),
+                space
+            )),
+        },
+        other => other,
+    })?;
     let mapped = result
         .map(|history| {
             history
@@ -77,12 +87,13 @@ pub fn json_set(
         p.json
             .set_or_create(&branch_id, &space, &key, &json_path, json_value),
     )?;
+    let v = extract_version(&version);
 
     // Best-effort auto-embed: read back the full document so we embed the complete
     // content, not just the fragment written at this path.
     embed_full_doc(p, branch_id, &space, &key);
 
-    Ok(Output::Version(extract_version(&version)))
+    Ok(Output::WriteResult { key, version: v })
 }
 
 /// Handle JsonGet command.
@@ -99,7 +110,18 @@ pub fn json_get(
     convert_result(validate_key(&key))?;
     let json_path = convert_result(parse_path(&path))?;
 
-    let result = convert_result(p.json.get_versioned(&branch_id, &space, &key, &json_path))?;
+    let result = convert_result(p.json.get_versioned(&branch_id, &space, &key, &json_path))
+        .map_err(|e| match e {
+            Error::DocumentNotFound { key: k, hint: None } => Error::DocumentNotFound {
+                key: k,
+                hint: Some(format!(
+                    "On branch '{}', space '{}'. Use json_list to see available documents.",
+                    branch.as_str(),
+                    space
+                )),
+            },
+            other => other,
+        })?;
     match result {
         Some(versioned) => {
             let value = convert_result(json_to_value(versioned.value))?;
@@ -129,7 +151,18 @@ pub fn json_get_at(
     let result = convert_result(
         p.json
             .get_at(&branch_id, &space, &key, &json_path, as_of_ts),
-    )?;
+    )
+    .map_err(|e| match e {
+        Error::DocumentNotFound { key: k, hint: None } => Error::DocumentNotFound {
+            key: k,
+            hint: Some(format!(
+                "On branch '{}', space '{}'. Use json_list to see available documents.",
+                branch.as_str(),
+                space
+            )),
+        },
+        other => other,
+    })?;
     match result {
         Some(json_val) => {
             let value = convert_result(json_to_value(json_val))?;
@@ -169,20 +202,23 @@ pub fn json_delete(
             );
         }
 
-        Ok(Output::Uint(if deleted { 1 } else { 0 }))
+        Ok(Output::DeleteResult { key, deleted })
     } else {
         match p.json.delete_at_path(&branch_id, &space, &key, &json_path) {
             Ok(_) => {
                 // Re-embed the remaining document after sub-path deletion
                 embed_full_doc(p, branch_id, &space, &key);
-                Ok(Output::Uint(1))
+                Ok(Output::DeleteResult { key, deleted: true })
             }
             Err(e) => {
-                // If path not found, return 0 (nothing deleted)
+                // If path not found, return deleted=false (nothing deleted)
                 let err = crate::Error::from(e);
                 match err {
                     crate::Error::InvalidPath { .. } | crate::Error::InvalidInput { .. } => {
-                        Ok(Output::Uint(0))
+                        Ok(Output::DeleteResult {
+                            key,
+                            deleted: false,
+                        })
                     }
                     other => Err(other),
                 }
@@ -491,8 +527,10 @@ pub fn json_list(
         limit as usize,
     ))?;
 
+    let has_more = result.next_cursor.is_some();
     Ok(Output::JsonListResult {
         keys: result.doc_ids,
+        has_more,
         cursor: result.next_cursor,
     })
 }
@@ -554,7 +592,11 @@ pub fn json_list_at(
         p.json
             .list_at(&branch_id, &space, prefix.as_deref(), as_of_ts),
     )?;
-    Ok(Output::JsonListResult { keys, cursor: None })
+    Ok(Output::JsonListResult {
+        keys,
+        has_more: false,
+        cursor: None,
+    })
 }
 
 #[cfg(test)]

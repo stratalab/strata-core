@@ -157,8 +157,14 @@ impl Executor {
     pub fn execute(&self, mut cmd: Command) -> Result<Output> {
         if self.access_mode == AccessMode::ReadOnly && cmd.is_write() {
             warn!(target: "strata::command", command = %cmd.name(), "Write rejected in read-only mode");
+            let hint = if self.primitives.db.is_follower() {
+                Some("This database is a read-only follower. Writes must go through the primary instance.".to_string())
+            } else {
+                Some("Database is in read-only mode.".to_string())
+            };
             return Err(Error::AccessDenied {
                 command: cmd.name().to_string(),
+                hint,
             });
         }
 

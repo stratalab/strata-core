@@ -973,3 +973,231 @@ fn test_output_batch_get_results_skip_serializing_none() {
     assert!(json.contains("value"));
     assert!(json.contains("version"));
 }
+
+// =============================================================================
+// Write Metadata Output Tests (#1443)
+// =============================================================================
+
+#[test]
+fn test_output_write_result() {
+    test_output_round_trip(Output::WriteResult {
+        key: "my-key".to_string(),
+        version: 42,
+    });
+}
+
+#[test]
+fn test_output_delete_result() {
+    test_output_round_trip(Output::DeleteResult {
+        key: "my-key".to_string(),
+        deleted: true,
+    });
+    test_output_round_trip(Output::DeleteResult {
+        key: "missing-key".to_string(),
+        deleted: false,
+    });
+}
+
+#[test]
+fn test_output_event_append_result() {
+    test_output_round_trip(Output::EventAppendResult {
+        sequence: 100,
+        event_type: "user.login".to_string(),
+    });
+}
+
+#[test]
+fn test_output_vector_write_result() {
+    test_output_round_trip(Output::VectorWriteResult {
+        collection: "embeddings".to_string(),
+        key: "vec-1".to_string(),
+        version: 7,
+    });
+}
+
+#[test]
+fn test_output_vector_delete_result() {
+    test_output_round_trip(Output::VectorDeleteResult {
+        collection: "embeddings".to_string(),
+        key: "vec-1".to_string(),
+        deleted: true,
+    });
+    test_output_round_trip(Output::VectorDeleteResult {
+        collection: "embeddings".to_string(),
+        key: "missing".to_string(),
+        deleted: false,
+    });
+}
+
+#[test]
+fn test_output_state_cas_result_success() {
+    test_output_round_trip(Output::StateCasResult {
+        cell: "counter".to_string(),
+        success: true,
+        version: Some(6),
+        current_value: None,
+        current_version: None,
+    });
+}
+
+#[test]
+fn test_output_state_cas_result_conflict() {
+    test_output_round_trip(Output::StateCasResult {
+        cell: "counter".to_string(),
+        success: false,
+        version: None,
+        current_value: Some(Value::Int(5)),
+        current_version: Some(3),
+    });
+}
+
+#[test]
+fn test_output_state_cas_result_skip_none_fields() {
+    // On success, current_value and current_version should be absent from JSON
+    let output = Output::StateCasResult {
+        cell: "c".to_string(),
+        success: true,
+        version: Some(1),
+        current_value: None,
+        current_version: None,
+    };
+    let json = serde_json::to_string(&output).unwrap();
+    assert!(
+        !json.contains("current_value"),
+        "None fields should be skipped: {}",
+        json
+    );
+    assert!(
+        !json.contains("current_version"),
+        "None fields should be skipped: {}",
+        json
+    );
+
+    // On conflict, version should be absent
+    let output = Output::StateCasResult {
+        cell: "c".to_string(),
+        success: false,
+        version: None,
+        current_value: Some(Value::Int(10)),
+        current_version: Some(2),
+    };
+    let json = serde_json::to_string(&output).unwrap();
+    assert!(
+        json.contains("current_value"),
+        "Conflict fields should be present: {}",
+        json
+    );
+    assert!(
+        json.contains("current_version"),
+        "Conflict fields should be present: {}",
+        json
+    );
+}
+
+// =============================================================================
+// Pagination Output Tests (#1444)
+// =============================================================================
+
+#[test]
+fn test_output_keys_page_with_more() {
+    test_output_round_trip(Output::KeysPage {
+        keys: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        has_more: true,
+        cursor: Some("c".to_string()),
+    });
+}
+
+#[test]
+fn test_output_keys_page_last_page() {
+    test_output_round_trip(Output::KeysPage {
+        keys: vec!["x".to_string(), "y".to_string()],
+        has_more: false,
+        cursor: None,
+    });
+}
+
+#[test]
+fn test_output_keys_page_empty() {
+    test_output_round_trip(Output::KeysPage {
+        keys: vec![],
+        has_more: false,
+        cursor: None,
+    });
+}
+
+#[test]
+fn test_output_keys_page_cursor_skipped_when_none() {
+    let output = Output::KeysPage {
+        keys: vec!["z".to_string()],
+        has_more: false,
+        cursor: None,
+    };
+    let json = serde_json::to_string(&output).unwrap();
+    assert!(
+        !json.contains("cursor"),
+        "None cursor should be skipped: {}",
+        json
+    );
+}
+
+#[test]
+fn test_output_json_list_result_with_has_more() {
+    test_output_round_trip(Output::JsonListResult {
+        keys: vec!["doc1".to_string(), "doc2".to_string()],
+        has_more: true,
+        cursor: Some("doc2".to_string()),
+    });
+    test_output_round_trip(Output::JsonListResult {
+        keys: vec!["doc3".to_string()],
+        has_more: false,
+        cursor: None,
+    });
+}
+
+#[test]
+fn test_output_json_list_result_cursor_skipped_when_none() {
+    let output = Output::JsonListResult {
+        keys: vec!["doc1".to_string()],
+        has_more: false,
+        cursor: None,
+    };
+    let json = serde_json::to_string(&output).unwrap();
+    assert!(
+        !json.contains("cursor"),
+        "None cursor should be skipped in JsonListResult: {}",
+        json
+    );
+}
+
+#[test]
+fn test_output_write_result_edge_cases() {
+    // Empty key
+    test_output_round_trip(Output::WriteResult {
+        key: "".to_string(),
+        version: 0,
+    });
+    // Max version
+    test_output_round_trip(Output::WriteResult {
+        key: "k".to_string(),
+        version: u64::MAX,
+    });
+}
+
+#[test]
+fn test_output_delete_result_edge_cases() {
+    // Empty key with deleted=false
+    test_output_round_trip(Output::DeleteResult {
+        key: "".to_string(),
+        deleted: false,
+    });
+}
+
+#[test]
+fn test_output_keys_page_large_page() {
+    let keys: Vec<String> = (0..1000).map(|i| format!("key:{:04}", i)).collect();
+    test_output_round_trip(Output::KeysPage {
+        keys,
+        has_more: true,
+        cursor: Some("key:0999".to_string()),
+    });
+}

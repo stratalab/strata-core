@@ -45,12 +45,13 @@ fn test_kv_put_get_parity() {
         value: Value::String("executor".into()),
     });
 
-    // Both should succeed with a Version output
+    // Both should succeed with a WriteResult output
     match exec_result {
-        Ok(Output::Version(v)) => {
-            assert!(v > 0, "Write should return a positive version");
+        Ok(Output::WriteResult { key, version }) => {
+            assert_eq!(key, "key2");
+            assert!(version > 0, "Write should return a positive version");
         }
-        _ => panic!("Expected Version output"),
+        _ => panic!("Expected WriteResult output"),
     }
 
     // Now verify we can read back what was written via both methods
@@ -106,10 +107,13 @@ fn test_kv_delete_parity() {
         key: "to-delete".to_string(),
     });
 
-    // Should succeed and return true (existed)
+    // Should succeed and return DeleteResult with deleted=true (existed)
     match result {
-        Ok(Output::Bool(existed)) => assert!(existed),
-        _ => panic!("Expected Bool output"),
+        Ok(Output::DeleteResult { key, deleted }) => {
+            assert_eq!(key, "to-delete");
+            assert!(deleted);
+        }
+        _ => panic!("Expected DeleteResult output"),
     }
 
     // Verify deleted via direct primitive call
@@ -188,10 +192,13 @@ fn test_json_set_get_parity() {
         ),
     });
 
-    // JsonSet returns Version
+    // JsonSet returns WriteResult
     match result {
-        Ok(Output::Version(v)) => assert!(v > 0),
-        other => panic!("Expected Version output, got {:?}", other),
+        Ok(Output::WriteResult { key, version }) => {
+            assert_eq!(key, "doc1");
+            assert!(version > 0);
+        }
+        other => panic!("Expected WriteResult output, got {:?}", other),
     }
 
     // Get via executor - JsonGet returns MaybeVersioned
@@ -233,10 +240,12 @@ fn test_event_append_get_by_type_parity() {
         ),
     });
 
-    // Just verify it returns a Version
+    // Just verify it returns an EventAppendResult
     match result1 {
-        Ok(Output::Version(_seq)) => {}
-        other => panic!("Expected Version output, got {:?}", other),
+        Ok(Output::EventAppendResult { event_type, .. }) => {
+            assert_eq!(event_type, "events");
+        }
+        other => panic!("Expected EventAppendResult output, got {:?}", other),
     }
 
     // Append via direct primitive
@@ -290,8 +299,11 @@ fn test_state_set_get_parity() {
     });
 
     let counter1 = match result {
-        Ok(Output::Version(c)) => c,
-        _ => panic!("Expected Version output"),
+        Ok(Output::WriteResult { key, version }) => {
+            assert_eq!(key, "cell1");
+            version
+        }
+        _ => panic!("Expected WriteResult output"),
     };
 
     // Get via direct primitive

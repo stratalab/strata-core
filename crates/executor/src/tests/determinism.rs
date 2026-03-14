@@ -173,11 +173,11 @@ fn test_kv_delete_nonexistent_determinism() {
         })
         .collect();
 
-    // All should return Bool(false)
+    // All should return DeleteResult with deleted=false
     for result in &results {
         match result {
-            Ok(Output::Bool(false)) => {}
-            _ => panic!("Expected Bool(false) for deleting nonexistent key"),
+            Ok(Output::DeleteResult { deleted: false, .. }) => {}
+            _ => panic!("Expected DeleteResult {{ deleted: false }} for deleting nonexistent key"),
         }
     }
 }
@@ -200,11 +200,11 @@ fn test_sequential_writes_determinism() {
         });
 
         match result {
-            Ok(Output::Version(v)) => {
-                // Each write should get the next version
-                assert!(v > 0, "Version should be positive");
+            Ok(Output::WriteResult { key, version }) => {
+                assert_eq!(key, format!("key-{}", i));
+                assert!(version > 0, "Version should be positive");
             }
-            _ => panic!("Expected Version output for put"),
+            _ => panic!("Expected WriteResult output for put"),
         }
     }
 

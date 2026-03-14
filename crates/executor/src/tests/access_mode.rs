@@ -37,7 +37,7 @@ fn test_read_only_blocks_kv_put() {
     });
 
     match result {
-        Err(Error::AccessDenied { command }) => assert_eq!(command, "KvPut"),
+        Err(Error::AccessDenied { command, .. }) => assert_eq!(command, "KvPut"),
         other => panic!("expected AccessDenied, got {:?}", other),
     }
 }
@@ -179,7 +179,7 @@ fn test_read_only_blocks_all_writes() {
         let name = cmd.name().to_string();
         let result = executor.execute(cmd);
         match result {
-            Err(Error::AccessDenied { command }) => assert_eq!(command, name),
+            Err(Error::AccessDenied { command, .. }) => assert_eq!(command, name),
             other => panic!("expected AccessDenied for {}, got {:?}", name, other),
         }
     }
@@ -359,7 +359,7 @@ fn test_read_only_session_blocks_txn() {
     });
 
     match result {
-        Err(Error::AccessDenied { command }) => assert_eq!(command, "TxnBegin"),
+        Err(Error::AccessDenied { command, .. }) => assert_eq!(command, "TxnBegin"),
         other => panic!("expected AccessDenied, got {:?}", other),
     }
 }

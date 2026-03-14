@@ -75,7 +75,7 @@ impl Strata {
             vector,
             metadata,
         })? {
-            Output::Version(v) => Ok(v),
+            Output::VectorWriteResult { version, .. } => Ok(version),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for VectorUpsert".into(),
             }),
@@ -106,7 +106,7 @@ impl Strata {
             collection: collection.to_string(),
             key: key.to_string(),
         })? {
-            Output::Bool(deleted) => Ok(deleted),
+            Output::VectorDeleteResult { deleted, .. } => Ok(deleted),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for VectorDelete".into(),
             }),

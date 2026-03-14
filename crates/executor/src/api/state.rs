@@ -16,7 +16,7 @@ impl Strata {
             cell: cell.to_string(),
             value: value.into(),
         })? {
-            Output::Version(v) => Ok(v),
+            Output::WriteResult { version, .. } => Ok(version),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for StateSet".into(),
             }),
@@ -71,7 +71,15 @@ impl Strata {
             expected_counter,
             value: value.into(),
         })? {
-            Output::MaybeVersion(v) => Ok(v),
+            Output::StateCasResult {
+                success, version, ..
+            } => {
+                if success {
+                    Ok(version)
+                } else {
+                    Ok(None)
+                }
+            }
             _ => Err(Error::Internal {
                 reason: "Unexpected output for StateCas".into(),
             }),
@@ -86,7 +94,7 @@ impl Strata {
             cell: cell.to_string(),
             value: value.into(),
         })? {
-            Output::Version(v) => Ok(v),
+            Output::WriteResult { version, .. } => Ok(version),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for StateInit".into(),
             }),
@@ -102,7 +110,7 @@ impl Strata {
             space: self.space_id(),
             cell: cell.to_string(),
         })? {
-            Output::Bool(b) => Ok(b),
+            Output::DeleteResult { deleted, .. } => Ok(deleted),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for StateDelete".into(),
             }),

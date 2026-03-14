@@ -13,9 +13,26 @@ use strata_core::{Value, Version};
 use crate::bridge::{self, validate_value, Primitives};
 use crate::convert::convert_result;
 use crate::types::BranchId;
-use crate::{Output, Result};
+use crate::{Error, Output, Result};
 
 use super::require_branch_exists;
+
+/// Enrich a state cell error with fuzzy-match suggestions.
+fn enrich_state_error(
+    p: &Primitives,
+    branch_id: strata_core::types::BranchId,
+    space: &str,
+    err: Error,
+) -> Error {
+    match err {
+        Error::CellNotFound { cell, hint: None } => {
+            let candidates = p.state.list(&branch_id, space, None).unwrap_or_default();
+            let hint = crate::suggest::format_hint("cells", &candidates, &cell, 2);
+            Error::CellNotFound { cell, hint }
+        }
+        other => other,
+    }
+}
 
 /// Handle StateGetv command — get full version history for a state cell.
 pub fn state_getv(
@@ -26,7 +43,8 @@ pub fn state_getv(
 ) -> Result<Output> {
     let branch_id = bridge::to_core_branch_id(&branch)?;
     convert_result(bridge::validate_key(&cell))?;
-    let result = convert_result(p.state.getv(&branch_id, &space, &cell))?;
+    let result = convert_result(p.state.getv(&branch_id, &space, &cell))
+        .map_err(|e| enrich_state_error(p, branch_id, &space, e))?;
     let mapped = result.map(|history| {
         history
             .into_versions()
@@ -58,6 +76,7 @@ pub fn state_set(
     let text = super::embed_hook::extract_text(&value);
 
     let version = convert_result(p.state.set(&branch_id, &space, &cell, value))?;
+    let v = bridge::extract_version(&version);
 
     // Best-effort auto-embed after successful write
     if let Some(ref text) = text {
@@ -72,7 +91,10 @@ pub fn state_set(
         );
     }
 
-    Ok(Output::Version(bridge::extract_version(&version)))
+    Ok(Output::WriteResult {
+        key: cell,
+        version: v,
+    })
 }
 
 /// Handle StateGet command.
@@ -86,7 +108,8 @@ pub fn state_get(
 ) -> Result<Output> {
     let branch_id = bridge::to_core_branch_id(&branch)?;
     convert_result(bridge::validate_key(&cell))?;
-    let result = convert_result(p.state.get_versioned(&branch_id, &space, &cell))?;
+    let result = convert_result(p.state.get_versioned(&branch_id, &space, &cell))
+        .map_err(|e| enrich_state_error(p, branch_id, &space, e))?;
     Ok(Output::MaybeVersioned(
         result.map(bridge::to_versioned_value),
     ))
@@ -102,7 +125,8 @@ pub fn state_get_at(
 ) -> Result<Output> {
     let branch_id = bridge::to_core_branch_id(&branch)?;
     convert_result(bridge::validate_key(&cell))?;
-    let result = convert_result(p.state.get_at(&branch_id, &space, &cell, as_of_ts))?;
+    let result = convert_result(p.state.get_at(&branch_id, &space, &cell, as_of_ts))
+        .map_err(|e| enrich_state_error(p, branch_id, &space, e))?;
     Ok(Output::Maybe(result))
 }
 
@@ -123,23 +147,43 @@ pub fn state_cas(
     // Extract text before value is consumed
     let text = super::embed_hook::extract_text(&value);
 
+    // Helper to build a conflict result with current value for retry
+    let build_conflict = |p: &Primitives, cell: &str| -> Output {
+        let (current_value, current_version) = match p.state.get_versioned(&branch_id, &space, cell)
+        {
+            Ok(Some(v)) => (Some(v.value), Some(bridge::extract_version(&v.version))),
+            _ => (None, None),
+        };
+        Output::StateCasResult {
+            cell: cell.to_string(),
+            success: false,
+            version: None,
+            current_value,
+            current_version,
+        }
+    };
+
     let result =
         match expected_counter {
             None => {
                 // Init semantics: create only if cell doesn't exist.
                 // Check existence first since init() is idempotent.
                 if convert_result(p.state.get(&branch_id, &space, &cell))?.is_some() {
-                    return Ok(Output::MaybeVersion(None));
+                    return Ok(build_conflict(p, &cell));
                 }
                 match p.state.init(&branch_id, &space, &cell, value) {
-                    Ok(version) => Ok(Output::MaybeVersion(Some(bridge::extract_version(
-                        &version,
-                    )))),
+                    Ok(version) => Ok(Output::StateCasResult {
+                        cell: cell.clone(),
+                        success: true,
+                        version: Some(bridge::extract_version(&version)),
+                        current_value: None,
+                        current_version: None,
+                    }),
                     Err(e) => {
                         let err = crate::Error::from(e);
                         match err {
                             crate::Error::VersionConflict { .. }
-                            | crate::Error::Conflict { .. } => Ok(Output::MaybeVersion(None)),
+                            | crate::Error::Conflict { .. } => Ok(build_conflict(p, &cell)),
                             other => Err(other),
                         }
                     }
@@ -150,14 +194,18 @@ pub fn state_cas(
                     .state
                     .cas(&branch_id, &space, &cell, Version::Counter(expected), value)
                 {
-                    Ok(version) => Ok(Output::MaybeVersion(Some(bridge::extract_version(
-                        &version,
-                    )))),
+                    Ok(version) => Ok(Output::StateCasResult {
+                        cell: cell.clone(),
+                        success: true,
+                        version: Some(bridge::extract_version(&version)),
+                        current_value: None,
+                        current_version: None,
+                    }),
                     Err(e) => {
                         let err = crate::Error::from(e);
                         match err {
                             crate::Error::VersionConflict { .. }
-                            | crate::Error::Conflict { .. } => Ok(Output::MaybeVersion(None)),
+                            | crate::Error::Conflict { .. } => Ok(build_conflict(p, &cell)),
                             other => Err(other),
                         }
                     }
@@ -165,8 +213,8 @@ pub fn state_cas(
             }
         };
 
-    // Best-effort auto-embed only if the CAS/init actually succeeded (returned a version)
-    if let Ok(Output::MaybeVersion(Some(_))) = &result {
+    // Best-effort auto-embed only if the CAS/init actually succeeded
+    if let Ok(Output::StateCasResult { success: true, .. }) = &result {
         if let Some(ref text) = text {
             super::embed_hook::maybe_embed_text(
                 p,
@@ -200,6 +248,7 @@ pub fn state_init(
     let text = super::embed_hook::extract_text(&value);
 
     let version = convert_result(p.state.init(&branch_id, &space, &cell, value))?;
+    let v = bridge::extract_version(&version);
 
     // Best-effort auto-embed after successful write
     if let Some(ref text) = text {
@@ -214,7 +263,10 @@ pub fn state_init(
         );
     }
 
-    Ok(Output::Version(bridge::extract_version(&version)))
+    Ok(Output::WriteResult {
+        key: cell,
+        version: v,
+    })
 }
 
 /// Handle StateDelete command.
@@ -227,7 +279,8 @@ pub fn state_delete(
     require_branch_exists(p, &branch)?;
     let branch_id = bridge::to_core_branch_id(&branch)?;
     convert_result(bridge::validate_key(&cell))?;
-    let existed = convert_result(p.state.delete(&branch_id, &space, &cell))?;
+    let existed = convert_result(p.state.delete(&branch_id, &space, &cell))
+        .map_err(|e| enrich_state_error(p, branch_id, &space, e))?;
 
     // Best-effort remove shadow embedding
     if existed {
@@ -240,7 +293,10 @@ pub fn state_delete(
         );
     }
 
-    Ok(Output::Bool(existed))
+    Ok(Output::DeleteResult {
+        key: cell,
+        deleted: existed,
+    })
 }
 
 /// Handle StateList command.

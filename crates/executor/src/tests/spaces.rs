@@ -477,7 +477,7 @@ fn test_command_without_space_uses_default() {
         key: "compat-key".to_string(),
         value: Value::String("compat-value".into()),
     });
-    assert!(matches!(result, Ok(Output::Version(_))));
+    assert!(matches!(result, Ok(Output::WriteResult { .. })));
 
     // Read it back — should be in default space
     let result = db.executor().execute(Command::KvGet {
