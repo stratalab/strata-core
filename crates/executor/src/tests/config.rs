@@ -24,7 +24,7 @@ fn configure_set_and_get_provider() {
         key: "provider".into(),
         value: "anthropic".into(),
     });
-    assert!(matches!(result, Ok(Output::Unit)));
+    assert!(matches!(result, Ok(Output::ConfigSetResult { .. })));
 
     let result = executor
         .execute(Command::ConfigureGetKey {
@@ -252,7 +252,7 @@ fn configure_set_empty_api_key_is_allowed() {
         key: "anthropic_api_key".into(),
         value: "".into(),
     });
-    assert!(matches!(result, Ok(Output::Unit)));
+    assert!(matches!(result, Ok(Output::ConfigSetResult { .. })));
 }
 
 // =============================================================================
@@ -1400,4 +1400,303 @@ fn unknown_key_error_lists_all_new_keys() {
         "Error should indicate truncated keys: {}",
         msg
     );
+}
+
+// =============================================================================
+// ConfigSetResult field verification
+// =============================================================================
+
+#[test]
+fn configure_set_result_echoes_key_and_value() {
+    let executor = create_test_executor();
+
+    let result = executor
+        .execute(Command::ConfigureSet {
+            key: "provider".into(),
+            value: "anthropic".into(),
+        })
+        .unwrap();
+
+    match result {
+        Output::ConfigSetResult { key, new_value } => {
+            assert_eq!(key, "provider");
+            assert_eq!(new_value, "anthropic");
+        }
+        other => panic!("Expected ConfigSetResult, got {:?}", other),
+    }
+}
+
+#[test]
+fn configure_set_result_key_is_lowercased() {
+    let executor = create_test_executor();
+
+    let result = executor
+        .execute(Command::ConfigureSet {
+            key: "PROVIDER".into(),
+            value: "openai".into(),
+        })
+        .unwrap();
+
+    match result {
+        Output::ConfigSetResult { key, .. } => {
+            assert_eq!(key, "provider", "key should be lowercased");
+        }
+        other => panic!("Expected ConfigSetResult, got {:?}", other),
+    }
+}
+
+#[test]
+fn configure_set_result_masks_api_keys() {
+    let executor = create_test_executor();
+
+    for (config_key, input, expected_masked) in [
+        ("anthropic_api_key", "sk-ant-secret-12345", "sk-a***"),
+        ("openai_api_key", "sk-test-key-67890", "sk-t***"),
+        ("google_api_key", "AIza-xyz-secret", "AIza***"),
+    ] {
+        let result = executor
+            .execute(Command::ConfigureSet {
+                key: config_key.into(),
+                value: input.into(),
+            })
+            .unwrap();
+
+        match result {
+            Output::ConfigSetResult { key, new_value } => {
+                assert_eq!(key, config_key);
+                assert_eq!(
+                    new_value, expected_masked,
+                    "API key {:?} should be masked in response",
+                    config_key
+                );
+            }
+            other => panic!("Expected ConfigSetResult, got {:?}", other),
+        }
+    }
+}
+
+#[test]
+fn configure_set_result_masks_short_api_key() {
+    let executor = create_test_executor();
+
+    // 4-char key: fully masked
+    let result = executor
+        .execute(Command::ConfigureSet {
+            key: "anthropic_api_key".into(),
+            value: "abcd".into(),
+        })
+        .unwrap();
+
+    match result {
+        Output::ConfigSetResult { new_value, .. } => {
+            assert_eq!(new_value, "***", "Short key should be fully masked");
+        }
+        other => panic!("Expected ConfigSetResult, got {:?}", other),
+    }
+}
+
+#[test]
+fn configure_set_result_normalizes_embed_model() {
+    let executor = create_test_executor();
+
+    let result = executor
+        .execute(Command::ConfigureSet {
+            key: "embed_model".into(),
+            value: "MINILM".into(),
+        })
+        .unwrap();
+
+    match result {
+        Output::ConfigSetResult { key, new_value } => {
+            assert_eq!(key, "embed_model");
+            assert_eq!(new_value, "miniLM", "Should use canonical casing");
+        }
+        other => panic!("Expected ConfigSetResult, got {:?}", other),
+    }
+}
+
+#[test]
+fn configure_set_result_normalizes_auto_embed() {
+    let executor = create_test_executor();
+
+    // "TRUE" → "true"
+    let result = executor
+        .execute(Command::ConfigureSet {
+            key: "auto_embed".into(),
+            value: "TRUE".into(),
+        })
+        .unwrap();
+
+    match result {
+        Output::ConfigSetResult { new_value, .. } => {
+            assert_eq!(new_value, "true", "Should normalize to lowercase bool");
+        }
+        other => panic!("Expected ConfigSetResult, got {:?}", other),
+    }
+
+    // "False" → "false"
+    let result = executor
+        .execute(Command::ConfigureSet {
+            key: "auto_embed".into(),
+            value: "False".into(),
+        })
+        .unwrap();
+
+    match result {
+        Output::ConfigSetResult { new_value, .. } => {
+            assert_eq!(new_value, "false");
+        }
+        other => panic!("Expected ConfigSetResult, got {:?}", other),
+    }
+}
+
+#[test]
+fn configure_set_result_normalizes_numeric_values() {
+    let executor = create_test_executor();
+
+    // bm25_k1: "1.50" → "1.5" (f32 round-trip)
+    let result = executor
+        .execute(Command::ConfigureSet {
+            key: "bm25_k1".into(),
+            value: "1.50".into(),
+        })
+        .unwrap();
+
+    match result {
+        Output::ConfigSetResult { new_value, .. } => {
+            assert_eq!(new_value, "1.5", "Should normalize via f32 round-trip");
+        }
+        other => panic!("Expected ConfigSetResult, got {:?}", other),
+    }
+
+    // bm25_b: "0.750" → "0.75"
+    let result = executor
+        .execute(Command::ConfigureSet {
+            key: "bm25_b".into(),
+            value: "0.750".into(),
+        })
+        .unwrap();
+
+    match result {
+        Output::ConfigSetResult { new_value, .. } => {
+            assert_eq!(new_value, "0.75");
+        }
+        other => panic!("Expected ConfigSetResult, got {:?}", other),
+    }
+
+    // embed_batch_size: "0512" → "512"
+    let result = executor
+        .execute(Command::ConfigureSet {
+            key: "embed_batch_size".into(),
+            value: "0512".into(),
+        })
+        .unwrap();
+
+    match result {
+        Output::ConfigSetResult { new_value, .. } => {
+            assert_eq!(new_value, "512", "Should normalize via usize round-trip");
+        }
+        other => panic!("Expected ConfigSetResult, got {:?}", other),
+    }
+}
+
+#[test]
+fn configure_set_result_matches_get_key() {
+    let executor = create_test_executor();
+
+    // For every key type, ConfigSetResult.new_value should match ConfigureGetKey
+    // (except API keys where both mask but ConfigGet returns the real value)
+    let cases: Vec<(&str, &str)> = vec![
+        ("provider", "openai"),
+        ("default_model", "gpt-4"),
+        ("embed_model", "BGE-M3"),
+        ("auto_embed", "TRUE"),
+        ("bm25_k1", "1.50"),
+        ("bm25_b", "0.750"),
+        ("embed_batch_size", "0256"),
+    ];
+
+    for (key, value) in cases {
+        let set_result = executor
+            .execute(Command::ConfigureSet {
+                key: key.into(),
+                value: value.into(),
+            })
+            .unwrap();
+
+        let get_result = executor
+            .execute(Command::ConfigureGetKey { key: key.into() })
+            .unwrap();
+
+        let set_value = match set_result {
+            Output::ConfigSetResult { new_value, .. } => new_value,
+            other => panic!("Expected ConfigSetResult for {:?}, got {:?}", key, other),
+        };
+        let get_value = match get_result {
+            Output::ConfigValue(Some(v)) => v,
+            other => panic!("Expected ConfigValue for {:?}, got {:?}", key, other),
+        };
+
+        assert_eq!(
+            set_value, get_value,
+            "ConfigSetResult.new_value should match ConfigureGetKey for {:?} (input: {:?})",
+            key, value
+        );
+    }
+}
+
+#[test]
+fn configure_set_result_durability() {
+    let executor = create_test_executor();
+
+    let result = executor
+        .execute(Command::ConfigureSet {
+            key: "durability".into(),
+            value: "Always".into(),
+        })
+        .unwrap();
+
+    match result {
+        Output::ConfigSetResult { key, new_value } => {
+            assert_eq!(key, "durability");
+            assert_eq!(new_value, "always", "Should lowercase durability");
+        }
+        other => panic!("Expected ConfigSetResult, got {:?}", other),
+    }
+}
+
+#[test]
+fn configure_set_result_model_config_keys() {
+    let executor = create_test_executor();
+
+    let result = executor
+        .execute(Command::ConfigureSet {
+            key: "model_endpoint".into(),
+            value: "http://localhost:11434/v1".into(),
+        })
+        .unwrap();
+
+    match result {
+        Output::ConfigSetResult { key, new_value } => {
+            assert_eq!(key, "model_endpoint");
+            assert_eq!(new_value, "http://localhost:11434/v1");
+        }
+        other => panic!("Expected ConfigSetResult, got {:?}", other),
+    }
+
+    // model_api_key should be masked
+    let result = executor
+        .execute(Command::ConfigureSet {
+            key: "model_api_key".into(),
+            value: "sk-secret-key".into(),
+        })
+        .unwrap();
+
+    match result {
+        Output::ConfigSetResult { key, new_value } => {
+            assert_eq!(key, "model_api_key");
+            assert_eq!(new_value, "sk-s***", "model_api_key should be masked");
+        }
+        other => panic!("Expected ConfigSetResult, got {:?}", other),
+    }
 }

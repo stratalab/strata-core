@@ -149,8 +149,8 @@ pub use bundle::{BundleInfo, ExportInfo, ImportInfo};
 
 // Re-export branch_ops types at crate root
 pub use branch_ops::{
-    BranchDiffEntry, BranchDiffResult, ConflictEntry, DiffSummary, ForkInfo, MergeInfo,
-    MergeStrategy, SpaceDiff,
+    BranchDiffEntry, BranchDiffResult, ConflictEntry, DiffFilter, DiffOptions, DiffSummary,
+    ForkInfo, MergeInfo, MergeStrategy, SpaceDiff,
 };
 
 #[cfg(feature = "perf-trace")]

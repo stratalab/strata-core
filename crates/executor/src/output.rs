@@ -196,6 +196,14 @@ pub enum Output {
     /// Database configuration snapshot
     Config(StrataConfig),
 
+    /// Configuration set acknowledgment — echoes key + effective value.
+    ConfigSetResult {
+        /// Configuration key that was set.
+        key: String,
+        /// Effective new value (normalized, e.g. "miniLM" not "minilm").
+        new_value: String,
+    },
+
     /// Single configuration value (for ConfigureGetKey).
     /// None if the key is not set.
     ConfigValue(Option<String>),
@@ -234,7 +242,40 @@ pub enum Output {
 
     // ==================== Intelligence ====================
     /// Search results across primitives
-    SearchResults(Vec<SearchResultHit>),
+    SearchResults {
+        /// Ranked search hits.
+        hits: Vec<SearchResultHit>,
+        /// Execution statistics.
+        stats: SearchStatsOutput,
+    },
+
+    /// Sample of entries from a primitive (keys + values for shape discovery)
+    SampleResult {
+        /// Total number of entries in the source.
+        total_count: u64,
+        /// Sampled items.
+        items: Vec<SampleItem>,
+    },
+
+    /// Graph node write result (add_node)
+    GraphWriteResult {
+        /// Node ID that was written.
+        node_id: String,
+        /// Whether a new node was created (false = updated existing).
+        created: bool,
+    },
+
+    /// Graph edge write result (add_edge)
+    GraphEdgeWriteResult {
+        /// Source node ID.
+        src: String,
+        /// Destination node ID.
+        dst: String,
+        /// Edge type label.
+        edge_type: String,
+        /// Whether a new edge was created (false = updated existing).
+        created: bool,
+    },
 
     // ==================== Space ====================
     /// List of space names

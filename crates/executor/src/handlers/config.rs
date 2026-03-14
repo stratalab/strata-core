@@ -216,6 +216,7 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
     // Durability uses persist_config_deferred (allows changing durability)
     if key_lower == "durability" {
         let v = value.trim().to_ascii_lowercase();
+        let effective = v.clone();
         p.db.persist_config_deferred(|cfg| {
             cfg.durability = v;
         })
@@ -224,7 +225,10 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
             target: "strata::config",
             "durability changed; takes effect on next restart"
         );
-        return Ok(Output::Unit);
+        return Ok(Output::ConfigSetResult {
+            key: key_lower,
+            new_value: effective,
+        });
     }
 
     // Model-related keys may need to create the model section
@@ -234,6 +238,11 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
     );
 
     if use_model_config {
+        let effective = if key_lower == "model_api_key" {
+            mask_api_key(&value)
+        } else {
+            value.clone()
+        };
         p.db.update_config(|cfg| {
             let model =
                 cfg.model
@@ -254,8 +263,37 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
             }
         })
         .map_err(crate::Error::from)?;
-        return Ok(Output::Unit);
+        return Ok(Output::ConfigSetResult {
+            key: key_lower,
+            new_value: effective,
+        });
     }
+
+    // Compute effective value for the response (normalized/masked as appropriate).
+    // Must match what ConfigureGetKey would return after the write.
+    let effective = match key_lower.as_str() {
+        "embed_model" => canonical_embed_model
+            .clone()
+            .unwrap_or_else(|| value.clone()),
+        "anthropic_api_key" | "openai_api_key" | "google_api_key" => mask_api_key(&value),
+        "auto_embed" => value.trim().eq_ignore_ascii_case("true").to_string(),
+        "bm25_k1" => value
+            .trim()
+            .parse::<f32>()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|_| value.clone()),
+        "bm25_b" => value
+            .trim()
+            .parse::<f32>()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|_| value.clone()),
+        "embed_batch_size" => value
+            .trim()
+            .parse::<usize>()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|_| value.clone()),
+        _ => value.clone(),
+    };
 
     p.db.update_config(|cfg| match key_lower.as_str() {
         "provider" => cfg.provider = value.clone(),
@@ -284,7 +322,10 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
     })
     .map_err(crate::Error::from)?;
 
-    Ok(Output::Unit)
+    Ok(Output::ConfigSetResult {
+        key: key_lower,
+        new_value: effective,
+    })
 }
 
 /// Handle ConfigureGetKey command: get the value of a named configuration key.

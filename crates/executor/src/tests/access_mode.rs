@@ -304,6 +304,9 @@ fn test_read_only_allows_all_reads() {
         Command::BranchDiff {
             branch_a: "default".into(),
             branch_b: "default".into(),
+            filter_primitives: None,
+            filter_spaces: None,
+            as_of: None,
         },
         Command::ConfigGet,
         Command::AutoEmbedStatus,
@@ -649,6 +652,9 @@ fn test_is_write_classification() {
         Command::BranchDiff {
             branch_a: "".into(),
             branch_b: "".into(),
+            filter_primitives: None,
+            filter_spaces: None,
+            as_of: None,
         },
         Command::ConfigGet,
         Command::AutoEmbedStatus,

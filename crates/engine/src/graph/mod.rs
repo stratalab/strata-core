@@ -249,13 +249,15 @@ impl GraphStore {
     // =========================================================================
 
     /// Add or update a node in the graph.
+    ///
+    /// Returns `true` if a new node was created, `false` if an existing node was updated.
     pub fn add_node(
         &self,
         branch_id: BranchId,
         graph: &str,
         node_id: &str,
         data: NodeData,
-    ) -> StrataResult<()> {
+    ) -> StrataResult<bool> {
         keys::validate_graph_name(graph)?;
         keys::validate_node_id(node_id)?;
 
@@ -288,6 +290,7 @@ impl GraphStore {
         self.db.transaction(branch_id, |txn| {
             // If updating, clean up old ref index and type index entries
             let old_val = txn.get(&storage_key)?;
+            let created = old_val.is_none();
             if let Some(Value::String(old_json)) = old_val {
                 if let Ok(old_data) = serde_json::from_str::<NodeData>(&old_json) {
                     if let Some(old_uri) = old_data.entity_ref {
@@ -314,7 +317,7 @@ impl GraphStore {
             if let Some(tk) = type_key.clone() {
                 txn.put(tk, Value::Null)?;
             }
-            Ok(())
+            Ok(created)
         })
     }
 
@@ -542,6 +545,8 @@ impl GraphStore {
 
     /// Add or update an edge in the graph.
     /// Appends to packed forward and reverse adjacency lists atomically.
+    ///
+    /// Returns `true` if a new edge was created, `false` if an existing edge was updated.
     pub fn add_edge(
         &self,
         branch_id: BranchId,
@@ -550,7 +555,7 @@ impl GraphStore {
         dst: &str,
         edge_type: &str,
         data: EdgeData,
-    ) -> StrataResult<()> {
+    ) -> StrataResult<bool> {
         keys::validate_graph_name(graph)?;
         keys::validate_node_id(src)?;
         keys::validate_node_id(dst)?;
@@ -623,7 +628,7 @@ impl GraphStore {
                 Self::write_edge_type_count(txn, &count_sk, count + 1)?;
             }
 
-            Ok(())
+            Ok(!was_update)
         })
     }
 
@@ -1315,17 +1320,19 @@ mod tests {
         let branch = default_branch();
 
         gs.create_graph(branch, "ng", None).unwrap();
-        gs.add_node(
-            branch,
-            "ng",
-            "n1",
-            NodeData {
-                entity_ref: None,
-                properties: Some(serde_json::json!({"name": "Alice"})),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let created = gs
+            .add_node(
+                branch,
+                "ng",
+                "n1",
+                NodeData {
+                    entity_ref: None,
+                    properties: Some(serde_json::json!({"name": "Alice"})),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(created, "add_node should return true for new node");
 
         let node = gs.get_node(branch, "ng", "n1").unwrap().unwrap();
         assert_eq!(node.properties, Some(serde_json::json!({"name": "Alice"})));
@@ -1590,30 +1597,35 @@ mod tests {
         gs.create_graph(branch, "eg", None).unwrap();
         gs.add_node(branch, "eg", "A", NodeData::default()).unwrap();
         gs.add_node(branch, "eg", "B", NodeData::default()).unwrap();
-        gs.add_edge(
-            branch,
-            "eg",
-            "A",
-            "B",
-            "E",
-            EdgeData {
-                weight: 1.0,
-                properties: None,
-            },
-        )
-        .unwrap();
-        gs.add_edge(
-            branch,
-            "eg",
-            "A",
-            "B",
-            "E",
-            EdgeData {
-                weight: 2.0,
-                properties: None,
-            },
-        )
-        .unwrap();
+        let created1 = gs
+            .add_edge(
+                branch,
+                "eg",
+                "A",
+                "B",
+                "E",
+                EdgeData {
+                    weight: 1.0,
+                    properties: None,
+                },
+            )
+            .unwrap();
+        assert!(created1, "first add_edge should return created=true");
+
+        let created2 = gs
+            .add_edge(
+                branch,
+                "eg",
+                "A",
+                "B",
+                "E",
+                EdgeData {
+                    weight: 2.0,
+                    properties: None,
+                },
+            )
+            .unwrap();
+        assert!(!created2, "second add_edge should return created=false");
 
         let edge = gs.get_edge(branch, "eg", "A", "B", "E").unwrap().unwrap();
         assert_eq!(edge.weight, 2.0);
@@ -1625,28 +1637,33 @@ mod tests {
         let branch = default_branch();
 
         gs.create_graph(branch, "ng", None).unwrap();
-        gs.add_node(
-            branch,
-            "ng",
-            "n1",
-            NodeData {
-                entity_ref: None,
-                properties: Some(serde_json::json!({"v": 1})),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        gs.add_node(
-            branch,
-            "ng",
-            "n1",
-            NodeData {
-                entity_ref: None,
-                properties: Some(serde_json::json!({"v": 2})),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let created1 = gs
+            .add_node(
+                branch,
+                "ng",
+                "n1",
+                NodeData {
+                    entity_ref: None,
+                    properties: Some(serde_json::json!({"v": 1})),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(created1, "first add_node should return created=true");
+
+        let created2 = gs
+            .add_node(
+                branch,
+                "ng",
+                "n1",
+                NodeData {
+                    entity_ref: None,
+                    properties: Some(serde_json::json!({"v": 2})),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(!created2, "second add_node should return created=false");
 
         let node = gs.get_node(branch, "ng", "n1").unwrap().unwrap();
         assert_eq!(node.properties, Some(serde_json::json!({"v": 2})));

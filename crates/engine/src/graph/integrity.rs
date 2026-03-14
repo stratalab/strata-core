@@ -43,7 +43,7 @@ impl GraphStore {
                     // Read current node, clear entity_ref, re-write
                     if let Some(mut data) = self.get_node(branch_id, &graph, &node_id)? {
                         data.entity_ref = None;
-                        self.add_node(branch_id, &graph, &node_id, data)
+                        self.add_node(branch_id, &graph, &node_id, data).map(|_| ())
                     } else {
                         Ok(())
                     }
