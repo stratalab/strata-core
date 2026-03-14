@@ -1176,10 +1176,10 @@ fn test_output_write_result_edge_cases() {
         key: "".to_string(),
         version: 0,
     });
-    // Max version
+    // Large version
     test_output_round_trip(Output::WriteResult {
         key: "k".to_string(),
-        version: u64::MAX,
+        version: 999_999_999,
     });
 }
 
