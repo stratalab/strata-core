@@ -844,6 +844,85 @@ pub enum Command {
         search: SearchQuery,
     },
 
+    // ==================== Data Introspection ====================
+    /// Count KV keys matching a prefix.
+    /// Returns: `Output::Uint`
+    KvCount {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Optional key prefix filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix: Option<String>,
+    },
+
+    /// Count JSON documents matching a prefix.
+    /// Returns: `Output::Uint`
+    JsonCount {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Optional key prefix filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix: Option<String>,
+    },
+
+    /// Sample KV entries for shape discovery.
+    /// Returns: `Output::SampleResult`
+    KvSample {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Optional key prefix filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix: Option<String>,
+        /// Number of samples to return (default: 5).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<usize>,
+    },
+
+    /// Sample JSON documents for shape discovery.
+    /// Returns: `Output::SampleResult`
+    JsonSample {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Optional key prefix filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix: Option<String>,
+        /// Number of samples to return (default: 5).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<usize>,
+    },
+
+    /// Sample vector entries for shape discovery (returns metadata, not embeddings).
+    /// Returns: `Output::SampleResult`
+    VectorSample {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Collection name.
+        collection: String,
+        /// Number of samples to return (default: 5).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<usize>,
+    },
+
     // ==================== Embedding (2) ====================
     /// Embed a single text string.
     /// Returns: `Output::Embedding`
@@ -1571,6 +1650,11 @@ impl Command {
             Command::BranchBundleValidate { .. } => "BranchBundleValidate",
             Command::ConfigureModel { .. } => "ConfigureModel",
             Command::Search { .. } => "Search",
+            Command::KvCount { .. } => "KvCount",
+            Command::JsonCount { .. } => "JsonCount",
+            Command::KvSample { .. } => "KvSample",
+            Command::JsonSample { .. } => "JsonSample",
+            Command::VectorSample { .. } => "VectorSample",
             Command::EmbedStatus => "EmbedStatus",
             Command::ConfigGet => "ConfigGet",
             Command::ConfigureSet { .. } => "ConfigureSet",
@@ -1689,7 +1773,13 @@ impl Command {
             | Command::VectorCollectionStats { branch, space, .. }
             | Command::VectorBatchUpsert { branch, space, .. }
             // Intelligence
-            | Command::Search { branch, space, .. } => {
+            | Command::Search { branch, space, .. }
+            // Data introspection
+            | Command::KvCount { branch, space, .. }
+            | Command::JsonCount { branch, space, .. }
+            | Command::KvSample { branch, space, .. }
+            | Command::JsonSample { branch, space, .. }
+            | Command::VectorSample { branch, space, .. } => {
                 resolve_branch!(branch);
                 resolve_space!(space);
             }

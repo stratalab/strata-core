@@ -1049,6 +1049,89 @@ impl Executor {
                 crate::handlers::search::search(&self.primitives, branch, space, search)
             }
 
+            // Data introspection commands
+            Command::KvCount {
+                branch,
+                space,
+                prefix,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::kv::kv_count(&self.primitives, branch, space, prefix)
+            }
+            Command::JsonCount {
+                branch,
+                space,
+                prefix,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::json::json_count(&self.primitives, branch, space, prefix)
+            }
+            Command::KvSample {
+                branch,
+                space,
+                prefix,
+                count,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::kv::kv_sample(
+                    &self.primitives,
+                    branch,
+                    space,
+                    prefix,
+                    count.unwrap_or(5),
+                )
+            }
+            Command::JsonSample {
+                branch,
+                space,
+                prefix,
+                count,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::json::json_sample(
+                    &self.primitives,
+                    branch,
+                    space,
+                    prefix,
+                    count.unwrap_or(5),
+                )
+            }
+            Command::VectorSample {
+                branch,
+                space,
+                collection,
+                count,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::vector::vector_sample(
+                    &self.primitives,
+                    branch,
+                    space,
+                    collection,
+                    count.unwrap_or(5),
+                )
+            }
+
             // Space commands
             Command::SpaceList { branch } => {
                 let branch = branch.ok_or(Error::InvalidInput {

@@ -535,6 +535,82 @@ pub fn json_list(
     })
 }
 
+/// Handle JsonCount command — count documents matching a prefix.
+pub fn json_count(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    prefix: Option<String>,
+) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+    // Use paginated list with a large limit to count documents
+    let mut total = 0u64;
+    let mut cursor: Option<String> = None;
+    loop {
+        let result = convert_result(p.json.list(
+            &branch_id,
+            &space,
+            prefix.as_deref(),
+            cursor.as_deref(),
+            1000,
+        ))?;
+        total += result.doc_ids.len() as u64;
+        match result.next_cursor {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+    Ok(Output::Uint(total))
+}
+
+/// Handle JsonSample command — evenly-spaced sample of JSON documents.
+pub fn json_sample(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    prefix: Option<String>,
+    count: usize,
+) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+    // Collect all document keys first
+    let mut all_keys = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let result = convert_result(p.json.list(
+            &branch_id,
+            &space,
+            prefix.as_deref(),
+            cursor.as_deref(),
+            1000,
+        ))?;
+        all_keys.extend(result.doc_ids);
+        match result.next_cursor {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+    let total = all_keys.len() as u64;
+    let indices = super::sample_indices(all_keys.len(), count);
+    let mut items = Vec::with_capacity(indices.len());
+    for idx in indices {
+        let key = &all_keys[idx];
+        let json_path = strata_core::primitives::json::JsonPath::root();
+        let result = convert_result(p.json.get(&branch_id, &space, key, &json_path))?;
+        if let Some(json_val) = result {
+            if let Ok(value) = convert_result(json_to_value(json_val)) {
+                items.push(crate::types::SampleItem {
+                    key: key.clone(),
+                    value,
+                });
+            }
+        }
+    }
+    Ok(Output::SampleResult {
+        total_count: total,
+        items,
+    })
+}
+
 /// Best-effort: read back the full JSON document and embed its complete text.
 ///
 /// This ensures that partial-path writes (e.g. `$.name`) produce an embedding

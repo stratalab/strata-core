@@ -658,6 +658,36 @@ pub struct SearchResultHit {
     pub snippet: Option<String>,
 }
 
+/// Execution statistics for a search operation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchStatsOutput {
+    /// Elapsed wall time in milliseconds.
+    pub elapsed_ms: f64,
+    /// Total candidates considered across all primitives.
+    pub candidates_considered: usize,
+    /// Per-primitive candidate counts (e.g. "kv" -> 150).
+    pub candidates_by_primitive: std::collections::HashMap<String, usize>,
+    /// Whether a search index was used (vs. full scan).
+    pub index_used: bool,
+    /// Whether results were truncated due to budget limits.
+    pub truncated: bool,
+    /// Search mode ("keyword" or "hybrid").
+    pub mode: String,
+    /// Whether query expansion was used.
+    pub expansion_used: bool,
+    /// Whether re-ranking was used.
+    pub rerank_used: bool,
+}
+
+/// A single sample item from a primitive (key + value for shape discovery).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SampleItem {
+    /// Key or identifier.
+    pub key: String,
+    /// Value at the key.
+    pub value: Value,
+}
+
 // =============================================================================
 // Graph Types
 // =============================================================================

@@ -544,6 +544,141 @@ fn test_command_search_full() {
 }
 
 // =============================================================================
+// Data Introspection Command Tests (#1445)
+// =============================================================================
+
+#[test]
+fn test_command_kv_count() {
+    test_command_round_trip(Command::KvCount {
+        branch: None,
+        space: None,
+        prefix: Some("user:".to_string()),
+    });
+    test_command_round_trip(Command::KvCount {
+        branch: None,
+        space: None,
+        prefix: None,
+    });
+}
+
+#[test]
+fn test_command_json_count() {
+    test_command_round_trip(Command::JsonCount {
+        branch: None,
+        space: None,
+        prefix: Some("doc:".to_string()),
+    });
+}
+
+#[test]
+fn test_command_kv_sample() {
+    test_command_round_trip(Command::KvSample {
+        branch: None,
+        space: None,
+        prefix: None,
+        count: Some(10),
+    });
+}
+
+#[test]
+fn test_command_json_sample() {
+    test_command_round_trip(Command::JsonSample {
+        branch: None,
+        space: None,
+        prefix: None,
+        count: Some(5),
+    });
+}
+
+#[test]
+fn test_command_vector_sample() {
+    test_command_round_trip(Command::VectorSample {
+        branch: None,
+        space: None,
+        collection: "embeddings".to_string(),
+        count: Some(3),
+    });
+}
+
+// =============================================================================
+// New Output Variant Tests (#1446, #1445, #1450)
+// =============================================================================
+
+#[test]
+fn test_output_search_results_with_stats() {
+    test_output_round_trip(Output::SearchResults {
+        hits: vec![SearchResultHit {
+            entity: "key1".to_string(),
+            primitive: "kv".to_string(),
+            score: 0.95,
+            rank: 1,
+            snippet: Some("matched text".to_string()),
+        }],
+        stats: SearchStatsOutput {
+            elapsed_ms: 12.5,
+            candidates_considered: 150,
+            candidates_by_primitive: [("kv".to_string(), 100), ("json".to_string(), 50)]
+                .into_iter()
+                .collect(),
+            index_used: true,
+            truncated: false,
+            mode: "hybrid".to_string(),
+            expansion_used: false,
+            rerank_used: false,
+        },
+    });
+}
+
+#[test]
+fn test_output_sample_result() {
+    test_output_round_trip(Output::SampleResult {
+        total_count: 100,
+        items: vec![
+            SampleItem {
+                key: "key1".to_string(),
+                value: Value::String("hello".to_string()),
+            },
+            SampleItem {
+                key: "key2".to_string(),
+                value: Value::Int(42),
+            },
+        ],
+    });
+    test_output_round_trip(Output::SampleResult {
+        total_count: 0,
+        items: vec![],
+    });
+}
+
+#[test]
+fn test_output_graph_write_result() {
+    test_output_round_trip(Output::GraphWriteResult {
+        node_id: "node-1".to_string(),
+        created: true,
+    });
+    test_output_round_trip(Output::GraphWriteResult {
+        node_id: "node-1".to_string(),
+        created: false,
+    });
+}
+
+#[test]
+fn test_output_graph_edge_write_result() {
+    test_output_round_trip(Output::GraphEdgeWriteResult {
+        src: "A".to_string(),
+        dst: "B".to_string(),
+        edge_type: "KNOWS".to_string(),
+        created: true,
+    });
+    test_output_round_trip(Output::GraphEdgeWriteResult {
+        src: "A".to_string(),
+        dst: "B".to_string(),
+        edge_type: "KNOWS".to_string(),
+        created: false,
+    });
+}
+
+// =============================================================================
 // Complex Value Serialization Tests
 // =============================================================================
 

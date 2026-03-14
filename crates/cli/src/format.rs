@@ -322,11 +322,27 @@ fn format_raw(output: &Output) -> String {
         }
         Output::Described(_) => serde_json::to_string_pretty(output).unwrap_or_default(),
         Output::Pong { version } => version.clone(),
-        Output::SearchResults(hits) => hits
+        Output::SearchResults { hits, .. } => hits
             .iter()
             .map(|h| format!("{}\t{}\t{}", h.entity, h.primitive, h.score))
             .collect::<Vec<_>>()
             .join("\n"),
+        Output::SampleResult { items, .. } => items
+            .iter()
+            .map(|item| format!("{}\t{}", item.key, format_value_raw(&item.value)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Output::GraphWriteResult { node_id, created } => {
+            format!("{}\t{}", node_id, created)
+        }
+        Output::GraphEdgeWriteResult {
+            src,
+            dst,
+            edge_type,
+            created,
+        } => {
+            format!("{}\t{}\t{}\t{}", src, dst, edge_type, created)
+        }
         Output::SpaceList(spaces) => spaces.join("\n"),
         Output::BranchExported(r) => format!("{}\t{}", r.path, r.entry_count),
         Output::BranchImported(r) => format!("{}\t{}", r.branch_id, r.keys_written),
@@ -808,11 +824,13 @@ fn format_human(output: &Output) -> String {
             lines.join("\n")
         }
         Output::Pong { version } => format!("PONG {}", version),
-        Output::SearchResults(hits) => {
+        Output::SearchResults { hits, stats } => {
+            let mut parts = Vec::new();
             if hits.is_empty() {
-                "(empty list)".to_string()
+                parts.push("(empty list)".to_string());
             } else {
-                hits.iter()
+                let hit_lines: Vec<String> = hits
+                    .iter()
                     .enumerate()
                     .map(|(i, h)| {
                         let snippet = h
@@ -829,8 +847,54 @@ fn format_human(output: &Output) -> String {
                             snippet
                         )
                     })
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                    .collect();
+                parts.push(hit_lines.join("\n"));
+            }
+            parts.push(format!(
+                "\n--- stats ---\nmode: {}, elapsed: {:.1}ms, candidates: {}, index: {}, truncated: {}, expansion: {}, rerank: {}",
+                stats.mode,
+                stats.elapsed_ms,
+                stats.candidates_considered,
+                stats.index_used,
+                stats.truncated,
+                stats.expansion_used,
+                stats.rerank_used,
+            ));
+            parts.join("")
+        }
+        Output::SampleResult { total_count, items } => {
+            if items.is_empty() {
+                format!("(empty — {} total entries)", total_count)
+            } else {
+                let mut lines = vec![format!("({} total, {} sampled)", total_count, items.len())];
+                for (i, item) in items.iter().enumerate() {
+                    lines.push(format!(
+                        "{}) \"{}\" => {}",
+                        i + 1,
+                        item.key,
+                        format_value_human(&item.value)
+                    ));
+                }
+                lines.join("\n")
+            }
+        }
+        Output::GraphWriteResult { node_id, created } => {
+            if *created {
+                format!("(created) node \"{}\"", node_id)
+            } else {
+                format!("(updated) node \"{}\"", node_id)
+            }
+        }
+        Output::GraphEdgeWriteResult {
+            src,
+            dst,
+            edge_type,
+            created,
+        } => {
+            if *created {
+                format!("(created) edge \"{}\" -> \"{}\" [{}]", src, dst, edge_type)
+            } else {
+                format!("(updated) edge \"{}\" -> \"{}\" [{}]", src, dst, edge_type)
             }
         }
         Output::SpaceList(spaces) => format_string_list(spaces),

@@ -291,6 +291,58 @@ pub fn kv_batch_put(
     Ok(Output::BatchResults(results))
 }
 
+/// Handle KvCount command — count keys matching a prefix.
+pub fn kv_count(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    prefix: Option<String>,
+) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+    if let Some(ref pfx) = prefix {
+        if !pfx.is_empty() {
+            convert_result(validate_key(pfx))?;
+        }
+    }
+    let keys = convert_result(p.kv.list(&branch_id, &space, prefix.as_deref()))?;
+    Ok(Output::Uint(keys.len() as u64))
+}
+
+/// Handle KvSample command — evenly-spaced sample of KV entries.
+pub fn kv_sample(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    prefix: Option<String>,
+    count: usize,
+) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+    if let Some(ref pfx) = prefix {
+        if !pfx.is_empty() {
+            convert_result(validate_key(pfx))?;
+        }
+    }
+    let keys = convert_result(p.kv.list(&branch_id, &space, prefix.as_deref()))?;
+    let total = keys.len() as u64;
+    let indices = super::sample_indices(keys.len(), count);
+    let mut items = Vec::with_capacity(indices.len());
+    for idx in indices {
+        let key = &keys[idx];
+        let value = match convert_result(p.kv.get(&branch_id, &space, key))? {
+            Some(v) => v,
+            None => continue,
+        };
+        items.push(crate::types::SampleItem {
+            key: key.clone(),
+            value,
+        });
+    }
+    Ok(Output::SampleResult {
+        total_count: total,
+        items,
+    })
+}
+
 /// Handle KvList with as_of timestamp (time-travel read).
 pub fn kv_list_at(
     p: &Arc<Primitives>,

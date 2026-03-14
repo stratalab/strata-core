@@ -35,7 +35,7 @@ fn test_search_empty_database() {
     });
 
     match result {
-        Ok(Output::SearchResults(hits)) => {
+        Ok(Output::SearchResults { hits, .. }) => {
             assert!(hits.is_empty(), "Empty database should return no results");
         }
         other => panic!("Expected SearchResults, got {:?}", other),
@@ -82,7 +82,7 @@ fn test_search_returns_empty_for_kv_primitive() {
     });
 
     match result {
-        Ok(Output::SearchResults(hits)) => {
+        Ok(Output::SearchResults { hits, .. }) => {
             assert_eq!(hits.len(), 1, "Should find the doc containing 'hello'");
             assert!(hits[0].score > 0.0);
         }
@@ -121,7 +121,7 @@ fn test_search_with_primitive_filter() {
     });
 
     match result {
-        Ok(Output::SearchResults(hits)) => {
+        Ok(Output::SearchResults { hits, .. }) => {
             // Should not find any data from event primitive
             assert!(hits.is_empty(), "Should not find data in event primitive");
         }
@@ -152,7 +152,7 @@ fn test_search_command_infrastructure_works() {
 
     // Verify the command infrastructure works
     match result {
-        Ok(Output::SearchResults(_)) => {
+        Ok(Output::SearchResults { .. }) => {
             // Command executed successfully
         }
         other => panic!("Expected SearchResults output type, got {:?}", other),

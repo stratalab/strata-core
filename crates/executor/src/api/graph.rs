@@ -108,7 +108,7 @@ impl Strata {
             properties,
             object_type: object_type.map(|s| s.to_string()),
         })? {
-            Output::Unit => Ok(()),
+            Output::GraphWriteResult { .. } => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphAddNode".into(),
             }),
@@ -201,7 +201,7 @@ impl Strata {
             weight,
             properties,
         })? {
-            Output::Unit => Ok(()),
+            Output::GraphEdgeWriteResult { .. } => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphAddEdge".into(),
             }),
