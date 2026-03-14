@@ -186,6 +186,7 @@ pub fn search(
         SearchMode::Hybrid => "hybrid",
         SearchMode::Vector => "vector",
     };
+    let model_name = p.db.config().model.map(|m| m.model.clone());
     let stats = SearchStatsOutput {
         elapsed_ms: response.stats.elapsed_micros as f64 / 1000.0,
         candidates_considered: response.stats.candidates_considered,
@@ -200,6 +201,12 @@ pub fn search(
         mode: mode_str.to_string(),
         expansion_used,
         rerank_used,
+        expansion_model: if expansion_used {
+            model_name.clone()
+        } else {
+            None
+        },
+        rerank_model: if rerank_used { model_name } else { None },
     };
 
     // Convert SearchResponse hits to SearchResultHit

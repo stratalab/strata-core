@@ -196,6 +196,14 @@ pub enum Output {
     /// Database configuration snapshot
     Config(StrataConfig),
 
+    /// Configuration set acknowledgment — echoes key + effective value.
+    ConfigSetResult {
+        /// Configuration key that was set.
+        key: String,
+        /// Effective new value (normalized, e.g. "miniLM" not "minilm").
+        new_value: String,
+    },
+
     /// Single configuration value (for ConfigureGetKey).
     /// None if the key is not set.
     ConfigValue(Option<String>),

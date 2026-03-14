@@ -167,7 +167,10 @@ pub fn format_diff(diff: &BranchDiffResult, mode: OutputMode) -> String {
                             .as_ref()
                             .map(|v| format_value_human(v))
                             .unwrap_or_default();
-                        lines.push(format!("    + {} ({}): {}", entry.key, entry.primitive, val_str));
+                        lines.push(format!(
+                            "    + {} ({}): {}",
+                            entry.key, entry.primitive, val_str
+                        ));
                     }
                     for entry in &sd.removed {
                         let val_str = entry
@@ -175,7 +178,10 @@ pub fn format_diff(diff: &BranchDiffResult, mode: OutputMode) -> String {
                             .as_ref()
                             .map(|v| format_value_human(v))
                             .unwrap_or_default();
-                        lines.push(format!("    - {} ({}): {}", entry.key, entry.primitive, val_str));
+                        lines.push(format!(
+                            "    - {} ({}): {}",
+                            entry.key, entry.primitive, val_str
+                        ));
                     }
                     for entry in &sd.modified {
                         let old = entry
@@ -470,6 +476,7 @@ fn format_raw(output: &Output) -> String {
                 nodes_inserted, edges_inserted
             )
         }
+        Output::ConfigSetResult { key, new_value } => format!("{}\t{}", key, new_value),
         Output::ConfigValue(None) => String::new(),
         Output::ConfigValue(Some(v)) => v.clone(),
         Output::GraphAnalyticsU64(result) => serde_json::to_string(&result).unwrap_or_default(),
@@ -902,6 +909,16 @@ fn format_human(output: &Output) -> String {
                     .collect();
                 parts.push(hit_lines.join("\n"));
             }
+            let expansion_info = if let Some(ref model) = stats.expansion_model {
+                format!("{} ({})", stats.expansion_used, model)
+            } else {
+                stats.expansion_used.to_string()
+            };
+            let rerank_info = if let Some(ref model) = stats.rerank_model {
+                format!("{} ({})", stats.rerank_used, model)
+            } else {
+                stats.rerank_used.to_string()
+            };
             parts.push(format!(
                 "\n--- stats ---\nmode: {}, elapsed: {:.1}ms, candidates: {}, index: {}, truncated: {}, expansion: {}, rerank: {}",
                 stats.mode,
@@ -909,8 +926,8 @@ fn format_human(output: &Output) -> String {
                 stats.candidates_considered,
                 stats.index_used,
                 stats.truncated,
-                stats.expansion_used,
-                stats.rerank_used,
+                expansion_info,
+                rerank_info,
             ));
             parts.join("")
         }
@@ -1134,6 +1151,9 @@ fn format_human(output: &Output) -> String {
                 "(bulk insert) {} node(s), {} edge(s) inserted",
                 nodes_inserted, edges_inserted
             )
+        }
+        Output::ConfigSetResult { key, new_value } => {
+            format!("OK: {} = \"{}\"", key, new_value)
         }
         Output::ConfigValue(None) => "(nil)".to_string(),
         Output::ConfigValue(Some(v)) => format!("\"{}\"", v),

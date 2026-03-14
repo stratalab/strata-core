@@ -406,13 +406,13 @@ pub fn diff_branches_with_options(
     }
 
     // Determine which TypeTags to scan
-    let type_tags: Vec<TypeTag> = match options
-        .filter
-        .as_ref()
-        .and_then(|f| f.primitives.as_ref())
+    let type_tags: Vec<TypeTag> = match options.filter.as_ref().and_then(|f| f.primitives.as_ref())
     {
         Some(prims) => {
-            let mut tags: Vec<TypeTag> = prims.iter().flat_map(|p| primitive_to_type_tags(*p)).collect();
+            let mut tags: Vec<TypeTag> = prims
+                .iter()
+                .flat_map(|p| primitive_to_type_tags(*p))
+                .collect();
             tags.sort();
             tags.dedup();
             tags
@@ -436,7 +436,10 @@ pub fn diff_branches_with_options(
             None => storage.list_by_type(&id_a, *type_tag),
         };
         for (key, vv) in entries_a {
-            if space_filter.as_ref().is_none_or(|f| f.contains(&key.namespace.space)) {
+            if space_filter
+                .as_ref()
+                .is_none_or(|f| f.contains(&key.namespace.space))
+            {
                 maps_a
                     .entry(key.namespace.space.clone())
                     .or_default()
@@ -449,7 +452,10 @@ pub fn diff_branches_with_options(
             None => storage.list_by_type(&id_b, *type_tag),
         };
         for (key, vv) in entries_b {
-            if space_filter.as_ref().is_none_or(|f| f.contains(&key.namespace.space)) {
+            if space_filter
+                .as_ref()
+                .is_none_or(|f| f.contains(&key.namespace.space))
+            {
                 maps_b
                     .entry(key.namespace.space.clone())
                     .or_default()
@@ -1632,7 +1638,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(diff_state.summary.total_removed, 1);
-        assert_eq!(diff_state.spaces[0].removed[0].primitive, PrimitiveType::State);
+        assert_eq!(
+            diff_state.spaces[0].removed[0].primitive,
+            PrimitiveType::State
+        );
     }
 
     #[test]
@@ -1930,8 +1939,7 @@ mod tests {
         write_kv(&db, "b", "default", "k2", Value::Int(3));
 
         let diff1 = diff_branches(&db, "a", "b").unwrap();
-        let diff2 =
-            diff_branches_with_options(&db, "a", "b", DiffOptions::default()).unwrap();
+        let diff2 = diff_branches_with_options(&db, "a", "b", DiffOptions::default()).unwrap();
 
         assert_eq!(diff1, diff2);
     }

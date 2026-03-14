@@ -677,6 +677,12 @@ pub struct SearchStatsOutput {
     pub expansion_used: bool,
     /// Whether re-ranking was used.
     pub rerank_used: bool,
+    /// Model name used for query expansion (when expansion_used is true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expansion_model: Option<String>,
+    /// Model name used for re-ranking (when rerank_used is true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerank_model: Option<String>,
 }
 
 /// A single sample item from a primitive (key + value for shape discovery).

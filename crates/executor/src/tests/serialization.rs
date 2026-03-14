@@ -625,7 +625,17 @@ fn test_output_search_results_with_stats() {
             mode: "hybrid".to_string(),
             expansion_used: false,
             rerank_used: false,
+            expansion_model: None,
+            rerank_model: None,
         },
+    });
+}
+
+#[test]
+fn test_output_config_set_result() {
+    test_output_round_trip(Output::ConfigSetResult {
+        key: "provider".to_string(),
+        new_value: "anthropic".to_string(),
     });
 }
 

@@ -24,7 +24,7 @@ fn configure_set_and_get_provider() {
         key: "provider".into(),
         value: "anthropic".into(),
     });
-    assert!(matches!(result, Ok(Output::Unit)));
+    assert!(matches!(result, Ok(Output::ConfigSetResult { .. })));
 
     let result = executor
         .execute(Command::ConfigureGetKey {
@@ -252,7 +252,7 @@ fn configure_set_empty_api_key_is_allowed() {
         key: "anthropic_api_key".into(),
         value: "".into(),
     });
-    assert!(matches!(result, Ok(Output::Unit)));
+    assert!(matches!(result, Ok(Output::ConfigSetResult { .. })));
 }
 
 // =============================================================================
