@@ -771,7 +771,10 @@ fn describe_with_all_primitives() {
             assert_eq!(d.primitives.state.count, 1);
             assert_eq!(d.primitives.state.cells, vec!["status"]);
             assert_eq!(d.primitives.vector.collections.len(), 1);
-            assert_eq!(d.primitives.vector.collections[0].metric, DistanceMetric::DotProduct);
+            assert_eq!(
+                d.primitives.vector.collections[0].metric,
+                DistanceMetric::DotProduct
+            );
             assert_eq!(d.primitives.graph.graphs.len(), 1);
             assert_eq!(d.primitives.graph.graphs[0].nodes, 1);
         }

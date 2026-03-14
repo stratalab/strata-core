@@ -458,8 +458,16 @@ fn test_output_described_empty_graph_skips_ontology() {
         link_types: vec![],
     };
     let json = serde_json::to_string(&entry).unwrap();
-    assert!(!json.contains("object_types"), "Empty vec should be skipped: {}", json);
-    assert!(!json.contains("link_types"), "Empty vec should be skipped: {}", json);
+    assert!(
+        !json.contains("object_types"),
+        "Empty vec should be skipped: {}",
+        json
+    );
+    assert!(
+        !json.contains("link_types"),
+        "Empty vec should be skipped: {}",
+        json
+    );
 
     // With values, they should appear
     let entry2 = GraphSummaryEntry {
@@ -470,8 +478,16 @@ fn test_output_described_empty_graph_skips_ontology() {
         link_types: vec![],
     };
     let json2 = serde_json::to_string(&entry2).unwrap();
-    assert!(json2.contains("object_types"), "Non-empty vec should appear: {}", json2);
-    assert!(!json2.contains("link_types"), "Empty vec should be skipped: {}", json2);
+    assert!(
+        json2.contains("object_types"),
+        "Non-empty vec should appear: {}",
+        json2
+    );
+    assert!(
+        !json2.contains("link_types"),
+        "Empty vec should be skipped: {}",
+        json2
+    );
 }
 
 #[test]

@@ -16,8 +16,8 @@
 
 pub mod branch;
 pub mod config;
-pub mod database;
 pub mod configure_model;
+pub mod database;
 pub mod embed;
 pub mod embed_hook;
 pub mod event;

@@ -52,7 +52,11 @@ pub fn describe(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
         });
 
     // -- JSON count --
-    let json_count = convert_result(p.json.list(&branch_id, default_space, None, None, u32::MAX as usize))
+    let json_count =
+        convert_result(
+            p.json
+                .list(&branch_id, default_space, None, None, u32::MAX as usize),
+        )
         .map(|result| result.doc_ids.len() as u64)
         .unwrap_or_else(|e| {
             warn!("describe: json list failed: {}", e);
@@ -141,11 +145,10 @@ pub fn describe(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
     };
 
     // -- Capabilities --
-    let search = p
-        .db
-        .extension::<strata_engine::search::InvertedIndex>()
-        .map(|idx| idx.is_enabled())
-        .unwrap_or(false);
+    let search =
+        p.db.extension::<strata_engine::search::InvertedIndex>()
+            .map(|idx| idx.is_enabled())
+            .unwrap_or(false);
 
     let has_vector_collections = !vector_collections.is_empty();
 
@@ -168,9 +171,7 @@ pub fn describe(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
         primitives: PrimitiveSummary {
             kv: CountSummary { count: kv_count },
             json: CountSummary { count: json_count },
-            events: CountSummary {
-                count: event_count,
-            },
+            events: CountSummary { count: event_count },
             state: StateSummary {
                 count: state_cells.len() as u64,
                 cells: state_cells,
