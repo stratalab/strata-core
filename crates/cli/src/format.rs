@@ -125,9 +125,22 @@ pub fn format_diff(diff: &BranchDiffResult, mode: OutputMode) -> String {
             },
             "spaces": diff.spaces.iter().map(|sd| serde_json::json!({
                 "space": sd.space,
-                "added": sd.added.len(),
-                "removed": sd.removed.len(),
-                "modified": sd.modified.len(),
+                "added": sd.added.iter().map(|e| serde_json::json!({
+                    "key": e.key,
+                    "primitive": e.primitive.to_string(),
+                    "value": e.value_b,
+                })).collect::<Vec<_>>(),
+                "removed": sd.removed.iter().map(|e| serde_json::json!({
+                    "key": e.key,
+                    "primitive": e.primitive.to_string(),
+                    "value": e.value_a,
+                })).collect::<Vec<_>>(),
+                "modified": sd.modified.iter().map(|e| serde_json::json!({
+                    "key": e.key,
+                    "primitive": e.primitive.to_string(),
+                    "value_a": e.value_a,
+                    "value_b": e.value_b,
+                })).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
         }))
         .unwrap(),
@@ -149,13 +162,36 @@ pub fn format_diff(diff: &BranchDiffResult, mode: OutputMode) -> String {
                 if !sd.added.is_empty() || !sd.removed.is_empty() || !sd.modified.is_empty() {
                     lines.push(format!("  Space \"{}\":", sd.space));
                     for entry in &sd.added {
-                        lines.push(format!("    + {} ({})", entry.key, entry.primitive));
+                        let val_str = entry
+                            .value_b
+                            .as_ref()
+                            .map(|v| format_value_human(v))
+                            .unwrap_or_default();
+                        lines.push(format!("    + {} ({}): {}", entry.key, entry.primitive, val_str));
                     }
                     for entry in &sd.removed {
-                        lines.push(format!("    - {} ({})", entry.key, entry.primitive));
+                        let val_str = entry
+                            .value_a
+                            .as_ref()
+                            .map(|v| format_value_human(v))
+                            .unwrap_or_default();
+                        lines.push(format!("    - {} ({}): {}", entry.key, entry.primitive, val_str));
                     }
                     for entry in &sd.modified {
-                        lines.push(format!("    ~ {} ({})", entry.key, entry.primitive));
+                        let old = entry
+                            .value_a
+                            .as_ref()
+                            .map(|v| format_value_human(v))
+                            .unwrap_or_default();
+                        let new = entry
+                            .value_b
+                            .as_ref()
+                            .map(|v| format_value_human(v))
+                            .unwrap_or_default();
+                        lines.push(format!(
+                            "    ~ {} ({}): {} → {}",
+                            entry.key, entry.primitive, old, new
+                        ));
                     }
                 }
             }
@@ -719,6 +755,22 @@ fn format_human(output: &Output) -> String {
                     space.removed.len(),
                     space.modified.len()
                 ));
+                for entry in &space.modified {
+                    let old = entry
+                        .value_a
+                        .as_ref()
+                        .map(|v| format_value_human(v))
+                        .unwrap_or_default();
+                    let new = entry
+                        .value_b
+                        .as_ref()
+                        .map(|v| format_value_human(v))
+                        .unwrap_or_default();
+                    lines.push(format!(
+                        "    ~ {} ({}): {} → {}",
+                        entry.key, entry.primitive, old, new
+                    ));
+                }
             }
             lines.join("\n")
         }

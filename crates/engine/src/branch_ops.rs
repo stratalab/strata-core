@@ -68,10 +68,10 @@ pub struct BranchDiffEntry {
     pub primitive: PrimitiveType,
     /// Space this entry belongs to
     pub space: String,
-    /// Debug-formatted value in branch A (None if not present)
-    pub value_a: Option<String>,
-    /// Debug-formatted value in branch B (None if not present)
-    pub value_b: Option<String>,
+    /// Value in branch A (None if not present)
+    pub value_a: Option<Value>,
+    /// Value in branch B (None if not present)
+    pub value_b: Option<Value>,
 }
 
 /// Per-space diff between two branches.
@@ -134,9 +134,9 @@ pub struct ConflictEntry {
     /// Space
     pub space: String,
     /// Value in the source branch
-    pub source_value: String,
+    pub source_value: Option<Value>,
     /// Value in the target branch
-    pub target_value: String,
+    pub target_value: Option<Value>,
 }
 
 /// Information returned after merging branches.
@@ -154,9 +154,40 @@ pub struct MergeInfo {
     pub spaces_merged: u64,
 }
 
+/// Options for filtering and time-scoping a branch diff.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DiffOptions {
+    /// Optional filter to narrow the diff by primitive type or space.
+    pub filter: Option<DiffFilter>,
+    /// Optional timestamp (microseconds) for point-in-time comparison.
+    /// When set, the diff compares branches as they looked at this timestamp.
+    pub as_of: Option<u64>,
+}
+
+/// Filter criteria for narrowing a branch diff.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DiffFilter {
+    /// Only include these primitive types. `None` means all types.
+    pub primitives: Option<Vec<PrimitiveType>>,
+    /// Only include these spaces. `None` means all spaces.
+    pub spaces: Option<Vec<String>>,
+}
+
 // =============================================================================
 // Helpers
 // =============================================================================
+
+/// Map a PrimitiveType to the TypeTags that should be scanned.
+fn primitive_to_type_tags(prim: PrimitiveType) -> Vec<TypeTag> {
+    match prim {
+        PrimitiveType::Kv => vec![TypeTag::KV],
+        PrimitiveType::Event => vec![TypeTag::Event],
+        PrimitiveType::State => vec![TypeTag::State],
+        PrimitiveType::Json => vec![TypeTag::Json],
+        PrimitiveType::Vector => vec![TypeTag::Vector, TypeTag::VectorConfig],
+        PrimitiveType::Branch => vec![], // Branch metadata is not scanned in diffs
+    }
+}
 
 /// Map a TypeTag to the corresponding PrimitiveType.
 fn type_tag_to_primitive(tag: TypeTag) -> PrimitiveType {
@@ -182,11 +213,6 @@ fn format_user_key(user_key: &[u8]) -> String {
                 .collect::<String>()
         }
     }
-}
-
-/// Format a value for display in diffs.
-fn format_value(value: &Value) -> String {
-    format!("{:?}", value)
 }
 
 /// Verify a branch exists and return its resolved BranchId.
@@ -318,8 +344,8 @@ pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> Strat
 
 /// Compare two branches and return a structured diff.
 ///
-/// Scans all data in both branches across all spaces and data types,
-/// producing per-space diffs showing added, removed, and modified entries.
+/// Convenience wrapper around [`diff_branches_with_options`] with no filtering
+/// or time constraints.
 ///
 /// # Errors
 ///
@@ -328,6 +354,29 @@ pub fn diff_branches(
     db: &Arc<Database>,
     branch_a: &str,
     branch_b: &str,
+) -> StrataResult<BranchDiffResult> {
+    diff_branches_with_options(db, branch_a, branch_b, DiffOptions::default())
+}
+
+/// Compare two branches with optional filtering and point-in-time snapshot.
+///
+/// Scans data in both branches across all (or filtered) spaces and data types,
+/// producing per-space diffs showing added, removed, and modified entries.
+///
+/// # Options
+///
+/// - `filter.primitives`: Only scan matching `TypeTag`s
+/// - `filter.spaces`: Only compare listed spaces
+/// - `as_of`: Use timestamp-aware storage scan for point-in-time comparison
+///
+/// # Errors
+///
+/// - Either branch does not exist
+pub fn diff_branches_with_options(
+    db: &Arc<Database>,
+    branch_a: &str,
+    branch_b: &str,
+    options: DiffOptions,
 ) -> StrataResult<BranchDiffResult> {
     let space_index = SpaceIndex::new(db.clone());
 
@@ -339,9 +388,37 @@ pub fn diff_branches(
     let spaces_a: HashSet<String> = space_index.list(id_a)?.into_iter().collect();
     let spaces_b: HashSet<String> = space_index.list(id_b)?.into_iter().collect();
 
-    let spaces_only_in_a: Vec<String> = spaces_a.difference(&spaces_b).cloned().collect();
-    let spaces_only_in_b: Vec<String> = spaces_b.difference(&spaces_a).cloned().collect();
-    let all_spaces: HashSet<String> = spaces_a.union(&spaces_b).cloned().collect();
+    // Apply space filter if set
+    let space_filter: Option<HashSet<String>> = options
+        .filter
+        .as_ref()
+        .and_then(|f| f.spaces.as_ref())
+        .map(|s| s.iter().cloned().collect());
+
+    let mut spaces_only_in_a: Vec<String> = spaces_a.difference(&spaces_b).cloned().collect();
+    let mut spaces_only_in_b: Vec<String> = spaces_b.difference(&spaces_a).cloned().collect();
+    let mut all_spaces: HashSet<String> = spaces_a.union(&spaces_b).cloned().collect();
+
+    if let Some(ref allowed) = space_filter {
+        all_spaces.retain(|s| allowed.contains(s));
+        spaces_only_in_a.retain(|s| allowed.contains(s));
+        spaces_only_in_b.retain(|s| allowed.contains(s));
+    }
+
+    // Determine which TypeTags to scan
+    let type_tags: Vec<TypeTag> = match options
+        .filter
+        .as_ref()
+        .and_then(|f| f.primitives.as_ref())
+    {
+        Some(prims) => {
+            let mut tags: Vec<TypeTag> = prims.iter().flat_map(|p| primitive_to_type_tags(*p)).collect();
+            tags.sort();
+            tags.dedup();
+            tags
+        }
+        None => DATA_TYPE_TAGS.to_vec(),
+    };
 
     let storage = db.storage();
     let mut space_diffs = Vec::new();
@@ -349,22 +426,35 @@ pub fn diff_branches(
     let mut total_removed = 0usize;
     let mut total_modified = 0usize;
 
-    // 3. Scan all data once per type tag, grouped by space
+    // 3. Scan data once per type tag, grouped by space
     let mut maps_a: HashMap<String, HashMap<(Vec<u8>, TypeTag), Value>> = HashMap::new();
     let mut maps_b: HashMap<String, HashMap<(Vec<u8>, TypeTag), Value>> = HashMap::new();
 
-    for type_tag in DATA_TYPE_TAGS {
-        for (key, vv) in storage.list_by_type(&id_a, type_tag) {
-            maps_a
-                .entry(key.namespace.space.clone())
-                .or_default()
-                .insert((key.user_key.to_vec(), type_tag), vv.value);
+    for type_tag in &type_tags {
+        let entries_a = match options.as_of {
+            Some(ts) => storage.list_by_type_at_timestamp(&id_a, *type_tag, ts),
+            None => storage.list_by_type(&id_a, *type_tag),
+        };
+        for (key, vv) in entries_a {
+            if space_filter.as_ref().is_none_or(|f| f.contains(&key.namespace.space)) {
+                maps_a
+                    .entry(key.namespace.space.clone())
+                    .or_default()
+                    .insert((key.user_key.to_vec(), *type_tag), vv.value);
+            }
         }
-        for (key, vv) in storage.list_by_type(&id_b, type_tag) {
-            maps_b
-                .entry(key.namespace.space.clone())
-                .or_default()
-                .insert((key.user_key.to_vec(), type_tag), vv.value);
+
+        let entries_b = match options.as_of {
+            Some(ts) => storage.list_by_type_at_timestamp(&id_b, *type_tag, ts),
+            None => storage.list_by_type(&id_b, *type_tag),
+        };
+        for (key, vv) in entries_b {
+            if space_filter.as_ref().is_none_or(|f| f.contains(&key.namespace.space)) {
+                maps_b
+                    .entry(key.namespace.space.clone())
+                    .or_default()
+                    .insert((key.user_key.to_vec(), *type_tag), vv.value);
+            }
         }
     }
 
@@ -389,7 +479,7 @@ pub fn diff_branches(
                         raw_key: user_key.clone(),
                         primitive,
                         space: space.clone(),
-                        value_a: Some(format_value(val_a)),
+                        value_a: Some(val_a.clone()),
                         value_b: None,
                     });
                 }
@@ -400,8 +490,8 @@ pub fn diff_branches(
                             raw_key: user_key.clone(),
                             primitive,
                             space: space.clone(),
-                            value_a: Some(format_value(val_a)),
-                            value_b: Some(format_value(val_b)),
+                            value_a: Some(val_a.clone()),
+                            value_b: Some(val_b.clone()),
                         });
                     }
                 }
@@ -417,7 +507,7 @@ pub fn diff_branches(
                     primitive: type_tag_to_primitive(*tag),
                     space: space.clone(),
                     value_a: None,
-                    value_b: Some(format_value(val_b)),
+                    value_b: Some(val_b.clone()),
                 });
             }
         }
@@ -493,8 +583,8 @@ pub fn merge_branches(
                     key: entry.key.clone(),
                     primitive: entry.primitive,
                     space: entry.space.clone(),
-                    source_value: entry.value_b.clone().unwrap_or_default(),
-                    target_value: entry.value_a.clone().unwrap_or_default(),
+                    source_value: entry.value_b.clone(),
+                    target_value: entry.value_a.clone(),
                 })
             })
             .collect();
@@ -516,8 +606,8 @@ pub fn merge_branches(
                     key: entry.key.clone(),
                     primitive: entry.primitive,
                     space: entry.space.clone(),
-                    source_value: entry.value_b.clone().unwrap_or_default(),
-                    target_value: entry.value_a.clone().unwrap_or_default(),
+                    source_value: entry.value_b.clone(),
+                    target_value: entry.value_a.clone(),
                 })
             })
             .collect()
@@ -559,7 +649,7 @@ pub fn merge_branches(
         }
 
         // Re-scan source data for this space to get actual values
-        // (diff only stores string representations)
+        // (diff values may be filtered; re-scan ensures we get the source truth)
         let mut source_values: HashMap<(Vec<u8>, TypeTag), Value> = HashMap::new();
         for type_tag in DATA_TYPE_TAGS {
             let entries = storage.list_by_type(&source_id, type_tag);
@@ -910,16 +1000,8 @@ mod tests {
         let space_diff = &diff.spaces[0];
         assert_eq!(space_diff.modified.len(), 1);
         assert_eq!(space_diff.modified[0].key, "shared");
-        assert!(space_diff.modified[0]
-            .value_a
-            .as_ref()
-            .unwrap()
-            .contains("Int(1)"));
-        assert!(space_diff.modified[0]
-            .value_b
-            .as_ref()
-            .unwrap()
-            .contains("Int(2)"));
+        assert_eq!(space_diff.modified[0].value_a, Some(Value::Int(1)));
+        assert_eq!(space_diff.modified[0].value_b, Some(Value::Int(2)));
     }
 
     #[test]
@@ -1163,6 +1245,9 @@ mod tests {
         assert_eq!(info.conflicts.len(), 1, "Should report 1 conflict");
         assert_eq!(info.conflicts[0].key, "shared");
         assert_eq!(info.conflicts[0].primitive, PrimitiveType::Kv);
+        // Verify conflict carries actual Values (source=B=incoming, target=A=base)
+        assert_eq!(info.conflicts[0].source_value, Some(Value::Int(2)));
+        assert_eq!(info.conflicts[0].target_value, Some(Value::Int(1)));
     }
 
     // =========================================================================
@@ -1493,6 +1578,385 @@ mod tests {
             .unwrap();
         assert_eq!(results_b.len(), 1, "col_b should have 1 vector");
         assert_eq!(results_b[0].key, "vec2");
+    }
+
+    // =========================================================================
+    // DiffOptions Tests (filtering + as_of)
+    // =========================================================================
+
+    #[test]
+    fn test_diff_filter_by_primitive_kv_only() {
+        let (_temp, db) = setup_with_branch("a");
+        let branch_index = BranchIndex::new(db.clone());
+        branch_index.create_branch("b").unwrap();
+
+        // Write KV and State data to branch A only
+        write_kv(&db, "a", "default", "kv1", Value::Int(1));
+        write_state(&db, "a", "default", "st1", Value::Bool(true));
+        write_json(&db, "a", "default", "j1", Value::String("doc".into()));
+
+        // Unfiltered: should see all 3 removed
+        let diff_all = diff_branches(&db, "a", "b").unwrap();
+        assert_eq!(diff_all.summary.total_removed, 3);
+
+        // Filter to KV only: should see 1 removed
+        let diff_kv = diff_branches_with_options(
+            &db,
+            "a",
+            "b",
+            DiffOptions {
+                filter: Some(DiffFilter {
+                    primitives: Some(vec![PrimitiveType::Kv]),
+                    spaces: None,
+                }),
+                as_of: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(diff_kv.summary.total_removed, 1);
+        assert_eq!(diff_kv.spaces[0].removed[0].primitive, PrimitiveType::Kv);
+        assert_eq!(diff_kv.spaces[0].removed[0].key, "kv1");
+
+        // Filter to State only: should see 1 removed
+        let diff_state = diff_branches_with_options(
+            &db,
+            "a",
+            "b",
+            DiffOptions {
+                filter: Some(DiffFilter {
+                    primitives: Some(vec![PrimitiveType::State]),
+                    spaces: None,
+                }),
+                as_of: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(diff_state.summary.total_removed, 1);
+        assert_eq!(diff_state.spaces[0].removed[0].primitive, PrimitiveType::State);
+    }
+
+    #[test]
+    fn test_diff_filter_by_multiple_primitives() {
+        let (_temp, db) = setup_with_branch("a");
+        let branch_index = BranchIndex::new(db.clone());
+        branch_index.create_branch("b").unwrap();
+
+        write_kv(&db, "a", "default", "kv1", Value::Int(1));
+        write_state(&db, "a", "default", "st1", Value::Bool(true));
+        write_json(&db, "a", "default", "j1", Value::String("doc".into()));
+
+        // Filter to KV + Json: should see 2 removed
+        let diff = diff_branches_with_options(
+            &db,
+            "a",
+            "b",
+            DiffOptions {
+                filter: Some(DiffFilter {
+                    primitives: Some(vec![PrimitiveType::Kv, PrimitiveType::Json]),
+                    spaces: None,
+                }),
+                as_of: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(diff.summary.total_removed, 2);
+    }
+
+    #[test]
+    fn test_diff_filter_by_space() {
+        let (_temp, db) = setup_with_branch("a");
+        let branch_index = BranchIndex::new(db.clone());
+        branch_index.create_branch("b").unwrap();
+
+        let space_index = SpaceIndex::new(db.clone());
+        let id_a = resolve_branch_name("a");
+        space_index.register(id_a, "alpha").unwrap();
+        space_index.register(id_a, "beta").unwrap();
+
+        write_kv(&db, "a", "default", "k1", Value::Int(1));
+        write_kv(&db, "a", "alpha", "k2", Value::Int(2));
+        write_kv(&db, "a", "beta", "k3", Value::Int(3));
+
+        // Unfiltered: 3 removed
+        let diff_all = diff_branches(&db, "a", "b").unwrap();
+        assert_eq!(diff_all.summary.total_removed, 3);
+
+        // Filter to "alpha" only: 1 removed
+        let diff_alpha = diff_branches_with_options(
+            &db,
+            "a",
+            "b",
+            DiffOptions {
+                filter: Some(DiffFilter {
+                    primitives: None,
+                    spaces: Some(vec!["alpha".to_string()]),
+                }),
+                as_of: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(diff_alpha.summary.total_removed, 1);
+        assert_eq!(diff_alpha.spaces[0].removed[0].key, "k2");
+
+        // spaces_only_in_a should also be filtered
+        // "alpha", "beta", "default" are all only in A, but filter to "alpha"
+        // should exclude "beta" and "default"
+        assert!(
+            !diff_alpha
+                .summary
+                .spaces_only_in_a
+                .contains(&"beta".to_string()),
+            "Filtered diff should not report 'beta' in spaces_only_in_a"
+        );
+        assert!(
+            !diff_alpha
+                .summary
+                .spaces_only_in_a
+                .contains(&"default".to_string()),
+            "Filtered diff should not report 'default' in spaces_only_in_a"
+        );
+    }
+
+    #[test]
+    fn test_diff_filter_combined_primitive_and_space() {
+        let (_temp, db) = setup_with_branch("a");
+        let branch_index = BranchIndex::new(db.clone());
+        branch_index.create_branch("b").unwrap();
+
+        let space_index = SpaceIndex::new(db.clone());
+        let id_a = resolve_branch_name("a");
+        space_index.register(id_a, "alpha").unwrap();
+
+        // KV in default, State in alpha, KV in alpha
+        write_kv(&db, "a", "default", "kv_d", Value::Int(1));
+        write_state(&db, "a", "alpha", "st_a", Value::Bool(true));
+        write_kv(&db, "a", "alpha", "kv_a", Value::Int(2));
+
+        // Filter: KV only + alpha only → should see 1 removed (kv_a)
+        let diff = diff_branches_with_options(
+            &db,
+            "a",
+            "b",
+            DiffOptions {
+                filter: Some(DiffFilter {
+                    primitives: Some(vec![PrimitiveType::Kv]),
+                    spaces: Some(vec!["alpha".to_string()]),
+                }),
+                as_of: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(diff.summary.total_removed, 1);
+        assert_eq!(diff.spaces[0].removed[0].key, "kv_a");
+        assert_eq!(diff.spaces[0].removed[0].primitive, PrimitiveType::Kv);
+    }
+
+    #[test]
+    fn test_diff_filter_empty_primitives_returns_empty() {
+        let (_temp, db) = setup_with_branch("a");
+        let branch_index = BranchIndex::new(db.clone());
+        branch_index.create_branch("b").unwrap();
+
+        write_kv(&db, "a", "default", "k1", Value::Int(1));
+
+        // Empty primitives filter → no type tags → empty diff
+        let diff = diff_branches_with_options(
+            &db,
+            "a",
+            "b",
+            DiffOptions {
+                filter: Some(DiffFilter {
+                    primitives: Some(vec![]),
+                    spaces: None,
+                }),
+                as_of: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(diff.summary.total_removed, 0);
+        assert_eq!(diff.summary.total_added, 0);
+        assert_eq!(diff.summary.total_modified, 0);
+    }
+
+    #[test]
+    fn test_diff_filter_nonexistent_space_returns_empty() {
+        let (_temp, db) = setup_with_branch("a");
+        let branch_index = BranchIndex::new(db.clone());
+        branch_index.create_branch("b").unwrap();
+
+        write_kv(&db, "a", "default", "k1", Value::Int(1));
+
+        // Filter to a space that doesn't exist → empty diff
+        let diff = diff_branches_with_options(
+            &db,
+            "a",
+            "b",
+            DiffOptions {
+                filter: Some(DiffFilter {
+                    primitives: None,
+                    spaces: Some(vec!["nonexistent".to_string()]),
+                }),
+                as_of: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(diff.summary.total_removed, 0);
+        assert_eq!(diff.summary.total_added, 0);
+    }
+
+    #[test]
+    fn test_diff_as_of_sees_old_values() {
+        let (_temp, db) = setup_with_branch("a");
+        let branch_index = BranchIndex::new(db.clone());
+        branch_index.create_branch("b").unwrap();
+
+        // Write initial value to A
+        write_kv(&db, "a", "default", "key", Value::Int(1));
+
+        // Record a timestamp after the first write
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let snapshot_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Overwrite with a new value after the snapshot
+        write_kv(&db, "a", "default", "key", Value::Int(2));
+
+        // Current diff: should show modified with value_a=Int(2) (no data in B)
+        let diff_now = diff_branches(&db, "a", "b").unwrap();
+        assert_eq!(diff_now.summary.total_removed, 1);
+        assert_eq!(
+            diff_now.spaces[0].removed[0].value_a,
+            Some(Value::Int(2)),
+            "Current diff should see latest value"
+        );
+
+        // as_of snapshot: should show value_a=Int(1)
+        let diff_snap = diff_branches_with_options(
+            &db,
+            "a",
+            "b",
+            DiffOptions {
+                filter: None,
+                as_of: Some(snapshot_ts),
+            },
+        )
+        .unwrap();
+        assert_eq!(diff_snap.summary.total_removed, 1);
+        assert_eq!(
+            diff_snap.spaces[0].removed[0].value_a,
+            Some(Value::Int(1)),
+            "Snapshot diff should see value at snapshot time"
+        );
+    }
+
+    #[test]
+    fn test_diff_as_of_before_any_writes_returns_empty() {
+        let (_temp, db) = setup_with_branch("a");
+        let branch_index = BranchIndex::new(db.clone());
+        branch_index.create_branch("b").unwrap();
+
+        // Record a timestamp before any data writes
+        let before_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        write_kv(&db, "a", "default", "k1", Value::Int(1));
+
+        // as_of before any writes: should be empty diff
+        let diff = diff_branches_with_options(
+            &db,
+            "a",
+            "b",
+            DiffOptions {
+                filter: None,
+                as_of: Some(before_ts),
+            },
+        )
+        .unwrap();
+        assert_eq!(diff.summary.total_removed, 0);
+        assert_eq!(diff.summary.total_added, 0);
+        assert_eq!(diff.summary.total_modified, 0);
+    }
+
+    #[test]
+    fn test_diff_as_of_with_filter() {
+        let (_temp, db) = setup_with_branch("a");
+        let branch_index = BranchIndex::new(db.clone());
+        branch_index.create_branch("b").unwrap();
+
+        // Write KV and State at different times
+        write_kv(&db, "a", "default", "kv1", Value::Int(1));
+        write_state(&db, "a", "default", "st1", Value::Bool(true));
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let snapshot_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+
+        // Both KV and State exist at snapshot_ts; filter to KV only
+        let diff = diff_branches_with_options(
+            &db,
+            "a",
+            "b",
+            DiffOptions {
+                filter: Some(DiffFilter {
+                    primitives: Some(vec![PrimitiveType::Kv]),
+                    spaces: None,
+                }),
+                as_of: Some(snapshot_ts),
+            },
+        )
+        .unwrap();
+        assert_eq!(diff.summary.total_removed, 1);
+        assert_eq!(diff.spaces[0].removed[0].primitive, PrimitiveType::Kv);
+    }
+
+    #[test]
+    fn test_diff_default_options_matches_diff_branches() {
+        // Verify that diff_branches_with_options with default options
+        // produces the same result as diff_branches
+        let (_temp, db) = setup_with_branch("a");
+        let branch_index = BranchIndex::new(db.clone());
+        branch_index.create_branch("b").unwrap();
+
+        write_kv(&db, "a", "default", "k1", Value::Int(1));
+        write_kv(&db, "b", "default", "k1", Value::Int(2));
+        write_kv(&db, "b", "default", "k2", Value::Int(3));
+
+        let diff1 = diff_branches(&db, "a", "b").unwrap();
+        let diff2 =
+            diff_branches_with_options(&db, "a", "b", DiffOptions::default()).unwrap();
+
+        assert_eq!(diff1, diff2);
+    }
+
+    #[test]
+    fn test_diff_value_fidelity_complex_types() {
+        // Verify that complex Value types round-trip through diff correctly
+        let (_temp, db) = setup_with_branch("a");
+        let branch_index = BranchIndex::new(db.clone());
+        branch_index.create_branch("b").unwrap();
+
+        let complex_val = Value::Array(Box::new(vec![
+            Value::Int(1),
+            Value::String("hello".into()),
+            Value::Bool(true),
+        ]));
+        write_kv(&db, "a", "default", "arr", complex_val.clone());
+
+        let diff = diff_branches(&db, "a", "b").unwrap();
+        assert_eq!(diff.summary.total_removed, 1);
+        assert_eq!(
+            diff.spaces[0].removed[0].value_a,
+            Some(complex_val),
+            "Complex Value should be preserved exactly"
+        );
     }
 
     #[test]

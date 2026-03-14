@@ -921,9 +921,20 @@ impl Executor {
                 source,
                 destination,
             } => crate::handlers::branch::branch_fork(&self.primitives, source, destination),
-            Command::BranchDiff { branch_a, branch_b } => {
-                crate::handlers::branch::branch_diff(&self.primitives, branch_a, branch_b)
-            }
+            Command::BranchDiff {
+                branch_a,
+                branch_b,
+                filter_primitives,
+                filter_spaces,
+                as_of,
+            } => crate::handlers::branch::branch_diff(
+                &self.primitives,
+                branch_a,
+                branch_b,
+                filter_primitives,
+                filter_spaces,
+                as_of,
+            ),
             Command::BranchMerge {
                 source,
                 target,

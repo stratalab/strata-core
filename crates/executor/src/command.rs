@@ -695,6 +695,15 @@ pub enum Command {
         branch_a: String,
         /// Second branch to compare.
         branch_b: String,
+        /// Optional filter by primitive types.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter_primitives: Option<Vec<strata_core::PrimitiveType>>,
+        /// Optional filter by space names.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter_spaces: Option<Vec<String>>,
+        /// Optional point-in-time timestamp (microseconds).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_of: Option<u64>,
     },
 
     /// Merge data from source branch into target branch.

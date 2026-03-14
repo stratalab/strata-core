@@ -836,6 +836,9 @@ fn test_command_branch_diff() {
     test_command_round_trip(Command::BranchDiff {
         branch_a: "main".to_string(),
         branch_b: "experiment".to_string(),
+        filter_primitives: None,
+        filter_spaces: None,
+        as_of: None,
     });
 }
 
@@ -906,7 +909,7 @@ fn test_output_branch_diff() {
                 primitive: strata_core::PrimitiveType::Kv,
                 space: "default".to_string(),
                 value_a: None,
-                value_b: Some("hello".to_string()),
+                value_b: Some(Value::String("hello".into())),
             }],
             removed: vec![],
             modified: vec![],

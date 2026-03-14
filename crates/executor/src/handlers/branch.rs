@@ -202,13 +202,31 @@ pub fn branch_fork(p: &Arc<Primitives>, source: String, destination: String) -> 
 }
 
 /// Handle BranchDiff command.
-pub fn branch_diff(p: &Arc<Primitives>, branch_a: String, branch_b: String) -> Result<Output> {
+pub fn branch_diff(
+    p: &Arc<Primitives>,
+    branch_a: String,
+    branch_b: String,
+    filter_primitives: Option<Vec<strata_core::PrimitiveType>>,
+    filter_spaces: Option<Vec<String>>,
+    as_of: Option<u64>,
+) -> Result<Output> {
+    let has_filter = filter_primitives.is_some() || filter_spaces.is_some();
+    let options = strata_engine::branch_ops::DiffOptions {
+        filter: if has_filter {
+            Some(strata_engine::branch_ops::DiffFilter {
+                primitives: filter_primitives,
+                spaces: filter_spaces,
+            })
+        } else {
+            None
+        },
+        as_of,
+    };
     let result =
-        strata_engine::branch_ops::diff_branches(&p.db, &branch_a, &branch_b).map_err(|e| {
-            Error::Internal {
+        strata_engine::branch_ops::diff_branches_with_options(&p.db, &branch_a, &branch_b, options)
+            .map_err(|e| Error::Internal {
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
     Ok(Output::BranchDiff(result))
 }
 
