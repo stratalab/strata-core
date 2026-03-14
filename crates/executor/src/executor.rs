@@ -196,6 +196,10 @@ impl Executor {
                 convert_result(self.primitives.db.compact())?;
                 Ok(Output::Unit)
             }
+            Command::Describe { branch } => {
+                let branch = branch.expect("resolve_defaults fills this");
+                crate::handlers::database::describe(&self.primitives, branch)
+            }
             Command::EmbedStatus => {
                 let info = crate::handlers::embed_hook::embed_status(&self.primitives);
                 Ok(Output::EmbedStatus(info))

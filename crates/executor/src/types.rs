@@ -398,6 +398,139 @@ pub struct BundleValidateResult {
 }
 
 // =============================================================================
+// Describe Types
+// =============================================================================
+
+/// Structured database snapshot for agent introspection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DescribeResult {
+    /// Database engine version string.
+    pub version: String,
+    /// Path to the database directory.
+    pub path: String,
+    /// Current branch name.
+    pub branch: String,
+    /// All branch names.
+    pub branches: Vec<String>,
+    /// All space names on the current branch.
+    pub spaces: Vec<String>,
+    /// Whether the database is in read-only follower mode.
+    pub follower: bool,
+    /// Per-primitive summaries.
+    pub primitives: PrimitiveSummary,
+    /// Configuration summary.
+    pub config: ConfigSummary,
+    /// Capability flags.
+    pub capabilities: CapabilitySummary,
+}
+
+/// Summary of all primitive stores.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrimitiveSummary {
+    /// KV store summary.
+    pub kv: CountSummary,
+    /// JSON store summary.
+    pub json: CountSummary,
+    /// Event log summary.
+    pub events: CountSummary,
+    /// State cell summary.
+    pub state: StateSummary,
+    /// Vector store summary.
+    pub vector: VectorSummary,
+    /// Graph store summary.
+    pub graph: GraphSummary,
+}
+
+/// Simple count summary for a primitive.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CountSummary {
+    /// Number of entries.
+    pub count: u64,
+}
+
+/// State cell summary with cell names.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StateSummary {
+    /// Number of state cells.
+    pub count: u64,
+    /// Names of all state cells.
+    pub cells: Vec<String>,
+}
+
+/// Vector store summary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VectorSummary {
+    /// Per-collection summaries.
+    pub collections: Vec<VectorCollectionSummary>,
+}
+
+/// Summary of a single vector collection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VectorCollectionSummary {
+    /// Collection name.
+    pub name: String,
+    /// Vector dimensionality.
+    pub dimension: usize,
+    /// Distance metric.
+    pub metric: DistanceMetric,
+    /// Number of vectors.
+    pub count: u64,
+}
+
+/// Graph store summary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GraphSummary {
+    /// Per-graph summaries.
+    pub graphs: Vec<GraphSummaryEntry>,
+}
+
+/// Summary of a single graph.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GraphSummaryEntry {
+    /// Graph name.
+    pub name: String,
+    /// Number of nodes.
+    pub nodes: u64,
+    /// Number of edges.
+    pub edges: u64,
+    /// Ontology object types.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub object_types: Vec<String>,
+    /// Ontology link types.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_types: Vec<String>,
+}
+
+/// Configuration summary (safe subset — no API keys).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigSummary {
+    /// Generation provider name.
+    pub provider: String,
+    /// Default generation model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    /// Whether auto-embed is enabled.
+    pub auto_embed: bool,
+    /// Embedding model name.
+    pub embed_model: String,
+    /// Durability mode.
+    pub durability: String,
+}
+
+/// Capability flags indicating what features are available.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CapabilitySummary {
+    /// Whether keyword search is available.
+    pub search: bool,
+    /// Whether vector similarity search is available.
+    pub vector_search: bool,
+    /// Whether text generation is available.
+    pub generation: bool,
+    /// Whether auto-embed is enabled.
+    pub auto_embed: bool,
+}
+
+// =============================================================================
 // Intelligence Types
 // =============================================================================
 
