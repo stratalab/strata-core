@@ -165,7 +165,7 @@ pub fn format_diff(diff: &BranchDiffResult, mode: OutputMode) -> String {
                         let val_str = entry
                             .value_b
                             .as_ref()
-                            .map(|v| format_value_human(v))
+                            .map(format_value_human)
                             .unwrap_or_default();
                         lines.push(format!(
                             "    + {} ({}): {}",
@@ -176,7 +176,7 @@ pub fn format_diff(diff: &BranchDiffResult, mode: OutputMode) -> String {
                         let val_str = entry
                             .value_a
                             .as_ref()
-                            .map(|v| format_value_human(v))
+                            .map(format_value_human)
                             .unwrap_or_default();
                         lines.push(format!(
                             "    - {} ({}): {}",
@@ -187,12 +187,12 @@ pub fn format_diff(diff: &BranchDiffResult, mode: OutputMode) -> String {
                         let old = entry
                             .value_a
                             .as_ref()
-                            .map(|v| format_value_human(v))
+                            .map(format_value_human)
                             .unwrap_or_default();
                         let new = entry
                             .value_b
                             .as_ref()
-                            .map(|v| format_value_human(v))
+                            .map(format_value_human)
                             .unwrap_or_default();
                         lines.push(format!(
                             "    ~ {} ({}): {} → {}",
@@ -766,12 +766,12 @@ fn format_human(output: &Output) -> String {
                     let old = entry
                         .value_a
                         .as_ref()
-                        .map(|v| format_value_human(v))
+                        .map(format_value_human)
                         .unwrap_or_default();
                     let new = entry
                         .value_b
                         .as_ref()
-                        .map(|v| format_value_human(v))
+                        .map(format_value_human)
                         .unwrap_or_default();
                     lines.push(format!(
                         "    ~ {} ({}): {} → {}",

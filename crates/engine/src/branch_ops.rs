@@ -438,7 +438,7 @@ pub fn diff_branches_with_options(
         for (key, vv) in entries_a {
             if space_filter
                 .as_ref()
-                .is_none_or(|f| f.contains(&key.namespace.space))
+                .map_or(true, |f| f.contains(&key.namespace.space))
             {
                 maps_a
                     .entry(key.namespace.space.clone())
@@ -454,7 +454,7 @@ pub fn diff_branches_with_options(
         for (key, vv) in entries_b {
             if space_filter
                 .as_ref()
-                .is_none_or(|f| f.contains(&key.namespace.space))
+                .map_or(true, |f| f.contains(&key.namespace.space))
             {
                 maps_b
                     .entry(key.namespace.space.clone())
