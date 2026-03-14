@@ -61,7 +61,6 @@ fn enrich_ontology_error(
     if msg.contains("is not declared in frozen ontology") {
         if msg.starts_with("Object type") {
             if let Ok(types) = p.graph.list_object_types(branch_id, graph) {
-                // Extract the type name from the error message
                 if let Some(type_name) = extract_quoted(&msg) {
                     let hint = crate::suggest::format_hint("object types", &types, &type_name, 2);
                     return Error::InvalidInput { reason: msg, hint };
