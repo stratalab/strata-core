@@ -1,4 +1,4 @@
-//! Database-level command handlers.
+//! Database-level command handlers (describe, ping, info, flush, compact).
 
 use std::sync::Arc;
 
