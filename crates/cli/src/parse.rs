@@ -167,6 +167,9 @@ pub fn matches_to_action(matches: &ArgMatches, state: &SessionState) -> Result<C
         "info" => Ok(CliAction::Execute(Command::Info)),
         "flush" => Ok(CliAction::Execute(Command::Flush)),
         "compact" => Ok(CliAction::Execute(Command::Compact)),
+        "describe" => Ok(CliAction::Execute(Command::Describe {
+            branch: branch(state),
+        })),
         "search" => parse_search(sub_matches, state),
         "config" => parse_config(sub_matches),
         "configure-model" => parse_configure_model(sub_matches),
@@ -195,6 +198,7 @@ pub fn matches_to_action(matches: &ArgMatches, state: &SessionState) -> Result<C
                 "info",
                 "flush",
                 "compact",
+                "describe",
                 "search",
                 "config",
                 "configure-model",

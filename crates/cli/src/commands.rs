@@ -83,6 +83,7 @@ pub fn build_cli() -> Command {
         .subcommand(build_info())
         .subcommand(build_flush())
         .subcommand(build_compact())
+        .subcommand(build_describe())
         .subcommand(build_search())
         .subcommand(build_setup())
         .subcommand(build_configure_model())
@@ -702,6 +703,10 @@ fn build_flush() -> Command {
 
 fn build_compact() -> Command {
     Command::new("compact").about("Trigger compaction")
+}
+
+fn build_describe() -> Command {
+    Command::new("describe").about("Show database snapshot for agent introspection")
 }
 
 // =========================================================================

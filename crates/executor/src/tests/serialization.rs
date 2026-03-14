@@ -62,6 +62,14 @@ fn test_command_compact() {
     test_command_round_trip(Command::Compact);
 }
 
+#[test]
+fn test_command_describe() {
+    test_command_round_trip(Command::Describe {
+        branch: Some(BranchId::from("default")),
+    });
+    test_command_round_trip(Command::Describe { branch: None });
+}
+
 // =============================================================================
 // KV Command Tests (4 MVP)
 // =============================================================================
@@ -386,6 +394,84 @@ fn test_output_pong() {
     test_output_round_trip(Output::Pong {
         version: "0.1.0".to_string(),
     });
+}
+
+#[test]
+fn test_output_described() {
+    test_output_round_trip(Output::Described(DescribeResult {
+        version: "0.6.0".to_string(),
+        path: "/tmp/test".to_string(),
+        branch: "default".to_string(),
+        branches: vec!["default".to_string(), "experiment".to_string()],
+        spaces: vec!["default".to_string()],
+        follower: false,
+        primitives: PrimitiveSummary {
+            kv: CountSummary { count: 10 },
+            json: CountSummary { count: 5 },
+            events: CountSummary { count: 100 },
+            state: StateSummary {
+                count: 2,
+                cells: vec!["status".to_string(), "counter".to_string()],
+            },
+            vector: VectorSummary {
+                collections: vec![VectorCollectionSummary {
+                    name: "embeddings".to_string(),
+                    dimension: 384,
+                    metric: DistanceMetric::Cosine,
+                    count: 5000,
+                }],
+            },
+            graph: GraphSummary {
+                graphs: vec![GraphSummaryEntry {
+                    name: "social".to_string(),
+                    nodes: 100,
+                    edges: 500,
+                    object_types: vec!["Person".to_string()],
+                    link_types: vec!["follows".to_string()],
+                }],
+            },
+        },
+        config: ConfigSummary {
+            provider: "local".to_string(),
+            default_model: None,
+            auto_embed: false,
+            embed_model: "miniLM".to_string(),
+            durability: "standard".to_string(),
+        },
+        capabilities: CapabilitySummary {
+            search: true,
+            vector_search: true,
+            generation: false,
+            auto_embed: false,
+        },
+    }));
+}
+
+#[test]
+fn test_output_described_empty_graph_skips_ontology() {
+    // GraphSummaryEntry with empty object_types/link_types should skip those in JSON
+    let entry = GraphSummaryEntry {
+        name: "g".to_string(),
+        nodes: 0,
+        edges: 0,
+        object_types: vec![],
+        link_types: vec![],
+    };
+    let json = serde_json::to_string(&entry).unwrap();
+    assert!(!json.contains("object_types"), "Empty vec should be skipped: {}", json);
+    assert!(!json.contains("link_types"), "Empty vec should be skipped: {}", json);
+
+    // With values, they should appear
+    let entry2 = GraphSummaryEntry {
+        name: "g2".to_string(),
+        nodes: 1,
+        edges: 0,
+        object_types: vec!["Person".to_string()],
+        link_types: vec![],
+    };
+    let json2 = serde_json::to_string(&entry2).unwrap();
+    assert!(json2.contains("object_types"), "Non-empty vec should appear: {}", json2);
+    assert!(!json2.contains("link_types"), "Empty vec should be skipped: {}", json2);
 }
 
 #[test]

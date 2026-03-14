@@ -293,6 +293,7 @@ fn format_raw(output: &Output) -> String {
                 info.version, info.uptime_secs, info.branch_count, info.total_keys
             )
         }
+        Output::Described(_) => serde_json::to_string_pretty(output).unwrap_or_default(),
         Output::Pong { version } => version.clone(),
         Output::SearchResults(hits) => hits
             .iter()
@@ -643,6 +644,68 @@ fn format_human(output: &Output) -> String {
                 "version: {}\nuptime_secs: {}\nbranches: {}\ntotal_keys: {}",
                 info.version, info.uptime_secs, info.branch_count, info.total_keys
             )
+        }
+        Output::Described(d) => {
+            let mut lines = Vec::new();
+            lines.push(format!("Strata v{}", d.version));
+            lines.push(format!("path: {}", d.path));
+            lines.push(format!(
+                "branch: {} ({})",
+                d.branch,
+                if d.follower { "follower" } else { "leader" }
+            ));
+            lines.push(format!("branches: {}", d.branches.join(", ")));
+            lines.push(format!("spaces: {}", d.spaces.join(", ")));
+            lines.push(String::new());
+            lines.push("Primitives:".to_string());
+            lines.push(format!("  kv:     {} keys", d.primitives.kv.count));
+            lines.push(format!("  json:   {} docs", d.primitives.json.count));
+            lines.push(format!("  events: {} entries", d.primitives.events.count));
+            lines.push(format!(
+                "  state:  {} cells [{}]",
+                d.primitives.state.count,
+                d.primitives.state.cells.join(", ")
+            ));
+            if d.primitives.vector.collections.is_empty() {
+                lines.push("  vector: (none)".to_string());
+            } else {
+                lines.push("  vector:".to_string());
+                for c in &d.primitives.vector.collections {
+                    let metric_str = match c.metric {
+                        strata_executor::DistanceMetric::Cosine => "cosine",
+                        strata_executor::DistanceMetric::Euclidean => "euclidean",
+                        strata_executor::DistanceMetric::DotProduct => "dot_product",
+                    };
+                    lines.push(format!(
+                        "    - {} (dim: {}, metric: {}, count: {})",
+                        c.name, c.dimension, metric_str, c.count
+                    ));
+                }
+            }
+            if d.primitives.graph.graphs.is_empty() {
+                lines.push("  graph:  (none)".to_string());
+            } else {
+                lines.push("  graph:".to_string());
+                for g in &d.primitives.graph.graphs {
+                    lines.push(format!(
+                        "    - {} (nodes: {}, edges: {})",
+                        g.name, g.nodes, g.edges
+                    ));
+                }
+            }
+            lines.push(String::new());
+            lines.push(format!(
+                "Config: provider={}, auto_embed={}, embed_model={}, durability={}",
+                d.config.provider, d.config.auto_embed, d.config.embed_model, d.config.durability
+            ));
+            lines.push(format!(
+                "Capabilities: search={}, vector_search={}, generation={}, auto_embed={}",
+                d.capabilities.search,
+                d.capabilities.vector_search,
+                d.capabilities.generation,
+                d.capabilities.auto_embed
+            ));
+            lines.join("\n")
         }
         Output::Pong { version } => format!("PONG {}", version),
         Output::SearchResults(hits) => {

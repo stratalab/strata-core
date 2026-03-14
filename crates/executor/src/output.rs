@@ -147,6 +147,9 @@ pub enum Output {
     /// Database info
     DatabaseInfo(DatabaseInfo),
 
+    /// Database introspection snapshot
+    Described(DescribeResult),
+
     /// Ping response
     Pong {
         /// Database engine version string.

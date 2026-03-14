@@ -775,6 +775,14 @@ pub enum Command {
     /// Trigger compaction
     Compact,
 
+    /// Return a structured snapshot of the database for agent introspection.
+    /// Returns: `Output::Described`
+    Describe {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+    },
+
     /// Get the available time range for a branch.
     /// Returns: `Output::TimeRange`
     TimeRange {
@@ -1556,6 +1564,7 @@ impl Command {
             Command::Info => "Info",
             Command::Flush => "Flush",
             Command::Compact => "Compact",
+            Command::Describe { .. } => "Describe",
             Command::TimeRange { .. } => "TimeRange",
             Command::BranchExport { .. } => "BranchExport",
             Command::BranchImport { .. } => "BranchImport",
@@ -1685,12 +1694,13 @@ impl Command {
                 resolve_space!(space);
             }
 
-            // Retention, Transaction begin, TimeRange — only have branch, no space
+            // Retention, Transaction begin, TimeRange, Describe — only have branch, no space
             Command::RetentionApply { branch, .. }
             | Command::RetentionStats { branch, .. }
             | Command::RetentionPreview { branch, .. }
             | Command::TxnBegin { branch, .. }
-            | Command::TimeRange { branch, .. } => {
+            | Command::TimeRange { branch, .. }
+            | Command::Describe { branch, .. } => {
                 resolve_branch!(branch);
             }
 
