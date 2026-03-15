@@ -12,90 +12,7 @@ env:
 
 jobs:
   # --------------------------------------------------------------------------
-  # 1. Read pinned llama.cpp version
-  # --------------------------------------------------------------------------
-  read-version:
-    name: Read llama.cpp version
-    runs-on: ubuntu-latest
-    outputs:
-      llama_version: ${{ steps.ver.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Read LLAMA_CPP_VERSION
-        id: ver
-        run: echo "version=$(cat LLAMA_CPP_VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
-
-  # --------------------------------------------------------------------------
-  # 2. Build libllama for all platforms
-  # --------------------------------------------------------------------------
-  build-libllama:
-    name: Build libllama (${{ matrix.target }})
-    needs: read-version
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
-            cmake_flags: -DGGML_NATIVE=OFF -DGGML_AVX2=ON
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-latest
-            cmake_flags: -DGGML_NATIVE=OFF -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64
-          - target: x86_64-apple-darwin
-            runner: macos-13
-            cmake_flags: -DGGML_NATIVE=OFF -DGGML_METAL=OFF
-          - target: aarch64-apple-darwin
-            runner: macos-14
-            cmake_flags: -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON
-          - target: x86_64-pc-windows-msvc
-            runner: windows-latest
-            cmake_flags: -DGGML_NATIVE=OFF -DGGML_AVX2=ON
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Clone llama.cpp
-        run: git clone --depth 1 --branch ${{ needs.read-version.outputs.llama_version }} https://github.com/ggerganov/llama.cpp.git llama.cpp
-
-      - name: Install cross-compilation tools (aarch64-linux)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-
-      - name: Configure CMake
-        run: >
-          cmake -S llama.cpp -B llama.cpp/build
-          -DBUILD_SHARED_LIBS=ON
-          -DCMAKE_BUILD_TYPE=Release
-          ${{ matrix.cmake_flags }}
-
-      - name: Build libllama
-        run: cmake --build llama.cpp/build --config Release --target llama
-
-      - name: Collect shared libraries
-        shell: bash
-        run: |
-          mkdir -p libllama-out
-          # Collect all shared libraries: .so, .so.* (versioned), .dylib, .dll
-          # Include both regular files and symlinks; cp dereferences symlinks
-          # so the artifact directory contains only regular files.
-          find llama.cpp/build \
-            \( -name "*.so" -o -name "*.so.*" -o -name "*.dylib" -o -name "*.dll" \) \
-            \( -type f -o -type l \) \
-            -exec cp {} libllama-out/ \;
-          echo "Collected libraries:"
-          ls -la libllama-out/
-
-      - name: Upload libllama artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: libllama-${{ matrix.target }}
-          path: libllama-out/
-
-  # --------------------------------------------------------------------------
-  # 3. Build strata binary for all platforms
+  # 1. Build strata binary with embedding statically linked
   # --------------------------------------------------------------------------
   build:
     name: Build strata (${{ matrix.target }})
@@ -117,6 +34,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -127,12 +46,12 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu cmake
 
-      - name: Build
+      - name: Build (embed statically linked)
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-gcc' || '' }}
-        run: cargo build --release --package strata-cli --target ${{ matrix.target }}
+        run: cargo build --release --features embed --package strata-cli --target ${{ matrix.target }}
 
       - name: Upload strata binary (unix)
         if: runner.os != 'Windows'
@@ -149,11 +68,11 @@ jobs:
           path: target/${{ matrix.target }}/release/strata.exe
 
   # --------------------------------------------------------------------------
-  # 4. Package archives (bin/lib layout for unix, flat for windows)
+  # 2. Package archives
   # --------------------------------------------------------------------------
   package:
     name: Package (${{ matrix.target }})
-    needs: [build, build-libllama]
+    needs: build
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -186,29 +105,21 @@ jobs:
           name: strata-${{ matrix.target }}
           path: staging/bin
 
-      - name: Download libllama
-        uses: actions/download-artifact@v4
-        with:
-          name: libllama-${{ matrix.target }}
-          path: staging/lib
-
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
         run: |
           chmod +x staging/bin/strata
           cp README.md staging/
           ARCHIVE_NAME="strata-v${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz"
-          tar czf "${ARCHIVE_NAME}" -C staging bin lib README.md
+          tar czf "${ARCHIVE_NAME}" -C staging bin README.md
           echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> "$GITHUB_ENV"
 
       - name: Package (windows)
         if: matrix.archive == 'zip'
         shell: bash
         run: |
-          # Windows uses flat layout: strata.exe + DLLs + README.md
           mkdir -p staging-flat
           cp staging/bin/strata.exe staging-flat/
-          cp staging/lib/*.dll staging-flat/
           cp README.md staging-flat/
           ARCHIVE_NAME="strata-v${{ steps.version.outputs.version }}-${{ matrix.target }}.zip"
           cd staging-flat
@@ -223,7 +134,7 @@ jobs:
           path: ${{ env.ARCHIVE_NAME }}
 
   # --------------------------------------------------------------------------
-  # 5. Create GitHub Release
+  # 3. Create GitHub Release
   # --------------------------------------------------------------------------
   release:
     name: Create Release
@@ -260,7 +171,7 @@ jobs:
             strata-v*.tar.gz strata-v*.zip checksums-sha256.txt
 
   # --------------------------------------------------------------------------
-  # 6. Update Homebrew Tap
+  # 4. Update Homebrew Tap
   # --------------------------------------------------------------------------
   update-homebrew:
     name: Update Homebrew Tap
@@ -327,7 +238,6 @@ jobs:
 
             def install
               bin.install "bin/strata"
-              lib.install Dir["lib/*"]
             end
 
             test do
