@@ -9,7 +9,7 @@ pub static CATALOG: &[CatalogEntry] = &[
         name: "miniLM",
         aliases: &["all-minilm"],
         task: ModelTask::Embed,
-        hf_repo: "leliuga/all-MiniLM-L6-v2-GGUF",
+        hf_repo: "stratalab-org/all-MiniLM-L6-v2-GGUF",
         default_quant: "f16",
         variants: &[QuantVariant {
             name: "f16",
@@ -24,7 +24,7 @@ pub static CATALOG: &[CatalogEntry] = &[
         name: "nomic-embed",
         aliases: &["nomic", "nomic-embed-text"],
         task: ModelTask::Embed,
-        hf_repo: "nomic-ai/nomic-embed-text-v1.5-GGUF",
+        hf_repo: "stratalab-org/nomic-embed-text-v1.5-GGUF",
         default_quant: "q8_0",
         variants: &[QuantVariant {
             name: "q8_0",
@@ -39,7 +39,7 @@ pub static CATALOG: &[CatalogEntry] = &[
         name: "bge-m3",
         aliases: &["bge"],
         task: ModelTask::Embed,
-        hf_repo: "second-state/BGE-M3-GGUF",
+        hf_repo: "stratalab-org/BGE-M3-GGUF",
         default_quant: "q8_0",
         variants: &[QuantVariant {
             name: "q8_0",
@@ -54,7 +54,7 @@ pub static CATALOG: &[CatalogEntry] = &[
         name: "gemma-embed",
         aliases: &["embedding-gemma"],
         task: ModelTask::Embed,
-        hf_repo: "lm-kit/embedding-gemma-300M-GGUF",
+        hf_repo: "stratalab-org/embedding-gemma-300M-GGUF",
         default_quant: "q8_0",
         variants: &[QuantVariant {
             name: "q8_0",
@@ -70,7 +70,7 @@ pub static CATALOG: &[CatalogEntry] = &[
         name: "gpt2",
         aliases: &[],
         task: ModelTask::Generate,
-        hf_repo: "QuantFactory/gpt2-GGUF",
+        hf_repo: "stratalab-org/gpt2-GGUF",
         default_quant: "q8_0",
         variants: &[
             QuantVariant {
@@ -93,7 +93,7 @@ pub static CATALOG: &[CatalogEntry] = &[
         name: "tinyllama",
         aliases: &["tiny-llama"],
         task: ModelTask::Generate,
-        hf_repo: "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+        hf_repo: "stratalab-org/TinyLlama-1.1B-Chat-v1.0-GGUF",
         default_quant: "q4_k_m",
         variants: &[
             QuantVariant {
@@ -116,7 +116,7 @@ pub static CATALOG: &[CatalogEntry] = &[
         name: "qwen3:1.7b",
         aliases: &["qwen3-1.7b"],
         task: ModelTask::Generate,
-        hf_repo: "Qwen/Qwen3-1.7B-GGUF",
+        hf_repo: "stratalab-org/Qwen3-1.7B-GGUF",
         default_quant: "q4_k_m",
         variants: &[
             QuantVariant {
@@ -139,7 +139,7 @@ pub static CATALOG: &[CatalogEntry] = &[
         name: "gemma3:1b",
         aliases: &["gemma3-1b", "gemma-3-1b"],
         task: ModelTask::Generate,
-        hf_repo: "unsloth/gemma-3-1b-it-GGUF",
+        hf_repo: "stratalab-org/gemma-3-1b-it-GGUF",
         default_quant: "q4_k_m",
         variants: &[
             QuantVariant {
@@ -162,7 +162,7 @@ pub static CATALOG: &[CatalogEntry] = &[
         name: "phi3.5",
         aliases: &["phi-3.5", "phi3.5-mini"],
         task: ModelTask::Generate,
-        hf_repo: "bartowski/Phi-3.5-mini-instruct-GGUF",
+        hf_repo: "stratalab-org/Phi-3.5-mini-instruct-GGUF",
         default_quant: "q4_k_m",
         variants: &[
             QuantVariant {
@@ -185,7 +185,7 @@ pub static CATALOG: &[CatalogEntry] = &[
         name: "llama3.1:8b",
         aliases: &["llama3.1-8b", "llama-3.1-8b"],
         task: ModelTask::Generate,
-        hf_repo: "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+        hf_repo: "stratalab-org/Meta-Llama-3.1-8B-Instruct-GGUF",
         default_quant: "q4_k_m",
         variants: &[
             QuantVariant {
@@ -220,7 +220,7 @@ pub static CATALOG: &[CatalogEntry] = &[
         name: "qwen3:8b",
         aliases: &["qwen3-8b"],
         task: ModelTask::Generate,
-        hf_repo: "Qwen/Qwen3-8B-GGUF",
+        hf_repo: "stratalab-org/Qwen3-8B-GGUF",
         default_quant: "q4_k_m",
         variants: &[
             QuantVariant {
