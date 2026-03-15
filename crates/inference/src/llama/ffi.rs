@@ -110,6 +110,7 @@ pub struct LlamaSamplerChainParams {
 const _: () = assert!(std::mem::size_of::<LlamaSamplerChainParams>() == 1);
 
 /// Matches `struct llama_batch` from llama.h (56 bytes on x86_64).
+#[derive(Copy, Clone)]
 #[repr(C)]
 pub struct LlamaBatch {
     pub n_tokens: i32,
@@ -501,23 +502,20 @@ impl LlamaCppApi {
     }
 
     /// Get pooled embeddings (for models with pooling).
-    /// Returns a raw pointer to `n_embd` floats owned by llama.cpp, or null on error.
+    /// Returns a raw pointer to `n_embd` floats owned by llama.cpp, or null if
+    /// the model does not support embeddings or no data is available.
     pub fn get_embeddings(&self, ctx: LlamaContext) -> *mut f32 {
-        let ptr = unsafe { llama_get_embeddings(ctx) };
-        assert!(!ptr.is_null(), "llama_get_embeddings returned null");
-        ptr
+        unsafe { llama_get_embeddings(ctx) }
     }
 
     pub fn get_embeddings_ith(&self, ctx: LlamaContext, i: i32) -> *mut f32 {
-        let ptr = unsafe { llama_get_embeddings_ith(ctx, i) };
-        assert!(!ptr.is_null(), "llama_get_embeddings_ith returned null");
-        ptr
+        unsafe { llama_get_embeddings_ith(ctx, i) }
     }
 
+    /// Get pooled embeddings for a specific sequence ID.
+    /// Returns null if the sequence has no embeddings (caller must handle).
     pub fn get_embeddings_seq(&self, ctx: LlamaContext, seq_id: LlamaSeqId) -> *mut f32 {
-        let ptr = unsafe { llama_get_embeddings_seq(ctx, seq_id) };
-        assert!(!ptr.is_null(), "llama_get_embeddings_seq returned null");
-        ptr
+        unsafe { llama_get_embeddings_seq(ctx, seq_id) }
     }
 
     // -----------------------------------------------------------------------
