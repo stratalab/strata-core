@@ -372,6 +372,50 @@ impl JsonStore {
         Ok(VersionedHistory::new(versions))
     }
 
+    /// Core read-modify-write for a single JSON document within a transaction.
+    ///
+    /// If the document exists, applies `set_at_path` and increments version.
+    /// If `create_if_missing` is true and the document doesn't exist, creates it.
+    /// Returns the resulting document version.
+    fn set_in_txn(
+        txn: &mut TransactionContext,
+        key: &Key,
+        doc_id: &str,
+        path: &JsonPath,
+        value: JsonValue,
+        create_if_missing: bool,
+    ) -> StrataResult<Version> {
+        match txn.get(key)? {
+            Some(stored) => {
+                let mut doc = Self::deserialize_doc(&stored)?;
+                set_at_path(&mut doc.value, path, value)
+                    .map_err(|e| StrataError::invalid_input(format!("Path error: {}", e)))?;
+                doc.touch();
+                let serialized = Self::serialize_doc(&doc)?;
+                txn.put(key.clone(), serialized)?;
+                Ok(Version::counter(doc.version))
+            }
+            None if create_if_missing => {
+                let initial = if path.is_root() {
+                    value
+                } else {
+                    let mut obj = JsonValue::object();
+                    set_at_path(&mut obj, path, value)
+                        .map_err(|e| StrataError::invalid_input(format!("Path error: {}", e)))?;
+                    obj
+                };
+                let doc = JsonDoc::new(doc_id, initial);
+                let serialized = Self::serialize_doc(&doc)?;
+                txn.put(key.clone(), serialized)?;
+                Ok(Version::counter(doc.version))
+            }
+            None => Err(StrataError::invalid_input(format!(
+                "JSON document {} not found",
+                doc_id
+            ))),
+        }
+    }
+
     /// Set value at path, creating the document if it doesn't exist.
     ///
     /// Combines exists-check, create, and set into a single atomic transaction,
@@ -392,36 +436,8 @@ impl JsonStore {
         value.validate().map_err(limit_error_to_error)?;
 
         let key = self.key_for(branch_id, space, doc_id);
-
         self.db.transaction(*branch_id, |txn| {
-            match txn.get(&key)? {
-                Some(stored) => {
-                    // Document exists — set at path
-                    let mut doc = Self::deserialize_doc(&stored)?;
-                    set_at_path(&mut doc.value, path, value)
-                        .map_err(|e| StrataError::invalid_input(format!("Path error: {}", e)))?;
-                    doc.touch();
-                    let serialized = Self::serialize_doc(&doc)?;
-                    txn.put(key.clone(), serialized)?;
-                    Ok(Version::counter(doc.version))
-                }
-                None => {
-                    // Document doesn't exist — create with value at path
-                    let initial = if path.is_root() {
-                        value
-                    } else {
-                        let mut obj = JsonValue::object();
-                        set_at_path(&mut obj, path, value).map_err(|e| {
-                            StrataError::invalid_input(format!("Path error: {}", e))
-                        })?;
-                        obj
-                    };
-                    let doc = JsonDoc::new(doc_id, initial);
-                    let serialized = Self::serialize_doc(&doc)?;
-                    txn.put(key.clone(), serialized)?;
-                    Ok(Version::counter(doc.version))
-                }
-            }
+            Self::set_in_txn(txn, &key, doc_id, path, value, true)
         })
     }
 
@@ -444,35 +460,8 @@ impl JsonStore {
             let mut versions = Vec::with_capacity(entries.len());
             for (doc_id, path, value) in &entries {
                 let key = self.key_for(branch_id, space, doc_id);
-
-                let result = match txn.get(&key)? {
-                    Some(stored) => {
-                        let mut doc = Self::deserialize_doc(&stored)?;
-                        set_at_path(&mut doc.value, path, value.clone()).map_err(|e| {
-                            StrataError::invalid_input(format!("Path error: {}", e))
-                        })?;
-                        doc.touch();
-                        let serialized = Self::serialize_doc(&doc)?;
-                        txn.put(key, serialized)?;
-                        Version::counter(doc.version)
-                    }
-                    None => {
-                        let initial = if path.is_root() {
-                            value.clone()
-                        } else {
-                            let mut obj = JsonValue::object();
-                            set_at_path(&mut obj, path, value.clone()).map_err(|e| {
-                                StrataError::invalid_input(format!("Path error: {}", e))
-                            })?;
-                            obj
-                        };
-                        let doc = JsonDoc::new(doc_id, initial);
-                        let serialized = Self::serialize_doc(&doc)?;
-                        txn.put(key, serialized)?;
-                        Version::counter(doc.version)
-                    }
-                };
-                versions.push(Ok(result));
+                let version = Self::set_in_txn(txn, &key, doc_id, path, value.clone(), true)?;
+                versions.push(Ok(version));
             }
             Ok(versions)
         })
@@ -520,24 +509,8 @@ impl JsonStore {
         value.validate().map_err(limit_error_to_error)?;
 
         let key = self.key_for(branch_id, space, doc_id);
-
         self.db.transaction(*branch_id, |txn| {
-            // Load existing document
-            let stored = txn.get(&key)?.ok_or_else(|| {
-                StrataError::invalid_input(format!("JSON document {} not found", doc_id))
-            })?;
-            let mut doc = Self::deserialize_doc(&stored)?;
-
-            // Apply mutation
-            set_at_path(&mut doc.value, path, value)
-                .map_err(|e| StrataError::invalid_input(format!("Path error: {}", e)))?;
-            doc.touch();
-
-            // Store updated document
-            let serialized = Self::serialize_doc(&doc)?;
-            txn.put(key.clone(), serialized)?;
-
-            Ok(Version::counter(doc.version))
+            Self::set_in_txn(txn, &key, doc_id, path, value, false)
         })
     }
 
