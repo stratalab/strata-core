@@ -336,7 +336,13 @@ fn build_event() -> Command {
             Command::new("list")
                 .about("List events by type")
                 .arg(Arg::new("type").required(true).help("Event type"))
-                .arg(Arg::new("limit").long("limit").help("Maximum events"))
+                .arg(
+                    Arg::new("limit")
+                        .long("limit")
+                        .short('n')
+                        .value_name("COUNT")
+                        .help("Maximum events to return"),
+                )
                 .arg(
                     Arg::new("after")
                         .long("after")
@@ -490,10 +496,18 @@ fn build_vector() -> Command {
                         .required(true)
                         .help("Query vector as JSON array"),
                 )
-                .arg(Arg::new("k").default_value("10").help("Number of results"))
+                .arg(
+                    Arg::new("top-k")
+                        .long("top-k")
+                        .short('k')
+                        .default_value("10")
+                        .value_name("COUNT")
+                        .help("Number of results to return (default: 10)"),
+                )
                 .arg(
                     Arg::new("metric")
                         .long("metric")
+                        .value_name("METRIC")
                         .help("Distance metric: cosine, euclidean, dotproduct"),
                 )
                 .arg(
@@ -663,7 +677,7 @@ fn build_space() -> Command {
 fn build_txn_begin() -> Command {
     Command::new("begin").about("Begin a new transaction").arg(
         Arg::new("txn-read-only")
-            .long("read-only")
+            .long("txn-read-only")
             .action(clap::ArgAction::SetTrue)
             .help("Start a read-only transaction"),
     )
@@ -717,7 +731,13 @@ fn build_search() -> Command {
     Command::new("search")
         .about("Search across multiple primitives")
         .arg(Arg::new("query").required(true).help("Search query"))
-        .arg(Arg::new("k").long("k").help("Number of results"))
+        .arg(
+            Arg::new("top-k")
+                .long("top-k")
+                .short('k')
+                .value_name("COUNT")
+                .help("Number of results to return"),
+        )
         .arg(
             Arg::new("primitives")
                 .long("primitives")
@@ -1034,10 +1054,17 @@ fn build_graph() -> Command {
                 .about("Breadth-first search traversal")
                 .arg(Arg::new("graph").required(true).help("Graph name"))
                 .arg(Arg::new("start").required(true).help("Start node ID"))
-                .arg(Arg::new("max-depth").required(true).help("Maximum depth"))
+                .arg(
+                    Arg::new("max-depth")
+                        .long("max-depth")
+                        .required(true)
+                        .value_name("DEPTH")
+                        .help("Maximum traversal depth"),
+                )
                 .arg(
                     Arg::new("max-nodes")
                         .long("max-nodes")
+                        .value_name("COUNT")
                         .help("Maximum nodes to visit"),
                 )
                 .arg(
@@ -1148,7 +1175,9 @@ fn build_graph() -> Command {
                         .arg(Arg::new("graph").required(true).help("Graph name"))
                         .arg(
                             Arg::new("max-iterations")
+                                .long("max-iterations")
                                 .required(true)
+                                .value_name("COUNT")
                                 .help("Maximum iterations"),
                         )
                         .arg(

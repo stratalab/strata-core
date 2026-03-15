@@ -788,10 +788,10 @@ fn parse_vector_cmd(matches: &ArgMatches, state: &SessionState) -> Result<CliAct
             let collection = m.get_one::<String>("collection").unwrap().clone();
             let query = parse_vector(m.get_one::<String>("query").unwrap())?;
             let k = m
-                .get_one::<String>("k")
+                .get_one::<String>("top-k")
                 .unwrap()
                 .parse::<u64>()
-                .map_err(|e| format!("Invalid k: {}", e))?;
+                .map_err(|e| format!("Invalid top-k: {}", e))?;
             let metric = m
                 .get_one::<String>("metric")
                 .map(|s| parse_metric(s))
@@ -1637,10 +1637,10 @@ fn parse_detokenize(matches: &ArgMatches) -> Result<CliAction, String> {
 fn parse_search(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
     let query = matches.get_one::<String>("query").unwrap().clone();
     let k = matches
-        .get_one::<String>("k")
+        .get_one::<String>("top-k")
         .map(|s| s.parse::<u64>())
         .transpose()
-        .map_err(|e| format!("Invalid k: {}", e))?;
+        .map_err(|e| format!("Invalid top-k: {}", e))?;
     let primitives = matches
         .get_one::<String>("primitives")
         .map(|s| s.split(',').map(|p| p.trim().to_string()).collect());
@@ -1974,7 +1974,7 @@ mod tests {
 
     #[test]
     fn graph_bfs_minimal() {
-        let cmd = parse_cmd(&["graph", "bfs", "social", "alice", "3"]);
+        let cmd = parse_cmd(&["graph", "bfs", "social", "alice", "--max-depth", "3"]);
         assert_eq!(
             cmd,
             Command::GraphBfs {
@@ -1996,6 +1996,7 @@ mod tests {
             "bfs",
             "social",
             "alice",
+            "--max-depth",
             "5",
             "--max-nodes",
             "100",
@@ -2020,7 +2021,7 @@ mod tests {
 
     #[test]
     fn graph_bfs_invalid_depth() {
-        let err = parse_err(&["graph", "bfs", "social", "alice", "not_a_number"]);
+        let err = parse_err(&["graph", "bfs", "social", "alice", "--max-depth", "not_a_number"]);
         assert!(err.contains("Invalid max-depth"), "got: {}", err);
     }
 
@@ -2314,7 +2315,7 @@ mod tests {
 
     #[test]
     fn graph_bfs_invalid_max_nodes() {
-        let err = parse_err(&["graph", "bfs", "g", "start", "3", "--max-nodes", "xyz"]);
+        let err = parse_err(&["graph", "bfs", "g", "start", "--max-depth", "3", "--max-nodes", "xyz"]);
         assert!(err.contains("Invalid max-nodes"), "got: {}", err);
     }
 
@@ -2348,6 +2349,7 @@ mod tests {
             "bfs",
             "social",
             "alice",
+            "--max-depth",
             "2",
             "--edge-types",
             "FOLLOWS, LIKES, BLOCKS",
