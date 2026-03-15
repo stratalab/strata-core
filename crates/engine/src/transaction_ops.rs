@@ -135,7 +135,6 @@ pub trait TransactionOps {
 
     /// Check if a JSON document exists
     fn json_exists(&mut self, doc_id: &str) -> Result<bool, StrataError>;
-
 }
 
 #[cfg(test)]
@@ -323,7 +322,6 @@ mod tests {
         fn json_exists(&mut self, doc_id: &str) -> Result<bool, StrataError> {
             Ok(self.json_data.contains_key(doc_id))
         }
-
     }
 
     // ========== Object Safety Tests ==========

@@ -476,7 +476,6 @@ impl<'a> TransactionOps for Transaction<'a> {
         // Delegate to ctx which checks json_writes buffer → snapshot
         self.ctx.json_exists(&full_key)
     }
-
 }
 
 #[cfg(test)]

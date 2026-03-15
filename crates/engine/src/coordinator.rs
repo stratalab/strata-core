@@ -200,7 +200,10 @@ impl TransactionCoordinator {
         wal_arc: Option<&Arc<ParkingMutex<WalWriter>>>,
     ) -> StrataResult<u64> {
         let txn_id = txn.txn_id;
-        self.handle_commit_result(txn_id, self.manager.commit_with_wal_arc(txn, store, wal_arc))
+        self.handle_commit_result(
+            txn_id,
+            self.manager.commit_with_wal_arc(txn, store, wal_arc),
+        )
     }
 
     /// Handle the result of a commit attempt: record metrics and convert errors.
@@ -348,7 +351,10 @@ impl TransactionCoordinator {
         version: u64,
     ) -> StrataResult<u64> {
         let txn_id = txn.txn_id;
-        self.handle_commit_result(txn_id, self.manager.commit_with_version(txn, store, wal, version))
+        self.handle_commit_result(
+            txn_id,
+            self.manager.commit_with_version(txn, store, wal, version),
+        )
     }
 
     /// Get transaction metrics
