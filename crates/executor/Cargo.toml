@@ -12,8 +12,6 @@ description = "Command execution layer for Strata database"
 [features]
 default = []
 embed = ["strata-intelligence/embed", "strata-engine/embed"]
-embed-cuda = ["strata-intelligence/embed-cuda", "strata-engine/embed"]
-embed-metal = ["strata-intelligence/embed-metal", "strata-engine/embed"]
 expand = ["strata-search/expand"]
 rerank = ["strata-search/rerank"]
 # Cloud generation providers — forwarded through intelligence to inference

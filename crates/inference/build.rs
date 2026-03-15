@@ -16,42 +16,19 @@ fn build_llama_cpp() {
         .define("LLAMA_BUILD_SERVER", "OFF")
         .define("LLAMA_CURL", "OFF");
 
-    // --- GPU backend selection ---
+    // Metal: cmake auto-detects (ON on Apple, OFF elsewhere).
+    // We just need to embed the Metal library so it doesn't need a .metallib file at runtime.
+    #[cfg(target_os = "macos")]
+    config.define("GGML_METAL_EMBED_LIBRARY", "ON");
 
-    #[cfg(feature = "embed-cuda")]
-    {
+    // CUDA: probe for nvcc — if found, enable CUDA backend.
+    let has_cuda = probe_cuda();
+    if has_cuda {
         config.define("GGML_CUDA", "ON");
     }
 
-    #[cfg(feature = "embed-metal")]
-    {
-        config.define("GGML_METAL", "ON");
-        config.define("GGML_METAL_EMBED_LIBRARY", "ON");
-    }
-
-    // Auto-enable Metal on macOS ARM when no GPU feature is explicitly set
-    #[cfg(all(
-        target_os = "macos",
-        target_arch = "aarch64",
-        not(feature = "embed-metal"),
-        not(feature = "embed-cuda")
-    ))]
-    {
-        config.define("GGML_METAL", "ON");
-        config.define("GGML_METAL_EMBED_LIBRARY", "ON");
-    }
-
-    // Disable Metal on macOS x86 unless explicitly requested
-    #[cfg(all(
-        target_os = "macos",
-        target_arch = "x86_64",
-        not(feature = "embed-metal")
-    ))]
-    config.define("GGML_METAL", "OFF");
-
-    // --- CPU optimizations ---
-
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    // CPU optimizations for x86_64
+    #[cfg(target_arch = "x86_64")]
     config.define("GGML_AVX2", "ON");
 
     let dst = config.build_target("llama").build();
@@ -59,47 +36,36 @@ fn build_llama_cpp() {
     // --- Link static libraries ---
 
     let build_dir = dst.join("build");
-    println!(
-        "cargo:rustc-link-search=native={}",
-        build_dir.join("src").display()
-    );
-    println!(
-        "cargo:rustc-link-search=native={}",
-        build_dir.join("ggml/src").display()
-    );
-    println!("cargo:rustc-link-search=native={}", build_dir.display());
+    // Add search paths for all possible library locations
+    for subdir in &[
+        "src",
+        "ggml/src",
+        "ggml/src/ggml-cuda",
+        "ggml/src/ggml-metal",
+        "",
+    ] {
+        let path = build_dir.join(subdir);
+        if path.exists() {
+            println!("cargo:rustc-link-search=native={}", path.display());
+        }
+    }
 
+    // Core libraries (always present)
     println!("cargo:rustc-link-lib=static=llama");
     println!("cargo:rustc-link-lib=static=ggml");
     println!("cargo:rustc-link-lib=static=ggml-base");
     println!("cargo:rustc-link-lib=static=ggml-cpu");
 
-    // GPU-specific libraries
-    #[cfg(feature = "embed-cuda")]
-    {
-        println!(
-            "cargo:rustc-link-search=native={}",
-            build_dir.join("ggml/src/ggml-cuda").display()
-        );
-        println!("cargo:rustc-link-lib=static=ggml-cuda");
+    // GPU libraries (linked only if the static lib was actually built)
+    if has_cuda {
+        try_link_static(&build_dir, "ggml-cuda");
         println!("cargo:rustc-link-lib=cuda");
         println!("cargo:rustc-link-lib=cublas");
         println!("cargo:rustc-link-lib=cudart");
     }
 
-    #[cfg(any(
-        feature = "embed-metal",
-        all(target_os = "macos", target_arch = "aarch64")
-    ))]
-    {
-        println!(
-            "cargo:rustc-link-search=native={}",
-            build_dir.join("ggml/src/ggml-metal").display()
-        );
-        // ggml-metal may be built as a separate static lib
-        // Try to link it; if it's folded into ggml, the linker will skip it
-        println!("cargo:rustc-link-lib=static=ggml-metal");
-    }
+    #[cfg(target_os = "macos")]
+    try_link_static(&build_dir, "ggml-metal");
 
     // --- System dependencies ---
 
@@ -115,17 +81,49 @@ fn build_llama_cpp() {
     {
         println!("cargo:rustc-link-lib=c++");
         println!("cargo:rustc-link-lib=framework=Accelerate");
-        // Metal frameworks (needed when Metal is enabled)
-        #[cfg(any(
-            feature = "embed-metal",
-            all(target_os = "macos", target_arch = "aarch64")
-        ))]
-        {
-            println!("cargo:rustc-link-lib=framework=Metal");
-            println!("cargo:rustc-link-lib=framework=MetalKit");
-            println!("cargo:rustc-link-lib=framework=Foundation");
-        }
+        println!("cargo:rustc-link-lib=framework=Foundation");
+        println!("cargo:rustc-link-lib=framework=Metal");
+        println!("cargo:rustc-link-lib=framework=MetalKit");
     }
 
     println!("cargo:rerun-if-changed=vendor/llama.cpp/CMakeLists.txt");
+}
+
+/// Check if CUDA toolkit is available by looking for `nvcc`.
+#[cfg(feature = "local")]
+fn probe_cuda() -> bool {
+    std::process::Command::new("nvcc")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Link a static library if its `.a` file exists in the build tree.
+#[cfg(feature = "local")]
+fn try_link_static(build_dir: &std::path::Path, name: &str) {
+    let lib_name = format!("lib{name}.a");
+    for entry in walkdir(build_dir) {
+        if entry.ends_with(&lib_name) {
+            println!("cargo:rustc-link-lib=static={name}");
+            return;
+        }
+    }
+}
+
+/// Simple recursive file listing (avoids adding walkdir dependency).
+#[cfg(feature = "local")]
+fn walkdir(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(walkdir(&path));
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files
 }

@@ -11,9 +11,7 @@ description = "Inference engine for Strata — local (llama.cpp) and cloud provi
 
 [features]
 default = ["local"]
-local = ["dep:cmake"]   # Compile llama.cpp from vendored source and statically link
-embed-cuda = ["local"]  # Build with CUDA GPU support
-embed-metal = ["local"] # Build with Metal GPU support (macOS)
+local = ["dep:cmake"]   # Compile llama.cpp from vendored source (GPU auto-detected)
 download = ["dep:ureq", "dep:sha2"]  # Enable model download from HuggingFace
 anthropic = ["dep:ureq", "dep:serde", "dep:serde_json"]   # Enable Anthropic (Claude) cloud provider
 openai = ["dep:ureq", "dep:serde", "dep:serde_json"]      # Enable OpenAI (GPT) cloud provider

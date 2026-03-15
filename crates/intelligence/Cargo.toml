@@ -12,8 +12,6 @@ description = "Embedding and inference infrastructure for Strata"
 [features]
 default = []
 embed = ["dep:strata-inference"]
-embed-cuda = ["embed", "strata-inference/embed-cuda"]
-embed-metal = ["embed", "strata-inference/embed-metal"]
 # Cloud generation providers — each enables the corresponding
 # strata-inference feature. Requires 'embed' to be useful.
 anthropic = ["embed", "strata-inference/anthropic"]
