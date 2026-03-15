@@ -126,7 +126,7 @@ impl JsonDoc {
     /// Increment version and update timestamp
     ///
     /// Call this after any modification to the document.
-    pub fn touch(&mut self) {
+    pub(crate) fn touch(&mut self) {
         self.version += 1;
         self.updated_at = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -181,13 +181,13 @@ impl JsonStore {
     }
 
     /// Build namespace for branch+space-scoped operations
-    fn namespace_for(&self, branch_id: &BranchId, space: &str) -> Namespace {
-        Namespace::for_branch_space(*branch_id, space)
+    fn namespace_for(&self, branch_id: &BranchId, space: &str) -> Arc<Namespace> {
+        Arc::new(Namespace::for_branch_space(*branch_id, space))
     }
 
     /// Build key for JSON document
     fn key_for(&self, branch_id: &BranchId, space: &str, doc_id: &str) -> Key {
-        Key::new_json(Arc::new(self.namespace_for(branch_id, space)), doc_id)
+        Key::new_json(self.namespace_for(branch_id, space), doc_id)
     }
 
     // ========================================================================
@@ -651,7 +651,7 @@ impl JsonStore {
     ) -> StrataResult<JsonListResult> {
         let ns = self.namespace_for(branch_id, space);
         // Narrow scan at storage level: if prefix is given, only scan matching keys
-        let scan_prefix = Key::new_json(Arc::new(ns), prefix.unwrap_or(""));
+        let scan_prefix = Key::new_json(ns, prefix.unwrap_or(""));
 
         self.db.transaction(*branch_id, |txn| {
             let mut doc_ids = Vec::with_capacity(limit + 1);
@@ -731,7 +731,7 @@ impl JsonStore {
     ) -> StrataResult<Vec<String>> {
         let ns = self.namespace_for(branch_id, space);
         // Narrow scan at storage level: if prefix is given, only scan matching keys
-        let scan_key = Key::new_json(Arc::new(ns), prefix.unwrap_or(""));
+        let scan_key = Key::new_json(ns, prefix.unwrap_or(""));
         let results = self.db.scan_prefix_at_timestamp(&scan_key, as_of_ts)?;
         let mut doc_ids = Vec::new();
         for (key, _vv) in results {
