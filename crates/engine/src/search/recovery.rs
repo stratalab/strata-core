@@ -96,6 +96,10 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
     // ---------------------------------------------------------------
     // Slow path: rebuild from KV/State/Event entries
     // ---------------------------------------------------------------
+    // Enable the index before scanning so that index_document() calls
+    // are not silently dropped by the is_enabled() guard.
+    index.enable();
+
     let mut docs_indexed: u64 = 0;
     let mut branches_scanned: u64 = 0;
 
