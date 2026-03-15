@@ -413,7 +413,7 @@ impl Session {
                     }
                 } else {
                     // Path-based get still needs Transaction for JSON patch logic
-                    let txn = Transaction::new(ctx, ns);
+                    let mut txn = Transaction::new(ctx, ns);
                     let json_path = convert_result(parse_path(&path))?;
                     let result = txn.json_get_path(&key, &json_path).map_err(Error::from)?;
                     match result {
@@ -472,7 +472,7 @@ impl Session {
                 })
             }
             Command::EventGet { sequence, .. } => {
-                let txn = Transaction::new(ctx, ns);
+                let mut txn = Transaction::new(ctx, ns);
                 let result = txn.event_get(sequence).map_err(Error::from)?;
                 Ok(Output::MaybeVersioned(result.map(|v| {
                     to_versioned_value(strata_core::Versioned::new(
@@ -482,7 +482,7 @@ impl Session {
                 })))
             }
             Command::EventLen { .. } => {
-                let txn = Transaction::new(ctx, ns);
+                let mut txn = Transaction::new(ctx, ns);
                 let len = txn.event_len().map_err(Error::from)?;
                 Ok(Output::Uint(len))
             }

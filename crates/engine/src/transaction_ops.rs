@@ -6,8 +6,8 @@
 //!
 //! ## Design Principles
 //!
-//! 1. **Reads are `&self`**: Read operations never modify state
-//! 2. **Writes are `&mut self`**: Write operations require exclusive access
+//! 1. **All methods are `&mut self`**: Reads need mutability for read-set tracking
+//! 2. **Writes modify state**: Write operations require exclusive access
 //! 3. **All operations return `Result<T, StrataError>`**: Consistent error handling
 //! 4. **All reads return `Versioned<T>`**: Version information is never lost
 //! 5. **All writes return `Version`**: Every mutation produces a version
@@ -60,7 +60,7 @@ pub trait TransactionOps {
     // =========================================================================
 
     /// Get a KV entry by key
-    fn kv_get(&self, key: &str) -> Result<Option<Versioned<Value>>, StrataError>;
+    fn kv_get(&mut self, key: &str) -> Result<Option<Versioned<Value>>, StrataError>;
 
     /// Put a KV entry (upsert semantics)
     fn kv_put(&mut self, key: &str, value: Value) -> Result<Version, StrataError>;
@@ -69,10 +69,10 @@ pub trait TransactionOps {
     fn kv_delete(&mut self, key: &str) -> Result<bool, StrataError>;
 
     /// Check if a KV entry exists
-    fn kv_exists(&self, key: &str) -> Result<bool, StrataError>;
+    fn kv_exists(&mut self, key: &str) -> Result<bool, StrataError>;
 
     /// List keys matching a prefix
-    fn kv_list(&self, prefix: Option<&str>) -> Result<Vec<String>, StrataError>;
+    fn kv_list(&mut self, prefix: Option<&str>) -> Result<Vec<String>, StrataError>;
 
     // =========================================================================
     // Event Operations (Phase 2)
@@ -82,20 +82,20 @@ pub trait TransactionOps {
     fn event_append(&mut self, event_type: &str, payload: Value) -> Result<Version, StrataError>;
 
     /// Read an event by sequence number
-    fn event_get(&self, sequence: u64) -> Result<Option<Versioned<Event>>, StrataError>;
+    fn event_get(&mut self, sequence: u64) -> Result<Option<Versioned<Event>>, StrataError>;
 
     /// Read a range of events [start, end)
-    fn event_range(&self, start: u64, end: u64) -> Result<Vec<Versioned<Event>>, StrataError>;
+    fn event_range(&mut self, start: u64, end: u64) -> Result<Vec<Versioned<Event>>, StrataError>;
 
     /// Get current event count (length of the log)
-    fn event_len(&self) -> Result<u64, StrataError>;
+    fn event_len(&mut self) -> Result<u64, StrataError>;
 
     // =========================================================================
     // State Operations (4 MVP)
     // =========================================================================
 
     /// Read a state cell
-    fn state_get(&self, name: &str) -> Result<Option<Versioned<State>>, StrataError>;
+    fn state_get(&mut self, name: &str) -> Result<Option<Versioned<State>>, StrataError>;
 
     /// Initialize a state cell (fails if exists)
     fn state_init(&mut self, name: &str, value: Value) -> Result<Version, StrataError>;
@@ -116,11 +116,11 @@ pub trait TransactionOps {
     fn json_create(&mut self, doc_id: &str, value: JsonValue) -> Result<Version, StrataError>;
 
     /// Get an entire JSON document
-    fn json_get(&self, doc_id: &str) -> Result<Option<Versioned<JsonValue>>, StrataError>;
+    fn json_get(&mut self, doc_id: &str) -> Result<Option<Versioned<JsonValue>>, StrataError>;
 
     /// Get a value at a path within a JSON document
     fn json_get_path(
-        &self,
+        &mut self,
         doc_id: &str,
         path: &JsonPath,
     ) -> Result<Option<JsonValue>, StrataError>;
@@ -137,7 +137,7 @@ pub trait TransactionOps {
     fn json_delete(&mut self, doc_id: &str) -> Result<bool, StrataError>;
 
     /// Check if a JSON document exists
-    fn json_exists(&self, doc_id: &str) -> Result<bool, StrataError>;
+    fn json_exists(&mut self, doc_id: &str) -> Result<bool, StrataError>;
 
     /// Destroy a JSON document (same as delete, for API consistency)
     fn json_destroy(&mut self, doc_id: &str) -> Result<bool, StrataError>;
@@ -157,7 +157,7 @@ pub trait TransactionOps {
 
     /// Get a vector by key
     fn vector_get(
-        &self,
+        &mut self,
         collection: &str,
         key: &str,
     ) -> Result<Option<Versioned<VectorEntry>>, StrataError>;
@@ -167,7 +167,7 @@ pub trait TransactionOps {
 
     /// Search for similar vectors
     fn vector_search(
-        &self,
+        &mut self,
         collection: &str,
         query: &[f32],
         k: usize,
@@ -175,14 +175,14 @@ pub trait TransactionOps {
     ) -> Result<Vec<VectorMatch>, StrataError>;
 
     /// Check if a vector exists
-    fn vector_exists(&self, collection: &str, key: &str) -> Result<bool, StrataError>;
+    fn vector_exists(&mut self, collection: &str, key: &str) -> Result<bool, StrataError>;
 
     // =========================================================================
     // Run Operations (Phase 5 - Limited, runs are meta-level)
     // =========================================================================
 
     /// Get run metadata (the current run)
-    fn branch_metadata(&self) -> Result<Option<Versioned<BranchMetadata>>, StrataError>;
+    fn branch_metadata(&mut self) -> Result<Option<Versioned<BranchMetadata>>, StrataError>;
 
     /// Update run status
     fn branch_update_status(&mut self, status: BranchStatus) -> Result<Version, StrataError>;
@@ -215,7 +215,7 @@ mod tests {
     }
 
     impl TransactionOps for MockTransactionOps {
-        fn kv_get(&self, key: &str) -> Result<Option<Versioned<Value>>, StrataError> {
+        fn kv_get(&mut self, key: &str) -> Result<Option<Versioned<Value>>, StrataError> {
             Ok(self
                 .kv_data
                 .get(key)
@@ -231,11 +231,11 @@ mod tests {
             Ok(self.kv_data.remove(key).is_some())
         }
 
-        fn kv_exists(&self, key: &str) -> Result<bool, StrataError> {
+        fn kv_exists(&mut self, key: &str) -> Result<bool, StrataError> {
             Ok(self.kv_data.contains_key(key))
         }
 
-        fn kv_list(&self, prefix: Option<&str>) -> Result<Vec<String>, StrataError> {
+        fn kv_list(&mut self, prefix: Option<&str>) -> Result<Vec<String>, StrataError> {
             let keys: Vec<_> = self
                 .kv_data
                 .keys()
@@ -254,7 +254,7 @@ mod tests {
             Ok(Version::seq(self.event_count))
         }
 
-        fn event_get(&self, sequence: u64) -> Result<Option<Versioned<Event>>, StrataError> {
+        fn event_get(&mut self, sequence: u64) -> Result<Option<Versioned<Event>>, StrataError> {
             if sequence == 0 || sequence > self.event_count {
                 return Ok(None);
             }
@@ -262,18 +262,18 @@ mod tests {
         }
 
         fn event_range(
-            &self,
+            &mut self,
             _start: u64,
             _end: u64,
         ) -> Result<Vec<Versioned<Event>>, StrataError> {
             Ok(Vec::new())
         }
 
-        fn event_len(&self) -> Result<u64, StrataError> {
+        fn event_len(&mut self) -> Result<u64, StrataError> {
             Ok(self.event_count)
         }
 
-        fn state_get(&self, name: &str) -> Result<Option<Versioned<State>>, StrataError> {
+        fn state_get(&mut self, name: &str) -> Result<Option<Versioned<State>>, StrataError> {
             Ok(self
                 .state_data
                 .get(name)
@@ -330,7 +330,7 @@ mod tests {
             Ok(Version::txn(1))
         }
 
-        fn json_get(&self, doc_id: &str) -> Result<Option<Versioned<JsonValue>>, StrataError> {
+        fn json_get(&mut self, doc_id: &str) -> Result<Option<Versioned<JsonValue>>, StrataError> {
             Ok(self
                 .json_data
                 .get(doc_id)
@@ -338,7 +338,7 @@ mod tests {
         }
 
         fn json_get_path(
-            &self,
+            &mut self,
             doc_id: &str,
             path: &JsonPath,
         ) -> Result<Option<JsonValue>, StrataError> {
@@ -370,7 +370,7 @@ mod tests {
             Ok(self.json_data.remove(doc_id).is_some())
         }
 
-        fn json_exists(&self, doc_id: &str) -> Result<bool, StrataError> {
+        fn json_exists(&mut self, doc_id: &str) -> Result<bool, StrataError> {
             Ok(self.json_data.contains_key(doc_id))
         }
 
@@ -394,7 +394,7 @@ mod tests {
         }
 
         fn vector_get(
-            &self,
+            &mut self,
             _collection: &str,
             _key: &str,
         ) -> Result<Option<Versioned<VectorEntry>>, StrataError> {
@@ -414,7 +414,7 @@ mod tests {
         }
 
         fn vector_search(
-            &self,
+            &mut self,
             _collection: &str,
             _query: &[f32],
             _k: usize,
@@ -427,7 +427,7 @@ mod tests {
             ))
         }
 
-        fn vector_exists(&self, _collection: &str, _key: &str) -> Result<bool, StrataError> {
+        fn vector_exists(&mut self, _collection: &str, _key: &str) -> Result<bool, StrataError> {
             Err(StrataError::invalid_input(
                 "Vector exists is not supported inside transactions. \
                  Use VectorStore::exists() directly."
@@ -436,7 +436,7 @@ mod tests {
         }
 
         // Branch operations — not supported in transactions (returns proper error)
-        fn branch_metadata(&self) -> Result<Option<Versioned<BranchMetadata>>, StrataError> {
+        fn branch_metadata(&mut self) -> Result<Option<Versioned<BranchMetadata>>, StrataError> {
             Err(StrataError::invalid_input(
                 "Branch metadata is not supported inside transactions. \
                  Use BranchIndex methods directly."
@@ -660,28 +660,21 @@ mod tests {
     // ========== Trait Method Signatures ==========
 
     #[test]
-    fn test_read_methods_take_shared_ref() {
-        // This test verifies that read methods use &self (not &mut self)
-        // by calling them on an immutable reference
-        let ops = MockTransactionOps::new();
-        let ops_ref: &dyn TransactionOps = &ops;
-
-        // All these should compile with &self
-        let _ = ops_ref.kv_get("key");
-        let _ = ops_ref.kv_exists("key");
-        let _ = ops_ref.kv_list(None);
-        let _ = ops_ref.event_get(1);
-        let _ = ops_ref.event_range(1, 10);
-        let _ = ops_ref.event_len();
-    }
-
-    #[test]
-    fn test_write_methods_take_mutable_ref() {
-        // This test verifies that write methods use &mut self
+    fn test_all_methods_take_mutable_ref() {
+        // All TransactionOps methods now use &mut self (reads need
+        // mutability for read-set tracking in snapshot isolation).
         let mut ops = MockTransactionOps::new();
         let ops_mut: &mut dyn TransactionOps = &mut ops;
 
-        // All these should compile with &mut self
+        // Reads
+        let _ = ops_mut.kv_get("key");
+        let _ = ops_mut.kv_exists("key");
+        let _ = ops_mut.kv_list(None);
+        let _ = ops_mut.event_get(1);
+        let _ = ops_mut.event_range(1, 10);
+        let _ = ops_mut.event_len();
+
+        // Writes
         let _ = ops_mut.kv_put("key", Value::Int(1));
         let _ = ops_mut.kv_delete("key");
         let _ = ops_mut.event_append("test", Value::Null);
