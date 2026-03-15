@@ -361,7 +361,7 @@ impl crate::search::Searchable for KVStore {
             .filter_map(|scored| {
                 let entity_ref = index.resolve_doc_id(scored.doc_id)?;
                 let snippet = if let EntityRef::Kv { ref key, .. } = entity_ref {
-                    self.get(&req.branch_id, "default", key)
+                    self.get(&req.branch_id, &req.space, key)
                         .ok()
                         .flatten()
                         .map(|v| match &v {
