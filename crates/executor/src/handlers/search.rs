@@ -58,7 +58,7 @@ fn parse_time_range(input: &TimeRangeInput) -> Result<(u64, u64)> {
 pub fn search(
     p: &Arc<Primitives>,
     branch: BranchId,
-    _space: String,
+    space: String,
     sq: SearchQuery,
 ) -> Result<Output> {
     let core_branch_id = to_core_branch_id(&branch)?;
@@ -82,7 +82,7 @@ pub fn search(
     // Parse time_range
     let parsed_time_range = sq.time_range.as_ref().map(parse_time_range).transpose()?;
 
-    let mut req = SearchRequest::new(core_branch_id, &sq.query);
+    let mut req = SearchRequest::new(core_branch_id, &sq.query).with_space(space);
     if let Some(top_k) = sq.k {
         req = req.with_k(top_k as usize);
     }

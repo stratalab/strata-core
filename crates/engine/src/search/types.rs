@@ -161,6 +161,9 @@ pub struct SearchRequest {
     /// Optional: precomputed query embedding (skip embedder call in hybrid search).
     /// Used by `search_expanded()` to batch-embed all expansion texts upfront.
     pub precomputed_embedding: Option<Vec<f32>>,
+
+    /// Space to search within (defaults to "default").
+    pub space: String,
 }
 
 impl SearchRequest {
@@ -185,6 +188,7 @@ impl SearchRequest {
             time_range: None,
             tags_any: vec![],
             precomputed_embedding: None,
+            space: "default".to_string(),
         }
     }
 
@@ -227,6 +231,12 @@ impl SearchRequest {
     /// Builder: set precomputed query embedding (avoids re-embedding in hybrid search)
     pub fn with_precomputed_embedding(mut self, embedding: Vec<f32>) -> Self {
         self.precomputed_embedding = Some(embedding);
+        self
+    }
+
+    /// Builder: set space to search within
+    pub fn with_space(mut self, space: impl Into<String>) -> Self {
+        self.space = space.into();
         self
     }
 
