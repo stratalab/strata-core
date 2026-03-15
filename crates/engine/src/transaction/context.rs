@@ -23,8 +23,8 @@ use std::sync::Arc;
 use strata_concurrency::{JsonStoreExt, TransactionContext};
 use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 use strata_core::{
-    BranchMetadata, BranchStatus, EntityRef, Event, JsonPatch, JsonPath, JsonValue, MetadataFilter,
-    State, StrataError, Timestamp, Value, VectorEntry, VectorMatch, Version, Versioned,
+    BranchMetadata, BranchStatus, EntityRef, Event, JsonPath, JsonValue, MetadataFilter, State,
+    StrataError, Timestamp, Value, VectorEntry, VectorMatch, Version, Versioned,
 };
 
 /// Transaction wrapper that implements TransactionOps
@@ -114,11 +114,6 @@ impl<'a> Transaction<'a> {
         Key::new_event(self.namespace.clone(), sequence)
     }
 
-    /// Extract user key from a full Key
-    fn user_key(key: &Key) -> String {
-        key.user_key_string().unwrap_or_default()
-    }
-
     /// Compute hash for an event using the canonical hash function.
     fn compute_event_hash(event: &Event) -> [u8; 32] {
         crate::primitives::event::compute_event_hash(
@@ -156,26 +151,12 @@ impl<'a> TransactionOps for Transaction<'a> {
     // KV Operations (Phase 2)
     // =========================================================================
 
-    fn kv_get(&self, key: &str) -> Result<Option<Versioned<Value>>, StrataError> {
+    fn kv_get(&mut self, key: &str) -> Result<Option<Versioned<Value>>, StrataError> {
         let full_key = self.kv_key(key);
 
-        // Check write set first (read-your-writes)
-        if let Some(value) = self.ctx.write_set.get(&full_key) {
-            return Ok(Some(Versioned::new(
-                value.clone(),
-                Version::txn(self.ctx.txn_id),
-            )));
-        }
-
-        // Check delete set (uncommitted delete returns None)
-        if self.ctx.delete_set.contains(&full_key) {
-            return Ok(None);
-        }
-
-        // For reads from snapshot, we can only see uncommitted changes
-        // The full implementation would need TransactionContext to expose
-        // a snapshot read method.
-        Ok(None)
+        // Delegate to ctx.get() which checks write_set → delete_set → snapshot
+        let result = self.ctx.get(&full_key)?;
+        Ok(result.map(|v| Versioned::new(v, Version::txn(self.ctx.txn_id))))
     }
 
     fn kv_put(&mut self, key: &str, value: Value) -> Result<Version, StrataError> {
@@ -199,49 +180,35 @@ impl<'a> TransactionOps for Transaction<'a> {
         Ok(existed)
     }
 
-    fn kv_exists(&self, key: &str) -> Result<bool, StrataError> {
+    fn kv_exists(&mut self, key: &str) -> Result<bool, StrataError> {
         let full_key = self.kv_key(key);
 
-        // Check write set first
-        if self.ctx.write_set.contains_key(&full_key) {
-            return Ok(true);
-        }
-
-        // Check delete set
-        if self.ctx.delete_set.contains(&full_key) {
-            return Ok(false);
-        }
-
-        // For keys not in write/delete set, we'd need snapshot access
-        Ok(false)
+        // Delegate to ctx.get() which checks write_set → delete_set → snapshot
+        Ok(self.ctx.get(&full_key)?.is_some())
     }
 
-    fn kv_list(&self, prefix: Option<&str>) -> Result<Vec<String>, StrataError> {
-        let mut keys: Vec<String> = Vec::new();
+    fn kv_list(&mut self, prefix: Option<&str>) -> Result<Vec<String>, StrataError> {
+        // Build prefix key for snapshot scan
+        let prefix_key = match prefix {
+            Some(p) => Key::new_kv(self.namespace.clone(), p),
+            None => Key::new(self.namespace.clone(), TypeTag::KV, vec![]),
+        };
 
-        // Collect keys from write set matching prefix
-        for key in self.ctx.write_set.keys() {
-            if key.type_tag == TypeTag::KV && key.namespace == self.namespace {
-                let user_key = Self::user_key(key);
-                if let Some(p) = prefix {
-                    if user_key.starts_with(p) {
-                        keys.push(user_key);
-                    }
+        // scan_prefix merges write_set, excludes delete_set, and reads snapshot
+        let entries = self.ctx.scan_prefix(&prefix_key)?;
+        let mut keys: Vec<String> = entries
+            .into_iter()
+            .filter_map(|(k, _)| {
+                if k.type_tag == TypeTag::KV && k.namespace == self.namespace {
+                    k.user_key_string()
                 } else {
-                    keys.push(user_key);
+                    None
                 }
-            }
-        }
-
-        // Remove deleted keys
-        for key in &self.ctx.delete_set {
-            if key.type_tag == TypeTag::KV && key.namespace == self.namespace {
-                let user_key = Self::user_key(key);
-                keys.retain(|k| k != &user_key);
-            }
-        }
+            })
+            .collect();
 
         keys.sort();
+        keys.dedup();
         Ok(keys)
     }
 
@@ -302,8 +269,8 @@ impl<'a> TransactionOps for Transaction<'a> {
         Ok(Version::seq(sequence))
     }
 
-    fn event_get(&self, sequence: u64) -> Result<Option<Versioned<Event>>, StrataError> {
-        // Check pending events first (read-your-writes)
+    fn event_get(&mut self, sequence: u64) -> Result<Option<Versioned<Event>>, StrataError> {
+        // Check pending events first (read-your-writes for this Transaction instance)
         if sequence >= self.base_sequence {
             let index = (sequence - self.base_sequence) as usize;
             if index < self.pending_events.len() {
@@ -312,21 +279,21 @@ impl<'a> TransactionOps for Transaction<'a> {
             }
         }
 
-        // Check if the event was written to ctx.write_set
+        // Delegate to ctx.get() which checks write_set → delete_set → snapshot
         let event_key = self.event_key(sequence);
-        if let Some(Value::String(s)) = self.ctx.write_set.get(&event_key) {
-            let event: Event = serde_json::from_str(s).map_err(|e| StrataError::Serialization {
-                message: e.to_string(),
-            })?;
-            return Ok(Some(Versioned::new(event, Version::seq(sequence))));
+        match self.ctx.get(&event_key)? {
+            Some(Value::String(s)) => {
+                let event: Event =
+                    serde_json::from_str(&s).map_err(|e| StrataError::Serialization {
+                        message: e.to_string(),
+                    })?;
+                Ok(Some(Versioned::new(event, Version::seq(sequence))))
+            }
+            _ => Ok(None),
         }
-
-        // For reads from snapshot, would need snapshot access
-        // Return None for events not in pending or write set
-        Ok(None)
     }
 
-    fn event_range(&self, start: u64, end: u64) -> Result<Vec<Versioned<Event>>, StrataError> {
+    fn event_range(&mut self, start: u64, end: u64) -> Result<Vec<Versioned<Event>>, StrataError> {
         let mut results = Vec::new();
 
         for seq in start..end {
@@ -338,7 +305,7 @@ impl<'a> TransactionOps for Transaction<'a> {
         Ok(results)
     }
 
-    fn event_len(&self) -> Result<u64, StrataError> {
+    fn event_len(&mut self) -> Result<u64, StrataError> {
         // Base sequence from snapshot + pending events
         Ok(self.base_sequence + self.pending_events.len() as u64)
     }
@@ -347,33 +314,27 @@ impl<'a> TransactionOps for Transaction<'a> {
     // State Operations (Phase 3)
     // =========================================================================
 
-    fn state_get(&self, name: &str) -> Result<Option<Versioned<State>>, StrataError> {
+    fn state_get(&mut self, name: &str) -> Result<Option<Versioned<State>>, StrataError> {
         let full_key = self.state_key(name);
 
-        // Check write set first (read-your-writes)
-        // Uses Value::String matching StateCell primitive format
-        if let Some(Value::String(s)) = self.ctx.write_set.get(&full_key) {
-            let state: State = serde_json::from_str(s).map_err(|e| StrataError::Serialization {
-                message: e.to_string(),
-            })?;
-            return Ok(Some(Versioned::new(state.clone(), state.version)));
+        // Delegate to ctx.get() which checks write_set → delete_set → snapshot
+        match self.ctx.get(&full_key)? {
+            Some(Value::String(s)) => {
+                let state: State =
+                    serde_json::from_str(&s).map_err(|e| StrataError::Serialization {
+                        message: e.to_string(),
+                    })?;
+                Ok(Some(Versioned::new(state.clone(), state.version)))
+            }
+            _ => Ok(None),
         }
-
-        // Check delete set (uncommitted delete returns None)
-        if self.ctx.delete_set.contains(&full_key) {
-            return Ok(None);
-        }
-
-        // For reads from snapshot, would need snapshot access
-        // Return None for state not in write set
-        Ok(None)
     }
 
     fn state_init(&mut self, name: &str, value: Value) -> Result<Version, StrataError> {
         let full_key = self.state_key(name);
 
-        // Check if state already exists (init should only work for new state)
-        if self.ctx.write_set.contains_key(&full_key) {
+        // Check if state already exists (in write_set, or snapshot)
+        if self.ctx.get(&full_key)?.is_some() {
             return Err(StrataError::invalid_operation(
                 EntityRef::state(self.branch_id(), name),
                 "state already exists",
@@ -402,14 +363,16 @@ impl<'a> TransactionOps for Transaction<'a> {
     ) -> Result<Version, StrataError> {
         let full_key = self.state_key(name);
 
-        // Read current state to get version (Value::String matching StateCell format)
-        let current_state = if let Some(Value::String(s)) = self.ctx.write_set.get(&full_key) {
-            let state: State = serde_json::from_str(s).map_err(|e| StrataError::Serialization {
-                message: e.to_string(),
-            })?;
-            Some(state)
-        } else {
-            None
+        // Read current state (write_set → delete_set → snapshot)
+        let current_state = match self.ctx.get(&full_key)? {
+            Some(Value::String(s)) => {
+                let state: State =
+                    serde_json::from_str(&s).map_err(|e| StrataError::Serialization {
+                        message: e.to_string(),
+                    })?;
+                Some(state)
+            }
+            _ => None,
         };
 
         // For CAS, state must exist
@@ -447,19 +410,12 @@ impl<'a> TransactionOps for Transaction<'a> {
     fn json_create(&mut self, doc_id: &str, value: JsonValue) -> Result<Version, StrataError> {
         let full_key = self.json_key(doc_id);
 
-        // Check if document already exists in this transaction's writes
-        // (same pattern as state_init checking write_set)
-        for entry in self.ctx.json_writes() {
-            if entry.key == full_key {
-                if let JsonPatch::Set { path, .. } = &entry.patch {
-                    if path.is_root() {
-                        return Err(StrataError::invalid_operation(
-                            EntityRef::json(self.branch_id(), doc_id),
-                            "document already exists",
-                        ));
-                    }
-                }
-            }
+        // Check if document already exists (in write buffer or snapshot)
+        if self.ctx.json_exists(&full_key)? {
+            return Err(StrataError::invalid_operation(
+                EntityRef::json(self.branch_id(), doc_id),
+                "document already exists",
+            ));
         }
 
         // Create the document by setting at root path
@@ -468,76 +424,25 @@ impl<'a> TransactionOps for Transaction<'a> {
         Ok(Version::txn(self.ctx.txn_id))
     }
 
-    fn json_get(&self, doc_id: &str) -> Result<Option<Versioned<JsonValue>>, StrataError> {
+    fn json_get(&mut self, doc_id: &str) -> Result<Option<Versioned<JsonValue>>, StrataError> {
         let full_key = self.json_key(doc_id);
 
-        // Check json_writes for root Set on this key (read-your-writes)
-        // Iterate in reverse to get the most recent write
-        for entry in self.ctx.json_writes().iter().rev() {
-            if entry.key == full_key {
-                match &entry.patch {
-                    JsonPatch::Set { path, value } if path.is_root() => {
-                        return Ok(Some(Versioned::new(
-                            value.clone(),
-                            Version::txn(self.ctx.txn_id),
-                        )));
-                    }
-                    JsonPatch::Delete { path } if path.is_root() => {
-                        // Document was deleted in this transaction
-                        return Ok(None);
-                    }
-                    _ => {}
-                }
-            }
+        // Delegate to ctx which checks json_writes buffer → snapshot
+        match self.ctx.json_get_document(&full_key)? {
+            Some(jv) => Ok(Some(Versioned::new(jv, Version::txn(self.ctx.txn_id)))),
+            None => Ok(None),
         }
-
-        // For documents not in json_writes, return None
-        // (same pattern as kv_get returning None for snapshot reads)
-        Ok(None)
     }
 
     fn json_get_path(
-        &self,
+        &mut self,
         doc_id: &str,
         path: &JsonPath,
     ) -> Result<Option<JsonValue>, StrataError> {
         let full_key = self.json_key(doc_id);
 
-        // Check json_writes for writes affecting this path (read-your-writes)
-        for entry in self.ctx.json_writes().iter().rev() {
-            if entry.key == full_key {
-                match &entry.patch {
-                    JsonPatch::Set {
-                        path: set_path,
-                        value,
-                    } => {
-                        // If the set path is an ancestor of or equal to our path
-                        if set_path.is_ancestor_of(path) || set_path == path {
-                            if set_path == path {
-                                return Ok(Some(value.clone()));
-                            }
-                            // Navigate into the written value using relative path
-                            let relative_segments: Vec<_> = path
-                                .segments()
-                                .iter()
-                                .skip(set_path.len())
-                                .cloned()
-                                .collect();
-                            let relative_path = JsonPath::from_segments(relative_segments);
-                            return Ok(strata_core::get_at_path(value, &relative_path).cloned());
-                        }
-                    }
-                    JsonPatch::Delete { path: del_path } => {
-                        if del_path.is_ancestor_of(path) || del_path == path {
-                            return Ok(None);
-                        }
-                    }
-                }
-            }
-        }
-
-        // For paths not in json_writes, return None
-        Ok(None)
+        // Delegate to ctx which checks json_writes buffer → snapshot
+        self.ctx.json_get(&full_key, path)
     }
 
     fn json_set(
@@ -566,28 +471,11 @@ impl<'a> TransactionOps for Transaction<'a> {
         Ok(existed)
     }
 
-    fn json_exists(&self, doc_id: &str) -> Result<bool, StrataError> {
+    fn json_exists(&mut self, doc_id: &str) -> Result<bool, StrataError> {
         let full_key = self.json_key(doc_id);
 
-        // Check json_writes for root Set/Delete on this key
-        // (same pattern as kv_exists checking write_set/delete_set)
-        for entry in self.ctx.json_writes().iter().rev() {
-            if entry.key == full_key {
-                match &entry.patch {
-                    JsonPatch::Set { path, .. } if path.is_root() => {
-                        return Ok(true);
-                    }
-                    JsonPatch::Delete { path } if path.is_root() => {
-                        return Ok(false);
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        // For documents not in json_writes, return false
-        // (same pattern as kv_exists returning false for keys not in buffers)
-        Ok(false)
+        // Delegate to ctx which checks json_writes buffer → snapshot
+        self.ctx.json_exists(&full_key)
     }
 
     fn json_destroy(&mut self, doc_id: &str) -> Result<bool, StrataError> {
@@ -618,7 +506,7 @@ impl<'a> TransactionOps for Transaction<'a> {
     }
 
     fn vector_get(
-        &self,
+        &mut self,
         _collection: &str,
         _key: &str,
     ) -> Result<Option<Versioned<VectorEntry>>, StrataError> {
@@ -638,7 +526,7 @@ impl<'a> TransactionOps for Transaction<'a> {
     }
 
     fn vector_search(
-        &self,
+        &mut self,
         _collection: &str,
         _query: &[f32],
         _k: usize,
@@ -651,7 +539,7 @@ impl<'a> TransactionOps for Transaction<'a> {
         ))
     }
 
-    fn vector_exists(&self, _collection: &str, _key: &str) -> Result<bool, StrataError> {
+    fn vector_exists(&mut self, _collection: &str, _key: &str) -> Result<bool, StrataError> {
         Err(StrataError::invalid_input(
             "Vector exists is not supported inside transactions. \
              Use VectorStore::exists() directly."
@@ -663,7 +551,7 @@ impl<'a> TransactionOps for Transaction<'a> {
     // Branch Operations — not supported in transactions
     // =========================================================================
 
-    fn branch_metadata(&self) -> Result<Option<Versioned<BranchMetadata>>, StrataError> {
+    fn branch_metadata(&mut self) -> Result<Option<Versioned<BranchMetadata>>, StrataError> {
         Err(StrataError::invalid_input(
             "Branch metadata is not supported inside transactions. \
              Use BranchIndex methods directly."
@@ -874,7 +762,7 @@ mod tests {
     fn test_event_get_not_found() {
         let ns = create_test_namespace();
         let mut ctx = create_test_context(&ns);
-        let txn = Transaction::new(&mut ctx, ns.clone());
+        let mut txn = Transaction::new(&mut ctx, ns.clone());
 
         // Reading non-existent event returns None
         let result = txn.event_get(999).unwrap();
@@ -1156,7 +1044,7 @@ mod tests {
     fn test_json_get_nonexistent() {
         let ns = create_test_namespace();
         let mut ctx = create_test_context(&ns);
-        let txn = Transaction::new(&mut ctx, ns.clone());
+        let mut txn = Transaction::new(&mut ctx, ns.clone());
 
         // Getting non-existent document returns None
         let result = txn.json_get("nonexistent").unwrap();
