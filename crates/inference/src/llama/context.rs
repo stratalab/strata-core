@@ -68,7 +68,7 @@ impl LlamaCppContext {
         cparams.pooling_type = LLAMA_POOLING_TYPE_MEAN;
         // Use model's training context size
         cparams.n_ctx = 0; // 0 = from model
-        // Allow batched embedding with multiple sequences per encode call
+                           // Allow batched embedding with multiple sequences per encode call
         cparams.n_seq_max = 512;
         let n_seq_max = cparams.n_seq_max as usize;
 

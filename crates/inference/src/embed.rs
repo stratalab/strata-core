@@ -282,8 +282,7 @@ impl EmbeddingEngine {
 
                     // SAFETY: emb_ptr is non-null and points to n_embd floats owned
                     // by llama.cpp's context, which we hold via the Mutex lock.
-                    let embedding =
-                        unsafe { std::slice::from_raw_parts(emb_ptr, n_embd) }.to_vec();
+                    let embedding = unsafe { std::slice::from_raw_parts(emb_ptr, n_embd) }.to_vec();
                     results[idx] = l2_normalize(&embedding);
                 }
 
@@ -701,7 +700,9 @@ mod tests {
         let single_batch = engine
             .embed_batch(&["hello world"])
             .expect("single batch should succeed");
-        let single = engine.embed("hello world").expect("single embed should succeed");
+        let single = engine
+            .embed("hello world")
+            .expect("single embed should succeed");
         assert_eq!(single_batch.len(), 1);
         for (a, b) in single_batch[0].iter().zip(single.iter()) {
             assert!(
@@ -715,10 +716,12 @@ mod tests {
             "The cat sat on the mat",
             "A dog ran through the park",
             "Machine learning is fascinating",
-            "", // empty text
+            "",                       // empty text
             "The cat sat on the mat", // duplicate of first
         ];
-        let embeddings = engine.embed_batch(&texts).expect("multi batch should succeed");
+        let embeddings = engine
+            .embed_batch(&texts)
+            .expect("multi batch should succeed");
         assert_eq!(embeddings.len(), 5);
 
         // All embeddings (including empty) should have correct dimension
