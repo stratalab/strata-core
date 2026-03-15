@@ -479,8 +479,8 @@ fn format_raw(output: &Output) -> String {
         Output::ConfigSetResult { key, new_value } => format!("{}\t{}", key, new_value),
         Output::ConfigValue(None) => String::new(),
         Output::ConfigValue(Some(v)) => v.clone(),
-        Output::GraphAnalyticsU64(result) => serde_json::to_string(&result).unwrap_or_default(),
-        Output::GraphAnalyticsF64(result) => serde_json::to_string(&result).unwrap_or_default(),
+        Output::GraphGroupSummary(result) => serde_json::to_string(&result).unwrap_or_default(),
+        Output::GraphScoreSummary(result) => serde_json::to_string(&result).unwrap_or_default(),
         Output::GraphPage { items, next_cursor } => {
             let page = serde_json::json!({ "items": items, "next_cursor": next_cursor });
             serde_json::to_string(&page).unwrap_or_default()
@@ -1158,21 +1158,80 @@ fn format_human(output: &Output) -> String {
         }
         Output::ConfigValue(None) => "(nil)".to_string(),
         Output::ConfigValue(Some(v)) => format!("\"{}\"", v),
-        Output::GraphAnalyticsU64(result) => {
-            format!(
-                "({}) {} node(s)\n{}",
+        Output::GraphGroupSummary(result) => {
+            let mut lines = vec![format!(
+                "({}) graph={} | {} node(s), {} group(s) | largest group: {} node(s)",
                 result.algorithm,
-                result.result.len(),
-                serde_json::to_string_pretty(&result).unwrap_or_default()
-            )
+                result.graph,
+                result.node_count,
+                result.group_count,
+                result.largest_group_size,
+            )];
+            for g in &result.groups {
+                lines.push(format!(
+                    "  group {} — {} node(s): [{}]",
+                    g.id,
+                    g.size,
+                    g.sample_nodes.join(", ")
+                ));
+            }
+            if result.all.is_some() {
+                lines.push(format!(
+                    "\n{}",
+                    serde_json::to_string_pretty(&result).unwrap_or_default()
+                ));
+            }
+            lines.join("\n")
         }
-        Output::GraphAnalyticsF64(result) => {
-            format!(
-                "({}) {} node(s)\n{}",
-                result.algorithm,
-                result.result.len(),
-                serde_json::to_string_pretty(&result).unwrap_or_default()
-            )
+        Output::GraphScoreSummary(result) => {
+            let mut lines = vec![format!(
+                "({}) graph={} | {} node(s)",
+                result.algorithm, result.graph, result.node_count,
+            )];
+            if let Some(iters) = result.iterations {
+                let conv = result
+                    .converged
+                    .map(|c| {
+                        if c {
+                            " (converged)"
+                        } else {
+                            " (not converged)"
+                        }
+                    })
+                    .unwrap_or("");
+                lines.push(format!("  iterations: {}{}", iters, conv));
+            }
+            if let Some(gcc) = result.global_clustering_coefficient {
+                lines.push(format!("  global clustering coefficient: {:.6}", gcc));
+            }
+            if let Some(zc) = result.zero_count {
+                lines.push(format!("  zero-coefficient nodes: {}", zc));
+            }
+            if let Some(src) = &result.source {
+                lines.push(format!("  source: {}", src));
+            }
+            let d = &result.distribution;
+            lines.push(format!(
+                "  distribution: min={:.6} max={:.6} mean={:.6} median={:.6} p90={:.6} p99={:.6}",
+                d.min, d.max, d.mean, d.median, d.p90, d.p99,
+            ));
+            lines.push("  top nodes:".to_string());
+            for n in &result.top_nodes {
+                lines.push(format!("    {} — {:.6}", n.node_id, n.score));
+            }
+            if let Some(farthest) = &result.farthest {
+                lines.push("  farthest nodes:".to_string());
+                for n in farthest {
+                    lines.push(format!("    {} — {:.6}", n.node_id, n.score));
+                }
+            }
+            if result.all.is_some() {
+                lines.push(format!(
+                    "\n{}",
+                    serde_json::to_string_pretty(&result).unwrap_or_default()
+                ));
+            }
+            lines.join("\n")
         }
         Output::GraphPage { items, next_cursor } => {
             let cursor_info = match next_cursor {

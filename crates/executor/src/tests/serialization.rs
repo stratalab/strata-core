@@ -936,6 +936,7 @@ fn test_output_branch_diff() {
                 key: "new-key".to_string(),
                 raw_key: b"new-key".to_vec(),
                 primitive: strata_core::PrimitiveType::Kv,
+                type_tag: strata_core::TypeTag::KV,
                 space: "default".to_string(),
                 value_a: None,
                 value_b: Some(Value::String("hello".into())),

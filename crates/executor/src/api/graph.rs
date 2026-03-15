@@ -1,9 +1,7 @@
 //! Graph operations on the Strata API surface.
 
 use super::Strata;
-use crate::types::{
-    GraphAnalyticsF64Result, GraphAnalyticsU64Result, GraphBfsResult, GraphNeighborHit,
-};
+use crate::types::{GraphBfsResult, GraphGroupSummary, GraphNeighborHit, GraphScoreSummary};
 use crate::{Command, Error, Output, Result, Value};
 
 impl Strata {
@@ -520,12 +518,19 @@ impl Strata {
     // =========================================================================
 
     /// Compute Weakly Connected Components.
-    pub fn graph_wcc(&self, graph: &str) -> Result<GraphAnalyticsU64Result> {
+    pub fn graph_wcc(
+        &self,
+        graph: &str,
+        top_n: Option<usize>,
+        include_all: Option<bool>,
+    ) -> Result<GraphGroupSummary> {
         match self.executor.execute(Command::GraphWcc {
             branch: self.branch_id(),
             graph: graph.to_string(),
+            top_n,
+            include_all,
         })? {
-            Output::GraphAnalyticsU64(r) => Ok(r),
+            Output::GraphGroupSummary(r) => Ok(r),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphWcc".into(),
             }),
@@ -538,14 +543,18 @@ impl Strata {
         graph: &str,
         max_iterations: usize,
         direction: Option<&str>,
-    ) -> Result<GraphAnalyticsU64Result> {
+        top_n: Option<usize>,
+        include_all: Option<bool>,
+    ) -> Result<GraphGroupSummary> {
         match self.executor.execute(Command::GraphCdlp {
             branch: self.branch_id(),
             graph: graph.to_string(),
             max_iterations,
             direction: direction.map(|s| s.to_string()),
+            top_n,
+            include_all,
         })? {
-            Output::GraphAnalyticsU64(r) => Ok(r),
+            Output::GraphGroupSummary(r) => Ok(r),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphCdlp".into(),
             }),
@@ -559,15 +568,19 @@ impl Strata {
         damping: Option<f64>,
         max_iterations: Option<usize>,
         tolerance: Option<f64>,
-    ) -> Result<GraphAnalyticsF64Result> {
+        top_n: Option<usize>,
+        include_all: Option<bool>,
+    ) -> Result<GraphScoreSummary> {
         match self.executor.execute(Command::GraphPagerank {
             branch: self.branch_id(),
             graph: graph.to_string(),
             damping,
             max_iterations,
             tolerance,
+            top_n,
+            include_all,
         })? {
-            Output::GraphAnalyticsF64(r) => Ok(r),
+            Output::GraphScoreSummary(r) => Ok(r),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphPagerank".into(),
             }),
@@ -575,12 +588,19 @@ impl Strata {
     }
 
     /// Compute Local Clustering Coefficients.
-    pub fn graph_lcc(&self, graph: &str) -> Result<GraphAnalyticsF64Result> {
+    pub fn graph_lcc(
+        &self,
+        graph: &str,
+        top_n: Option<usize>,
+        include_all: Option<bool>,
+    ) -> Result<GraphScoreSummary> {
         match self.executor.execute(Command::GraphLcc {
             branch: self.branch_id(),
             graph: graph.to_string(),
+            top_n,
+            include_all,
         })? {
-            Output::GraphAnalyticsF64(r) => Ok(r),
+            Output::GraphScoreSummary(r) => Ok(r),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphLcc".into(),
             }),
@@ -593,14 +613,18 @@ impl Strata {
         graph: &str,
         source: &str,
         direction: Option<&str>,
-    ) -> Result<GraphAnalyticsF64Result> {
+        top_n: Option<usize>,
+        include_all: Option<bool>,
+    ) -> Result<GraphScoreSummary> {
         match self.executor.execute(Command::GraphSssp {
             branch: self.branch_id(),
             graph: graph.to_string(),
             source: source.to_string(),
             direction: direction.map(|s| s.to_string()),
+            top_n,
+            include_all,
         })? {
-            Output::GraphAnalyticsF64(r) => Ok(r),
+            Output::GraphScoreSummary(r) => Ok(r),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphSssp".into(),
             }),

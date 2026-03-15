@@ -342,11 +342,11 @@ pub enum Output {
         path: String,
     },
 
-    /// Graph analytics result with u64 values (WCC, CDLP).
-    GraphAnalyticsU64(GraphAnalyticsU64Result),
+    /// Graph grouping analytics summary (WCC, CDLP).
+    GraphGroupSummary(GraphGroupSummary),
 
-    /// Graph analytics result with f64 values (PageRank, LCC, SSSP).
-    GraphAnalyticsF64(GraphAnalyticsF64Result),
+    /// Graph score-based analytics summary (PageRank, LCC, SSSP).
+    GraphScoreSummary(GraphScoreSummary),
 
     /// Graph paginated result (items + optional cursor).
     GraphPage {

@@ -1127,7 +1127,18 @@ fn build_graph() -> Command {
                 .subcommand(
                     Command::new("wcc")
                         .about("Weakly Connected Components")
-                        .arg(Arg::new("graph").required(true).help("Graph name")),
+                        .arg(Arg::new("graph").required(true).help("Graph name"))
+                        .arg(
+                            Arg::new("top-n")
+                                .long("top-n")
+                                .help("Number of top groups to return (default 10)"),
+                        )
+                        .arg(
+                            Arg::new("include-all")
+                                .long("include-all")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Include full raw results"),
+                        ),
                 )
                 .subcommand(
                     Command::new("cdlp")
@@ -1142,6 +1153,17 @@ fn build_graph() -> Command {
                             Arg::new("direction")
                                 .long("direction")
                                 .help("Direction: outgoing, incoming, both"),
+                        )
+                        .arg(
+                            Arg::new("top-n")
+                                .long("top-n")
+                                .help("Number of top groups to return (default 10)"),
+                        )
+                        .arg(
+                            Arg::new("include-all")
+                                .long("include-all")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Include full raw results"),
                         ),
                 )
                 .subcommand(
@@ -1162,12 +1184,34 @@ fn build_graph() -> Command {
                             Arg::new("tolerance")
                                 .long("tolerance")
                                 .help("Convergence tolerance (default 1e-6)"),
+                        )
+                        .arg(
+                            Arg::new("top-n")
+                                .long("top-n")
+                                .help("Number of top nodes to return (default 10)"),
+                        )
+                        .arg(
+                            Arg::new("include-all")
+                                .long("include-all")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Include full raw results"),
                         ),
                 )
                 .subcommand(
                     Command::new("lcc")
                         .about("Local Clustering Coefficient")
-                        .arg(Arg::new("graph").required(true).help("Graph name")),
+                        .arg(Arg::new("graph").required(true).help("Graph name"))
+                        .arg(
+                            Arg::new("top-n")
+                                .long("top-n")
+                                .help("Number of top nodes to return (default 10)"),
+                        )
+                        .arg(
+                            Arg::new("include-all")
+                                .long("include-all")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Include full raw results"),
+                        ),
                 )
                 .subcommand(
                     Command::new("sssp")
@@ -1178,6 +1222,17 @@ fn build_graph() -> Command {
                             Arg::new("direction")
                                 .long("direction")
                                 .help("Direction: outgoing, incoming, both"),
+                        )
+                        .arg(
+                            Arg::new("top-n")
+                                .long("top-n")
+                                .help("Number of top nodes to return (default 10)"),
+                        )
+                        .arg(
+                            Arg::new("include-all")
+                                .long("include-all")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Include full raw results"),
                         ),
                 ),
         )
