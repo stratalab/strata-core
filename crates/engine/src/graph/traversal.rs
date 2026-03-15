@@ -86,8 +86,10 @@ impl GraphStore {
 
     /// Breadth-first search from a start node.
     ///
-    /// Builds an in-memory adjacency index from all edges in a single bulk scan,
-    /// then runs BFS against it. This avoids per-node KV transactions during traversal.
+    /// Uses lazy per-node neighbor lookups so cost is proportional to the
+    /// subgraph actually visited, not the total graph size. For bounded
+    /// traversals (max_depth, max_nodes) on large graphs this is
+    /// dramatically faster than scanning all edges up front.
     pub fn bfs(
         &self,
         branch_id: BranchId,
@@ -95,20 +97,11 @@ impl GraphStore {
         start: &str,
         opts: BfsOptions,
     ) -> StrataResult<BfsResult> {
-        let index = self.build_adjacency_index(branch_id, graph)?;
-        Ok(self.bfs_with_index(start, &opts, &index))
-    }
+        let edge_type_filter: Option<HashSet<String>> = opts
+            .edge_types
+            .as_ref()
+            .map(|v| v.iter().cloned().collect());
 
-    /// BFS using a pre-built adjacency index (no per-node KV lookups).
-    ///
-    /// Use this when you already have an `AdjacencyIndex` (e.g. for running
-    /// multiple traversals on the same graph without rebuilding the index).
-    pub fn bfs_with_index(
-        &self,
-        start: &str,
-        opts: &BfsOptions,
-        index: &AdjacencyIndex,
-    ) -> BfsResult {
         let mut visited: Vec<String> = Vec::new();
         let mut depths: HashMap<String, usize> = HashMap::new();
         let mut edges: Vec<(String, String, String)> = Vec::new();
@@ -132,13 +125,86 @@ impl GraphStore {
                 continue;
             }
 
-            // Macro-like inline to process each (dst, edge_type) pair from the
-            // zero-alloc iterators, avoiding closure borrow conflicts.
+            // Fetch neighbors on demand — one KV lookup per node visited
+            let mut process_neighbors = |neighbors: Vec<Neighbor>| {
+                for n in neighbors {
+                    if let Some(ref fs) = edge_type_filter {
+                        if !fs.contains(&n.edge_type) {
+                            continue;
+                        }
+                    }
+                    if !seen.contains(&n.node_id) {
+                        seen.insert(n.node_id.clone());
+                        edges.push((current.clone(), n.node_id.clone(), n.edge_type));
+                        queue.push_back((n.node_id, depth + 1));
+                    }
+                }
+            };
+
+            match opts.direction {
+                Direction::Outgoing => {
+                    process_neighbors(self.outgoing_neighbors(branch_id, graph, &current, None)?);
+                }
+                Direction::Incoming => {
+                    process_neighbors(self.incoming_neighbors(branch_id, graph, &current, None)?);
+                }
+                Direction::Both => {
+                    process_neighbors(self.outgoing_neighbors(branch_id, graph, &current, None)?);
+                    process_neighbors(self.incoming_neighbors(branch_id, graph, &current, None)?);
+                }
+            }
+        }
+
+        Ok(BfsResult {
+            visited,
+            depths,
+            edges,
+        })
+    }
+
+    /// BFS using a pre-built adjacency index (no per-node KV lookups).
+    ///
+    /// Use this when you already have an `AdjacencyIndex` (e.g. for running
+    /// multiple traversals on the same graph without rebuilding the index).
+    pub fn bfs_with_index(
+        &self,
+        start: &str,
+        opts: &BfsOptions,
+        index: &AdjacencyIndex,
+    ) -> BfsResult {
+        let edge_type_filter: Option<HashSet<&str>> = opts
+            .edge_types
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
+
+        let mut visited: Vec<String> = Vec::new();
+        let mut depths: HashMap<String, usize> = HashMap::new();
+        let mut edges: Vec<(String, String, String)> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+
+        queue.push_back((start.to_string(), 0));
+        seen.insert(start.to_string());
+
+        while let Some((current, depth)) = queue.pop_front() {
+            if let Some(max) = opts.max_nodes {
+                if visited.len() >= max {
+                    break;
+                }
+            }
+
+            visited.push(current.clone());
+            depths.insert(current.clone(), depth);
+
+            if depth >= opts.max_depth {
+                continue;
+            }
+
             macro_rules! process_neighbors {
                 ($iter:expr) => {
                     for (neighbor_id, et) in $iter {
-                        if let Some(ref filter) = opts.edge_types {
-                            if !filter.iter().any(|f| f == et) {
+                        if let Some(ref fs) = edge_type_filter {
+                            if !fs.contains(et) {
                                 continue;
                             }
                         }
