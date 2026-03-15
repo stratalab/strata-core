@@ -283,25 +283,66 @@ impl EventLog {
 
     // ========== Append Operation ==========
 
-    /// Append a new event to the log
+    /// Core event creation: hash, build, store event + type index, update metadata chain.
+    ///
+    /// Used by both `append()` and `batch_append()`. Caller is responsible
+    /// for writing the updated `meta` back to storage after all events.
+    fn append_event_in_txn(
+        txn: &mut TransactionContext,
+        ns: &Arc<Namespace>,
+        meta: &mut EventLogMeta,
+        event_type: &str,
+        payload: &Value,
+    ) -> StrataResult<u64> {
+        let sequence = meta.next_sequence;
+        let timestamp = Timestamp::now();
+
+        let hash = compute_event_hash(
+            sequence,
+            event_type,
+            payload,
+            timestamp.as_micros(),
+            &meta.head_hash,
+        );
+
+        let event = Event {
+            sequence,
+            event_type: event_type.to_string(),
+            payload: payload.clone(),
+            timestamp,
+            prev_hash: meta.head_hash,
+            hash,
+        };
+
+        // Write event
+        let event_key = Key::new_event(ns.clone(), sequence);
+        txn.put(event_key, to_stored_value(&event)?)?;
+
+        // Write per-type index key for efficient get_by_type lookups (#972)
+        let idx_key = Key::new_event_type_idx(ns.clone(), event_type, sequence);
+        txn.put(idx_key, Value::Null)?;
+
+        // Update stream metadata
+        match meta.streams.get_mut(event_type) {
+            Some(stream_meta) => stream_meta.update(sequence, timestamp.as_micros()),
+            None => {
+                meta.streams.insert(
+                    event_type.to_string(),
+                    StreamMeta::new(sequence, timestamp.as_micros()),
+                );
+            }
+        }
+
+        // Update chain
+        meta.next_sequence = sequence + 1;
+        meta.head_hash = hash;
+
+        Ok(sequence)
+    }
+
+    /// Append a new event to the log.
     ///
     /// Returns the assigned sequence version.
-    /// Serializes through CAS on metadata key - parallel appends will retry
-    /// automatically with exponential backoff.
-    ///
-    /// # Arguments
-    /// * `branch_id` - The branch to append to
-    /// * `event_type` - User-defined event category (non-empty, max 256 chars)
-    /// * `payload` - Event data (must be a JSON object, no NaN/Infinity)
-    ///
-    /// # Returns
-    /// Version::Sequence containing the assigned sequence number
-    ///
-    /// # Errors
-    /// Returns error if:
-    /// - `event_type` is empty or exceeds 256 characters
-    /// - `payload` is not a JSON object
-    /// - `payload` contains NaN or Infinity float values
     pub fn append(
         &self,
         branch_id: &BranchId,
@@ -309,67 +350,21 @@ impl EventLog {
         event_type: &str,
         payload: Value,
     ) -> StrataResult<Version> {
-        // Validate inputs before entering transaction
         validate_event_type(event_type).map_err(|e| StrataError::invalid_input(e.to_string()))?;
         validate_payload(&payload).map_err(|e| StrataError::invalid_input(e.to_string()))?;
 
         let ns = self.namespace_for(branch_id, space);
-        let event_type_owned = event_type.to_string();
 
         let result = self.db.transaction(*branch_id, |txn| {
-            // Read current metadata (or default)
             let meta_key = Key::new_event_meta(ns.clone());
             let mut meta: EventLogMeta = match txn.get(&meta_key)? {
                 Some(v) => from_stored_value(&v).unwrap_or_else(|_| EventLogMeta::default()),
                 None => EventLogMeta::default(),
             };
 
-            // Compute event hash using current hash version
-            let sequence = meta.next_sequence;
-            let timestamp = Timestamp::now();
+            let sequence = Self::append_event_in_txn(txn, &ns, &mut meta, event_type, &payload)?;
 
-            let hash = compute_event_hash(
-                sequence,
-                &event_type_owned,
-                &payload,
-                timestamp.as_micros(),
-                &meta.head_hash,
-            );
-
-            // Build event
-            let event = Event {
-                sequence,
-                event_type: event_type_owned.clone(),
-                payload: payload.clone(),
-                timestamp,
-                prev_hash: meta.head_hash,
-                hash,
-            };
-
-            // Write event
-            let event_key = Key::new_event(ns.clone(), sequence);
-            txn.put(event_key, to_stored_value(&event)?)?;
-
-            // Write per-type index key for efficient get_by_type lookups (#972)
-            let idx_key = Key::new_event_type_idx(ns.clone(), &event_type_owned, sequence);
-            txn.put(idx_key, Value::Null)?;
-
-            // Update stream metadata
-            match meta.streams.get_mut(&event_type_owned) {
-                Some(stream_meta) => stream_meta.update(sequence, timestamp.as_micros()),
-                None => {
-                    meta.streams.insert(
-                        event_type_owned.clone(),
-                        StreamMeta::new(sequence, timestamp.as_micros()),
-                    );
-                }
-            }
-
-            // Update metadata (CAS semantics through transaction)
-            meta.next_sequence = sequence + 1;
-            meta.head_hash = hash;
             txn.put(meta_key, to_stored_value(&meta)?)?;
-
             Ok(Version::Sequence(sequence))
         })?;
 
@@ -441,7 +436,6 @@ impl EventLog {
         let ns = self.namespace_for(branch_id, space);
 
         let sequences = self.db.transaction(*branch_id, |txn| {
-            // Read current metadata
             let meta_key = Key::new_event_meta(ns.clone());
             let mut meta: EventLogMeta = match txn.get(&meta_key)? {
                 Some(v) => from_stored_value(&v).unwrap_or_else(|_| EventLogMeta::default()),
@@ -449,58 +443,14 @@ impl EventLog {
             };
 
             let mut sequences = Vec::with_capacity(valid_indices.len());
-
             for &i in &valid_indices {
                 let (event_type, payload) = &entries[i];
-                let sequence = meta.next_sequence;
-                let timestamp = Timestamp::now();
-
-                let hash = compute_event_hash(
-                    sequence,
-                    event_type,
-                    payload,
-                    timestamp.as_micros(),
-                    &meta.head_hash,
-                );
-
-                let event = Event {
-                    sequence,
-                    event_type: event_type.clone(),
-                    payload: payload.clone(),
-                    timestamp,
-                    prev_hash: meta.head_hash,
-                    hash,
-                };
-
-                // Write event
-                let event_key = Key::new_event(ns.clone(), sequence);
-                txn.put(event_key, to_stored_value(&event)?)?;
-
-                // Write per-type index key
-                let idx_key = Key::new_event_type_idx(ns.clone(), event_type, sequence);
-                txn.put(idx_key, strata_core::value::Value::Null)?;
-
-                // Update stream metadata
-                match meta.streams.get_mut(event_type) {
-                    Some(stream_meta) => stream_meta.update(sequence, timestamp.as_micros()),
-                    None => {
-                        meta.streams.insert(
-                            event_type.clone(),
-                            StreamMeta::new(sequence, timestamp.as_micros()),
-                        );
-                    }
-                }
-
-                // Update chain
-                meta.next_sequence = sequence + 1;
-                meta.head_hash = hash;
-
+                let sequence = Self::append_event_in_txn(txn, &ns, &mut meta, event_type, payload)?;
                 sequences.push(sequence);
             }
 
             // Write updated metadata once
             txn.put(meta_key, to_stored_value(&meta)?)?;
-
             Ok(sequences)
         })?;
 
