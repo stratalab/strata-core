@@ -23,8 +23,7 @@ use std::sync::Arc;
 use strata_concurrency::{JsonStoreExt, TransactionContext};
 use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 use strata_core::{
-    BranchMetadata, BranchStatus, EntityRef, Event, JsonPath, JsonValue, MetadataFilter, State,
-    StrataError, Timestamp, Value, VectorEntry, VectorMatch, Version, Versioned,
+    EntityRef, Event, JsonPath, JsonValue, State, StrataError, Timestamp, Value, Version, Versioned,
 };
 
 /// Transaction wrapper that implements TransactionOps
@@ -478,94 +477,6 @@ impl<'a> TransactionOps for Transaction<'a> {
         self.ctx.json_exists(&full_key)
     }
 
-    fn json_destroy(&mut self, doc_id: &str) -> Result<bool, StrataError> {
-        // json_destroy is the same as json_delete
-        // (destroy entire document)
-        self.json_delete(doc_id)
-    }
-
-    // =========================================================================
-    // Vector Operations — not supported in transactions
-    //
-    // Vector operations require in-memory index backends that are not
-    // accessible from TransactionContext. Use VectorStore methods directly.
-    // =========================================================================
-
-    fn vector_insert(
-        &mut self,
-        _collection: &str,
-        _key: &str,
-        _embedding: &[f32],
-        _metadata: Option<Value>,
-    ) -> Result<Version, StrataError> {
-        Err(StrataError::invalid_input(
-            "Vector insert is not supported inside transactions. \
-             Use VectorStore::insert() directly."
-                .to_string(),
-        ))
-    }
-
-    fn vector_get(
-        &mut self,
-        _collection: &str,
-        _key: &str,
-    ) -> Result<Option<Versioned<VectorEntry>>, StrataError> {
-        Err(StrataError::invalid_input(
-            "Vector get is not supported inside transactions. \
-             Use VectorStore::get() directly."
-                .to_string(),
-        ))
-    }
-
-    fn vector_delete(&mut self, _collection: &str, _key: &str) -> Result<bool, StrataError> {
-        Err(StrataError::invalid_input(
-            "Vector delete is not supported inside transactions. \
-             Use VectorStore::delete() directly."
-                .to_string(),
-        ))
-    }
-
-    fn vector_search(
-        &mut self,
-        _collection: &str,
-        _query: &[f32],
-        _k: usize,
-        _filter: Option<MetadataFilter>,
-    ) -> Result<Vec<VectorMatch>, StrataError> {
-        Err(StrataError::invalid_input(
-            "Vector search is not supported inside transactions. \
-             Use VectorStore::search() directly."
-                .to_string(),
-        ))
-    }
-
-    fn vector_exists(&mut self, _collection: &str, _key: &str) -> Result<bool, StrataError> {
-        Err(StrataError::invalid_input(
-            "Vector exists is not supported inside transactions. \
-             Use VectorStore::exists() directly."
-                .to_string(),
-        ))
-    }
-
-    // =========================================================================
-    // Branch Operations — not supported in transactions
-    // =========================================================================
-
-    fn branch_metadata(&mut self) -> Result<Option<Versioned<BranchMetadata>>, StrataError> {
-        Err(StrataError::invalid_input(
-            "Branch metadata is not supported inside transactions. \
-             Use BranchIndex methods directly."
-                .to_string(),
-        ))
-    }
-
-    fn branch_update_status(&mut self, _status: BranchStatus) -> Result<Version, StrataError> {
-        Err(StrataError::invalid_input(
-            "Branch status update is not supported inside transactions. \
-             Use BranchIndex methods directly."
-                .to_string(),
-        ))
-    }
 }
 
 #[cfg(test)]
@@ -1022,22 +933,6 @@ mod tests {
         let doc: JsonValue = serde_json::json!({}).into();
         txn.json_create("doc", doc).unwrap();
         assert!(txn.json_exists("doc").unwrap());
-    }
-
-    #[test]
-    fn test_json_destroy() {
-        let ns = create_test_namespace();
-        let mut ctx = create_test_context(&ns);
-        let mut txn = Transaction::new(&mut ctx, ns.clone());
-
-        // Create then destroy
-        let doc: JsonValue = serde_json::json!({"data": true}).into();
-        txn.json_create("doc", doc).unwrap();
-        let existed = txn.json_destroy("doc").unwrap();
-        assert!(existed);
-
-        // Should no longer exist
-        assert!(!txn.json_exists("doc").unwrap());
     }
 
     #[test]

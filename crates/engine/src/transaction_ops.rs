@@ -29,10 +29,7 @@
 //! })?;
 //! ```
 
-use strata_core::{
-    BranchMetadata, BranchStatus, Event, JsonPath, JsonValue, MetadataFilter, State, StrataError,
-    Value, VectorEntry, VectorMatch, Version, Versioned,
-};
+use strata_core::{Event, JsonPath, JsonValue, State, StrataError, Value, Version, Versioned};
 
 /// Operations available within a transaction
 ///
@@ -139,53 +136,6 @@ pub trait TransactionOps {
     /// Check if a JSON document exists
     fn json_exists(&mut self, doc_id: &str) -> Result<bool, StrataError>;
 
-    /// Destroy a JSON document (same as delete, for API consistency)
-    fn json_destroy(&mut self, doc_id: &str) -> Result<bool, StrataError>;
-
-    // =========================================================================
-    // Vector Operations (Phase 4)
-    // =========================================================================
-
-    /// Insert a vector into a collection
-    fn vector_insert(
-        &mut self,
-        collection: &str,
-        key: &str,
-        embedding: &[f32],
-        metadata: Option<Value>,
-    ) -> Result<Version, StrataError>;
-
-    /// Get a vector by key
-    fn vector_get(
-        &mut self,
-        collection: &str,
-        key: &str,
-    ) -> Result<Option<Versioned<VectorEntry>>, StrataError>;
-
-    /// Delete a vector
-    fn vector_delete(&mut self, collection: &str, key: &str) -> Result<bool, StrataError>;
-
-    /// Search for similar vectors
-    fn vector_search(
-        &mut self,
-        collection: &str,
-        query: &[f32],
-        k: usize,
-        filter: Option<MetadataFilter>,
-    ) -> Result<Vec<VectorMatch>, StrataError>;
-
-    /// Check if a vector exists
-    fn vector_exists(&mut self, collection: &str, key: &str) -> Result<bool, StrataError>;
-
-    // =========================================================================
-    // Run Operations (Phase 5 - Limited, runs are meta-level)
-    // =========================================================================
-
-    /// Get run metadata (the current run)
-    fn branch_metadata(&mut self) -> Result<Option<Versioned<BranchMetadata>>, StrataError>;
-
-    /// Update run status
-    fn branch_update_status(&mut self, status: BranchStatus) -> Result<Version, StrataError>;
 }
 
 #[cfg(test)]
@@ -374,83 +324,6 @@ mod tests {
             Ok(self.json_data.contains_key(doc_id))
         }
 
-        fn json_destroy(&mut self, doc_id: &str) -> Result<bool, StrataError> {
-            self.json_delete(doc_id)
-        }
-
-        // Vector operations — not supported in transactions (returns proper error)
-        fn vector_insert(
-            &mut self,
-            _collection: &str,
-            _key: &str,
-            _embedding: &[f32],
-            _metadata: Option<Value>,
-        ) -> Result<Version, StrataError> {
-            Err(StrataError::invalid_input(
-                "Vector insert is not supported inside transactions. \
-                 Use VectorStore::insert() directly."
-                    .to_string(),
-            ))
-        }
-
-        fn vector_get(
-            &mut self,
-            _collection: &str,
-            _key: &str,
-        ) -> Result<Option<Versioned<VectorEntry>>, StrataError> {
-            Err(StrataError::invalid_input(
-                "Vector get is not supported inside transactions. \
-                 Use VectorStore::get() directly."
-                    .to_string(),
-            ))
-        }
-
-        fn vector_delete(&mut self, _collection: &str, _key: &str) -> Result<bool, StrataError> {
-            Err(StrataError::invalid_input(
-                "Vector delete is not supported inside transactions. \
-                 Use VectorStore::delete() directly."
-                    .to_string(),
-            ))
-        }
-
-        fn vector_search(
-            &mut self,
-            _collection: &str,
-            _query: &[f32],
-            _k: usize,
-            _filter: Option<MetadataFilter>,
-        ) -> Result<Vec<VectorMatch>, StrataError> {
-            Err(StrataError::invalid_input(
-                "Vector search is not supported inside transactions. \
-                 Use VectorStore::search() directly."
-                    .to_string(),
-            ))
-        }
-
-        fn vector_exists(&mut self, _collection: &str, _key: &str) -> Result<bool, StrataError> {
-            Err(StrataError::invalid_input(
-                "Vector exists is not supported inside transactions. \
-                 Use VectorStore::exists() directly."
-                    .to_string(),
-            ))
-        }
-
-        // Branch operations — not supported in transactions (returns proper error)
-        fn branch_metadata(&mut self) -> Result<Option<Versioned<BranchMetadata>>, StrataError> {
-            Err(StrataError::invalid_input(
-                "Branch metadata is not supported inside transactions. \
-                 Use BranchIndex methods directly."
-                    .to_string(),
-            ))
-        }
-
-        fn branch_update_status(&mut self, _status: BranchStatus) -> Result<Version, StrataError> {
-            Err(StrataError::invalid_input(
-                "Branch status update is not supported inside transactions. \
-                 Use BranchIndex methods directly."
-                    .to_string(),
-            ))
-        }
     }
 
     // ========== Object Safety Tests ==========
@@ -632,29 +505,6 @@ mod tests {
         ops.json_create("doc", doc.clone()).unwrap();
         let result = ops.json_create("doc", doc);
         assert!(result.is_err());
-    }
-
-    // ========== Vector/Branch Operations Return Proper Errors (Not Panics) ==========
-
-    #[test]
-    fn test_vector_operations_return_errors_not_panics() {
-        let mut ops: Box<dyn TransactionOps> = Box::new(MockTransactionOps::new());
-
-        // All vector operations should return Err, not panic
-        assert!(ops.vector_insert("col", "k", &[1.0], None).is_err());
-        assert!(ops.vector_get("col", "k").is_err());
-        assert!(ops.vector_delete("col", "k").is_err());
-        assert!(ops.vector_search("col", &[1.0], 5, None).is_err());
-        assert!(ops.vector_exists("col", "k").is_err());
-    }
-
-    #[test]
-    fn test_branch_operations_return_errors_not_panics() {
-        let mut ops: Box<dyn TransactionOps> = Box::new(MockTransactionOps::new());
-
-        // Branch operations should return Err, not panic
-        assert!(ops.branch_metadata().is_err());
-        assert!(ops.branch_update_status(BranchStatus::Active).is_err());
     }
 
     // ========== Trait Method Signatures ==========
