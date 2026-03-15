@@ -1189,7 +1189,16 @@ fn format_human(output: &Output) -> String {
                 result.algorithm, result.graph, result.node_count,
             )];
             if let Some(iters) = result.iterations {
-                let conv = result.converged.map(|c| if c { " (converged)" } else { " (not converged)" }).unwrap_or("");
+                let conv = result
+                    .converged
+                    .map(|c| {
+                        if c {
+                            " (converged)"
+                        } else {
+                            " (not converged)"
+                        }
+                    })
+                    .unwrap_or("");
                 lines.push(format!("  iterations: {}{}", iters, conv));
             }
             if let Some(gcc) = result.global_clustering_coefficient {

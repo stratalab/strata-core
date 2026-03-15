@@ -666,8 +666,12 @@ fn compute_distribution(sorted: &[f64]) -> crate::types::ScoreDistribution {
         sorted[n / 2]
     };
     // Nearest-rank percentile: index = ceil(p * n) - 1
-    let p90_idx = ((0.9_f64 * n as f64).ceil() as usize).saturating_sub(1).min(n - 1);
-    let p99_idx = ((0.99_f64 * n as f64).ceil() as usize).saturating_sub(1).min(n - 1);
+    let p90_idx = ((0.9_f64 * n as f64).ceil() as usize)
+        .saturating_sub(1)
+        .min(n - 1);
+    let p99_idx = ((0.99_f64 * n as f64).ceil() as usize)
+        .saturating_sub(1)
+        .min(n - 1);
     crate::types::ScoreDistribution {
         min: sorted[0],
         max: sorted[n - 1],
@@ -874,14 +878,8 @@ pub fn graph_lcc(
         let sum: f64 = result.coefficients.values().sum();
         sum / result.coefficients.len() as f64
     };
-    let mut summary = build_score_summary(
-        "lcc",
-        &graph,
-        result.coefficients,
-        top_n,
-        include_all,
-        true,
-    );
+    let mut summary =
+        build_score_summary("lcc", &graph, result.coefficients, top_n, include_all, true);
     summary.global_clustering_coefficient = Some(gcc);
     summary.zero_count = Some(zero_count);
     Ok(Output::GraphScoreSummary(summary))
@@ -1277,8 +1275,7 @@ mod tests {
         raw.insert("c".into(), 2);
         let s = build_group_summary("wcc", "mygraph", raw, Some(10), Some(true));
         let json = serde_json::to_string(&s).unwrap();
-        let deserialized: crate::types::GraphGroupSummary =
-            serde_json::from_str(&json).unwrap();
+        let deserialized: crate::types::GraphGroupSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(s, deserialized);
     }
 
@@ -1291,8 +1288,7 @@ mod tests {
         s.iterations = Some(15);
         s.converged = Some(true);
         let json = serde_json::to_string(&s).unwrap();
-        let deserialized: crate::types::GraphScoreSummary =
-            serde_json::from_str(&json).unwrap();
+        let deserialized: crate::types::GraphScoreSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(s, deserialized);
     }
 

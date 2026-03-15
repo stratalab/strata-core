@@ -38,9 +38,9 @@ pub use instrumentation::PerfTrace;
 pub use recovery::{
     recover_all_participants, register_recovery_participant, RecoveryFn, RecoveryParticipant,
 };
+pub use strata_concurrency::TransactionContext;
 pub use strata_durability::wal::DurabilityMode;
 pub use strata_durability::WalCounters;
-pub use strata_concurrency::TransactionContext;
 pub use transaction::{Transaction, TransactionPool, MAX_POOL_SIZE};
 pub use transaction_ops::TransactionOps;
 
