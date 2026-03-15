@@ -12,7 +12,7 @@ use std::sync::Arc;
 use strata_core::contract::Version;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
-use strata_engine::Database;
+use strata_engine::{Database, SearchRequest};
 use strata_engine::{BranchIndex, EventLog, KVStore, StateCell};
 use tempfile::TempDir;
 
@@ -693,5 +693,131 @@ fn test_all_primitives_recover_together() {
             .unwrap()
             .unwrap();
         assert_eq!(state, Value::Int(100));
+    }
+}
+
+/// Test BM25 search index survives recovery (#1486)
+#[test]
+fn test_search_index_survives_recovery() {
+    use strata_engine::search::Searchable;
+
+    let temp_dir = TempDir::new().unwrap();
+    let path = get_path(&temp_dir);
+    let branch_id = BranchId::new();
+
+    // Session 1: index documents and verify search works
+    {
+        let db = Database::open(&path).unwrap();
+        let kv = KVStore::new(db.clone());
+
+        kv.put(
+            &branch_id,
+            "default",
+            "doc1",
+            Value::String("breast cancer cholesterol statin drugs".into()),
+        )
+        .unwrap();
+        kv.put(
+            &branch_id,
+            "default",
+            "doc2",
+            Value::String("cardiovascular disease heart attack prevention".into()),
+        )
+        .unwrap();
+        kv.put(
+            &branch_id,
+            "default",
+            "doc3",
+            Value::String("machine learning neural network deep learning".into()),
+        )
+        .unwrap();
+
+        // Search works in same session
+        let req = SearchRequest::new(branch_id, "cholesterol");
+        let response = kv.search(&req).unwrap();
+        assert!(
+            !response.hits.is_empty(),
+            "Search should return results in same session"
+        );
+    }
+
+    // Session 2: reopen and verify search still works
+    {
+        let db = Database::open(&path).unwrap();
+        let kv = KVStore::new(db.clone());
+
+        // KV data survived
+        assert_eq!(
+            kv.get(&branch_id, "default", "doc1").unwrap(),
+            Some(Value::String(
+                "breast cancer cholesterol statin drugs".into()
+            ))
+        );
+
+        // Search index also survived
+        let req = SearchRequest::new(branch_id, "cholesterol");
+        let response = kv.search(&req).unwrap();
+        assert!(
+            !response.hits.is_empty(),
+            "Search should return results after reopen (index must survive recovery)"
+        );
+    }
+}
+
+/// Test search index survives multiple recovery cycles (#1486)
+#[test]
+fn test_search_index_survives_multiple_recoveries() {
+    use strata_engine::search::Searchable;
+
+    let temp_dir = TempDir::new().unwrap();
+    let path = get_path(&temp_dir);
+    let branch_id = BranchId::new();
+
+    // Cycle 1: Create initial data
+    {
+        let db = Database::open(&path).unwrap();
+        let kv = KVStore::new(db.clone());
+        kv.put(
+            &branch_id,
+            "default",
+            "doc1",
+            Value::String("database indexing search retrieval".into()),
+        )
+        .unwrap();
+    }
+
+    // Cycle 2: Add more data, verify previous data searchable
+    {
+        let db = Database::open(&path).unwrap();
+        let kv = KVStore::new(db.clone());
+
+        let req = SearchRequest::new(branch_id, "indexing");
+        let response = kv.search(&req).unwrap();
+        assert!(
+            !response.hits.is_empty(),
+            "Cycle 2: doc1 should be searchable"
+        );
+
+        kv.put(
+            &branch_id,
+            "default",
+            "doc2",
+            Value::String("information retrieval ranking algorithms".into()),
+        )
+        .unwrap();
+    }
+
+    // Cycle 3: Verify both documents searchable
+    {
+        let db = Database::open(&path).unwrap();
+        let kv = KVStore::new(db.clone());
+
+        let req = SearchRequest::new(branch_id, "retrieval");
+        let response = kv.search(&req).unwrap();
+        assert!(
+            response.hits.len() >= 2,
+            "Cycle 3: both docs should be searchable for 'retrieval', got {}",
+            response.hits.len()
+        );
     }
 }
