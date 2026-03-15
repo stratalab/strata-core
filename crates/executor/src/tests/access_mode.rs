@@ -314,6 +314,15 @@ fn test_read_only_allows_all_reads() {
         Command::ConfigureGetKey {
             key: "provider".into(),
         },
+        Command::DbExport {
+            branch: None,
+            space: None,
+            primitive: crate::types::ExportPrimitive::Kv,
+            format: crate::types::ExportFormat::Csv,
+            prefix: None,
+            limit: None,
+            path: None,
+        },
     ];
 
     for cmd in read_commands {
@@ -661,6 +670,15 @@ fn test_is_write_classification() {
         Command::DurabilityCounters,
         Command::ConfigureGetKey {
             key: "provider".into(),
+        },
+        Command::DbExport {
+            branch: None,
+            space: None,
+            primitive: crate::types::ExportPrimitive::Kv,
+            format: crate::types::ExportFormat::Csv,
+            prefix: None,
+            limit: None,
+            path: None,
         },
     ];
 

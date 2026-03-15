@@ -1368,3 +1368,99 @@ fn test_output_keys_page_large_page() {
         cursor: Some("key:0999".to_string()),
     });
 }
+
+// =============================================================================
+// Export Command/Output Tests
+// =============================================================================
+
+#[test]
+fn test_command_db_export() {
+    test_command_round_trip(Command::DbExport {
+        branch: Some(BranchId::from("default")),
+        space: None,
+        primitive: ExportPrimitive::Kv,
+        format: ExportFormat::Csv,
+        prefix: Some("user:".to_string()),
+        limit: Some(100),
+        path: Some("/tmp/export.csv".to_string()),
+    });
+    test_command_round_trip(Command::DbExport {
+        branch: None,
+        space: None,
+        primitive: ExportPrimitive::Json,
+        format: ExportFormat::Json,
+        prefix: None,
+        limit: None,
+        path: None,
+    });
+    test_command_round_trip(Command::DbExport {
+        branch: None,
+        space: None,
+        primitive: ExportPrimitive::Events,
+        format: ExportFormat::Jsonl,
+        prefix: None,
+        limit: Some(50),
+        path: None,
+    });
+    test_command_round_trip(Command::DbExport {
+        branch: None,
+        space: None,
+        primitive: ExportPrimitive::State,
+        format: ExportFormat::Json,
+        prefix: None,
+        limit: None,
+        path: None,
+    });
+}
+
+#[test]
+fn test_output_exported_inline() {
+    test_output_round_trip(Output::Exported(ExportResult {
+        row_count: 3,
+        format: ExportFormat::Csv,
+        primitive: ExportPrimitive::Kv,
+        data: Some("key,value\na,1\nb,2\nc,3".to_string()),
+        path: None,
+        size_bytes: None,
+    }));
+}
+
+#[test]
+fn test_output_exported_to_file() {
+    test_output_round_trip(Output::Exported(ExportResult {
+        row_count: 100,
+        format: ExportFormat::Json,
+        primitive: ExportPrimitive::Json,
+        data: None,
+        path: Some("/tmp/export.json".to_string()),
+        size_bytes: Some(4096),
+    }));
+}
+
+#[test]
+fn test_output_exported_optional_fields_skipped() {
+    let output = Output::Exported(ExportResult {
+        row_count: 0,
+        format: ExportFormat::Jsonl,
+        primitive: ExportPrimitive::Events,
+        data: None,
+        path: None,
+        size_bytes: None,
+    });
+    let json = serde_json::to_string(&output).unwrap();
+    assert!(
+        !json.contains("\"data\""),
+        "None data should be skipped: {}",
+        json
+    );
+    assert!(
+        !json.contains("\"path\""),
+        "None path should be skipped: {}",
+        json
+    );
+    assert!(
+        !json.contains("\"size_bytes\""),
+        "None size_bytes should be skipped: {}",
+        json
+    );
+}

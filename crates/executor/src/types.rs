@@ -719,6 +719,68 @@ pub struct GraphAnalyticsF64Result {
     pub iterations: Option<usize>,
 }
 
+// =============================================================================
+// Export Types
+// =============================================================================
+
+/// Output format for data export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportFormat {
+    /// Comma-separated values.
+    Csv,
+    /// Pretty-printed JSON array.
+    Json,
+    /// Newline-delimited JSON (one object per line).
+    Jsonl,
+}
+
+/// Which primitive to export data from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportPrimitive {
+    /// Key-value store.
+    Kv,
+    /// JSON document store.
+    Json,
+    /// State cells.
+    State,
+    /// Event log.
+    Events,
+}
+
+impl ExportPrimitive {
+    /// Returns the primitive name as a static string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExportPrimitive::Kv => "kv",
+            ExportPrimitive::Json => "json",
+            ExportPrimitive::State => "state",
+            ExportPrimitive::Events => "events",
+        }
+    }
+}
+
+/// Result of a data export operation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExportResult {
+    /// Number of rows exported.
+    pub row_count: u64,
+    /// Output format used.
+    pub format: ExportFormat,
+    /// Primitive exported from.
+    pub primitive: ExportPrimitive,
+    /// Rendered data (inline). Present when no file path was specified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    /// File path where data was written. Present when a path was specified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Size of the rendered data in bytes. Present when written to file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+}
+
 /// A neighbor entry returned by graph neighbor queries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphNeighborHit {

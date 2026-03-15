@@ -3,16 +3,13 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::bridge::{to_core_branch_id, Primitives};
+use strata_core::primitives::json::JsonPath;
+
+use crate::bridge::{json_to_value, to_core_branch_id, Primitives};
 use crate::convert::convert_result;
 use crate::types::{BranchId, ExportFormat, ExportPrimitive, ExportResult};
 use crate::{Error, Output, Result};
 use strata_core::Value;
-
-/// Inline threshold: return data inline if row count is at most this.
-const INLINE_ROW_LIMIT: usize = 1000;
-/// Inline threshold: return data inline if rendered size is at most this (1 MB).
-const INLINE_BYTE_LIMIT: usize = 1_048_576;
 
 /// A single export row: key + value.
 struct ExportRow {
@@ -35,11 +32,8 @@ fn collect_kv(
     let max = limit.map(|l| l as usize).unwrap_or(usize::MAX);
     let mut rows = Vec::new();
     for key in keys.into_iter().take(max) {
-        if let Some(vv) = convert_result(p.kv.get(&branch_id, space, &key))? {
-            rows.push(ExportRow {
-                key,
-                value: vv.value,
-            });
+        if let Some(value) = convert_result(p.kv.get(&branch_id, space, &key))? {
+            rows.push(ExportRow { key, value });
         }
     }
     Ok(rows)
@@ -52,15 +46,35 @@ fn collect_json(
     prefix: Option<&str>,
     limit: Option<u64>,
 ) -> Result<Vec<ExportRow>> {
-    let keys = convert_result(p.json.list(&branch_id, space, prefix, None, None))?;
     let max = limit.map(|l| l as usize).unwrap_or(usize::MAX);
     let mut rows = Vec::new();
-    for key in keys.into_iter().take(max) {
-        if let Some(vv) = convert_result(p.json.get(&branch_id, space, &key, "$"))? {
-            rows.push(ExportRow {
-                key,
-                value: vv.value,
-            });
+    let mut cursor: Option<String> = None;
+    let root = JsonPath::root();
+
+    loop {
+        let result =
+            convert_result(
+                p.json
+                    .list(&branch_id, space, prefix, cursor.as_deref(), 1000),
+            )?;
+
+        let page_empty = result.doc_ids.is_empty();
+
+        for doc_id in result.doc_ids {
+            if rows.len() >= max {
+                return Ok(rows);
+            }
+            if let Some(json_val) = convert_result(p.json.get(&branch_id, space, &doc_id, &root))? {
+                let value = convert_result(json_to_value(json_val))?;
+                rows.push(ExportRow { key: doc_id, value });
+            }
+        }
+
+        match result.next_cursor {
+            // Guard against empty pages with a cursor (would spin forever)
+            Some(_) if page_empty => break,
+            Some(c) => cursor = Some(c),
+            None => break,
         }
     }
     Ok(rows)
@@ -77,11 +91,8 @@ fn collect_state(
     let max = limit.map(|l| l as usize).unwrap_or(usize::MAX);
     let mut rows = Vec::new();
     for cell in cells.into_iter().take(max) {
-        if let Some(vv) = convert_result(p.state.get(&branch_id, space, &cell))? {
-            rows.push(ExportRow {
-                key: cell,
-                value: vv.value,
-            });
+        if let Some(value) = convert_result(p.state.get(&branch_id, space, &cell))? {
+            rows.push(ExportRow { key: cell, value });
         }
     }
     Ok(rows)
@@ -98,10 +109,10 @@ fn collect_events(
     let count = std::cmp::min(len as usize, max);
     let mut rows = Vec::new();
     for seq in 0..count {
-        if let Some(event) = convert_result(p.event.get(&branch_id, space, seq as u64))? {
-            // Build an object from the event fields
-            let mut obj = std::collections::BTreeMap::new();
-            obj.insert("sequence".to_string(), Value::Int(seq as i64));
+        if let Some(versioned) = convert_result(p.event.get(&branch_id, space, seq as u64))? {
+            let event = &versioned.value;
+            let mut obj = std::collections::HashMap::new();
+            obj.insert("sequence".to_string(), Value::Int(event.sequence as i64));
             obj.insert(
                 "event_type".to_string(),
                 Value::String(event.event_type.clone()),
@@ -207,7 +218,7 @@ fn flatten_value(
             let col = if prefix.is_empty() { "value" } else { prefix };
             out.insert(
                 col.to_string(),
-                base64::engine::general_purpose::STANDARD.encode(b.as_ref()),
+                base64::engine::general_purpose::STANDARD.encode(b.as_slice()),
             );
         }
         Value::Array(arr) => {
@@ -240,7 +251,13 @@ fn render_csv(rows: &[ExportRow]) -> String {
     let mut lines = Vec::with_capacity(rows.len() + 1);
 
     // Header
-    lines.push(columns.iter().map(|c| csv_escape(c)).collect::<Vec<_>>().join(","));
+    lines.push(
+        columns
+            .iter()
+            .map(|c| csv_escape(c))
+            .collect::<Vec<_>>()
+            .join(","),
+    );
 
     // Data rows
     for row in rows {
@@ -272,7 +289,7 @@ fn value_to_json_value(v: &Value) -> serde_json::Value {
         Value::Bytes(b) => {
             use base64::Engine;
             serde_json::Value::String(
-                base64::engine::general_purpose::STANDARD.encode(b.as_ref()),
+                base64::engine::general_purpose::STANDARD.encode(b.as_slice()),
             )
         }
         Value::Array(arr) => {
@@ -292,10 +309,15 @@ fn row_to_json(row: &ExportRow) -> serde_json::Value {
     match &row.value {
         Value::Object(obj) => {
             let mut map = serde_json::Map::new();
-            map.insert("key".to_string(), serde_json::Value::String(row.key.clone()));
+            // Insert object fields first, then "key" last so the export key
+            // always wins over any "key" field inside the value.
             for (k, v) in obj.as_ref() {
                 map.insert(k.clone(), value_to_json_value(v));
             }
+            map.insert(
+                "key".to_string(),
+                serde_json::Value::String(row.key.clone()),
+            );
             serde_json::Value::Object(map)
         }
         other => {
@@ -324,6 +346,7 @@ fn render_jsonl(rows: &[ExportRow]) -> String {
 // =============================================================================
 
 /// Handle DbExport command.
+#[allow(clippy::too_many_arguments)]
 pub fn db_export(
     p: &Arc<Primitives>,
     branch: BranchId,
@@ -353,45 +376,13 @@ pub fn db_export(
 
     let row_count = rows.len() as u64;
 
-    // 3. Decide inline vs file
-    let should_write = path.is_some()
-        || rows.len() > INLINE_ROW_LIMIT
-        || rendered.len() > INLINE_BYTE_LIMIT;
-
-    if should_write {
-        let file_path = match path {
-            Some(p) => p,
-            None => {
-                // Generate a default path under data_dir/exports/
-                let data_dir = p.db.data_dir();
-                let exports_dir = data_dir.join("exports");
-                std::fs::create_dir_all(&exports_dir).map_err(|e| Error::Io {
-                    reason: format!("Failed to create exports directory: {}", e),
-                })?;
-                let ext = match format {
-                    ExportFormat::Csv => "csv",
-                    ExportFormat::Json => "json",
-                    ExportFormat::Jsonl => "jsonl",
-                };
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                exports_dir
-                    .join(format!("{}_{}.{}", primitive.as_str(), ts, ext))
-                    .to_string_lossy()
-                    .to_string()
-            }
-        };
-
+    // 3. Output destination: file if path provided, otherwise inline
+    if let Some(file_path) = path {
         // Validate parent directory exists for explicit paths
         if let Some(parent) = std::path::Path::new(&file_path).parent() {
-            if !parent.exists() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
                 return Err(Error::Io {
-                    reason: format!(
-                        "Parent directory '{}' does not exist",
-                        parent.display()
-                    ),
+                    reason: format!("Parent directory '{}' does not exist", parent.display()),
                 });
             }
         }
@@ -417,5 +408,395 @@ pub fn db_export(
             path: None,
             size_bytes: None,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(key: &str, value: Value) -> ExportRow {
+        ExportRow {
+            key: key.to_string(),
+            value,
+        }
+    }
+
+    // =========================================================================
+    // csv_escape
+    // =========================================================================
+
+    #[test]
+    fn csv_escape_plain() {
+        assert_eq!(csv_escape("hello"), "hello");
+    }
+
+    #[test]
+    fn csv_escape_with_comma() {
+        assert_eq!(csv_escape("a,b"), "\"a,b\"");
+    }
+
+    #[test]
+    fn csv_escape_with_quotes() {
+        assert_eq!(csv_escape("say \"hi\""), "\"say \"\"hi\"\"\"");
+    }
+
+    #[test]
+    fn csv_escape_with_newline() {
+        assert_eq!(csv_escape("line1\nline2"), "\"line1\nline2\"");
+    }
+
+    #[test]
+    fn csv_escape_with_cr() {
+        assert_eq!(csv_escape("a\rb"), "\"a\rb\"");
+    }
+
+    #[test]
+    fn csv_escape_empty() {
+        assert_eq!(csv_escape(""), "");
+    }
+
+    // =========================================================================
+    // detect_columns
+    // =========================================================================
+
+    #[test]
+    fn detect_columns_scalar_values() {
+        let rows = vec![row("a", Value::Int(1)), row("b", Value::String("x".into()))];
+        assert_eq!(detect_columns(&rows), vec!["key", "value"]);
+    }
+
+    #[test]
+    fn detect_columns_object_values() {
+        let mut obj = std::collections::HashMap::new();
+        obj.insert("name".to_string(), Value::String("Alice".into()));
+        obj.insert("age".to_string(), Value::Int(30));
+        let rows = vec![row("u1", Value::object(obj))];
+        let cols = detect_columns(&rows);
+        assert_eq!(cols[0], "key");
+        assert!(cols.contains(&"age".to_string()));
+        assert!(cols.contains(&"name".to_string()));
+    }
+
+    #[test]
+    fn detect_columns_mixed_shapes() {
+        // Row 1 has {name}, Row 2 has {name, email} — union of columns
+        let mut obj1 = std::collections::HashMap::new();
+        obj1.insert("name".to_string(), Value::String("Alice".into()));
+        let mut obj2 = std::collections::HashMap::new();
+        obj2.insert("name".to_string(), Value::String("Bob".into()));
+        obj2.insert("email".to_string(), Value::String("b@b.com".into()));
+        let rows = vec![
+            row("u1", Value::object(obj1)),
+            row("u2", Value::object(obj2)),
+        ];
+        let cols = detect_columns(&rows);
+        assert_eq!(cols[0], "key");
+        assert!(cols.contains(&"email".to_string()));
+        assert!(cols.contains(&"name".to_string()));
+        assert_eq!(cols.len(), 3); // key, email, name
+    }
+
+    #[test]
+    fn detect_columns_nested_object() {
+        let mut inner = std::collections::HashMap::new();
+        inner.insert("city".to_string(), Value::String("NYC".into()));
+        let mut obj = std::collections::HashMap::new();
+        obj.insert("addr".to_string(), Value::object(inner));
+        let rows = vec![row("u1", Value::object(obj))];
+        let cols = detect_columns(&rows);
+        assert!(cols.contains(&"addr.city".to_string()));
+    }
+
+    #[test]
+    fn detect_columns_empty_rows() {
+        let rows: Vec<ExportRow> = vec![];
+        // No rows = no columns beyond "key"
+        assert_eq!(detect_columns(&rows), vec!["key"]);
+    }
+
+    // =========================================================================
+    // render_csv
+    // =========================================================================
+
+    #[test]
+    fn render_csv_empty() {
+        assert_eq!(render_csv(&[]), "");
+    }
+
+    #[test]
+    fn render_csv_scalar_values() {
+        let rows = vec![row("a", Value::Int(1)), row("b", Value::Int(2))];
+        let csv = render_csv(&rows);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines[0], "key,value");
+        assert_eq!(lines[1], "a,1");
+        assert_eq!(lines[2], "b,2");
+    }
+
+    #[test]
+    fn render_csv_object_values() {
+        let mut obj = std::collections::HashMap::new();
+        obj.insert("x".to_string(), Value::Int(10));
+        obj.insert("y".to_string(), Value::Int(20));
+        let rows = vec![row("p1", Value::object(obj))];
+        let csv = render_csv(&rows);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines[0], "key,x,y");
+        assert_eq!(lines[1], "p1,10,20");
+    }
+
+    #[test]
+    fn render_csv_missing_columns_are_empty() {
+        // Row 1 has {a, b}, Row 2 only has {a} — b should be empty for row 2
+        let mut obj1 = std::collections::HashMap::new();
+        obj1.insert("a".to_string(), Value::Int(1));
+        obj1.insert("b".to_string(), Value::Int(2));
+        let mut obj2 = std::collections::HashMap::new();
+        obj2.insert("a".to_string(), Value::Int(3));
+        let rows = vec![
+            row("r1", Value::object(obj1)),
+            row("r2", Value::object(obj2)),
+        ];
+        let csv = render_csv(&rows);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines[0], "key,a,b");
+        assert_eq!(lines[1], "r1,1,2");
+        assert_eq!(lines[2], "r2,3,"); // b is empty
+    }
+
+    #[test]
+    fn render_csv_value_with_comma_is_quoted() {
+        let rows = vec![row("k", Value::String("hello, world".into()))];
+        let csv = render_csv(&rows);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines[1], "k,\"hello, world\"");
+    }
+
+    #[test]
+    fn render_csv_key_with_special_chars() {
+        let rows = vec![row("a,b", Value::Int(1))];
+        let csv = render_csv(&rows);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines[1], "\"a,b\",1");
+    }
+
+    #[test]
+    fn render_csv_null_value() {
+        let rows = vec![row("k", Value::Null)];
+        let csv = render_csv(&rows);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines[1], "k,"); // Null renders as empty
+    }
+
+    #[test]
+    fn render_csv_bool_value() {
+        let rows = vec![row("k", Value::Bool(true))];
+        let csv = render_csv(&rows);
+        assert!(csv.contains("k,true"));
+    }
+
+    #[test]
+    fn render_csv_float_value() {
+        let rows = vec![row("k", Value::Float(3.14))];
+        let csv = render_csv(&rows);
+        assert!(csv.contains("k,3.14"));
+    }
+
+    #[test]
+    fn render_csv_bytes_value() {
+        let rows = vec![row("k", Value::Bytes(vec![0xDE, 0xAD]))];
+        let csv = render_csv(&rows);
+        // base64 of [0xDE, 0xAD] = "3q0="
+        assert!(csv.contains("3q0="));
+    }
+
+    #[test]
+    fn render_csv_array_value() {
+        let rows = vec![row(
+            "k",
+            Value::Array(Box::new(vec![Value::Int(1), Value::Int(2)])),
+        )];
+        let csv = render_csv(&rows);
+        // Arrays become JSON in a single cell — contains brackets and comma
+        assert!(csv.contains("[1"));
+        assert!(csv.contains("2]"));
+    }
+
+    // =========================================================================
+    // render_json / render_jsonl
+    // =========================================================================
+
+    #[test]
+    fn render_json_empty() {
+        assert_eq!(render_json(&[]), "[]");
+    }
+
+    #[test]
+    fn render_jsonl_empty() {
+        assert_eq!(render_jsonl(&[]), "");
+    }
+
+    #[test]
+    fn render_json_scalar() {
+        let rows = vec![row("k1", Value::Int(42))];
+        let json = render_json(&rows);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0]["key"], "k1");
+        assert_eq!(parsed[0]["value"], 42);
+    }
+
+    #[test]
+    fn render_json_object_merges_fields() {
+        let mut obj = std::collections::HashMap::new();
+        obj.insert("name".to_string(), Value::String("Alice".into()));
+        let rows = vec![row("u1", Value::object(obj))];
+        let json = render_json(&rows);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0]["key"], "u1");
+        assert_eq!(parsed[0]["name"], "Alice");
+        // "value" key should NOT exist — fields are merged
+        assert!(parsed[0].get("value").is_none());
+    }
+
+    #[test]
+    fn render_json_object_key_field_does_not_shadow_row_key() {
+        // Object has a "key" field — export key must win
+        let mut obj = std::collections::HashMap::new();
+        obj.insert("key".to_string(), Value::String("WRONG".into()));
+        obj.insert("x".to_string(), Value::Int(1));
+        let rows = vec![row("correct-key", Value::object(obj))];
+        let json = render_json(&rows);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0]["key"], "correct-key");
+    }
+
+    #[test]
+    fn render_jsonl_multiple_rows() {
+        let rows = vec![row("a", Value::Int(1)), row("b", Value::Int(2))];
+        let jsonl = render_jsonl(&rows);
+        let lines: Vec<&str> = jsonl.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let r0: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        let r1: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(r0["key"], "a");
+        assert_eq!(r1["key"], "b");
+    }
+
+    #[test]
+    fn render_jsonl_each_line_is_valid_json() {
+        let mut obj = std::collections::HashMap::new();
+        obj.insert("n".to_string(), Value::String("line\nbreak".into()));
+        let rows = vec![row("k", Value::object(obj))];
+        let jsonl = render_jsonl(&rows);
+        // JSONL lines must not contain raw newlines from data
+        // serde_json escapes \n inside strings, so this should be one line
+        assert_eq!(jsonl.lines().count(), 1);
+        let parsed: serde_json::Value = serde_json::from_str(&jsonl).unwrap();
+        assert_eq!(parsed["n"], "line\nbreak");
+    }
+
+    #[test]
+    fn render_json_bytes_as_base64() {
+        let rows = vec![row("k", Value::Bytes(vec![1, 2, 3]))];
+        let json = render_json(&rows);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        // base64 of [1, 2, 3] = "AQID"
+        assert_eq!(parsed[0]["value"], "AQID");
+    }
+
+    #[test]
+    fn render_json_nested_object() {
+        let mut inner = std::collections::HashMap::new();
+        inner.insert("z".to_string(), Value::Int(99));
+        let mut obj = std::collections::HashMap::new();
+        obj.insert("nested".to_string(), Value::object(inner));
+        let rows = vec![row("k", Value::object(obj))];
+        let json = render_json(&rows);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0]["nested"]["z"], 99);
+    }
+
+    #[test]
+    fn render_json_null_value() {
+        let rows = vec![row("k", Value::Null)];
+        let json = render_json(&rows);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert!(parsed[0]["value"].is_null());
+    }
+
+    // =========================================================================
+    // value_to_json_value
+    // =========================================================================
+
+    #[test]
+    fn value_to_json_all_types() {
+        assert_eq!(value_to_json_value(&Value::Null), serde_json::Value::Null);
+        assert_eq!(
+            value_to_json_value(&Value::Bool(true)),
+            serde_json::json!(true)
+        );
+        assert_eq!(value_to_json_value(&Value::Int(42)), serde_json::json!(42));
+        assert_eq!(
+            value_to_json_value(&Value::Float(1.5)),
+            serde_json::json!(1.5)
+        );
+        assert_eq!(
+            value_to_json_value(&Value::String("hi".into())),
+            serde_json::json!("hi")
+        );
+        // Bytes → base64 string
+        let b = value_to_json_value(&Value::Bytes(vec![0xFF]));
+        assert!(b.is_string());
+        // Array
+        let a = value_to_json_value(&Value::Array(Box::new(vec![Value::Int(1)])));
+        assert!(a.is_array());
+        assert_eq!(a[0], 1);
+        // Object
+        let mut m = std::collections::HashMap::new();
+        m.insert("k".to_string(), Value::Int(1));
+        let o = value_to_json_value(&Value::object(m));
+        assert_eq!(o["k"], 1);
+    }
+
+    // =========================================================================
+    // flatten_value
+    // =========================================================================
+
+    #[test]
+    fn flatten_value_scalar_at_root() {
+        let mut out = std::collections::BTreeMap::new();
+        flatten_value("", &Value::Int(42), &mut out);
+        assert_eq!(out.get("value").unwrap(), "42");
+    }
+
+    #[test]
+    fn flatten_value_object_at_root() {
+        let mut m = std::collections::HashMap::new();
+        m.insert("a".to_string(), Value::Int(1));
+        m.insert("b".to_string(), Value::String("hi".into()));
+        let mut out = std::collections::BTreeMap::new();
+        flatten_value("", &Value::object(m), &mut out);
+        assert_eq!(out.get("a").unwrap(), "1");
+        assert_eq!(out.get("b").unwrap(), "hi");
+    }
+
+    #[test]
+    fn flatten_value_nested_object() {
+        let mut inner = std::collections::HashMap::new();
+        inner.insert("c".to_string(), Value::Int(9));
+        let mut outer = std::collections::HashMap::new();
+        outer.insert("sub".to_string(), Value::object(inner));
+        let mut out = std::collections::BTreeMap::new();
+        flatten_value("", &Value::object(outer), &mut out);
+        assert_eq!(out.get("sub.c").unwrap(), "9");
+    }
+
+    #[test]
+    fn flatten_value_null() {
+        let mut out = std::collections::BTreeMap::new();
+        flatten_value("", &Value::Null, &mut out);
+        assert_eq!(out.get("value").unwrap(), "");
     }
 }
