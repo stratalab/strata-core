@@ -959,4 +959,137 @@ mod tests {
         let result = txn.json_get_path("doc", &JsonPath::root()).unwrap();
         assert_eq!(result, Some(doc));
     }
+
+    // =========================================================================
+    // Snapshot Read Tests (#1414)
+    //
+    // These tests verify that Transaction read methods correctly fall through
+    // to the snapshot when data is not in the write_set or delete_set.
+    // =========================================================================
+
+    /// Helper: pre-commit data into the store so a new TransactionContext can
+    /// read it from the snapshot.
+    fn commit_kv(store: &Arc<ShardedStore>, ns: &Namespace, key: &str, value: Value) {
+        use strata_core::WriteMode;
+        use strata_storage::stored_value::StoredValue;
+        let k = Key::new_kv(Arc::new(ns.clone()), key);
+        let version = store.next_version();
+        let sv = StoredValue::new(value, Version::txn(version), None);
+        store.put(k, sv, WriteMode::Append).unwrap();
+    }
+
+    #[test]
+    fn test_kv_get_reads_snapshot() {
+        let ns = create_test_namespace();
+        let store = Arc::new(ShardedStore::new());
+
+        // Pre-commit data into the store
+        commit_kv(
+            &store,
+            &ns,
+            "committed_key",
+            Value::String("from_snapshot".into()),
+        );
+
+        // Create a new TransactionContext that sees the snapshot
+        let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
+        let mut txn = Transaction::new(&mut ctx, ns.clone());
+
+        // Read should see the committed data
+        let result = txn.kv_get("committed_key").unwrap();
+        assert!(
+            result.is_some(),
+            "kv_get should see committed snapshot data"
+        );
+        assert_eq!(result.unwrap().value, Value::String("from_snapshot".into()));
+    }
+
+    #[test]
+    fn test_kv_exists_sees_snapshot() {
+        let ns = create_test_namespace();
+        let store = Arc::new(ShardedStore::new());
+        commit_kv(&store, &ns, "exists_key", Value::Int(42));
+
+        let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
+        let mut txn = Transaction::new(&mut ctx, ns.clone());
+
+        assert!(txn.kv_exists("exists_key").unwrap());
+        assert!(!txn.kv_exists("missing_key").unwrap());
+    }
+
+    #[test]
+    fn test_kv_list_includes_snapshot() {
+        let ns = create_test_namespace();
+        let store = Arc::new(ShardedStore::new());
+        commit_kv(&store, &ns, "user:1", Value::Int(1));
+        commit_kv(&store, &ns, "user:2", Value::Int(2));
+
+        let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
+        let mut txn = Transaction::new(&mut ctx, ns.clone());
+
+        let keys = txn.kv_list(Some("user:")).unwrap();
+        assert_eq!(keys.len(), 2, "kv_list should include snapshot keys");
+        assert!(keys.contains(&"user:1".to_string()));
+        assert!(keys.contains(&"user:2".to_string()));
+    }
+
+    #[test]
+    fn test_kv_list_merges_snapshot_and_writes() {
+        let ns = create_test_namespace();
+        let store = Arc::new(ShardedStore::new());
+        commit_kv(&store, &ns, "user:1", Value::Int(1));
+
+        let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
+        let mut txn = Transaction::new(&mut ctx, ns.clone());
+
+        // Add a new key in the transaction
+        txn.kv_put("user:2", Value::Int(2)).unwrap();
+
+        let keys = txn.kv_list(Some("user:")).unwrap();
+        assert_eq!(
+            keys.len(),
+            2,
+            "should see both snapshot and uncommitted keys"
+        );
+        assert!(keys.contains(&"user:1".to_string()));
+        assert!(keys.contains(&"user:2".to_string()));
+    }
+
+    #[test]
+    fn test_kv_delete_hides_snapshot_data() {
+        let ns = create_test_namespace();
+        let store = Arc::new(ShardedStore::new());
+        commit_kv(&store, &ns, "to_delete", Value::Int(1));
+
+        let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
+        let mut txn = Transaction::new(&mut ctx, ns.clone());
+
+        // Verify it exists in snapshot
+        assert!(txn.kv_exists("to_delete").unwrap());
+
+        // Delete it
+        let existed = txn.kv_delete("to_delete").unwrap();
+        assert!(existed, "should report that snapshot key existed");
+
+        // Now it should be gone
+        assert!(!txn.kv_exists("to_delete").unwrap());
+        assert!(txn.kv_get("to_delete").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_write_overrides_snapshot() {
+        let ns = create_test_namespace();
+        let store = Arc::new(ShardedStore::new());
+        commit_kv(&store, &ns, "key", Value::String("old".into()));
+
+        let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
+        let mut txn = Transaction::new(&mut ctx, ns.clone());
+
+        // Override the snapshot value
+        txn.kv_put("key", Value::String("new".into())).unwrap();
+
+        // Should see the new value, not the snapshot
+        let result = txn.kv_get("key").unwrap().unwrap();
+        assert_eq!(result.value, Value::String("new".into()));
+    }
 }
