@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn from_registry_known_model_not_local_returns_error_or_succeeds() {
         // Known model but not downloaded → Registry error with helpful message.
-        // With embed-bundled + model on disk, this can succeed — that's fine.
+        // If the model is already on disk, this succeeds — that's fine.
         let result = EmbeddingEngine::from_registry("miniLM");
         if let Err(err) = result {
             let msg = err.to_string();

@@ -1,9 +1,9 @@
 fn main() {
-    #[cfg(feature = "embed-bundled")]
+    #[cfg(feature = "local")]
     build_llama_cpp();
 }
 
-#[cfg(feature = "embed-bundled")]
+#[cfg(feature = "local")]
 fn build_llama_cpp() {
     let mut config = cmake::Config::new("vendor/llama.cpp");
 
@@ -42,7 +42,11 @@ fn build_llama_cpp() {
     }
 
     // Disable Metal on macOS x86 unless explicitly requested
-    #[cfg(all(target_os = "macos", target_arch = "x86_64", not(feature = "embed-metal")))]
+    #[cfg(all(
+        target_os = "macos",
+        target_arch = "x86_64",
+        not(feature = "embed-metal")
+    ))]
     config.define("GGML_METAL", "OFF");
 
     // --- CPU optimizations ---
