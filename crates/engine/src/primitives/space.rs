@@ -105,8 +105,8 @@ impl SpaceIndex {
 
     /// Check if a space has any data.
     ///
-    /// Scans all data TypeTags (KV, Event, State, Json, Vector) in the
-    /// space's namespace to determine if any keys exist.
+    /// **Note:** This is O(N) — scans all data TypeTags (KV, Event, State,
+    /// Json, Vector, VectorConfig) in the space's namespace. Not a cheap check.
     pub fn is_empty(&self, branch_id: BranchId, space: &str) -> StrataResult<bool> {
         self.db.transaction(branch_id, |txn| {
             let ns = Arc::new(Namespace::for_branch_space(branch_id, space));

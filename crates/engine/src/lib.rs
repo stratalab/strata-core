@@ -38,9 +38,9 @@ pub use instrumentation::PerfTrace;
 pub use recovery::{
     recover_all_participants, register_recovery_participant, RecoveryFn, RecoveryParticipant,
 };
+pub use strata_concurrency::TransactionContext;
 pub use strata_durability::wal::DurabilityMode;
 pub use strata_durability::WalCounters;
-pub use strata_concurrency::TransactionContext;
 pub use transaction::{Transaction, TransactionPool, MAX_POOL_SIZE};
 pub use transaction_ops::TransactionOps;
 
@@ -81,7 +81,6 @@ pub use primitives::{
     CollectionRecord,
     DistanceMetric,
     Event,
-    EventHandle,
     EventLog,
     EventLogExt,
     FilterCondition,
@@ -92,7 +91,6 @@ pub use primitives::{
     // Index
     InvertedIndex,
     JsonDoc,
-    JsonHandle,
     JsonScalar,
     JsonStore,
     JsonStoreExt,
@@ -100,7 +98,6 @@ pub use primitives::{
     KVStore,
     // Extension traits
     KVStoreExt,
-    KvHandle,
     MetadataFilter,
     PostingEntry,
     PostingList,
@@ -115,7 +112,6 @@ pub use primitives::{
     State,
     StateCell,
     StateCellExt,
-    StateHandle,
     StorageDtype,
     VectorBackendState,
     // Vector types
