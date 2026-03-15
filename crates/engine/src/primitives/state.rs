@@ -216,38 +216,37 @@ impl StateCell {
         expected_version: Version,
         new_value: Value,
     ) -> StrataResult<Version> {
-        self.db
-            .transaction(*branch_id, |txn| {
-                let key = self.key_for(branch_id, space, name);
+        self.db.transaction(*branch_id, |txn| {
+            let key = self.key_for(branch_id, space, name);
 
-                let current: State = match txn.get(&key)? {
-                    Some(v) => from_stored_value(&v)
-                        .map_err(|e| strata_core::StrataError::serialization(e.to_string()))?,
-                    None => {
-                        return Err(strata_core::StrataError::invalid_input(format!(
-                            "StateCell '{}' not found",
-                            name
-                        )))
-                    }
-                };
-
-                if current.version != expected_version {
-                    return Err(strata_core::StrataError::conflict(format!(
-                        "Version mismatch: expected {:?}, got {:?}",
-                        expected_version, current.version
-                    )));
+            let current: State = match txn.get(&key)? {
+                Some(v) => from_stored_value(&v)
+                    .map_err(|e| strata_core::StrataError::serialization(e.to_string()))?,
+                None => {
+                    return Err(strata_core::StrataError::invalid_input(format!(
+                        "StateCell '{}' not found",
+                        name
+                    )))
                 }
+            };
 
-                let new_version = current.version.increment();
-                let new_state = State {
-                    value: new_value.clone(),
-                    version: new_version,
-                    updated_at: State::now(),
-                };
+            if current.version != expected_version {
+                return Err(strata_core::StrataError::conflict(format!(
+                    "Version mismatch: expected {:?}, got {:?}",
+                    expected_version, current.version
+                )));
+            }
 
-                txn.put(key, to_stored_value(&new_state)?)?;
-                Ok(new_state.version)
-            })
+            let new_version = current.version.increment();
+            let new_state = State {
+                value: new_value.clone(),
+                version: new_version,
+                updated_at: State::now(),
+            };
+
+            txn.put(key, to_stored_value(&new_state)?)?;
+            Ok(new_state.version)
+        })
     }
 
     /// Unconditional set (force write)
@@ -264,29 +263,27 @@ impl StateCell {
         value: Value,
     ) -> StrataResult<Version> {
         let value_for_index = value.clone();
-        let result = self
-            .db
-            .transaction(*branch_id, |txn| {
-                let key = self.key_for(branch_id, space, name);
+        let result = self.db.transaction(*branch_id, |txn| {
+            let key = self.key_for(branch_id, space, name);
 
-                let new_version = match txn.get(&key)? {
-                    Some(v) => {
-                        let current: State = from_stored_value(&v)
-                            .map_err(|e| strata_core::StrataError::serialization(e.to_string()))?;
-                        current.version.increment()
-                    }
-                    None => Version::counter(1),
-                };
+            let new_version = match txn.get(&key)? {
+                Some(v) => {
+                    let current: State = from_stored_value(&v)
+                        .map_err(|e| strata_core::StrataError::serialization(e.to_string()))?;
+                    current.version.increment()
+                }
+                None => Version::counter(1),
+            };
 
-                let new_state = State {
-                    value: value.clone(),
-                    version: new_version,
-                    updated_at: State::now(),
-                };
+            let new_state = State {
+                value: value.clone(),
+                version: new_version,
+                updated_at: State::now(),
+            };
 
-                txn.put(key, to_stored_value(&new_state)?)?;
-                Ok(new_state.version)
-            })?;
+            txn.put(key, to_stored_value(&new_state)?)?;
+            Ok(new_state.version)
+        })?;
 
         // Update inverted index (zero overhead when disabled)
         let index = self.db.extension::<crate::search::InvertedIndex>()?;
@@ -328,34 +325,31 @@ impl StateCell {
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect();
 
-        let versions = self
-            .db
-            .transaction(*branch_id, |txn| {
-                let mut versions = Vec::with_capacity(entries.len());
-                for (name, value) in &entries {
-                    let key = self.key_for(branch_id, space, name);
+        let versions = self.db.transaction(*branch_id, |txn| {
+            let mut versions = Vec::with_capacity(entries.len());
+            for (name, value) in &entries {
+                let key = self.key_for(branch_id, space, name);
 
-                    let new_version = match txn.get(&key)? {
-                        Some(v) => {
-                            let current: State = from_stored_value(&v).map_err(|e| {
-                                strata_core::StrataError::serialization(e.to_string())
-                            })?;
-                            current.version.increment()
-                        }
-                        None => Version::counter(1),
-                    };
+                let new_version = match txn.get(&key)? {
+                    Some(v) => {
+                        let current: State = from_stored_value(&v)
+                            .map_err(|e| strata_core::StrataError::serialization(e.to_string()))?;
+                        current.version.increment()
+                    }
+                    None => Version::counter(1),
+                };
 
-                    let new_state = State {
-                        value: value.clone(),
-                        version: new_version,
-                        updated_at: State::now(),
-                    };
+                let new_state = State {
+                    value: value.clone(),
+                    version: new_version,
+                    updated_at: State::now(),
+                };
 
-                    txn.put(key, to_stored_value(&new_state)?)?;
-                    versions.push(new_version);
-                }
-                Ok(versions)
-            })?;
+                txn.put(key, to_stored_value(&new_state)?)?;
+                versions.push(new_version);
+            }
+            Ok(versions)
+        })?;
 
         // Post-commit: update inverted index
         let index = self.db.extension::<crate::search::InvertedIndex>()?;

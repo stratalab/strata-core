@@ -22,12 +22,10 @@
 pub mod config;
 mod registry;
 
-
 pub use config::{
     ModelConfig, StorageConfig, StrataConfig, SHADOW_EVENT, SHADOW_JSON, SHADOW_KV, SHADOW_STATE,
 };
 pub use registry::OPEN_DATABASES;
-
 
 use crate::background::BackgroundScheduler;
 use crate::coordinator::TransactionCoordinator;
@@ -2268,9 +2266,11 @@ mod tests {
 
         // Always mode
         {
-            let db =
-                Database::open_with_durability(temp_dir.path().join("strict"), DurabilityMode::Always)
-                    .unwrap();
+            let db = Database::open_with_durability(
+                temp_dir.path().join("strict"),
+                DurabilityMode::Always,
+            )
+            .unwrap();
             assert!(!db.is_cache());
         }
 
@@ -2289,8 +2289,9 @@ mod tests {
 
         // Cache mode
         {
-            let db = Database::open_with_durability(temp_dir.path().join("none"), DurabilityMode::Cache)
-                .unwrap();
+            let db =
+                Database::open_with_durability(temp_dir.path().join("none"), DurabilityMode::Cache)
+                    .unwrap();
             assert!(!db.is_cache());
         }
     }
@@ -3245,9 +3246,11 @@ mod tests {
     fn test_put_direct_contention_scaling() {
         const OPS_PER_THREAD: usize = 10_000;
         let temp_dir = TempDir::new().unwrap();
-        let db =
-            Database::open_with_durability(temp_dir.path().join("contention"), DurabilityMode::Cache)
-                .unwrap();
+        let db = Database::open_with_durability(
+            temp_dir.path().join("contention"),
+            DurabilityMode::Cache,
+        )
+        .unwrap();
 
         // Phase 1: Concurrent writes — measure throughput scaling
         let thread_counts = [1, 4, 8, 16];

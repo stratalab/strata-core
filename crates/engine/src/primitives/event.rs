@@ -316,64 +316,62 @@ impl EventLog {
         let ns = self.namespace_for(branch_id, space);
         let event_type_owned = event_type.to_string();
 
-        let result = self
-            .db
-            .transaction(*branch_id, |txn| {
-                // Read current metadata (or default)
-                let meta_key = Key::new_event_meta(ns.clone());
-                let mut meta: EventLogMeta = match txn.get(&meta_key)? {
-                    Some(v) => from_stored_value(&v).unwrap_or_else(|_| EventLogMeta::default()),
-                    None => EventLogMeta::default(),
-                };
+        let result = self.db.transaction(*branch_id, |txn| {
+            // Read current metadata (or default)
+            let meta_key = Key::new_event_meta(ns.clone());
+            let mut meta: EventLogMeta = match txn.get(&meta_key)? {
+                Some(v) => from_stored_value(&v).unwrap_or_else(|_| EventLogMeta::default()),
+                None => EventLogMeta::default(),
+            };
 
-                // Compute event hash using current hash version
-                let sequence = meta.next_sequence;
-                let timestamp = Timestamp::now();
+            // Compute event hash using current hash version
+            let sequence = meta.next_sequence;
+            let timestamp = Timestamp::now();
 
-                let hash = compute_event_hash(
-                    sequence,
-                    &event_type_owned,
-                    &payload,
-                    timestamp.as_micros(),
-                    &meta.head_hash,
-                );
+            let hash = compute_event_hash(
+                sequence,
+                &event_type_owned,
+                &payload,
+                timestamp.as_micros(),
+                &meta.head_hash,
+            );
 
-                // Build event
-                let event = Event {
-                    sequence,
-                    event_type: event_type_owned.clone(),
-                    payload: payload.clone(),
-                    timestamp,
-                    prev_hash: meta.head_hash,
-                    hash,
-                };
+            // Build event
+            let event = Event {
+                sequence,
+                event_type: event_type_owned.clone(),
+                payload: payload.clone(),
+                timestamp,
+                prev_hash: meta.head_hash,
+                hash,
+            };
 
-                // Write event
-                let event_key = Key::new_event(ns.clone(), sequence);
-                txn.put(event_key, to_stored_value(&event)?)?;
+            // Write event
+            let event_key = Key::new_event(ns.clone(), sequence);
+            txn.put(event_key, to_stored_value(&event)?)?;
 
-                // Write per-type index key for efficient get_by_type lookups (#972)
-                let idx_key = Key::new_event_type_idx(ns.clone(), &event_type_owned, sequence);
-                txn.put(idx_key, Value::Null)?;
+            // Write per-type index key for efficient get_by_type lookups (#972)
+            let idx_key = Key::new_event_type_idx(ns.clone(), &event_type_owned, sequence);
+            txn.put(idx_key, Value::Null)?;
 
-                // Update stream metadata
-                match meta.streams.get_mut(&event_type_owned) {
-                    Some(stream_meta) => stream_meta.update(sequence, timestamp.as_micros()),
-                    None => {
-                        meta.streams.insert(
-                            event_type_owned.clone(),
-                            StreamMeta::new(sequence, timestamp.as_micros()),
-                        );
-                    }
+            // Update stream metadata
+            match meta.streams.get_mut(&event_type_owned) {
+                Some(stream_meta) => stream_meta.update(sequence, timestamp.as_micros()),
+                None => {
+                    meta.streams.insert(
+                        event_type_owned.clone(),
+                        StreamMeta::new(sequence, timestamp.as_micros()),
+                    );
                 }
+            }
 
-                // Update metadata (CAS semantics through transaction)
-                meta.next_sequence = sequence + 1;
-                meta.head_hash = hash;
-                txn.put(meta_key, to_stored_value(&meta)?)?;
+            // Update metadata (CAS semantics through transaction)
+            meta.next_sequence = sequence + 1;
+            meta.head_hash = hash;
+            txn.put(meta_key, to_stored_value(&meta)?)?;
 
-                Ok(Version::Sequence(sequence))
-            })?;
+            Ok(Version::Sequence(sequence))
+        })?;
 
         // Update inverted index (zero overhead when disabled)
         let idx = self.db.extension::<crate::search::InvertedIndex>()?;
@@ -442,71 +440,69 @@ impl EventLog {
 
         let ns = self.namespace_for(branch_id, space);
 
-        let sequences = self
-            .db
-            .transaction(*branch_id, |txn| {
-                // Read current metadata
-                let meta_key = Key::new_event_meta(ns.clone());
-                let mut meta: EventLogMeta = match txn.get(&meta_key)? {
-                    Some(v) => from_stored_value(&v).unwrap_or_else(|_| EventLogMeta::default()),
-                    None => EventLogMeta::default(),
+        let sequences = self.db.transaction(*branch_id, |txn| {
+            // Read current metadata
+            let meta_key = Key::new_event_meta(ns.clone());
+            let mut meta: EventLogMeta = match txn.get(&meta_key)? {
+                Some(v) => from_stored_value(&v).unwrap_or_else(|_| EventLogMeta::default()),
+                None => EventLogMeta::default(),
+            };
+
+            let mut sequences = Vec::with_capacity(valid_indices.len());
+
+            for &i in &valid_indices {
+                let (event_type, payload) = &entries[i];
+                let sequence = meta.next_sequence;
+                let timestamp = Timestamp::now();
+
+                let hash = compute_event_hash(
+                    sequence,
+                    event_type,
+                    payload,
+                    timestamp.as_micros(),
+                    &meta.head_hash,
+                );
+
+                let event = Event {
+                    sequence,
+                    event_type: event_type.clone(),
+                    payload: payload.clone(),
+                    timestamp,
+                    prev_hash: meta.head_hash,
+                    hash,
                 };
 
-                let mut sequences = Vec::with_capacity(valid_indices.len());
+                // Write event
+                let event_key = Key::new_event(ns.clone(), sequence);
+                txn.put(event_key, to_stored_value(&event)?)?;
 
-                for &i in &valid_indices {
-                    let (event_type, payload) = &entries[i];
-                    let sequence = meta.next_sequence;
-                    let timestamp = Timestamp::now();
+                // Write per-type index key
+                let idx_key = Key::new_event_type_idx(ns.clone(), event_type, sequence);
+                txn.put(idx_key, strata_core::value::Value::Null)?;
 
-                    let hash = compute_event_hash(
-                        sequence,
-                        event_type,
-                        payload,
-                        timestamp.as_micros(),
-                        &meta.head_hash,
-                    );
-
-                    let event = Event {
-                        sequence,
-                        event_type: event_type.clone(),
-                        payload: payload.clone(),
-                        timestamp,
-                        prev_hash: meta.head_hash,
-                        hash,
-                    };
-
-                    // Write event
-                    let event_key = Key::new_event(ns.clone(), sequence);
-                    txn.put(event_key, to_stored_value(&event)?)?;
-
-                    // Write per-type index key
-                    let idx_key = Key::new_event_type_idx(ns.clone(), event_type, sequence);
-                    txn.put(idx_key, strata_core::value::Value::Null)?;
-
-                    // Update stream metadata
-                    match meta.streams.get_mut(event_type) {
-                        Some(stream_meta) => stream_meta.update(sequence, timestamp.as_micros()),
-                        None => {
-                            meta.streams.insert(
-                                event_type.clone(),
-                                StreamMeta::new(sequence, timestamp.as_micros()),
-                            );
-                        }
+                // Update stream metadata
+                match meta.streams.get_mut(event_type) {
+                    Some(stream_meta) => stream_meta.update(sequence, timestamp.as_micros()),
+                    None => {
+                        meta.streams.insert(
+                            event_type.clone(),
+                            StreamMeta::new(sequence, timestamp.as_micros()),
+                        );
                     }
-
-                    // Update chain
-                    meta.next_sequence = sequence + 1;
-                    meta.head_hash = hash;
-
-                    sequences.push(sequence);
                 }
 
-                // Write updated metadata once
-                txn.put(meta_key, to_stored_value(&meta)?)?;
+                // Update chain
+                meta.next_sequence = sequence + 1;
+                meta.head_hash = hash;
 
-                Ok(sequences)
-            })?;
+                sequences.push(sequence);
+            }
+
+            // Write updated metadata once
+            txn.put(meta_key, to_stored_value(&meta)?)?;
+
+            Ok(sequences)
+        })?;
 
         // Post-commit: update inverted index
         let idx = self.db.extension::<crate::search::InvertedIndex>()?;
