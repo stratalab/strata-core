@@ -219,8 +219,8 @@ impl EmbeddingEngine {
 
             if non_empty == 0 {
                 // All empty texts in this sub-batch
-                for idx in i..batch_end {
-                    results[idx] = vec![0.0f32; n_embd];
+                for result in &mut results[i..batch_end] {
+                    *result = vec![0.0f32; n_embd];
                 }
             } else {
                 // Allocate batch: total_tokens slots, 0 = token input, 1 seq_id per token
