@@ -105,6 +105,8 @@ comparison-benchmarks = ["dep:redb", "dep:heed", "dep:rusqlite"]
 usearch-enabled = ["dep:usearch"]
 # Enable auto-embedding (MiniLM-L6-v2 inference runtime)
 embed = ["strata-executor/embed"]
+# Bundled llama.cpp — compiles from vendored source, no dlopen needed
+embed-bundled = ["strata-executor/embed-bundled"]
 # GPU-accelerated embedding via CUDA (Linux/Windows with NVIDIA GPU)
 embed-cuda = ["strata-executor/embed-cuda"]
 # GPU-accelerated embedding via Metal (macOS with Apple GPU)

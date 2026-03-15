@@ -12,10 +12,14 @@ description = "Inference engine for Strata — local (llama.cpp) and cloud provi
 [features]
 default = ["local"]
 local = []              # Enable local llama.cpp inference
+embed-bundled = ["local", "dep:cmake"]  # Compile llama.cpp from vendored source (no dlopen)
 download = ["dep:ureq", "dep:sha2"]  # Enable model download from HuggingFace
 anthropic = ["dep:ureq", "dep:serde", "dep:serde_json"]   # Enable Anthropic (Claude) cloud provider
 openai = ["dep:ureq", "dep:serde", "dep:serde_json"]      # Enable OpenAI (GPT) cloud provider
 google = ["dep:ureq", "dep:serde", "dep:serde_json"]       # Enable Google (Gemini) cloud provider
+
+[build-dependencies]
+cmake = { version = "0.1", optional = true }
 
 [dependencies]
 thiserror = { workspace = true }

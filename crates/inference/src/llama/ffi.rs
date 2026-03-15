@@ -7,6 +7,8 @@
 
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
+
+#[cfg(not(feature = "embed-bundled"))]
 use std::path::PathBuf;
 
 use super::dl::DynLib;
@@ -132,6 +134,7 @@ const _: () = assert!(std::mem::size_of::<LlamaBatch>() == 56);
 // ---------------------------------------------------------------------------
 
 // Backend
+#[cfg(not(feature = "embed-bundled"))]
 type FnBackendInit = unsafe extern "C" fn();
 type FnBackendFree = unsafe extern "C" fn();
 
@@ -222,6 +225,7 @@ type FnSamplerInitMinP = unsafe extern "C" fn(p: f32, min_keep: usize) -> LlamaS
 // Symbol loading macro
 // ---------------------------------------------------------------------------
 
+#[cfg(not(feature = "embed-bundled"))]
 macro_rules! load_sym {
     ($lib:expr, $name:expr) => {{
         let cname = concat!($name, "\0");
@@ -245,7 +249,7 @@ macro_rules! load_sym {
 ///
 /// `Debug` is implemented manually because function pointers don't derive Debug.
 pub struct LlamaCppApi {
-    _lib: DynLib,
+    _lib: Option<DynLib>,
 
     // Backend
     backend_free: FnBackendFree,
@@ -329,6 +333,89 @@ impl LlamaCppApi {
     /// 4. `~/.strata/lib/` (Unix) or `%LOCALAPPDATA%\strata\lib\` (Windows)
     /// 5. System search (`libllama.so` / `libllama.dylib` / `llama.dll`)
     pub fn load() -> Result<Self, String> {
+        // When bundled, use statically linked symbols (no dlopen needed)
+        #[cfg(feature = "embed-bundled")]
+        {
+            Self::bundled()
+        }
+
+        #[cfg(not(feature = "embed-bundled"))]
+        {
+            Self::load_dynamic()
+        }
+    }
+
+    /// Create from statically linked llama.cpp symbols (bundled build).
+    #[cfg(feature = "embed-bundled")]
+    fn bundled() -> Result<Self, String> {
+        use super::bundled;
+
+        // Initialize backend
+        use std::sync::Once;
+        static BACKEND_INIT: Once = Once::new();
+        BACKEND_INIT.call_once(|| unsafe { bundled::llama_backend_init() });
+
+        // Runtime layout probes (same as dynamic path)
+        let mparams = unsafe { bundled::llama_model_default_params() };
+        if !mparams.use_mmap {
+            return Err("bundled llama.cpp version mismatch: use_mmap is false".to_string());
+        }
+        if mparams.vocab_only {
+            return Err("bundled llama.cpp version mismatch: vocab_only is true".to_string());
+        }
+        let cparams = unsafe { bundled::llama_context_default_params() };
+        if cparams.n_ctx == 0 && cparams.n_batch == 0 {
+            return Err("bundled llama.cpp: context default params look zeroed".to_string());
+        }
+
+        Ok(Self {
+            _lib: None,
+            backend_free: bundled::llama_backend_free,
+            model_default_params: bundled::llama_model_default_params,
+            model_load_from_file: bundled::llama_model_load_from_file,
+            model_free: bundled::llama_model_free,
+            model_get_vocab: bundled::llama_model_get_vocab,
+            model_n_embd: bundled::llama_model_n_embd,
+            model_n_ctx_train: bundled::llama_model_n_ctx_train,
+            model_has_encoder: bundled::llama_model_has_encoder,
+            context_default_params: bundled::llama_context_default_params,
+            init_from_model: bundled::llama_init_from_model,
+            free: bundled::llama_free,
+            get_memory: bundled::shim_get_memory,
+            memory_clear: bundled::shim_memory_clear,
+            tokenize: bundled::llama_tokenize,
+            token_to_piece: bundled::llama_token_to_piece,
+            detokenize: bundled::llama_detokenize,
+            vocab_n_tokens: bundled::llama_vocab_n_tokens,
+            vocab_bos: bundled::llama_vocab_bos,
+            vocab_eos: bundled::llama_vocab_eos,
+            vocab_is_eog: bundled::llama_vocab_is_eog,
+            batch_get_one: bundled::llama_batch_get_one,
+            batch_init: bundled::llama_batch_init,
+            batch_free: bundled::llama_batch_free,
+            encode: bundled::llama_encode,
+            decode: bundled::llama_decode,
+            get_logits_ith: bundled::llama_get_logits_ith,
+            get_embeddings: bundled::llama_get_embeddings,
+            get_embeddings_ith: bundled::llama_get_embeddings_ith,
+            get_embeddings_seq: bundled::llama_get_embeddings_seq,
+            sampler_chain_init: bundled::llama_sampler_chain_init,
+            sampler_chain_default_params: bundled::llama_sampler_chain_default_params,
+            sampler_chain_add: bundled::llama_sampler_chain_add,
+            sampler_sample: bundled::llama_sampler_sample,
+            sampler_free: bundled::llama_sampler_free,
+            sampler_init_greedy: bundled::llama_sampler_init_greedy,
+            sampler_init_dist: bundled::llama_sampler_init_dist,
+            sampler_init_top_k: bundled::llama_sampler_init_top_k,
+            sampler_init_top_p: bundled::llama_sampler_init_top_p,
+            sampler_init_temp: bundled::llama_sampler_init_temp,
+            sampler_init_min_p: bundled::llama_sampler_init_min_p,
+        })
+    }
+
+    /// Load via dlopen (the default path when not bundled).
+    #[cfg(not(feature = "embed-bundled"))]
+    fn load_dynamic() -> Result<Self, String> {
         let lib = Self::open_library()?;
 
         // Resolve all symbols
@@ -419,7 +506,7 @@ impl LlamaCppApi {
         }
 
         Ok(Self {
-            _lib: lib,
+            _lib: Some(lib),
             backend_free,
             model_default_params,
             model_load_from_file,
@@ -471,6 +558,7 @@ impl LlamaCppApi {
     /// 3. `../lib/` relative to executable
     /// 4. `~/.strata/lib/` (Unix) or `%LOCALAPPDATA%\strata\lib\` (Windows)
     /// 5. System search (bare library name)
+    #[cfg(not(feature = "embed-bundled"))]
     fn open_library() -> Result<DynLib, String> {
         let filename = super::dl::libllama_filename();
 
@@ -950,8 +1038,10 @@ mod tests {
     }
 
     // --- Library loading error (no libllama expected in CI) ---
+    // These tests only apply to the dlopen path (not bundled).
 
     #[test]
+    #[cfg(not(feature = "embed-bundled"))]
     fn load_without_libllama_returns_descriptive_error() {
         let _lock = ENV_MUTEX.lock().unwrap();
         // Temporarily override to ensure we don't accidentally find a real libllama
@@ -971,6 +1061,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "embed-bundled"))]
     fn load_with_empty_llama_lib_path_falls_through() {
         let _lock = ENV_MUTEX.lock().unwrap();
         // Empty LLAMA_LIB_PATH should skip the env var check and try other paths
@@ -990,6 +1081,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "embed-bundled"))]
     fn load_error_includes_system_search_failure() {
         let _lock = ENV_MUTEX.lock().unwrap();
         // When all paths fail, the error should reflect the system search
