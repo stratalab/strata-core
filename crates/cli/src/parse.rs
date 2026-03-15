@@ -1656,12 +1656,16 @@ fn parse_search(matches: &ArgMatches, state: &SessionState) -> Result<CliAction,
     };
 
     let mode = matches.get_one::<String>("mode").cloned();
-    let expand = matches
-        .get_one::<String>("expand")
-        .map(|s| s.eq_ignore_ascii_case("true"));
-    let rerank = matches
-        .get_one::<String>("rerank")
-        .map(|s| s.eq_ignore_ascii_case("true"));
+    let expand = if matches.get_flag("expand") {
+        Some(true)
+    } else {
+        None
+    };
+    let rerank = if matches.get_flag("rerank") {
+        Some(true)
+    } else {
+        None
+    };
 
     Ok(CliAction::Execute(Command::Search {
         branch: branch(state),

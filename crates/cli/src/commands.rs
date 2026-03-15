@@ -741,12 +741,14 @@ fn build_search() -> Command {
         .arg(
             Arg::new("expand")
                 .long("expand")
-                .help("Enable/disable query expansion (true/false)"),
+                .action(clap::ArgAction::SetTrue)
+                .help("Enable query expansion"),
         )
         .arg(
             Arg::new("rerank")
                 .long("rerank")
-                .help("Enable/disable reranking (true/false)"),
+                .action(clap::ArgAction::SetTrue)
+                .help("Enable reranking"),
         )
 }
 
