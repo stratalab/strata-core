@@ -55,9 +55,6 @@ pub struct ForkInfo {
 }
 
 /// A single entry in a branch diff.
-///
-/// Named `BranchDiffEntry` to distinguish from [`crate::recovery::replay::DiffEntry`]
-/// which is used for recovery replay diffs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BranchDiffEntry {
     /// User key (UTF-8 or hex-encoded for binary keys)
@@ -66,6 +63,8 @@ pub struct BranchDiffEntry {
     pub raw_key: Vec<u8>,
     /// Primitive type of this entry
     pub primitive: PrimitiveType,
+    /// Storage-level type tag (preserves Vector vs VectorConfig distinction)
+    pub type_tag: TypeTag,
     /// Space this entry belongs to
     pub space: String,
     /// Value in branch A (None if not present)
@@ -484,6 +483,7 @@ pub fn diff_branches_with_options(
                         key: key_str,
                         raw_key: user_key.clone(),
                         primitive,
+                        type_tag: *tag,
                         space: space.clone(),
                         value_a: Some(val_a.clone()),
                         value_b: None,
@@ -495,6 +495,7 @@ pub fn diff_branches_with_options(
                             key: key_str,
                             raw_key: user_key.clone(),
                             primitive,
+                            type_tag: *tag,
                             space: space.clone(),
                             value_a: Some(val_a.clone()),
                             value_b: Some(val_b.clone()),
@@ -511,6 +512,7 @@ pub fn diff_branches_with_options(
                     key: format_user_key(user_key),
                     raw_key: user_key.clone(),
                     primitive: type_tag_to_primitive(*tag),
+                    type_tag: *tag,
                     space: space.clone(),
                     value_a: None,
                     value_b: Some(val_b.clone()),
@@ -624,7 +626,6 @@ pub fn merge_branches(
     // 3. Resolve IDs
     let source_id = resolve_branch_name(source);
     let target_id = resolve_branch_name(target);
-    let storage = db.storage();
 
     let mut keys_applied = 0u64;
     let mut spaces_merged = 0u64;
@@ -654,32 +655,16 @@ pub fn merge_branches(
             continue;
         }
 
-        // Re-scan source data for this space to get actual values
-        // (diff values may be filtered; re-scan ensures we get the source truth)
-        let mut source_values: HashMap<(Vec<u8>, TypeTag), Value> = HashMap::new();
-        for type_tag in DATA_TYPE_TAGS {
-            let entries = storage.list_by_type(&source_id, type_tag);
-            for (key, vv) in entries {
-                if key.namespace.space == *space {
-                    source_values.insert((key.user_key.to_vec(), type_tag), vv.value);
-                }
-            }
-        }
-
-        // Write to target
+        // Write to target using values already present in the diff entries.
+        // Each diff entry corresponds to exactly one (user_key, type_tag) pair
+        // from the diff scan, so we use the type_tag directly.
         let mut batch: Vec<(Key, Value)> = Vec::new();
         for diff_entry in &entries_to_apply {
-            // Find the matching source value
-            for type_tag in DATA_TYPE_TAGS {
-                if type_tag_to_primitive(type_tag) == diff_entry.primitive {
-                    let user_key_bytes = diff_entry.raw_key.clone();
-                    if let Some(value) = source_values.get(&(user_key_bytes.clone(), type_tag)) {
-                        let target_ns = Arc::new(Namespace::for_branch_space(target_id, space));
-                        let target_key = Key::new(target_ns, type_tag, user_key_bytes);
-                        batch.push((target_key, value.clone()));
-                        break;
-                    }
-                }
+            if let Some(value) = &diff_entry.value_b {
+                let target_ns = Arc::new(Namespace::for_branch_space(target_id, space));
+                let target_key =
+                    Key::new(target_ns, diff_entry.type_tag, diff_entry.raw_key.clone());
+                batch.push((target_key, value.clone()));
             }
         }
 

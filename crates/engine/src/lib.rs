@@ -36,12 +36,10 @@ pub use coordinator::{TransactionCoordinator, TransactionMetrics};
 pub use database::{Database, DatabaseDiskUsage, ModelConfig, StrataConfig};
 pub use instrumentation::PerfTrace;
 pub use recovery::{
-    diff_views, recover_all_participants, register_recovery_participant, BranchDiff, BranchError,
-    DiffEntry, ReadOnlyView, RecoveryFn, RecoveryParticipant, ReplayBranchIndex, ReplayError,
+    recover_all_participants, register_recovery_participant, RecoveryFn, RecoveryParticipant,
 };
 pub use strata_durability::wal::DurabilityMode;
 pub use strata_durability::WalCounters;
-// Note: Use strata_core::PrimitiveType for DiffEntry.primitive field
 pub use strata_concurrency::TransactionContext;
 pub use transaction::{Transaction, TransactionPool, MAX_POOL_SIZE};
 pub use transaction_ops::TransactionOps;
