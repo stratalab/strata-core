@@ -921,9 +921,20 @@ impl Executor {
                 source,
                 destination,
             } => crate::handlers::branch::branch_fork(&self.primitives, source, destination),
-            Command::BranchDiff { branch_a, branch_b } => {
-                crate::handlers::branch::branch_diff(&self.primitives, branch_a, branch_b)
-            }
+            Command::BranchDiff {
+                branch_a,
+                branch_b,
+                filter_primitives,
+                filter_spaces,
+                as_of,
+            } => crate::handlers::branch::branch_diff(
+                &self.primitives,
+                branch_a,
+                branch_b,
+                filter_primitives,
+                filter_spaces,
+                as_of,
+            ),
             Command::BranchMerge {
                 source,
                 target,
@@ -1077,6 +1088,89 @@ impl Executor {
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::search::search(&self.primitives, branch, space, search)
+            }
+
+            // Data introspection commands
+            Command::KvCount {
+                branch,
+                space,
+                prefix,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::kv::kv_count(&self.primitives, branch, space, prefix)
+            }
+            Command::JsonCount {
+                branch,
+                space,
+                prefix,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::json::json_count(&self.primitives, branch, space, prefix)
+            }
+            Command::KvSample {
+                branch,
+                space,
+                prefix,
+                count,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::kv::kv_sample(
+                    &self.primitives,
+                    branch,
+                    space,
+                    prefix,
+                    count.unwrap_or(5),
+                )
+            }
+            Command::JsonSample {
+                branch,
+                space,
+                prefix,
+                count,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::json::json_sample(
+                    &self.primitives,
+                    branch,
+                    space,
+                    prefix,
+                    count.unwrap_or(5),
+                )
+            }
+            Command::VectorSample {
+                branch,
+                space,
+                collection,
+                count,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::vector::vector_sample(
+                    &self.primitives,
+                    branch,
+                    space,
+                    collection,
+                    count.unwrap_or(5),
+                )
             }
 
             // Space commands

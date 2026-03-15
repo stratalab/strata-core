@@ -110,7 +110,7 @@ impl Strata {
             key: key.to_string(),
             value: value.to_string(),
         })? {
-            Output::Unit => Ok(()),
+            Output::ConfigSetResult { .. } => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for ConfigureSet".into(),
             }),

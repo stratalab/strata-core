@@ -125,9 +125,22 @@ pub fn format_diff(diff: &BranchDiffResult, mode: OutputMode) -> String {
             },
             "spaces": diff.spaces.iter().map(|sd| serde_json::json!({
                 "space": sd.space,
-                "added": sd.added.len(),
-                "removed": sd.removed.len(),
-                "modified": sd.modified.len(),
+                "added": sd.added.iter().map(|e| serde_json::json!({
+                    "key": e.key,
+                    "primitive": e.primitive.to_string(),
+                    "value": e.value_b,
+                })).collect::<Vec<_>>(),
+                "removed": sd.removed.iter().map(|e| serde_json::json!({
+                    "key": e.key,
+                    "primitive": e.primitive.to_string(),
+                    "value": e.value_a,
+                })).collect::<Vec<_>>(),
+                "modified": sd.modified.iter().map(|e| serde_json::json!({
+                    "key": e.key,
+                    "primitive": e.primitive.to_string(),
+                    "value_a": e.value_a,
+                    "value_b": e.value_b,
+                })).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
         }))
         .unwrap(),
@@ -149,13 +162,42 @@ pub fn format_diff(diff: &BranchDiffResult, mode: OutputMode) -> String {
                 if !sd.added.is_empty() || !sd.removed.is_empty() || !sd.modified.is_empty() {
                     lines.push(format!("  Space \"{}\":", sd.space));
                     for entry in &sd.added {
-                        lines.push(format!("    + {} ({})", entry.key, entry.primitive));
+                        let val_str = entry
+                            .value_b
+                            .as_ref()
+                            .map(format_value_human)
+                            .unwrap_or_default();
+                        lines.push(format!(
+                            "    + {} ({}): {}",
+                            entry.key, entry.primitive, val_str
+                        ));
                     }
                     for entry in &sd.removed {
-                        lines.push(format!("    - {} ({})", entry.key, entry.primitive));
+                        let val_str = entry
+                            .value_a
+                            .as_ref()
+                            .map(format_value_human)
+                            .unwrap_or_default();
+                        lines.push(format!(
+                            "    - {} ({}): {}",
+                            entry.key, entry.primitive, val_str
+                        ));
                     }
                     for entry in &sd.modified {
-                        lines.push(format!("    ~ {} ({})", entry.key, entry.primitive));
+                        let old = entry
+                            .value_a
+                            .as_ref()
+                            .map(format_value_human)
+                            .unwrap_or_default();
+                        let new = entry
+                            .value_b
+                            .as_ref()
+                            .map(format_value_human)
+                            .unwrap_or_default();
+                        lines.push(format!(
+                            "    ~ {} ({}): {} → {}",
+                            entry.key, entry.primitive, old, new
+                        ));
                     }
                 }
             }
@@ -322,11 +364,27 @@ fn format_raw(output: &Output) -> String {
         }
         Output::Described(_) => serde_json::to_string_pretty(output).unwrap_or_default(),
         Output::Pong { version } => version.clone(),
-        Output::SearchResults(hits) => hits
+        Output::SearchResults { hits, .. } => hits
             .iter()
             .map(|h| format!("{}\t{}\t{}", h.entity, h.primitive, h.score))
             .collect::<Vec<_>>()
             .join("\n"),
+        Output::SampleResult { items, .. } => items
+            .iter()
+            .map(|item| format!("{}\t{}", item.key, format_value_raw(&item.value)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Output::GraphWriteResult { node_id, created } => {
+            format!("{}\t{}", node_id, created)
+        }
+        Output::GraphEdgeWriteResult {
+            src,
+            dst,
+            edge_type,
+            created,
+        } => {
+            format!("{}\t{}\t{}\t{}", src, dst, edge_type, created)
+        }
         Output::SpaceList(spaces) => spaces.join("\n"),
         Output::BranchExported(r) => format!("{}\t{}", r.path, r.entry_count),
         Output::BranchImported(r) => format!("{}\t{}", r.branch_id, r.keys_written),
@@ -418,6 +476,7 @@ fn format_raw(output: &Output) -> String {
                 nodes_inserted, edges_inserted
             )
         }
+        Output::ConfigSetResult { key, new_value } => format!("{}\t{}", key, new_value),
         Output::ConfigValue(None) => String::new(),
         Output::ConfigValue(Some(v)) => v.clone(),
         Output::GraphAnalyticsU64(result) => serde_json::to_string(&result).unwrap_or_default(),
@@ -704,6 +763,22 @@ fn format_human(output: &Output) -> String {
                     space.removed.len(),
                     space.modified.len()
                 ));
+                for entry in &space.modified {
+                    let old = entry
+                        .value_a
+                        .as_ref()
+                        .map(format_value_human)
+                        .unwrap_or_default();
+                    let new = entry
+                        .value_b
+                        .as_ref()
+                        .map(format_value_human)
+                        .unwrap_or_default();
+                    lines.push(format!(
+                        "    ~ {} ({}): {} → {}",
+                        entry.key, entry.primitive, old, new
+                    ));
+                }
             }
             lines.join("\n")
         }
@@ -809,11 +884,13 @@ fn format_human(output: &Output) -> String {
             lines.join("\n")
         }
         Output::Pong { version } => format!("PONG {}", version),
-        Output::SearchResults(hits) => {
+        Output::SearchResults { hits, stats } => {
+            let mut parts = Vec::new();
             if hits.is_empty() {
-                "(empty list)".to_string()
+                parts.push("(empty list)".to_string());
             } else {
-                hits.iter()
+                let hit_lines: Vec<String> = hits
+                    .iter()
                     .enumerate()
                     .map(|(i, h)| {
                         let snippet = h
@@ -830,8 +907,64 @@ fn format_human(output: &Output) -> String {
                             snippet
                         )
                     })
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                    .collect();
+                parts.push(hit_lines.join("\n"));
+            }
+            let expansion_info = if let Some(ref model) = stats.expansion_model {
+                format!("{} ({})", stats.expansion_used, model)
+            } else {
+                stats.expansion_used.to_string()
+            };
+            let rerank_info = if let Some(ref model) = stats.rerank_model {
+                format!("{} ({})", stats.rerank_used, model)
+            } else {
+                stats.rerank_used.to_string()
+            };
+            parts.push(format!(
+                "\n--- stats ---\nmode: {}, elapsed: {:.1}ms, candidates: {}, index: {}, truncated: {}, expansion: {}, rerank: {}",
+                stats.mode,
+                stats.elapsed_ms,
+                stats.candidates_considered,
+                stats.index_used,
+                stats.truncated,
+                expansion_info,
+                rerank_info,
+            ));
+            parts.join("")
+        }
+        Output::SampleResult { total_count, items } => {
+            if items.is_empty() {
+                format!("(empty — {} total entries)", total_count)
+            } else {
+                let mut lines = vec![format!("({} total, {} sampled)", total_count, items.len())];
+                for (i, item) in items.iter().enumerate() {
+                    lines.push(format!(
+                        "{}) \"{}\" => {}",
+                        i + 1,
+                        item.key,
+                        format_value_human(&item.value)
+                    ));
+                }
+                lines.join("\n")
+            }
+        }
+        Output::GraphWriteResult { node_id, created } => {
+            if *created {
+                format!("(created) node \"{}\"", node_id)
+            } else {
+                format!("(updated) node \"{}\"", node_id)
+            }
+        }
+        Output::GraphEdgeWriteResult {
+            src,
+            dst,
+            edge_type,
+            created,
+        } => {
+            if *created {
+                format!("(created) edge \"{}\" -> \"{}\" [{}]", src, dst, edge_type)
+            } else {
+                format!("(updated) edge \"{}\" -> \"{}\" [{}]", src, dst, edge_type)
             }
         }
         Output::SpaceList(spaces) => format_string_list(spaces),
@@ -1019,6 +1152,9 @@ fn format_human(output: &Output) -> String {
                 "(bulk insert) {} node(s), {} edge(s) inserted",
                 nodes_inserted, edges_inserted
             )
+        }
+        Output::ConfigSetResult { key, new_value } => {
+            format!("OK: {} = \"{}\"", key, new_value)
         }
         Output::ConfigValue(None) => "(nil)".to_string(),
         Output::ConfigValue(Some(v)) => format!("\"{}\"", v),

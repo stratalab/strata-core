@@ -1182,6 +1182,41 @@ impl VectorStore {
         Ok(None)
     }
 
+    /// List all vector keys in a collection.
+    ///
+    /// Returns just the user-facing key names (without internal prefixes).
+    /// Useful for introspection and sampling.
+    pub fn list_keys(
+        &self,
+        branch_id: BranchId,
+        space: &str,
+        collection: &str,
+    ) -> VectorResult<Vec<String>> {
+        use strata_core::traits::Storage;
+
+        let namespace = self.namespace_for(branch_id, space);
+        let prefix = Key::vector_collection_prefix(namespace, collection);
+
+        let version = self.db.storage().version();
+        let entries = self
+            .db
+            .storage()
+            .scan_prefix(&prefix, version)
+            .map_err(|e| VectorError::Storage(e.to_string()))?;
+
+        let mut keys = Vec::new();
+        for (key, _) in entries {
+            let user_key = String::from_utf8(key.user_key.to_vec()).unwrap_or_default();
+            // Strip the collection prefix to get just the vector key
+            let vector_key = user_key
+                .strip_prefix(&format!("{}/", collection))
+                .unwrap_or(&user_key)
+                .to_string();
+            keys.push(vector_key);
+        }
+        Ok(keys)
+    }
+
     // ========================================================================
     // Internal Helpers
     // ========================================================================

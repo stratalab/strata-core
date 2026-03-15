@@ -695,6 +695,15 @@ pub enum Command {
         branch_a: String,
         /// Second branch to compare.
         branch_b: String,
+        /// Optional filter by primitive types.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter_primitives: Option<Vec<strata_core::PrimitiveType>>,
+        /// Optional filter by space names.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter_spaces: Option<Vec<String>>,
+        /// Optional point-in-time timestamp (microseconds).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_of: Option<u64>,
     },
 
     /// Merge data from source branch into target branch.
@@ -868,6 +877,85 @@ pub enum Command {
         search: SearchQuery,
     },
 
+    // ==================== Data Introspection ====================
+    /// Count KV keys matching a prefix.
+    /// Returns: `Output::Uint`
+    KvCount {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Optional key prefix filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix: Option<String>,
+    },
+
+    /// Count JSON documents matching a prefix.
+    /// Returns: `Output::Uint`
+    JsonCount {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Optional key prefix filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix: Option<String>,
+    },
+
+    /// Sample KV entries for shape discovery.
+    /// Returns: `Output::SampleResult`
+    KvSample {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Optional key prefix filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix: Option<String>,
+        /// Number of samples to return (default: 5).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<usize>,
+    },
+
+    /// Sample JSON documents for shape discovery.
+    /// Returns: `Output::SampleResult`
+    JsonSample {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Optional key prefix filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix: Option<String>,
+        /// Number of samples to return (default: 5).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<usize>,
+    },
+
+    /// Sample vector entries for shape discovery (returns metadata, not embeddings).
+    /// Returns: `Output::SampleResult`
+    VectorSample {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Collection name.
+        collection: String,
+        /// Number of samples to return (default: 5).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<usize>,
+    },
+
     // ==================== Embedding (2) ====================
     /// Embed a single text string.
     /// Returns: `Output::Embedding`
@@ -989,7 +1077,11 @@ pub enum Command {
     /// Returns: `Output::Unit`
     ///
     /// Supported keys: `provider`, `default_model`, `anthropic_api_key`,
-    /// `openai_api_key`, `google_api_key`.
+    /// `openai_api_key`, `google_api_key`, `embed_model`, `durability`,
+    /// `auto_embed`, `bm25_k1`, `bm25_b`, `embed_batch_size`,
+    /// `model_endpoint`, `model_name`, `model_api_key`, `model_timeout_ms`.
+    ///
+    /// Returns: `Output::ConfigSetResult`
     ConfigureSet {
         /// Configuration key name.
         key: String,
@@ -1596,6 +1688,11 @@ impl Command {
             Command::BranchBundleValidate { .. } => "BranchBundleValidate",
             Command::ConfigureModel { .. } => "ConfigureModel",
             Command::Search { .. } => "Search",
+            Command::KvCount { .. } => "KvCount",
+            Command::JsonCount { .. } => "JsonCount",
+            Command::KvSample { .. } => "KvSample",
+            Command::JsonSample { .. } => "JsonSample",
+            Command::VectorSample { .. } => "VectorSample",
             Command::EmbedStatus => "EmbedStatus",
             Command::ConfigGet => "ConfigGet",
             Command::ConfigureSet { .. } => "ConfigureSet",
@@ -1715,6 +1812,12 @@ impl Command {
             | Command::VectorBatchUpsert { branch, space, .. }
             // Intelligence
             | Command::Search { branch, space, .. }
+            // Data introspection
+            | Command::KvCount { branch, space, .. }
+            | Command::JsonCount { branch, space, .. }
+            | Command::KvSample { branch, space, .. }
+            | Command::JsonSample { branch, space, .. }
+            | Command::VectorSample { branch, space, .. }
             // Export
             | Command::DbExport { branch, space, .. } => {
                 resolve_branch!(branch);

@@ -828,6 +828,42 @@ impl ShardedStore {
             .unwrap_or_default()
     }
 
+    /// List all entries of a specific type for a branch at or before a given timestamp.
+    ///
+    /// Same as `list_by_type` but uses `chain.get_at_timestamp(max_timestamp)`
+    /// instead of `chain.latest()`, enabling point-in-time snapshot queries.
+    pub fn list_by_type_at_timestamp(
+        &self,
+        branch_id: &BranchId,
+        type_tag: strata_core::types::TypeTag,
+        max_timestamp: u64,
+    ) -> Vec<(Key, VersionedValue)> {
+        self.shards
+            .get_mut(branch_id)
+            .map(|mut shard| {
+                shard.ensure_ordered_keys();
+                shard
+                    .ordered_keys
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .filter(|k| k.type_tag == type_tag)
+                    .filter_map(|k| {
+                        shard.data.get(k).and_then(|chain| {
+                            chain.get_at_timestamp(max_timestamp).and_then(|sv| {
+                                if !sv.is_tombstone() {
+                                    Some(((**k).clone(), sv.versioned()))
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Count entries of a specific type for a branch (excludes tombstones)
     pub fn count_by_type(
         &self,

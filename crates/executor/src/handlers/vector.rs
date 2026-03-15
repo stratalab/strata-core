@@ -406,6 +406,53 @@ pub fn vector_search_at(
     Ok(Output::VectorMatches(results?))
 }
 
+/// Handle VectorSample command — evenly-spaced sample of vector entries (metadata only).
+pub fn vector_sample(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    collection: String,
+    count: usize,
+) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+    convert_result(validate_not_internal_collection(&collection))?;
+
+    let keys = convert_vector_result(
+        p.vector.list_keys(branch_id, &space, &collection),
+        branch_id,
+    )?;
+    let total = keys.len() as u64;
+    let indices = super::sample_indices(keys.len(), count);
+    let mut items = Vec::with_capacity(indices.len());
+    for idx in indices {
+        let key = &keys[idx];
+        let result =
+            convert_vector_result(p.vector.get(branch_id, &space, &collection, key), branch_id)?;
+        if let Some(versioned) = result {
+            // Return metadata only (no embedding — too large for discovery)
+            let metadata = versioned
+                .value
+                .metadata
+                .clone()
+                .map(serde_json_to_value_public)
+                .transpose()
+                .map_err(crate::Error::from)?;
+            let value = match metadata {
+                Some(v) => v,
+                None => Value::Null,
+            };
+            items.push(crate::types::SampleItem {
+                key: key.clone(),
+                value,
+            });
+        }
+    }
+    Ok(Output::SampleResult {
+        total_count: total,
+        items,
+    })
+}
+
 /// Handle TimeRange command — get the available time range for a branch.
 pub fn time_range(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;

@@ -123,6 +123,37 @@ impl<'a> Branches<'a> {
         match self.executor.execute(Command::BranchDiff {
             branch_a: branch_a.to_string(),
             branch_b: branch_b.to_string(),
+            filter_primitives: None,
+            filter_spaces: None,
+            as_of: None,
+        })? {
+            Output::BranchDiff(result) => Ok(result),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for BranchDiff".into(),
+            }),
+        }
+    }
+
+    /// Compare two branches with filtering and point-in-time options.
+    pub fn diff_with_options(
+        &self,
+        branch_a: &str,
+        branch_b: &str,
+        options: strata_engine::branch_ops::DiffOptions,
+    ) -> Result<BranchDiffResult> {
+        let has_filter = options.filter.is_some();
+        let (filter_primitives, filter_spaces) = if has_filter {
+            let f = options.filter.unwrap_or_default();
+            (f.primitives, f.spaces)
+        } else {
+            (None, None)
+        };
+        match self.executor.execute(Command::BranchDiff {
+            branch_a: branch_a.to_string(),
+            branch_b: branch_b.to_string(),
+            filter_primitives,
+            filter_spaces,
+            as_of: options.as_of,
         })? {
             Output::BranchDiff(result) => Ok(result),
             _ => Err(Error::Internal {

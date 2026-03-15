@@ -73,8 +73,8 @@ mod tests;
 
 // Core types
 pub use api::{
-    BranchDiffEntry, BranchDiffResult, Branches, ConflictEntry, DiffSummary, ForkInfo, MergeInfo,
-    MergeStrategy, SpaceDiff, Strata,
+    BranchDiffEntry, BranchDiffResult, Branches, ConflictEntry, DiffFilter, DiffOptions,
+    DiffSummary, ForkInfo, MergeInfo, MergeStrategy, SpaceDiff, Strata,
 };
 pub use command::Command;
 pub use error::Error;

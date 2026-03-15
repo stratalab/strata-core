@@ -13,7 +13,7 @@ use strata_search::HybridSearch;
 use tracing::debug;
 
 use crate::bridge::{to_core_branch_id, Primitives};
-use crate::types::{BranchId, SearchQuery, SearchResultHit, TimeRangeInput};
+use crate::types::{BranchId, SearchQuery, SearchResultHit, SearchStatsOutput, TimeRangeInput};
 use crate::{Error, Output, Result};
 
 /// Strong signal threshold: if top BM25 score >= this, skip expansion.
@@ -128,7 +128,7 @@ pub fn search(
         None => has_model,
     };
 
-    let response = if should_expand {
+    let (response, expansion_used, rerank_used) = if should_expand {
         // Strong signal detection: cheap BM25 probe BEFORE calling LLM
         let probe_req = req.clone().with_mode(SearchMode::Keyword);
         let probe = hybrid.search(&probe_req).map_err(crate::Error::from)?;
@@ -141,7 +141,8 @@ pub fn search(
                 "Strong BM25 signal, skipping expansion and reranking"
             );
             // Strong signal: return full hybrid search (skip LLM entirely)
-            hybrid.search(&req).map_err(crate::Error::from)?
+            let r = hybrid.search(&req).map_err(crate::Error::from)?;
+            (r, false, false)
         } else if let Some(expansions) = try_expand(&p.db, &sq.query) {
             debug!(
                 target: "strata::search",
@@ -153,30 +154,63 @@ pub fn search(
                 .search_expanded(&req, &expansions, 2.0)
                 .map_err(crate::Error::from)?;
             if should_rerank {
-                try_rerank(&p.db, &sq.query, expanded_response)
+                let r = try_rerank(&p.db, &sq.query, expanded_response);
+                (r, true, true)
             } else {
-                expanded_response
+                (expanded_response, true, false)
             }
         } else {
             // Expansion failed — fall back to normal search + optional reranking
             let base_response = hybrid.search(&req).map_err(crate::Error::from)?;
             if should_rerank {
-                try_rerank(&p.db, &sq.query, base_response)
+                let r = try_rerank(&p.db, &sq.query, base_response);
+                (r, false, true)
             } else {
-                base_response
+                (base_response, false, false)
             }
         }
     } else if should_rerank {
         // No expansion but reranking enabled
         let base_response = hybrid.search(&req).map_err(crate::Error::from)?;
-        try_rerank(&p.db, &sq.query, base_response)
+        let r = try_rerank(&p.db, &sq.query, base_response);
+        (r, false, true)
     } else {
         // No model configured or both disabled — plain search
-        hybrid.search(&req).map_err(crate::Error::from)?
+        let r = hybrid.search(&req).map_err(crate::Error::from)?;
+        (r, false, false)
+    };
+
+    // Convert engine SearchStats → SearchStatsOutput
+    let mode_str = match mode {
+        SearchMode::Keyword => "keyword",
+        SearchMode::Hybrid => "hybrid",
+        SearchMode::Vector => "vector",
+    };
+    let model_name = p.db.config().model.map(|m| m.model.clone());
+    let stats = SearchStatsOutput {
+        elapsed_ms: response.stats.elapsed_micros as f64 / 1000.0,
+        candidates_considered: response.stats.candidates_considered,
+        candidates_by_primitive: response
+            .stats
+            .candidates_by_primitive
+            .iter()
+            .map(|(k, v)| (k.id().to_string(), *v))
+            .collect(),
+        index_used: response.stats.index_used,
+        truncated: response.truncated,
+        mode: mode_str.to_string(),
+        expansion_used,
+        rerank_used,
+        expansion_model: if expansion_used {
+            model_name.clone()
+        } else {
+            None
+        },
+        rerank_model: if rerank_used { model_name } else { None },
     };
 
     // Convert SearchResponse hits to SearchResultHit
-    let results: Vec<SearchResultHit> = response
+    let hits: Vec<SearchResultHit> = response
         .hits
         .into_iter()
         .map(|hit| {
@@ -191,7 +225,7 @@ pub fn search(
         })
         .collect();
 
-    Ok(Output::SearchResults(results))
+    Ok(Output::SearchResults { hits, stats })
 }
 
 /// Check if a model is configured (cheap — no LLM call).

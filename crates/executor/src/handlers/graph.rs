@@ -41,6 +41,51 @@ fn enrich_graph_error(
     }
 }
 
+/// Enrich ontology validation errors with fuzzy-match suggestions.
+///
+/// When a node's object_type or an edge's edge_type is "not declared in frozen ontology",
+/// suggest similar types from the ontology.
+fn enrich_ontology_error(
+    p: &Primitives,
+    branch_id: strata_core::types::BranchId,
+    graph: &str,
+    err: Error,
+) -> Error {
+    let msg = match &err {
+        Error::ConstraintViolation { reason, .. } => reason.clone(),
+        Error::InvalidInput { reason, .. } => reason.clone(),
+        _ => return err,
+    };
+
+    // Pattern: "Object type 'X' is not declared in frozen ontology for graph 'G'"
+    if msg.contains("is not declared in frozen ontology") {
+        if msg.starts_with("Object type") {
+            if let Ok(types) = p.graph.list_object_types(branch_id, graph) {
+                if let Some(type_name) = extract_quoted(&msg) {
+                    let hint = crate::suggest::format_hint("object types", &types, &type_name, 2);
+                    return Error::InvalidInput { reason: msg, hint };
+                }
+            }
+        } else if msg.starts_with("Edge type") {
+            if let Ok(types) = p.graph.list_link_types(branch_id, graph) {
+                if let Some(type_name) = extract_quoted(&msg) {
+                    let hint = crate::suggest::format_hint("link types", &types, &type_name, 2);
+                    return Error::InvalidInput { reason: msg, hint };
+                }
+            }
+        }
+    }
+    err
+}
+
+/// Extract the first single-quoted substring from a message (e.g. "'Foo'" → "Foo").
+fn extract_quoted(msg: &str) -> Option<String> {
+    let start = msg.find('\'')?;
+    let rest = &msg[start + 1..];
+    let end = rest.find('\'')?;
+    Some(rest[..end].to_string())
+}
+
 /// Parse a direction string to a Direction enum.
 fn parse_direction(s: Option<&str>) -> Result<Direction> {
     match s {
@@ -144,9 +189,10 @@ pub fn graph_add_node(
         properties: props,
         object_type,
     };
-    convert_result(p.graph.add_node(core_branch, &graph, &node_id, data))
-        .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
-    Ok(Output::Unit)
+    let created = convert_result(p.graph.add_node(core_branch, &graph, &node_id, data))
+        .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))
+        .map_err(|e| enrich_ontology_error(p, core_branch, &graph, e))?;
+    Ok(Output::GraphWriteResult { node_id, created })
 }
 
 /// Handle GraphGetNode command.
@@ -234,12 +280,19 @@ pub fn graph_add_edge(
         weight: weight.unwrap_or(1.0),
         properties: props,
     };
-    convert_result(
-        p.graph
-            .add_edge(core_branch, &graph, &src, &dst, &edge_type, data),
-    )
-    .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
-    Ok(Output::Unit)
+    let created =
+        convert_result(
+            p.graph
+                .add_edge(core_branch, &graph, &src, &dst, &edge_type, data),
+        )
+        .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))
+        .map_err(|e| enrich_ontology_error(p, core_branch, &graph, e))?;
+    Ok(Output::GraphEdgeWriteResult {
+        src,
+        dst,
+        edge_type,
+        created,
+    })
 }
 
 /// Handle GraphRemoveEdge command.
@@ -682,6 +735,43 @@ pub fn graph_sssp(
             iterations: None,
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_quoted_basic() {
+        assert_eq!(
+            extract_quoted("Object type 'Person' is not declared"),
+            Some("Person".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_quoted_no_quotes() {
+        assert_eq!(extract_quoted("no quotes here"), None);
+    }
+
+    #[test]
+    fn extract_quoted_single_quote_only() {
+        assert_eq!(extract_quoted("just 'one"), None);
+    }
+
+    #[test]
+    fn extract_quoted_empty_between_quotes() {
+        assert_eq!(extract_quoted("empty '' value"), Some("".to_string()));
+    }
+
+    #[test]
+    fn extract_quoted_multiple_pairs() {
+        // Returns the first pair
+        assert_eq!(
+            extract_quoted("'first' and 'second'"),
+            Some("first".to_string())
+        );
+    }
 }
 
 /// Convert serde_json::Value to strata_core::Value.
