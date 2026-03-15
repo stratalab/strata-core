@@ -19,6 +19,7 @@ pub(crate) struct LlamaCppContext {
     pub vocab: LlamaVocab,
     pub n_embd: usize,
     pub n_ctx: usize,
+    pub n_seq_max: usize,
     pub vocab_size: usize,
     #[allow(dead_code)]
     pub bos_id: LlamaToken,
@@ -67,6 +68,9 @@ impl LlamaCppContext {
         cparams.pooling_type = LLAMA_POOLING_TYPE_MEAN;
         // Use model's training context size
         cparams.n_ctx = 0; // 0 = from model
+        // Allow batched embedding with multiple sequences per encode call
+        cparams.n_seq_max = 512;
+        let n_seq_max = cparams.n_seq_max as usize;
 
         let ctx = api.init_from_model(model, cparams).map_err(|e| {
             // Free model on context creation failure to avoid leak
@@ -85,6 +89,7 @@ impl LlamaCppContext {
             n_embd = n_embd,
             vocab_size = vocab_size,
             n_ctx = n_ctx,
+            n_seq_max = n_seq_max,
             has_encoder = has_encoder,
             "llama.cpp embedding context created"
         );
@@ -96,6 +101,7 @@ impl LlamaCppContext {
             vocab,
             n_embd,
             n_ctx,
+            n_seq_max,
             vocab_size,
             bos_id,
             eos_id,
@@ -152,6 +158,7 @@ impl LlamaCppContext {
             None => train_ctx.min(4096), // default cap
         };
         cparams.n_ctx = n_ctx as u32;
+        let n_seq_max = cparams.n_seq_max as usize;
 
         let ctx = api.init_from_model(model, cparams).map_err(|e| {
             // Free model on context creation failure to avoid leak
@@ -174,6 +181,7 @@ impl LlamaCppContext {
             vocab,
             n_embd,
             n_ctx,
+            n_seq_max,
             vocab_size,
             bos_id,
             eos_id,

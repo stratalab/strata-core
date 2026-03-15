@@ -146,12 +146,155 @@ impl EmbeddingEngine {
         Ok(normalized)
     }
 
-    /// Produce embeddings for a batch of texts.
+    /// Produce embeddings for a batch of texts using native multi-sequence batching.
     ///
-    /// Each text is processed independently (sequential). Batched GPU execution
-    /// can be optimized in a future iteration.
+    /// Multiple texts are packed into a single llama.cpp batch with distinct
+    /// sequence IDs, enabling the encoder to process them in one pass. When the
+    /// total token count exceeds the context window (`n_ctx`), texts are split
+    /// into sub-batches automatically.
+    ///
+    /// Note: unlike [`embed`], this method does **not** fall back to
+    /// `get_embeddings` when `get_embeddings_seq` returns null. Per-sequence
+    /// pooled embeddings are required, which is guaranteed when the context is
+    /// created with `pooling_type = MEAN` (our default in `load_for_embedding`).
     pub fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
-        texts.iter().map(|text| self.embed(text)).collect()
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        if texts.len() == 1 {
+            return Ok(vec![self.embed(texts[0])?]);
+        }
+
+        let ctx = self
+            .ctx
+            .lock()
+            .map_err(|e| InferenceError::LlamaCpp(format!("mutex poisoned: {}", e)))?;
+
+        let n_embd = ctx.n_embd;
+        let n_ctx = ctx.n_ctx;
+        let n_seq_max = ctx.n_seq_max;
+
+        // 1. Tokenize all texts, truncating to n_ctx
+        let tokenized: Vec<Vec<i32>> = texts
+            .iter()
+            .map(|text| {
+                let mut tokens = ctx.tokenize(text, true);
+                if tokens.len() > n_ctx {
+                    tokens.truncate(n_ctx);
+                }
+                tokens
+            })
+            .collect();
+
+        let mut results: Vec<Vec<f32>> = vec![Vec::new(); texts.len()];
+
+        // 2. Process in sub-batches that fit within n_ctx tokens and n_seq_max sequences
+        let mut i = 0;
+        while i < texts.len() {
+            let mut total_tokens = 0usize;
+            let mut batch_end = i;
+            let mut non_empty = 0usize;
+
+            while batch_end < texts.len() {
+                let tok_len = tokenized[batch_end].len();
+                if tok_len == 0 {
+                    batch_end += 1;
+                    continue;
+                }
+                if non_empty >= n_seq_max {
+                    break;
+                }
+                if total_tokens + tok_len > n_ctx && non_empty > 0 {
+                    break;
+                }
+                total_tokens += tok_len;
+                non_empty += 1;
+                batch_end += 1;
+            }
+
+            if batch_end == i {
+                batch_end = i + 1;
+                total_tokens = tokenized[i].len();
+            }
+
+            if non_empty == 0 {
+                // All empty texts in this sub-batch
+                for idx in i..batch_end {
+                    results[idx] = vec![0.0f32; n_embd];
+                }
+            } else {
+                // Allocate batch: total_tokens slots, 0 = token input, 1 seq_id per token
+                let mut batch = ctx.api.batch_init(total_tokens as i32, 0, 1);
+
+                let mut seq_id: i32 = 0;
+                let mut token_offset = 0usize;
+                let mut seq_map: Vec<(usize, i32)> = Vec::with_capacity(non_empty);
+
+                for idx in i..batch_end {
+                    if tokenized[idx].is_empty() {
+                        results[idx] = vec![0.0f32; n_embd];
+                        continue;
+                    }
+
+                    for (pos, &token) in tokenized[idx].iter().enumerate() {
+                        // SAFETY: batch was allocated with total_tokens capacity via
+                        // batch_init. token_offset < total_tokens is guaranteed by the
+                        // sub-batch grouping logic above.
+                        unsafe {
+                            *batch.token.add(token_offset) = token;
+                            *batch.pos.add(token_offset) = pos as i32;
+                            *batch.n_seq_id.add(token_offset) = 1;
+                            *(*batch.seq_id.add(token_offset)) = seq_id;
+                            *batch.logits.add(token_offset) = 0;
+                        }
+                        token_offset += 1;
+                    }
+
+                    seq_map.push((idx, seq_id));
+                    seq_id += 1;
+                }
+
+                batch.n_tokens = token_offset as i32;
+
+                // 3. Run inference (single encode/decode for the entire sub-batch)
+                let inference_result = if ctx.has_encoder {
+                    ctx.api.encode(ctx.ctx, batch)
+                } else {
+                    ctx.api.decode(ctx.ctx, batch)
+                };
+
+                if let Err(e) = inference_result {
+                    ctx.api.batch_free(batch);
+                    ctx.clear_memory();
+                    return Err(InferenceError::LlamaCpp(e));
+                }
+
+                // 4. Extract per-sequence embeddings
+                for &(idx, sid) in &seq_map {
+                    let emb_ptr = ctx.api.get_embeddings_seq(ctx.ctx, sid);
+                    if emb_ptr.is_null() {
+                        ctx.api.batch_free(batch);
+                        ctx.clear_memory();
+                        return Err(InferenceError::LlamaCpp(format!(
+                            "get_embeddings_seq returned null for seq_id {sid}"
+                        )));
+                    }
+
+                    // SAFETY: emb_ptr is non-null and points to n_embd floats owned
+                    // by llama.cpp's context, which we hold via the Mutex lock.
+                    let embedding =
+                        unsafe { std::slice::from_raw_parts(emb_ptr, n_embd) }.to_vec();
+                    results[idx] = l2_normalize(&embedding);
+                }
+
+                ctx.api.batch_free(batch);
+                ctx.clear_memory();
+            }
+
+            i = batch_end;
+        }
+
+        Ok(results)
     }
 
     /// The dimensionality of output embedding vectors.
@@ -452,7 +595,19 @@ mod tests {
         assert_send_sync::<EmbeddingEngine>();
     }
 
-    // --- Smoke test: load miniLM and produce an embedding ---
+    // --- embed_batch compile-time checks (no libllama needed) ---
+
+    #[test]
+    fn embed_batch_signature_returns_correct_type() {
+        // Compile-time check: embed_batch accepts &[&str] and returns
+        // Result<Vec<Vec<f32>>, InferenceError>. Runtime behavior is
+        // tested in the smoke tests below (requires libllama + model).
+        fn _check(_e: &EmbeddingEngine) -> Result<Vec<Vec<f32>>, crate::InferenceError> {
+            _e.embed_batch(&[])
+        }
+    }
+
+    // --- Smoke tests: load miniLM and produce embeddings ---
 
     #[test]
     #[ignore]
@@ -523,6 +678,178 @@ mod tests {
             assert!(
                 (a - b).abs() < 1e-6,
                 "embedding should be deterministic, dim {i}: {a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn smoke_embed_batch_minilm() {
+        let engine = match EmbeddingEngine::from_registry("miniLM") {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("skipping smoke_embed_batch_minilm: {e}");
+                return;
+            }
+        };
+
+        // --- Empty batch ---
+        let empty = engine.embed_batch(&[]).expect("empty batch should succeed");
+        assert!(empty.is_empty());
+
+        // --- Single-element batch should match single embed ---
+        let single_batch = engine
+            .embed_batch(&["hello world"])
+            .expect("single batch should succeed");
+        let single = engine.embed("hello world").expect("single embed should succeed");
+        assert_eq!(single_batch.len(), 1);
+        for (a, b) in single_batch[0].iter().zip(single.iter()) {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "single-batch should match single embed"
+            );
+        }
+
+        // --- Multi-element batch with empties and duplicates ---
+        let texts = vec![
+            "The cat sat on the mat",
+            "A dog ran through the park",
+            "Machine learning is fascinating",
+            "", // empty text
+            "The cat sat on the mat", // duplicate of first
+        ];
+        let embeddings = engine.embed_batch(&texts).expect("multi batch should succeed");
+        assert_eq!(embeddings.len(), 5);
+
+        // All embeddings (including empty) should have correct dimension
+        for (i, emb) in embeddings.iter().enumerate() {
+            assert_eq!(
+                emb.len(),
+                384,
+                "text {i} should have 384 dims, got {}",
+                emb.len()
+            );
+        }
+
+        // Empty text should produce zero vector
+        let zero_norm: f32 = embeddings[3].iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            zero_norm < 1e-6,
+            "empty text should produce zero vector, got norm={zero_norm}"
+        );
+
+        // Non-empty embeddings should be unit vectors
+        for i in [0, 1, 2, 4] {
+            let norm: f32 = embeddings[i].iter().map(|x| x * x).sum::<f32>().sqrt();
+            assert!(
+                (norm - 1.0).abs() < 1e-4,
+                "text {i} should be unit vector, got norm={norm}"
+            );
+        }
+
+        // Duplicate texts should produce identical embeddings
+        for (a, b) in embeddings[0].iter().zip(embeddings[4].iter()) {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "duplicate texts should produce identical embeddings"
+            );
+        }
+
+        // Different texts should produce different embeddings
+        let cosine_01: f32 = embeddings[0]
+            .iter()
+            .zip(embeddings[1].iter())
+            .map(|(a, b)| a * b)
+            .sum();
+        assert!(
+            cosine_01 < 0.99,
+            "different texts should differ, cosine={cosine_01}"
+        );
+
+        // --- Batch results must match individual embed() for every text ---
+        // This is the critical correctness property: multi-sequence batching
+        // must produce identical results to single-sequence processing.
+        for (i, text) in texts.iter().enumerate() {
+            if text.is_empty() {
+                continue; // empty produces zero vector in both paths
+            }
+            let individual = engine.embed(text).expect("individual embed should succeed");
+            for (j, (a, b)) in embeddings[i].iter().zip(individual.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-5,
+                    "text[{i}] dim[{j}] batch={a} vs individual={b}"
+                );
+            }
+        }
+
+        // --- All-empty batch ---
+        let all_empty = engine
+            .embed_batch(&["", "", ""])
+            .expect("all-empty batch should succeed");
+        assert_eq!(all_empty.len(), 3);
+        for (i, emb) in all_empty.iter().enumerate() {
+            assert_eq!(emb.len(), 384, "empty text {i} should have 384 dims");
+            let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+            assert!(norm < 1e-6, "empty text {i} should be zero vector");
+        }
+
+        // --- Larger batch to exercise sub-batch splitting ---
+        // MiniLM has n_ctx=512. With ~50-token texts, sub-batching triggers
+        // at ~10 texts. Generate 20 distinct texts to force multiple sub-batches.
+        let long_texts: Vec<String> = (0..20)
+            .map(|i| {
+                format!(
+                    "This is test sentence number {} which contains enough words to \
+                     generate a reasonable number of tokens for the embedding model \
+                     to process during the sub-batch splitting test",
+                    i
+                )
+            })
+            .collect();
+        let long_refs: Vec<&str> = long_texts.iter().map(|s| s.as_str()).collect();
+        let batch_results = engine
+            .embed_batch(&long_refs)
+            .expect("large batch should succeed");
+        assert_eq!(batch_results.len(), 20);
+
+        // Verify each text in the large batch matches its individual embedding
+        for (i, text) in long_refs.iter().enumerate() {
+            let individual = engine.embed(text).expect("individual embed should succeed");
+            assert_eq!(batch_results[i].len(), individual.len());
+            for (j, (a, b)) in batch_results[i].iter().zip(individual.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-5,
+                    "large batch text[{i}] dim[{j}] batch={a} vs individual={b}"
+                );
+            }
+        }
+
+        // --- Two texts that are both exactly at truncation boundary ---
+        // Create a very long text that will be truncated to n_ctx
+        let long_text = "word ".repeat(2000); // ~2000 tokens, well over n_ctx=512
+        let batch_truncated = engine
+            .embed_batch(&[&long_text, &long_text])
+            .expect("truncated batch should succeed");
+        assert_eq!(batch_truncated.len(), 2);
+        // Both should produce identical embeddings after truncation
+        for (a, b) in batch_truncated[0].iter().zip(batch_truncated[1].iter()) {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "identical truncated texts should produce identical embeddings"
+            );
+        }
+        // And should match individual embed
+        let individual_truncated = engine
+            .embed(&long_text)
+            .expect("individual truncated embed should succeed");
+        for (j, (a, b)) in batch_truncated[0]
+            .iter()
+            .zip(individual_truncated.iter())
+            .enumerate()
+        {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "truncated batch dim[{j}] batch={a} vs individual={b}"
             );
         }
     }
