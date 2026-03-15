@@ -791,6 +791,30 @@ pub enum Command {
         branch: Option<BranchId>,
     },
 
+    /// Export primitive data to CSV, JSON, or JSONL.
+    /// Returns: `Output::Exported`
+    DbExport {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Which primitive to export from.
+        primitive: ExportPrimitive,
+        /// Output format.
+        format: ExportFormat,
+        /// Optional key/doc prefix filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix: Option<String>,
+        /// Maximum number of rows to export.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u64>,
+        /// File path to write to. If omitted, data is returned inline.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+
     // ==================== Bundle (3) ====================
     /// Export a branch to a .branchbundle.tar.zst archive.
     /// Returns: `Output::BranchExported`
@@ -1566,6 +1590,7 @@ impl Command {
             Command::Compact => "Compact",
             Command::Describe { .. } => "Describe",
             Command::TimeRange { .. } => "TimeRange",
+            Command::DbExport { .. } => "DbExport",
             Command::BranchExport { .. } => "BranchExport",
             Command::BranchImport { .. } => "BranchImport",
             Command::BranchBundleValidate { .. } => "BranchBundleValidate",
@@ -1689,7 +1714,9 @@ impl Command {
             | Command::VectorCollectionStats { branch, space, .. }
             | Command::VectorBatchUpsert { branch, space, .. }
             // Intelligence
-            | Command::Search { branch, space, .. } => {
+            | Command::Search { branch, space, .. }
+            // Export
+            | Command::DbExport { branch, space, .. } => {
                 resolve_branch!(branch);
                 resolve_space!(space);
             }

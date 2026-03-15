@@ -426,6 +426,7 @@ fn format_raw(output: &Output) -> String {
             let page = serde_json::json!({ "items": items, "next_cursor": next_cursor });
             serde_json::to_string(&page).unwrap_or_default()
         }
+        Output::Exported(r) => r.data.clone().unwrap_or_default(),
     }
 }
 
@@ -1049,6 +1050,26 @@ fn format_human(output: &Output) -> String {
                 items.join("\n")
             )
         }
+        Output::Exported(r) => match (&r.data, &r.path) {
+            (Some(data), _) => {
+                format!(
+                    "(exported) {} row(s) as {}\n{}",
+                    r.row_count,
+                    r.primitive.as_str(),
+                    data
+                )
+            }
+            (_, Some(path)) => {
+                format!(
+                    "Exported {} row(s) from {} to {} ({} bytes)",
+                    r.row_count,
+                    r.primitive.as_str(),
+                    path,
+                    r.size_bytes.unwrap_or(0)
+                )
+            }
+            _ => format!("(exported) {} row(s)", r.row_count),
+        },
     }
 }
 

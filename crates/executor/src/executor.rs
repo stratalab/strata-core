@@ -959,6 +959,36 @@ impl Executor {
                 })
             }
 
+            // Export command
+            Command::DbExport {
+                branch,
+                space,
+                primitive,
+                format,
+                prefix,
+                limit,
+                path,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.ok_or(Error::InvalidInput {
+                    reason: "Space must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                crate::handlers::export::db_export(
+                    &self.primitives,
+                    branch,
+                    space,
+                    primitive,
+                    format,
+                    prefix,
+                    limit,
+                    path,
+                )
+            }
+
             // Bundle commands
             Command::BranchExport { branch_id, path } => {
                 crate::handlers::branch::branch_export(&self.primitives, branch_id, path)

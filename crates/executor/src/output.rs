@@ -314,6 +314,9 @@ pub enum Output {
         /// Cursor for the next page (None = last page).
         next_cursor: Option<String>,
     },
+
+    /// Data export result (CSV/JSON/JSONL).
+    Exported(ExportResult),
 }
 
 /// Snapshot of the embedding pipeline status.

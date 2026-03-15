@@ -5,6 +5,7 @@ pub mod config;
 pub mod describe;
 pub mod determinism;
 pub mod execute_many;
+pub mod export;
 pub mod parity;
 pub mod search;
 pub mod serialization;
