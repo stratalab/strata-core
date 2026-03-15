@@ -16,24 +16,44 @@ fn build_llama_cpp() {
         .define("LLAMA_BUILD_SERVER", "OFF")
         .define("LLAMA_CURL", "OFF");
 
-    // macOS ARM: enable Metal
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    // --- GPU backend selection ---
+
+    #[cfg(feature = "embed-cuda")]
+    {
+        config.define("GGML_CUDA", "ON");
+    }
+
+    #[cfg(feature = "embed-metal")]
     {
         config.define("GGML_METAL", "ON");
         config.define("GGML_METAL_EMBED_LIBRARY", "ON");
     }
 
-    // macOS x86: disable Metal
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    // Auto-enable Metal on macOS ARM when no GPU feature is explicitly set
+    #[cfg(all(
+        target_os = "macos",
+        target_arch = "aarch64",
+        not(feature = "embed-metal"),
+        not(feature = "embed-cuda")
+    ))]
+    {
+        config.define("GGML_METAL", "ON");
+        config.define("GGML_METAL_EMBED_LIBRARY", "ON");
+    }
+
+    // Disable Metal on macOS x86 unless explicitly requested
+    #[cfg(all(target_os = "macos", target_arch = "x86_64", not(feature = "embed-metal")))]
     config.define("GGML_METAL", "OFF");
 
-    // Linux x86: enable AVX2 (matching CI)
+    // --- CPU optimizations ---
+
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     config.define("GGML_AVX2", "ON");
 
     let dst = config.build_target("llama").build();
 
-    // Link static libraries produced by cmake
+    // --- Link static libraries ---
+
     let build_dir = dst.join("build");
     println!(
         "cargo:rustc-link-search=native={}",
@@ -43,7 +63,6 @@ fn build_llama_cpp() {
         "cargo:rustc-link-search=native={}",
         build_dir.join("ggml/src").display()
     );
-    // Some cmake versions put libs directly under build/
     println!("cargo:rustc-link-search=native={}", build_dir.display());
 
     println!("cargo:rustc-link-lib=static=llama");
@@ -51,7 +70,35 @@ fn build_llama_cpp() {
     println!("cargo:rustc-link-lib=static=ggml-base");
     println!("cargo:rustc-link-lib=static=ggml-cpu");
 
-    // System dependencies
+    // GPU-specific libraries
+    #[cfg(feature = "embed-cuda")]
+    {
+        println!(
+            "cargo:rustc-link-search=native={}",
+            build_dir.join("ggml/src/ggml-cuda").display()
+        );
+        println!("cargo:rustc-link-lib=static=ggml-cuda");
+        println!("cargo:rustc-link-lib=cuda");
+        println!("cargo:rustc-link-lib=cublas");
+        println!("cargo:rustc-link-lib=cudart");
+    }
+
+    #[cfg(any(
+        feature = "embed-metal",
+        all(target_os = "macos", target_arch = "aarch64")
+    ))]
+    {
+        println!(
+            "cargo:rustc-link-search=native={}",
+            build_dir.join("ggml/src/ggml-metal").display()
+        );
+        // ggml-metal may be built as a separate static lib
+        // Try to link it; if it's folded into ggml, the linker will skip it
+        println!("cargo:rustc-link-lib=static=ggml-metal");
+    }
+
+    // --- System dependencies ---
+
     #[cfg(target_os = "linux")]
     {
         println!("cargo:rustc-link-lib=stdc++");
@@ -64,7 +111,11 @@ fn build_llama_cpp() {
     {
         println!("cargo:rustc-link-lib=c++");
         println!("cargo:rustc-link-lib=framework=Accelerate");
-        #[cfg(target_arch = "aarch64")]
+        // Metal frameworks (needed when Metal is enabled)
+        #[cfg(any(
+            feature = "embed-metal",
+            all(target_os = "macos", target_arch = "aarch64")
+        ))]
         {
             println!("cargo:rustc-link-lib=framework=Metal");
             println!("cargo:rustc-link-lib=framework=MetalKit");

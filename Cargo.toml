@@ -107,7 +107,10 @@ usearch-enabled = ["dep:usearch"]
 embed = ["strata-executor/embed"]
 # Bundled llama.cpp — compiles from vendored source, no dlopen needed
 embed-bundled = ["strata-executor/embed-bundled"]
-# GPU-accelerated embedding via CUDA (Linux/Windows with NVIDIA GPU)
+# Bundled + GPU: compile llama.cpp with CUDA or Metal support
+embed-bundled-cuda = ["strata-executor/embed-bundled-cuda"]
+embed-bundled-metal = ["strata-executor/embed-bundled-metal"]
+# GPU-accelerated embedding via dlopen (requires pre-built libllama)
 embed-cuda = ["strata-executor/embed-cuda"]
 # GPU-accelerated embedding via Metal (macOS with Apple GPU)
 embed-metal = ["strata-executor/embed-metal"]

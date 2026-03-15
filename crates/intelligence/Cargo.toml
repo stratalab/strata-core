@@ -15,6 +15,8 @@ embed = ["dep:strata-inference"]
 # GPU acceleration is loaded dynamically at runtime — these features
 # are kept for backwards compatibility but simply enable 'embed'.
 embed-bundled = ["embed", "strata-inference/embed-bundled"]
+embed-bundled-cuda = ["embed-bundled", "strata-inference/embed-cuda"]
+embed-bundled-metal = ["embed-bundled", "strata-inference/embed-metal"]
 embed-cuda = ["embed"]
 embed-metal = ["embed"]
 # Cloud generation providers — each enables the corresponding
