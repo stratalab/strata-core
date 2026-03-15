@@ -452,7 +452,12 @@ mod tests {
         ri.create_branch("run-c").unwrap();
 
         let branches = ri.list_branches().unwrap();
-        assert_eq!(branches.len(), 3);
+        // Filter out _system_ branch created by init_system_branch
+        let user_branches: Vec<_> = branches
+            .iter()
+            .filter(|b| !b.starts_with("_system"))
+            .collect();
+        assert_eq!(user_branches.len(), 3);
         assert!(branches.contains(&"run-a".to_string()));
         assert!(branches.contains(&"run-b".to_string()));
         assert!(branches.contains(&"run-c".to_string()));

@@ -448,9 +448,13 @@ fn test_branch_index_list_survives_recovery() {
     let db = Database::open(&path).unwrap();
     let branch_index = BranchIndex::new(db.clone());
 
-    // List all branches works
+    // List all branches works (includes _system_ from init_system_branch)
     let branches = branch_index.list_branches().unwrap();
-    assert_eq!(branches.len(), 3);
+    let user_branches: Vec<_> = branches
+        .iter()
+        .filter(|b| !b.starts_with("_system"))
+        .collect();
+    assert_eq!(user_branches.len(), 3);
     assert!(branches.contains(&"branch1".to_string()));
     assert!(branches.contains(&"branch2".to_string()));
     assert!(branches.contains(&"branch3".to_string()));

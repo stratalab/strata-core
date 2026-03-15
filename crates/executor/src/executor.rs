@@ -170,6 +170,11 @@ impl Executor {
 
         cmd.resolve_defaults();
 
+        // Reject data commands targeting reserved _system branches
+        if let Some(branch) = cmd.resolved_branch() {
+            crate::handlers::reject_system_branch(branch)?;
+        }
+
         let cmd_name = cmd.name();
         let start = Instant::now();
 

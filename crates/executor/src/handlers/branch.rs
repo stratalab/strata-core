@@ -72,6 +72,12 @@ fn validate_branch_name(name: &str) -> Result<()> {
             hint: None,
         });
     }
+    if name.starts_with("_system") {
+        return Err(Error::InvalidInput {
+            reason: "Branch names starting with '_system' are reserved".to_string(),
+            hint: Some("Choose a different branch name.".to_string()),
+        });
+    }
     Ok(())
 }
 
@@ -116,6 +122,9 @@ pub fn branch_create(
 
 /// Handle BranchGet command.
 pub fn branch_get(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
+    if branch.as_str().starts_with("_system") {
+        return Ok(Output::MaybeBranchInfo(None));
+    }
     let result = convert_result(p.branch.get_branch(branch.as_str()))?;
     match result {
         Some(v) => Ok(Output::MaybeBranchInfo(Some(versioned_to_branch_info(v)))),
@@ -135,6 +144,9 @@ pub fn branch_list(
 
     let mut all = Vec::new();
     for id in ids {
+        if id.starts_with("_system") {
+            continue;
+        }
         if let Some(versioned) = convert_result(p.branch.get_branch(&id))? {
             all.push(versioned_to_branch_info(versioned));
         }
@@ -151,6 +163,9 @@ pub fn branch_list(
 
 /// Handle BranchExists command.
 pub fn branch_exists(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
+    if branch.as_str().starts_with("_system") {
+        return Ok(Output::Bool(false));
+    }
     let exists = convert_result(p.branch.exists(branch.as_str()))?;
     Ok(Output::Bool(exists))
 }
@@ -162,6 +177,7 @@ pub fn branch_exists(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
 /// - Deletes all vector collections for the branch to free memory (#946)
 pub fn branch_delete(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
     reject_default_branch(&branch, "delete")?;
+    crate::handlers::reject_system_branch(&branch)?;
     convert_result(p.branch.delete_branch(branch.as_str()))?;
 
     // Cleanup: remove per-branch commit lock (#944)
@@ -192,6 +208,13 @@ pub fn branch_delete(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
 
 /// Handle BranchFork command.
 pub fn branch_fork(p: &Arc<Primitives>, source: String, destination: String) -> Result<Output> {
+    if source.starts_with("_system") {
+        return Err(Error::InvalidInput {
+            reason: format!("Cannot fork from reserved branch '{}'", source),
+            hint: Some("Branches starting with '_system' are internal.".to_string()),
+        });
+    }
+    validate_branch_name(&destination)?;
     let info =
         strata_engine::branch_ops::fork_branch(&p.db, &source, &destination).map_err(|e| {
             Error::Internal {
@@ -237,6 +260,12 @@ pub fn branch_merge(
     target: String,
     strategy: strata_engine::MergeStrategy,
 ) -> Result<Output> {
+    if source.starts_with("_system") || target.starts_with("_system") {
+        return Err(Error::InvalidInput {
+            reason: "Cannot merge to or from reserved '_system' branches".to_string(),
+            hint: Some("Branches starting with '_system' are internal.".to_string()),
+        });
+    }
     let info = strata_engine::branch_ops::merge_branches(&p.db, &source, &target, strategy)
         .map_err(|e| Error::Internal {
             reason: e.to_string(),
@@ -326,5 +355,39 @@ mod tests {
         let info = metadata_to_branch_info(&m);
         assert_eq!(info.id.as_str(), "test-branch");
         assert_eq!(info.status, crate::types::BranchStatus::Active);
+    }
+
+    #[test]
+    fn reject_create_system_branch() {
+        assert!(validate_branch_name("_system_foo").is_err());
+        assert!(validate_branch_name("_system_").is_err());
+        assert!(validate_branch_name("_system").is_err());
+    }
+
+    #[test]
+    fn reject_system_branch_variants() {
+        // All _system* prefixes must be rejected
+        for name in &["_system_", "_system", "_system_foo", "_system_bar"] {
+            let branch = BranchId::from(*name);
+            assert!(
+                crate::handlers::reject_system_branch(&branch).is_err(),
+                "expected rejection for '{name}'"
+            );
+        }
+        // Normal branches must be allowed
+        for name in &["default", "my-branch", "system_not_prefixed"] {
+            let branch = BranchId::from(*name);
+            assert!(
+                crate::handlers::reject_system_branch(&branch).is_ok(),
+                "expected OK for '{name}'"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_normal_branch_names() {
+        assert!(validate_branch_name("my-branch").is_ok());
+        assert!(validate_branch_name("feature/test").is_ok());
+        assert!(validate_branch_name("default").is_ok());
     }
 }

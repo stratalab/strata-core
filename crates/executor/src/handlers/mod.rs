@@ -39,6 +39,23 @@ use crate::convert::convert_result;
 use crate::types::BranchId;
 use crate::{Error, Result};
 
+/// Reject operations targeting reserved `_system` branches.
+///
+/// Any branch whose name starts with `_system` is reserved for internal use
+/// and must not be directly accessed by user commands.
+pub(crate) fn reject_system_branch(branch: &BranchId) -> Result<()> {
+    if branch.as_str().starts_with("_system") {
+        return Err(Error::InvalidInput {
+            reason: format!("Branch '{}' is reserved for system use", branch.as_str()),
+            hint: Some(
+                "Branches starting with '_system' are internal and cannot be accessed directly."
+                    .to_string(),
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Validate that a branch exists before performing a write operation (#951).
 ///
 /// The default branch is always allowed (it is implicit and not stored in BranchIndex).
