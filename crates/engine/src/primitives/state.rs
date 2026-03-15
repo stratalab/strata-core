@@ -15,7 +15,7 @@
 //! - TypeTag: State (0x03)
 //! - Key format: `<namespace>:<TypeTag::State>:<cell_name>`
 
-use crate::database::{Database, RetryConfig};
+use crate::database::Database;
 use crate::primitives::extensions::StateCellExt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -216,12 +216,8 @@ impl StateCell {
         expected_version: Version,
         new_value: Value,
     ) -> StrataResult<Version> {
-        let retry_config = RetryConfig::default()
-            .with_max_retries(50)
-            .with_base_delay_ms(1)
-            .with_max_delay_ms(50);
         self.db
-            .transaction_with_retry(*branch_id, retry_config, |txn| {
+            .transaction(*branch_id, |txn| {
                 let key = self.key_for(branch_id, space, name);
 
                 let current: State = match txn.get(&key)? {
@@ -267,14 +263,10 @@ impl StateCell {
         name: &str,
         value: Value,
     ) -> StrataResult<Version> {
-        let retry_config = RetryConfig::default()
-            .with_max_retries(50)
-            .with_base_delay_ms(1)
-            .with_max_delay_ms(50);
         let value_for_index = value.clone();
         let result = self
             .db
-            .transaction_with_retry(*branch_id, retry_config, |txn| {
+            .transaction(*branch_id, |txn| {
                 let key = self.key_for(branch_id, space, name);
 
                 let new_version = match txn.get(&key)? {
@@ -331,11 +323,6 @@ impl StateCell {
             return Ok(Vec::new());
         }
 
-        let retry_config = RetryConfig::default()
-            .with_max_retries(50)
-            .with_base_delay_ms(1)
-            .with_max_delay_ms(50);
-
         let values_for_index: Vec<(String, Value)> = entries
             .iter()
             .map(|(name, value)| (name.clone(), value.clone()))
@@ -343,7 +330,7 @@ impl StateCell {
 
         let versions = self
             .db
-            .transaction_with_retry(*branch_id, retry_config, |txn| {
+            .transaction(*branch_id, |txn| {
                 let mut versions = Vec::with_capacity(entries.len());
                 for (name, value) in &entries {
                     let key = self.key_for(branch_id, space, name);

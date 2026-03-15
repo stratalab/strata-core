@@ -157,14 +157,6 @@ impl TransactionCoordinator {
         Ok(txn)
     }
 
-    /// Allocate commit version
-    ///
-    /// Per spec Section 6.1: Version incremented ONCE for the whole transaction.
-    /// All keys in a transaction get the same commit version.
-    pub fn allocate_commit_version(&self) -> StrataResult<u64> {
-        self.manager.allocate_version().map_err(StrataError::from)
-    }
-
     /// Commit a transaction through the concurrency layer
     ///
     /// Delegates the full commit protocol to TransactionManager:
@@ -194,21 +186,7 @@ impl TransactionCoordinator {
         wal: Option<&mut WalWriter>,
     ) -> StrataResult<u64> {
         let txn_id = txn.txn_id;
-
-        let result = self.manager.commit(txn, store, wal);
-
-        match result {
-            Ok(version) => {
-                self.record_commit(txn_id);
-                info!(target: "strata::txn", "Transaction committed");
-                Ok(version)
-            }
-            Err(e) => {
-                self.record_abort(txn_id);
-                warn!(target: "strata::txn", error = %e, "Transaction aborted");
-                Err(StrataError::from(e))
-            }
-        }
+        self.handle_commit_result(txn_id, self.manager.commit(txn, store, wal))
     }
 
     /// Commit a transaction with narrow WAL lock scope.
@@ -222,11 +200,19 @@ impl TransactionCoordinator {
         wal_arc: Option<&Arc<ParkingMutex<WalWriter>>>,
     ) -> StrataResult<u64> {
         let txn_id = txn.txn_id;
+        self.handle_commit_result(txn_id, self.manager.commit_with_wal_arc(txn, store, wal_arc))
+    }
 
-        match self.manager.commit_with_wal_arc(txn, store, wal_arc) {
+    /// Handle the result of a commit attempt: record metrics and convert errors.
+    fn handle_commit_result(
+        &self,
+        txn_id: u64,
+        result: Result<u64, strata_concurrency::CommitError>,
+    ) -> StrataResult<u64> {
+        match result {
             Ok(version) => {
                 self.record_commit(txn_id);
-                info!(target: "strata::txn", "Transaction committed");
+                info!(target: "strata::txn", version, "Transaction committed");
                 Ok(version)
             }
             Err(e) => {
@@ -362,19 +348,7 @@ impl TransactionCoordinator {
         version: u64,
     ) -> StrataResult<u64> {
         let txn_id = txn.txn_id;
-
-        match self.manager.commit_with_version(txn, store, wal, version) {
-            Ok(v) => {
-                self.record_commit(txn_id);
-                info!(target: "strata::txn", version = v, "Coordinated commit succeeded");
-                Ok(v)
-            }
-            Err(e) => {
-                self.record_abort(txn_id);
-                warn!(target: "strata::txn", error = %e, "Coordinated commit aborted");
-                Err(StrataError::from(e))
-            }
-        }
+        self.handle_commit_result(txn_id, self.manager.commit_with_version(txn, store, wal, version))
     }
 
     /// Get transaction metrics
@@ -474,6 +448,14 @@ impl TransactionMetrics {
         } else {
             0.0
         }
+    }
+}
+
+#[cfg(test)]
+impl TransactionCoordinator {
+    /// Allocate commit version (test-only)
+    pub fn allocate_commit_version(&self) -> StrataResult<u64> {
+        self.manager.allocate_version().map_err(StrataError::from)
     }
 }
 

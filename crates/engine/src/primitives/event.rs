@@ -34,7 +34,7 @@
 //! - Event key: `<namespace>:<TypeTag::Event>:<sequence_be_bytes>`
 //! - Metadata key: `<namespace>:<TypeTag::Event>:__meta__`
 
-use crate::database::{Database, RetryConfig};
+use crate::database::Database;
 use crate::primitives::extensions::EventLogExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -313,21 +313,12 @@ impl EventLog {
         validate_event_type(event_type).map_err(|e| StrataError::invalid_input(e.to_string()))?;
         validate_payload(&payload).map_err(|e| StrataError::invalid_input(e.to_string()))?;
 
-        // Use high retry count for contention scenarios
-        // EventLog appends serialize through metadata CAS, so conflicts are expected
-        // With N concurrent threads, worst case needs N retries per append
-        // 200 retries with fast backoff handles 100+ concurrent threads reliably
-        let retry_config = RetryConfig::default()
-            .with_max_retries(50)
-            .with_base_delay_ms(1)
-            .with_max_delay_ms(50);
-
         let ns = self.namespace_for(branch_id, space);
         let event_type_owned = event_type.to_string();
 
         let result = self
             .db
-            .transaction_with_retry(*branch_id, retry_config, |txn| {
+            .transaction(*branch_id, |txn| {
                 // Read current metadata (or default)
                 let meta_key = Key::new_event_meta(ns.clone());
                 let mut meta: EventLogMeta = match txn.get(&meta_key)? {
@@ -449,16 +440,11 @@ impl EventLog {
                 .collect());
         }
 
-        let retry_config = RetryConfig::default()
-            .with_max_retries(50)
-            .with_base_delay_ms(1)
-            .with_max_delay_ms(50);
-
         let ns = self.namespace_for(branch_id, space);
 
         let sequences = self
             .db
-            .transaction_with_retry(*branch_id, retry_config, |txn| {
+            .transaction(*branch_id, |txn| {
                 // Read current metadata
                 let meta_key = Key::new_event_meta(ns.clone());
                 let mut meta: EventLogMeta = match txn.get(&meta_key)? {

@@ -21,13 +21,13 @@
 
 pub mod config;
 mod registry;
-mod transactions;
+
 
 pub use config::{
     ModelConfig, StorageConfig, StrataConfig, SHADOW_EVENT, SHADOW_JSON, SHADOW_KV, SHADOW_STATE,
 };
 pub use registry::OPEN_DATABASES;
-pub use transactions::RetryConfig;
+
 
 use crate::background::BackgroundScheduler;
 use crate::coordinator::TransactionCoordinator;
@@ -227,6 +227,9 @@ pub struct Database {
 
     /// Whether this database is a read-only follower (no lock, no WAL writer).
     follower: bool,
+
+    /// Whether shutdown() has already completed (prevents double freeze in Drop).
+    shutdown_complete: AtomicBool,
 }
 
 impl Database {
@@ -323,57 +326,8 @@ impl Database {
         let config_path = data_dir.join(config::CONFIG_FILE_NAME);
         cfg.write_to_file(&config_path)?;
 
-        let db = Self::open_with_mode_and_config(path, mode, cfg)?;
+        let db = Self::open_internal(path, mode, cfg)?;
         Ok(db)
-    }
-
-    /// Open database with specific durability mode (convenience wrapper).
-    ///
-    /// Uses a default `StrataConfig` with the given durability mode.
-    #[allow(dead_code)]
-    pub(crate) fn open_with_mode<P: AsRef<Path>>(
-        path: P,
-        durability_mode: DurabilityMode,
-    ) -> StrataResult<Arc<Self>> {
-        let dur_str = match durability_mode {
-            DurabilityMode::Always => "always",
-            _ => "standard",
-        };
-        let cfg = StrataConfig {
-            durability: dur_str.to_string(),
-            ..StrataConfig::default()
-        };
-        Self::open_with_mode_and_config(path, durability_mode, cfg)
-    }
-
-    /// Open database with specific durability mode and full config.
-    ///
-    /// # Thread Safety
-    ///
-    /// Uses a global registry to ensure the same path returns the same instance.
-    /// If a database at this path is already open, returns the existing Arc.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Directory path for the database
-    /// * `durability_mode` - Durability mode for WAL operations
-    /// * `cfg` - Full configuration to store in the Database
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(Arc<Database>)` - Ready-to-use database instance
-    /// * `Err` - If directory creation, WAL opening, or recovery fails
-    ///
-    /// # Recovery
-    ///
-    /// Per spec Section 5: Uses RecoveryCoordinator to replay WAL and
-    /// initialize TransactionManager with the recovered version.
-    pub(crate) fn open_with_mode_and_config<P: AsRef<Path>>(
-        path: P,
-        durability_mode: DurabilityMode,
-        cfg: StrataConfig,
-    ) -> StrataResult<Arc<Self>> {
-        Self::open_internal(path, durability_mode, cfg)
     }
 
     fn open_internal<P: AsRef<Path>>(
@@ -518,6 +472,7 @@ impl Database {
             wal_dir,
             wal_watermark,
             follower: true,
+            shutdown_complete: AtomicBool::new(false),
         });
 
         crate::primitives::vector::register_vector_recovery();
@@ -649,6 +604,7 @@ impl Database {
             wal_dir,
             wal_watermark,
             follower: false,
+            shutdown_complete: AtomicBool::new(false),
         });
 
         Ok(db)
@@ -722,6 +678,7 @@ impl Database {
             wal_dir: PathBuf::new(),
             wal_watermark: AtomicU64::new(0),
             follower: false,
+            shutdown_complete: AtomicBool::new(false),
         });
 
         // Note: Ephemeral databases are NOT registered in the global registry
@@ -1789,71 +1746,6 @@ impl Database {
         outcome
     }
 
-    /// Execute a transaction with automatic retry on conflict
-    ///
-    /// Per spec Section 4.3: Implicit transactions include automatic retry on conflict.
-    /// This method provides explicit retry control for transactions that may conflict.
-    ///
-    /// The closure is called repeatedly until either:
-    /// - The transaction commits successfully
-    /// - A non-conflict error occurs (not retried)
-    /// - Maximum retries are exceeded
-    ///
-    /// # Arguments
-    /// * `branch_id` - BranchId for namespace isolation
-    /// * `config` - Retry configuration (max retries, delays)
-    /// * `f` - Closure that performs transaction operations (must be `Fn`, not `FnOnce`)
-    ///
-    /// # Returns
-    /// * `Ok(T)` - Closure return value on successful commit
-    /// * `Err` - On non-conflict error or max retries exceeded
-    ///
-    /// # Example
-    /// ```text
-    /// let config = RetryConfig::default();
-    /// let result = db.transaction_with_retry(branch_id, config, |txn| {
-    ///     let val = txn.get(&key)?;
-    ///     txn.put(key.clone(), Value::Int(val.value + 1))?;
-    ///     Ok(())
-    /// })?;
-    /// ```
-    pub(crate) fn transaction_with_retry<F, T>(
-        &self,
-        branch_id: BranchId,
-        config: RetryConfig,
-        f: F,
-    ) -> StrataResult<T>
-    where
-        F: Fn(&mut TransactionContext) -> StrataResult<T>,
-    {
-        self.check_accepting()?;
-
-        let mut last_error = None;
-
-        for attempt in 0..=config.max_retries {
-            let mut txn = self.begin_transaction(branch_id)?;
-            let result = f(&mut txn);
-            let outcome = self.run_single_attempt(&mut txn, result, self.durability_mode);
-            self.end_transaction(txn);
-
-            match outcome {
-                Ok((value, _)) => return Ok(value),
-                Err(e) if e.is_conflict() && attempt < config.max_retries => {
-                    last_error = Some(e);
-                    std::thread::sleep(config.calculate_delay(attempt));
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        // Unreachable: the loop always returns — either Ok on success,
-        // Err on non-conflict or final attempt. This is a defensive fallback.
-        Err(last_error.unwrap_or_else(|| {
-            StrataError::internal("retry loop exited without returning a result".to_string())
-        }))
-    }
-
     /// Begin a new transaction (for manual control)
     ///
     /// Returns a TransactionContext that must be manually committed or aborted.
@@ -2095,6 +1987,7 @@ impl Database {
         // the first fails, so a vector freeze error doesn't also lose search data.
         let vec_result = self.freeze_vector_heaps();
         let search_result = self.freeze_search_index();
+        self.shutdown_complete.store(true, Ordering::Release);
         vec_result?;
         search_result?;
 
@@ -2113,22 +2006,20 @@ impl Drop for Database {
             let _ = handle.join();
         }
 
-        // Followers are read-only — never write to the primary's data directory.
-        if self.follower {
-            return;
-        }
+        // Skip flush/freeze if shutdown() already completed them.
+        if !self.shutdown_complete.load(Ordering::Acquire) && !self.follower {
+            // Final flush to persist any remaining data
+            let _ = self.flush();
 
-        // Final flush to persist any remaining data
-        let _ = self.flush();
+            // Freeze vector heaps to mmap so lite KV records can recover
+            if let Err(e) = self.freeze_vector_heaps() {
+                tracing::warn!(target: "strata::db", error = %e, "Failed to freeze vector heaps in drop");
+            }
 
-        // Freeze vector heaps to mmap so lite KV records can recover
-        if let Err(e) = self.freeze_vector_heaps() {
-            tracing::warn!(target: "strata::db", error = %e, "Failed to freeze vector heaps in drop");
-        }
-
-        // Freeze search index to disk for fast recovery
-        if let Err(e) = self.freeze_search_index() {
-            tracing::warn!(target: "strata::db", error = %e, "Failed to freeze search index in drop");
+            // Freeze search index to disk for fast recovery
+            if let Err(e) = self.freeze_search_index() {
+                tracing::warn!(target: "strata::db", error = %e, "Failed to freeze search index in drop");
+            }
         }
 
         // Remove from registry if we're disk-backed
@@ -2154,6 +2045,25 @@ mod tests {
     use strata_durability::format::WalRecord;
     use strata_durability::now_micros;
     use tempfile::TempDir;
+
+    impl Database {
+        /// Test-only helper: open with a specific durability mode.
+        fn open_with_durability<P: AsRef<Path>>(
+            path: P,
+            durability_mode: DurabilityMode,
+        ) -> StrataResult<Arc<Self>> {
+            let dur_str = match durability_mode {
+                DurabilityMode::Always => "always",
+                DurabilityMode::Cache => "cache",
+                _ => "standard",
+            };
+            let cfg = StrataConfig {
+                durability: dur_str.to_string(),
+                ..StrataConfig::default()
+            };
+            Self::open_internal(path, durability_mode, cfg)
+        }
+    }
 
     /// Helper: write a committed transaction to the segmented WAL
     fn write_wal_txn(
@@ -2359,14 +2269,14 @@ mod tests {
         // Always mode
         {
             let db =
-                Database::open_with_mode(temp_dir.path().join("strict"), DurabilityMode::Always)
+                Database::open_with_durability(temp_dir.path().join("strict"), DurabilityMode::Always)
                     .unwrap();
             assert!(!db.is_cache());
         }
 
         // Standard mode
         {
-            let db = Database::open_with_mode(
+            let db = Database::open_with_durability(
                 temp_dir.path().join("batched"),
                 DurabilityMode::Standard {
                     interval_ms: 100,
@@ -2379,7 +2289,7 @@ mod tests {
 
         // Cache mode
         {
-            let db = Database::open_with_mode(temp_dir.path().join("none"), DurabilityMode::Cache)
+            let db = Database::open_with_durability(temp_dir.path().join("none"), DurabilityMode::Cache)
                 .unwrap();
             assert!(!db.is_cache());
         }
@@ -2520,53 +2430,6 @@ mod tests {
         // Verify committed
         let stored = db.storage().get_versioned(&key, u64::MAX).unwrap().unwrap();
         assert_eq!(stored.value, Value::Int(123));
-    }
-
-    // ========================================================================
-    // Retry Tests
-    // ========================================================================
-
-    #[test]
-    fn test_retry_config_default() {
-        let config = RetryConfig::default();
-        assert_eq!(config.max_retries, 3);
-        assert_eq!(config.base_delay_ms, 10);
-        assert_eq!(config.max_delay_ms, 100);
-    }
-
-    #[test]
-    fn test_retry_config_builder() {
-        let config = RetryConfig::new()
-            .with_max_retries(5)
-            .with_base_delay_ms(20)
-            .with_max_delay_ms(200);
-
-        assert_eq!(config.max_retries, 5);
-        assert_eq!(config.base_delay_ms, 20);
-        assert_eq!(config.max_delay_ms, 200);
-    }
-
-    #[test]
-    fn test_retry_config_no_retry() {
-        let config = RetryConfig::no_retry();
-        assert_eq!(config.max_retries, 0);
-    }
-
-    #[test]
-    fn test_retry_config_delay_calculation() {
-        let config = RetryConfig {
-            max_retries: 5,
-            base_delay_ms: 10,
-            max_delay_ms: 100,
-        };
-
-        // Exponential backoff: 10, 20, 40, 80, 100 (capped)
-        assert_eq!(config.calculate_delay(0).as_millis(), 10);
-        assert_eq!(config.calculate_delay(1).as_millis(), 20);
-        assert_eq!(config.calculate_delay(2).as_millis(), 40);
-        assert_eq!(config.calculate_delay(3).as_millis(), 80);
-        assert_eq!(config.calculate_delay(4).as_millis(), 100); // Capped at max
-        assert_eq!(config.calculate_delay(5).as_millis(), 100); // Still capped
     }
 
     // ========================================================================
@@ -3147,7 +3010,7 @@ mod tests {
                 interval_ms: 2_000,
                 batch_size: 1_000_000,
             };
-            let db = Database::open_with_mode(&db_path, mode).unwrap();
+            let db = Database::open_with_durability(&db_path, mode).unwrap();
 
             db.transaction(branch_id, |txn| {
                 txn.put(key.clone(), Value::Bytes(b"final_sync_value".to_vec()))?;
@@ -3383,7 +3246,7 @@ mod tests {
         const OPS_PER_THREAD: usize = 10_000;
         let temp_dir = TempDir::new().unwrap();
         let db =
-            Database::open_with_mode(temp_dir.path().join("contention"), DurabilityMode::Cache)
+            Database::open_with_durability(temp_dir.path().join("contention"), DurabilityMode::Cache)
                 .unwrap();
 
         // Phase 1: Concurrent writes — measure throughput scaling
