@@ -757,18 +757,13 @@ impl JsonStore {
         as_of_ts: u64,
     ) -> StrataResult<Vec<String>> {
         let ns = self.namespace_for(branch_id, space);
-        let scan_prefix = Key::new_json_prefix(Arc::new(ns));
-        let results = self.db.scan_prefix_at_timestamp(&scan_prefix, as_of_ts)?;
+        // Narrow scan at storage level: if prefix is given, only scan matching keys
+        let scan_key = Key::new_json(Arc::new(ns), prefix.unwrap_or(""));
+        let results = self.db.scan_prefix_at_timestamp(&scan_key, as_of_ts)?;
         let mut doc_ids = Vec::new();
-        for (_, vv) in results {
-            if let Ok(doc) = Self::deserialize_doc(&vv.value) {
-                if let Some(p) = prefix {
-                    if doc.id.starts_with(p) {
-                        doc_ids.push(doc.id);
-                    }
-                } else {
-                    doc_ids.push(doc.id);
-                }
+        for (key, _vv) in results {
+            if let Some(doc_id) = key.user_key_string() {
+                doc_ids.push(doc_id);
             }
         }
         Ok(doc_ids)
