@@ -1,15 +1,12 @@
-//! llama.cpp C API bindings loaded at runtime via dlopen.
+//! llama.cpp C API bindings via static linking.
 //!
-//! Uses the [`DynLib`] wrapper from [`super::dl`] to load `libllama.so` (Linux),
-//! `libllama.dylib` (macOS), or `llama.dll` (Windows) at runtime, avoiding any
-//! build-time dependency. All function pointers are resolved once during
-//! [`LlamaCppApi::load()`].
+//! All symbols are resolved at link time from the vendored llama.cpp build
+//! (compiled via `build.rs`). [`LlamaCppApi::load()`] initialises the backend
+//! once and runs layout probes, then returns a zero-sized handle whose methods
+//! call directly into the extern symbols.
 
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
-use std::path::PathBuf;
-
-use super::dl::DynLib;
 
 // ---------------------------------------------------------------------------
 // llama.cpp C types
@@ -128,184 +125,122 @@ pub struct LlamaBatch {
 const _: () = assert!(std::mem::size_of::<LlamaBatch>() == 56);
 
 // ---------------------------------------------------------------------------
-// Function pointer types
+// Statically linked extern "C" symbols
 // ---------------------------------------------------------------------------
 
-// Backend
-type FnBackendInit = unsafe extern "C" fn();
-type FnBackendFree = unsafe extern "C" fn();
+// b5440 uses llama_kv_self_clear(ctx) instead of the newer
+// llama_get_memory(ctx) + llama_memory_clear(mem, data) API.
+// These shims bridge the two: get_memory returns the ctx pointer itself,
+// and memory_clear passes it back to llama_kv_self_clear.
 
-// Model
-type FnModelDefaultParams = unsafe extern "C" fn() -> LlamaModelParams;
-type FnModelLoadFromFile =
-    unsafe extern "C" fn(path: *const c_char, params: LlamaModelParams) -> LlamaModel;
-type FnModelFree = unsafe extern "C" fn(model: LlamaModel);
-type FnModelGetVocab = unsafe extern "C" fn(model: LlamaModel) -> LlamaVocab;
-type FnModelNEmbd = unsafe extern "C" fn(model: LlamaModel) -> i32;
-type FnModelNCtxTrain = unsafe extern "C" fn(model: LlamaModel) -> i32;
-type FnModelHasEncoder = unsafe extern "C" fn(model: LlamaModel) -> bool;
+/// Returns the ctx pointer as the "memory" handle.
+unsafe extern "C" fn shim_get_memory(ctx: LlamaContext) -> LlamaMemory {
+    ctx
+}
 
-// Context
-type FnContextDefaultParams = unsafe extern "C" fn() -> LlamaContextParams;
-type FnInitFromModel =
-    unsafe extern "C" fn(model: LlamaModel, params: LlamaContextParams) -> LlamaContext;
-type FnFree = unsafe extern "C" fn(ctx: LlamaContext);
+/// Calls llama_kv_self_clear with the ctx pointer (passed as mem).
+unsafe extern "C" fn shim_memory_clear(mem: LlamaMemory, _data: bool) {
+    llama_kv_self_clear(mem as LlamaContext);
+}
 
-// Memory
-type FnGetMemory = unsafe extern "C" fn(ctx: LlamaContext) -> LlamaMemory;
-type FnMemoryClear = unsafe extern "C" fn(mem: LlamaMemory, data: bool);
+extern "C" {
+    // Backend
+    pub fn llama_backend_init();
+    pub fn llama_backend_free();
 
-// Tokenize
-type FnTokenize = unsafe extern "C" fn(
-    vocab: LlamaVocab,
-    text: *const c_char,
-    text_len: i32,
-    tokens: *mut LlamaToken,
-    n_tokens_max: i32,
-    add_special: bool,
-    parse_special: bool,
-) -> i32;
-type FnTokenToPiece = unsafe extern "C" fn(
-    vocab: LlamaVocab,
-    token: LlamaToken,
-    buf: *mut c_char,
-    length: i32,
-    lstrip: i32,
-    special: bool,
-) -> i32;
-type FnDetokenize = unsafe extern "C" fn(
-    vocab: LlamaVocab,
-    tokens: *const LlamaToken,
-    n_tokens: i32,
-    text: *mut c_char,
-    text_len_max: i32,
-    remove_special: bool,
-    unparse_special: bool,
-) -> i32;
+    // Model
+    pub fn llama_model_default_params() -> LlamaModelParams;
+    pub fn llama_model_load_from_file(path: *const c_char, params: LlamaModelParams) -> LlamaModel;
+    pub fn llama_model_free(model: LlamaModel);
+    pub fn llama_model_get_vocab(model: LlamaModel) -> LlamaVocab;
+    pub fn llama_model_n_embd(model: LlamaModel) -> i32;
+    pub fn llama_model_n_ctx_train(model: LlamaModel) -> i32;
+    pub fn llama_model_has_encoder(model: LlamaModel) -> bool;
 
-// Vocab
-type FnVocabNTokens = unsafe extern "C" fn(vocab: LlamaVocab) -> i32;
-type FnVocabBos = unsafe extern "C" fn(vocab: LlamaVocab) -> LlamaToken;
-type FnVocabEos = unsafe extern "C" fn(vocab: LlamaVocab) -> LlamaToken;
-type FnVocabIsEog = unsafe extern "C" fn(vocab: LlamaVocab, token: LlamaToken) -> bool;
+    // Context
+    pub fn llama_context_default_params() -> LlamaContextParams;
+    pub fn llama_init_from_model(model: LlamaModel, params: LlamaContextParams) -> LlamaContext;
+    pub fn llama_free(ctx: LlamaContext);
 
-// Batch
-type FnBatchGetOne = unsafe extern "C" fn(tokens: *mut LlamaToken, n_tokens: i32) -> LlamaBatch;
-type FnBatchInit = unsafe extern "C" fn(n_tokens: i32, embd: i32, n_seq_max: i32) -> LlamaBatch;
-type FnBatchFree = unsafe extern "C" fn(batch: LlamaBatch);
+    // Memory (b5440 uses the older KV cache API -- called via shims above)
+    #[allow(dead_code)]
+    pub fn llama_get_kv_self(ctx: LlamaContext) -> LlamaMemory;
+    pub fn llama_kv_self_clear(ctx: LlamaContext);
 
-// Inference
-type FnEncode = unsafe extern "C" fn(ctx: LlamaContext, batch: LlamaBatch) -> i32;
-type FnDecode = unsafe extern "C" fn(ctx: LlamaContext, batch: LlamaBatch) -> i32;
+    // Tokenize
+    pub fn llama_tokenize(
+        vocab: LlamaVocab,
+        text: *const c_char,
+        text_len: i32,
+        tokens: *mut LlamaToken,
+        n_tokens_max: i32,
+        add_special: bool,
+        parse_special: bool,
+    ) -> i32;
+    pub fn llama_token_to_piece(
+        vocab: LlamaVocab,
+        token: LlamaToken,
+        buf: *mut c_char,
+        length: i32,
+        lstrip: i32,
+        special: bool,
+    ) -> i32;
+    pub fn llama_detokenize(
+        vocab: LlamaVocab,
+        tokens: *const LlamaToken,
+        n_tokens: i32,
+        text: *mut c_char,
+        text_len_max: i32,
+        remove_special: bool,
+        unparse_special: bool,
+    ) -> i32;
 
-// Output
-type FnGetLogitsIth = unsafe extern "C" fn(ctx: LlamaContext, i: i32) -> *mut f32;
-type FnGetEmbeddings = unsafe extern "C" fn(ctx: LlamaContext) -> *mut f32;
-type FnGetEmbeddingsIth = unsafe extern "C" fn(ctx: LlamaContext, i: i32) -> *mut f32;
-type FnGetEmbeddingsSeq = unsafe extern "C" fn(ctx: LlamaContext, seq_id: LlamaSeqId) -> *mut f32;
+    // Vocab
+    pub fn llama_vocab_n_tokens(vocab: LlamaVocab) -> i32;
+    pub fn llama_vocab_bos(vocab: LlamaVocab) -> LlamaToken;
+    pub fn llama_vocab_eos(vocab: LlamaVocab) -> LlamaToken;
+    pub fn llama_vocab_is_eog(vocab: LlamaVocab, token: LlamaToken) -> bool;
 
-// Sampling
-type FnSamplerChainInit = unsafe extern "C" fn(params: LlamaSamplerChainParams) -> LlamaSampler;
-type FnSamplerChainDefaultParams = unsafe extern "C" fn() -> LlamaSamplerChainParams;
-type FnSamplerChainAdd = unsafe extern "C" fn(chain: LlamaSampler, smpl: LlamaSampler);
-type FnSamplerSample =
-    unsafe extern "C" fn(smpl: LlamaSampler, ctx: LlamaContext, idx: i32) -> LlamaToken;
-type FnSamplerFree = unsafe extern "C" fn(smpl: LlamaSampler);
-type FnSamplerInitGreedy = unsafe extern "C" fn() -> LlamaSampler;
-type FnSamplerInitDist = unsafe extern "C" fn(seed: u32) -> LlamaSampler;
-type FnSamplerInitTopK = unsafe extern "C" fn(k: i32) -> LlamaSampler;
-type FnSamplerInitTopP = unsafe extern "C" fn(p: f32, min_keep: usize) -> LlamaSampler;
-type FnSamplerInitTemp = unsafe extern "C" fn(t: f32) -> LlamaSampler;
-type FnSamplerInitMinP = unsafe extern "C" fn(p: f32, min_keep: usize) -> LlamaSampler;
+    // Batch
+    pub fn llama_batch_get_one(tokens: *mut LlamaToken, n_tokens: i32) -> LlamaBatch;
+    pub fn llama_batch_init(n_tokens: i32, embd: i32, n_seq_max: i32) -> LlamaBatch;
+    pub fn llama_batch_free(batch: LlamaBatch);
 
-// ---------------------------------------------------------------------------
-// Symbol loading macro
-// ---------------------------------------------------------------------------
+    // Inference
+    pub fn llama_encode(ctx: LlamaContext, batch: LlamaBatch) -> i32;
+    pub fn llama_decode(ctx: LlamaContext, batch: LlamaBatch) -> i32;
 
-macro_rules! load_sym {
-    ($lib:expr, $name:expr) => {{
-        let cname = concat!($name, "\0");
-        let cstr = unsafe { CStr::from_bytes_with_nul_unchecked(cname.as_bytes()) };
-        let ptr =
-            unsafe { $lib.sym(cstr) }.map_err(|e| format!("failed to load {}: {}", $name, e))?;
-        if ptr.is_null() {
-            return Err(format!("{} resolved to null", $name));
-        }
-        unsafe { std::mem::transmute::<*mut c_void, _>(ptr) }
-    }};
+    // Output
+    pub fn llama_get_logits_ith(ctx: LlamaContext, i: i32) -> *mut f32;
+    pub fn llama_get_embeddings(ctx: LlamaContext) -> *mut f32;
+    pub fn llama_get_embeddings_ith(ctx: LlamaContext, i: i32) -> *mut f32;
+    pub fn llama_get_embeddings_seq(ctx: LlamaContext, seq_id: LlamaSeqId) -> *mut f32;
+
+    // Sampling
+    pub fn llama_sampler_chain_init(params: LlamaSamplerChainParams) -> LlamaSampler;
+    pub fn llama_sampler_chain_default_params() -> LlamaSamplerChainParams;
+    pub fn llama_sampler_chain_add(chain: LlamaSampler, smpl: LlamaSampler);
+    pub fn llama_sampler_sample(smpl: LlamaSampler, ctx: LlamaContext, idx: i32) -> LlamaToken;
+    pub fn llama_sampler_free(smpl: LlamaSampler);
+    pub fn llama_sampler_init_greedy() -> LlamaSampler;
+    pub fn llama_sampler_init_dist(seed: u32) -> LlamaSampler;
+    pub fn llama_sampler_init_top_k(k: i32) -> LlamaSampler;
+    pub fn llama_sampler_init_top_p(p: f32, min_keep: usize) -> LlamaSampler;
+    pub fn llama_sampler_init_temp(t: f32) -> LlamaSampler;
+    pub fn llama_sampler_init_min_p(p: f32, min_keep: usize) -> LlamaSampler;
 }
 
 // ---------------------------------------------------------------------------
-// LlamaCppApi — resolved function pointers
+// LlamaCppApi — thin handle to statically linked symbols
 // ---------------------------------------------------------------------------
 
-/// Holds the dynamically loaded libllama and all resolved function pointers.
+/// Handle to the statically linked llama.cpp API.
 ///
 /// Created once via [`LlamaCppApi::load()`]. `Drop` calls `llama_backend_free()`.
 ///
-/// `Debug` is implemented manually because function pointers don't derive Debug.
+/// The struct is zero-sized — all methods call directly into extern symbols.
 pub struct LlamaCppApi {
-    _lib: DynLib,
-
-    // Backend
-    backend_free: FnBackendFree,
-
-    // Model
-    pub(crate) model_default_params: FnModelDefaultParams,
-    model_load_from_file: FnModelLoadFromFile,
-    model_free: FnModelFree,
-    model_get_vocab: FnModelGetVocab,
-    model_n_embd: FnModelNEmbd,
-    model_n_ctx_train: FnModelNCtxTrain,
-    model_has_encoder: FnModelHasEncoder,
-
-    // Context
-    pub(crate) context_default_params: FnContextDefaultParams,
-    init_from_model: FnInitFromModel,
-    free: FnFree,
-
-    // Memory
-    get_memory: FnGetMemory,
-    memory_clear: FnMemoryClear,
-
-    // Tokenize
-    tokenize: FnTokenize,
-    token_to_piece: FnTokenToPiece,
-    detokenize: FnDetokenize,
-
-    // Vocab
-    vocab_n_tokens: FnVocabNTokens,
-    vocab_bos: FnVocabBos,
-    vocab_eos: FnVocabEos,
-    vocab_is_eog: FnVocabIsEog,
-
-    // Batch
-    batch_get_one: FnBatchGetOne,
-    batch_init: FnBatchInit,
-    batch_free: FnBatchFree,
-
-    // Inference
-    encode: FnEncode,
-    decode: FnDecode,
-
-    // Output
-    get_logits_ith: FnGetLogitsIth,
-    get_embeddings: FnGetEmbeddings,
-    get_embeddings_ith: FnGetEmbeddingsIth,
-    get_embeddings_seq: FnGetEmbeddingsSeq,
-
-    // Sampling
-    sampler_chain_init: FnSamplerChainInit,
-    pub(crate) sampler_chain_default_params: FnSamplerChainDefaultParams,
-    sampler_chain_add: FnSamplerChainAdd,
-    sampler_sample: FnSamplerSample,
-    sampler_free: FnSamplerFree,
-    sampler_init_greedy: FnSamplerInitGreedy,
-    sampler_init_dist: FnSamplerInitDist,
-    sampler_init_top_k: FnSamplerInitTopK,
-    sampler_init_top_p: FnSamplerInitTopP,
-    sampler_init_temp: FnSamplerInitTemp,
-    sampler_init_min_p: FnSamplerInitMinP,
+    _private: (),
 }
 
 impl std::fmt::Debug for LlamaCppApi {
@@ -320,223 +255,34 @@ unsafe impl Send for LlamaCppApi {}
 unsafe impl Sync for LlamaCppApi {}
 
 impl LlamaCppApi {
-    /// Attempt to load libllama and resolve all required function pointers.
-    ///
-    /// Search order:
-    /// 1. `LLAMA_LIB_PATH` env var (exact path)
-    /// 2. Same directory as executable
-    /// 3. `../lib/` relative to executable
-    /// 4. `~/.strata/lib/` (Unix) or `%LOCALAPPDATA%\strata\lib\` (Windows)
-    /// 5. System search (`libllama.so` / `libllama.dylib` / `llama.dll`)
+    /// Initialise the llama.cpp backend (once) and verify struct layout probes.
     pub fn load() -> Result<Self, String> {
-        let lib = Self::open_library()?;
-
-        // Resolve all symbols
-        let backend_init: FnBackendInit = load_sym!(lib, "llama_backend_init");
-        let backend_free: FnBackendFree = load_sym!(lib, "llama_backend_free");
-
-        let model_default_params: FnModelDefaultParams =
-            load_sym!(lib, "llama_model_default_params");
-        let model_load_from_file: FnModelLoadFromFile =
-            load_sym!(lib, "llama_model_load_from_file");
-        let model_free: FnModelFree = load_sym!(lib, "llama_model_free");
-        let model_get_vocab: FnModelGetVocab = load_sym!(lib, "llama_model_get_vocab");
-        let model_n_embd: FnModelNEmbd = load_sym!(lib, "llama_model_n_embd");
-        let model_n_ctx_train: FnModelNCtxTrain = load_sym!(lib, "llama_model_n_ctx_train");
-        let model_has_encoder: FnModelHasEncoder = load_sym!(lib, "llama_model_has_encoder");
-
-        let context_default_params: FnContextDefaultParams =
-            load_sym!(lib, "llama_context_default_params");
-        let init_from_model: FnInitFromModel = load_sym!(lib, "llama_init_from_model");
-        let free: FnFree = load_sym!(lib, "llama_free");
-
-        let get_memory: FnGetMemory = load_sym!(lib, "llama_get_memory");
-        let memory_clear: FnMemoryClear = load_sym!(lib, "llama_memory_clear");
-
-        let tokenize: FnTokenize = load_sym!(lib, "llama_tokenize");
-        let token_to_piece: FnTokenToPiece = load_sym!(lib, "llama_token_to_piece");
-        let detokenize: FnDetokenize = load_sym!(lib, "llama_detokenize");
-
-        let vocab_n_tokens: FnVocabNTokens = load_sym!(lib, "llama_vocab_n_tokens");
-        let vocab_bos: FnVocabBos = load_sym!(lib, "llama_vocab_bos");
-        let vocab_eos: FnVocabEos = load_sym!(lib, "llama_vocab_eos");
-        let vocab_is_eog: FnVocabIsEog = load_sym!(lib, "llama_vocab_is_eog");
-
-        let batch_get_one: FnBatchGetOne = load_sym!(lib, "llama_batch_get_one");
-        let batch_init: FnBatchInit = load_sym!(lib, "llama_batch_init");
-        let batch_free: FnBatchFree = load_sym!(lib, "llama_batch_free");
-
-        let encode: FnEncode = load_sym!(lib, "llama_encode");
-        let decode: FnDecode = load_sym!(lib, "llama_decode");
-
-        let get_logits_ith: FnGetLogitsIth = load_sym!(lib, "llama_get_logits_ith");
-        let get_embeddings: FnGetEmbeddings = load_sym!(lib, "llama_get_embeddings");
-        let get_embeddings_ith: FnGetEmbeddingsIth = load_sym!(lib, "llama_get_embeddings_ith");
-        let get_embeddings_seq: FnGetEmbeddingsSeq = load_sym!(lib, "llama_get_embeddings_seq");
-
-        let sampler_chain_init: FnSamplerChainInit = load_sym!(lib, "llama_sampler_chain_init");
-        let sampler_chain_default_params: FnSamplerChainDefaultParams =
-            load_sym!(lib, "llama_sampler_chain_default_params");
-        let sampler_chain_add: FnSamplerChainAdd = load_sym!(lib, "llama_sampler_chain_add");
-        let sampler_sample: FnSamplerSample = load_sym!(lib, "llama_sampler_sample");
-        let sampler_free: FnSamplerFree = load_sym!(lib, "llama_sampler_free");
-        let sampler_init_greedy: FnSamplerInitGreedy = load_sym!(lib, "llama_sampler_init_greedy");
-        let sampler_init_dist: FnSamplerInitDist = load_sym!(lib, "llama_sampler_init_dist");
-        let sampler_init_top_k: FnSamplerInitTopK = load_sym!(lib, "llama_sampler_init_top_k");
-        let sampler_init_top_p: FnSamplerInitTopP = load_sym!(lib, "llama_sampler_init_top_p");
-        let sampler_init_temp: FnSamplerInitTemp = load_sym!(lib, "llama_sampler_init_temp");
-        let sampler_init_min_p: FnSamplerInitMinP = load_sym!(lib, "llama_sampler_init_min_p");
-
-        // Initialize the backend (Once guard prevents double-init from concurrent callers)
         use std::sync::Once;
         static BACKEND_INIT: Once = Once::new();
-        BACKEND_INIT.call_once(|| unsafe { backend_init() });
+        BACKEND_INIT.call_once(|| unsafe { llama_backend_init() });
 
-        // Runtime probe: verify struct layout by checking default params.
-        // use_mmap defaults to true in all known llama.cpp versions; if it
-        // reads as false, our struct layout is misaligned.
-        let mparams = unsafe { model_default_params() };
+        // Runtime layout probes: verify struct layout by checking default params.
+        let mparams = unsafe { llama_model_default_params() };
         if !mparams.use_mmap {
             return Err(
-                "libllama version mismatch: llama_model_default_params().use_mmap is false \
-                 (expected true). The struct layout may differ from what strata-inference expects. \
-                 Check LLAMA_CPP_VERSION for the pinned version."
+                "llama.cpp version mismatch: llama_model_default_params().use_mmap is false \
+                 (expected true). The struct layout may differ from what strata-inference expects."
                     .to_string(),
             );
         }
-        // Additional layout canary: vocab_only should be false by default
         if mparams.vocab_only {
             return Err(
-                "libllama version mismatch: vocab_only should be false by default".to_string(),
+                "llama.cpp version mismatch: vocab_only should be false by default".to_string(),
             );
         }
-        // Verify context default params aren't zeroed (would indicate layout mismatch)
-        let cparams = unsafe { context_default_params() };
+        let cparams = unsafe { llama_context_default_params() };
         if cparams.n_ctx == 0 && cparams.n_batch == 0 {
             return Err(
-                "libllama version mismatch: context default params look zeroed".to_string(),
+                "llama.cpp version mismatch: context default params look zeroed".to_string(),
             );
         }
 
-        Ok(Self {
-            _lib: lib,
-            backend_free,
-            model_default_params,
-            model_load_from_file,
-            model_free,
-            model_get_vocab,
-            model_n_embd,
-            model_n_ctx_train,
-            model_has_encoder,
-            context_default_params,
-            init_from_model,
-            free,
-            get_memory,
-            memory_clear,
-            tokenize,
-            token_to_piece,
-            detokenize,
-            vocab_n_tokens,
-            vocab_bos,
-            vocab_eos,
-            vocab_is_eog,
-            batch_get_one,
-            batch_init,
-            batch_free,
-            encode,
-            decode,
-            get_logits_ith,
-            get_embeddings,
-            get_embeddings_ith,
-            get_embeddings_seq,
-            sampler_chain_init,
-            sampler_chain_default_params,
-            sampler_chain_add,
-            sampler_sample,
-            sampler_free,
-            sampler_init_greedy,
-            sampler_init_dist,
-            sampler_init_top_k,
-            sampler_init_top_p,
-            sampler_init_temp,
-            sampler_init_min_p,
-        })
-    }
-
-    /// Try to open libllama from multiple search paths.
-    ///
-    /// Search order per PLAN-strata-inference.md:
-    /// 1. `LLAMA_LIB_PATH` env var (exact path)
-    /// 2. Same directory as executable
-    /// 3. `../lib/` relative to executable
-    /// 4. `~/.strata/lib/` (Unix) or `%LOCALAPPDATA%\strata\lib\` (Windows)
-    /// 5. System search (bare library name)
-    fn open_library() -> Result<DynLib, String> {
-        let filename = super::dl::libllama_filename();
-
-        // 1. Explicit env var — exact path
-        if let Ok(path) = std::env::var("LLAMA_LIB_PATH") {
-            if !path.is_empty() {
-                let cpath = std::ffi::CString::new(path.as_bytes())
-                    .map_err(|_| "LLAMA_LIB_PATH contains null byte".to_string())?;
-                return DynLib::open(&cpath);
-            }
-        }
-
-        // Build candidate paths
-        let mut candidates: Vec<PathBuf> = Vec::new();
-
-        // 2 & 3. Relative to executable
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(exe_dir) = exe.parent() {
-                // 2. Same directory as executable
-                candidates.push(exe_dir.join(&filename));
-                // 3. ../lib/ relative to executable
-                candidates.push(exe_dir.join("../lib").join(&filename));
-            }
-        }
-
-        // 4. User-local directory
-        #[cfg(unix)]
-        if let Ok(home) = std::env::var("HOME") {
-            candidates.push(PathBuf::from(home).join(".strata/lib").join(&filename));
-        }
-        #[cfg(windows)]
-        if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            candidates.push(PathBuf::from(local).join("strata\\lib").join(&filename));
-        }
-
-        // Try each candidate path
-        for path in &candidates {
-            if let Some(path_str) = path.to_str() {
-                if let Ok(cpath) = std::ffi::CString::new(path_str) {
-                    if let Ok(lib) = DynLib::open(&cpath) {
-                        return Ok(lib);
-                    }
-                }
-            }
-        }
-
-        // 5. System search (bare library name)
-        let sys_name = std::ffi::CString::new(filename.as_bytes())
-            .map_err(|_| "library filename contains null byte".to_string())?;
-        let last_err = match DynLib::open(&sys_name) {
-            Ok(lib) => return Ok(lib),
-            Err(e) => e,
-        };
-
-        // Build a helpful error listing all paths tried
-        let tried: Vec<String> = candidates
-            .iter()
-            .map(|p| format!("  - {}", p.display()))
-            .collect();
-        Err(format!(
-            "could not load {filename}: {last_err}\n\
-             Searched:\n\
-             {tried}\n\
-             Set LLAMA_LIB_PATH to the exact path, or install libllama in one of the above locations.",
-            tried = tried.join("\n")
-        ))
+        Ok(Self { _private: () })
     }
 
     // -----------------------------------------------------------------------
@@ -544,7 +290,7 @@ impl LlamaCppApi {
     // -----------------------------------------------------------------------
 
     pub fn model_default_params(&self) -> LlamaModelParams {
-        unsafe { (self.model_default_params)() }
+        unsafe { llama_model_default_params() }
     }
 
     pub fn model_load_from_file(
@@ -552,7 +298,7 @@ impl LlamaCppApi {
         path: &CStr,
         params: LlamaModelParams,
     ) -> Result<LlamaModel, String> {
-        let model = unsafe { (self.model_load_from_file)(path.as_ptr(), params) };
+        let model = unsafe { llama_model_load_from_file(path.as_ptr(), params) };
         if model.is_null() {
             return Err(format!("llama_model_load_from_file failed for {:?}", path));
         }
@@ -561,26 +307,26 @@ impl LlamaCppApi {
 
     pub fn model_free(&self, model: LlamaModel) {
         if !model.is_null() {
-            unsafe { (self.model_free)(model) };
+            unsafe { llama_model_free(model) };
         }
     }
 
     pub fn model_get_vocab(&self, model: LlamaModel) -> LlamaVocab {
-        let vocab = unsafe { (self.model_get_vocab)(model) };
+        let vocab = unsafe { llama_model_get_vocab(model) };
         assert!(!vocab.is_null(), "llama_model_get_vocab returned null");
         vocab
     }
 
     pub fn model_n_embd(&self, model: LlamaModel) -> i32 {
-        unsafe { (self.model_n_embd)(model) }
+        unsafe { llama_model_n_embd(model) }
     }
 
     pub fn model_n_ctx_train(&self, model: LlamaModel) -> i32 {
-        unsafe { (self.model_n_ctx_train)(model) }
+        unsafe { llama_model_n_ctx_train(model) }
     }
 
     pub fn model_has_encoder(&self, model: LlamaModel) -> bool {
-        unsafe { (self.model_has_encoder)(model) }
+        unsafe { llama_model_has_encoder(model) }
     }
 
     // -----------------------------------------------------------------------
@@ -588,7 +334,7 @@ impl LlamaCppApi {
     // -----------------------------------------------------------------------
 
     pub fn context_default_params(&self) -> LlamaContextParams {
-        unsafe { (self.context_default_params)() }
+        unsafe { llama_context_default_params() }
     }
 
     pub fn init_from_model(
@@ -596,7 +342,7 @@ impl LlamaCppApi {
         model: LlamaModel,
         params: LlamaContextParams,
     ) -> Result<LlamaContext, String> {
-        let ctx = unsafe { (self.init_from_model)(model, params) };
+        let ctx = unsafe { llama_init_from_model(model, params) };
         if ctx.is_null() {
             return Err("llama_init_from_model returned null".to_string());
         }
@@ -605,7 +351,7 @@ impl LlamaCppApi {
 
     pub fn free(&self, ctx: LlamaContext) {
         if !ctx.is_null() {
-            unsafe { (self.free)(ctx) };
+            unsafe { llama_free(ctx) };
         }
     }
 
@@ -614,12 +360,12 @@ impl LlamaCppApi {
     // -----------------------------------------------------------------------
 
     pub fn get_memory(&self, ctx: LlamaContext) -> LlamaMemory {
-        unsafe { (self.get_memory)(ctx) }
+        unsafe { shim_get_memory(ctx) }
     }
 
     pub fn memory_clear(&self, mem: LlamaMemory, data: bool) {
         if !mem.is_null() {
-            unsafe { (self.memory_clear)(mem, data) };
+            unsafe { shim_memory_clear(mem, data) };
         }
     }
 
@@ -636,7 +382,7 @@ impl LlamaCppApi {
         parse_special: bool,
     ) -> i32 {
         unsafe {
-            (self.tokenize)(
+            llama_tokenize(
                 vocab,
                 text.as_ptr() as *const c_char,
                 text.len() as i32,
@@ -650,7 +396,7 @@ impl LlamaCppApi {
 
     pub fn token_to_piece(&self, vocab: LlamaVocab, token: LlamaToken, buf: &mut [u8]) -> i32 {
         unsafe {
-            (self.token_to_piece)(
+            llama_token_to_piece(
                 vocab,
                 token,
                 buf.as_mut_ptr() as *mut c_char,
@@ -669,7 +415,7 @@ impl LlamaCppApi {
         remove_special: bool,
     ) -> i32 {
         unsafe {
-            (self.detokenize)(
+            llama_detokenize(
                 vocab,
                 tokens.as_ptr(),
                 tokens.len() as i32,
@@ -686,19 +432,19 @@ impl LlamaCppApi {
     // -----------------------------------------------------------------------
 
     pub fn vocab_n_tokens(&self, vocab: LlamaVocab) -> i32 {
-        unsafe { (self.vocab_n_tokens)(vocab) }
+        unsafe { llama_vocab_n_tokens(vocab) }
     }
 
     pub fn vocab_bos(&self, vocab: LlamaVocab) -> LlamaToken {
-        unsafe { (self.vocab_bos)(vocab) }
+        unsafe { llama_vocab_bos(vocab) }
     }
 
     pub fn vocab_eos(&self, vocab: LlamaVocab) -> LlamaToken {
-        unsafe { (self.vocab_eos)(vocab) }
+        unsafe { llama_vocab_eos(vocab) }
     }
 
     pub fn vocab_is_eog(&self, vocab: LlamaVocab, token: LlamaToken) -> bool {
-        unsafe { (self.vocab_is_eog)(vocab, token) }
+        unsafe { llama_vocab_is_eog(vocab, token) }
     }
 
     // -----------------------------------------------------------------------
@@ -706,15 +452,15 @@ impl LlamaCppApi {
     // -----------------------------------------------------------------------
 
     pub fn batch_get_one(&self, tokens: &mut [LlamaToken]) -> LlamaBatch {
-        unsafe { (self.batch_get_one)(tokens.as_mut_ptr(), tokens.len() as i32) }
+        unsafe { llama_batch_get_one(tokens.as_mut_ptr(), tokens.len() as i32) }
     }
 
     pub fn batch_init(&self, n_tokens: i32, embd: i32, n_seq_max: i32) -> LlamaBatch {
-        unsafe { (self.batch_init)(n_tokens, embd, n_seq_max) }
+        unsafe { llama_batch_init(n_tokens, embd, n_seq_max) }
     }
 
     pub fn batch_free(&self, batch: LlamaBatch) {
-        unsafe { (self.batch_free)(batch) };
+        unsafe { llama_batch_free(batch) };
     }
 
     // -----------------------------------------------------------------------
@@ -727,7 +473,7 @@ impl LlamaCppApi {
     /// tokens: use `true` for initial prompts (adds BOS/EOS per the model's
     /// chat template), `false` for continuation text.
     pub fn encode(&self, ctx: LlamaContext, batch: LlamaBatch) -> Result<(), String> {
-        let rc = unsafe { (self.encode)(ctx, batch) };
+        let rc = unsafe { llama_encode(ctx, batch) };
         if rc != 0 {
             return Err(format!("llama_encode failed with code {}", rc));
         }
@@ -735,7 +481,7 @@ impl LlamaCppApi {
     }
 
     pub fn decode(&self, ctx: LlamaContext, batch: LlamaBatch) -> Result<(), String> {
-        let rc = unsafe { (self.decode)(ctx, batch) };
+        let rc = unsafe { llama_decode(ctx, batch) };
         if rc != 0 {
             return Err(format!("llama_decode failed with code {}", rc));
         }
@@ -749,7 +495,7 @@ impl LlamaCppApi {
     /// Get logits for the i-th token of the last decode call.
     /// Returns a raw pointer to `n_vocab` floats owned by llama.cpp, or null on error.
     pub fn get_logits_ith(&self, ctx: LlamaContext, i: i32) -> *mut f32 {
-        let ptr = unsafe { (self.get_logits_ith)(ctx, i) };
+        let ptr = unsafe { llama_get_logits_ith(ctx, i) };
         assert!(!ptr.is_null(), "llama_get_logits_ith returned null");
         ptr
     }
@@ -757,19 +503,19 @@ impl LlamaCppApi {
     /// Get pooled embeddings (for models with pooling).
     /// Returns a raw pointer to `n_embd` floats owned by llama.cpp, or null on error.
     pub fn get_embeddings(&self, ctx: LlamaContext) -> *mut f32 {
-        let ptr = unsafe { (self.get_embeddings)(ctx) };
+        let ptr = unsafe { llama_get_embeddings(ctx) };
         assert!(!ptr.is_null(), "llama_get_embeddings returned null");
         ptr
     }
 
     pub fn get_embeddings_ith(&self, ctx: LlamaContext, i: i32) -> *mut f32 {
-        let ptr = unsafe { (self.get_embeddings_ith)(ctx, i) };
+        let ptr = unsafe { llama_get_embeddings_ith(ctx, i) };
         assert!(!ptr.is_null(), "llama_get_embeddings_ith returned null");
         ptr
     }
 
     pub fn get_embeddings_seq(&self, ctx: LlamaContext, seq_id: LlamaSeqId) -> *mut f32 {
-        let ptr = unsafe { (self.get_embeddings_seq)(ctx, seq_id) };
+        let ptr = unsafe { llama_get_embeddings_seq(ctx, seq_id) };
         assert!(!ptr.is_null(), "llama_get_embeddings_seq returned null");
         ptr
     }
@@ -779,55 +525,55 @@ impl LlamaCppApi {
     // -----------------------------------------------------------------------
 
     pub fn sampler_chain_init(&self, params: LlamaSamplerChainParams) -> LlamaSampler {
-        unsafe { (self.sampler_chain_init)(params) }
+        unsafe { llama_sampler_chain_init(params) }
     }
 
     pub fn sampler_chain_default_params(&self) -> LlamaSamplerChainParams {
-        unsafe { (self.sampler_chain_default_params)() }
+        unsafe { llama_sampler_chain_default_params() }
     }
 
     pub fn sampler_chain_add(&self, chain: LlamaSampler, smpl: LlamaSampler) {
-        unsafe { (self.sampler_chain_add)(chain, smpl) };
+        unsafe { llama_sampler_chain_add(chain, smpl) };
     }
 
     pub fn sampler_sample(&self, smpl: LlamaSampler, ctx: LlamaContext, idx: i32) -> LlamaToken {
-        unsafe { (self.sampler_sample)(smpl, ctx, idx) }
+        unsafe { llama_sampler_sample(smpl, ctx, idx) }
     }
 
     pub fn sampler_free(&self, smpl: LlamaSampler) {
         if !smpl.is_null() {
-            unsafe { (self.sampler_free)(smpl) };
+            unsafe { llama_sampler_free(smpl) };
         }
     }
 
     pub fn sampler_init_greedy(&self) -> LlamaSampler {
-        unsafe { (self.sampler_init_greedy)() }
+        unsafe { llama_sampler_init_greedy() }
     }
 
     pub fn sampler_init_dist(&self, seed: u32) -> LlamaSampler {
-        unsafe { (self.sampler_init_dist)(seed) }
+        unsafe { llama_sampler_init_dist(seed) }
     }
 
     pub fn sampler_init_top_k(&self, k: i32) -> LlamaSampler {
-        unsafe { (self.sampler_init_top_k)(k) }
+        unsafe { llama_sampler_init_top_k(k) }
     }
 
     pub fn sampler_init_top_p(&self, p: f32, min_keep: usize) -> LlamaSampler {
-        unsafe { (self.sampler_init_top_p)(p, min_keep) }
+        unsafe { llama_sampler_init_top_p(p, min_keep) }
     }
 
     pub fn sampler_init_temp(&self, t: f32) -> LlamaSampler {
-        unsafe { (self.sampler_init_temp)(t) }
+        unsafe { llama_sampler_init_temp(t) }
     }
 
     pub fn sampler_init_min_p(&self, p: f32, min_keep: usize) -> LlamaSampler {
-        unsafe { (self.sampler_init_min_p)(p, min_keep) }
+        unsafe { llama_sampler_init_min_p(p, min_keep) }
     }
 }
 
 impl Drop for LlamaCppApi {
     fn drop(&mut self) {
-        unsafe { (self.backend_free)() };
+        unsafe { llama_backend_free() };
     }
 }
 
@@ -838,11 +584,6 @@ impl Drop for LlamaCppApi {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Mutex to serialize tests that mutate env vars (LLAMA_LIB_PATH).
-    // Required because Rust runs tests in parallel and env vars are global.
-    use std::sync::Mutex;
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     // --- Compile-time struct size assertions (also checked above via const) ---
 
@@ -949,82 +690,6 @@ mod tests {
         // Plus the i32 + pad = 8. Total = 56.
     }
 
-    // --- Library loading error (no libllama expected in CI) ---
-
-    #[test]
-    fn load_without_libllama_returns_descriptive_error() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        // Temporarily override to ensure we don't accidentally find a real libllama
-        // This test verifies the error message is helpful, not just "error"
-        unsafe { std::env::set_var("LLAMA_LIB_PATH", "/nonexistent/path/libllama.so") };
-        let result = LlamaCppApi::load();
-        unsafe { std::env::remove_var("LLAMA_LIB_PATH") };
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(!err.is_empty(), "error should not be empty");
-        // Error should mention the path or library name
-        assert!(
-            err.contains("nonexistent") || err.contains("libllama"),
-            "error should mention the path or library: {err}"
-        );
-    }
-
-    #[test]
-    fn load_with_empty_llama_lib_path_falls_through() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        // Empty LLAMA_LIB_PATH should skip the env var check and try other paths
-        unsafe { std::env::set_var("LLAMA_LIB_PATH", "") };
-        let result = LlamaCppApi::load();
-        unsafe { std::env::remove_var("LLAMA_LIB_PATH") };
-
-        // Will fail (no libllama in CI) but should have tried other paths
-        if let Err(err) = result {
-            // Error should mention the search paths, not "LLAMA_LIB_PATH"
-            assert!(
-                err.contains("Searched") || err.contains("libllama"),
-                "error should list search paths: {err}"
-            );
-        }
-        // If it somehow succeeds (libllama is installed), that's fine too
-    }
-
-    #[test]
-    fn load_error_includes_system_search_failure() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        // When all paths fail, the error should reflect the system search
-        // failure (the last attempt), not just candidate path failures
-        unsafe { std::env::set_var("LLAMA_LIB_PATH", "") };
-        let result = LlamaCppApi::load();
-        unsafe { std::env::remove_var("LLAMA_LIB_PATH") };
-
-        if let Err(err) = result {
-            // The error message should contain the library filename
-            let filename = super::super::dl::libllama_filename();
-            assert!(
-                err.contains(&filename),
-                "error should mention {filename}: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn llama_cpp_api_debug_impl() {
-        // LlamaCppApi has a manual Debug impl — verify it doesn't panic
-        // and contains the struct name. We can't construct one without libllama,
-        // but we test the format indirectly via the error path.
-        let result = LlamaCppApi::load();
-        if let Ok(api) = result {
-            let dbg = format!("{:?}", api);
-            assert!(
-                dbg.contains("LlamaCppApi"),
-                "Debug output should contain struct name: {dbg}"
-            );
-        }
-        // If load fails, that's expected (no libllama) — the test still verifies
-        // the Debug impl compiles and is callable.
-    }
-
     #[test]
     fn pooling_types_are_sequential() {
         // Verify the enum values are in order (important for array indexing)
@@ -1064,12 +729,11 @@ mod tests {
         assert!(batch.logits.is_null());
     }
 
-    // --- Smoke test: load libllama and verify symbol resolution ---
+    // --- Smoke test: load and verify symbol resolution ---
 
     #[test]
     #[ignore]
     fn smoke_test_load_api() {
-        let has_env = std::env::var("LLAMA_LIB_PATH").is_ok();
         match LlamaCppApi::load() {
             Ok(api) => {
                 // Verify model default params are sane
@@ -1113,11 +777,7 @@ mod tests {
                 );
             }
             Err(e) => {
-                if has_env {
-                    panic!("LLAMA_LIB_PATH is set but load failed: {e}");
-                }
-                // No LLAMA_LIB_PATH → expected in CI without libllama
-                eprintln!("skipping smoke_test_load_api: {e}");
+                panic!("load() failed: {e}");
             }
         }
     }

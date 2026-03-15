@@ -363,20 +363,20 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn from_registry_known_model_not_local_returns_registry_error() {
-        // Known model but not downloaded → Registry error with helpful message
+    fn from_registry_known_model_not_local_returns_error_or_succeeds() {
+        // Known model but not downloaded → Registry error with helpful message.
+        // If the model is already on disk, this succeeds — that's fine.
         let result = EmbeddingEngine::from_registry("miniLM");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        let msg = err.to_string();
-        // Could be Registry (model not found locally) or LlamaCpp (libllama not found)
-        assert!(
-            matches!(
-                err,
-                InferenceError::Registry(_) | InferenceError::LlamaCpp(_)
-            ),
-            "should be Registry or LlamaCpp error, got: {msg}"
-        );
+        if let Err(err) = result {
+            let msg = err.to_string();
+            assert!(
+                matches!(
+                    err,
+                    InferenceError::Registry(_) | InferenceError::LlamaCpp(_)
+                ),
+                "should be Registry or LlamaCpp error, got: {msg}"
+            );
+        }
     }
 
     #[test]

@@ -1,13 +1,12 @@
 //! llama.cpp FFI layer for local embedding and generation.
 //!
-//! Dynamically loads `libllama` at runtime via [`dl::DynLib`] and provides:
-//! - [`ffi::LlamaCppApi`] — resolved function pointers with safe wrappers
+//! Statically links `libllama` compiled from vendored source via `build.rs`.
+//! - [`ffi::LlamaCppApi`] — safe wrappers around the llama.cpp C API
 //! - [`context::LlamaCppContext`] — model/context lifecycle and tokenization
 //!
-//! Requires the `local` feature flag. No build-time dependency on llama.cpp.
+//! Requires the `local` feature flag (enabled by default).
 
 pub(crate) mod context;
-pub mod dl;
 // Safe wrappers intentionally accept raw pointers (opaque FFI handles).
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub mod ffi;
