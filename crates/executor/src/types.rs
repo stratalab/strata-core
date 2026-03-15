@@ -698,25 +698,97 @@ pub struct SampleItem {
 // Graph Types
 // =============================================================================
 
-/// Graph analytics result with u64 per-node values (WCC components, CDLP labels).
+/// A node with its score (used in analytics summaries).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GraphAnalyticsU64Result {
-    /// Algorithm name (e.g. "wcc", "cdlp").
-    pub algorithm: String,
-    /// Per-node result values.
-    pub result: std::collections::HashMap<String, u64>,
+pub struct NodeScore {
+    /// Node identifier.
+    pub node_id: String,
+    /// Score value.
+    pub score: f64,
 }
 
-/// Graph analytics result with f64 per-node values (PageRank, LCC, SSSP).
+/// A group of nodes sharing a label/component (used in WCC/CDLP summaries).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GraphAnalyticsF64Result {
+pub struct GroupInfo {
+    /// Group identifier (component ID or label hash).
+    pub id: u64,
+    /// Number of nodes in this group.
+    pub size: usize,
+    /// Sample node IDs from this group.
+    pub sample_nodes: Vec<String>,
+}
+
+/// Statistical distribution of scores.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScoreDistribution {
+    /// Minimum score.
+    pub min: f64,
+    /// Maximum score.
+    pub max: f64,
+    /// Arithmetic mean.
+    pub mean: f64,
+    /// Median (50th percentile).
+    pub median: f64,
+    /// 90th percentile.
+    pub p90: f64,
+    /// 99th percentile.
+    pub p99: f64,
+}
+
+/// Summary of a grouping analytics result (WCC, CDLP).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GraphGroupSummary {
+    /// Algorithm name (e.g. "wcc", "cdlp").
+    pub algorithm: String,
+    /// Graph name.
+    pub graph: String,
+    /// Total number of nodes.
+    pub node_count: usize,
+    /// Number of distinct groups.
+    pub group_count: usize,
+    /// Size of the largest group.
+    pub largest_group_size: usize,
+    /// Top groups sorted by size descending, with sample nodes.
+    pub groups: Vec<GroupInfo>,
+    /// Full raw results (only when `include_all` is true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all: Option<std::collections::HashMap<String, u64>>,
+}
+
+/// Summary of a score-based analytics result (PageRank, LCC, SSSP).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GraphScoreSummary {
     /// Algorithm name (e.g. "pagerank", "lcc", "sssp").
     pub algorithm: String,
-    /// Per-node result values.
-    pub result: std::collections::HashMap<String, f64>,
-    /// Number of iterations (for iterative algorithms like PageRank).
+    /// Graph name.
+    pub graph: String,
+    /// Total number of nodes.
+    pub node_count: usize,
+    /// Top nodes by score.
+    pub top_nodes: Vec<NodeScore>,
+    /// Score distribution statistics.
+    pub distribution: ScoreDistribution,
+    /// Number of iterations (PageRank).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iterations: Option<usize>,
+    /// Whether the algorithm converged (PageRank).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub converged: Option<bool>,
+    /// Global clustering coefficient — mean of all coefficients (LCC).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_clustering_coefficient: Option<f64>,
+    /// Count of nodes with zero coefficient (LCC).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zero_count: Option<usize>,
+    /// Source node (SSSP).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Farthest reachable nodes (SSSP).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub farthest: Option<Vec<NodeScore>>,
+    /// Full raw results (only when `include_all` is true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all: Option<std::collections::HashMap<String, f64>>,
 }
 
 // =============================================================================

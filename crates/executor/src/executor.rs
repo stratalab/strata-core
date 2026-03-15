@@ -1570,18 +1570,31 @@ impl Executor {
             }
 
             // Graph Analytics
-            Command::GraphWcc { branch, graph } => {
+            Command::GraphWcc {
+                branch,
+                graph,
+                top_n,
+                include_all,
+            } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
-                crate::handlers::graph::graph_wcc(&self.primitives, branch, graph)
+                crate::handlers::graph::graph_wcc(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    top_n,
+                    include_all,
+                )
             }
             Command::GraphCdlp {
                 branch,
                 graph,
                 max_iterations,
                 direction,
+                top_n,
+                include_all,
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
@@ -1593,6 +1606,8 @@ impl Executor {
                     graph,
                     max_iterations,
                     direction,
+                    top_n,
+                    include_all,
                 )
             }
             Command::GraphPagerank {
@@ -1601,6 +1616,8 @@ impl Executor {
                 damping,
                 max_iterations,
                 tolerance,
+                top_n,
+                include_all,
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
@@ -1613,20 +1630,35 @@ impl Executor {
                     damping,
                     max_iterations,
                     tolerance,
+                    top_n,
+                    include_all,
                 )
             }
-            Command::GraphLcc { branch, graph } => {
+            Command::GraphLcc {
+                branch,
+                graph,
+                top_n,
+                include_all,
+            } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
-                crate::handlers::graph::graph_lcc(&self.primitives, branch, graph)
+                crate::handlers::graph::graph_lcc(
+                    &self.primitives,
+                    branch,
+                    graph,
+                    top_n,
+                    include_all,
+                )
             }
             Command::GraphSssp {
                 branch,
                 graph,
                 source,
                 direction,
+                top_n,
+                include_all,
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
@@ -1638,6 +1670,8 @@ impl Executor {
                     graph,
                     source,
                     direction,
+                    top_n,
+                    include_all,
                 )
             }
         };

@@ -1489,17 +1489,23 @@ pub enum Command {
 
     // ==================== Graph Analytics ====================
     /// Weakly Connected Components (union-find).
-    /// Returns: `Output::GraphAnalyticsU64`
+    /// Returns: `Output::GraphGroupSummary`
     GraphWcc {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
         /// Graph name.
         graph: String,
+        /// Number of top groups to return (default 10).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top_n: Option<usize>,
+        /// Include full raw results.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include_all: Option<bool>,
     },
 
     /// Community Detection via Label Propagation.
-    /// Returns: `Output::GraphAnalyticsU64`
+    /// Returns: `Output::GraphGroupSummary`
     GraphCdlp {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1511,10 +1517,16 @@ pub enum Command {
         /// Direction: `"outgoing"`, `"incoming"`, or `"both"`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         direction: Option<String>,
+        /// Number of top groups to return (default 10).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top_n: Option<usize>,
+        /// Include full raw results.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include_all: Option<bool>,
     },
 
     /// PageRank importance scoring.
-    /// Returns: `Output::GraphAnalyticsF64`
+    /// Returns: `Output::GraphScoreSummary`
     GraphPagerank {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1530,20 +1542,32 @@ pub enum Command {
         /// Convergence tolerance (default 1e-6).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tolerance: Option<f64>,
+        /// Number of top nodes to return (default 10).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top_n: Option<usize>,
+        /// Include full raw results.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include_all: Option<bool>,
     },
 
     /// Local Clustering Coefficient.
-    /// Returns: `Output::GraphAnalyticsF64`
+    /// Returns: `Output::GraphScoreSummary`
     GraphLcc {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
         /// Graph name.
         graph: String,
+        /// Number of top nodes to return (default 10).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top_n: Option<usize>,
+        /// Include full raw results.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include_all: Option<bool>,
     },
 
     /// Single-Source Shortest Path (Dijkstra).
-    /// Returns: `Output::GraphAnalyticsF64`
+    /// Returns: `Output::GraphScoreSummary`
     GraphSssp {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1555,6 +1579,12 @@ pub enum Command {
         /// Direction: `"outgoing"`, `"incoming"`, or `"both"`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         direction: Option<String>,
+        /// Number of top nodes to return (default 10).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top_n: Option<usize>,
+        /// Include full raw results.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include_all: Option<bool>,
     },
 }
 

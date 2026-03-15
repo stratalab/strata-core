@@ -1216,12 +1216,25 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
         // Analytics (nested)
         "analytics" => {
             let (alg_sub, alg_m) = m.subcommand().ok_or("No analytics subcommand")?;
+            // Shared analytics options
+            let top_n = alg_m
+                .get_one::<String>("top-n")
+                .map(|s| s.parse::<usize>())
+                .transpose()
+                .map_err(|e| format!("Invalid top-n: {}", e))?;
+            let include_all = if alg_m.get_flag("include-all") {
+                Some(true)
+            } else {
+                None
+            };
             match alg_sub {
                 "wcc" => {
                     let graph = alg_m.get_one::<String>("graph").unwrap().clone();
                     Ok(CliAction::Execute(Command::GraphWcc {
                         branch: branch(state),
                         graph,
+                        top_n,
+                        include_all,
                     }))
                 }
                 "cdlp" => {
@@ -1237,6 +1250,8 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                         graph,
                         max_iterations,
                         direction,
+                        top_n,
+                        include_all,
                     }))
                 }
                 "pagerank" => {
@@ -1262,6 +1277,8 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                         damping,
                         max_iterations,
                         tolerance,
+                        top_n,
+                        include_all,
                     }))
                 }
                 "lcc" => {
@@ -1269,6 +1286,8 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                     Ok(CliAction::Execute(Command::GraphLcc {
                         branch: branch(state),
                         graph,
+                        top_n,
+                        include_all,
                     }))
                 }
                 "sssp" => {
@@ -1280,6 +1299,8 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                         graph,
                         source,
                         direction,
+                        top_n,
+                        include_all,
                     }))
                 }
                 other => Err(unknown_subcommand(
