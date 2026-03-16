@@ -22,7 +22,9 @@
 //! All mmap files are **caches** — if missing, corrupt, or version-mismatched,
 //! recovery falls back transparently to full KV-based rebuild with no data loss.
 
+use crate::branch_dag::SYSTEM_BRANCH;
 use crate::database::Database;
+use crate::primitives::branch::resolve_branch_name;
 use crate::recovery::{register_recovery_participant, RecoveryParticipant};
 use crate::search::InvertedIndex;
 use strata_core::types::TypeTag;
@@ -103,7 +105,14 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
     let mut docs_indexed: u64 = 0;
     let mut branches_scanned: u64 = 0;
 
+    // Skip the _system_ branch — its KV entries are internal graph
+    // infrastructure (DAG metadata, catalog, node data), not user content.
+    let system_branch_id = resolve_branch_name(SYSTEM_BRANCH);
+
     for branch_id in db.storage().branch_ids() {
+        if branch_id == system_branch_id {
+            continue;
+        }
         branches_scanned += 1;
 
         // --- KV entries ---
