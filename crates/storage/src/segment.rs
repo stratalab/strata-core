@@ -212,7 +212,10 @@ impl KVSegment {
 
             // If this block's first key has a typed_key_prefix > our typed_key, stop
             if bi > block_idx {
-                let block_first_ik = InternalKey::from_bytes(ie.key.clone());
+                let block_first_ik = match InternalKey::try_from_bytes(ie.key.clone()) {
+                    Some(ik) => ik,
+                    None => break, // Corrupt index key — stop scanning
+                };
                 if block_first_ik.typed_key_prefix() > typed_key.as_slice() {
                     break;
                 }
