@@ -1928,8 +1928,19 @@ mod tests {
 
     #[test]
     fn graph_bfs_invalid_depth() {
-        let err = parse_err(&["graph", "bfs", "social", "alice", "--max-depth", "not_a_number"]);
-        assert!(err.contains("invalid") || err.contains("Invalid"), "got: {}", err);
+        let err = parse_err(&[
+            "graph",
+            "bfs",
+            "social",
+            "alice",
+            "--max-depth",
+            "not_a_number",
+        ]);
+        assert!(
+            err.contains("invalid") || err.contains("Invalid"),
+            "got: {}",
+            err
+        );
     }
 
     // =========================================================================
@@ -2211,7 +2222,11 @@ mod tests {
             "--weight",
             "not_a_float",
         ]);
-        assert!(err.contains("invalid") || err.contains("Invalid"), "got: {}", err);
+        assert!(
+            err.contains("invalid") || err.contains("Invalid"),
+            "got: {}",
+            err
+        );
     }
 
     #[test]
@@ -2222,15 +2237,32 @@ mod tests {
 
     #[test]
     fn graph_bfs_invalid_max_nodes() {
-        let err = parse_err(&["graph", "bfs", "g", "start", "--max-depth", "3", "--max-nodes", "xyz"]);
-        assert!(err.contains("invalid") || err.contains("Invalid"), "got: {}", err);
+        let err = parse_err(&[
+            "graph",
+            "bfs",
+            "g",
+            "start",
+            "--max-depth",
+            "3",
+            "--max-nodes",
+            "xyz",
+        ]);
+        assert!(
+            err.contains("invalid") || err.contains("Invalid"),
+            "got: {}",
+            err
+        );
     }
 
     #[test]
     fn graph_bulk_insert_invalid_chunk_size() {
         let json = r#"{"nodes":[]}"#;
         let err = parse_err(&["graph", "bulk-insert", "g", json, "--chunk-size", "abc"]);
-        assert!(err.contains("invalid") || err.contains("Invalid"), "got: {}", err);
+        assert!(
+            err.contains("invalid") || err.contains("Invalid"),
+            "got: {}",
+            err
+        );
     }
 
     #[test]
