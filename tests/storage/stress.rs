@@ -11,7 +11,7 @@ use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
-use strata_storage::sharded::ShardedStore;
+use strata_storage::SegmentedStore;
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
     let ns = Arc::new(Namespace::for_branch(branch_id));
@@ -22,7 +22,7 @@ fn create_test_key(branch_id: BranchId, name: &str) -> Key {
 #[test]
 #[ignore]
 fn stress_concurrent_writers_readers() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let stop = Arc::new(AtomicBool::new(false));
     let writes = Arc::new(AtomicU64::new(0));
@@ -111,7 +111,7 @@ fn stress_concurrent_writers_readers() {
 #[test]
 #[ignore]
 fn stress_rapid_snapshot_creation() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
 
     // Populate
@@ -149,7 +149,7 @@ fn stress_rapid_snapshot_creation() {
 #[test]
 #[ignore]
 fn stress_version_chain_growth() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "deep_chain");
 
@@ -191,7 +191,7 @@ fn stress_version_chain_growth() {
 #[test]
 #[ignore]
 fn stress_ttl_expiration_cleanup() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
 
     // Insert 10K keys with short TTL
@@ -223,7 +223,7 @@ fn stress_ttl_expiration_cleanup() {
 #[test]
 #[ignore]
 fn stress_many_branches_concurrent() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let num_branches = 100;
     let keys_per_branch = 100;
 
@@ -271,7 +271,7 @@ fn stress_many_branches_concurrent() {
 #[test]
 #[ignore]
 fn stress_sustained_throughput() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
 
     let duration = Duration::from_secs(5);

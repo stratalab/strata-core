@@ -13,7 +13,7 @@ use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
-use strata_storage::sharded::ShardedStore;
+use strata_storage::SegmentedStore;
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
     let ns = Arc::new(Namespace::for_branch(branch_id));
@@ -26,7 +26,7 @@ fn create_test_key(branch_id: BranchId, name: &str) -> Key {
 
 #[test]
 fn cas_succeeds_when_version_matches() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "cas_ok");
 
@@ -54,7 +54,7 @@ fn cas_succeeds_when_version_matches() {
 
 #[test]
 fn cas_create_succeeds_when_key_absent() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "cas_create");
 
@@ -80,7 +80,7 @@ fn cas_create_succeeds_when_key_absent() {
 
 #[test]
 fn cas_fails_when_version_stale() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "cas_stale");
 
@@ -125,7 +125,7 @@ fn cas_fails_when_version_stale() {
 
 #[test]
 fn cas_create_fails_when_key_exists() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "cas_exists");
 
@@ -147,7 +147,7 @@ fn cas_create_fails_when_key_exists() {
 
 #[test]
 fn cas_fails_when_key_deleted() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "cas_deleted");
 
@@ -199,7 +199,7 @@ fn cas_not_added_to_read_set() {
 
 #[test]
 fn cas_validated_separately_from_reads() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let read_key = create_test_key(branch_id, "read_key");
     let cas_key = create_test_key(branch_id, "cas_key");
@@ -259,7 +259,7 @@ fn cas_validated_separately_from_reads() {
 
 #[test]
 fn multiple_cas_all_succeed() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
 
     // Setup 3 keys
@@ -302,7 +302,7 @@ fn multiple_cas_all_succeed() {
 
 #[test]
 fn multiple_cas_one_fails() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
 
     // Setup 3 keys
@@ -368,7 +368,7 @@ fn multiple_cas_one_fails() {
 
 #[test]
 fn cas_in_full_transaction() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "cas_txn");
 
@@ -398,7 +398,7 @@ fn cas_in_full_transaction() {
 
 #[test]
 fn cas_with_read_of_same_key() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "cas_read_same");
 
@@ -433,7 +433,7 @@ fn cas_with_read_of_same_key() {
 
 #[test]
 fn cas_empty_set_validates() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let cas_set: Vec<CASOperation> = Vec::new();
 
     let result = validate_cas_set(&cas_set, &*store).unwrap();
@@ -458,7 +458,7 @@ fn cas_operation_fields_accessible() {
 
 #[test]
 fn cas_conflict_reports_correct_key() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "conflict_key");
 

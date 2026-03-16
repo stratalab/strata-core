@@ -2,7 +2,7 @@
 //!
 //! Defines the interface for primitives that need to participate in
 //! Database recovery. This is for primitives with runtime state that
-//! lives outside ShardedStore (e.g., VectorStore's in-memory backends).
+//! lives outside SegmentedStore (e.g., VectorStore's in-memory backends).
 //!
 //! ## Design Philosophy
 //!

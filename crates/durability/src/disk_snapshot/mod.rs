@@ -25,7 +25,7 @@
 //! # Note
 //!
 //! This is distinct from the in-memory MVCC snapshot isolation (version-bounded
-//! reads from ShardedStore). This module handles persistence to disk.
+//! reads from SegmentedStore). This module handles persistence to disk.
 
 pub mod checkpoint;
 pub mod reader;

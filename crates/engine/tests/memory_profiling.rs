@@ -161,7 +161,7 @@ fn test_large_value_memory() {
 fn document_memory_characteristics() {
     println!("\n=== Memory Characteristics ===\n");
 
-    println!("Snapshot Isolation (via ShardedStore + start_version):");
+    println!("Snapshot Isolation (via SegmentedStore + start_version):");
     println!("  - O(1) snapshot creation (capture version + Arc clone)");
     println!("  - Memory: O(1) per active transaction (no data cloning)");
     println!("  - Version-bounded reads from live storage");

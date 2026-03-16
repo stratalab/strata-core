@@ -17,7 +17,7 @@ use strata_core::value::Value;
 use strata_core::StrataError;
 use strata_core::StrataResult;
 use strata_core::{Version, Versioned, VersionedValue};
-use strata_storage::ShardedStore;
+use strata_storage::SegmentedStore;
 
 /// Error type for commit failures
 ///
@@ -385,7 +385,7 @@ pub struct TransactionContext {
     /// Backing store for snapshot reads
     ///
     /// Reads are bounded by `start_version` for MVCC isolation.
-    store: Option<Arc<ShardedStore>>,
+    store: Option<Arc<SegmentedStore>>,
 
     // Operation tracking
     /// Keys read and their versions (for validation)
@@ -527,15 +527,15 @@ impl TransactionContext {
     /// ```
     /// use strata_concurrency::TransactionContext;
     /// use strata_core::types::BranchId;
-    /// use strata_storage::ShardedStore;
+    /// use strata_storage::SegmentedStore;
     /// use std::sync::Arc;
     ///
     /// let branch_id = BranchId::new();
-    /// let store = Arc::new(ShardedStore::new());
+    /// let store = Arc::new(SegmentedStore::new());
     /// let txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
     /// assert!(txn.is_active());
     /// ```
-    pub fn with_store(txn_id: u64, branch_id: BranchId, store: Arc<ShardedStore>) -> Self {
+    pub fn with_store(txn_id: u64, branch_id: BranchId, store: Arc<SegmentedStore>) -> Self {
         let start_version = store.version();
         TransactionContext {
             txn_id,
@@ -1416,43 +1416,42 @@ impl TransactionContext {
             )));
         }
 
-        let mut result = ApplyResult {
-            commit_version,
-            puts_applied: 0,
-            deletes_applied: 0,
-            cas_applied: 0,
-        };
+        let puts_count = self.write_set.len();
+        let deletes_count = self.delete_set.len();
+        let cas_count = self.cas_set.len();
 
-        // Apply puts from write_set — drain to avoid cloning keys and values
+        // Collect puts (write_set + CAS) into a single batch — drain for zero-copy moves.
+        let mut writes: Vec<(Key, Value, WriteMode)> = Vec::with_capacity(puts_count + cas_count);
+
         for (key, value) in self.write_set.drain() {
             let mode = self
                 .key_write_modes
                 .remove(&key)
                 .unwrap_or(WriteMode::Append);
-            store.put_with_version_mode(key, value, commit_version, None, mode)?;
-            result.puts_applied += 1;
+            writes.push((key, value, mode));
         }
 
-        // Apply deletes from delete_set — drain to avoid cloning keys
-        for key in self.delete_set.drain() {
-            store.delete_with_version(&key, commit_version)?;
-            result.deletes_applied += 1;
-        }
-
-        // Apply CAS operations from cas_set — drain to avoid cloning
-        // Note: CAS validation already passed in commit(), so we just apply the new values
+        // CAS operations always use Append mode (validation already passed).
         for cas_op in self.cas_set.drain(..) {
-            store.put_with_version_mode(
-                cas_op.key,
-                cas_op.new_value,
-                commit_version,
-                None,
-                WriteMode::Append,
-            )?;
-            result.cas_applied += 1;
+            writes.push((cas_op.key, cas_op.new_value, WriteMode::Append));
         }
 
-        Ok(result)
+        // Collect deletes into batch
+        let deletes: Vec<Key> = self.delete_set.drain().collect();
+
+        // Apply via batch methods — implementations can optimize (e.g., acquire
+        // branch guards once per branch instead of per entry).
+        store.apply_batch(writes, commit_version)?;
+        if !deletes.is_empty() {
+            store.delete_batch(deletes, commit_version)?;
+        }
+
+        Ok(ApplyResult {
+            commit_version,
+            puts_applied: puts_count,
+            deletes_applied: deletes_count,
+            cas_applied: cas_count,
+        })
     }
 
     // === Introspection ===
@@ -1534,7 +1533,7 @@ impl TransactionContext {
     /// ```no_run
     /// # use strata_concurrency::TransactionContext;
     /// # use strata_core::types::BranchId;
-    /// # use strata_storage::ShardedStore;
+    /// # use strata_storage::SegmentedStore;
     /// # use std::sync::Arc;
     /// let branch_id = BranchId::default();
     /// let mut ctx = TransactionContext::new(1, branch_id, 100);
@@ -1542,10 +1541,10 @@ impl TransactionContext {
     ///
     /// // Reset for reuse - capacity is preserved!
     /// let new_branch_id = BranchId::default();
-    /// let store = Arc::new(ShardedStore::new());
+    /// let store = Arc::new(SegmentedStore::new());
     /// ctx.reset(2, new_branch_id, Some(store));
     /// ```
-    pub fn reset(&mut self, txn_id: u64, branch_id: BranchId, store: Option<Arc<ShardedStore>>) {
+    pub fn reset(&mut self, txn_id: u64, branch_id: BranchId, store: Option<Arc<SegmentedStore>>) {
         // Update identity
         self.txn_id = txn_id;
         self.branch_id = branch_id;
@@ -1799,8 +1798,8 @@ mod tests {
     }
 
     /// Create a store with a single key-value at the given version.
-    fn store_with_key(key: &Key, value: Value, version: u64) -> Arc<ShardedStore> {
-        let store = Arc::new(ShardedStore::new());
+    fn store_with_key(key: &Key, value: Value, version: u64) -> Arc<SegmentedStore> {
+        let store = Arc::new(SegmentedStore::new());
         store
             .put_with_version_mode(key.clone(), value, version, None, WriteMode::Append)
             .unwrap();
@@ -1808,8 +1807,8 @@ mod tests {
     }
 
     /// Create an empty store (no data).
-    fn empty_store() -> Arc<ShardedStore> {
-        Arc::new(ShardedStore::new())
+    fn empty_store() -> Arc<SegmentedStore> {
+        Arc::new(SegmentedStore::new())
     }
 
     #[test]
@@ -2151,14 +2150,17 @@ mod tests {
         assert_eq!(latest.value, Value::Int(99));
         assert_eq!(latest.version.as_u64(), 4);
 
-        // Only 1 version should remain (the KeepLast(1) write)
+        // SegmentedStore appends all versions (pruning happens at compaction),
+        // so all 4 versions are present (3 original + 1 from put_replace).
         let history_after = Storage::get_history(&*store, &key, None, None).unwrap();
         assert_eq!(
             history_after.len(),
-            1,
-            "KeepLast(1) should leave exactly 1 version, got {}",
+            4,
+            "SegmentedStore keeps all versions; expected 4, got {}",
             history_after.len()
         );
+        assert_eq!(history_after[0].value, Value::Int(99));
+        assert_eq!(history_after[0].version.as_u64(), 4);
     }
 
     // ========================================================================
@@ -2332,7 +2334,7 @@ mod tests {
     fn test_read_only_scan_prefix_skips_read_set() {
         let ns = test_namespace();
         let branch_id = BranchId::new();
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         for i in 0..3 {
             let key = test_key(&ns, &format!("pfx:{}", i));
             store

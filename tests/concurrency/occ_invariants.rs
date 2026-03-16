@@ -13,7 +13,7 @@ use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
-use strata_storage::sharded::ShardedStore;
+use strata_storage::SegmentedStore;
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
     let ns = Arc::new(Namespace::for_branch(branch_id));
@@ -26,7 +26,7 @@ fn create_test_key(branch_id: BranchId, name: &str) -> Key {
 
 #[test]
 fn first_committer_wins_read_write_conflict() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "contested");
 
@@ -80,7 +80,7 @@ fn first_committer_wins_read_write_conflict() {
 
 #[test]
 fn blind_writes_dont_conflict() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "blind");
 
@@ -108,7 +108,7 @@ fn blind_writes_dont_conflict() {
 
 #[test]
 fn read_only_transaction_always_commits() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "readonly");
 
@@ -146,7 +146,7 @@ fn write_skew_is_allowed() {
     // Both commit, final: A=-10, B=-10, constraint violated!
     // Per spec: write skew is ALLOWED (we don't try to prevent it)
 
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key_a = create_test_key(branch_id, "account_a");
     let key_b = create_test_key(branch_id, "account_b");
@@ -193,7 +193,7 @@ fn write_skew_is_allowed() {
 
 #[test]
 fn conflict_reports_correct_versions() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "versioned");
 
@@ -244,7 +244,7 @@ fn conflict_reports_correct_versions() {
 
 #[test]
 fn multiple_conflicts_all_reported() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key1 = create_test_key(branch_id, "key1");
     let key2 = create_test_key(branch_id, "key2");
@@ -293,7 +293,7 @@ fn multiple_conflicts_all_reported() {
 
 #[test]
 fn no_conflict_when_versions_match() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "stable");
 
@@ -327,7 +327,7 @@ fn no_conflict_when_versions_match() {
 
 #[test]
 fn empty_transaction_validates() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
 
     let t1 = TransactionContext::new(1, branch_id, 1);
@@ -342,7 +342,7 @@ fn empty_transaction_validates() {
 
 #[test]
 fn read_nonexistent_key_tracks_version_zero() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "ghost");
 
@@ -369,7 +369,7 @@ fn read_nonexistent_key_tracks_version_zero() {
 
 #[test]
 fn delete_after_read_causes_conflict() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "deleted");
 

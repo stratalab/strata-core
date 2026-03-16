@@ -56,7 +56,7 @@ use strata_durability::wal::WalWriter;
 /// This ensures that no other transaction on the same branch can modify storage
 /// between the time we validate and the time we apply our writes.
 ///
-/// Transactions on different branches can commit in parallel, as ShardedStore
+/// Transactions on different branches can commit in parallel, as SegmentedStore
 /// maintains per-branch shards and there's no cross-branch conflict.
 pub struct TransactionManager {
     /// Global version counter
@@ -645,6 +645,19 @@ impl TransactionManager {
 
         Ok(commit_version)
     }
+
+    /// Commit a transaction in bulk load mode — skips WAL for speed.
+    ///
+    /// Identical to `commit()` with `wal: None`. Data is applied to storage but
+    /// is NOT durable until the caller flushes memtables to disk. Suitable for
+    /// large initial imports where the source data can be re-read on failure.
+    pub fn commit_bulk_load<S: Storage>(
+        &self,
+        txn: &mut TransactionContext,
+        store: &S,
+    ) -> std::result::Result<u64, CommitError> {
+        self.commit(txn, store, None)
+    }
 }
 
 impl Default for TransactionManager {
@@ -663,7 +676,7 @@ mod tests {
     use strata_core::value::Value;
     use strata_durability::codec::IdentityCodec;
     use strata_durability::wal::{DurabilityMode, WalConfig};
-    use strata_storage::ShardedStore;
+    use strata_storage::SegmentedStore;
     use tempfile::TempDir;
 
     fn create_test_namespace(branch_id: BranchId) -> Arc<Namespace> {
@@ -745,7 +758,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = Arc::new(TransactionManager::new(0));
 
         let branch_id1 = BranchId::new();
@@ -801,7 +814,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
 
         let branch_id = BranchId::new();
@@ -845,7 +858,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = Arc::new(TransactionManager::new(0));
 
         let num_threads = 10;
@@ -894,7 +907,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
 
         let branch_id = BranchId::new();
@@ -957,7 +970,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
 
         let branch_id = BranchId::new();
@@ -1008,7 +1021,7 @@ mod tests {
 
     #[test]
     fn test_read_only_no_version_increment() {
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
 
@@ -1027,7 +1040,7 @@ mod tests {
     #[test]
     fn test_read_only_no_lock_contention() {
         // Two concurrent read-only transactions on the same branch shouldn't block
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = Arc::new(TransactionManager::new(0));
         let branch_id = BranchId::new();
 
@@ -1054,7 +1067,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
 
@@ -1078,7 +1091,7 @@ mod tests {
 
     #[test]
     fn test_read_only_rejects_non_active() {
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
 
@@ -1102,7 +1115,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1125,7 +1138,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1165,7 +1178,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1185,7 +1198,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1214,7 +1227,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1255,7 +1268,7 @@ mod tests {
 
     #[test]
     fn test_commit_with_wal_arc_no_wal() {
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1279,7 +1292,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = Arc::new(TransactionManager::new(0));
 
         let num_threads = 10;
@@ -1331,7 +1344,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1392,7 +1405,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
 
@@ -1420,7 +1433,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1455,7 +1468,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1545,7 +1558,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1696,5 +1709,100 @@ mod tests {
         // Now removal should succeed since no one holds it
         assert!(manager.remove_branch_lock(&branch_id));
         assert!(!manager.commit_locks.contains_key(&branch_id));
+    }
+
+    // ========================================================================
+    // Bulk load commit tests (Epic 8d)
+    // ========================================================================
+
+    #[test]
+    fn commit_bulk_load_applies_writes() {
+        let manager = TransactionManager::new(0);
+        let store = Arc::new(SegmentedStore::new());
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = create_test_key(&ns, "bulk_key");
+
+        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        txn.put(key.clone(), Value::Int(42)).unwrap();
+
+        let version = manager.commit_bulk_load(&mut txn, store.as_ref()).unwrap();
+        assert!(version > 0);
+
+        // Data should be readable
+        let result = store.get_versioned(&key, u64::MAX).unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().value, Value::Int(42));
+    }
+
+    #[test]
+    fn commit_bulk_load_no_wal_records() {
+        let dir = TempDir::new().unwrap();
+        let wal_dir = dir.path().join("wal");
+        let manager = TransactionManager::new(0);
+        let store = Arc::new(SegmentedStore::new());
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        // Create WAL for reference
+        let mut wal = create_test_wal(&wal_dir);
+
+        // Bulk load commit — should NOT write to WAL
+        let key = create_test_key(&ns, "no_wal");
+        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        txn.put(key.clone(), Value::Int(1)).unwrap();
+        manager.commit_bulk_load(&mut txn, store.as_ref()).unwrap();
+
+        // Normal commit — writes to WAL
+        let key2 = create_test_key(&ns, "with_wal");
+        let mut txn2 = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
+        txn2.put(key2.clone(), Value::Int(2)).unwrap();
+        manager
+            .commit(&mut txn2, store.as_ref(), Some(&mut wal))
+            .unwrap();
+
+        // WAL should have exactly 1 record (from the normal commit)
+        let reader = strata_durability::wal::WalReader::new();
+        let result = reader.read_all(&wal_dir).unwrap();
+        assert_eq!(
+            result.records.len(),
+            1,
+            "Bulk load should not write WAL records"
+        );
+    }
+
+    #[test]
+    fn commit_bulk_load_normal_commits_after() {
+        let dir = TempDir::new().unwrap();
+        let wal_dir = dir.path().join("wal");
+        let manager = TransactionManager::new(0);
+        let store = Arc::new(SegmentedStore::new());
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let mut wal = create_test_wal(&wal_dir);
+
+        // Bulk load
+        let key1 = create_test_key(&ns, "k1");
+        let mut txn1 = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        txn1.put(key1.clone(), Value::Int(1)).unwrap();
+        manager.commit_bulk_load(&mut txn1, store.as_ref()).unwrap();
+
+        // Normal commit after bulk load
+        let key2 = create_test_key(&ns, "k2");
+        let mut txn2 = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
+        txn2.put(key2.clone(), Value::Int(2)).unwrap();
+        manager
+            .commit(&mut txn2, store.as_ref(), Some(&mut wal))
+            .unwrap();
+
+        // Both values readable
+        assert_eq!(
+            store.get_versioned(&key1, u64::MAX).unwrap().unwrap().value,
+            Value::Int(1)
+        );
+        assert_eq!(
+            store.get_versioned(&key2, u64::MAX).unwrap().unwrap().value,
+            Value::Int(2)
+        );
     }
 }

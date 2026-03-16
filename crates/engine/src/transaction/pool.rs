@@ -17,7 +17,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use strata_concurrency::TransactionContext;
 use strata_core::types::BranchId;
-use strata_storage::ShardedStore;
+use strata_storage::SegmentedStore;
 
 /// Maximum contexts per thread
 ///
@@ -65,7 +65,7 @@ impl TransactionPool {
     pub fn acquire(
         txn_id: u64,
         branch_id: BranchId,
-        store: Option<Arc<ShardedStore>>,
+        store: Option<Arc<SegmentedStore>>,
     ) -> TransactionContext {
         TXN_POOL.with(|pool| {
             match pool.borrow_mut().pop() {
@@ -290,7 +290,7 @@ mod tests {
         let branch_id = BranchId::new();
 
         // Create a store with data at version 500
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let ns = create_test_namespace();
         let key = create_test_key(&ns, b"test");
         Storage::put_with_version_mode(&*store, key, Value::Int(1), 500, None, WriteMode::Append)

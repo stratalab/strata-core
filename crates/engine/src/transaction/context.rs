@@ -481,7 +481,7 @@ impl<'a> TransactionOps for Transaction<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_storage::ShardedStore;
+    use strata_storage::SegmentedStore;
 
     fn create_test_namespace() -> Arc<Namespace> {
         let branch_id = BranchId::new();
@@ -489,7 +489,7 @@ mod tests {
     }
 
     fn create_test_context(ns: &Namespace) -> TransactionContext {
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         TransactionContext::with_store(1, ns.branch_id, store)
     }
 
@@ -969,19 +969,20 @@ mod tests {
 
     /// Helper: pre-commit data into the store so a new TransactionContext can
     /// read it from the snapshot.
-    fn commit_kv(store: &Arc<ShardedStore>, ns: &Namespace, key: &str, value: Value) {
+    fn commit_kv(store: &Arc<SegmentedStore>, ns: &Namespace, key: &str, value: Value) {
+        use strata_core::traits::Storage;
         use strata_core::WriteMode;
-        use strata_storage::stored_value::StoredValue;
         let k = Key::new_kv(Arc::new(ns.clone()), key);
         let version = store.next_version();
-        let sv = StoredValue::new(value, Version::txn(version), None);
-        store.put(k, sv, WriteMode::Append).unwrap();
+        store
+            .put_with_version_mode(k, value, version, None, WriteMode::Append)
+            .unwrap();
     }
 
     #[test]
     fn test_kv_get_reads_snapshot() {
         let ns = create_test_namespace();
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
 
         // Pre-commit data into the store
         commit_kv(
@@ -1007,7 +1008,7 @@ mod tests {
     #[test]
     fn test_kv_exists_sees_snapshot() {
         let ns = create_test_namespace();
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         commit_kv(&store, &ns, "exists_key", Value::Int(42));
 
         let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
@@ -1020,7 +1021,7 @@ mod tests {
     #[test]
     fn test_kv_list_includes_snapshot() {
         let ns = create_test_namespace();
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         commit_kv(&store, &ns, "user:1", Value::Int(1));
         commit_kv(&store, &ns, "user:2", Value::Int(2));
 
@@ -1036,7 +1037,7 @@ mod tests {
     #[test]
     fn test_kv_list_merges_snapshot_and_writes() {
         let ns = create_test_namespace();
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         commit_kv(&store, &ns, "user:1", Value::Int(1));
 
         let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
@@ -1058,7 +1059,7 @@ mod tests {
     #[test]
     fn test_kv_delete_hides_snapshot_data() {
         let ns = create_test_namespace();
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         commit_kv(&store, &ns, "to_delete", Value::Int(1));
 
         let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
@@ -1079,7 +1080,7 @@ mod tests {
     #[test]
     fn test_write_overrides_snapshot() {
         let ns = create_test_namespace();
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         commit_kv(&store, &ns, "key", Value::String("old".into()));
 
         let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);

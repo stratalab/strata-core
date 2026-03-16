@@ -13,7 +13,7 @@ use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
-use strata_storage::sharded::ShardedStore;
+use strata_storage::SegmentedStore;
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
     let ns = Arc::new(Namespace::for_branch(branch_id));
@@ -26,7 +26,7 @@ fn create_test_key(branch_id: BranchId, name: &str) -> Key {
 
 #[test]
 fn version_chain_stores_newest_first() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "versioned");
 
@@ -51,7 +51,7 @@ fn version_chain_stores_newest_first() {
 
 #[test]
 fn get_at_version_returns_value_lte_version() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "versioned");
 
@@ -79,7 +79,7 @@ fn get_at_version_returns_value_lte_version() {
 
 #[test]
 fn get_at_version_before_first_returns_none() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "versioned");
 
@@ -98,7 +98,7 @@ fn get_at_version_before_first_returns_none() {
 
 #[test]
 fn version_chain_preserves_all_versions() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "preserved");
 
@@ -133,7 +133,7 @@ fn version_chain_preserves_all_versions() {
 
 #[test]
 fn expired_values_filtered_at_read_time() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "ttl_test");
 
@@ -153,7 +153,7 @@ fn expired_values_filtered_at_read_time() {
 
 #[test]
 fn non_expired_values_returned() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "ttl_valid");
 
@@ -171,7 +171,7 @@ fn non_expired_values_returned() {
 
 #[test]
 fn no_ttl_never_expires() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "no_ttl");
 
@@ -195,7 +195,7 @@ fn no_ttl_never_expires() {
 
 #[test]
 fn tombstone_preserves_snapshot_isolation() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "tombstone_iso");
 
@@ -225,7 +225,7 @@ fn tombstone_preserves_snapshot_isolation() {
 
 #[test]
 fn tombstone_not_returned_to_user() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "tombstone_hidden");
 
@@ -242,7 +242,7 @@ fn tombstone_not_returned_to_user() {
 
 #[test]
 fn delete_nonexistent_key_succeeds() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "never_existed");
 
@@ -257,7 +257,7 @@ fn delete_nonexistent_key_succeeds() {
 
 #[test]
 fn version_counter_monotonically_increases() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
 
     let v1 = store.next_version();
     let v2 = store.next_version();
@@ -269,7 +269,7 @@ fn version_counter_monotonically_increases() {
 
 #[test]
 fn version_counter_wraps_at_u64_max() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
 
     // Set version close to MAX
     store.set_version(u64::MAX - 2);
@@ -290,7 +290,7 @@ fn version_counter_wraps_at_u64_max() {
 
 #[test]
 fn concurrent_increments_are_unique() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let num_threads = 8;
     let increments_per_thread = 1000;
 
@@ -331,7 +331,7 @@ fn concurrent_increments_are_unique() {
 
 #[test]
 fn history_pagination_works() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "paginated");
 
@@ -368,7 +368,7 @@ fn history_pagination_works() {
 
 #[test]
 fn history_of_nonexistent_key_is_empty() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "nonexistent");
 

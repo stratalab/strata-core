@@ -8,7 +8,7 @@ use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
-use strata_storage::sharded::ShardedStore;
+use strata_storage::SegmentedStore;
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
     let ns = Arc::new(Namespace::for_branch(branch_id));
@@ -21,7 +21,7 @@ fn create_test_key(branch_id: BranchId, name: &str) -> Key {
 
 #[test]
 fn different_branches_have_separate_namespaces() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch1 = BranchId::new();
     let branch2 = BranchId::new();
 
@@ -45,7 +45,7 @@ fn different_branches_have_separate_namespaces() {
 
 #[test]
 fn clear_branch_only_affects_target_branch() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch1 = BranchId::new();
     let branch2 = BranchId::new();
 
@@ -84,7 +84,7 @@ fn clear_branch_only_affects_target_branch() {
 
 #[test]
 fn delete_in_one_branch_doesnt_affect_other() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch1 = BranchId::new();
     let branch2 = BranchId::new();
 
@@ -117,7 +117,7 @@ fn delete_in_one_branch_doesnt_affect_other() {
 
 #[test]
 fn concurrent_writes_to_different_branches() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let num_branches = 8;
     let keys_per_branch = 100;
 
@@ -153,7 +153,7 @@ fn concurrent_writes_to_different_branches() {
 
 #[test]
 fn concurrent_reads_and_writes_different_branches() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let read_branch = BranchId::new();
     let write_branch = BranchId::new();
 
@@ -209,7 +209,7 @@ fn concurrent_reads_and_writes_different_branches() {
 
 #[test]
 fn branch_ids_lists_all_active_branches() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch1 = BranchId::new();
     let branch2 = BranchId::new();
     let branch3 = BranchId::new();
@@ -238,7 +238,7 @@ fn branch_ids_lists_all_active_branches() {
 
 #[test]
 fn branch_entry_count() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
 
     // Put 10 keys
@@ -255,7 +255,7 @@ fn branch_entry_count() {
 
 #[test]
 fn list_branch_keys() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
     let ns = Arc::new(Namespace::for_branch(branch_id));
 
@@ -277,7 +277,7 @@ fn list_branch_keys() {
 
 #[test]
 fn get_from_nonexistent_branch_returns_none() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "never_written");
 
@@ -287,7 +287,7 @@ fn get_from_nonexistent_branch_returns_none() {
 
 #[test]
 fn clear_nonexistent_branch_succeeds() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
 
     // Should not panic
@@ -296,7 +296,7 @@ fn clear_nonexistent_branch_succeeds() {
 
 #[test]
 fn branch_entry_count_for_empty_branch() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
 
     let count = store.branch_entry_count(&branch_id);
