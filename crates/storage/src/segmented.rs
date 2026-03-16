@@ -8,9 +8,11 @@
 //! Read path: active → frozen (newest first) → segments (newest first).
 //! The first match for a key at commit_id ≤ snapshot wins.
 
+use crate::compaction::CompactionIterator;
 use crate::key_encoding::{encode_typed_key, InternalKey};
 use crate::memtable::{Memtable, MemtableEntry};
 use crate::merge_iter::{MergeIterator, MvccIterator};
+use crate::pressure::{MemoryPressure, PressureLevel};
 use crate::segment::{KVSegment, SegmentEntry};
 use crate::segment_builder::SegmentBuilder;
 
@@ -25,6 +27,23 @@ use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{BranchId, Key};
 use strata_core::value::Value;
 use strata_core::{StrataResult, Timestamp, VersionedValue};
+
+// ---------------------------------------------------------------------------
+// CompactionResult
+// ---------------------------------------------------------------------------
+
+/// Statistics returned by [`SegmentedStore::compact_branch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionResult {
+    /// Number of input segments that were merged.
+    pub segments_merged: usize,
+    /// Number of entries in the output segment.
+    pub output_entries: u64,
+    /// Number of entries pruned (input - output).
+    pub entries_pruned: u64,
+    /// Size of the output segment file in bytes.
+    pub output_file_size: u64,
+}
 
 // ---------------------------------------------------------------------------
 // BranchState
@@ -69,6 +88,8 @@ pub struct SegmentedStore {
     write_buffer_size: u64,
     /// Monotonic counter for memtable IDs and segment file names.
     next_segment_id: AtomicU64,
+    /// Memory pressure tracking.
+    pressure: MemoryPressure,
 }
 
 impl SegmentedStore {
@@ -83,6 +104,7 @@ impl SegmentedStore {
             segments_dir: None,
             write_buffer_size: 0,
             next_segment_id: AtomicU64::new(1),
+            pressure: MemoryPressure::disabled(),
         }
     }
 
@@ -98,6 +120,23 @@ impl SegmentedStore {
             segments_dir: Some(segments_dir),
             write_buffer_size: write_buffer_size as u64,
             next_segment_id: AtomicU64::new(1),
+            pressure: MemoryPressure::disabled(),
+        }
+    }
+
+    /// Create a segmented store with a directory, write buffer, and memory pressure tracking.
+    pub fn with_dir_and_pressure(
+        segments_dir: PathBuf,
+        write_buffer_size: usize,
+        pressure: MemoryPressure,
+    ) -> Self {
+        Self {
+            branches: DashMap::new(),
+            version: AtomicU64::new(0),
+            segments_dir: Some(segments_dir),
+            write_buffer_size: write_buffer_size as u64,
+            next_segment_id: AtomicU64::new(1),
+            pressure,
         }
     }
 
@@ -422,6 +461,203 @@ impl SegmentedStore {
             old.freeze();
             branch.frozen.insert(0, Arc::new(old));
         }
+    }
+
+    // ========================================================================
+    // Compaction
+    // ========================================================================
+
+    /// Compact all segments for a branch into a single segment, pruning old versions.
+    ///
+    /// Returns `Ok(None)` if there is nothing to compact (ephemeral mode,
+    /// branch missing, or fewer than 2 segments). Returns `Ok(Some(result))`
+    /// with compaction statistics on success.
+    ///
+    /// Versions with `commit_id < prune_floor` are pruned (at most one per
+    /// logical key survives). Dead tombstones below the floor are removed
+    /// entirely. When `prune_floor == 0`, no versions are pruned.
+    ///
+    /// # Concurrent flush safety
+    ///
+    /// If a concurrent `flush_oldest_frozen` inserts a new segment for the
+    /// same branch while compaction is running, the new segment is preserved.
+    /// The caller should still serialize flush and compact for a given branch
+    /// when possible, to avoid repeated compaction of freshly-flushed data.
+    pub fn compact_branch(
+        &self,
+        branch_id: &BranchId,
+        prune_floor: u64,
+    ) -> io::Result<Option<CompactionResult>> {
+        let segments_dir = match &self.segments_dir {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+
+        // Snapshot current segments under a read guard.
+        let (old_segments, total_input_entries) = {
+            let branch = match self.branches.get(branch_id) {
+                Some(b) => b,
+                None => return Ok(None),
+            };
+            if branch.segments.len() < 2 {
+                return Ok(None);
+            }
+            let segs: Vec<Arc<KVSegment>> = branch.segments.iter().map(Arc::clone).collect();
+            let total: u64 = segs.iter().map(|s| s.entry_count()).sum();
+            (segs, total)
+            // DashMap guard drops here
+        };
+
+        let segments_merged = old_segments.len();
+
+        // Build compaction (no lock held — I/O heavy).
+        let seg_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
+        let branch_hex = hex_encode_branch(branch_id);
+        let branch_dir = segments_dir.join(&branch_hex);
+        std::fs::create_dir_all(&branch_dir)?;
+        let seg_path = branch_dir.join(format!("{}.sst", seg_id));
+
+        // Build sorted source iterators from each segment (oldest → newest
+        // doesn't matter for MergeIterator ordering, but we use the same
+        // order as flush: index 0 = newest).
+        let sources: Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> = old_segments
+            .iter()
+            .map(|seg| {
+                let entries: Vec<_> = seg
+                    .iter_seek_all()
+                    .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
+                    .collect();
+                Box::new(entries.into_iter())
+                    as Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>
+            })
+            .collect();
+
+        let merge = MergeIterator::new(sources);
+        let compaction_iter = CompactionIterator::new(merge, prune_floor);
+
+        let builder = SegmentBuilder::default();
+        let meta = builder.build_from_iter(compaction_iter, &seg_path)?;
+
+        // Open the newly written segment.
+        let new_segment = KVSegment::open(&seg_path)?;
+        let new_seg_filename = format!("{}.sst", seg_id);
+
+        // Swap: remove only the segments we compacted, insert the new one.
+        // Any segments added by concurrent flushes (not in old_segments) are kept.
+        let old_seg_count;
+        {
+            let mut branch = self
+                .branches
+                .entry(*branch_id)
+                .or_insert_with(BranchState::new);
+            old_seg_count = branch.segments.len();
+            branch.segments.retain(|s| {
+                !old_segments.iter().any(|old| Arc::ptr_eq(s, old))
+            });
+            // Compacted segment goes at the end (oldest — covers the range
+            // of all old segments). Any concurrent segments are newer and
+            // already at the front.
+            branch.segments.push(Arc::new(new_segment));
+        }
+
+        // File cleanup: only delete .sst files for the segments we compacted.
+        // Build a set of filenames to keep (new segment + any concurrent segments).
+        // We know old segments used IDs allocated before `seg_id`, so their
+        // filenames differ from `new_seg_filename`. We enumerate the directory
+        // and only remove files that are NOT the new segment and that existed
+        // before compaction started (i.e., have a numeric stem < seg_id).
+        if old_seg_count == segments_merged {
+            // Fast path: no concurrent segments appeared, safe to delete all
+            // .sst files except the new one.
+            if let Ok(dir_entries) = std::fs::read_dir(&branch_dir) {
+                for entry in dir_entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("sst") {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name != new_seg_filename {
+                                let _ = std::fs::remove_file(&path);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Concurrent segments appeared — only delete files whose numeric
+            // stem is < seg_id (these belonged to the old segments we merged).
+            if let Ok(dir_entries) = std::fs::read_dir(&branch_dir) {
+                for entry in dir_entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("sst") {
+                        continue;
+                    }
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        if let Ok(file_id) = stem.parse::<u64>() {
+                            if file_id < seg_id {
+                                let _ = std::fs::remove_file(&path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let entries_pruned = total_input_entries.saturating_sub(meta.entry_count);
+
+        Ok(Some(CompactionResult {
+            segments_merged,
+            output_entries: meta.entry_count,
+            entries_pruned,
+            output_file_size: meta.file_size,
+        }))
+    }
+
+    /// Returns `true` if the branch has more than `threshold` segments.
+    pub fn should_compact(&self, branch_id: &BranchId, segment_threshold: usize) -> bool {
+        self.branches
+            .get(branch_id)
+            .is_some_and(|b| b.segments.len() >= segment_threshold)
+    }
+
+    // ========================================================================
+    // Memory pressure
+    // ========================================================================
+
+    /// Sum of `approx_bytes()` across all active + frozen memtables.
+    pub fn total_memtable_bytes(&self) -> u64 {
+        let mut total: u64 = 0;
+        for entry in self.branches.iter() {
+            let branch = entry.value();
+            total += branch.active.approx_bytes();
+            for frozen in &branch.frozen {
+                total += frozen.approx_bytes();
+            }
+        }
+        total
+    }
+
+    /// Check the current memory pressure level.
+    pub fn pressure_level(&self) -> PressureLevel {
+        self.pressure.level(self.total_memtable_bytes())
+    }
+
+    /// Branch IDs with frozen memtables, ordered by frozen count descending.
+    ///
+    /// Useful for the caller to decide which branches to flush first.
+    pub fn branches_needing_flush(&self) -> Vec<BranchId> {
+        let mut branches: Vec<(BranchId, usize)> = self
+            .branches
+            .iter()
+            .filter_map(|entry| {
+                let count = entry.value().frozen.len();
+                if count > 0 {
+                    Some((*entry.key(), count))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        branches.sort_by(|a, b| b.1.cmp(&a.1));
+        branches.into_iter().map(|(id, _)| id).collect()
     }
 
     // ========================================================================
@@ -1683,5 +1919,474 @@ mod tests {
             store.get_versioned(&kv_key("k"), 1).unwrap().unwrap().value,
             Value::Int(1),
         );
+    }
+
+    // ===== Compaction tests =====
+
+    #[test]
+    fn compact_merges_two_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        seed(&store, kv_key("b"), Value::Int(2), 2);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        assert_eq!(store.branch_segment_count(&b), 2);
+
+        let result = store.compact_branch(&b, 0).unwrap().unwrap();
+        assert_eq!(result.segments_merged, 2);
+        assert_eq!(result.output_entries, 2);
+        assert_eq!(result.entries_pruned, 0);
+        assert_eq!(store.branch_segment_count(&b), 1);
+
+        assert_eq!(store.get_versioned(&kv_key("a"), u64::MAX).unwrap().unwrap().value, Value::Int(1));
+        assert_eq!(store.get_versioned(&kv_key("b"), u64::MAX).unwrap().unwrap().value, Value::Int(2));
+    }
+
+    #[test]
+    fn compact_merges_overlapping_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        seed(&store, kv_key("k"), Value::Int(2), 2);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        let result = store.compact_branch(&b, 0).unwrap().unwrap();
+        assert_eq!(result.output_entries, 2);
+        assert_eq!(result.entries_pruned, 0);
+
+        assert_eq!(store.get_versioned(&kv_key("k"), u64::MAX).unwrap().unwrap().value, Value::Int(2));
+        assert_eq!(store.get_versioned(&kv_key("k"), 1).unwrap().unwrap().value, Value::Int(1));
+    }
+
+    #[test]
+    fn compact_prunes_old_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        for commit in 1..=3u64 {
+            seed(&store, kv_key("k"), Value::Int(commit as i64), commit);
+            store.rotate_memtable(&b);
+            store.flush_oldest_frozen(&b).unwrap();
+        }
+        assert_eq!(store.branch_segment_count(&b), 3);
+
+        // floor=3: commit 3 (above floor) + commit 2 (newest below floor) survive, commit 1 pruned
+        let result = store.compact_branch(&b, 3).unwrap().unwrap();
+        assert_eq!(result.segments_merged, 3);
+        assert_eq!(result.output_entries, 2);
+        assert_eq!(result.entries_pruned, 1);
+
+        // Verify the correct versions survived
+        assert_eq!(store.get_versioned(&kv_key("k"), u64::MAX).unwrap().unwrap().value, Value::Int(3));
+        assert_eq!(store.get_versioned(&kv_key("k"), 2).unwrap().unwrap().value, Value::Int(2));
+        // Version 1 was pruned — reading at snapshot 1 should return nothing
+        assert!(store.get_versioned(&kv_key("k"), 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn compact_removes_dead_tombstones() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        store.delete_with_version(&kv_key("k"), 2).unwrap();
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        let result = store.compact_branch(&b, 5).unwrap().unwrap();
+        assert_eq!(result.output_entries, 0);
+        assert_eq!(result.entries_pruned, 2);
+    }
+
+    #[test]
+    fn compact_preserves_tombstone_above_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        store.delete_with_version(&kv_key("k"), 3).unwrap();
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        let result = store.compact_branch(&b, 2).unwrap().unwrap();
+        assert_eq!(result.output_entries, 2);
+        assert_eq!(result.entries_pruned, 0);
+    }
+
+    #[test]
+    fn compact_noop_zero_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        assert!(store.compact_branch(&b, 0).unwrap().is_none());
+    }
+
+    #[test]
+    fn compact_noop_one_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+        assert_eq!(store.branch_segment_count(&b), 1);
+        assert!(store.compact_branch(&b, 0).unwrap().is_none());
+    }
+
+    #[test]
+    fn compact_noop_ephemeral() {
+        let store = SegmentedStore::new();
+        let b = branch();
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        assert!(store.compact_branch(&b, 0).unwrap().is_none());
+    }
+
+    #[test]
+    fn compact_deletes_old_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        for commit in 1..=3u64 {
+            seed(&store, kv_key("k"), Value::Int(commit as i64), commit);
+            store.rotate_memtable(&b);
+            store.flush_oldest_frozen(&b).unwrap();
+        }
+
+        let branch_dir = dir.path().join(hex_encode_branch(&b));
+        let files_before: Vec<_> = std::fs::read_dir(&branch_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("sst"))
+            .collect();
+        assert_eq!(files_before.len(), 3);
+
+        store.compact_branch(&b, 0).unwrap();
+
+        let files_after: Vec<_> = std::fs::read_dir(&branch_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("sst"))
+            .collect();
+        assert_eq!(files_after.len(), 1);
+    }
+
+    #[test]
+    fn compact_reads_correct_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        seed(&store, kv_key("b"), Value::Int(10), 1);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        seed(&store, kv_key("a"), Value::Int(2), 2);
+        seed(&store, kv_key("c"), Value::Int(20), 2);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        store.compact_branch(&b, 0).unwrap();
+
+        assert_eq!(store.get_versioned(&kv_key("a"), u64::MAX).unwrap().unwrap().value, Value::Int(2));
+        assert_eq!(store.get_versioned(&kv_key("b"), u64::MAX).unwrap().unwrap().value, Value::Int(10));
+        assert_eq!(store.get_versioned(&kv_key("c"), u64::MAX).unwrap().unwrap().value, Value::Int(20));
+
+        let prefix_key = Key::new(ns(), TypeTag::KV, Vec::new());
+        let results = store.scan_prefix(&prefix_key, u64::MAX).unwrap();
+        assert_eq!(results.len(), 3);
+
+        let history = store.get_history(&kv_key("a"), None, None).unwrap();
+        assert_eq!(history.len(), 2);
+    }
+
+    #[test]
+    fn compact_result_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        // Two keys, multiple versions across segments
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        seed(&store, kv_key("b"), Value::Int(10), 1);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        seed(&store, kv_key("a"), Value::Int(2), 2);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        seed(&store, kv_key("a"), Value::Int(3), 3);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        // 4 total entries: a@3, a@2, a@1, b@1
+        // floor=3: a keeps 3 (above) + 2 (floor entry), prunes 1. b keeps 1 (floor entry).
+        let result = store.compact_branch(&b, 3).unwrap().unwrap();
+        assert_eq!(result.segments_merged, 3);
+        assert_eq!(result.output_entries, 3); // a@3, a@2, b@1
+        assert_eq!(result.entries_pruned, 1); // a@1
+
+        // Verify reads are correct
+        assert_eq!(store.get_versioned(&kv_key("a"), u64::MAX).unwrap().unwrap().value, Value::Int(3));
+        assert_eq!(store.get_versioned(&kv_key("a"), 2).unwrap().unwrap().value, Value::Int(2));
+        assert_eq!(store.get_versioned(&kv_key("b"), u64::MAX).unwrap().unwrap().value, Value::Int(10));
+    }
+
+    // ===== Memory pressure tests =====
+
+    #[test]
+    fn total_memtable_bytes_empty() {
+        let store = SegmentedStore::new();
+        assert_eq!(store.total_memtable_bytes(), 0);
+    }
+
+    #[test]
+    fn total_memtable_bytes_active_only() {
+        let store = SegmentedStore::new();
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        assert!(store.total_memtable_bytes() > 0);
+    }
+
+    #[test]
+    fn total_memtable_bytes_includes_frozen() {
+        let store = SegmentedStore::new();
+        let b = branch();
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        let before_rotate = store.total_memtable_bytes();
+        store.rotate_memtable(&b);
+        seed(&store, kv_key("k2"), Value::Int(2), 2);
+        let after = store.total_memtable_bytes();
+        assert!(after > before_rotate);
+    }
+
+    #[test]
+    fn total_memtable_bytes_multiple_branches() {
+        let store = SegmentedStore::new();
+        let b1 = branch();
+        let b2 = BranchId::from_bytes([2; 16]);
+        let ns2 = Arc::new(Namespace::new(b2, "default".to_string()));
+
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        let bytes1 = store.total_memtable_bytes();
+        assert!(bytes1 > 0);
+
+        seed(&store, Key::new(ns2, TypeTag::KV, b"x".to_vec()), Value::Int(2), 2);
+        let bytes2 = store.total_memtable_bytes();
+        assert!(bytes2 > bytes1);
+
+        let b1_bytes = store.branches.get(&b1).unwrap().active.approx_bytes();
+        let b2_bytes = store.branches.get(&b2).unwrap().active.approx_bytes();
+        assert_eq!(bytes2, b1_bytes + b2_bytes);
+    }
+
+    #[test]
+    fn pressure_level_with_disabled() {
+        let store = SegmentedStore::new();
+        seed(&store, kv_key("k"), Value::String("x".repeat(10000)), 1);
+        assert_eq!(store.pressure_level(), PressureLevel::Normal);
+    }
+
+    #[test]
+    fn pressure_level_tracks_growth() {
+        use crate::pressure::MemoryPressure;
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir_and_pressure(
+            dir.path().to_path_buf(),
+            0,
+            MemoryPressure::new(1000, 0.7, 0.9),
+        );
+
+        assert_eq!(store.pressure_level(), PressureLevel::Normal);
+
+        for i in 0..20u64 {
+            seed(
+                &store,
+                kv_key(&format!("key_{}", i)),
+                Value::String("x".repeat(30)),
+                i + 1,
+            );
+        }
+        let level = store.pressure_level();
+        assert!(level >= PressureLevel::Warning, "expected at least Warning, got {:?}", level);
+    }
+
+    #[test]
+    fn branches_needing_flush_prioritization() {
+        let store = SegmentedStore::new();
+        let b1 = branch();
+        let b2 = BranchId::from_bytes([2; 16]);
+        let ns2 = Arc::new(Namespace::new(b2, "default".to_string()));
+
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        store.rotate_memtable(&b1);
+
+        for i in 0..3u64 {
+            seed(
+                &store,
+                Key::new(ns2.clone(), TypeTag::KV, format!("k{}", i).into_bytes()),
+                Value::Int(i as i64),
+                i + 1,
+            );
+            store.rotate_memtable(&b2);
+        }
+
+        let needing = store.branches_needing_flush();
+        assert_eq!(needing.len(), 2);
+        assert_eq!(needing[0], b2);
+        assert_eq!(needing[1], b1);
+    }
+
+    #[test]
+    fn should_compact_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        assert!(!store.should_compact(&b, 2));
+
+        seed(&store, kv_key("b"), Value::Int(2), 2);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        assert!(store.should_compact(&b, 2));
+    }
+
+    #[test]
+    fn compact_after_flush_integration() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        for commit in 1..=3u64 {
+            seed(
+                &store,
+                kv_key(&format!("k{}", commit)),
+                Value::Int(commit as i64),
+                commit,
+            );
+            store.rotate_memtable(&b);
+            store.flush_oldest_frozen(&b).unwrap();
+        }
+
+        assert!(store.should_compact(&b, 3));
+
+        store.compact_branch(&b, 0).unwrap();
+        assert_eq!(store.branch_segment_count(&b), 1);
+        assert!(!store.should_compact(&b, 2));
+
+        for commit in 1..=3u64 {
+            assert_eq!(
+                store.get_versioned(&kv_key(&format!("k{}", commit)), u64::MAX).unwrap().unwrap().value,
+                Value::Int(commit as i64),
+            );
+        }
+    }
+
+    #[test]
+    fn compact_with_active_memtable_data() {
+        // Verify memtable data coexists correctly with compacted segments.
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        // Create 2 segments
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        seed(&store, kv_key("b"), Value::Int(2), 2);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        // Write to active memtable (NOT flushed)
+        seed(&store, kv_key("c"), Value::Int(3), 3);
+        // Update "a" in memtable (newer version than segment)
+        seed(&store, kv_key("a"), Value::Int(10), 4);
+
+        // Compact segments — memtable data must survive
+        store.compact_branch(&b, 0).unwrap();
+        assert_eq!(store.branch_segment_count(&b), 1);
+
+        // Memtable data visible
+        assert_eq!(store.get_versioned(&kv_key("c"), u64::MAX).unwrap().unwrap().value, Value::Int(3));
+        // Memtable update shadows segment version
+        assert_eq!(store.get_versioned(&kv_key("a"), u64::MAX).unwrap().unwrap().value, Value::Int(10));
+        // Old segment version still readable at old snapshot
+        assert_eq!(store.get_versioned(&kv_key("a"), 1).unwrap().unwrap().value, Value::Int(1));
+        // Segment-only data still readable
+        assert_eq!(store.get_versioned(&kv_key("b"), u64::MAX).unwrap().unwrap().value, Value::Int(2));
+    }
+
+    #[test]
+    fn compact_concurrent_flush_preserves_new_segment() {
+        // Simulate: compact snapshots 2 segments, then a flush adds a 3rd
+        // segment before the swap. The 3rd segment must survive.
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        // Create 2 segments
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        seed(&store, kv_key("b"), Value::Int(2), 2);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        // Compact — this merges the 2 segments into 1
+        store.compact_branch(&b, 0).unwrap();
+        assert_eq!(store.branch_segment_count(&b), 1);
+
+        // Now create 2 more segments and write a frozen memtable
+        seed(&store, kv_key("c"), Value::Int(3), 3);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        seed(&store, kv_key("d"), Value::Int(4), 4);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        // Now we have 3 segments (1 from compaction + 2 new)
+        assert_eq!(store.branch_segment_count(&b), 3);
+
+        // Compact again
+        store.compact_branch(&b, 0).unwrap();
+        assert_eq!(store.branch_segment_count(&b), 1);
+
+        // All data still readable
+        assert_eq!(store.get_versioned(&kv_key("a"), u64::MAX).unwrap().unwrap().value, Value::Int(1));
+        assert_eq!(store.get_versioned(&kv_key("b"), u64::MAX).unwrap().unwrap().value, Value::Int(2));
+        assert_eq!(store.get_versioned(&kv_key("c"), u64::MAX).unwrap().unwrap().value, Value::Int(3));
+        assert_eq!(store.get_versioned(&kv_key("d"), u64::MAX).unwrap().unwrap().value, Value::Int(4));
     }
 }

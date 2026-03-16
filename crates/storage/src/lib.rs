@@ -14,10 +14,12 @@
 #![warn(clippy::all)]
 
 pub mod bloom;
+pub mod compaction;
 pub mod index;
 pub mod key_encoding;
 pub mod memtable;
 pub mod merge_iter;
+pub mod pressure;
 pub mod segment;
 pub mod segment_builder;
 pub mod segmented;
@@ -26,9 +28,11 @@ pub mod stored_value;
 pub mod ttl;
 
 pub use bloom::BloomFilter;
+pub use compaction::CompactionIterator;
 pub use index::{BranchIndex, TypeIndex};
+pub use pressure::{MemoryPressure, PressureLevel};
 pub use segment::KVSegment;
 pub use segment_builder::{SegmentBuilder, SegmentMeta};
-pub use segmented::SegmentedStore;
+pub use segmented::{CompactionResult, SegmentedStore};
 pub use sharded::{BranchMemoryStats, Shard, ShardedStore, StorageMemoryStats};
 pub use ttl::TTLIndex;

@@ -202,15 +202,13 @@ impl Memtable {
         let seek_key = InternalKey::encode(key, u64::MAX);
         let typed_prefix = encode_typed_key(key);
 
-        for entry in self.map.range(seek_key..) {
-            let ik = entry.key();
-            if ik.typed_key_prefix() != typed_prefix.as_slice() {
-                break;
-            }
-            // The first entry IS the latest version (commit_id descending)
-            return Some(ik.commit_id());
+        let entry = self.map.range(seek_key..).next()?;
+        let ik = entry.key();
+        if ik.typed_key_prefix() != typed_prefix.as_slice() {
+            return None;
         }
-        None
+        // The first entry IS the latest version (commit_id descending)
+        Some(ik.commit_id())
     }
 
     /// Get all versions of a key, returned as `(commit_id, MemtableEntry)` pairs.
