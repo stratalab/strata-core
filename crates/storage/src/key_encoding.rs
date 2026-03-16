@@ -152,6 +152,17 @@ impl InternalKey {
         InternalKey(bytes)
     }
 
+    /// Create an InternalKey from raw bytes, returning `None` if too short.
+    ///
+    /// Unlike [`from_bytes`](Self::from_bytes), this never panics on corrupt
+    /// or truncated data — callers can propagate the `None` gracefully.
+    pub fn try_from_bytes(bytes: Vec<u8>) -> Option<Self> {
+        if bytes.len() < 28 {
+            return None;
+        }
+        Some(InternalKey(bytes))
+    }
+
     /// Access the raw bytes.
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
@@ -516,6 +527,20 @@ mod tests {
     fn from_bytes_rejects_short_input() {
         let result = std::panic::catch_unwind(|| InternalKey::from_bytes(vec![1, 2, 3]));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn try_from_bytes_rejects_short_input() {
+        assert!(InternalKey::try_from_bytes(vec![1, 2, 3]).is_none());
+    }
+
+    #[test]
+    fn try_from_bytes_accepts_valid_input() {
+        let key = make_key("default", TypeTag::KV, "hello");
+        let ik = InternalKey::encode(&key, 42);
+        let bytes = ik.into_bytes();
+        let recovered = InternalKey::try_from_bytes(bytes).unwrap();
+        assert_eq!(recovered.commit_id(), 42);
     }
 
     #[test]
