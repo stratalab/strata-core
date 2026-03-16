@@ -481,6 +481,8 @@ impl Database {
             index.enable();
         }
 
+        crate::branch_dag::load_status_cache_readonly(&db);
+
         Ok(db)
     }
 
@@ -605,6 +607,8 @@ impl Database {
             shutdown_complete: AtomicBool::new(false),
         });
 
+        crate::branch_dag::init_system_branch(&db);
+
         Ok(db)
     }
 
@@ -687,6 +691,8 @@ impl Database {
         // so we enable the index directly.
         let index = db.extension::<crate::search::InvertedIndex>()?;
         index.enable();
+
+        crate::branch_dag::init_system_branch(&db);
 
         Ok(db)
     }
@@ -2256,8 +2262,9 @@ mod tests {
         assert!(result.is_ok());
 
         let db = result.unwrap();
-        // Storage should be empty since no valid segments exist
-        assert_eq!(db.storage().current_version(), 0);
+        // Storage has only system branch init transactions (no user data recovered)
+        // init_system_branch writes 3 transactions: branch, graph, node
+        assert!(db.storage().current_version() <= 3);
     }
 
     #[test]
@@ -2676,8 +2683,14 @@ mod tests {
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
 
-        // Fresh DB: version starts at 0, gc_safe_point should be 0 (current <= 1)
-        assert_eq!(db.gc_safe_point(), 0);
+        // After open, system branch init may have advanced the version.
+        // gc_safe_point = max(0, current_version - 1)
+        let initial_sp = db.gc_safe_point();
+        assert!(
+            initial_sp <= 3,
+            "gc_safe_point should be small after init, got {}",
+            initial_sp
+        );
 
         // Commit two transactions to advance version past 1
         let key = Key::new_kv(ns.clone(), "gc_key");
@@ -2794,9 +2807,14 @@ mod tests {
     fn test_run_gc_no_prune_at_version_zero() {
         let db = Database::cache().unwrap();
 
-        // Version is 1, gc_safe_point returns 0
+        // After init_system_branch, version has advanced; no user data to prune
         let (safe_point, pruned) = db.run_gc();
-        assert_eq!(safe_point, 0);
+        // safe_point may be > 0 due to system branch init transactions
+        assert!(
+            safe_point <= 4,
+            "safe_point should be small, got {}",
+            safe_point
+        );
         assert_eq!(pruned, 0);
     }
 
@@ -2900,10 +2918,11 @@ mod tests {
         );
 
         let db = result.unwrap();
-        assert_eq!(
-            db.storage().current_version(),
-            0,
-            "Should start with empty state"
+        // Only system branch init transactions present (no user data recovered)
+        assert!(
+            db.storage().current_version() <= 3,
+            "Should have at most system init transactions, got {}",
+            db.storage().current_version()
         );
     }
 
@@ -2954,7 +2973,8 @@ mod tests {
                 .is_none(),
             "Valid data before corruption should be lost in lossy mode"
         );
-        assert_eq!(db.storage().current_version(), 0);
+        // Only system branch init transactions present (user data was discarded)
+        assert!(db.storage().current_version() <= 3);
     }
 
     // ========================================================================

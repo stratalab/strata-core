@@ -170,6 +170,11 @@ impl Executor {
 
         cmd.resolve_defaults();
 
+        // Reject data commands targeting reserved _system branches
+        if let Some(branch) = cmd.resolved_branch() {
+            crate::handlers::reject_system_branch(branch)?;
+        }
+
         let cmd_name = cmd.name();
         let start = Instant::now();
 
@@ -920,7 +925,15 @@ impl Executor {
             Command::BranchFork {
                 source,
                 destination,
-            } => crate::handlers::branch::branch_fork(&self.primitives, source, destination),
+                message,
+                creator,
+            } => crate::handlers::branch::branch_fork(
+                &self.primitives,
+                source,
+                destination,
+                message,
+                creator,
+            ),
             Command::BranchDiff {
                 branch_a,
                 branch_b,
@@ -939,7 +952,16 @@ impl Executor {
                 source,
                 target,
                 strategy,
-            } => crate::handlers::branch::branch_merge(&self.primitives, source, target, strategy),
+                message,
+                creator,
+            } => crate::handlers::branch::branch_merge(
+                &self.primitives,
+                source,
+                target,
+                strategy,
+                message,
+                creator,
+            ),
 
             // Transaction commands - handled by Session, not Executor
             Command::TxnBegin { .. }

@@ -44,7 +44,9 @@ pub use strata_durability::WalCounters;
 pub use transaction::{Transaction, TransactionPool, MAX_POOL_SIZE};
 pub use transaction_ops::TransactionOps;
 
+pub mod branch_dag;
 pub mod branch_ops;
+pub mod branch_status_cache;
 pub mod bundle;
 pub mod graph;
 pub mod primitives;
@@ -146,6 +148,9 @@ pub use branch_ops::{
     BranchDiffEntry, BranchDiffResult, ConflictEntry, DiffFilter, DiffOptions, DiffSummary,
     ForkInfo, MergeInfo, MergeStrategy, SpaceDiff,
 };
+
+// Re-export branch_dag types at crate root
+pub use branch_dag::{DagBranchInfo, DagBranchStatus, DagEventId, ForkRecord, MergeRecord};
 
 #[cfg(feature = "perf-trace")]
 pub use instrumentation::{PerfBreakdown, PerfStats};

@@ -686,6 +686,12 @@ pub enum Command {
         source: String,
         /// Destination branch name.
         destination: String,
+        /// Optional message describing the fork.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        /// Optional creator identifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creator: Option<String>,
     },
 
     /// Compare two branches and return structured differences.
@@ -715,6 +721,12 @@ pub enum Command {
         target: String,
         /// Conflict resolution strategy.
         strategy: MergeStrategy,
+        /// Optional message describing the merge.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        /// Optional creator identifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creator: Option<String>,
     },
 
     // ==================== Transaction (5) ====================
@@ -1952,5 +1964,109 @@ impl Command {
     /// Backwards-compatible alias for resolve_defaults
     pub fn resolve_default_branch(&mut self) {
         self.resolve_defaults();
+    }
+
+    /// Return the resolved branch for data-scoped commands, if any.
+    ///
+    /// Must be called *after* `resolve_defaults()`. Returns `None` for
+    /// branch-lifecycle, transaction, and database-level commands.
+    pub fn resolved_branch(&self) -> Option<&BranchId> {
+        match self {
+            // Data commands with branch + space
+            Command::KvPut { branch, .. }
+            | Command::KvBatchPut { branch, .. }
+            | Command::KvGet { branch, .. }
+            | Command::KvDelete { branch, .. }
+            | Command::KvList { branch, .. }
+            | Command::KvGetv { branch, .. }
+            | Command::JsonSet { branch, .. }
+            | Command::JsonBatchSet { branch, .. }
+            | Command::JsonBatchGet { branch, .. }
+            | Command::JsonBatchDelete { branch, .. }
+            | Command::JsonGet { branch, .. }
+            | Command::JsonGetv { branch, .. }
+            | Command::JsonDelete { branch, .. }
+            | Command::JsonList { branch, .. }
+            | Command::EventAppend { branch, .. }
+            | Command::EventBatchAppend { branch, .. }
+            | Command::EventGet { branch, .. }
+            | Command::EventGetByType { branch, .. }
+            | Command::EventLen { branch, .. }
+            | Command::StateSet { branch, .. }
+            | Command::StateBatchSet { branch, .. }
+            | Command::StateGet { branch, .. }
+            | Command::StateGetv { branch, .. }
+            | Command::StateCas { branch, .. }
+            | Command::StateInit { branch, .. }
+            | Command::StateDelete { branch, .. }
+            | Command::StateList { branch, .. }
+            | Command::VectorUpsert { branch, .. }
+            | Command::VectorGet { branch, .. }
+            | Command::VectorDelete { branch, .. }
+            | Command::VectorSearch { branch, .. }
+            | Command::VectorCreateCollection { branch, .. }
+            | Command::VectorDeleteCollection { branch, .. }
+            | Command::VectorListCollections { branch, .. }
+            | Command::VectorCollectionStats { branch, .. }
+            | Command::VectorBatchUpsert { branch, .. }
+            | Command::Search { branch, .. }
+            | Command::KvCount { branch, .. }
+            | Command::JsonCount { branch, .. }
+            | Command::KvSample { branch, .. }
+            | Command::JsonSample { branch, .. }
+            | Command::VectorSample { branch, .. }
+            | Command::DbExport { branch, .. } => branch.as_ref(),
+
+            // Commands with branch only (no space)
+            Command::RetentionApply { branch, .. }
+            | Command::RetentionStats { branch, .. }
+            | Command::RetentionPreview { branch, .. }
+            | Command::TxnBegin { branch, .. }
+            | Command::TimeRange { branch, .. }
+            | Command::Describe { branch, .. } => branch.as_ref(),
+
+            // Space commands
+            Command::SpaceList { branch, .. }
+            | Command::SpaceCreate { branch, .. }
+            | Command::SpaceDelete { branch, .. }
+            | Command::SpaceExists { branch, .. } => branch.as_ref(),
+
+            // Graph commands
+            Command::GraphCreate { branch, .. }
+            | Command::GraphDelete { branch, .. }
+            | Command::GraphList { branch, .. }
+            | Command::GraphGetMeta { branch, .. }
+            | Command::GraphAddNode { branch, .. }
+            | Command::GraphGetNode { branch, .. }
+            | Command::GraphRemoveNode { branch, .. }
+            | Command::GraphListNodes { branch, .. }
+            | Command::GraphListNodesPaginated { branch, .. }
+            | Command::GraphAddEdge { branch, .. }
+            | Command::GraphRemoveEdge { branch, .. }
+            | Command::GraphNeighbors { branch, .. }
+            | Command::GraphBulkInsert { branch, .. }
+            | Command::GraphBfs { branch, .. }
+            | Command::GraphDefineObjectType { branch, .. }
+            | Command::GraphGetObjectType { branch, .. }
+            | Command::GraphListObjectTypes { branch, .. }
+            | Command::GraphListOntologyTypes { branch, .. }
+            | Command::GraphDeleteObjectType { branch, .. }
+            | Command::GraphDefineLinkType { branch, .. }
+            | Command::GraphGetLinkType { branch, .. }
+            | Command::GraphListLinkTypes { branch, .. }
+            | Command::GraphDeleteLinkType { branch, .. }
+            | Command::GraphFreezeOntology { branch, .. }
+            | Command::GraphOntologyStatus { branch, .. }
+            | Command::GraphOntologySummary { branch, .. }
+            | Command::GraphNodesByType { branch, .. }
+            | Command::GraphWcc { branch, .. }
+            | Command::GraphCdlp { branch, .. }
+            | Command::GraphPagerank { branch, .. }
+            | Command::GraphLcc { branch, .. }
+            | Command::GraphSssp { branch, .. } => branch.as_ref(),
+
+            // Branch lifecycle, Transaction, Database — no data branch
+            _ => None,
+        }
     }
 }

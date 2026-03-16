@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use strata_engine::branch_dag;
 use strata_engine::BranchMetadata;
 
 use crate::bridge::{extract_version, from_engine_branch_status, Primitives};
@@ -72,6 +73,12 @@ fn validate_branch_name(name: &str) -> Result<()> {
             hint: None,
         });
     }
+    if name.starts_with("_system") {
+        return Err(Error::InvalidInput {
+            reason: "Branch names starting with '_system' are reserved".to_string(),
+            hint: Some("Choose a different branch name.".to_string()),
+        });
+    }
     Ok(())
 }
 
@@ -108,6 +115,11 @@ pub fn branch_create(
     // MVP: ignore metadata, use simple create_branch
     let versioned = convert_result(p.branch.create_branch(&branch_str))?;
 
+    // Best-effort: record branch creation in the DAG
+    if let Err(e) = branch_dag::dag_add_branch(&p.db, &branch_str, None, None) {
+        tracing::warn!(target: "strata::branch_dag", branch = %branch_str, error = %e, "Failed to record branch creation in DAG");
+    }
+
     Ok(Output::BranchWithVersion {
         info: metadata_to_branch_info(&versioned.value),
         version: extract_version(&versioned.version),
@@ -116,6 +128,9 @@ pub fn branch_create(
 
 /// Handle BranchGet command.
 pub fn branch_get(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
+    if branch.as_str().starts_with("_system") {
+        return Ok(Output::MaybeBranchInfo(None));
+    }
     let result = convert_result(p.branch.get_branch(branch.as_str()))?;
     match result {
         Some(v) => Ok(Output::MaybeBranchInfo(Some(versioned_to_branch_info(v)))),
@@ -135,6 +150,9 @@ pub fn branch_list(
 
     let mut all = Vec::new();
     for id in ids {
+        if id.starts_with("_system") {
+            continue;
+        }
         if let Some(versioned) = convert_result(p.branch.get_branch(&id))? {
             all.push(versioned_to_branch_info(versioned));
         }
@@ -151,6 +169,9 @@ pub fn branch_list(
 
 /// Handle BranchExists command.
 pub fn branch_exists(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
+    if branch.as_str().starts_with("_system") {
+        return Ok(Output::Bool(false));
+    }
     let exists = convert_result(p.branch.exists(branch.as_str()))?;
     Ok(Output::Bool(exists))
 }
@@ -162,6 +183,7 @@ pub fn branch_exists(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
 /// - Deletes all vector collections for the branch to free memory (#946)
 pub fn branch_delete(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
     reject_default_branch(&branch, "delete")?;
+    crate::handlers::reject_system_branch(&branch)?;
     convert_result(p.branch.delete_branch(branch.as_str()))?;
 
     // Cleanup: remove per-branch commit lock (#944)
@@ -183,6 +205,11 @@ pub fn branch_delete(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
         }
     }
 
+    // Best-effort: mark branch as deleted in the DAG
+    if let Err(e) = branch_dag::dag_mark_deleted(&p.db, branch.as_str()) {
+        tracing::warn!(target: "strata::branch_dag", branch = %branch.as_str(), error = %e, "Failed to mark branch as deleted in DAG");
+    }
+
     Ok(Output::Unit)
 }
 
@@ -191,13 +218,40 @@ pub fn branch_delete(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
 // =============================================================================
 
 /// Handle BranchFork command.
-pub fn branch_fork(p: &Arc<Primitives>, source: String, destination: String) -> Result<Output> {
+pub fn branch_fork(
+    p: &Arc<Primitives>,
+    source: String,
+    destination: String,
+    message: Option<String>,
+    creator: Option<String>,
+) -> Result<Output> {
+    if source.starts_with("_system") {
+        return Err(Error::InvalidInput {
+            reason: format!("Cannot fork from reserved branch '{}'", source),
+            hint: Some("Branches starting with '_system' are internal.".to_string()),
+        });
+    }
+    validate_branch_name(&destination)?;
     let info =
         strata_engine::branch_ops::fork_branch(&p.db, &source, &destination).map_err(|e| {
             Error::Internal {
                 reason: e.to_string(),
             }
         })?;
+
+    // Best-effort: record fork in the DAG
+    // dag_record_fork internally calls ensure_branch_node_exists for both
+    // parent and child, so no separate dag_add_branch call is needed.
+    if let Err(e) = branch_dag::dag_record_fork(
+        &p.db,
+        &source,
+        &destination,
+        message.as_deref(),
+        creator.as_deref(),
+    ) {
+        tracing::warn!(target: "strata::branch_dag", source = %source, destination = %destination, error = %e, "Failed to record fork in DAG");
+    }
+
     Ok(Output::BranchForked(info))
 }
 
@@ -236,11 +290,37 @@ pub fn branch_merge(
     source: String,
     target: String,
     strategy: strata_engine::MergeStrategy,
+    message: Option<String>,
+    creator: Option<String>,
 ) -> Result<Output> {
+    if source.starts_with("_system") || target.starts_with("_system") {
+        return Err(Error::InvalidInput {
+            reason: "Cannot merge to or from reserved '_system' branches".to_string(),
+            hint: Some("Branches starting with '_system' are internal.".to_string()),
+        });
+    }
     let info = strata_engine::branch_ops::merge_branches(&p.db, &source, &target, strategy)
         .map_err(|e| Error::Internal {
             reason: e.to_string(),
         })?;
+
+    // Best-effort: record merge in the DAG
+    let strategy_str = match strategy {
+        strata_engine::MergeStrategy::LastWriterWins => "last_writer_wins",
+        strata_engine::MergeStrategy::Strict => "strict",
+    };
+    if let Err(e) = branch_dag::dag_record_merge(
+        &p.db,
+        &source,
+        &target,
+        &info,
+        Some(strategy_str),
+        message.as_deref(),
+        creator.as_deref(),
+    ) {
+        tracing::warn!(target: "strata::branch_dag", source = %source, target = %target, error = %e, "Failed to record merge in DAG");
+    }
+
     Ok(Output::BranchMerged(info))
 }
 
@@ -272,6 +352,11 @@ pub fn branch_import(p: &Arc<Primitives>, path: String) -> Result<Output> {
     let info = strata_engine::bundle::import_branch(&p.db, import_path).map_err(|e| Error::Io {
         reason: format!("Import failed: {}", e),
     })?;
+
+    // Best-effort: record imported branch in the DAG
+    if let Err(e) = branch_dag::dag_add_branch(&p.db, &info.branch_id, None, None) {
+        tracing::warn!(target: "strata::branch_dag", branch = %info.branch_id, error = %e, "Failed to record imported branch in DAG");
+    }
 
     Ok(Output::BranchImported(crate::types::BranchImportResult {
         branch_id: info.branch_id,
@@ -326,5 +411,39 @@ mod tests {
         let info = metadata_to_branch_info(&m);
         assert_eq!(info.id.as_str(), "test-branch");
         assert_eq!(info.status, crate::types::BranchStatus::Active);
+    }
+
+    #[test]
+    fn reject_create_system_branch() {
+        assert!(validate_branch_name("_system_foo").is_err());
+        assert!(validate_branch_name("_system_").is_err());
+        assert!(validate_branch_name("_system").is_err());
+    }
+
+    #[test]
+    fn reject_system_branch_variants() {
+        // All _system* prefixes must be rejected
+        for name in &["_system_", "_system", "_system_foo", "_system_bar"] {
+            let branch = BranchId::from(*name);
+            assert!(
+                crate::handlers::reject_system_branch(&branch).is_err(),
+                "expected rejection for '{name}'"
+            );
+        }
+        // Normal branches must be allowed
+        for name in &["default", "my-branch", "system_not_prefixed"] {
+            let branch = BranchId::from(*name);
+            assert!(
+                crate::handlers::reject_system_branch(&branch).is_ok(),
+                "expected OK for '{name}'"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_normal_branch_names() {
+        assert!(validate_branch_name("my-branch").is_ok());
+        assert!(validate_branch_name("feature/test").is_ok());
+        assert!(validate_branch_name("default").is_ok());
     }
 }

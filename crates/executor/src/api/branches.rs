@@ -110,6 +110,29 @@ impl<'a> Branches<'a> {
         match self.executor.execute(Command::BranchFork {
             source: source.to_string(),
             destination: destination.to_string(),
+            message: None,
+            creator: None,
+        })? {
+            Output::BranchForked(info) => Ok(info),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for BranchFork".into(),
+            }),
+        }
+    }
+
+    /// Fork a branch with optional message and creator.
+    pub fn fork_with_options(
+        &self,
+        source: &str,
+        destination: &str,
+        message: Option<String>,
+        creator: Option<String>,
+    ) -> Result<ForkInfo> {
+        match self.executor.execute(Command::BranchFork {
+            source: source.to_string(),
+            destination: destination.to_string(),
+            message,
+            creator,
         })? {
             Output::BranchForked(info) => Ok(info),
             _ => Err(Error::Internal {
@@ -168,6 +191,31 @@ impl<'a> Branches<'a> {
             source: source.to_string(),
             target: target.to_string(),
             strategy,
+            message: None,
+            creator: None,
+        })? {
+            Output::BranchMerged(info) => Ok(info),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for BranchMerge".into(),
+            }),
+        }
+    }
+
+    /// Merge branches with optional message and creator.
+    pub fn merge_with_options(
+        &self,
+        source: &str,
+        target: &str,
+        strategy: MergeStrategy,
+        message: Option<String>,
+        creator: Option<String>,
+    ) -> Result<MergeInfo> {
+        match self.executor.execute(Command::BranchMerge {
+            source: source.to_string(),
+            target: target.to_string(),
+            strategy,
+            message,
+            creator,
         })? {
             Output::BranchMerged(info) => Ok(info),
             _ => Err(Error::Internal {

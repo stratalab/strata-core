@@ -857,6 +857,8 @@ fn test_command_branch_fork() {
     test_command_round_trip(Command::BranchFork {
         source: "main".to_string(),
         destination: "experiment".to_string(),
+        message: None,
+        creator: None,
     });
 }
 
@@ -877,6 +879,8 @@ fn test_command_branch_merge_lww() {
         source: "experiment".to_string(),
         target: "main".to_string(),
         strategy: MergeStrategy::LastWriterWins,
+        message: None,
+        creator: None,
     });
 }
 
@@ -886,6 +890,8 @@ fn test_command_branch_merge_strict() {
         source: "experiment".to_string(),
         target: "main".to_string(),
         strategy: MergeStrategy::Strict,
+        message: None,
+        creator: None,
     });
 }
 
