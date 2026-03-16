@@ -12,8 +12,11 @@ use crate::key_encoding::{encode_typed_key, InternalKey};
 use crate::memtable::{Memtable, MemtableEntry};
 use crate::merge_iter::{MergeIterator, MvccIterator};
 use crate::segment::{KVSegment, SegmentEntry};
+use crate::segment_builder::SegmentBuilder;
 
 use dashmap::DashMap;
+use std::io;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -60,14 +63,41 @@ pub struct SegmentedStore {
     branches: DashMap<BranchId, BranchState>,
     /// Global monotonic version counter.
     version: AtomicU64,
+    /// Directory for segment files.  `None` = ephemeral (memtable-only).
+    segments_dir: Option<PathBuf>,
+    /// Memtable rotation threshold in bytes.  0 = disabled.
+    write_buffer_size: u64,
+    /// Monotonic counter for memtable IDs and segment file names.
+    next_segment_id: AtomicU64,
 }
 
 impl SegmentedStore {
-    /// Create a new empty segmented store.
+    /// Create a new ephemeral segmented store (no disk segments).
+    ///
+    /// Rotation still works (frozen memtables accumulate), but flush is a no-op
+    /// because there is no directory to write segments into.
     pub fn new() -> Self {
         Self {
             branches: DashMap::new(),
             version: AtomicU64::new(0),
+            segments_dir: None,
+            write_buffer_size: 0,
+            next_segment_id: AtomicU64::new(1),
+        }
+    }
+
+    /// Create a segmented store backed by a directory for segment files.
+    ///
+    /// When a memtable exceeds `write_buffer_size` bytes it is automatically
+    /// frozen on the next write.  Call [`flush_oldest_frozen`] to persist
+    /// frozen memtables to disk as KV segments.
+    pub fn with_dir(segments_dir: PathBuf, write_buffer_size: usize) -> Self {
+        Self {
+            branches: DashMap::new(),
+            version: AtomicU64::new(0),
+            segments_dir: Some(segments_dir),
+            write_buffer_size: write_buffer_size as u64,
+            next_segment_id: AtomicU64::new(1),
         }
     }
 
@@ -162,6 +192,119 @@ impl SegmentedStore {
             Some((key, entry.to_versioned(commit_id)))
         })
         .collect()
+    }
+
+    // ========================================================================
+    // Rotation & Flush
+    // ========================================================================
+
+    /// Freeze the active memtable for `branch_id` and swap in a fresh one.
+    ///
+    /// The old (now frozen) memtable is pushed to the front of `frozen` so
+    /// that newest-first read ordering is preserved.  This is cheap (~µs).
+    ///
+    /// Returns `false` if the branch does not exist.
+    pub fn rotate_memtable(&self, branch_id: &BranchId) -> bool {
+        let mut branch = match self.branches.get_mut(branch_id) {
+            Some(b) => b,
+            None => return false,
+        };
+        let next_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
+        let old = std::mem::replace(&mut branch.active, Memtable::new(next_id));
+        old.freeze();
+        branch.frozen.insert(0, Arc::new(old));
+        true
+    }
+
+    /// Flush the oldest frozen memtable for `branch_id` to a KV segment on disk.
+    ///
+    /// Returns `Ok(true)` if a memtable was flushed, `Ok(false)` if there was
+    /// nothing to flush (no frozen memtables, branch missing, or ephemeral mode).
+    ///
+    /// The frozen memtable stays in the read path during I/O so concurrent
+    /// readers never see a gap.  It is only removed when the segment is
+    /// installed, in a single DashMap guard.
+    pub fn flush_oldest_frozen(&self, branch_id: &BranchId) -> io::Result<bool> {
+        let segments_dir = match &self.segments_dir {
+            Some(d) => d,
+            None => return Ok(false),
+        };
+
+        // Clone the Arc to the oldest frozen memtable (keep it in the list
+        // so readers can still find it during I/O).
+        let frozen_mt = {
+            let branch = match self.branches.get(branch_id) {
+                Some(b) => b,
+                None => return Ok(false),
+            };
+            match branch.frozen.last() {
+                Some(mt) => Arc::clone(mt),
+                None => return Ok(false),
+            }
+            // DashMap guard drops here; data stays alive via Arc
+        };
+
+        // Build segment to disk (no locks held — I/O-heavy).
+        let seg_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
+        let seg_path = segments_dir.join(format!("{}.sst", seg_id));
+
+        std::fs::create_dir_all(segments_dir)?;
+        let builder = SegmentBuilder::default();
+        builder.build_from_iter(frozen_mt.iter_all(), &seg_path)?;
+
+        // Open the newly written segment.
+        let segment = KVSegment::open(&seg_path)?;
+
+        // Atomically: remove the frozen memtable we just flushed and install
+        // the segment, under a single DashMap guard.
+        let mut branch = self
+            .branches
+            .entry(*branch_id)
+            .or_insert_with(BranchState::new);
+        if let Some(last) = branch.frozen.last() {
+            if last.id() == frozen_mt.id() {
+                branch.frozen.pop();
+            }
+        }
+        branch.segments.insert(0, Arc::new(segment));
+
+        Ok(true)
+    }
+
+    /// Returns `true` if `branch_id` has any frozen memtables pending flush.
+    pub fn has_frozen(&self, branch_id: &BranchId) -> bool {
+        self.branches
+            .get(branch_id)
+            .is_some_and(|b| !b.frozen.is_empty())
+    }
+
+    /// Number of frozen memtables for a branch (test helper).
+    pub fn branch_frozen_count(&self, branch_id: &BranchId) -> usize {
+        self.branches
+            .get(branch_id)
+            .map_or(0, |b| b.frozen.len())
+    }
+
+    /// Number of on-disk segments for a branch (test helper).
+    pub fn branch_segment_count(&self, branch_id: &BranchId) -> usize {
+        self.branches
+            .get(branch_id)
+            .map_or(0, |b| b.segments.len())
+    }
+
+    /// Check whether the active memtable should be rotated and do so inline.
+    ///
+    /// Called after every write within the DashMap entry guard.
+    #[inline]
+    fn maybe_rotate(&self, branch: &mut BranchState) {
+        if self.write_buffer_size > 0
+            && branch.active.approx_bytes() >= self.write_buffer_size
+        {
+            let next_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
+            let old = std::mem::replace(&mut branch.active, Memtable::new(next_id));
+            old.freeze();
+            branch.frozen.insert(0, Arc::new(old));
+        }
     }
 
     // ========================================================================
@@ -377,7 +520,7 @@ impl Storage for SegmentedStore {
         let branch_id = key.namespace.branch_id;
 
         // Get-or-create branch
-        let branch = self
+        let mut branch = self
             .branches
             .entry(branch_id)
             .or_insert_with(BranchState::new);
@@ -391,6 +534,9 @@ impl Storage for SegmentedStore {
         };
         branch.active.put_entry(&key, version, entry);
 
+        // Rotate if active memtable exceeds threshold
+        self.maybe_rotate(&mut branch);
+
         // Update global version
         self.version.fetch_max(version, Ordering::AcqRel);
 
@@ -400,7 +546,7 @@ impl Storage for SegmentedStore {
     fn delete_with_version(&self, key: &Key, version: u64) -> StrataResult<()> {
         let branch_id = key.namespace.branch_id;
 
-        let branch = self
+        let mut branch = self
             .branches
             .entry(branch_id)
             .or_insert_with(BranchState::new);
@@ -412,6 +558,9 @@ impl Storage for SegmentedStore {
             ttl_ms: 0,
         };
         branch.active.put_entry(key, version, entry);
+
+        // Rotate if active memtable exceeds threshold
+        self.maybe_rotate(&mut branch);
 
         // Update global version
         self.version.fetch_max(version, Ordering::AcqRel);
@@ -875,5 +1024,344 @@ mod tests {
         assert!(store
             .list_branch(&BranchId::from_bytes([99; 16]))
             .is_empty());
+    }
+
+    // ===== Flush pipeline tests =====
+
+    #[test]
+    fn flush_moves_data_to_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+        for i in 1..=100u64 {
+            seed(&store, kv_key(&format!("k{:04}", i)), Value::Int(i as i64), i);
+        }
+
+        assert!(store.rotate_memtable(&branch()));
+        assert!(store.has_frozen(&branch()));
+        assert_eq!(store.branch_frozen_count(&branch()), 1);
+
+        let flushed = store.flush_oldest_frozen(&branch()).unwrap();
+        assert!(flushed);
+        assert_eq!(store.branch_frozen_count(&branch()), 0);
+        assert_eq!(store.branch_segment_count(&branch()), 1);
+
+        for i in 1..=100u64 {
+            let result = store
+                .get_versioned(&kv_key(&format!("k{:04}", i)), u64::MAX)
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.value, Value::Int(i as i64));
+        }
+    }
+
+    #[test]
+    fn flush_produces_valid_segment_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        store.rotate_memtable(&branch());
+        store.flush_oldest_frozen(&branch()).unwrap();
+
+        let sst_files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "sst"))
+            .collect();
+        assert!(!sst_files.is_empty());
+
+        let seg = crate::segment::KVSegment::open(&sst_files[0].path()).unwrap();
+        assert_eq!(seg.entry_count(), 1);
+    }
+
+    #[test]
+    fn flush_empty_frozen_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        let flushed = store.flush_oldest_frozen(&branch()).unwrap();
+        assert!(!flushed);
+    }
+
+    #[test]
+    fn flush_without_dir_is_noop() {
+        let store = SegmentedStore::new();
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        store.rotate_memtable(&branch());
+        assert!(store.has_frozen(&branch()));
+
+        let flushed = store.flush_oldest_frozen(&branch()).unwrap();
+        assert!(!flushed);
+    }
+
+    #[test]
+    fn rotation_triggers_at_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 1);
+
+        seed(&store, kv_key("k"), Value::Int(42), 1);
+
+        assert!(
+            store.branch_frozen_count(&branch()) >= 1,
+            "rotation should have triggered at 1-byte threshold"
+        );
+    }
+
+    #[test]
+    fn rotation_creates_fresh_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 1);
+
+        seed(&store, kv_key("old"), Value::Int(1), 1);
+        seed(&store, kv_key("new"), Value::Int(2), 2);
+
+        assert_eq!(
+            store.get_versioned(&kv_key("old"), u64::MAX).unwrap().unwrap().value,
+            Value::Int(1),
+        );
+        assert_eq!(
+            store.get_versioned(&kv_key("new"), u64::MAX).unwrap().unwrap().value,
+            Value::Int(2),
+        );
+    }
+
+    #[test]
+    fn no_rotation_when_threshold_zero() {
+        let store = SegmentedStore::new();
+
+        for i in 1..=100u64 {
+            seed(&store, kv_key(&format!("k{}", i)), Value::Int(i as i64), i);
+        }
+
+        assert_eq!(store.branch_frozen_count(&branch()), 0);
+    }
+
+    #[test]
+    fn mvcc_correct_across_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        store.rotate_memtable(&branch());
+        store.flush_oldest_frozen(&branch()).unwrap();
+
+        seed(&store, kv_key("k"), Value::Int(2), 2);
+
+        assert_eq!(
+            store.get_versioned(&kv_key("k"), 1).unwrap().unwrap().value,
+            Value::Int(1),
+        );
+        assert_eq!(
+            store.get_versioned(&kv_key("k"), 2).unwrap().unwrap().value,
+            Value::Int(2),
+        );
+    }
+
+    #[test]
+    fn prefix_scan_spans_memtable_and_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+        seed(&store, kv_key("item/a"), Value::Int(1), 1);
+        seed(&store, kv_key("item/b"), Value::Int(2), 2);
+        store.rotate_memtable(&branch());
+        store.flush_oldest_frozen(&branch()).unwrap();
+
+        seed(&store, kv_key("item/c"), Value::Int(3), 3);
+        seed(&store, kv_key("item/d"), Value::Int(4), 4);
+
+        let prefix = Key::new(ns(), TypeTag::KV, "item/".as_bytes().to_vec());
+        let results = store.scan_prefix(&prefix, u64::MAX).unwrap();
+        assert_eq!(results.len(), 4);
+    }
+
+    #[test]
+    fn get_history_spans_memtable_and_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        seed(&store, kv_key("k"), Value::Int(2), 2);
+        store.rotate_memtable(&branch());
+        store.flush_oldest_frozen(&branch()).unwrap();
+
+        seed(&store, kv_key("k"), Value::Int(3), 3);
+
+        let history = store.get_history(&kv_key("k"), None, None).unwrap();
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].value, Value::Int(3));
+        assert_eq!(history[1].value, Value::Int(2));
+        assert_eq!(history[2].value, Value::Int(1));
+    }
+
+    #[test]
+    fn multiple_flushes_produce_multiple_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+        for cycle in 0..3u64 {
+            let base = cycle * 10 + 1;
+            for i in 0..10u64 {
+                seed(
+                    &store,
+                    kv_key(&format!("c{}k{}", cycle, i)),
+                    Value::Int((base + i) as i64),
+                    base + i,
+                );
+            }
+            store.rotate_memtable(&branch());
+            store.flush_oldest_frozen(&branch()).unwrap();
+        }
+
+        assert_eq!(store.branch_segment_count(&branch()), 3);
+
+        for cycle in 0..3u64 {
+            let base = cycle * 10 + 1;
+            for i in 0..10u64 {
+                let result = store
+                    .get_versioned(&kv_key(&format!("c{}k{}", cycle, i)), u64::MAX)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(result.value, Value::Int((base + i) as i64));
+            }
+        }
+    }
+
+    #[test]
+    fn newest_segment_wins_for_same_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        store.rotate_memtable(&branch());
+        store.flush_oldest_frozen(&branch()).unwrap();
+
+        seed(&store, kv_key("k"), Value::Int(2), 2);
+        store.rotate_memtable(&branch());
+        store.flush_oldest_frozen(&branch()).unwrap();
+
+        assert_eq!(store.branch_segment_count(&branch()), 2);
+
+        let result = store
+            .get_versioned(&kv_key("k"), u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.value, Value::Int(2));
+    }
+
+    #[test]
+    fn reads_dont_block_during_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SegmentedStore::with_dir(dir.path().to_path_buf(), 0));
+
+        for i in 1..=50u64 {
+            store
+                .put_with_version_mode(
+                    kv_key(&format!("k{:04}", i)),
+                    Value::Int(i as i64),
+                    i,
+                    None,
+                    WriteMode::Append,
+                )
+                .unwrap();
+        }
+        store.rotate_memtable(&branch());
+
+        let store_reader = Arc::clone(&store);
+        let reader = std::thread::spawn(move || {
+            for i in 1..=50u64 {
+                let result = store_reader
+                    .get_versioned(&kv_key(&format!("k{:04}", i)), u64::MAX)
+                    .unwrap();
+                assert!(result.is_some(), "key k{:04} should be readable", i);
+            }
+        });
+
+        store.flush_oldest_frozen(&branch()).unwrap();
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn rotate_nonexistent_branch_returns_false() {
+        let store = SegmentedStore::new();
+        assert!(!store.rotate_memtable(&branch()));
+    }
+
+    #[test]
+    fn flush_nonexistent_branch_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let flushed = store.flush_oldest_frozen(&branch()).unwrap();
+        assert!(!flushed);
+    }
+
+    #[test]
+    fn delete_across_flush_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        store.rotate_memtable(&branch());
+        store.flush_oldest_frozen(&branch()).unwrap();
+
+        store.delete_with_version(&kv_key("k"), 2).unwrap();
+
+        assert!(store.get_versioned(&kv_key("k"), 2).unwrap().is_none());
+        assert_eq!(
+            store.get_versioned(&kv_key("k"), 1).unwrap().unwrap().value,
+            Value::Int(1),
+        );
+    }
+
+    #[test]
+    fn tombstone_survives_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+        // Write value then delete, so the frozen memtable contains both
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        store.delete_with_version(&kv_key("k"), 2).unwrap();
+        store.rotate_memtable(&branch());
+        store.flush_oldest_frozen(&branch()).unwrap();
+
+        // Tombstone must survive the flush — key is deleted at snapshot 2
+        assert!(store.get_versioned(&kv_key("k"), 2).unwrap().is_none());
+        // Value is still visible at snapshot 1
+        assert_eq!(
+            store.get_versioned(&kv_key("k"), 1).unwrap().unwrap().value,
+            Value::Int(1),
+        );
+        // History shows both versions from the segment
+        let history = store.get_history(&kv_key("k"), None, None).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].value, Value::Null); // tombstone at v2
+        assert_eq!(history[1].value, Value::Int(1)); // value at v1
+    }
+
+    #[test]
+    fn frozen_memtable_reads_correct_order() {
+        let store = SegmentedStore::new();
+
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        store.rotate_memtable(&branch());
+        seed(&store, kv_key("k"), Value::Int(2), 2);
+        store.rotate_memtable(&branch());
+        seed(&store, kv_key("k"), Value::Int(3), 3);
+
+        assert_eq!(store.branch_frozen_count(&branch()), 2);
+        assert_eq!(
+            store.get_versioned(&kv_key("k"), u64::MAX).unwrap().unwrap().value,
+            Value::Int(3),
+        );
+        assert_eq!(
+            store.get_versioned(&kv_key("k"), 2).unwrap().unwrap().value,
+            Value::Int(2),
+        );
+        assert_eq!(
+            store.get_versioned(&kv_key("k"), 1).unwrap().unwrap().value,
+            Value::Int(1),
+        );
     }
 }

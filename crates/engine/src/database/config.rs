@@ -67,6 +67,15 @@ pub struct StorageConfig {
     /// versions exceeding this limit. Explicit KeepLast(n) overrides.
     #[serde(default)]
     pub max_versions_per_key: usize,
+    /// Memtable write buffer size in bytes. When a branch's active memtable
+    /// exceeds this threshold, it is frozen and a new active memtable is swapped in.
+    /// Default: 128 MiB. Set to 0 to disable automatic rotation.
+    #[serde(default = "default_write_buffer_size")]
+    pub write_buffer_size: usize,
+    /// Maximum number of frozen (immutable) memtables allowed per branch before
+    /// write stalling kicks in. Default: 4. Reserved for future enforcement.
+    #[serde(default = "default_max_immutable_memtables")]
+    pub max_immutable_memtables: usize,
 }
 
 fn default_max_branches() -> usize {
@@ -77,12 +86,22 @@ fn default_max_write_buffer_entries() -> usize {
     500_000
 }
 
+fn default_write_buffer_size() -> usize {
+    128 * 1024 * 1024 // 128 MiB
+}
+
+fn default_max_immutable_memtables() -> usize {
+    4
+}
+
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             max_branches: default_max_branches(),
             max_write_buffer_entries: default_max_write_buffer_entries(),
             max_versions_per_key: 0,
+            write_buffer_size: default_write_buffer_size(),
+            max_immutable_memtables: default_max_immutable_memtables(),
         }
     }
 }
@@ -273,6 +292,8 @@ auto_embed = false
 # max_branches = 1024
 # max_write_buffer_entries = 500000
 # max_versions_per_key = 0    # 0 = unlimited; set to e.g. 100 to cap MVCC history
+# write_buffer_size = 134217728  # 128 MiB; memtable rotation threshold
+# max_immutable_memtables = 4   # max frozen memtables before stall (future)
 "#
     }
 
@@ -788,6 +809,8 @@ auto_embed = false
         assert_eq!(config.storage.max_branches, 1024);
         assert_eq!(config.storage.max_write_buffer_entries, 500_000);
         assert_eq!(config.storage.max_versions_per_key, 0);
+        assert_eq!(config.storage.write_buffer_size, 128 * 1024 * 1024);
+        assert_eq!(config.storage.max_immutable_memtables, 4);
     }
 
     #[test]
@@ -801,6 +824,25 @@ auto_embed = false
         assert_eq!(config.storage.max_branches, 1024);
         assert_eq!(config.storage.max_write_buffer_entries, 500_000);
         assert_eq!(config.storage.max_versions_per_key, 0);
+        assert_eq!(config.storage.write_buffer_size, 128 * 1024 * 1024);
+        assert_eq!(config.storage.max_immutable_memtables, 4);
+    }
+
+    #[test]
+    fn test_write_buffer_size_round_trip() {
+        let toml_str = r#"
+[storage]
+write_buffer_size = 67108864
+max_immutable_memtables = 8
+"#;
+        let config: StrataConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.storage.write_buffer_size, 64 * 1024 * 1024);
+        assert_eq!(config.storage.max_immutable_memtables, 8);
+
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        let reparsed: StrataConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.storage.write_buffer_size, 64 * 1024 * 1024);
+        assert_eq!(reparsed.storage.max_immutable_memtables, 8);
     }
 
     #[test]
