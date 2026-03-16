@@ -686,6 +686,12 @@ pub enum Command {
         source: String,
         /// Destination branch name.
         destination: String,
+        /// Optional message describing the fork.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        /// Optional creator identifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creator: Option<String>,
     },
 
     /// Compare two branches and return structured differences.
@@ -715,6 +721,12 @@ pub enum Command {
         target: String,
         /// Conflict resolution strategy.
         strategy: MergeStrategy,
+        /// Optional message describing the merge.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        /// Optional creator identifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creator: Option<String>,
     },
 
     // ==================== Transaction (5) ====================

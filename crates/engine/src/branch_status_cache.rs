@@ -34,6 +34,9 @@ impl BranchStatusCache {
 
     /// Returns `true` if the branch is active (or not in the cache, defaulting to writable).
     pub fn is_writable(&self, name: &str) -> bool {
-        !matches!(self.get(name), Some(DagBranchStatus::Archived))
+        match self.get(name) {
+            Some(status) => status.is_writable(),
+            None => true,
+        }
     }
 }

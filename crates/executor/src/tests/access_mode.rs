@@ -157,11 +157,15 @@ fn test_read_only_blocks_all_writes() {
         Command::BranchFork {
             source: "default".into(),
             destination: "fork".into(),
+            message: None,
+            creator: None,
         },
         Command::BranchMerge {
             source: "a".into(),
             target: "b".into(),
             strategy: strata_engine::MergeStrategy::LastWriterWins,
+            message: None,
+            creator: None,
         },
         Command::ConfigSetAutoEmbed { enabled: true },
         Command::TxnBegin {
@@ -505,11 +509,15 @@ fn test_is_write_classification() {
         Command::BranchFork {
             source: "".into(),
             destination: "".into(),
+            message: None,
+            creator: None,
         },
         Command::BranchMerge {
             source: "".into(),
             target: "".into(),
             strategy: strata_engine::MergeStrategy::LastWriterWins,
+            message: None,
+            creator: None,
         },
         Command::ConfigSetAutoEmbed { enabled: false },
         Command::ConfigureSet {

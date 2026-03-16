@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use strata_engine::branch_dag;
 use strata_engine::BranchMetadata;
 
 use crate::bridge::{extract_version, from_engine_branch_status, Primitives};
@@ -114,6 +115,11 @@ pub fn branch_create(
     // MVP: ignore metadata, use simple create_branch
     let versioned = convert_result(p.branch.create_branch(&branch_str))?;
 
+    // Best-effort: record branch creation in the DAG
+    if let Err(e) = branch_dag::dag_add_branch(&p.db, &branch_str, None, None) {
+        tracing::warn!(target: "strata::branch_dag", branch = %branch_str, error = %e, "Failed to record branch creation in DAG");
+    }
+
     Ok(Output::BranchWithVersion {
         info: metadata_to_branch_info(&versioned.value),
         version: extract_version(&versioned.version),
@@ -199,6 +205,11 @@ pub fn branch_delete(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
         }
     }
 
+    // Best-effort: mark branch as deleted in the DAG
+    if let Err(e) = branch_dag::dag_mark_deleted(&p.db, branch.as_str()) {
+        tracing::warn!(target: "strata::branch_dag", branch = %branch.as_str(), error = %e, "Failed to mark branch as deleted in DAG");
+    }
+
     Ok(Output::Unit)
 }
 
@@ -207,7 +218,13 @@ pub fn branch_delete(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
 // =============================================================================
 
 /// Handle BranchFork command.
-pub fn branch_fork(p: &Arc<Primitives>, source: String, destination: String) -> Result<Output> {
+pub fn branch_fork(
+    p: &Arc<Primitives>,
+    source: String,
+    destination: String,
+    message: Option<String>,
+    creator: Option<String>,
+) -> Result<Output> {
     if source.starts_with("_system") {
         return Err(Error::InvalidInput {
             reason: format!("Cannot fork from reserved branch '{}'", source),
@@ -221,6 +238,20 @@ pub fn branch_fork(p: &Arc<Primitives>, source: String, destination: String) -> 
                 reason: e.to_string(),
             }
         })?;
+
+    // Best-effort: record fork in the DAG
+    // dag_record_fork internally calls ensure_branch_node_exists for both
+    // parent and child, so no separate dag_add_branch call is needed.
+    if let Err(e) = branch_dag::dag_record_fork(
+        &p.db,
+        &source,
+        &destination,
+        message.as_deref(),
+        creator.as_deref(),
+    ) {
+        tracing::warn!(target: "strata::branch_dag", source = %source, destination = %destination, error = %e, "Failed to record fork in DAG");
+    }
+
     Ok(Output::BranchForked(info))
 }
 
@@ -259,6 +290,8 @@ pub fn branch_merge(
     source: String,
     target: String,
     strategy: strata_engine::MergeStrategy,
+    message: Option<String>,
+    creator: Option<String>,
 ) -> Result<Output> {
     if source.starts_with("_system") || target.starts_with("_system") {
         return Err(Error::InvalidInput {
@@ -270,6 +303,24 @@ pub fn branch_merge(
         .map_err(|e| Error::Internal {
             reason: e.to_string(),
         })?;
+
+    // Best-effort: record merge in the DAG
+    let strategy_str = match strategy {
+        strata_engine::MergeStrategy::LastWriterWins => "last_writer_wins",
+        strata_engine::MergeStrategy::Strict => "strict",
+    };
+    if let Err(e) = branch_dag::dag_record_merge(
+        &p.db,
+        &source,
+        &target,
+        &info,
+        Some(strategy_str),
+        message.as_deref(),
+        creator.as_deref(),
+    ) {
+        tracing::warn!(target: "strata::branch_dag", source = %source, target = %target, error = %e, "Failed to record merge in DAG");
+    }
+
     Ok(Output::BranchMerged(info))
 }
 
@@ -301,6 +352,11 @@ pub fn branch_import(p: &Arc<Primitives>, path: String) -> Result<Output> {
     let info = strata_engine::bundle::import_branch(&p.db, import_path).map_err(|e| Error::Io {
         reason: format!("Import failed: {}", e),
     })?;
+
+    // Best-effort: record imported branch in the DAG
+    if let Err(e) = branch_dag::dag_add_branch(&p.db, &info.branch_id, None, None) {
+        tracing::warn!(target: "strata::branch_dag", branch = %info.branch_id, error = %e, "Failed to record imported branch in DAG");
+    }
 
     Ok(Output::BranchImported(crate::types::BranchImportResult {
         branch_id: info.branch_id,
