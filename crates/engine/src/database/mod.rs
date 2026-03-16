@@ -1711,6 +1711,11 @@ impl Database {
     /// Schedule background flush tasks for branches with frozen memtables.
     /// Best-effort: errors are logged, never propagated to the commit caller.
     fn schedule_flush_if_needed(&self) {
+        // Fast path: ephemeral databases never flush (no segments_dir)
+        if self.storage.segments_dir().is_none() {
+            return;
+        }
+
         let branches = self.storage.branches_needing_flush();
         if branches.is_empty() {
             return;
@@ -1790,9 +1795,12 @@ impl Database {
         match result {
             Ok(value) => {
                 // Commit on success
+                let had_writes = !txn.is_read_only();
                 let commit_version = self.commit_internal(txn, durability)?;
-                // Schedule flush for branches with frozen memtables (best-effort)
-                self.schedule_flush_if_needed();
+                // Schedule flush only for write transactions (reads skip entirely)
+                if had_writes {
+                    self.schedule_flush_if_needed();
+                }
                 Ok((value, commit_version))
             }
             Err(e) => {
@@ -1960,8 +1968,11 @@ impl Database {
     /// # Contract
     /// Returns the commit version (u64) assigned to all writes in this transaction.
     pub fn commit_transaction(&self, txn: &mut TransactionContext) -> StrataResult<u64> {
+        let had_writes = !txn.is_read_only();
         let version = self.commit_internal(txn, self.durability_mode)?;
-        self.schedule_flush_if_needed();
+        if had_writes {
+            self.schedule_flush_if_needed();
+        }
         Ok(version)
     }
 

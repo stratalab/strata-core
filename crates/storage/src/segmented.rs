@@ -97,6 +97,8 @@ pub struct SegmentedStore {
     max_branches: AtomicUsize,
     /// Maximum versions to keep per key (0 = unlimited, pruned at compaction).
     max_versions_per_key: AtomicUsize,
+    /// Total frozen memtable count across all branches (for O(1) "any frozen?" check).
+    total_frozen_count: AtomicUsize,
 }
 
 impl SegmentedStore {
@@ -115,6 +117,7 @@ impl SegmentedStore {
             bulk_load_branches: DashMap::new(),
             max_branches: AtomicUsize::new(0),
             max_versions_per_key: AtomicUsize::new(0),
+            total_frozen_count: AtomicUsize::new(0),
         }
     }
 
@@ -134,6 +137,7 @@ impl SegmentedStore {
             bulk_load_branches: DashMap::new(),
             max_branches: AtomicUsize::new(0),
             max_versions_per_key: AtomicUsize::new(0),
+            total_frozen_count: AtomicUsize::new(0),
         }
     }
 
@@ -153,6 +157,7 @@ impl SegmentedStore {
             bulk_load_branches: DashMap::new(),
             max_branches: AtomicUsize::new(0),
             max_versions_per_key: AtomicUsize::new(0),
+            total_frozen_count: AtomicUsize::new(0),
         }
     }
 
@@ -576,6 +581,7 @@ impl SegmentedStore {
         let old = std::mem::replace(&mut branch.active, Memtable::new(next_id));
         old.freeze();
         branch.frozen.insert(0, Arc::new(old));
+        self.total_frozen_count.fetch_add(1, Ordering::Relaxed);
         true
     }
 
@@ -628,6 +634,7 @@ impl SegmentedStore {
         if let Some(last) = branch.frozen.last() {
             if last.id() == frozen_mt.id() {
                 branch.frozen.pop();
+                self.total_frozen_count.fetch_sub(1, Ordering::Relaxed);
             }
         }
         branch.segments.insert(0, Arc::new(segment));
@@ -779,6 +786,7 @@ impl SegmentedStore {
             let old = std::mem::replace(&mut branch.active, Memtable::new(next_id));
             old.freeze();
             branch.frozen.insert(0, Arc::new(old));
+            self.total_frozen_count.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -961,10 +969,23 @@ impl SegmentedStore {
         self.pressure.level(self.total_memtable_bytes())
     }
 
+    /// Returns `true` if any branch has frozen memtables pending flush.
+    ///
+    /// O(1) check via atomic counter — no DashMap scan.
+    #[inline]
+    pub fn has_frozen_memtables(&self) -> bool {
+        self.total_frozen_count.load(Ordering::Relaxed) > 0
+    }
+
     /// Branch IDs with frozen memtables, ordered by frozen count descending.
     ///
     /// Useful for the caller to decide which branches to flush first.
     pub fn branches_needing_flush(&self) -> Vec<BranchId> {
+        // Fast path: no frozen memtables anywhere
+        if !self.has_frozen_memtables() {
+            return Vec::new();
+        }
+
         let mut branches: Vec<(BranchId, usize)> = self
             .branches
             .iter()
