@@ -15,5 +15,5 @@ pub use mode::DurabilityMode;
 
 // Segmented WAL types (primary API)
 pub use config::{WalConfig, WalConfigError};
-pub use reader::{ReadStopReason, TruncateInfo, WalReader, WalReaderError};
+pub use reader::{ReadStopReason, TruncateInfo, WalReader, WalReaderError, WalRecordIterator};
 pub use writer::{WalCounters, WalDiskUsage, WalWriter};

@@ -297,9 +297,7 @@ impl SegmentedStore {
     /// Point-in-time query: for each key, finds the latest version whose
     /// timestamp ≤ max_ts, ignoring newer versions entirely.
     ///
-    /// **Limitation:** On-disk segments (v1 format) do not store timestamps.
-    /// Flushed entries appear with timestamp=0 and will always match any
-    /// `max_ts` query. Results are only fully correct for memtable-resident data.
+    /// **Note:** v2 segments store timestamps; v1 segments default to timestamp=0.
     pub fn list_by_type_at_timestamp(
         &self,
         branch_id: &BranchId,
@@ -358,8 +356,7 @@ impl SegmentedStore {
 
     /// Get the latest entry for a key where timestamp ≤ max_ts.
     ///
-    /// **Limitation:** On-disk segments (v1 format) do not store timestamps.
-    /// Flushed entries appear with timestamp=0 and will always match.
+    /// **Note:** v2 segments store timestamps; v1 segments default to timestamp=0.
     pub fn get_at_timestamp(
         &self,
         key: &Key,
@@ -389,8 +386,7 @@ impl SegmentedStore {
     ///
     /// For each key, finds the latest version whose timestamp ≤ max_timestamp.
     ///
-    /// **Limitation:** On-disk segments (v1 format) do not store timestamps.
-    /// Flushed entries appear with timestamp=0 and will always match.
+    /// **Note:** v2 segments store timestamps; v1 segments default to timestamp=0.
     pub fn scan_prefix_at_timestamp(
         &self,
         prefix: &Key,
@@ -1399,10 +1395,8 @@ fn segment_entry_to_memtable_entry(se: SegmentEntry) -> MemtableEntry {
     MemtableEntry {
         value: se.value,
         is_tombstone: se.is_tombstone,
-        // Segments don't store timestamp/TTL in v1 format.
-        // Use epoch as placeholder; TTL is 0 (no expiry).
-        timestamp: Timestamp::from_micros(0),
-        ttl_ms: 0,
+        timestamp: Timestamp::from_micros(se.timestamp),
+        ttl_ms: se.ttl_ms,
     }
 }
 

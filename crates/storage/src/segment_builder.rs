@@ -33,7 +33,7 @@ const KV_HEADER_MAGIC: [u8; 8] = *b"STRAKV\0\0";
 const FOOTER_MAGIC: [u8; 8] = *b"STRAKEND";
 
 /// Current format version.
-const FORMAT_VERSION: u16 = 1;
+const FORMAT_VERSION: u16 = 2;
 
 /// Fixed header size in bytes.
 const KV_HEADER_SIZE: usize = 64;
@@ -255,7 +255,7 @@ impl SegmentBuilder {
 
 /// Encode a single entry into a data block buffer.
 ///
-/// Format: `| ik_len: u32 | ik_bytes | value_kind: u8 | value_len: u32 | value_bytes |`
+/// v2 format: `| ik_len: u32 | ik_bytes | value_kind: u8 | timestamp: u64 LE | ttl_ms: u64 LE | value_len: u32 | value_bytes |`
 fn encode_entry(ik: &InternalKey, entry: &MemtableEntry, buf: &mut Vec<u8>) {
     let ik_bytes = ik.as_bytes();
     buf.extend_from_slice(&(ik_bytes.len() as u32).to_le_bytes());
@@ -263,9 +263,13 @@ fn encode_entry(ik: &InternalKey, entry: &MemtableEntry, buf: &mut Vec<u8>) {
 
     if entry.is_tombstone {
         buf.push(VALUE_KIND_DEL);
+        buf.extend_from_slice(&entry.timestamp.as_micros().to_le_bytes());
+        buf.extend_from_slice(&entry.ttl_ms.to_le_bytes());
         buf.extend_from_slice(&0u32.to_le_bytes());
     } else {
         buf.push(VALUE_KIND_PUT);
+        buf.extend_from_slice(&entry.timestamp.as_micros().to_le_bytes());
+        buf.extend_from_slice(&entry.ttl_ms.to_le_bytes());
         let value_bytes =
             bincode::serialize(&entry.value).expect("Value serialization should not fail");
         buf.extend_from_slice(&(value_bytes.len() as u32).to_le_bytes());
@@ -275,8 +279,8 @@ fn encode_entry(ik: &InternalKey, entry: &MemtableEntry, buf: &mut Vec<u8>) {
 
 /// Decode a single entry from a data block at the given offset.
 ///
-/// Returns `(internal_key, is_tombstone, value, bytes_consumed)`.
-pub(crate) fn decode_entry(data: &[u8]) -> Option<(InternalKey, bool, Value, usize)> {
+/// Returns `(internal_key, is_tombstone, value, timestamp_micros, ttl_ms, bytes_consumed)`.
+pub(crate) fn decode_entry(data: &[u8]) -> Option<(InternalKey, bool, Value, u64, u64, usize)> {
     if data.len() < 4 {
         return None;
     }
@@ -296,6 +300,15 @@ pub(crate) fn decode_entry(data: &[u8]) -> Option<(InternalKey, bool, Value, usi
     let value_kind = data[pos];
     pos += 1;
 
+    // Read timestamp and ttl_ms after value_kind
+    if pos + 16 > data.len() {
+        return None;
+    }
+    let timestamp = u64::from_le_bytes(data[pos..pos + 8].try_into().ok()?);
+    pos += 8;
+    let ttl_ms = u64::from_le_bytes(data[pos..pos + 8].try_into().ok()?);
+    pos += 8;
+
     if pos + 4 > data.len() {
         return None;
     }
@@ -303,7 +316,7 @@ pub(crate) fn decode_entry(data: &[u8]) -> Option<(InternalKey, bool, Value, usi
     pos += 4;
 
     if value_kind == VALUE_KIND_DEL {
-        return Some((ik, true, Value::Null, pos));
+        return Some((ik, true, Value::Null, timestamp, ttl_ms, pos));
     }
 
     if value_kind != VALUE_KIND_PUT {
@@ -316,7 +329,7 @@ pub(crate) fn decode_entry(data: &[u8]) -> Option<(InternalKey, bool, Value, usi
     let value: Value = bincode::deserialize(&data[pos..pos + value_len]).ok()?;
     pos += value_len;
 
-    Some((ik, false, value, pos))
+    Some((ik, false, value, timestamp, ttl_ms, pos))
 }
 
 // ---------------------------------------------------------------------------
@@ -700,10 +713,13 @@ mod tests {
         let mut buf = Vec::new();
         encode_entry(&ik, &entry, &mut buf);
 
-        let (decoded_ik, is_tomb, decoded_val, consumed) = decode_entry(&buf).unwrap();
+        let (decoded_ik, is_tomb, decoded_val, ts, ttl, consumed) =
+            decode_entry(&buf).unwrap();
         assert_eq!(decoded_ik, ik);
         assert!(!is_tomb);
         assert_eq!(decoded_val, Value::String("world".into()));
+        assert_eq!(ts, entry.timestamp.as_micros());
+        assert_eq!(ttl, 0);
         assert_eq!(consumed, buf.len());
     }
 
@@ -720,9 +736,12 @@ mod tests {
         let mut buf = Vec::new();
         encode_entry(&ik, &entry, &mut buf);
 
-        let (decoded_ik, is_tomb, _, consumed) = decode_entry(&buf).unwrap();
+        let (decoded_ik, is_tomb, _, ts, ttl, consumed) =
+            decode_entry(&buf).unwrap();
         assert_eq!(decoded_ik, ik);
         assert!(is_tomb);
+        assert_eq!(ts, entry.timestamp.as_micros());
+        assert_eq!(ttl, 0);
         assert_eq!(consumed, buf.len());
     }
 
@@ -791,5 +810,99 @@ mod tests {
         let meta = builder.build_from_iter(mt.iter_all(), &path).unwrap();
         assert_eq!(meta.entry_count, 2000);
         assert!(meta.file_size > 4096); // must span multiple blocks
+    }
+
+    #[test]
+    fn v2_entry_encode_decode_with_timestamp_and_ttl() {
+        let ik = InternalKey::encode(&key("ts_key"), 7);
+        let ts = strata_core::Timestamp::from_micros(1_700_000_000_000_000);
+        let entry = MemtableEntry {
+            value: Value::String("with_ts".into()),
+            is_tombstone: false,
+            timestamp: ts,
+            ttl_ms: 30_000,
+        };
+
+        let mut buf = Vec::new();
+        encode_entry(&ik, &entry, &mut buf);
+
+        let (decoded_ik, is_tomb, decoded_val, decoded_ts, decoded_ttl, consumed) =
+            decode_entry(&buf).unwrap();
+        assert_eq!(decoded_ik, ik);
+        assert!(!is_tomb);
+        assert_eq!(decoded_val, Value::String("with_ts".into()));
+        assert_eq!(decoded_ts, 1_700_000_000_000_000);
+        assert_eq!(decoded_ttl, 30_000);
+        assert_eq!(consumed, buf.len());
+    }
+
+    #[test]
+    fn v2_tombstone_preserves_timestamp_and_ttl() {
+        let ik = InternalKey::encode(&key("del_key"), 10);
+        let ts = strata_core::Timestamp::from_micros(42_000_000);
+        let entry = MemtableEntry {
+            value: Value::Null,
+            is_tombstone: true,
+            timestamp: ts,
+            ttl_ms: 5_000,
+        };
+
+        let mut buf = Vec::new();
+        encode_entry(&ik, &entry, &mut buf);
+
+        let (decoded_ik, is_tomb, _, decoded_ts, decoded_ttl, consumed) =
+            decode_entry(&buf).unwrap();
+        assert_eq!(decoded_ik, ik);
+        assert!(is_tomb);
+        assert_eq!(decoded_ts, 42_000_000);
+        assert_eq!(decoded_ttl, 5_000);
+        assert_eq!(consumed, buf.len());
+    }
+
+    #[test]
+    fn v2_segment_build_open_preserves_timestamps() {
+        use crate::segment::KVSegment;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v2ts.sst");
+
+        let mt = Memtable::new(0);
+        let ts = strata_core::Timestamp::from_micros(1_600_000_000_000_000);
+        mt.put_entry(
+            &key("a"),
+            1,
+            MemtableEntry {
+                value: Value::Int(10),
+                is_tombstone: false,
+                timestamp: ts,
+                ttl_ms: 60_000,
+            },
+        );
+        mt.put_entry(
+            &key("b"),
+            2,
+            MemtableEntry {
+                value: Value::Null,
+                is_tombstone: true,
+                timestamp: strata_core::Timestamp::from_micros(999),
+                ttl_ms: 0,
+            },
+        );
+        mt.freeze();
+
+        let builder = SegmentBuilder::default();
+        builder.build_from_iter(mt.iter_all(), &path).unwrap();
+
+        let seg = KVSegment::open(&path).unwrap();
+
+        let e = seg.point_lookup(&key("a"), u64::MAX).unwrap();
+        assert_eq!(e.value, Value::Int(10));
+        assert_eq!(e.timestamp, 1_600_000_000_000_000);
+        assert_eq!(e.ttl_ms, 60_000);
+
+        let e = seg.point_lookup(&key("b"), u64::MAX).unwrap();
+        assert!(e.is_tombstone);
+        assert_eq!(e.timestamp, 999);
+        assert_eq!(e.ttl_ms, 0);
     }
 }
