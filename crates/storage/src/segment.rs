@@ -36,6 +36,10 @@ pub struct SegmentEntry {
     pub is_tombstone: bool,
     /// The commit_id of this entry.
     pub commit_id: u64,
+    /// Microseconds since epoch (0 for v1 segments).
+    pub timestamp: u64,
+    /// TTL in milliseconds (0 = no TTL, 0 for v1 segments).
+    pub ttl_ms: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -287,7 +291,8 @@ impl KVSegment {
         let block_data = self.read_data_block(ie)?;
         let mut pos = 0;
         while pos < block_data.len() {
-            let (ik, is_tomb, value, consumed) = decode_entry(&block_data[pos..])?;
+            let (ik, is_tomb, value, timestamp, ttl_ms, consumed) =
+                decode_entry(&block_data[pos..])?;
             pos += consumed;
 
             // Check if this entry matches our typed key
@@ -307,6 +312,8 @@ impl KVSegment {
                     value,
                     is_tombstone: is_tomb,
                     commit_id,
+                    timestamp,
+                    ttl_ms,
                 });
             }
         }
@@ -381,7 +388,7 @@ impl<'a> Iterator for SegmentIter<'a> {
             }
 
             match decode_entry(&data[self.block_offset..]) {
-                Some((ik, is_tomb, value, consumed)) => {
+                Some((ik, is_tomb, value, timestamp, ttl_ms, consumed)) => {
                     self.block_offset += consumed;
 
                     // Check prefix match
@@ -402,6 +409,8 @@ impl<'a> Iterator for SegmentIter<'a> {
                             value,
                             is_tombstone: is_tomb,
                             commit_id,
+                            timestamp,
+                            ttl_ms,
                         },
                     ));
                 }
@@ -926,5 +935,94 @@ mod tests {
             assert_eq!(e.value, Value::Int(i as i64));
             assert_eq!(e.commit_id, i as u64 + 1);
         }
+    }
+
+    // ===== Timestamp & TTL (v2 format) =====
+
+    #[test]
+    fn point_lookup_returns_timestamp_and_ttl() {
+        use crate::memtable::MemtableEntry;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v2ts.sst");
+
+        let mt = Memtable::new(0);
+        let ts = strata_core::Timestamp::from_micros(1_700_000_000_000_000);
+        mt.put_entry(
+            &kv_key("k1"),
+            1,
+            MemtableEntry {
+                value: Value::Int(42),
+                is_tombstone: false,
+                timestamp: ts,
+                ttl_ms: 30_000,
+            },
+        );
+        mt.put_entry(
+            &kv_key("k2"),
+            2,
+            MemtableEntry {
+                value: Value::Null,
+                is_tombstone: true,
+                timestamp: strata_core::Timestamp::from_micros(555),
+                ttl_ms: 10_000,
+            },
+        );
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+
+        let e = seg.point_lookup(&kv_key("k1"), u64::MAX).unwrap();
+        assert_eq!(e.value, Value::Int(42));
+        assert_eq!(e.timestamp, 1_700_000_000_000_000);
+        assert_eq!(e.ttl_ms, 30_000);
+
+        let e = seg.point_lookup(&kv_key("k2"), u64::MAX).unwrap();
+        assert!(e.is_tombstone);
+        assert_eq!(e.timestamp, 555);
+        assert_eq!(e.ttl_ms, 10_000);
+    }
+
+    #[test]
+    fn iter_seek_returns_timestamp_and_ttl() {
+        use crate::memtable::MemtableEntry;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v2iter.sst");
+
+        let mt = Memtable::new(0);
+        mt.put_entry(
+            &kv_key("item:1"),
+            1,
+            MemtableEntry {
+                value: Value::Int(1),
+                is_tombstone: false,
+                timestamp: strata_core::Timestamp::from_micros(100_000),
+                ttl_ms: 5_000,
+            },
+        );
+        mt.put_entry(
+            &kv_key("item:2"),
+            2,
+            MemtableEntry {
+                value: Value::Int(2),
+                is_tombstone: false,
+                timestamp: strata_core::Timestamp::from_micros(200_000),
+                ttl_ms: 0,
+            },
+        );
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        let results: Vec<_> = seg.iter_seek(&kv_key("item:")).collect();
+        assert_eq!(results.len(), 2);
+
+        assert_eq!(results[0].1.timestamp, 100_000);
+        assert_eq!(results[0].1.ttl_ms, 5_000);
+
+        assert_eq!(results[1].1.timestamp, 200_000);
+        assert_eq!(results[1].1.ttl_ms, 0);
     }
 }

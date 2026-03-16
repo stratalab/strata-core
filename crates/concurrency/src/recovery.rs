@@ -107,13 +107,15 @@ impl RecoveryCoordinator {
             });
         }
 
-        // Read all records from segmented WAL
+        // Stream records from segmented WAL one segment at a time.
+        // This bounds memory to O(largest_segment) instead of O(total_wal_size),
+        // preventing OOM on large databases.
         let reader = WalReader::new();
-        let read_result = reader
-            .read_all(&self.wal_dir)
+        let records_iter = reader
+            .iter_all(&self.wal_dir)
             .map_err(|e| strata_core::StrataError::storage(format!("WAL read failed: {}", e)))?;
 
-        for record in &read_result.records {
+        for record in records_iter {
             max_txn_id = max_txn_id.max(record.txn_id);
 
             let payload = TransactionPayload::from_bytes(&record.writeset).map_err(|e| {
@@ -988,6 +990,61 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(stored.value, Value::Int(i as i64));
+        }
+    }
+
+    /// Verify that streaming recovery (iter_all) produces the same results
+    /// as the prior bulk approach (read_all). This test uses iter_all
+    /// indirectly via RecoveryCoordinator::recover(), which now uses iter_all.
+    #[test]
+    fn test_streaming_recovery_matches_read_all() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            for i in 1..=20u64 {
+                write_txn(
+                    &mut wal,
+                    i,
+                    branch_id,
+                    vec![(
+                        Key::new_kv(ns.clone(), format!("key{}", i)),
+                        Value::Int(i as i64 * 10),
+                    )],
+                    vec![],
+                    i,
+                );
+            }
+        }
+
+        // Verify recovery (which uses iter_all) returns correct results
+        let coordinator = RecoveryCoordinator::new(wal_dir.clone());
+        let result = coordinator.recover().unwrap();
+
+        assert_eq!(result.stats.txns_replayed, 20);
+        assert_eq!(result.stats.final_version, 20);
+        assert_eq!(result.stats.writes_applied, 20);
+        assert_eq!(result.txn_manager.current_version(), 20);
+
+        // Cross-check: read_all should yield the same records
+        let reader = WalReader::new();
+        let read_all_result = reader.read_all(&wal_dir).unwrap();
+        assert_eq!(read_all_result.records.len(), 20);
+
+        // Verify each key was written correctly
+        for i in 1..=20u64 {
+            let key = Key::new_kv(ns.clone(), format!("key{}", i));
+            let stored = result
+                .storage
+                .get_versioned(&key, u64::MAX)
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.value, Value::Int(i as i64 * 10));
+            assert_eq!(stored.version.as_u64(), i);
         }
     }
 }

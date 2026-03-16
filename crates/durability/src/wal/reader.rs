@@ -5,7 +5,7 @@
 use crate::format::segment_meta::SegmentMeta;
 use crate::format::{WalRecord, WalRecordError, WalSegment};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::warn;
 
 /// Maximum number of bytes to scan forward when searching for the next
@@ -414,6 +414,84 @@ impl WalReader {
             })
             .map(|(num, _)| num)
             .collect())
+    }
+
+    /// Lazy iterator over all WAL records across all segments.
+    ///
+    /// Unlike `read_all()`, this processes one segment at a time, keeping
+    /// only the current segment's records in memory. Total memory usage is
+    /// O(largest_segment) instead of O(total_wal_size).
+    pub fn iter_all(&self, wal_dir: &Path) -> Result<WalRecordIterator, WalReaderError> {
+        let mut segments = self.list_segments(wal_dir)?;
+        segments.sort();
+        Ok(WalRecordIterator {
+            wal_dir: wal_dir.to_path_buf(),
+            segments,
+            current_segment_idx: 0,
+            current_records: Vec::new(),
+            current_record_idx: 0,
+        })
+    }
+}
+
+/// Iterator that yields WalRecords one at a time across all WAL segments.
+///
+/// Loads one segment at a time into memory, yielding records from it before
+/// moving to the next segment. This bounds memory to O(largest_segment)
+/// instead of O(total_wal_size), preventing OOM on large databases.
+pub struct WalRecordIterator {
+    wal_dir: PathBuf,
+    segments: Vec<u64>,
+    current_segment_idx: usize,
+    current_records: Vec<WalRecord>,
+    current_record_idx: usize,
+}
+
+impl Iterator for WalRecordIterator {
+    type Item = WalRecord;
+
+    fn next(&mut self) -> Option<WalRecord> {
+        loop {
+            // Yield from current segment's records
+            if self.current_record_idx < self.current_records.len() {
+                let idx = self.current_record_idx;
+                self.current_record_idx += 1;
+                return Some(self.current_records[idx].clone());
+            }
+
+            // Free the previous segment's records before loading the next
+            if !self.current_records.is_empty() {
+                self.current_records = Vec::new();
+            }
+
+            // Move to next segment
+            if self.current_segment_idx >= self.segments.len() {
+                return None;
+            }
+
+            let seg_num = self.segments[self.current_segment_idx];
+            self.current_segment_idx += 1;
+
+            let reader = WalReader::new();
+            match reader.read_segment(&self.wal_dir, seg_num) {
+                Ok((records, _, _, _)) => {
+                    self.current_records = records;
+                    self.current_record_idx = 0;
+                }
+                Err(e) => {
+                    // Skip corrupt/unreadable segments during recovery.
+                    // Log a warning so silent data loss is observable.
+                    tracing::warn!(
+                        target: "strata::recovery",
+                        segment = seg_num,
+                        error = %e,
+                        "Skipping unreadable WAL segment during streaming recovery"
+                    );
+                    self.current_records.clear();
+                    self.current_record_idx = 0;
+                }
+            }
+        }
     }
 }
 
@@ -1263,5 +1341,121 @@ mod tests {
         assert!(filtered.iter().all(|r| r.txn_id > 3));
         let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id).collect();
         assert_eq!(txn_ids, vec![4, 5, 6]);
+    }
+
+    // ---- Streaming iterator (iter_all) tests ----
+
+    #[test]
+    fn test_iter_all_matches_read_all() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let records: Vec<_> = (1..=10)
+            .map(|i| WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8; 20]))
+            .collect();
+
+        write_records(&wal_dir, &records);
+
+        let reader = WalReader::new();
+
+        // Collect via read_all
+        let read_all_result = reader.read_all(&wal_dir).unwrap();
+        let read_all_records = read_all_result.records;
+
+        // Collect via iter_all
+        let iter_all_records: Vec<WalRecord> = reader.iter_all(&wal_dir).unwrap().collect();
+
+        // Must produce identical records in the same order
+        assert_eq!(read_all_records.len(), iter_all_records.len());
+        for (a, b) in read_all_records.iter().zip(iter_all_records.iter()) {
+            assert_eq!(a.txn_id, b.txn_id);
+            assert_eq!(a.branch_id, b.branch_id);
+            assert_eq!(a.timestamp, b.timestamp);
+            assert_eq!(a.writeset, b.writeset);
+        }
+    }
+
+    #[test]
+    fn test_iter_all_empty_wal() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        // Create empty segment
+        WalSegment::create(&wal_dir, 1, [1u8; 16]).unwrap();
+
+        let reader = WalReader::new();
+        let iter_records: Vec<WalRecord> = reader.iter_all(&wal_dir).unwrap().collect();
+        assert!(iter_records.is_empty());
+    }
+
+    #[test]
+    fn test_iter_all_multiple_segments() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        // Use tiny segment size to force rotation across multiple segments
+        let config = WalConfig::new()
+            .with_segment_size(100)
+            .with_buffered_sync_bytes(50);
+
+        let mut writer = WalWriter::new(
+            wal_dir.to_path_buf(),
+            [1u8; 16],
+            DurabilityMode::Always,
+            config,
+            make_codec(),
+        )
+        .unwrap();
+
+        for i in 1..=6u64 {
+            writer
+                .append(&WalRecord::new(i, [1u8; 16], i * 1000, vec![0; 50]))
+                .unwrap();
+        }
+        writer.close().unwrap();
+
+        let reader = WalReader::new();
+        let segments = reader.list_segments(&wal_dir).unwrap();
+        assert!(segments.len() > 1, "Should have rotated");
+
+        // Verify iter_all matches read_all across multiple segments
+        let read_all_records = reader.read_all(&wal_dir).unwrap().records;
+        let iter_all_records: Vec<WalRecord> = reader.iter_all(&wal_dir).unwrap().collect();
+
+        assert_eq!(read_all_records.len(), iter_all_records.len());
+        for (a, b) in read_all_records.iter().zip(iter_all_records.iter()) {
+            assert_eq!(a.txn_id, b.txn_id);
+            assert_eq!(a.writeset, b.writeset);
+        }
+    }
+
+    #[test]
+    fn test_iter_all_with_partial_record() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let records: Vec<_> = (1..=3)
+            .map(|i| WalRecord::new(i, [1u8; 16], 0, vec![i as u8]))
+            .collect();
+        write_records(&wal_dir, &records);
+
+        // Append garbage to simulate crash mid-write
+        let segment_path = WalSegment::segment_path(&wal_dir, 1);
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&segment_path)
+            .unwrap();
+        file.write_all(&[0xFF; 10]).unwrap();
+
+        let reader = WalReader::new();
+
+        // iter_all should still yield the 3 valid records
+        let iter_records: Vec<WalRecord> = reader.iter_all(&wal_dir).unwrap().collect();
+        assert_eq!(iter_records.len(), 3);
+        for (i, record) in iter_records.iter().enumerate() {
+            assert_eq!(record.txn_id, (i + 1) as u64);
+        }
     }
 }
