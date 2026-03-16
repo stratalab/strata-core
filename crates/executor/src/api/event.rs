@@ -123,12 +123,13 @@ impl Strata {
     // Event Extended Variants
     // =========================================================================
 
-    /// Read events of a specific type with limit and pagination options.
+    /// Read events of a specific type with limit, pagination, and time-travel options.
     pub fn event_get_by_type_with_options(
         &self,
         event_type: &str,
         limit: Option<u64>,
         after_sequence: Option<u64>,
+        as_of: Option<u64>,
     ) -> Result<Vec<VersionedValue>> {
         match self.executor.execute(Command::EventGetByType {
             branch: self.branch_id(),
@@ -136,7 +137,7 @@ impl Strata {
             event_type: event_type.to_string(),
             limit,
             after_sequence,
-            as_of: None,
+            as_of,
         })? {
             Output::VersionedValues(events) => Ok(events),
             _ => Err(Error::Internal {

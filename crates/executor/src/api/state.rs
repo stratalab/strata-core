@@ -156,6 +156,27 @@ impl Strata {
         }
     }
 
+    /// List state cell names at a specific point in time.
+    ///
+    /// `as_of` is a timestamp in microseconds since epoch.
+    pub fn state_list_as_of(
+        &self,
+        prefix: Option<&str>,
+        as_of: Option<u64>,
+    ) -> Result<Vec<String>> {
+        match self.executor.execute(Command::StateList {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            prefix: prefix.map(|s| s.to_string()),
+            as_of,
+        })? {
+            Output::Keys(keys) => Ok(keys),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for StateList".into(),
+            }),
+        }
+    }
+
     // =========================================================================
     // State Batch Operations
     // =========================================================================

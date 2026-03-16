@@ -231,6 +231,31 @@ impl Strata {
         }
     }
 
+    /// List JSON documents with cursor-based pagination at a specific point in time.
+    ///
+    /// `as_of` is a timestamp in microseconds since epoch.
+    pub fn json_list_as_of(
+        &self,
+        prefix: Option<String>,
+        cursor: Option<String>,
+        limit: u64,
+        as_of: Option<u64>,
+    ) -> Result<(Vec<String>, Option<String>)> {
+        match self.executor.execute(Command::JsonList {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            prefix,
+            cursor,
+            limit,
+            as_of,
+        })? {
+            Output::JsonListResult { keys, cursor, .. } => Ok((keys, cursor)),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for JsonList".into(),
+            }),
+        }
+    }
+
     // =========================================================================
     // JSON Batch Operations
     // =========================================================================

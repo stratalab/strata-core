@@ -1666,7 +1666,7 @@ mod tests {
         db.kv_put("p:2", "b").unwrap();
 
         // as_of=None should list both keys
-        let keys = db.kv_list_as_of(Some("p:"), None).unwrap();
+        let keys = db.kv_list_as_of(Some("p:"), None, None, None).unwrap();
         assert_eq!(keys.len(), 2);
     }
 
@@ -1865,14 +1865,14 @@ mod tests {
 
         // Limit to 2
         let events = db
-            .event_get_by_type_with_options("paged", Some(2), None)
+            .event_get_by_type_with_options("paged", Some(2), None, None)
             .unwrap();
         assert_eq!(events.len(), 2);
 
         // After sequence of the first event
         let first_seq = events[0].version;
         let after = db
-            .event_get_by_type_with_options("paged", None, Some(first_seq))
+            .event_get_by_type_with_options("paged", None, Some(first_seq), None)
             .unwrap();
         // Should exclude the first event
         assert!(after.len() < 3);
@@ -1890,7 +1890,7 @@ mod tests {
 
         // No filter — should return both
         let matches = db
-            .vector_search_with_filter("fvecs", vec![1.0, 0.0, 0.0, 0.0], 10, None, None)
+            .vector_search_with_filter("fvecs", vec![1.0, 0.0, 0.0, 0.0], 10, None, None, None)
             .unwrap();
         assert_eq!(matches.len(), 2);
     }
@@ -2030,5 +2030,110 @@ mod tests {
         let counters = db.durability_counters().unwrap();
         // Cache databases return default (zero) counters
         let _ = counters;
+    }
+
+    // =========================================================================
+    // Tests for #1499 gap methods
+    // =========================================================================
+
+    #[test]
+    fn test_state_list_as_of() {
+        let db = create_strata();
+        db.state_set("sl:a", "1").unwrap();
+        db.state_set("sl:b", "2").unwrap();
+
+        let keys = db.state_list_as_of(Some("sl:"), None).unwrap();
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn test_json_list_as_of() {
+        let db = create_strata();
+        db.json_set("jl:1", "$", Value::Int(1)).unwrap();
+        db.json_set("jl:2", "$", Value::Int(2)).unwrap();
+
+        let (keys, cursor) = db
+            .json_list_as_of(Some("jl:".into()), None, 100, None)
+            .unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(cursor.is_none());
+    }
+
+    #[test]
+    fn test_vector_get_as_of() {
+        let db = create_strata();
+        db.vector_create_collection("vga", 2, DistanceMetric::Cosine)
+            .unwrap();
+        db.vector_upsert("vga", "k1", vec![1.0, 0.0], None).unwrap();
+
+        let data = db.vector_get_as_of("vga", "k1", None).unwrap();
+        assert!(data.is_some());
+
+        let missing = db.vector_get_as_of("vga", "nonexistent", None).unwrap();
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn test_graph_bulk_insert_typed() {
+        use crate::types::{BulkGraphEdge, BulkGraphNode};
+        let db = create_strata();
+        db.graph_create("gbi").unwrap();
+
+        let nodes = vec![
+            BulkGraphNode {
+                node_id: "n1".into(),
+                entity_ref: None,
+                properties: None,
+                object_type: Some("Person".into()),
+            },
+            BulkGraphNode {
+                node_id: "n2".into(),
+                entity_ref: None,
+                properties: None,
+                object_type: Some("Person".into()),
+            },
+        ];
+        let edges = vec![BulkGraphEdge {
+            src: "n1".into(),
+            dst: "n2".into(),
+            edge_type: "knows".into(),
+            weight: None,
+            properties: None,
+        }];
+
+        let (ni, ei) = db
+            .graph_bulk_insert_typed("gbi", nodes, edges, Some(100))
+            .unwrap();
+        assert_eq!(ni, 2);
+        assert_eq!(ei, 1);
+    }
+
+    #[test]
+    fn test_graph_list_ontology_types() {
+        let db = create_strata();
+        db.graph_create("glo").unwrap();
+
+        // Define an object type and a link type
+        let obj_def = Value::object(
+            [("name".to_string(), Value::String("Person".into()))]
+                .into_iter()
+                .collect(),
+        );
+        db.graph_define_object_type("glo", obj_def).unwrap();
+
+        let link_def = Value::object(
+            [
+                ("name".to_string(), Value::String("knows".into())),
+                ("source".to_string(), Value::String("Person".into())),
+                ("target".to_string(), Value::String("Person".into())),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        db.graph_define_link_type("glo", link_def).unwrap();
+
+        let types = db.graph_list_ontology_types("glo").unwrap();
+        assert!(types.contains(&"Person".to_string()));
+        assert!(types.contains(&"knows".to_string()));
     }
 }
