@@ -44,6 +44,7 @@ mod graph;
 mod json;
 mod kv;
 mod state;
+mod system;
 mod vector;
 
 pub use branches::Branches;
@@ -51,6 +52,7 @@ pub use strata_engine::branch_ops::{
     BranchDiffEntry, BranchDiffResult, ConflictEntry, DiffFilter, DiffOptions, DiffSummary,
     ForkInfo, MergeInfo, MergeStrategy, SpaceDiff,
 };
+pub use system::SystemBranch;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -341,6 +343,18 @@ impl Strata {
     /// ```
     pub fn branches(&self) -> Branches<'_> {
         Branches::new(&self.executor)
+    }
+
+    /// Get a handle to the `_system_` branch for internal operations.
+    ///
+    /// The returned handle bypasses the user-facing guard that rejects
+    /// access to reserved branches. It provides KV, JSON, state, and event
+    /// operations pre-bound to `_system_`.
+    ///
+    /// Intended for internal consumers (e.g., strata-ai) that need to
+    /// store private workspace data in the user's database.
+    pub fn system_branch(&self) -> SystemBranch<'_> {
+        SystemBranch::new(&self.executor)
     }
 
     /// Create a new [`Session`] for interactive transaction support.
@@ -1527,5 +1541,86 @@ mod tests {
             assert!(db.graph_add_node("rg", "n1", None, None).is_err());
             assert!(db.graph_add_edge("rg", "A", "B", "E", None, None).is_err());
         }
+    }
+
+    // =========================================================================
+    // SystemBranch Tests
+    // =========================================================================
+
+    #[test]
+    fn test_system_branch_kv_roundtrip() {
+        let db = Strata::cache().unwrap();
+        let sys = db.system_branch();
+
+        sys.kv_put("_ai:cache:abc", "cached-value").unwrap();
+        let val = sys.kv_get("_ai:cache:abc").unwrap();
+        assert_eq!(val, Some(Value::String("cached-value".into())));
+
+        let keys = sys.kv_list(Some("_ai:cache:")).unwrap();
+        assert!(keys.contains(&"_ai:cache:abc".to_string()));
+
+        sys.kv_delete("_ai:cache:abc").unwrap();
+        assert!(sys.kv_get("_ai:cache:abc").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_system_branch_json_roundtrip() {
+        let db = Strata::cache().unwrap();
+        let sys = db.system_branch();
+
+        sys.json_set(
+            "_ai:catalog:users",
+            "$",
+            Value::String(r#"{"columns":["id","name"]}"#.into()),
+        )
+        .unwrap();
+        let val = sys.json_get("_ai:catalog:users", "$").unwrap();
+        assert!(val.is_some());
+    }
+
+    #[test]
+    fn test_system_branch_state_roundtrip() {
+        let db = Strata::cache().unwrap();
+        let sys = db.system_branch();
+
+        sys.state_set("_ai:pref:theme", "dark").unwrap();
+        let val = sys.state_get("_ai:pref:theme").unwrap();
+        assert_eq!(val, Some(Value::String("dark".into())));
+    }
+
+    #[test]
+    fn test_system_branch_event_roundtrip() {
+        let db = Strata::cache().unwrap();
+        let sys = db.system_branch();
+
+        let payload = serde_json::json!({"action": "query executed"});
+        let seq = sys
+            .event_append("ai.activity", Value::from(payload))
+            .unwrap();
+
+        let event = sys.event_get(seq).unwrap();
+        assert!(event.is_some());
+    }
+
+    #[test]
+    fn test_system_branch_hidden_from_user_apis() {
+        let db = Strata::cache().unwrap();
+
+        // Write via system handle
+        let sys = db.system_branch();
+        sys.kv_put("secret", "hidden").unwrap();
+
+        // User-facing APIs should not see _system_
+        let branches = db.branches().list().unwrap();
+        assert!(!branches.iter().any(|b| b.starts_with("_system")));
+
+        // Direct access to _system_ via user API should fail
+        let result = db.executor.execute(Command::KvGet {
+            branch: Some(BranchId::from("_system_")),
+            space: Some("default".to_string()),
+            key: "secret".to_string(),
+            as_of: None,
+        });
+        assert!(result.is_err());
     }
 }
