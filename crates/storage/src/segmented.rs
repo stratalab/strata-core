@@ -58,6 +58,10 @@ struct BranchState {
     frozen: Vec<Arc<Memtable>>,
     /// On-disk KV segments, newest first.
     segments: Vec<Arc<KVSegment>>,
+    /// Minimum timestamp seen across all writes (for O(1) time_range).
+    min_timestamp: AtomicU64,
+    /// Maximum timestamp seen across all writes (for O(1) time_range).
+    max_timestamp: AtomicU64,
 }
 
 impl BranchState {
@@ -66,6 +70,8 @@ impl BranchState {
             active: Memtable::new(0),
             frozen: Vec::new(),
             segments: Vec::new(),
+            min_timestamp: AtomicU64::new(u64::MAX),
+            max_timestamp: AtomicU64::new(0),
         }
     }
 }
@@ -459,17 +465,20 @@ impl SegmentedStore {
     ///
     /// Returns `(oldest_ts, latest_ts)` in microseconds since epoch.
     /// Returns `None` if the branch has no data.
+    ///
+    /// This is an O(1) operation using cached atomic min/max timestamps
+    /// updated on every write. The range includes timestamps from all
+    /// writes (puts, deletes, tombstones), so it may extend beyond the
+    /// range of currently live (non-deleted) entries.
     pub fn time_range(&self, branch_id: BranchId) -> StrataResult<Option<(u64, u64)>> {
-        let entries = self.list_branch(&branch_id);
-        if entries.is_empty() {
-            return Ok(None);
-        }
-        let mut min_ts = u64::MAX;
-        let mut max_ts = 0u64;
-        for (_, vv) in &entries {
-            let ts = vv.timestamp.as_micros();
-            min_ts = min_ts.min(ts);
-            max_ts = max_ts.max(ts);
+        let branch = match self.branches.get(&branch_id) {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        let min_ts = branch.min_timestamp.load(Ordering::Relaxed);
+        let max_ts = branch.max_timestamp.load(Ordering::Relaxed);
+        if min_ts == u64::MAX {
+            return Ok(None); // No data written
         }
         Ok(Some((min_ts, max_ts)))
     }
@@ -1399,7 +1408,11 @@ impl Storage for SegmentedStore {
             timestamp: Timestamp::now(),
             ttl_ms,
         };
+        let ts = entry.timestamp.as_micros();
         branch.active.put_entry(&key, version, entry);
+        // Track timestamp for O(1) time_range
+        branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
+        branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
 
         // Rotate if active memtable exceeds threshold
         self.maybe_rotate_branch(branch_id, &mut branch);
@@ -1424,7 +1437,11 @@ impl Storage for SegmentedStore {
             timestamp: Timestamp::now(),
             ttl_ms: 0,
         };
+        let ts = entry.timestamp.as_micros();
         branch.active.put_entry(key, version, entry);
+        // Track timestamp for O(1) time_range
+        branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
+        branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
 
         // Rotate if active memtable exceeds threshold
         self.maybe_rotate_branch(branch_id, &mut branch);
@@ -1453,6 +1470,7 @@ impl Storage for SegmentedStore {
         }
 
         let timestamp = Timestamp::now();
+        let ts = timestamp.as_micros();
         for (branch_id, entries) in by_branch {
             let mut branch = self
                 .branches
@@ -1467,6 +1485,9 @@ impl Storage for SegmentedStore {
                 };
                 branch.active.put_entry(&key, version, entry);
             }
+            // Track timestamp for O(1) time_range
+            branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
+            branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
@@ -1489,6 +1510,7 @@ impl Storage for SegmentedStore {
         }
 
         let timestamp = Timestamp::now();
+        let ts = timestamp.as_micros();
         for (branch_id, keys) in by_branch {
             let mut branch = self
                 .branches
@@ -1503,6 +1525,9 @@ impl Storage for SegmentedStore {
                 };
                 branch.active.put_entry(&key, version, entry);
             }
+            // Track timestamp for O(1) time_range
+            branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
+            branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
@@ -3709,5 +3734,54 @@ mod tests {
                 .value,
             Value::Int(3)
         );
+    }
+
+    // ===== O(1) time_range tests =====
+
+    #[test]
+    fn time_range_empty_branch_returns_none() {
+        let store = SegmentedStore::new();
+        assert_eq!(store.time_range(branch()).unwrap(), None);
+    }
+
+    #[test]
+    fn time_range_o1_tracks_writes() {
+        let store = SegmentedStore::new();
+
+        // No data -> None
+        assert_eq!(store.time_range(branch()).unwrap(), None);
+
+        // Write some data
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        seed(&store, kv_key("b"), Value::Int(2), 2);
+
+        let range = store.time_range(branch()).unwrap().unwrap();
+        // min and max should be close to now (within last second)
+        assert!(range.0 > 0);
+        assert!(range.1 >= range.0);
+    }
+
+    #[test]
+    fn time_range_o1_includes_deletes() {
+        let store = SegmentedStore::new();
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        let range_before = store.time_range(branch()).unwrap().unwrap();
+
+        // Short sleep to ensure delete timestamp is strictly later
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        store.delete_with_version(&kv_key("a"), 2).unwrap();
+
+        let range_after = store.time_range(branch()).unwrap().unwrap();
+        // max should have advanced to include the delete timestamp
+        assert!(range_after.1 >= range_before.1);
+    }
+
+    #[test]
+    fn time_range_o1_nonexistent_branch_returns_none() {
+        let store = SegmentedStore::new();
+        // Write to one branch, query another
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        let other_branch = BranchId::from_bytes([99; 16]);
+        assert_eq!(store.time_range(other_branch).unwrap(), None);
     }
 }

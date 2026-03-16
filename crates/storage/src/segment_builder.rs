@@ -293,7 +293,7 @@ pub(crate) fn decode_entry(data: &[u8]) -> Option<(InternalKey, bool, Value, u64
     if pos + ik_len > data.len() {
         return None;
     }
-    let ik = InternalKey::from_bytes(data[pos..pos + ik_len].to_vec());
+    let ik = InternalKey::try_from_bytes(data[pos..pos + ik_len].to_vec())?;
     pos += ik_len;
 
     if pos >= data.len() {
