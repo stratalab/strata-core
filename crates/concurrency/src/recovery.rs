@@ -36,6 +36,10 @@ pub struct RecoveryCoordinator {
     /// Path to snapshot directory (optional, not used in M2)
     #[allow(dead_code)]
     snapshot_path: Option<PathBuf>,
+    /// Path to segments directory for on-disk segment storage (optional)
+    segments_dir: Option<PathBuf>,
+    /// Write buffer size in bytes for SegmentedStore (used when segments_dir is set)
+    write_buffer_size: usize,
 }
 
 impl RecoveryCoordinator {
@@ -47,6 +51,8 @@ impl RecoveryCoordinator {
         RecoveryCoordinator {
             wal_dir,
             snapshot_path: None,
+            segments_dir: None,
+            write_buffer_size: 0,
         }
     }
 
@@ -57,6 +63,17 @@ impl RecoveryCoordinator {
     #[allow(dead_code)]
     pub(crate) fn with_snapshot_path(mut self, path: PathBuf) -> Self {
         self.snapshot_path = Some(path);
+        self
+    }
+
+    /// Set the segments directory and write buffer size for on-disk segment storage.
+    ///
+    /// When set, recovery will create a `SegmentedStore::with_dir()` instead of
+    /// an ephemeral `SegmentedStore::new()`, enabling flush/compaction to persist
+    /// frozen memtables as on-disk SST segments.
+    pub fn with_segments(mut self, segments_dir: PathBuf, write_buffer_size: usize) -> Self {
+        self.segments_dir = Some(segments_dir);
+        self.write_buffer_size = write_buffer_size;
         self
     }
 
@@ -73,7 +90,10 @@ impl RecoveryCoordinator {
     /// - If WAL directory cannot be read
     /// - If record deserialization fails
     pub fn recover(&self) -> StrataResult<RecoveryResult> {
-        let storage = SegmentedStore::new();
+        let storage = match &self.segments_dir {
+            Some(dir) => SegmentedStore::with_dir(dir.clone(), self.write_buffer_size),
+            None => SegmentedStore::new(),
+        };
         let mut max_version = 0u64;
         let mut max_txn_id = 0u64;
         let mut stats = RecoveryStats::default();
