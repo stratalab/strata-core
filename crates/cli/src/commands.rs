@@ -542,7 +542,12 @@ fn build_vector() -> Command {
             Command::new("create")
                 .about("Create a vector collection")
                 .arg(Arg::new("name").required(true).help("Collection name"))
-                .arg(Arg::new("dim").required(true).value_parser(clap::value_parser!(u64)).help("Vector dimension"))
+                .arg(
+                    Arg::new("dim")
+                        .required(true)
+                        .value_parser(clap::value_parser!(u64))
+                        .help("Vector dimension"),
+                )
                 .arg(
                     Arg::new("metric")
                         .long("metric")
@@ -603,9 +608,14 @@ fn build_branch() -> Command {
                 .arg(Arg::new("name").required(true).help("Branch name")),
         )
         .subcommand(
-            Command::new("list")
-                .about("List all branches")
-                .arg(Arg::new("limit").long("limit").short('n').value_name("COUNT").value_parser(clap::value_parser!(u64)).help("Maximum branches")),
+            Command::new("list").about("List all branches").arg(
+                Arg::new("limit")
+                    .long("limit")
+                    .short('n')
+                    .value_name("COUNT")
+                    .value_parser(clap::value_parser!(u64))
+                    .help("Maximum branches"),
+            ),
         )
         .subcommand(
             Command::new("exists")
@@ -1015,7 +1025,12 @@ fn build_graph() -> Command {
                         .value_name("JSON")
                         .help("Node properties as JSON"),
                 )
-                .arg(Arg::new("type").long("type").value_name("TYPE").help("Object type name")),
+                .arg(
+                    Arg::new("type")
+                        .long("type")
+                        .value_name("TYPE")
+                        .help("Object type name"),
+                ),
         )
         .subcommand(
             Command::new("get-node")
@@ -1033,7 +1048,12 @@ fn build_graph() -> Command {
             Command::new("list-nodes")
                 .about("List all nodes in a graph")
                 .arg(Arg::new("graph").required(true).help("Graph name"))
-                .arg(Arg::new("type").long("type").value_name("TYPE").help("Filter by object type")),
+                .arg(
+                    Arg::new("type")
+                        .long("type")
+                        .value_name("TYPE")
+                        .help("Filter by object type"),
+                ),
         )
         // Edges
         .subcommand(
@@ -1043,7 +1063,13 @@ fn build_graph() -> Command {
                 .arg(Arg::new("src").required(true).help("Source node ID"))
                 .arg(Arg::new("dst").required(true).help("Destination node ID"))
                 .arg(Arg::new("edge-type").required(true).help("Edge type"))
-                .arg(Arg::new("weight").long("weight").value_name("WEIGHT").value_parser(clap::value_parser!(f64)).help("Edge weight (f64)"))
+                .arg(
+                    Arg::new("weight")
+                        .long("weight")
+                        .value_name("WEIGHT")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Edge weight (f64)"),
+                )
                 .arg(
                     Arg::new("properties")
                         .long("properties")

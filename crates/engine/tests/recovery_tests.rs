@@ -12,8 +12,8 @@ use std::sync::Arc;
 use strata_core::contract::Version;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
-use strata_engine::{Database, SearchRequest};
 use strata_engine::{BranchIndex, EventLog, KVStore, StateCell};
+use strata_engine::{Database, SearchRequest};
 use tempfile::TempDir;
 
 /// Helper to create an object payload with a string value
