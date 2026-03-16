@@ -90,6 +90,8 @@ pub struct SegmentedStore {
     next_segment_id: AtomicU64,
     /// Memory pressure tracking.
     pressure: MemoryPressure,
+    /// Branches currently in bulk load mode (rotation deferred).
+    bulk_load_branches: DashMap<BranchId, ()>,
 }
 
 impl SegmentedStore {
@@ -105,6 +107,7 @@ impl SegmentedStore {
             write_buffer_size: 0,
             next_segment_id: AtomicU64::new(1),
             pressure: MemoryPressure::disabled(),
+            bulk_load_branches: DashMap::new(),
         }
     }
 
@@ -121,6 +124,7 @@ impl SegmentedStore {
             write_buffer_size: write_buffer_size as u64,
             next_segment_id: AtomicU64::new(1),
             pressure: MemoryPressure::disabled(),
+            bulk_load_branches: DashMap::new(),
         }
     }
 
@@ -137,6 +141,7 @@ impl SegmentedStore {
             write_buffer_size: write_buffer_size as u64,
             next_segment_id: AtomicU64::new(1),
             pressure,
+            bulk_load_branches: DashMap::new(),
         }
     }
 
@@ -231,6 +236,41 @@ impl SegmentedStore {
             Some((key, entry.to_versioned(commit_id)))
         })
         .collect()
+    }
+
+    // ========================================================================
+    // Bulk Load Mode
+    // ========================================================================
+
+    /// Enter bulk load mode for a branch — defers memtable rotation.
+    ///
+    /// While in bulk load mode, `maybe_rotate` skips this branch so the active
+    /// memtable can grow beyond `write_buffer_size`. Call `end_bulk_load()` when
+    /// done to flush all accumulated data.
+    pub fn begin_bulk_load(&self, branch_id: &BranchId) {
+        self.bulk_load_branches.insert(*branch_id, ());
+    }
+
+    /// Exit bulk load mode for a branch — rotates and flushes all memtables.
+    ///
+    /// After this call, all data written during the bulk load is flushed to
+    /// frozen memtables (and to disk segments if a directory is configured).
+    /// Normal rotation behavior resumes.
+    pub fn end_bulk_load(&self, branch_id: &BranchId) -> io::Result<()> {
+        self.bulk_load_branches.remove(branch_id);
+
+        // Rotate the active memtable (unconditionally — it may be large)
+        self.rotate_memtable(branch_id);
+
+        // Flush all frozen memtables for this branch
+        while self.flush_oldest_frozen(branch_id)? {}
+
+        Ok(())
+    }
+
+    /// Check if a branch is in bulk load mode.
+    pub fn is_bulk_loading(&self, branch_id: &BranchId) -> bool {
+        self.bulk_load_branches.contains_key(branch_id)
     }
 
     // ========================================================================
@@ -452,9 +492,10 @@ impl SegmentedStore {
     ///
     /// Called after every write within the DashMap entry guard.
     #[inline]
-    fn maybe_rotate(&self, branch: &mut BranchState) {
+    fn maybe_rotate_branch(&self, branch_id: BranchId, branch: &mut BranchState) {
         if self.write_buffer_size > 0
             && branch.active.approx_bytes() >= self.write_buffer_size
+            && !self.bulk_load_branches.contains_key(&branch_id)
         {
             let next_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
             let old = std::mem::replace(&mut branch.active, Memtable::new(next_id));
@@ -899,7 +940,7 @@ impl Storage for SegmentedStore {
         branch.active.put_entry(&key, version, entry);
 
         // Rotate if active memtable exceeds threshold
-        self.maybe_rotate(&mut branch);
+        self.maybe_rotate_branch(branch_id, &mut branch);
 
         // Update global version
         self.version.fetch_max(version, Ordering::AcqRel);
@@ -924,11 +965,90 @@ impl Storage for SegmentedStore {
         branch.active.put_entry(key, version, entry);
 
         // Rotate if active memtable exceeds threshold
-        self.maybe_rotate(&mut branch);
+        self.maybe_rotate_branch(branch_id, &mut branch);
 
         // Update global version
         self.version.fetch_max(version, Ordering::AcqRel);
 
+        Ok(())
+    }
+
+    fn apply_batch(
+        &self,
+        writes: Vec<(Key, Value, WriteMode)>,
+        version: u64,
+    ) -> StrataResult<()> {
+        if writes.is_empty() {
+            return Ok(());
+        }
+
+        // Group by branch_id — acquire each DashMap guard once per branch.
+        // WriteMode is ignored (same as put_with_version_mode): memtable appends
+        // all versions unconditionally; version chain pruning happens at compaction.
+        let mut by_branch: std::collections::HashMap<BranchId, Vec<(Key, Value)>> =
+            std::collections::HashMap::new();
+        for (key, value, _mode) in writes {
+            by_branch
+                .entry(key.namespace.branch_id)
+                .or_default()
+                .push((key, value));
+        }
+
+        let timestamp = Timestamp::now();
+        for (branch_id, entries) in by_branch {
+            let mut branch = self
+                .branches
+                .entry(branch_id)
+                .or_insert_with(BranchState::new);
+            for (key, value) in entries {
+                let entry = MemtableEntry {
+                    value,
+                    is_tombstone: false,
+                    timestamp,
+                    ttl_ms: 0,
+                };
+                branch.active.put_entry(&key, version, entry);
+            }
+            self.maybe_rotate_branch(branch_id, &mut branch);
+        }
+
+        self.version.fetch_max(version, Ordering::AcqRel);
+        Ok(())
+    }
+
+    fn delete_batch(&self, deletes: Vec<Key>, version: u64) -> StrataResult<()> {
+        if deletes.is_empty() {
+            return Ok(());
+        }
+
+        let mut by_branch: std::collections::HashMap<BranchId, Vec<Key>> =
+            std::collections::HashMap::new();
+        for key in deletes {
+            by_branch
+                .entry(key.namespace.branch_id)
+                .or_default()
+                .push(key);
+        }
+
+        let timestamp = Timestamp::now();
+        for (branch_id, keys) in by_branch {
+            let mut branch = self
+                .branches
+                .entry(branch_id)
+                .or_insert_with(BranchState::new);
+            for key in keys {
+                let entry = MemtableEntry {
+                    value: Value::Null,
+                    is_tombstone: true,
+                    timestamp,
+                    ttl_ms: 0,
+                };
+                branch.active.put_entry(&key, version, entry);
+            }
+            self.maybe_rotate_branch(branch_id, &mut branch);
+        }
+
+        self.version.fetch_max(version, Ordering::AcqRel);
         Ok(())
     }
 
@@ -2388,5 +2508,166 @@ mod tests {
         assert_eq!(store.get_versioned(&kv_key("b"), u64::MAX).unwrap().unwrap().value, Value::Int(2));
         assert_eq!(store.get_versioned(&kv_key("c"), u64::MAX).unwrap().unwrap().value, Value::Int(3));
         assert_eq!(store.get_versioned(&kv_key("d"), u64::MAX).unwrap().unwrap().value, Value::Int(4));
+    }
+
+    // ========================================================================
+    // Batch apply tests (Epic 8b)
+    // ========================================================================
+
+    #[test]
+    fn apply_batch_equivalent_to_individual() {
+        let store = SegmentedStore::new();
+        let b = branch();
+
+        // Write some keys individually
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        seed(&store, kv_key("b"), Value::Int(2), 1);
+
+        // Write same keys via apply_batch
+        let store2 = SegmentedStore::new();
+        let writes = vec![
+            (kv_key("a"), Value::Int(1), WriteMode::Append),
+            (kv_key("b"), Value::Int(2), WriteMode::Append),
+        ];
+        store2.apply_batch(writes, 1).unwrap();
+
+        // Both stores should produce the same results
+        for key_name in &["a", "b"] {
+            let k = kv_key(key_name);
+            let v1 = store.get_versioned(&k, u64::MAX).unwrap().unwrap().value;
+            let v2 = store2.get_versioned(&k, u64::MAX).unwrap().unwrap().value;
+            assert_eq!(v1, v2);
+        }
+    }
+
+    #[test]
+    fn apply_batch_cross_branch() {
+        let store = SegmentedStore::new();
+        let b1 = BranchId::from_bytes([1; 16]);
+        let b2 = BranchId::from_bytes([2; 16]);
+        let ns1 = Arc::new(Namespace::new(b1, "default".to_string()));
+        let ns2 = Arc::new(Namespace::new(b2, "default".to_string()));
+
+        let k1 = Key::new(ns1, TypeTag::KV, b"x".to_vec());
+        let k2 = Key::new(ns2, TypeTag::KV, b"y".to_vec());
+
+        let writes = vec![
+            (k1.clone(), Value::Int(10), WriteMode::Append),
+            (k2.clone(), Value::Int(20), WriteMode::Append),
+        ];
+        store.apply_batch(writes, 5).unwrap();
+
+        assert_eq!(
+            store.get_versioned(&k1, u64::MAX).unwrap().unwrap().value,
+            Value::Int(10)
+        );
+        assert_eq!(
+            store.get_versioned(&k2, u64::MAX).unwrap().unwrap().value,
+            Value::Int(20)
+        );
+    }
+
+    #[test]
+    fn apply_batch_with_deletes() {
+        let store = SegmentedStore::new();
+        let b = branch();
+
+        // Write first
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        seed(&store, kv_key("b"), Value::Int(2), 1);
+
+        // Delete via batch
+        let deletes = vec![kv_key("a")];
+        store.delete_batch(deletes, 2).unwrap();
+
+        assert!(store.get_versioned(&kv_key("a"), u64::MAX).unwrap().is_none());
+        assert_eq!(
+            store.get_versioned(&kv_key("b"), u64::MAX).unwrap().unwrap().value,
+            Value::Int(2)
+        );
+    }
+
+    #[test]
+    fn apply_batch_empty() {
+        let store = SegmentedStore::new();
+        store.apply_batch(vec![], 1).unwrap();
+        store.delete_batch(vec![], 1).unwrap();
+        assert_eq!(store.current_version(), 0);
+    }
+
+    // ========================================================================
+    // Bulk load mode tests (Epic 8d)
+    // ========================================================================
+
+    #[test]
+    fn bulk_load_data_readable() {
+        let store = SegmentedStore::new();
+        let b = branch();
+
+        store.begin_bulk_load(&b);
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        seed(&store, kv_key("b"), Value::Int(2), 2);
+
+        // Data should be readable even during bulk load
+        assert_eq!(
+            store.get_versioned(&kv_key("a"), u64::MAX).unwrap().unwrap().value,
+            Value::Int(1)
+        );
+
+        store.end_bulk_load(&b).unwrap();
+
+        assert_eq!(
+            store.get_versioned(&kv_key("b"), u64::MAX).unwrap().unwrap().value,
+            Value::Int(2)
+        );
+    }
+
+    #[test]
+    fn bulk_load_defers_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        // Tiny write buffer (64 bytes) — normally would rotate after 1 entry
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 64);
+        let b = branch();
+
+        store.begin_bulk_load(&b);
+        assert!(store.is_bulk_loading(&b));
+
+        // Write many entries — should NOT rotate during bulk load
+        for i in 0..100 {
+            seed(&store, kv_key(&format!("k{}", i)), Value::Int(i), (i + 1) as u64);
+        }
+
+        // No frozen memtables — everything in active
+        assert_eq!(store.branch_frozen_count(&b), 0);
+
+        store.end_bulk_load(&b).unwrap();
+        assert!(!store.is_bulk_loading(&b));
+
+        // After end_bulk_load, data is still readable
+        for i in 0..100 {
+            assert!(store.get_versioned(&kv_key(&format!("k{}", i)), u64::MAX).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn bulk_load_normal_writes_after() {
+        let store = SegmentedStore::new();
+        let b = branch();
+
+        store.begin_bulk_load(&b);
+        seed(&store, kv_key("bulk"), Value::Int(1), 1);
+        store.end_bulk_load(&b).unwrap();
+
+        // Normal writes should work after bulk load
+        seed(&store, kv_key("normal"), Value::Int(2), 2);
+
+        assert_eq!(
+            store.get_versioned(&kv_key("bulk"), u64::MAX).unwrap().unwrap().value,
+            Value::Int(1)
+        );
+        assert_eq!(
+            store.get_versioned(&kv_key("normal"), u64::MAX).unwrap().unwrap().value,
+            Value::Int(2)
+        );
     }
 }

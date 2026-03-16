@@ -169,6 +169,34 @@ pub trait Storage: Send + Sync {
     /// Returns an error if the storage operation fails.
     fn delete_with_version(&self, key: &Key, version: u64) -> StrataResult<()>;
 
+    /// Apply a batch of writes in a single operation.
+    ///
+    /// Default implementation iterates and calls `put_with_version_mode()` per entry.
+    /// Storage implementations can override to batch operations (e.g., acquire
+    /// branch guards once per branch instead of per entry).
+    ///
+    /// All writes share the same `version` (same transaction commit version).
+    fn apply_batch(
+        &self,
+        writes: Vec<(Key, Value, WriteMode)>,
+        version: u64,
+    ) -> StrataResult<()> {
+        for (key, value, mode) in writes {
+            self.put_with_version_mode(key, value, version, None, mode)?;
+        }
+        Ok(())
+    }
+
+    /// Apply a batch of deletes in a single operation.
+    ///
+    /// Default implementation iterates and calls `delete_with_version()` per entry.
+    fn delete_batch(&self, deletes: Vec<Key>, version: u64) -> StrataResult<()> {
+        for key in &deletes {
+            self.delete_with_version(key, version)?;
+        }
+        Ok(())
+    }
+
     /// Get only the version number for a key (no Value clone)
     ///
     /// Returns the raw version as `u64` without constructing a `VersionedValue`.

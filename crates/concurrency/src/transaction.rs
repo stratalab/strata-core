@@ -1416,43 +1416,43 @@ impl TransactionContext {
             )));
         }
 
-        let mut result = ApplyResult {
-            commit_version,
-            puts_applied: 0,
-            deletes_applied: 0,
-            cas_applied: 0,
-        };
+        let puts_count = self.write_set.len();
+        let deletes_count = self.delete_set.len();
+        let cas_count = self.cas_set.len();
 
-        // Apply puts from write_set — drain to avoid cloning keys and values
+        // Collect puts (write_set + CAS) into a single batch — drain for zero-copy moves.
+        let mut writes: Vec<(Key, Value, WriteMode)> =
+            Vec::with_capacity(puts_count + cas_count);
+
         for (key, value) in self.write_set.drain() {
             let mode = self
                 .key_write_modes
                 .remove(&key)
                 .unwrap_or(WriteMode::Append);
-            store.put_with_version_mode(key, value, commit_version, None, mode)?;
-            result.puts_applied += 1;
+            writes.push((key, value, mode));
         }
 
-        // Apply deletes from delete_set — drain to avoid cloning keys
-        for key in self.delete_set.drain() {
-            store.delete_with_version(&key, commit_version)?;
-            result.deletes_applied += 1;
-        }
-
-        // Apply CAS operations from cas_set — drain to avoid cloning
-        // Note: CAS validation already passed in commit(), so we just apply the new values
+        // CAS operations always use Append mode (validation already passed).
         for cas_op in self.cas_set.drain(..) {
-            store.put_with_version_mode(
-                cas_op.key,
-                cas_op.new_value,
-                commit_version,
-                None,
-                WriteMode::Append,
-            )?;
-            result.cas_applied += 1;
+            writes.push((cas_op.key, cas_op.new_value, WriteMode::Append));
         }
 
-        Ok(result)
+        // Collect deletes into batch
+        let deletes: Vec<Key> = self.delete_set.drain().collect();
+
+        // Apply via batch methods — implementations can optimize (e.g., acquire
+        // branch guards once per branch instead of per entry).
+        store.apply_batch(writes, commit_version)?;
+        if !deletes.is_empty() {
+            store.delete_batch(deletes, commit_version)?;
+        }
+
+        Ok(ApplyResult {
+            commit_version,
+            puts_applied: puts_count,
+            deletes_applied: deletes_count,
+            cas_applied: cas_count,
+        })
     }
 
     // === Introspection ===
