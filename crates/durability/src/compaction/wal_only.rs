@@ -77,16 +77,13 @@ impl WalOnlyCompactor {
         let start_time = std::time::Instant::now();
         let mut info = CompactInfo::new(CompactMode::WALOnly);
 
-        // Get snapshot watermark from MANIFEST
+        // Get effective watermark from MANIFEST (min of snapshot and flush watermarks)
         let (watermark, manifest_active) = {
             let manifest = self.manifest.lock();
+            let m = manifest.manifest();
 
-            let watermark = manifest
-                .manifest()
-                .snapshot_watermark
-                .ok_or(CompactionError::NoSnapshot)?;
-
-            let active_segment = manifest.manifest().active_wal_segment;
+            let watermark = effective_watermark(m).ok_or(CompactionError::NoSnapshot)?;
+            let active_segment = m.active_wal_segment;
 
             (watermark, active_segment)
         };
@@ -305,6 +302,23 @@ impl WalOnlyCompactor {
     /// Get the WAL directory path
     pub fn wal_dir(&self) -> &Path {
         &self.wal_dir
+    }
+}
+
+/// Compute the effective watermark for WAL truncation.
+///
+/// Uses the minimum of the snapshot watermark and the flush watermark,
+/// so WAL segments are only deleted when covered by both (if both exist).
+/// Returns `None` if neither watermark is available.
+fn effective_watermark(manifest: &crate::format::Manifest) -> Option<u64> {
+    match (
+        manifest.snapshot_watermark,
+        manifest.flushed_through_commit_id,
+    ) {
+        (Some(sw), Some(fw)) => Some(sw.min(fw)),
+        (Some(sw), None) => Some(sw),
+        (None, Some(fw)) => Some(fw),
+        (None, None) => None,
     }
 }
 
@@ -736,6 +750,79 @@ mod tests {
         assert!(segment_path(&wal_dir, 4).exists());
 
         assert_eq!(info.wal_segments_removed, 2);
+    }
+
+    // ========================================================================
+    // Epic 5: flush watermark tests
+    // ========================================================================
+
+    #[test]
+    fn test_wal_truncation_uses_flush_watermark() {
+        let (_dir, wal_dir, manifest) = setup_test_env();
+
+        create_segment_with_records(&wal_dir, 1, &[1, 2, 3]).unwrap();
+        create_segment_with_records(&wal_dir, 2, &[4, 5, 6]).unwrap();
+        create_segment_with_records(&wal_dir, 3, &[7, 8, 9]).unwrap();
+
+        // Set ONLY flush watermark (no snapshot), active segment high
+        {
+            let mut m = manifest.lock();
+            m.manifest_mut().flushed_through_commit_id = Some(6);
+            m.manifest_mut().active_wal_segment = 10;
+            m.persist().unwrap();
+        }
+
+        let compactor = WalOnlyCompactor::new(wal_dir.clone(), manifest);
+        let info = compactor.compact().unwrap();
+
+        assert_eq!(info.wal_segments_removed, 2);
+        assert!(!segment_path(&wal_dir, 1).exists());
+        assert!(!segment_path(&wal_dir, 2).exists());
+        assert!(segment_path(&wal_dir, 3).exists());
+    }
+
+    #[test]
+    fn test_wal_truncation_uses_min_of_both_watermarks() {
+        let (_dir, wal_dir, manifest) = setup_test_env();
+
+        create_segment_with_records(&wal_dir, 1, &[1, 2, 3]).unwrap();
+        create_segment_with_records(&wal_dir, 2, &[4, 5, 6]).unwrap();
+        create_segment_with_records(&wal_dir, 3, &[7, 8, 9]).unwrap();
+
+        // Snapshot watermark at 6, flush watermark at 4 → effective = min(6, 4) = 4
+        {
+            let mut m = manifest.lock();
+            m.set_snapshot_watermark(1, 6).unwrap();
+            m.manifest_mut().flushed_through_commit_id = Some(4);
+            m.manifest_mut().active_wal_segment = 10;
+            m.persist().unwrap();
+        }
+
+        let compactor = WalOnlyCompactor::new(wal_dir.clone(), manifest);
+        let info = compactor.compact().unwrap();
+
+        // Only segment 1 covered (max txn 3 <= 4)
+        assert_eq!(info.wal_segments_removed, 1);
+        assert!(!segment_path(&wal_dir, 1).exists());
+        assert!(segment_path(&wal_dir, 2).exists());
+        assert!(segment_path(&wal_dir, 3).exists());
+    }
+
+    #[test]
+    fn test_wal_truncation_no_watermarks_returns_error() {
+        let (_dir, wal_dir, manifest) = setup_test_env();
+
+        create_segment_with_records(&wal_dir, 1, &[1, 2, 3]).unwrap();
+
+        {
+            let mut m = manifest.lock();
+            m.manifest_mut().active_wal_segment = 10;
+            m.persist().unwrap();
+        }
+
+        let compactor = WalOnlyCompactor::new(wal_dir, manifest);
+        let result = compactor.compact();
+        assert!(matches!(result, Err(CompactionError::NoSnapshot)));
     }
 
     #[test]

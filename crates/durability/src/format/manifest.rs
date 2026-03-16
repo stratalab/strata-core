@@ -15,6 +15,7 @@
 //! | Active WAL Seg   | 8 bytes (u64 LE)
 //! | Snapshot Watermark | 8 bytes (u64 LE, 0 = none)
 //! | Snapshot ID      | 8 bytes (u64 LE, 0 = none)
+//! | Flush Watermark  | 8 bytes (u64 LE, 0 = none) [v2+]
 //! | CRC32            | 4 bytes
 //! +------------------+
 //! ```
@@ -27,7 +28,7 @@ use std::path::{Path, PathBuf};
 pub const MANIFEST_MAGIC: [u8; 4] = *b"STRM";
 
 /// Current MANIFEST format version
-pub const MANIFEST_FORMAT_VERSION: u32 = 1;
+pub const MANIFEST_FORMAT_VERSION: u32 = 2;
 
 /// MANIFEST file structure
 ///
@@ -50,6 +51,9 @@ pub struct Manifest {
     pub snapshot_watermark: Option<u64>,
     /// Latest snapshot identifier (if any)
     pub snapshot_id: Option<u64>,
+    /// Highest commit_id that has been flushed to a KV segment (if any).
+    /// Used for WAL truncation and delta-only WAL replay on recovery.
+    pub flushed_through_commit_id: Option<u64>,
 }
 
 impl Manifest {
@@ -62,6 +66,7 @@ impl Manifest {
             active_wal_segment: 1,
             snapshot_watermark: None,
             snapshot_id: None,
+            flushed_through_commit_id: None,
         }
     }
 
@@ -72,8 +77,8 @@ impl Manifest {
         // Magic
         bytes.extend_from_slice(&MANIFEST_MAGIC);
 
-        // Format version
-        bytes.extend_from_slice(&self.format_version.to_le_bytes());
+        // Format version — always write current version (upgrades v1 on persist)
+        bytes.extend_from_slice(&MANIFEST_FORMAT_VERSION.to_le_bytes());
 
         // Database UUID
         bytes.extend_from_slice(&self.database_uuid);
@@ -92,6 +97,10 @@ impl Manifest {
         // Snapshot ID (0 = none)
         let snapshot_id = self.snapshot_id.unwrap_or(0);
         bytes.extend_from_slice(&snapshot_id.to_le_bytes());
+
+        // Flushed-through commit ID (0 = none) — v2+
+        let flushed = self.flushed_through_commit_id.unwrap_or(0);
+        bytes.extend_from_slice(&flushed.to_le_bytes());
 
         // CRC32 of all preceding bytes
         let crc = crc32fast::hash(&bytes);
@@ -157,8 +166,17 @@ impl Manifest {
 
         // Snapshot ID
         let snapshot_id_val = u64::from_le_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
+        cursor += 8;
         let snapshot_id = if snapshot_id_val > 0 {
             Some(snapshot_id_val)
+        } else {
+            None
+        };
+
+        // Flushed-through commit ID — v2+ only
+        let flushed_through_commit_id = if format_version >= 2 && cursor + 8 <= bytes.len() - 4 {
+            let val = u64::from_le_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
+            if val > 0 { Some(val) } else { None }
         } else {
             None
         };
@@ -170,6 +188,7 @@ impl Manifest {
             active_wal_segment,
             snapshot_watermark,
             snapshot_id,
+            flushed_through_commit_id,
         })
     }
 }
@@ -268,6 +287,12 @@ impl ManifestManager {
         self.persist()
     }
 
+    /// Update the flush watermark (highest commit_id flushed to segments) and persist.
+    pub fn set_flush_watermark(&mut self, commit_id: u64) -> Result<(), ManifestError> {
+        self.manifest.flushed_through_commit_id = Some(commit_id);
+        self.persist()
+    }
+
     /// Clear snapshot info (for testing/reset)
     pub fn clear_snapshot(&mut self) -> Result<(), ManifestError> {
         self.manifest.snapshot_id = None;
@@ -344,6 +369,7 @@ mod tests {
             active_wal_segment: 42,
             snapshot_watermark: Some(1000),
             snapshot_id: Some(5),
+            flushed_through_commit_id: None,
         };
 
         let bytes = manifest.to_bytes();
@@ -517,6 +543,63 @@ mod tests {
         let _ = ManifestManager::load(manifest_path).unwrap();
 
         drop(manager);
+    }
+
+    #[test]
+    fn test_manifest_v2_round_trip_with_flush_watermark() {
+        let mut manifest = Manifest::new(test_uuid(), "identity".to_string());
+        manifest.flushed_through_commit_id = Some(42);
+
+        let bytes = manifest.to_bytes();
+        let parsed = Manifest::from_bytes(&bytes).unwrap();
+
+        assert_eq!(parsed.flushed_through_commit_id, Some(42));
+        assert_eq!(parsed.format_version, 2);
+        assert_eq!(manifest, parsed);
+    }
+
+    #[test]
+    fn test_manifest_v1_loads_with_default_flush_watermark() {
+        // Build a v1-format manifest (no flush watermark field)
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MANIFEST_MAGIC);
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // format_version = 1
+        bytes.extend_from_slice(&test_uuid());
+        let codec = b"identity";
+        bytes.extend_from_slice(&(codec.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(codec);
+        bytes.extend_from_slice(&1u64.to_le_bytes()); // active_wal_segment
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // snapshot_watermark
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // snapshot_id
+        let crc = crc32fast::hash(&bytes);
+        bytes.extend_from_slice(&crc.to_le_bytes());
+
+        let parsed = Manifest::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.format_version, 1);
+        assert_eq!(parsed.flushed_through_commit_id, None);
+    }
+
+    #[test]
+    fn test_manifest_manager_set_flush_watermark() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manifest_path = temp_dir.path().join("MANIFEST");
+
+        let mut manager =
+            ManifestManager::create(manifest_path.clone(), test_uuid(), "identity".to_string())
+                .unwrap();
+
+        manager.set_flush_watermark(500).unwrap();
+        assert_eq!(manager.manifest().flushed_through_commit_id, Some(500));
+
+        // Reload and verify persistence
+        let loaded = ManifestManager::load(manifest_path).unwrap();
+        assert_eq!(loaded.manifest().flushed_through_commit_id, Some(500));
+    }
+
+    #[test]
+    fn test_manifest_new_has_no_flush_watermark() {
+        let manifest = Manifest::new(test_uuid(), "identity".to_string());
+        assert_eq!(manifest.flushed_through_commit_id, None);
     }
 
     #[test]

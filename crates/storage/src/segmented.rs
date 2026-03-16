@@ -246,9 +246,10 @@ impl SegmentedStore {
 
         // Build segment to disk (no locks held — I/O-heavy).
         let seg_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
-        let seg_path = segments_dir.join(format!("{}.sst", seg_id));
-
-        std::fs::create_dir_all(segments_dir)?;
+        let branch_hex = hex_encode_branch(branch_id);
+        let branch_dir = segments_dir.join(&branch_hex);
+        std::fs::create_dir_all(&branch_dir)?;
+        let seg_path = branch_dir.join(format!("{}.sst", seg_id));
         let builder = SegmentBuilder::default();
         builder.build_from_iter(frozen_mt.iter_all(), &seg_path)?;
 
@@ -290,6 +291,122 @@ impl SegmentedStore {
         self.branches
             .get(branch_id)
             .map_or(0, |b| b.segments.len())
+    }
+
+    /// Return the maximum commit_id across all flushed segments for a branch.
+    ///
+    /// Returns `None` if the branch has no segments.
+    pub fn max_flushed_commit(&self, branch_id: &BranchId) -> Option<u64> {
+        let branch = self.branches.get(branch_id)?;
+        branch
+            .segments
+            .iter()
+            .map(|s| s.commit_range().1)
+            .max()
+    }
+
+    /// Get the segments directory (if any).
+    pub fn segments_dir(&self) -> Option<&PathBuf> {
+        self.segments_dir.as_ref()
+    }
+
+    /// Recover flushed segments from disk.
+    ///
+    /// Scans `segments_dir` for branch subdirectories (hex-encoded BranchId),
+    /// opens `.sst` files within each, and installs them into the store.
+    ///
+    /// Returns `Ok(info)` with recovery statistics, or `Err` on fatal I/O errors.
+    /// Individual corrupt `.sst` files are skipped (counted in `errors_skipped`).
+    pub fn recover_segments(&self) -> io::Result<RecoverSegmentsInfo> {
+        let segments_dir = match &self.segments_dir {
+            Some(d) => d,
+            None => {
+                return Ok(RecoverSegmentsInfo {
+                    branches_recovered: 0,
+                    segments_loaded: 0,
+                    errors_skipped: 0,
+                })
+            }
+        };
+
+        if !segments_dir.exists() {
+            return Ok(RecoverSegmentsInfo {
+                branches_recovered: 0,
+                segments_loaded: 0,
+                errors_skipped: 0,
+            });
+        }
+
+        let mut info = RecoverSegmentsInfo {
+            branches_recovered: 0,
+            segments_loaded: 0,
+            errors_skipped: 0,
+        };
+
+        for entry in std::fs::read_dir(segments_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let dir_name = match entry.file_name().to_str() {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+
+            let branch_id = match hex_decode_branch(&dir_name) {
+                Some(id) => id,
+                None => continue,
+            };
+
+            let mut branch_segments: Vec<Arc<KVSegment>> = Vec::new();
+
+            for seg_entry in std::fs::read_dir(&path)? {
+                let seg_entry = seg_entry?;
+                let seg_path = seg_entry.path();
+                if seg_path.extension().and_then(|e| e.to_str()) != Some("sst") {
+                    continue;
+                }
+
+                match KVSegment::open(&seg_path) {
+                    Ok(seg) => {
+                        // Parse segment ID from filename to avoid ID collisions
+                        if let Some(stem) = seg_path.file_stem().and_then(|s| s.to_str()) {
+                            if let Ok(file_seg_id) = stem.parse::<u64>() {
+                                self.next_segment_id
+                                    .fetch_max(file_seg_id + 1, Ordering::Relaxed);
+                            }
+                        }
+                        branch_segments.push(Arc::new(seg));
+                    }
+                    Err(_) => {
+                        info.errors_skipped += 1;
+                    }
+                }
+            }
+
+            if branch_segments.is_empty() {
+                continue;
+            }
+
+            // Sort by commit_max descending (newest first)
+            branch_segments.sort_by(|a, b| b.commit_range().1.cmp(&a.commit_range().1));
+
+            let mut branch = self
+                .branches
+                .entry(branch_id)
+                .or_insert_with(BranchState::new);
+
+            info.segments_loaded += branch_segments.len();
+            branch.segments.extend(branch_segments);
+            // Re-sort after extending in case there were existing segments
+            branch.segments.sort_by(|a, b| b.commit_range().1.cmp(&a.commit_range().1));
+
+            info.branches_recovered += 1;
+        }
+
+        Ok(info)
     }
 
     /// Check whether the active memtable should be rotated and do so inline.
@@ -414,6 +531,17 @@ impl SegmentedStore {
         })
         .collect()
     }
+}
+
+/// Statistics returned by [`SegmentedStore::recover_segments`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverSegmentsInfo {
+    /// Number of branch subdirectories successfully loaded.
+    pub branches_recovered: usize,
+    /// Total number of `.sst` segments loaded across all branches.
+    pub segments_loaded: usize,
+    /// Number of `.sst` files that failed to open (corrupt/invalid).
+    pub errors_skipped: usize,
 }
 
 impl Default for SegmentedStore {
@@ -591,6 +719,30 @@ impl Storage for SegmentedStore {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Hex-encode a BranchId's 16 bytes to a 32-char lowercase hex string.
+fn hex_encode_branch(branch_id: &BranchId) -> String {
+    let bytes = branch_id.as_bytes();
+    let mut s = String::with_capacity(32);
+    for &b in bytes.iter() {
+        use std::fmt::Write;
+        let _ = write!(s, "{:02x}", b);
+    }
+    s
+}
+
+/// Decode a 32-char hex string back to a BranchId.
+/// Returns `None` if the string is not exactly 32 hex chars.
+fn hex_decode_branch(hex: &str) -> Option<BranchId> {
+    if hex.len() != 32 || !hex.is_ascii() {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    for i in 0..16 {
+        bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(BranchId::from_bytes(bytes))
+}
 
 /// Convert a `SegmentEntry` into a `MemtableEntry` for the merge path.
 fn segment_entry_to_memtable_entry(se: SegmentEntry) -> MemtableEntry {
@@ -1064,7 +1216,10 @@ mod tests {
         store.rotate_memtable(&branch());
         store.flush_oldest_frozen(&branch()).unwrap();
 
-        let sst_files: Vec<_> = std::fs::read_dir(dir.path())
+        // Segments are now in a branch subdirectory
+        let branch_hex = super::hex_encode_branch(&branch());
+        let branch_dir = dir.path().join(&branch_hex);
+        let sst_files: Vec<_> = std::fs::read_dir(&branch_dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().map_or(false, |ext| ext == "sst"))
@@ -1338,6 +1493,171 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].value, Value::Null); // tombstone at v2
         assert_eq!(history[1].value, Value::Int(1)); // value at v1
+    }
+
+    // ===== Recovery tests =====
+
+    #[test]
+    fn recover_segments_loads_flushed_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+        for i in 1..=50u64 {
+            seed(&store, kv_key(&format!("k{:04}", i)), Value::Int(i as i64), i);
+        }
+        store.rotate_memtable(&branch());
+        store.flush_oldest_frozen(&branch()).unwrap();
+
+        let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let info = store2.recover_segments().unwrap();
+        assert_eq!(info.branches_recovered, 1);
+        assert_eq!(info.segments_loaded, 1);
+        assert_eq!(info.errors_skipped, 0);
+
+        for i in 1..=50u64 {
+            let result = store2
+                .get_versioned(&kv_key(&format!("k{:04}", i)), u64::MAX)
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.value, Value::Int(i as i64));
+        }
+    }
+
+    #[test]
+    fn recover_segments_multiple_branches() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+        let b1 = BranchId::from_bytes([1; 16]);
+        let b2 = BranchId::from_bytes([2; 16]);
+        let ns1 = Arc::new(Namespace::new(b1, "default".to_string()));
+        let ns2 = Arc::new(Namespace::new(b2, "default".to_string()));
+
+        for i in 1..=10u64 {
+            let key = Key::new(ns1.clone(), TypeTag::KV, format!("k{}", i).into_bytes());
+            store
+                .put_with_version_mode(key, Value::Int(i as i64), i, None, WriteMode::Append)
+                .unwrap();
+        }
+        store.rotate_memtable(&b1);
+        store.flush_oldest_frozen(&b1).unwrap();
+
+        for i in 11..=20u64 {
+            let key = Key::new(ns2.clone(), TypeTag::KV, format!("k{}", i).into_bytes());
+            store
+                .put_with_version_mode(key, Value::Int(i as i64), i, None, WriteMode::Append)
+                .unwrap();
+        }
+        store.rotate_memtable(&b2);
+        store.flush_oldest_frozen(&b2).unwrap();
+
+        let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let info = store2.recover_segments().unwrap();
+        assert_eq!(info.branches_recovered, 2);
+        assert_eq!(info.segments_loaded, 2);
+
+        let k1 = Key::new(ns1, TypeTag::KV, "k1".as_bytes().to_vec());
+        let k11 = Key::new(ns2, TypeTag::KV, "k11".as_bytes().to_vec());
+        assert!(store2.get_versioned(&k1, u64::MAX).unwrap().is_some());
+        assert!(store2.get_versioned(&k11, u64::MAX).unwrap().is_some());
+    }
+
+    #[test]
+    fn recover_segments_skips_corrupt_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        store.rotate_memtable(&branch());
+        store.flush_oldest_frozen(&branch()).unwrap();
+
+        let branch_hex = super::hex_encode_branch(&branch());
+        let corrupt_path = dir.path().join(&branch_hex).join("corrupt.sst");
+        std::fs::write(&corrupt_path, b"not a valid segment").unwrap();
+
+        let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let info = store2.recover_segments().unwrap();
+        assert_eq!(info.segments_loaded, 1);
+        assert_eq!(info.errors_skipped, 1);
+        assert!(store2.get_versioned(&kv_key("k"), u64::MAX).unwrap().is_some());
+    }
+
+    #[test]
+    fn recover_segments_empty_dir_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let info = store.recover_segments().unwrap();
+        assert_eq!(info, super::RecoverSegmentsInfo { branches_recovered: 0, segments_loaded: 0, errors_skipped: 0 });
+    }
+
+    #[test]
+    fn recover_segments_no_dir_is_noop() {
+        let store = SegmentedStore::new();
+        let info = store.recover_segments().unwrap();
+        assert_eq!(info.branches_recovered, 0);
+    }
+
+    #[test]
+    fn recover_segments_ordering() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+        for cycle in 0..3u64 {
+            let base = cycle * 10 + 1;
+            for i in 0..5u64 {
+                seed(&store, kv_key(&format!("c{}k{}", cycle, i)), Value::Int((base + i) as i64), base + i);
+            }
+            store.rotate_memtable(&branch());
+            store.flush_oldest_frozen(&branch()).unwrap();
+        }
+
+        let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let info = store2.recover_segments().unwrap();
+        assert_eq!(info.segments_loaded, 3);
+
+        let branch = store2.branches.get(&branch()).unwrap();
+        assert!(branch.segments[0].commit_range().1 >= branch.segments[1].commit_range().1);
+        assert!(branch.segments[1].commit_range().1 >= branch.segments[2].commit_range().1);
+    }
+
+    #[test]
+    fn max_flushed_commit_returns_correct_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+        assert_eq!(store.max_flushed_commit(&branch()), None);
+
+        seed(&store, kv_key("k1"), Value::Int(1), 5);
+        seed(&store, kv_key("k2"), Value::Int(2), 10);
+        store.rotate_memtable(&branch());
+        store.flush_oldest_frozen(&branch()).unwrap();
+        assert_eq!(store.max_flushed_commit(&branch()), Some(10));
+
+        seed(&store, kv_key("k3"), Value::Int(3), 20);
+        store.rotate_memtable(&branch());
+        store.flush_oldest_frozen(&branch()).unwrap();
+        assert_eq!(store.max_flushed_commit(&branch()), Some(20));
+    }
+
+    #[test]
+    fn flush_writes_to_branch_subdirectory() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        store.rotate_memtable(&branch());
+        store.flush_oldest_frozen(&branch()).unwrap();
+
+        let branch_hex = super::hex_encode_branch(&branch());
+        let branch_dir = dir.path().join(&branch_hex);
+        assert!(branch_dir.exists());
+
+        let sst_files: Vec<_> = std::fs::read_dir(&branch_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|e| e.to_str()) == Some("sst"))
+            .collect();
+        assert_eq!(sst_files.len(), 1);
     }
 
     #[test]
