@@ -129,4 +129,68 @@ impl Strata {
             }),
         }
     }
+
+    // =========================================================================
+    // KV as_of Variants
+    // =========================================================================
+
+    /// Get a value from the KV store at a specific point in time.
+    ///
+    /// `as_of` is a timestamp in microseconds since epoch.
+    pub fn kv_get_as_of(&self, key: &str, as_of: Option<u64>) -> Result<Option<Value>> {
+        match self.executor.execute(Command::KvGet {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            key: key.to_string(),
+            as_of,
+        })? {
+            Output::MaybeVersioned(v) => Ok(v.map(|vv| vv.value)),
+            Output::Maybe(v) => Ok(v),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for KvGet".into(),
+            }),
+        }
+    }
+
+    /// List keys with optional prefix filter at a specific point in time.
+    ///
+    /// `as_of` is a timestamp in microseconds since epoch.
+    pub fn kv_list_as_of(&self, prefix: Option<&str>, as_of: Option<u64>) -> Result<Vec<String>> {
+        match self.executor.execute(Command::KvList {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            prefix: prefix.map(|s| s.to_string()),
+            cursor: None,
+            limit: None,
+            as_of,
+        })? {
+            Output::Keys(keys) => Ok(keys),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for KvList".into(),
+            }),
+        }
+    }
+
+    // =========================================================================
+    // KV Batch Operations
+    // =========================================================================
+
+    /// Batch put multiple key-value pairs in a single transaction.
+    ///
+    /// Returns per-item results positionally mapped to the input entries.
+    pub fn kv_batch_put(
+        &self,
+        entries: Vec<crate::types::BatchKvEntry>,
+    ) -> Result<Vec<crate::types::BatchItemResult>> {
+        match self.executor.execute(Command::KvBatchPut {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            entries,
+        })? {
+            Output::BatchResults(results) => Ok(results),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for KvBatchPut".into(),
+            }),
+        }
+    }
 }

@@ -171,4 +171,30 @@ impl Strata {
             }),
         }
     }
+
+    /// Search for similar vectors with optional filter and metric override.
+    pub fn vector_search_with_filter(
+        &self,
+        collection: &str,
+        query: Vec<f32>,
+        k: u64,
+        filter: Option<Vec<MetadataFilter>>,
+        metric: Option<DistanceMetric>,
+    ) -> Result<Vec<VectorMatch>> {
+        match self.executor.execute(Command::VectorSearch {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            collection: collection.to_string(),
+            query,
+            k,
+            filter,
+            metric,
+            as_of: None,
+        })? {
+            Output::VectorMatches(matches) => Ok(matches),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for VectorSearch".into(),
+            }),
+        }
+    }
 }

@@ -70,4 +70,78 @@ impl Strata {
             }),
         }
     }
+
+    // =========================================================================
+    // Event as_of Variant
+    // =========================================================================
+
+    /// Read a specific event by sequence number at a specific point in time.
+    ///
+    /// `as_of` is a timestamp in microseconds since epoch.
+    pub fn event_get_as_of(
+        &self,
+        sequence: u64,
+        as_of: Option<u64>,
+    ) -> Result<Option<VersionedValue>> {
+        match self.executor.execute(Command::EventGet {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            sequence,
+            as_of,
+        })? {
+            Output::MaybeVersioned(v) => Ok(v),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for EventGet".into(),
+            }),
+        }
+    }
+
+    // =========================================================================
+    // Event Batch Operations
+    // =========================================================================
+
+    /// Batch append multiple events in a single transaction.
+    ///
+    /// Returns per-item results positionally mapped to the input entries.
+    pub fn event_batch_append(
+        &self,
+        entries: Vec<crate::types::BatchEventEntry>,
+    ) -> Result<Vec<crate::types::BatchItemResult>> {
+        match self.executor.execute(Command::EventBatchAppend {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            entries,
+        })? {
+            Output::BatchResults(results) => Ok(results),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for EventBatchAppend".into(),
+            }),
+        }
+    }
+
+    // =========================================================================
+    // Event Extended Variants
+    // =========================================================================
+
+    /// Read events of a specific type with limit and pagination options.
+    pub fn event_get_by_type_with_options(
+        &self,
+        event_type: &str,
+        limit: Option<u64>,
+        after_sequence: Option<u64>,
+    ) -> Result<Vec<VersionedValue>> {
+        match self.executor.execute(Command::EventGetByType {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            event_type: event_type.to_string(),
+            limit,
+            after_sequence,
+            as_of: None,
+        })? {
+            Output::VersionedValues(events) => Ok(events),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for EventGetByType".into(),
+            }),
+        }
+    }
 }

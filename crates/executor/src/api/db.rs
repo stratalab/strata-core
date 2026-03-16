@@ -229,4 +229,179 @@ impl Strata {
             }),
         }
     }
+
+    // =========================================================================
+    // Introspection / Analytics
+    // =========================================================================
+
+    /// Return a structured snapshot of the database for introspection.
+    pub fn describe(&self) -> Result<DescribeResult> {
+        match self.executor.execute(Command::Describe {
+            branch: self.branch_id(),
+        })? {
+            Output::Described(result) => Ok(result),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for Describe".into(),
+            }),
+        }
+    }
+
+    /// Get the available time range for the current branch.
+    ///
+    /// Returns (oldest_ts, latest_ts) in microseconds since epoch.
+    /// Either value may be `None` if the branch has no data.
+    pub fn time_range(&self) -> Result<(Option<u64>, Option<u64>)> {
+        match self.executor.execute(Command::TimeRange {
+            branch: self.branch_id(),
+        })? {
+            Output::TimeRange {
+                oldest_ts,
+                latest_ts,
+            } => Ok((oldest_ts, latest_ts)),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for TimeRange".into(),
+            }),
+        }
+    }
+
+    /// Search across multiple primitives using a structured query.
+    pub fn search(&self, query: SearchQuery) -> Result<(Vec<SearchResultHit>, SearchStatsOutput)> {
+        match self.executor.execute(Command::Search {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            search: query,
+        })? {
+            Output::SearchResults { hits, stats } => Ok((hits, stats)),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for Search".into(),
+            }),
+        }
+    }
+
+    /// Count KV keys, optionally filtered by prefix.
+    pub fn kv_count(&self, prefix: Option<&str>) -> Result<u64> {
+        match self.executor.execute(Command::KvCount {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            prefix: prefix.map(|s| s.to_string()),
+        })? {
+            Output::Uint(count) => Ok(count),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for KvCount".into(),
+            }),
+        }
+    }
+
+    /// Count JSON documents, optionally filtered by prefix.
+    pub fn json_count(&self, prefix: Option<&str>) -> Result<u64> {
+        match self.executor.execute(Command::JsonCount {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            prefix: prefix.map(|s| s.to_string()),
+        })? {
+            Output::Uint(count) => Ok(count),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for JsonCount".into(),
+            }),
+        }
+    }
+
+    // =========================================================================
+    // Sampling
+    // =========================================================================
+
+    /// Sample KV entries for shape discovery.
+    pub fn kv_sample(&self, count: Option<usize>) -> Result<(u64, Vec<SampleItem>)> {
+        match self.executor.execute(Command::KvSample {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            prefix: None,
+            count,
+        })? {
+            Output::SampleResult { total_count, items } => Ok((total_count, items)),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for KvSample".into(),
+            }),
+        }
+    }
+
+    /// Sample JSON documents for shape discovery.
+    pub fn json_sample(&self, count: Option<usize>) -> Result<(u64, Vec<SampleItem>)> {
+        match self.executor.execute(Command::JsonSample {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            prefix: None,
+            count,
+        })? {
+            Output::SampleResult { total_count, items } => Ok((total_count, items)),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for JsonSample".into(),
+            }),
+        }
+    }
+
+    /// Sample vector entries for shape discovery (returns metadata, not embeddings).
+    pub fn vector_sample(
+        &self,
+        collection: &str,
+        count: Option<usize>,
+    ) -> Result<(u64, Vec<SampleItem>)> {
+        match self.executor.execute(Command::VectorSample {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            collection: collection.to_string(),
+            count,
+        })? {
+            Output::SampleResult { total_count, items } => Ok((total_count, items)),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for VectorSample".into(),
+            }),
+        }
+    }
+
+    // =========================================================================
+    // Retention
+    // =========================================================================
+
+    /// Apply retention policy (trigger garbage collection) on the current branch.
+    pub fn retention_apply(&self) -> Result<()> {
+        match self.executor.execute(Command::RetentionApply {
+            branch: self.branch_id(),
+        })? {
+            Output::Unit => Ok(()),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for RetentionApply".into(),
+            }),
+        }
+    }
+
+    /// Get retention statistics for the current branch.
+    ///
+    /// Note: this command is not yet implemented in the executor and will
+    /// return an error.
+    pub fn retention_stats(&self) -> Result<()> {
+        match self.executor.execute(Command::RetentionStats {
+            branch: self.branch_id(),
+        })? {
+            Output::Unit => Ok(()),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for RetentionStats".into(),
+            }),
+        }
+    }
+
+    /// Preview what would be deleted by the retention policy.
+    ///
+    /// Note: this command is not yet implemented in the executor and will
+    /// return an error.
+    pub fn retention_preview(&self) -> Result<()> {
+        match self.executor.execute(Command::RetentionPreview {
+            branch: self.branch_id(),
+        })? {
+            Output::Unit => Ok(()),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for RetentionPreview".into(),
+            }),
+        }
+    }
 }
