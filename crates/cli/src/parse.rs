@@ -1553,13 +1553,13 @@ fn parse_search(matches: &ArgMatches, state: &SessionState) -> Result<CliAction,
         .map(|s| s.split(',').map(|p| p.trim().to_string()).collect());
 
     // Build time_range from --time-start and --time-end
-    let time_start = matches.get_one::<String>("time-start").cloned();
-    let time_end = matches.get_one::<String>("time-end").cloned();
-    let time_range = match (time_start, time_end) {
+    // Clap's .requires() guarantees both-or-neither, so only two branches are reachable.
+    let time_range = match (
+        matches.get_one::<String>("time-start").cloned(),
+        matches.get_one::<String>("time-end").cloned(),
+    ) {
         (Some(start), Some(end)) => Some(TimeRangeInput { start, end }),
-        (Some(_), None) => return Err("--time-start requires --time-end".to_string()),
-        (None, Some(_)) => return Err("--time-end requires --time-start".to_string()),
-        (None, None) => None,
+        _ => None,
     };
 
     let mode = matches.get_one::<String>("mode").cloned();
