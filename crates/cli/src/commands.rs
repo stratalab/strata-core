@@ -15,6 +15,7 @@ pub fn build_cli() -> Command {
         .arg(
             Arg::new("db")
                 .long("db")
+                .value_name("PATH")
                 .help("Database path (default: .strata)")
                 .global(true),
         )
@@ -29,12 +30,14 @@ pub fn build_cli() -> Command {
         .arg(
             Arg::new("branch")
                 .long("branch")
+                .value_name("NAME")
                 .help("Initial branch (default: default)")
                 .global(true),
         )
         .arg(
             Arg::new("space")
                 .long("space")
+                .value_name("NAME")
                 .help("Initial space (default: default)")
                 .global(true),
         )
@@ -513,6 +516,7 @@ fn build_vector() -> Command {
                 .arg(
                     Arg::new("filter")
                         .long("filter")
+                        .value_name("JSON")
                         .help("Metadata filter as JSON"),
                 ),
         )
@@ -525,6 +529,7 @@ fn build_vector() -> Command {
                     Arg::new("metric")
                         .long("metric")
                         .default_value("cosine")
+                        .value_name("METRIC")
                         .help("Distance metric"),
                 ),
         )
@@ -582,7 +587,7 @@ fn build_branch() -> Command {
         .subcommand(
             Command::new("list")
                 .about("List all branches")
-                .arg(Arg::new("limit").long("limit").help("Maximum branches")),
+                .arg(Arg::new("limit").long("limit").short('n').value_name("COUNT").help("Maximum branches")),
         )
         .subcommand(
             Command::new("exists")
@@ -617,6 +622,7 @@ fn build_branch() -> Command {
                     Arg::new("strategy")
                         .long("strategy")
                         .default_value("lww")
+                        .value_name("STRATEGY")
                         .help("Merge strategy: lww or strict"),
                 ),
         )
@@ -746,11 +752,13 @@ fn build_search() -> Command {
         .arg(
             Arg::new("time-start")
                 .long("time-start")
+                .requires("time-end")
                 .help("Time range start (ISO 8601, e.g. 2026-02-07T00:00:00Z)"),
         )
         .arg(
             Arg::new("time-end")
                 .long("time-end")
+                .requires("time-start")
                 .help("Time range end (ISO 8601, e.g. 2026-02-09T00:00:00Z)"),
         )
         .arg(
@@ -800,11 +808,13 @@ fn build_configure_model() -> Command {
         .arg(
             Arg::new("api-key")
                 .long("api-key")
+                .value_name("TOKEN")
                 .help("Bearer token for the endpoint"),
         )
         .arg(
             Arg::new("timeout")
                 .long("timeout")
+                .value_name("MS")
                 .help("Request timeout in milliseconds (default: 5000)"),
         )
 }
@@ -858,32 +868,38 @@ fn build_generate() -> Command {
         .arg(
             Arg::new("max-tokens")
                 .long("max-tokens")
+                .value_name("COUNT")
                 .help("Maximum tokens to generate (default: 256)"),
         )
         .arg(
             Arg::new("temperature")
                 .long("temperature")
+                .value_name("TEMP")
                 .help("Sampling temperature (0.0 = greedy)"),
         )
         .arg(
             Arg::new("top-k")
                 .long("top-k")
+                .value_name("K")
                 .help("Top-K sampling (0 = disabled)"),
         )
         .arg(
             Arg::new("top-p")
                 .long("top-p")
+                .value_name("P")
                 .help("Top-P nucleus sampling (1.0 = disabled)"),
         )
         .arg(
             Arg::new("seed")
                 .long("seed")
+                .value_name("SEED")
                 .help("Random seed for reproducibility"),
         )
         .arg(
             Arg::new("stop")
                 .long("stop")
                 .num_args(1..)
+                .value_name("TEXT")
                 .help("Stop sequences (text strings that stop generation)"),
         )
 }
@@ -960,14 +976,16 @@ fn build_graph() -> Command {
                 .arg(
                     Arg::new("entity-ref")
                         .long("entity-ref")
+                        .value_name("URI")
                         .help("Entity reference URI"),
                 )
                 .arg(
                     Arg::new("properties")
                         .long("properties")
+                        .value_name("JSON")
                         .help("Node properties as JSON"),
                 )
-                .arg(Arg::new("type").long("type").help("Object type name")),
+                .arg(Arg::new("type").long("type").value_name("TYPE").help("Object type name")),
         )
         .subcommand(
             Command::new("get-node")
@@ -985,7 +1003,7 @@ fn build_graph() -> Command {
             Command::new("list-nodes")
                 .about("List all nodes in a graph")
                 .arg(Arg::new("graph").required(true).help("Graph name"))
-                .arg(Arg::new("type").long("type").help("Filter by object type")),
+                .arg(Arg::new("type").long("type").value_name("TYPE").help("Filter by object type")),
         )
         // Edges
         .subcommand(
@@ -995,10 +1013,11 @@ fn build_graph() -> Command {
                 .arg(Arg::new("src").required(true).help("Source node ID"))
                 .arg(Arg::new("dst").required(true).help("Destination node ID"))
                 .arg(Arg::new("edge-type").required(true).help("Edge type"))
-                .arg(Arg::new("weight").long("weight").help("Edge weight (f64)"))
+                .arg(Arg::new("weight").long("weight").value_name("WEIGHT").help("Edge weight (f64)"))
                 .arg(
                     Arg::new("properties")
                         .long("properties")
+                        .value_name("JSON")
                         .help("Edge properties as JSON"),
                 ),
         )
@@ -1018,11 +1037,13 @@ fn build_graph() -> Command {
                 .arg(
                     Arg::new("direction")
                         .long("direction")
+                        .value_name("DIR")
                         .help("Direction: outgoing, incoming, both"),
                 )
                 .arg(
                     Arg::new("edge-type")
                         .long("edge-type")
+                        .value_name("TYPE")
                         .help("Filter by edge type"),
                 ),
         )
@@ -1046,6 +1067,7 @@ fn build_graph() -> Command {
                 .arg(
                     Arg::new("chunk-size")
                         .long("chunk-size")
+                        .value_name("SIZE")
                         .help("Chunk size for batching"),
                 ),
         )
@@ -1070,11 +1092,13 @@ fn build_graph() -> Command {
                 .arg(
                     Arg::new("edge-types")
                         .long("edge-types")
+                        .value_name("TYPES")
                         .help("Comma-separated edge types to follow"),
                 )
                 .arg(
                     Arg::new("direction")
                         .long("direction")
+                        .value_name("DIR")
                         .help("Direction: outgoing, incoming, both"),
                 ),
         )
@@ -1108,6 +1132,7 @@ fn build_graph() -> Command {
                         .arg(
                             Arg::new("kind")
                                 .long("kind")
+                                .value_name("KIND")
                                 .help("Type kind: object or link (default: try object first)"),
                         ),
                 )
@@ -1118,6 +1143,7 @@ fn build_graph() -> Command {
                         .arg(
                             Arg::new("kind")
                                 .long("kind")
+                                .value_name("KIND")
                                 .help("Type kind: object or link (default: list both)"),
                         ),
                 )
@@ -1129,6 +1155,7 @@ fn build_graph() -> Command {
                         .arg(
                             Arg::new("kind")
                                 .long("kind")
+                                .value_name("KIND")
                                 .help("Type kind: object or link (default: try object first)"),
                         ),
                 )
@@ -1160,7 +1187,8 @@ fn build_graph() -> Command {
                         .arg(
                             Arg::new("top-n")
                                 .long("top-n")
-                                .help("Number of top groups to return (default 10)"),
+                                .value_name("COUNT")
+                                .help("Number of top groups to return (default: 10)"),
                         )
                         .arg(
                             Arg::new("include-all")
@@ -1183,12 +1211,14 @@ fn build_graph() -> Command {
                         .arg(
                             Arg::new("direction")
                                 .long("direction")
+                                .value_name("DIR")
                                 .help("Direction: outgoing, incoming, both"),
                         )
                         .arg(
                             Arg::new("top-n")
                                 .long("top-n")
-                                .help("Number of top groups to return (default 10)"),
+                                .value_name("COUNT")
+                                .help("Number of top groups to return (default: 10)"),
                         )
                         .arg(
                             Arg::new("include-all")
@@ -1204,22 +1234,26 @@ fn build_graph() -> Command {
                         .arg(
                             Arg::new("damping")
                                 .long("damping")
-                                .help("Damping factor (default 0.85)"),
+                                .value_name("FACTOR")
+                                .help("Damping factor (default: 0.85)"),
                         )
                         .arg(
                             Arg::new("max-iterations")
                                 .long("max-iterations")
-                                .help("Maximum iterations (default 20)"),
+                                .value_name("COUNT")
+                                .help("Maximum iterations (default: 20)"),
                         )
                         .arg(
                             Arg::new("tolerance")
                                 .long("tolerance")
-                                .help("Convergence tolerance (default 1e-6)"),
+                                .value_name("EPSILON")
+                                .help("Convergence tolerance (default: 1e-6)"),
                         )
                         .arg(
                             Arg::new("top-n")
                                 .long("top-n")
-                                .help("Number of top nodes to return (default 10)"),
+                                .value_name("COUNT")
+                                .help("Number of top nodes to return (default: 10)"),
                         )
                         .arg(
                             Arg::new("include-all")
@@ -1235,7 +1269,8 @@ fn build_graph() -> Command {
                         .arg(
                             Arg::new("top-n")
                                 .long("top-n")
-                                .help("Number of top nodes to return (default 10)"),
+                                .value_name("COUNT")
+                                .help("Number of top nodes to return (default: 10)"),
                         )
                         .arg(
                             Arg::new("include-all")
@@ -1252,12 +1287,14 @@ fn build_graph() -> Command {
                         .arg(
                             Arg::new("direction")
                                 .long("direction")
+                                .value_name("DIR")
                                 .help("Direction: outgoing, incoming, both"),
                         )
                         .arg(
                             Arg::new("top-n")
                                 .long("top-n")
-                                .help("Number of top nodes to return (default 10)"),
+                                .value_name("COUNT")
+                                .help("Number of top nodes to return (default: 10)"),
                         )
                         .arg(
                             Arg::new("include-all")
