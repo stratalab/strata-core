@@ -175,6 +175,34 @@ impl Executor {
             crate::handlers::reject_system_branch(branch)?;
         }
 
+        self.dispatch(cmd)
+    }
+
+    /// Execute a command targeting the `_system_` branch.
+    ///
+    /// Skips the `reject_system_branch` guard, but still enforces access mode.
+    /// Used by [`SystemBranch`](crate::api::SystemBranch) to provide internal
+    /// access to the system branch.
+    pub(crate) fn execute_internal(&self, mut cmd: Command) -> Result<Output> {
+        if self.access_mode == AccessMode::ReadOnly && cmd.is_write() {
+            warn!(target: "strata::command", command = %cmd.name(), "Write rejected in read-only mode");
+            let hint = if self.primitives.db.is_follower() {
+                Some("This database is a read-only follower. Writes must go through the primary instance.".to_string())
+            } else {
+                Some("Database is in read-only mode.".to_string())
+            };
+            return Err(Error::AccessDenied {
+                command: cmd.name().to_string(),
+                hint,
+            });
+        }
+
+        cmd.resolve_defaults();
+        self.dispatch(cmd)
+    }
+
+    /// Internal dispatch — shared by `execute` and `execute_internal`.
+    fn dispatch(&self, cmd: Command) -> Result<Output> {
         let cmd_name = cmd.name();
         let start = Instant::now();
 
