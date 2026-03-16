@@ -27,6 +27,10 @@ pub struct CompactionIterator<I: Iterator<Item = (InternalKey, MemtableEntry)>> 
     prune_floor: u64,
     current_prefix: Option<Vec<u8>>,
     emitted_floor_entry: bool,
+    /// Maximum versions to keep per logical key (0 = unlimited).
+    max_versions: usize,
+    /// Number of versions emitted for the current logical key.
+    versions_emitted: usize,
 }
 
 impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> CompactionIterator<I> {
@@ -40,7 +44,19 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> CompactionIterator<I> {
             prune_floor,
             current_prefix: None,
             emitted_floor_entry: false,
+            max_versions: 0,
+            versions_emitted: 0,
         }
+    }
+
+    /// Set the maximum number of versions to keep per logical key.
+    ///
+    /// When `max > 0`, at most `max` versions are emitted per key
+    /// (counting both above-floor and floor entries). When `max == 0`,
+    /// version limiting is disabled and only `prune_floor` governs pruning.
+    pub fn with_max_versions(mut self, max: usize) -> Self {
+        self.max_versions = max;
+        self
     }
 }
 
@@ -52,16 +68,21 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for CompactionIt
             let (ik, entry) = self.inner.next()?;
             let prefix = ik.typed_key_prefix().to_vec();
 
-            // New logical key — reset floor tracking
+            // New logical key — reset tracking
             if self.current_prefix.as_ref() != Some(&prefix) {
                 self.current_prefix = Some(prefix);
                 self.emitted_floor_entry = false;
+                self.versions_emitted = 0;
             }
 
             let commit_id = ik.commit_id();
 
             if commit_id >= self.prune_floor {
-                // Above floor: always keep
+                // Above floor: check max_versions limit
+                if self.max_versions > 0 && self.versions_emitted >= self.max_versions {
+                    continue; // Skip — already emitted enough versions
+                }
+                self.versions_emitted += 1;
                 return Some((ik, entry));
             }
 
@@ -72,7 +93,11 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for CompactionIt
                     // Dead key cleanup: skip floor tombstone
                     continue;
                 }
-                // Keep one version at floor for point-in-time reads
+                // Keep one floor entry, but respect max_versions
+                if self.max_versions > 0 && self.versions_emitted >= self.max_versions {
+                    continue;
+                }
+                self.versions_emitted += 1;
                 return Some((ik, entry));
             }
 
@@ -240,6 +265,142 @@ mod tests {
         // Key with only a tombstone below floor — fully cleaned up
         let items = vec![(InternalKey::encode(&key("k"), 3), tombstone())];
         let result = compact(items, 10);
+        assert!(result.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // max_versions tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compaction_max_versions_limits_above_floor() {
+        // versions 10, 8, 6, 4, 2 with floor=0, max_versions=3
+        // → keeps only 10, 8, 6 (first 3 above floor)
+        let items = vec![
+            (InternalKey::encode(&key("k"), 10), entry(100)),
+            (InternalKey::encode(&key("k"), 8), entry(80)),
+            (InternalKey::encode(&key("k"), 6), entry(60)),
+            (InternalKey::encode(&key("k"), 4), entry(40)),
+            (InternalKey::encode(&key("k"), 2), entry(20)),
+        ];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 0)
+            .with_max_versions(3)
+            .collect();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].0.commit_id(), 10);
+        assert_eq!(result[1].0.commit_id(), 8);
+        assert_eq!(result[2].0.commit_id(), 6);
+    }
+
+    #[test]
+    fn compaction_max_versions_zero_keeps_all() {
+        let items = vec![
+            (InternalKey::encode(&key("k"), 5), entry(50)),
+            (InternalKey::encode(&key("k"), 3), entry(30)),
+            (InternalKey::encode(&key("k"), 1), entry(10)),
+        ];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 0)
+            .with_max_versions(0)
+            .collect();
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn compaction_max_versions_with_floor() {
+        // versions 10, 8, 6, 4, 2 with floor=5, max_versions=2
+        // Above floor: 10, 8 (limited to 2)
+        // Floor entry: 4 would be floor entry, but max_versions already reached → skip
+        let items = vec![
+            (InternalKey::encode(&key("k"), 10), entry(100)),
+            (InternalKey::encode(&key("k"), 8), entry(80)),
+            (InternalKey::encode(&key("k"), 6), entry(60)),
+            (InternalKey::encode(&key("k"), 4), entry(40)),
+            (InternalKey::encode(&key("k"), 2), entry(20)),
+        ];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 5)
+            .with_max_versions(2)
+            .collect();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0.commit_id(), 10);
+        assert_eq!(result[1].0.commit_id(), 8);
+    }
+
+    #[test]
+    fn compaction_max_versions_per_key_independent() {
+        // Two keys with max_versions=2
+        let items = vec![
+            (InternalKey::encode(&key("a"), 5), entry(50)),
+            (InternalKey::encode(&key("a"), 3), entry(30)),
+            (InternalKey::encode(&key("a"), 1), entry(10)),
+            (InternalKey::encode(&key("b"), 4), entry(40)),
+            (InternalKey::encode(&key("b"), 2), entry(20)),
+            (InternalKey::encode(&key("b"), 1), entry(10)),
+        ];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 0)
+            .with_max_versions(2)
+            .collect();
+        // key "a": 5, 3 (2 versions)
+        // key "b": 4, 2 (2 versions)
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0].0.commit_id(), 5); // a@5
+        assert_eq!(result[1].0.commit_id(), 3); // a@3
+        assert_eq!(result[2].0.commit_id(), 4); // b@4
+        assert_eq!(result[3].0.commit_id(), 2); // b@2
+    }
+
+    #[test]
+    fn compaction_max_versions_one_keeps_only_newest() {
+        // max_versions=1 should keep exactly one version per key
+        let items = vec![
+            (InternalKey::encode(&key("k"), 5), entry(50)),
+            (InternalKey::encode(&key("k"), 3), entry(30)),
+            (InternalKey::encode(&key("k"), 1), entry(10)),
+        ];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 0)
+            .with_max_versions(1)
+            .collect();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0.commit_id(), 5);
+    }
+
+    #[test]
+    fn compaction_max_versions_tombstone_above_floor_counts() {
+        // Tombstone above floor should count toward max_versions
+        // versions: tomb@10, value@8, value@6 with floor=3, max_versions=2
+        // → keeps tomb@10 (above, count=1), value@8 (above, count=2), skips rest
+        let items = vec![
+            (InternalKey::encode(&key("k"), 10), tombstone()),
+            (InternalKey::encode(&key("k"), 8), entry(80)),
+            (InternalKey::encode(&key("k"), 6), entry(60)),
+            (InternalKey::encode(&key("k"), 2), entry(20)),
+        ];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 3)
+            .with_max_versions(2)
+            .collect();
+        assert_eq!(result.len(), 2);
+        assert!(result[0].1.is_tombstone);
+        assert_eq!(result[0].0.commit_id(), 10);
+        assert_eq!(result[1].0.commit_id(), 8);
+    }
+
+    #[test]
+    fn compaction_max_versions_dead_tombstone_still_cleaned() {
+        // Dead tombstone cleanup should work regardless of max_versions
+        // All versions below floor, newest is tombstone → entire key dropped
+        let items = vec![
+            (InternalKey::encode(&key("k"), 3), tombstone()),
+            (InternalKey::encode(&key("k"), 1), entry(10)),
+        ];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 5)
+            .with_max_versions(10)
+            .collect();
         assert!(result.is_empty());
     }
 }

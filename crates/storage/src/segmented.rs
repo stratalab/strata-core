@@ -852,7 +852,9 @@ impl SegmentedStore {
             .collect();
 
         let merge = MergeIterator::new(sources);
-        let compaction_iter = CompactionIterator::new(merge, prune_floor);
+        let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
+        let compaction_iter =
+            CompactionIterator::new(merge, prune_floor).with_max_versions(max_versions);
 
         let builder = SegmentBuilder::default();
         let meta = builder.build_from_iter(compaction_iter, &seg_path)?;

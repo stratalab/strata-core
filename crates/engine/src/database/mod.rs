@@ -417,8 +417,12 @@ impl Database {
     ) -> StrataResult<Arc<Self>> {
         let wal_dir = canonical_path.join("wal");
 
+        // Segments directory for reading existing segments (read-only, no create)
+        let segments_dir = canonical_path.join("segments");
+
         // Recovery — purely read-only (no truncation, no file writes)
-        let recovery = RecoveryCoordinator::new(wal_dir.clone());
+        let recovery = RecoveryCoordinator::new(wal_dir.clone())
+            .with_segments(segments_dir, cfg.storage.write_buffer_size);
         let result = match recovery.recover() {
             Ok(result) => result,
             Err(e) => {
@@ -452,6 +456,27 @@ impl Database {
         let storage = Arc::new(result.storage);
         storage.set_max_branches(cfg.storage.max_branches);
         storage.set_max_versions_per_key(cfg.storage.max_versions_per_key);
+
+        // Recover previously flushed segments from disk
+        match storage.recover_segments() {
+            Ok(seg_info) => {
+                if seg_info.segments_loaded > 0 {
+                    info!(target: "strata::db",
+                        branches = seg_info.branches_recovered,
+                        segments = seg_info.segments_loaded,
+                        errors_skipped = seg_info.errors_skipped,
+                        "Recovered segments from disk");
+                }
+            }
+            Err(e) => {
+                warn!(target: "strata::db", error = %e, "Segment recovery failed");
+                if !cfg.allow_lossy_recovery {
+                    return Err(StrataError::corruption(format!(
+                        "Segment recovery failed: {}", e
+                    )));
+                }
+            }
+        }
 
         let db = Arc::new(Self {
             data_dir: canonical_path,
@@ -497,9 +522,14 @@ impl Database {
         let wal_dir = canonical_path.join("wal");
         std::fs::create_dir_all(&wal_dir).map_err(StrataError::from)?;
 
+        // Create segments directory for on-disk segment storage
+        let segments_dir = canonical_path.join("segments");
+        std::fs::create_dir_all(&segments_dir).map_err(StrataError::from)?;
+
         // Use RecoveryCoordinator for proper transaction-aware recovery
         // This reads all WalRecords from the segmented WAL directory
-        let recovery = RecoveryCoordinator::new(wal_dir.clone());
+        let recovery = RecoveryCoordinator::new(wal_dir.clone())
+            .with_segments(segments_dir, cfg.storage.write_buffer_size);
         let result = match recovery.recover() {
             Ok(result) => result,
             Err(e) => {
@@ -586,6 +616,27 @@ impl Database {
         let storage = Arc::new(result.storage);
         storage.set_max_branches(cfg.storage.max_branches);
         storage.set_max_versions_per_key(cfg.storage.max_versions_per_key);
+
+        // Recover previously flushed segments from disk
+        match storage.recover_segments() {
+            Ok(seg_info) => {
+                if seg_info.segments_loaded > 0 {
+                    info!(target: "strata::db",
+                        branches = seg_info.branches_recovered,
+                        segments = seg_info.segments_loaded,
+                        errors_skipped = seg_info.errors_skipped,
+                        "Recovered segments from disk");
+                }
+            }
+            Err(e) => {
+                warn!(target: "strata::db", error = %e, "Segment recovery failed");
+                if !cfg.allow_lossy_recovery {
+                    return Err(StrataError::corruption(format!(
+                        "Segment recovery failed: {}", e
+                    )));
+                }
+            }
+        }
 
         let db = Arc::new(Self {
             data_dir: canonical_path.clone(),
@@ -1657,6 +1708,73 @@ impl Database {
         Ok(())
     }
 
+    /// Schedule background flush tasks for branches with frozen memtables.
+    /// Best-effort: errors are logged, never propagated to the commit caller.
+    fn schedule_flush_if_needed(&self) {
+        let branches = self.storage.branches_needing_flush();
+        if branches.is_empty() {
+            return;
+        }
+
+        for branch_id in branches {
+            let storage = Arc::clone(&self.storage);
+            let submit_result = self.scheduler.submit(
+                crate::background::TaskPriority::High,
+                move || {
+                    match storage.flush_oldest_frozen(&branch_id) {
+                        Ok(true) => {
+                            tracing::debug!(
+                                target: "strata::flush",
+                                ?branch_id,
+                                "Flushed frozen memtable to segment"
+                            );
+                            // Post-flush: check if compaction is needed
+                            if storage.should_compact(&branch_id, 4) {
+                                match storage.compact_branch(&branch_id, 0) {
+                                    Ok(Some(result)) => {
+                                        tracing::debug!(
+                                            target: "strata::compact",
+                                            ?branch_id,
+                                            segments_merged = result.segments_merged,
+                                            entries_pruned = result.entries_pruned,
+                                            "Compaction complete"
+                                        );
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            target: "strata::compact",
+                                            ?branch_id,
+                                            error = %e,
+                                            "Background compaction failed"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "strata::flush",
+                                ?branch_id,
+                                error = %e,
+                                "Background flush failed"
+                            );
+                        }
+                    }
+                },
+            );
+            if let Err(e) = submit_result {
+                tracing::debug!(
+                    target: "strata::flush",
+                    error = %e,
+                    "Flush task rejected (queue full)"
+                );
+                break;
+            }
+        }
+    }
+
     /// Execute one transaction attempt: commit on success, abort on error.
     ///
     /// Handles the commit-or-abort decision and coordinator bookkeeping.
@@ -1673,6 +1791,8 @@ impl Database {
             Ok(value) => {
                 // Commit on success
                 let commit_version = self.commit_internal(txn, durability)?;
+                // Schedule flush for branches with frozen memtables (best-effort)
+                self.schedule_flush_if_needed();
                 Ok((value, commit_version))
             }
             Err(e) => {
@@ -1840,7 +1960,9 @@ impl Database {
     /// # Contract
     /// Returns the commit version (u64) assigned to all writes in this transaction.
     pub fn commit_transaction(&self, txn: &mut TransactionContext) -> StrataResult<u64> {
-        self.commit_internal(txn, self.durability_mode)
+        let version = self.commit_internal(txn, self.durability_mode)?;
+        self.schedule_flush_if_needed();
+        Ok(version)
     }
 
     /// Internal commit implementation shared by commit_transaction and transaction closures
