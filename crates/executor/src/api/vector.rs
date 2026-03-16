@@ -172,7 +172,7 @@ impl Strata {
         }
     }
 
-    /// Search for similar vectors with optional filter and metric override.
+    /// Search for similar vectors with optional filter, metric override, and time-travel.
     pub fn vector_search_with_filter(
         &self,
         collection: &str,
@@ -180,6 +180,7 @@ impl Strata {
         k: u64,
         filter: Option<Vec<MetadataFilter>>,
         metric: Option<DistanceMetric>,
+        as_of: Option<u64>,
     ) -> Result<Vec<VectorMatch>> {
         match self.executor.execute(Command::VectorSearch {
             branch: self.branch_id(),
@@ -189,11 +190,34 @@ impl Strata {
             k,
             filter,
             metric,
-            as_of: None,
+            as_of,
         })? {
             Output::VectorMatches(matches) => Ok(matches),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for VectorSearch".into(),
+            }),
+        }
+    }
+
+    /// Get a vector by key at a specific point in time.
+    ///
+    /// `as_of` is a timestamp in microseconds since epoch.
+    pub fn vector_get_as_of(
+        &self,
+        collection: &str,
+        key: &str,
+        as_of: Option<u64>,
+    ) -> Result<Option<VersionedVectorData>> {
+        match self.executor.execute(Command::VectorGet {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            collection: collection.to_string(),
+            key: key.to_string(),
+            as_of,
+        })? {
+            Output::VectorData(data) => Ok(data),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for VectorGet".into(),
             }),
         }
     }

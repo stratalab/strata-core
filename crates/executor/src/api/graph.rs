@@ -286,6 +286,36 @@ impl Strata {
         }
     }
 
+    /// Bulk insert nodes and edges with full typed control.
+    ///
+    /// Unlike `graph_bulk_insert`, this accepts `BulkGraphNode` and `BulkGraphEdge`
+    /// structs directly, supporting `object_type` on nodes and configurable `chunk_size`.
+    ///
+    /// Returns `(nodes_inserted, edges_inserted)`.
+    pub fn graph_bulk_insert_typed(
+        &self,
+        graph: &str,
+        nodes: Vec<crate::types::BulkGraphNode>,
+        edges: Vec<crate::types::BulkGraphEdge>,
+        chunk_size: Option<usize>,
+    ) -> Result<(u64, u64)> {
+        match self.executor.execute(Command::GraphBulkInsert {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+            nodes,
+            edges,
+            chunk_size,
+        })? {
+            Output::GraphBulkInsertResult {
+                nodes_inserted,
+                edges_inserted,
+            } => Ok((nodes_inserted, edges_inserted)),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphBulkInsert".into(),
+            }),
+        }
+    }
+
     // =========================================================================
     // Traversal
     // =========================================================================
@@ -495,6 +525,19 @@ impl Strata {
             Output::Maybe(v) => Ok(v),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphOntologySummary".into(),
+            }),
+        }
+    }
+
+    /// List all ontology type names (both object and link types).
+    pub fn graph_list_ontology_types(&self, graph: &str) -> Result<Vec<String>> {
+        match self.executor.execute(Command::GraphListOntologyTypes {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+        })? {
+            Output::Keys(names) => Ok(names),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphListOntologyTypes".into(),
             }),
         }
     }

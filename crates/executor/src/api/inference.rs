@@ -35,12 +35,49 @@ impl Strata {
         }
     }
 
+    /// Generate text with full control over sampling parameters.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_with_options(
+        &self,
+        model: &str,
+        prompt: &str,
+        max_tokens: Option<usize>,
+        temperature: Option<f32>,
+        top_k: Option<usize>,
+        top_p: Option<f32>,
+        seed: Option<u64>,
+        stop_tokens: Option<Vec<u32>>,
+        stop_sequences: Option<Vec<String>>,
+    ) -> Result<GenerationResult> {
+        match self.executor.execute(Command::Generate {
+            model: model.to_string(),
+            prompt: prompt.to_string(),
+            max_tokens,
+            temperature,
+            top_k,
+            top_p,
+            seed,
+            stop_tokens,
+            stop_sequences,
+        })? {
+            Output::Generated(result) => Ok(result),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for Generate".into(),
+            }),
+        }
+    }
+
     /// Tokenize text into token IDs using a model's tokenizer.
-    pub fn tokenize(&self, model: &str, text: &str) -> Result<TokenizeResult> {
+    pub fn tokenize(
+        &self,
+        model: &str,
+        text: &str,
+        add_special_tokens: Option<bool>,
+    ) -> Result<TokenizeResult> {
         match self.executor.execute(Command::Tokenize {
             model: model.to_string(),
             text: text.to_string(),
-            add_special_tokens: None,
+            add_special_tokens,
         })? {
             Output::TokenIds(result) => Ok(result),
             _ => Err(Error::Internal {

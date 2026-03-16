@@ -154,14 +154,21 @@ impl Strata {
 
     /// List keys with optional prefix filter at a specific point in time.
     ///
+    /// Supports cursor-based pagination via `cursor` and `limit`.
     /// `as_of` is a timestamp in microseconds since epoch.
-    pub fn kv_list_as_of(&self, prefix: Option<&str>, as_of: Option<u64>) -> Result<Vec<String>> {
+    pub fn kv_list_as_of(
+        &self,
+        prefix: Option<&str>,
+        cursor: Option<&str>,
+        limit: Option<u64>,
+        as_of: Option<u64>,
+    ) -> Result<Vec<String>> {
         match self.executor.execute(Command::KvList {
             branch: self.branch_id(),
             space: self.space_id(),
             prefix: prefix.map(|s| s.to_string()),
-            cursor: None,
-            limit: None,
+            cursor: cursor.map(|s| s.to_string()),
+            limit,
             as_of,
         })? {
             Output::Keys(keys) => Ok(keys),
