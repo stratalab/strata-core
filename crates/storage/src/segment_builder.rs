@@ -162,10 +162,11 @@ impl SegmentBuilder {
             // Flush block when it reaches target size
             if block_buf.len() >= self.data_block_size {
                 let bfk = block_first_key.take().unwrap();
-                let block_data_len = block_buf.len() as u32;
-                write_framed_block(&mut w, BLOCK_TYPE_DATA, &block_buf)?;
-                index_entries.push((bfk, file_offset, block_data_len));
-                file_offset += (BLOCK_FRAME_OVERHEAD + block_buf.len()) as u64;
+                let framed_size =
+                    write_framed_block_compressed(&mut w, BLOCK_TYPE_DATA, &block_buf, true)?;
+                let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
+                index_entries.push((bfk, file_offset, on_disk_data_len));
+                file_offset += framed_size as u64;
                 block_buf.clear();
             }
         }
@@ -173,10 +174,11 @@ impl SegmentBuilder {
         // Flush final partial block
         if !block_buf.is_empty() {
             let bfk = block_first_key.take().unwrap_or_default();
-            let block_data_len = block_buf.len() as u32;
-            write_framed_block(&mut w, BLOCK_TYPE_DATA, &block_buf)?;
-            index_entries.push((bfk, file_offset, block_data_len));
-            file_offset += (BLOCK_FRAME_OVERHEAD + block_buf.len()) as u64;
+            let framed_size =
+                write_framed_block_compressed(&mut w, BLOCK_TYPE_DATA, &block_buf, true)?;
+            let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
+            index_entries.push((bfk, file_offset, on_disk_data_len));
+            file_offset += framed_size as u64;
             block_buf.clear();
         }
 
@@ -346,6 +348,42 @@ fn write_framed_block<W: Write>(w: &mut W, block_type: u8, data: &[u8]) -> io::R
     let crc = crc32fast::hash(data);
     w.write_all(&crc.to_le_bytes())?;
     Ok(())
+}
+
+/// Write a framed block with optional zstd compression.
+///
+/// When `compress` is true, compresses the data with zstd level 3.
+/// If compression doesn't reduce size, falls back to uncompressed.
+/// The codec byte in the frame header indicates the compression used:
+/// - 0 = uncompressed
+/// - 1 = zstd
+///
+/// Returns the total framed size written (overhead + data).
+fn write_framed_block_compressed<W: Write>(
+    w: &mut W,
+    block_type: u8,
+    data: &[u8],
+    compress: bool,
+) -> io::Result<usize> {
+    let (write_data, codec_byte) = if compress && !data.is_empty() {
+        match zstd::encode_all(std::io::Cursor::new(data), 3) {
+            Ok(compressed) if compressed.len() < data.len() => {
+                (compressed, 1u8) // zstd compressed
+            }
+            _ => (data.to_vec(), 0u8), // fallback to uncompressed
+        }
+    } else {
+        (data.to_vec(), 0u8)
+    };
+
+    w.write_all(&[block_type])?;
+    w.write_all(&[codec_byte])?;
+    w.write_all(&[0u8; 2])?; // reserved
+    w.write_all(&(write_data.len() as u32).to_le_bytes())?;
+    w.write_all(&write_data)?;
+    let crc = crc32fast::hash(&write_data);
+    w.write_all(&crc.to_le_bytes())?;
+    Ok(BLOCK_FRAME_OVERHEAD + write_data.len())
 }
 
 /// Parse a framed block from a byte slice. Returns `(block_type, data_slice)`.
@@ -902,5 +940,80 @@ mod tests {
         assert!(e.is_tombstone);
         assert_eq!(e.timestamp, 999);
         assert_eq!(e.ttl_ms, 0);
+    }
+
+    #[test]
+    fn compressed_segment_roundtrip() {
+        use crate::segment::KVSegment;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("compressed.sst");
+
+        let mt = Memtable::new(0);
+        // Write repetitive data that compresses well
+        for i in 0..100u32 {
+            let k = key(&format!("key_{:06}", i));
+            let val = Value::String(format!("value_{}", "abcdefgh".repeat(20)));
+            mt.put(&k, i as u64 + 1, val, false);
+        }
+        mt.freeze();
+
+        let builder = SegmentBuilder::default();
+        let meta = builder.build_from_iter(mt.iter_all(), &path).unwrap();
+        assert_eq!(meta.entry_count, 100);
+
+        // Reopen and verify all entries
+        let seg = KVSegment::open(&path).unwrap();
+        for i in 0..100u32 {
+            let k = key(&format!("key_{:06}", i));
+            let e = seg.point_lookup(&k, u64::MAX).unwrap();
+            assert_eq!(
+                e.value,
+                Value::String(format!("value_{}", "abcdefgh".repeat(20)))
+            );
+        }
+    }
+
+    #[test]
+    fn compressed_segment_multi_block_roundtrip() {
+        use crate::segment::KVSegment;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("compressed_multi.sst");
+
+        let mt = Memtable::new(0);
+        // Write enough repetitive data to span multiple blocks
+        for i in 0..500u32 {
+            let k = key(&format!("key_{:06}", i));
+            let val = Value::String(format!("value_{}", "abcdefgh".repeat(20)));
+            mt.put(&k, i as u64 + 1, val, false);
+        }
+        mt.freeze();
+
+        // Use small block size to force multiple blocks
+        let builder = SegmentBuilder {
+            data_block_size: 4096,
+            bloom_bits_per_key: 10,
+        };
+        let meta = builder.build_from_iter(mt.iter_all(), &path).unwrap();
+        assert_eq!(meta.entry_count, 500);
+
+        // Reopen and verify all entries via point lookup
+        let seg = KVSegment::open(&path).unwrap();
+        for i in 0..500u32 {
+            let k = key(&format!("key_{:06}", i));
+            let e = seg
+                .point_lookup(&k, u64::MAX)
+                .unwrap_or_else(|| panic!("missing key_{:06}", i));
+            assert_eq!(
+                e.value,
+                Value::String(format!("value_{}", "abcdefgh".repeat(20)))
+            );
+            assert_eq!(e.commit_id, i as u64 + 1);
+        }
+
+        // Also verify iteration works across compressed blocks
+        let all: Vec<_> = seg.iter_seek_all().collect();
+        assert_eq!(all.len(), 500);
     }
 }

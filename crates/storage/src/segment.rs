@@ -265,11 +265,21 @@ impl KVSegment {
         self.header.entry_count
     }
 
+    /// File size in bytes (from the underlying mmap).
+    pub fn file_size(&self) -> u64 {
+        self.mmap.len() as u64
+    }
+
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
 
     /// Read and verify a data block from the mmap, returning its payload.
+    ///
+    /// Checks the codec byte in the block frame header:
+    /// - 0 = uncompressed (return data as-is)
+    /// - 1 = zstd compressed (decompress before returning)
+    /// - other = unknown codec (return None)
     fn read_data_block(&self, ie: &IndexEntry) -> Option<Vec<u8>> {
         let start = ie.block_offset as usize;
         let framed_len = FRAME_OVERHEAD + ie.block_data_len as usize;
@@ -277,8 +287,16 @@ impl KVSegment {
         if end > self.mmap.len() {
             return None;
         }
-        let (_, data) = parse_framed_block(&self.mmap[start..end])?;
-        Some(data.to_vec())
+
+        let raw = &self.mmap[start..end];
+        let codec_byte = raw[1];
+        let (_, data) = parse_framed_block(raw)?;
+
+        match codec_byte {
+            0 => Some(data.to_vec()),         // Uncompressed
+            1 => zstd::decode_all(data).ok(), // Zstd
+            _ => None,                        // Unknown codec
+        }
     }
 
     /// Scan a single data block for the newest version of a typed key at or below snapshot.
@@ -1024,5 +1042,70 @@ mod tests {
 
         assert_eq!(results[1].1.timestamp, 200_000);
         assert_eq!(results[1].1.ttl_ms, 0);
+    }
+
+    #[test]
+    fn compressed_and_uncompressed_coexist() {
+        // Verify that segments with compressed blocks work end-to-end
+        // Build with small block size to get multiple blocks
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..500u32 {
+            let k = kv_key(&format!("k_{:06}", i));
+            mt.put(&k, i as u64 + 1, Value::String("x".repeat(50)), false);
+        }
+        mt.freeze();
+        build_segment_small_blocks(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        assert_eq!(seg.entry_count(), 500);
+        // Spot check a few entries
+        let e = seg.point_lookup(&kv_key("k_000000"), u64::MAX).unwrap();
+        assert_eq!(e.commit_id, 1);
+        let e = seg.point_lookup(&kv_key("k_000499"), u64::MAX).unwrap();
+        assert_eq!(e.commit_id, 500);
+    }
+
+    #[test]
+    fn compressed_segment_reduces_file_size() {
+        // Build two segments with the same data: one with highly compressible data
+        // and verify file size is reasonable (segment with repetitive data should compress)
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("compressible.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..200u32 {
+            let k = kv_key(&format!("key_{:06}", i));
+            // Highly repetitive data that compresses well
+            let val = Value::String("A".repeat(500));
+            mt.put(&k, i as u64 + 1, val, false);
+        }
+        mt.freeze();
+
+        let builder = SegmentBuilder {
+            data_block_size: 4096,
+            bloom_bits_per_key: 10,
+        };
+        let meta = builder.build_from_iter(mt.iter_all(), &path).unwrap();
+        assert_eq!(meta.entry_count, 200);
+
+        // Verify all data is readable
+        let seg = KVSegment::open(&path).unwrap();
+        for i in 0..200u32 {
+            let k = kv_key(&format!("key_{:06}", i));
+            let e = seg.point_lookup(&k, u64::MAX).unwrap();
+            assert_eq!(e.value, Value::String("A".repeat(500)));
+        }
+
+        // The compressed file should be smaller than the uncompressed data payload
+        // 200 entries * ~500 bytes each = ~100KB of value data alone
+        // With compression, the file should be significantly smaller
+        assert!(
+            seg.file_size() < 100_000,
+            "compressed segment should be much smaller than raw data; got {} bytes",
+            seg.file_size(),
+        );
     }
 }

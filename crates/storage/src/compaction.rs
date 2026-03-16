@@ -107,6 +107,77 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for CompactionIt
 }
 
 // ---------------------------------------------------------------------------
+// Size-tiered compaction scheduler
+// ---------------------------------------------------------------------------
+
+/// Size-tiered compaction scheduler.
+///
+/// Groups segments into tiers by file size and identifies merge candidates.
+/// Tier assignment: `tier = floor(log4(file_size / base_size))`.
+pub struct CompactionScheduler {
+    /// Minimum segments in a tier to trigger a merge.
+    pub min_merge_width: usize,
+    /// Base segment size in bytes for tier calculation.
+    pub base_size: u64,
+}
+
+impl Default for CompactionScheduler {
+    fn default() -> Self {
+        Self {
+            min_merge_width: 4,
+            base_size: 64 * 1024 * 1024, // 64 MiB
+        }
+    }
+}
+
+/// A group of segments in the same size tier, eligible for merging.
+#[derive(Debug, Clone)]
+pub struct TierMergeCandidate {
+    /// Tier number (0 = smallest segments).
+    pub tier: u32,
+    /// Indices into the branch's segment list for segments to merge.
+    pub segment_indices: Vec<usize>,
+}
+
+impl CompactionScheduler {
+    /// Assign a tier to a segment based on its file size.
+    fn tier_for_size(&self, file_size: u64) -> u32 {
+        if file_size == 0 || self.base_size == 0 {
+            return 0;
+        }
+        let ratio = file_size as f64 / self.base_size as f64;
+        if ratio <= 1.0 {
+            0
+        } else {
+            ratio.log(4.0).floor() as u32
+        }
+    }
+
+    /// Find merge candidates: tiers with segment count >= min_merge_width.
+    ///
+    /// Returns candidates sorted by tier ascending (merge smallest first).
+    /// Each candidate contains the indices of segments to merge.
+    pub fn pick_candidates(&self, segment_sizes: &[u64]) -> Vec<TierMergeCandidate> {
+        use std::collections::BTreeMap;
+
+        let mut tiers: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        for (i, &size) in segment_sizes.iter().enumerate() {
+            let tier = self.tier_for_size(size);
+            tiers.entry(tier).or_default().push(i);
+        }
+
+        tiers
+            .into_iter()
+            .filter(|(_, indices)| indices.len() >= self.min_merge_width)
+            .map(|(tier, segment_indices)| TierMergeCandidate {
+                tier,
+                segment_indices,
+            })
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -402,5 +473,84 @@ mod tests {
             .with_max_versions(10)
             .collect();
         assert!(result.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // CompactionScheduler tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tier_assignment_sizes() {
+        let sched = CompactionScheduler::default();
+        // base_size = 64 MiB
+
+        // Zero and sub-base sizes → tier 0
+        assert_eq!(sched.tier_for_size(0), 0);
+        assert_eq!(sched.tier_for_size(1), 0);
+        assert_eq!(sched.tier_for_size(64 * 1024 * 1024), 0); // exactly base_size
+
+        // 4x base_size → log4(4) = 1 → tier 1
+        assert_eq!(sched.tier_for_size(4 * 64 * 1024 * 1024), 1);
+
+        // 16x base_size → log4(16) = 2 → tier 2
+        assert_eq!(sched.tier_for_size(16 * 64 * 1024 * 1024), 2);
+
+        // 2x base_size → log4(2) ≈ 0.5 → floor → tier 0
+        assert_eq!(sched.tier_for_size(2 * 64 * 1024 * 1024), 0);
+
+        // 5x base_size → log4(5) ≈ 1.16 → floor → tier 1
+        assert_eq!(sched.tier_for_size(5 * 64 * 1024 * 1024), 1);
+    }
+
+    #[test]
+    fn pick_candidates_groups_by_tier() {
+        let sched = CompactionScheduler {
+            min_merge_width: 4,
+            base_size: 64 * 1024 * 1024,
+        };
+
+        // 8 small segments (all tier 0)
+        let sizes = vec![100u64; 8];
+        let candidates = sched.pick_candidates(&sizes);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].tier, 0);
+        assert_eq!(candidates[0].segment_indices.len(), 8);
+        // Indices should be 0..8
+        for i in 0..8 {
+            assert_eq!(candidates[0].segment_indices[i], i);
+        }
+    }
+
+    #[test]
+    fn pick_candidates_respects_min_merge_width() {
+        let sched = CompactionScheduler {
+            min_merge_width: 4,
+            base_size: 64 * 1024 * 1024,
+        };
+
+        // Only 3 segments — below min_merge_width of 4
+        let sizes = vec![100u64; 3];
+        let candidates = sched.pick_candidates(&sizes);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn pick_candidates_multiple_tiers() {
+        let sched = CompactionScheduler {
+            min_merge_width: 2,
+            base_size: 1024, // 1 KiB base for easy testing
+        };
+
+        // Mix of sizes:
+        // 100, 200, 300, 500 → all ≤ base_size → tier 0
+        // 4096, 5000 → 4x-5x base → log4(4)=1, log4(~4.88)=1 → tier 1
+        let sizes = vec![100, 200, 300, 500, 4096, 5000];
+        let candidates = sched.pick_candidates(&sizes);
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].tier, 0);
+        assert_eq!(candidates[0].segment_indices.len(), 4);
+        assert_eq!(candidates[1].tier, 1);
+        assert_eq!(candidates[1].segment_indices.len(), 2);
     }
 }
