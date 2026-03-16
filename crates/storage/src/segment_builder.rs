@@ -713,8 +713,7 @@ mod tests {
         let mut buf = Vec::new();
         encode_entry(&ik, &entry, &mut buf);
 
-        let (decoded_ik, is_tomb, decoded_val, ts, ttl, consumed) =
-            decode_entry(&buf).unwrap();
+        let (decoded_ik, is_tomb, decoded_val, ts, ttl, consumed) = decode_entry(&buf).unwrap();
         assert_eq!(decoded_ik, ik);
         assert!(!is_tomb);
         assert_eq!(decoded_val, Value::String("world".into()));
@@ -736,8 +735,7 @@ mod tests {
         let mut buf = Vec::new();
         encode_entry(&ik, &entry, &mut buf);
 
-        let (decoded_ik, is_tomb, _, ts, ttl, consumed) =
-            decode_entry(&buf).unwrap();
+        let (decoded_ik, is_tomb, _, ts, ttl, consumed) = decode_entry(&buf).unwrap();
         assert_eq!(decoded_ik, ik);
         assert!(is_tomb);
         assert_eq!(ts, entry.timestamp.as_micros());

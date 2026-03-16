@@ -456,6 +456,7 @@ impl Database {
         let storage = Arc::new(result.storage);
         storage.set_max_branches(cfg.storage.max_branches);
         storage.set_max_versions_per_key(cfg.storage.max_versions_per_key);
+        storage.set_max_immutable_memtables(cfg.storage.max_immutable_memtables);
 
         // Recover previously flushed segments from disk
         match storage.recover_segments() {
@@ -472,7 +473,8 @@ impl Database {
                 warn!(target: "strata::db", error = %e, "Segment recovery failed");
                 if !cfg.allow_lossy_recovery {
                     return Err(StrataError::corruption(format!(
-                        "Segment recovery failed: {}", e
+                        "Segment recovery failed: {}",
+                        e
                     )));
                 }
             }
@@ -616,6 +618,7 @@ impl Database {
         let storage = Arc::new(result.storage);
         storage.set_max_branches(cfg.storage.max_branches);
         storage.set_max_versions_per_key(cfg.storage.max_versions_per_key);
+        storage.set_max_immutable_memtables(cfg.storage.max_immutable_memtables);
 
         // Recover previously flushed segments from disk
         match storage.recover_segments() {
@@ -632,7 +635,8 @@ impl Database {
                 warn!(target: "strata::db", error = %e, "Segment recovery failed");
                 if !cfg.allow_lossy_recovery {
                     return Err(StrataError::corruption(format!(
-                        "Segment recovery failed: {}", e
+                        "Segment recovery failed: {}",
+                        e
                     )));
                 }
             }
@@ -709,6 +713,7 @@ impl Database {
         let storage = SegmentedStore::new();
         storage.set_max_branches(cfg.storage.max_branches);
         storage.set_max_versions_per_key(cfg.storage.max_versions_per_key);
+        storage.set_max_immutable_memtables(cfg.storage.max_immutable_memtables);
 
         // Create coordinator starting at version 1 (no recovery needed), with write buffer limit
         let mut coordinator = TransactionCoordinator::new(1);
@@ -1723,52 +1728,57 @@ impl Database {
 
         for branch_id in branches {
             let storage = Arc::clone(&self.storage);
-            let submit_result = self.scheduler.submit(
-                crate::background::TaskPriority::High,
-                move || {
-                    match storage.flush_oldest_frozen(&branch_id) {
-                        Ok(true) => {
-                            tracing::debug!(
-                                target: "strata::flush",
-                                ?branch_id,
-                                "Flushed frozen memtable to segment"
-                            );
-                            // Post-flush: check if compaction is needed
-                            if storage.should_compact(&branch_id, 4) {
-                                match storage.compact_branch(&branch_id, 0) {
-                                    Ok(Some(result)) => {
-                                        tracing::debug!(
-                                            target: "strata::compact",
-                                            ?branch_id,
-                                            segments_merged = result.segments_merged,
-                                            entries_pruned = result.entries_pruned,
-                                            "Compaction complete"
-                                        );
-                                    }
-                                    Ok(None) => {}
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            target: "strata::compact",
-                                            ?branch_id,
-                                            error = %e,
-                                            "Background compaction failed"
-                                        );
+            let data_dir = self.data_dir.clone();
+            let wal_dir = self.wal_dir.clone();
+            let submit_result =
+                self.scheduler
+                    .submit(crate::background::TaskPriority::High, move || {
+                        match storage.flush_oldest_frozen(&branch_id) {
+                            Ok(true) => {
+                                tracing::debug!(
+                                    target: "strata::flush",
+                                    ?branch_id,
+                                    "Flushed frozen memtable to segment"
+                                );
+
+                                // Update flush watermark and truncate WAL
+                                Self::update_flush_watermark(&storage, &data_dir, &wal_dir);
+
+                                // Post-flush: check if compaction is needed
+                                if storage.should_compact(&branch_id, 4) {
+                                    match storage.compact_branch(&branch_id, 0) {
+                                        Ok(Some(result)) => {
+                                            tracing::debug!(
+                                                target: "strata::compact",
+                                                ?branch_id,
+                                                segments_merged = result.segments_merged,
+                                                entries_pruned = result.entries_pruned,
+                                                "Compaction complete"
+                                            );
+                                        }
+                                        Ok(None) => {}
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                target: "strata::compact",
+                                                ?branch_id,
+                                                error = %e,
+                                                "Background compaction failed"
+                                            );
+                                        }
                                     }
                                 }
                             }
+                            Ok(false) => {}
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "strata::flush",
+                                    ?branch_id,
+                                    error = %e,
+                                    "Background flush failed"
+                                );
+                            }
                         }
-                        Ok(false) => {}
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "strata::flush",
-                                ?branch_id,
-                                error = %e,
-                                "Background flush failed"
-                            );
-                        }
-                    }
-                },
-            );
+                    });
             if let Err(e) = submit_result {
                 tracing::debug!(
                     target: "strata::flush",
@@ -1776,6 +1786,115 @@ impl Database {
                     "Flush task rejected (queue full)"
                 );
                 break;
+            }
+        }
+    }
+
+    /// Update the MANIFEST flush watermark and truncate WAL segments below it.
+    ///
+    /// Computes the global flush watermark as the minimum `max_flushed_commit`
+    /// across all branches. WAL segments fully below this watermark are safe
+    /// to delete because their data is in segments.
+    ///
+    /// Best-effort: errors are logged, not propagated.
+    fn update_flush_watermark(storage: &SegmentedStore, data_dir: &Path, wal_dir: &Path) {
+        // Compute global flush watermark: min of max_flushed_commit across all branches
+        let branch_ids = storage.branch_ids();
+        if branch_ids.is_empty() {
+            return;
+        }
+
+        // Flush ALL branches so every branch's latest data is in segments.
+        // This ensures the watermark reflects the true minimum across all
+        // branches, including low-write branches like _system_ that never
+        // trigger automatic rotation.
+        for bid in &branch_ids {
+            storage.rotate_memtable(bid);
+            // Flush all frozen memtables for this branch (not just the oldest)
+            loop {
+                match storage.flush_oldest_frozen(bid) {
+                    Ok(true) => continue, // More frozen to flush
+                    Ok(false) => break,   // Done
+                    Err(e) => {
+                        tracing::debug!(
+                            target: "strata::flush",
+                            ?bid,
+                            error = %e,
+                            "Force-flush failed, skipping WAL truncation"
+                        );
+                        return; // Can't guarantee this branch's data is safe
+                    }
+                }
+            }
+        }
+
+        // Compute watermark: min of max_flushed_commit across all branches.
+        // After flushing above, every branch with data has segments.
+        let mut watermark = u64::MAX;
+        let mut has_any_segments = false;
+        for bid in &branch_ids {
+            match storage.max_flushed_commit(bid) {
+                Some(0) => {} // Empty segment — no real data, skip
+                Some(commit) => {
+                    watermark = watermark.min(commit);
+                    has_any_segments = true;
+                }
+                None => {
+                    if storage.has_frozen(bid) {
+                        return; // Unflushed data — WAL needed
+                    }
+                }
+            }
+        }
+        if !has_any_segments || watermark == u64::MAX {
+            return;
+        }
+
+        // Update MANIFEST
+        let manifest_path = data_dir.join("MANIFEST");
+        let mut mgr = match ManifestManager::load(manifest_path) {
+            Ok(mgr) => mgr,
+            Err(e) => {
+                tracing::debug!(
+                    target: "strata::flush",
+                    error = %e,
+                    "No MANIFEST found, skipping WAL truncation"
+                );
+                return;
+            }
+        };
+
+        if let Err(e) = mgr.set_flush_watermark(watermark) {
+            tracing::warn!(
+                target: "strata::flush",
+                error = %e,
+                watermark,
+                "Failed to update flush watermark in MANIFEST"
+            );
+            return; // Don't truncate WAL if watermark wasn't persisted
+        }
+
+        // Truncate WAL segments below watermark
+        let manifest_arc = Arc::new(ParkingMutex::new(mgr));
+        let compactor = WalOnlyCompactor::new(wal_dir.to_path_buf(), manifest_arc);
+        match compactor.compact() {
+            Ok(info) => {
+                if info.wal_segments_removed > 0 {
+                    tracing::debug!(
+                        target: "strata::wal",
+                        segments_removed = info.wal_segments_removed,
+                        bytes_reclaimed = info.reclaimed_bytes,
+                        watermark,
+                        "WAL segments truncated after flush"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "strata::wal",
+                    error = %e,
+                    "WAL compaction failed after flush"
+                );
             }
         }
     }

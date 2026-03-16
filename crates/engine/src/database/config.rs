@@ -73,7 +73,7 @@ pub struct StorageConfig {
     #[serde(default = "default_write_buffer_size")]
     pub write_buffer_size: usize,
     /// Maximum number of frozen (immutable) memtables allowed per branch before
-    /// write stalling kicks in. Default: 4. Reserved for future enforcement.
+    /// write stalling kicks in. Default: 4. Set to 0 for unlimited.
     #[serde(default = "default_max_immutable_memtables")]
     pub max_immutable_memtables: usize,
 }
@@ -293,7 +293,7 @@ auto_embed = false
 # max_write_buffer_entries = 500000
 # max_versions_per_key = 0    # 0 = unlimited; set to e.g. 100 to cap MVCC history
 # write_buffer_size = 134217728  # 128 MiB; memtable rotation threshold
-# max_immutable_memtables = 4   # max frozen memtables before stall (future)
+# max_immutable_memtables = 4   # max frozen memtables per branch before write stalling
 "#
     }
 

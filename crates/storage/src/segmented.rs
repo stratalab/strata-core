@@ -99,6 +99,8 @@ pub struct SegmentedStore {
     max_versions_per_key: AtomicUsize,
     /// Total frozen memtable count across all branches (for O(1) "any frozen?" check).
     total_frozen_count: AtomicUsize,
+    /// Maximum frozen memtables per branch before rotation is skipped (0 = unlimited).
+    max_immutable_memtables: AtomicUsize,
 }
 
 impl SegmentedStore {
@@ -118,6 +120,7 @@ impl SegmentedStore {
             max_branches: AtomicUsize::new(0),
             max_versions_per_key: AtomicUsize::new(0),
             total_frozen_count: AtomicUsize::new(0),
+            max_immutable_memtables: AtomicUsize::new(0),
         }
     }
 
@@ -138,6 +141,7 @@ impl SegmentedStore {
             max_branches: AtomicUsize::new(0),
             max_versions_per_key: AtomicUsize::new(0),
             total_frozen_count: AtomicUsize::new(0),
+            max_immutable_memtables: AtomicUsize::new(0),
         }
     }
 
@@ -158,6 +162,7 @@ impl SegmentedStore {
             max_branches: AtomicUsize::new(0),
             max_versions_per_key: AtomicUsize::new(0),
             total_frozen_count: AtomicUsize::new(0),
+            max_immutable_memtables: AtomicUsize::new(0),
         }
     }
 
@@ -267,6 +272,15 @@ impl SegmentedStore {
     /// Pruning happens at compaction time, not at write time.
     pub fn set_max_versions_per_key(&self, max: usize) {
         self.max_versions_per_key.store(max, Ordering::Relaxed);
+    }
+
+    /// Set maximum frozen memtables per branch before write stalling (0 = unlimited).
+    ///
+    /// When the limit is reached, `maybe_rotate_branch` skips rotation and lets
+    /// the active memtable grow beyond `write_buffer_size`. Once a frozen
+    /// memtable is flushed, rotation resumes on the next write.
+    pub fn set_max_immutable_memtables(&self, max: usize) {
+        self.max_immutable_memtables.store(max, Ordering::Relaxed);
     }
 
     /// Direct single-key read returning only the Value (no VersionedValue).
@@ -778,6 +792,14 @@ impl SegmentedStore {
             && branch.active.approx_bytes() >= self.write_buffer_size
             && !self.bulk_load_branches.contains_key(&branch_id)
         {
+            // Write stalling: skip rotation if too many frozen memtables.
+            // The active memtable grows beyond write_buffer_size until a
+            // frozen memtable is flushed, then rotation resumes.
+            let max_frozen = self.max_immutable_memtables.load(Ordering::Relaxed);
+            if max_frozen > 0 && branch.frozen.len() >= max_frozen {
+                return;
+            }
+
             let next_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
             let old = std::mem::replace(&mut branch.active, Memtable::new(next_id));
             old.freeze();
@@ -3338,5 +3360,73 @@ mod tests {
     fn shard_stats_detailed_missing_branch() {
         let store = SegmentedStore::new();
         assert!(store.shard_stats_detailed(&BranchId::new()).is_none());
+    }
+
+    // ===== Write stalling / backpressure tests =====
+
+    #[test]
+    fn write_stalling_skips_rotation_when_frozen_limit_reached() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().join("segments"), 1024); // 1KB threshold
+        store.set_max_immutable_memtables(2);
+
+        let bid = branch();
+
+        // Write enough to trigger rotation 3 times (well over 1KB each time)
+        for round in 0..3 {
+            for i in 0..20 {
+                let key_name = format!("round{}_{}", round, i);
+                seed(
+                    &store,
+                    kv_key(&key_name),
+                    Value::String("x".repeat(100)),
+                    (round * 20 + i + 1) as u64,
+                );
+            }
+        }
+
+        // Should have exactly 2 frozen (the limit), 3rd rotation was blocked
+        assert_eq!(store.branch_frozen_count(&bid), 2);
+
+        // Flush one frozen memtable
+        store.flush_oldest_frozen(&bid).unwrap();
+
+        // Now rotation should work again on next write batch
+        for i in 0..20 {
+            seed(
+                &store,
+                kv_key(&format!("after_{}", i)),
+                Value::String("y".repeat(100)),
+                100 + i as u64,
+            );
+        }
+
+        // Data should still be readable
+        assert!(store
+            .get_versioned(&kv_key("round0_0"), u64::MAX)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn write_stalling_disabled_when_max_is_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().join("segments"), 1024);
+        store.set_max_immutable_memtables(0); // unlimited
+
+        let _bid = branch();
+
+        // Write enough to trigger many rotations
+        for i in 0..100 {
+            seed(
+                &store,
+                kv_key(&format!("k{}", i)),
+                Value::String("x".repeat(100)),
+                i as u64 + 1,
+            );
+        }
+
+        // Should have rotated freely — more than 2 frozen
+        assert!(store.branch_frozen_count(&branch()) > 2);
     }
 }
