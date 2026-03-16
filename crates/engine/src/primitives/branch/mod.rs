@@ -1,7 +1,7 @@
-//! Run module for run lifecycle management and handles
+//! Branch module for branch lifecycle management and handles
 //!
 //! This module contains:
-//! - `index`: BranchIndex for creating, deleting, and managing runs
+//! - `index`: BranchIndex for creating, deleting, and managing branches
 //! - `handle`: BranchHandle facade for branch-scoped operations
 
 mod handle;

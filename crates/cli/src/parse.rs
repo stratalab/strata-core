@@ -397,11 +397,7 @@ fn parse_kv(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, Str
                     primitive: Primitive::Kv,
                 })
             } else {
-                let limit = m
-                    .get_one::<String>("limit")
-                    .map(|s| s.parse::<u64>())
-                    .transpose()
-                    .map_err(|e| format!("Invalid limit: {}", e))?;
+                let limit = m.get_one::<u64>("limit").copied();
                 let cursor = m.get_one::<String>("cursor").cloned();
                 Ok(CliAction::Execute(Command::KvList {
                     branch: branch(state),
@@ -501,12 +497,7 @@ fn parse_json(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, S
                 })
             } else {
                 let cursor = m.get_one::<String>("cursor").cloned();
-                let limit = m
-                    .get_one::<String>("limit")
-                    .map(|s| s.parse::<u64>())
-                    .transpose()
-                    .map_err(|e| format!("Invalid limit: {}", e))?
-                    .unwrap_or(100);
+                let limit = m.get_one::<u64>("limit").copied().unwrap_or(100);
                 Ok(CliAction::Execute(Command::JsonList {
                     branch: branch(state),
                     space: space(state),
@@ -573,16 +564,8 @@ fn parse_event(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
         }
         "list" => {
             let event_type = m.get_one::<String>("type").unwrap().clone();
-            let limit = m
-                .get_one::<String>("limit")
-                .map(|s| s.parse::<u64>())
-                .transpose()
-                .map_err(|e| format!("Invalid limit: {}", e))?;
-            let after_sequence = m
-                .get_one::<String>("after")
-                .map(|s| s.parse::<u64>())
-                .transpose()
-                .map_err(|e| format!("Invalid after: {}", e))?;
+            let limit = m.get_one::<u64>("limit").copied();
+            let after_sequence = m.get_one::<u64>("after").copied();
             Ok(CliAction::Execute(Command::EventGetByType {
                 branch: branch(state),
                 space: space(state),
@@ -787,11 +770,7 @@ fn parse_vector_cmd(matches: &ArgMatches, state: &SessionState) -> Result<CliAct
         "search" => {
             let collection = m.get_one::<String>("collection").unwrap().clone();
             let query = parse_vector(m.get_one::<String>("query").unwrap())?;
-            let k = m
-                .get_one::<String>("k")
-                .unwrap()
-                .parse::<u64>()
-                .map_err(|e| format!("Invalid k: {}", e))?;
+            let k = *m.get_one::<u64>("top-k").unwrap();
             let metric = m
                 .get_one::<String>("metric")
                 .map(|s| parse_metric(s))
@@ -815,11 +794,7 @@ fn parse_vector_cmd(matches: &ArgMatches, state: &SessionState) -> Result<CliAct
         }
         "create" => {
             let collection = m.get_one::<String>("name").unwrap().clone();
-            let dimension = m
-                .get_one::<String>("dim")
-                .unwrap()
-                .parse::<u64>()
-                .map_err(|e| format!("Invalid dimension: {}", e))?;
+            let dimension = *m.get_one::<u64>("dim").unwrap();
             let metric = parse_metric(m.get_one::<String>("metric").unwrap())?;
             Ok(CliAction::Execute(Command::VectorCreateCollection {
                 branch: branch(state),
@@ -971,11 +946,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
             let src = m.get_one::<String>("src").unwrap().clone();
             let dst = m.get_one::<String>("dst").unwrap().clone();
             let edge_type = m.get_one::<String>("edge-type").unwrap().clone();
-            let weight = m
-                .get_one::<String>("weight")
-                .map(|s| s.parse::<f64>())
-                .transpose()
-                .map_err(|e| format!("Invalid weight: {}", e))?;
+            let weight = m.get_one::<f64>("weight").copied();
             let properties = m
                 .get_one::<String>("properties")
                 .map(|s| parse_json_value(s))
@@ -1053,11 +1024,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                 .map_err(|e| format!("Invalid edges: {}", e))?
                 .unwrap_or_default();
 
-            let chunk_size = m
-                .get_one::<String>("chunk-size")
-                .map(|s| s.parse::<usize>())
-                .transpose()
-                .map_err(|e| format!("Invalid chunk-size: {}", e))?;
+            let chunk_size = m.get_one::<usize>("chunk-size").copied();
 
             Ok(CliAction::Execute(Command::GraphBulkInsert {
                 branch: branch(state),
@@ -1070,16 +1037,8 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
         "bfs" => {
             let graph = m.get_one::<String>("graph").unwrap().clone();
             let start = m.get_one::<String>("start").unwrap().clone();
-            let max_depth = m
-                .get_one::<String>("max-depth")
-                .unwrap()
-                .parse::<usize>()
-                .map_err(|e| format!("Invalid max-depth: {}", e))?;
-            let max_nodes = m
-                .get_one::<String>("max-nodes")
-                .map(|s| s.parse::<usize>())
-                .transpose()
-                .map_err(|e| format!("Invalid max-nodes: {}", e))?;
+            let max_depth = *m.get_one::<usize>("max-depth").unwrap();
+            let max_nodes = m.get_one::<usize>("max-nodes").copied();
             let edge_types = m
                 .get_one::<String>("edge-types")
                 .map(|s| s.split(',').map(|t| t.trim().to_string()).collect());
@@ -1217,11 +1176,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
         "analytics" => {
             let (alg_sub, alg_m) = m.subcommand().ok_or("No analytics subcommand")?;
             // Shared analytics options
-            let top_n = alg_m
-                .get_one::<String>("top-n")
-                .map(|s| s.parse::<usize>())
-                .transpose()
-                .map_err(|e| format!("Invalid top-n: {}", e))?;
+            let top_n = alg_m.get_one::<usize>("top-n").copied();
             let include_all = if alg_m.get_flag("include-all") {
                 Some(true)
             } else {
@@ -1239,11 +1194,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                 }
                 "cdlp" => {
                     let graph = alg_m.get_one::<String>("graph").unwrap().clone();
-                    let max_iterations = alg_m
-                        .get_one::<String>("max-iterations")
-                        .unwrap()
-                        .parse::<usize>()
-                        .map_err(|e| format!("Invalid max-iterations: {}", e))?;
+                    let max_iterations = *alg_m.get_one::<usize>("max-iterations").unwrap();
                     let direction = alg_m.get_one::<String>("direction").cloned();
                     Ok(CliAction::Execute(Command::GraphCdlp {
                         branch: branch(state),
@@ -1256,21 +1207,9 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                 }
                 "pagerank" => {
                     let graph = alg_m.get_one::<String>("graph").unwrap().clone();
-                    let damping = alg_m
-                        .get_one::<String>("damping")
-                        .map(|s| s.parse::<f64>())
-                        .transpose()
-                        .map_err(|e| format!("Invalid damping: {}", e))?;
-                    let max_iterations = alg_m
-                        .get_one::<String>("max-iterations")
-                        .map(|s| s.parse::<usize>())
-                        .transpose()
-                        .map_err(|e| format!("Invalid max-iterations: {}", e))?;
-                    let tolerance = alg_m
-                        .get_one::<String>("tolerance")
-                        .map(|s| s.parse::<f64>())
-                        .transpose()
-                        .map_err(|e| format!("Invalid tolerance: {}", e))?;
+                    let damping = alg_m.get_one::<f64>("damping").copied();
+                    let max_iterations = alg_m.get_one::<usize>("max-iterations").copied();
+                    let tolerance = alg_m.get_one::<f64>("tolerance").copied();
                     Ok(CliAction::Execute(Command::GraphPagerank {
                         branch: branch(state),
                         graph,
@@ -1355,11 +1294,7 @@ fn parse_branch(matches: &ArgMatches, _state: &SessionState) -> Result<CliAction
             }))
         }
         "list" => {
-            let limit = m
-                .get_one::<String>("limit")
-                .map(|s| s.parse::<u64>())
-                .transpose()
-                .map_err(|e| format!("Invalid limit: {}", e))?;
+            let limit = m.get_one::<u64>("limit").copied();
             Ok(CliAction::Execute(Command::BranchList {
                 state: None,
                 limit,
@@ -1521,11 +1456,7 @@ fn parse_configure_model(matches: &ArgMatches) -> Result<CliAction, String> {
     let endpoint = matches.get_one::<String>("endpoint").unwrap().clone();
     let model = matches.get_one::<String>("model").unwrap().clone();
     let api_key = matches.get_one::<String>("api-key").cloned();
-    let timeout_ms = matches
-        .get_one::<String>("timeout")
-        .map(|s| s.parse::<u64>())
-        .transpose()
-        .map_err(|e| format!("Invalid timeout: {}", e))?;
+    let timeout_ms = matches.get_one::<u64>("timeout").copied();
     Ok(CliAction::Execute(Command::ConfigureModel {
         endpoint,
         model,
@@ -1570,31 +1501,11 @@ fn parse_models(matches: &ArgMatches) -> Result<CliAction, String> {
 fn parse_generate(matches: &ArgMatches) -> Result<CliAction, String> {
     let model = matches.get_one::<String>("model").unwrap().clone();
     let prompt = matches.get_one::<String>("prompt").unwrap().clone();
-    let max_tokens = matches
-        .get_one::<String>("max-tokens")
-        .map(|s| s.parse::<usize>())
-        .transpose()
-        .map_err(|e| format!("Invalid max-tokens: {}", e))?;
-    let temperature = matches
-        .get_one::<String>("temperature")
-        .map(|s| s.parse::<f32>())
-        .transpose()
-        .map_err(|e| format!("Invalid temperature: {}", e))?;
-    let top_k = matches
-        .get_one::<String>("top-k")
-        .map(|s| s.parse::<usize>())
-        .transpose()
-        .map_err(|e| format!("Invalid top-k: {}", e))?;
-    let top_p = matches
-        .get_one::<String>("top-p")
-        .map(|s| s.parse::<f32>())
-        .transpose()
-        .map_err(|e| format!("Invalid top-p: {}", e))?;
-    let seed = matches
-        .get_one::<String>("seed")
-        .map(|s| s.parse::<u64>())
-        .transpose()
-        .map_err(|e| format!("Invalid seed: {}", e))?;
+    let max_tokens = matches.get_one::<usize>("max-tokens").copied();
+    let temperature = matches.get_one::<f32>("temperature").copied();
+    let top_k = matches.get_one::<usize>("top-k").copied();
+    let top_p = matches.get_one::<f32>("top-p").copied();
+    let seed = matches.get_one::<u64>("seed").copied();
     let stop_sequences: Option<Vec<String>> = matches
         .get_many::<String>("stop")
         .map(|vals| vals.cloned().collect());
@@ -1636,32 +1547,32 @@ fn parse_detokenize(matches: &ArgMatches) -> Result<CliAction, String> {
 
 fn parse_search(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
     let query = matches.get_one::<String>("query").unwrap().clone();
-    let k = matches
-        .get_one::<String>("k")
-        .map(|s| s.parse::<u64>())
-        .transpose()
-        .map_err(|e| format!("Invalid k: {}", e))?;
+    let k = matches.get_one::<u64>("top-k").copied();
     let primitives = matches
         .get_one::<String>("primitives")
         .map(|s| s.split(',').map(|p| p.trim().to_string()).collect());
 
     // Build time_range from --time-start and --time-end
-    let time_start = matches.get_one::<String>("time-start").cloned();
-    let time_end = matches.get_one::<String>("time-end").cloned();
-    let time_range = match (time_start, time_end) {
+    // Clap's .requires() guarantees both-or-neither, so only two branches are reachable.
+    let time_range = match (
+        matches.get_one::<String>("time-start").cloned(),
+        matches.get_one::<String>("time-end").cloned(),
+    ) {
         (Some(start), Some(end)) => Some(TimeRangeInput { start, end }),
-        (Some(_), None) => return Err("--time-start requires --time-end".to_string()),
-        (None, Some(_)) => return Err("--time-end requires --time-start".to_string()),
-        (None, None) => None,
+        _ => None,
     };
 
     let mode = matches.get_one::<String>("mode").cloned();
-    let expand = matches
-        .get_one::<String>("expand")
-        .map(|s| s.eq_ignore_ascii_case("true"));
-    let rerank = matches
-        .get_one::<String>("rerank")
-        .map(|s| s.eq_ignore_ascii_case("true"));
+    let expand = if matches.get_flag("expand") {
+        Some(true)
+    } else {
+        None
+    };
+    let rerank = if matches.get_flag("rerank") {
+        Some(true)
+    } else {
+        None
+    };
 
     Ok(CliAction::Execute(Command::Search {
         branch: branch(state),
@@ -1970,7 +1881,7 @@ mod tests {
 
     #[test]
     fn graph_bfs_minimal() {
-        let cmd = parse_cmd(&["graph", "bfs", "social", "alice", "3"]);
+        let cmd = parse_cmd(&["graph", "bfs", "social", "alice", "--max-depth", "3"]);
         assert_eq!(
             cmd,
             Command::GraphBfs {
@@ -1992,6 +1903,7 @@ mod tests {
             "bfs",
             "social",
             "alice",
+            "--max-depth",
             "5",
             "--max-nodes",
             "100",
@@ -2016,8 +1928,8 @@ mod tests {
 
     #[test]
     fn graph_bfs_invalid_depth() {
-        let err = parse_err(&["graph", "bfs", "social", "alice", "not_a_number"]);
-        assert!(err.contains("Invalid max-depth"), "got: {}", err);
+        let err = parse_err(&["graph", "bfs", "social", "alice", "--max-depth", "not_a_number"]);
+        assert!(err.contains("invalid") || err.contains("Invalid"), "got: {}", err);
     }
 
     // =========================================================================
@@ -2299,7 +2211,7 @@ mod tests {
             "--weight",
             "not_a_float",
         ]);
-        assert!(err.contains("Invalid weight"), "got: {}", err);
+        assert!(err.contains("invalid") || err.contains("Invalid"), "got: {}", err);
     }
 
     #[test]
@@ -2310,15 +2222,15 @@ mod tests {
 
     #[test]
     fn graph_bfs_invalid_max_nodes() {
-        let err = parse_err(&["graph", "bfs", "g", "start", "3", "--max-nodes", "xyz"]);
-        assert!(err.contains("Invalid max-nodes"), "got: {}", err);
+        let err = parse_err(&["graph", "bfs", "g", "start", "--max-depth", "3", "--max-nodes", "xyz"]);
+        assert!(err.contains("invalid") || err.contains("Invalid"), "got: {}", err);
     }
 
     #[test]
     fn graph_bulk_insert_invalid_chunk_size() {
         let json = r#"{"nodes":[]}"#;
         let err = parse_err(&["graph", "bulk-insert", "g", json, "--chunk-size", "abc"]);
-        assert!(err.contains("Invalid chunk-size"), "got: {}", err);
+        assert!(err.contains("invalid") || err.contains("Invalid"), "got: {}", err);
     }
 
     #[test]
@@ -2344,6 +2256,7 @@ mod tests {
             "bfs",
             "social",
             "alice",
+            "--max-depth",
             "2",
             "--edge-types",
             "FOLLOWS, LIKES, BLOCKS",

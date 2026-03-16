@@ -83,7 +83,6 @@ pub use primitives::{
     CollectionRecord,
     DistanceMetric,
     Event,
-    EventHandle,
     EventLog,
     EventLogExt,
     FilterCondition,
@@ -94,7 +93,6 @@ pub use primitives::{
     // Index
     InvertedIndex,
     JsonDoc,
-    JsonHandle,
     JsonScalar,
     JsonStore,
     JsonStoreExt,
@@ -102,7 +100,6 @@ pub use primitives::{
     KVStore,
     // Extension traits
     KVStoreExt,
-    KvHandle,
     MetadataFilter,
     PostingEntry,
     PostingList,
@@ -117,7 +114,6 @@ pub use primitives::{
     State,
     StateCell,
     StateCellExt,
-    StateHandle,
     StorageDtype,
     VectorBackendState,
     // Vector types
