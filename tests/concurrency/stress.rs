@@ -14,7 +14,7 @@ use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
-use strata_storage::sharded::ShardedStore;
+use strata_storage::SegmentedStore;
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
     let ns = Arc::new(Namespace::for_branch(branch_id));
@@ -25,7 +25,7 @@ fn create_test_key(branch_id: BranchId, name: &str) -> Key {
 #[test]
 #[ignore]
 fn stress_concurrent_read_write() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let manager = Arc::new(TransactionManager::new(1));
     let branch_id = BranchId::new();
 
@@ -111,7 +111,7 @@ fn stress_concurrent_read_write() {
 #[test]
 #[ignore]
 fn stress_transaction_throughput() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let manager = TransactionManager::new(1);
     let branch_id = BranchId::new();
 
@@ -177,7 +177,7 @@ fn stress_transaction_throughput() {
 #[test]
 #[ignore]
 fn stress_large_transaction() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
 
     // Create transaction with 10K operations
@@ -213,7 +213,7 @@ fn stress_large_transaction() {
 #[test]
 #[ignore]
 fn stress_many_branches() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let manager = Arc::new(TransactionManager::new(1));
     let barrier = Arc::new(Barrier::new(100));
     let commits = Arc::new(AtomicU64::new(0));
@@ -270,7 +270,7 @@ fn stress_many_branches() {
 #[test]
 #[ignore]
 fn stress_long_running_transaction() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "contested");
 
@@ -327,7 +327,7 @@ fn stress_long_running_transaction() {
 #[test]
 #[ignore]
 fn stress_sustained_workload() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let manager = Arc::new(TransactionManager::new(1));
     let branch_id = BranchId::new();
 

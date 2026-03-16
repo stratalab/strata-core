@@ -15,7 +15,7 @@ use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
-use strata_storage::sharded::ShardedStore;
+use strata_storage::SegmentedStore;
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
     let ns = Arc::new(Namespace::for_branch(branch_id));
@@ -28,7 +28,7 @@ fn create_test_key(branch_id: BranchId, name: &str) -> Key {
 
 #[test]
 fn parallel_commits_different_runs_no_contention() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let manager = Arc::new(TransactionManager::new(1));
     let barrier = Arc::new(Barrier::new(4));
     let commits = Arc::new(AtomicU64::new(0));
@@ -100,7 +100,7 @@ fn parallel_commits_different_runs_no_contention() {
 
 #[test]
 fn different_branches_have_independent_namespaces() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch1 = BranchId::new();
     let branch2 = BranchId::new();
 
@@ -129,7 +129,7 @@ fn different_branches_have_independent_namespaces() {
 
 #[test]
 fn high_contention_single_key() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let manager = Arc::new(TransactionManager::new(1));
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "contested");
@@ -212,7 +212,7 @@ fn high_contention_single_key() {
 
 #[test]
 fn interleaved_disjoint_operations_both_commit() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key_a = create_test_key(branch_id, "A");
     let key_b = create_test_key(branch_id, "B");
@@ -383,7 +383,7 @@ fn manager_with_txn_id_recovery() {
 
 #[test]
 fn concurrent_empty_transactions() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let barrier = Arc::new(Barrier::new(4));
 

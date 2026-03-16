@@ -12,7 +12,7 @@ use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
-use strata_storage::sharded::ShardedStore;
+use strata_storage::SegmentedStore;
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
     let ns = Arc::new(Namespace::for_branch(branch_id));
@@ -25,7 +25,7 @@ fn create_test_key(branch_id: BranchId, name: &str) -> Key {
 
 #[test]
 fn begin_commit_makes_writes_permanent() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "committed");
 
@@ -77,7 +77,7 @@ fn committed_status_is_committed() {
 
 #[test]
 fn begin_abort_discards_writes() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "aborted");
 
@@ -117,7 +117,7 @@ fn abort_reason_recorded_in_status() {
 
 #[test]
 fn validation_failure_leads_to_abort() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "conflict");
 
@@ -250,7 +250,7 @@ fn reset_after_commit_allows_reuse() {
 
 #[test]
 fn read_modify_write_workflow() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "rmw");
 
@@ -296,7 +296,7 @@ fn read_modify_write_workflow() {
 
 #[test]
 fn multi_key_transaction_workflow() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
 
     let key1 = create_test_key(branch_id, "k1");
@@ -360,7 +360,7 @@ fn multi_key_transaction_workflow() {
 
 #[test]
 fn delete_workflow() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "to_delete");
 
@@ -400,7 +400,7 @@ fn delete_workflow() {
 
 #[test]
 fn empty_transaction_commits() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
 
     let mut txn = TransactionContext::new(1, branch_id, 1);
@@ -415,7 +415,7 @@ fn empty_transaction_commits() {
 
 #[test]
 fn many_sequential_transactions() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "sequential");
 

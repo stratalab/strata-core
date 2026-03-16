@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use strata_core::traits::{Storage, WriteMode};
 use strata_core::StrataResult;
 use strata_durability::wal::WalReader;
-use strata_storage::ShardedStore;
+use strata_storage::SegmentedStore;
 
 /// Coordinates database recovery after crash or restart
 ///
@@ -73,7 +73,7 @@ impl RecoveryCoordinator {
     /// - If WAL directory cannot be read
     /// - If record deserialization fails
     pub fn recover(&self) -> StrataResult<RecoveryResult> {
-        let storage = ShardedStore::new();
+        let storage = SegmentedStore::new();
         let mut max_version = 0u64;
         let mut max_txn_id = 0u64;
         let mut stats = RecoveryStats::default();
@@ -142,7 +142,7 @@ impl RecoveryCoordinator {
 /// Result of recovery operation
 pub struct RecoveryResult {
     /// Recovered storage with all committed transactions applied
-    pub storage: ShardedStore,
+    pub storage: SegmentedStore,
     /// Transaction manager initialized with recovered version
     ///
     /// Per spec Section 6.1: The global version counter is set to the
@@ -161,7 +161,7 @@ impl RecoveryResult {
     /// rather than refusing to open.
     pub fn empty() -> Self {
         RecoveryResult {
-            storage: ShardedStore::new(),
+            storage: SegmentedStore::new(),
             txn_manager: TransactionManager::new(0),
             stats: RecoveryStats::default(),
         }

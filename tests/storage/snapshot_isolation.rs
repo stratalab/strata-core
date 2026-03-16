@@ -13,7 +13,7 @@ use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
-use strata_storage::sharded::ShardedStore;
+use strata_storage::SegmentedStore;
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
     let ns = Arc::new(Namespace::for_branch(branch_id));
@@ -26,7 +26,7 @@ fn create_test_key(branch_id: BranchId, name: &str) -> Key {
 
 #[test]
 fn snapshot_captures_current_version() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "capture");
 
@@ -46,7 +46,7 @@ fn snapshot_captures_current_version() {
 
 #[test]
 fn snapshot_acquisition_is_fast() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
 
     // Populate store with data
@@ -75,7 +75,7 @@ fn snapshot_acquisition_is_fast() {
 
 #[test]
 fn multiple_snapshots_independent() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "multi_snap");
 
@@ -118,7 +118,7 @@ fn multiple_snapshots_independent() {
 
 #[test]
 fn snapshot_ignores_concurrent_writes() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "concurrent");
 
@@ -149,7 +149,7 @@ fn snapshot_ignores_concurrent_writes() {
 
 #[test]
 fn snapshot_sees_pre_delete_value() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "pre_delete");
 
@@ -179,7 +179,7 @@ fn snapshot_sees_pre_delete_value() {
 
 #[test]
 fn repeated_reads_return_same_value() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "repeated");
 
@@ -200,7 +200,7 @@ fn repeated_reads_return_same_value() {
 
 #[test]
 fn multi_key_consistency_within_snapshot() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
 
     // Put related values
@@ -243,7 +243,7 @@ fn multi_key_consistency_within_snapshot() {
 
 #[test]
 fn concurrent_readers_dont_block() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
 
     // Populate
@@ -282,7 +282,7 @@ fn concurrent_readers_dont_block() {
 
 #[test]
 fn snapshot_survives_store_modifications() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
 
     // Initial population
@@ -343,7 +343,7 @@ fn snapshot_survives_store_modifications() {
 
 #[test]
 fn versioned_read_provides_isolation() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "cached");
 
@@ -375,7 +375,7 @@ fn versioned_read_provides_isolation() {
 
 #[test]
 fn snapshot_scan_sees_consistent_state() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let ns = Arc::new(Namespace::for_branch(branch_id));
 
@@ -417,7 +417,7 @@ fn snapshot_scan_sees_consistent_state() {
 
 #[test]
 fn snapshot_list_sees_all_keys() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let ns = Arc::new(Namespace::for_branch(branch_id));
 

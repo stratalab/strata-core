@@ -56,7 +56,7 @@ use strata_durability::wal::WalWriter;
 /// This ensures that no other transaction on the same branch can modify storage
 /// between the time we validate and the time we apply our writes.
 ///
-/// Transactions on different branches can commit in parallel, as ShardedStore
+/// Transactions on different branches can commit in parallel, as SegmentedStore
 /// maintains per-branch shards and there's no cross-branch conflict.
 pub struct TransactionManager {
     /// Global version counter
@@ -676,7 +676,7 @@ mod tests {
     use strata_core::value::Value;
     use strata_durability::codec::IdentityCodec;
     use strata_durability::wal::{DurabilityMode, WalConfig};
-    use strata_storage::ShardedStore;
+    use strata_storage::SegmentedStore;
     use tempfile::TempDir;
 
     fn create_test_namespace(branch_id: BranchId) -> Arc<Namespace> {
@@ -758,7 +758,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = Arc::new(TransactionManager::new(0));
 
         let branch_id1 = BranchId::new();
@@ -814,7 +814,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
 
         let branch_id = BranchId::new();
@@ -858,7 +858,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = Arc::new(TransactionManager::new(0));
 
         let num_threads = 10;
@@ -907,7 +907,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
 
         let branch_id = BranchId::new();
@@ -970,7 +970,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
 
         let branch_id = BranchId::new();
@@ -1021,7 +1021,7 @@ mod tests {
 
     #[test]
     fn test_read_only_no_version_increment() {
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
 
@@ -1040,7 +1040,7 @@ mod tests {
     #[test]
     fn test_read_only_no_lock_contention() {
         // Two concurrent read-only transactions on the same branch shouldn't block
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = Arc::new(TransactionManager::new(0));
         let branch_id = BranchId::new();
 
@@ -1067,7 +1067,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
 
@@ -1091,7 +1091,7 @@ mod tests {
 
     #[test]
     fn test_read_only_rejects_non_active() {
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
 
@@ -1115,7 +1115,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1138,7 +1138,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1178,7 +1178,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1198,7 +1198,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1227,7 +1227,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1268,7 +1268,7 @@ mod tests {
 
     #[test]
     fn test_commit_with_wal_arc_no_wal() {
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1292,7 +1292,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = Arc::new(TransactionManager::new(0));
 
         let num_threads = 10;
@@ -1344,7 +1344,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1405,7 +1405,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
 
@@ -1433,7 +1433,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1468,7 +1468,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1558,7 +1558,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1718,7 +1718,7 @@ mod tests {
     #[test]
     fn commit_bulk_load_applies_writes() {
         let manager = TransactionManager::new(0);
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "bulk_key");
@@ -1740,7 +1740,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_dir = dir.path().join("wal");
         let manager = TransactionManager::new(0);
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
 
@@ -1770,7 +1770,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal_dir = dir.path().join("wal");
         let manager = TransactionManager::new(0);
-        let store = Arc::new(ShardedStore::new());
+        let store = Arc::new(SegmentedStore::new());
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let mut wal = create_test_wal(&wal_dir);

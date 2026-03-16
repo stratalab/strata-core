@@ -19,7 +19,7 @@ use strata_core::types::BranchId;
 use strata_core::StrataError;
 use strata_core::StrataResult;
 use strata_durability::wal::WalWriter;
-use strata_storage::ShardedStore;
+use strata_storage::SegmentedStore;
 use tracing::{debug, info, warn};
 
 /// Transaction coordinator for the database
@@ -140,7 +140,7 @@ impl TransactionCoordinator {
     pub fn start_transaction(
         &self,
         branch_id: BranchId,
-        storage: &Arc<ShardedStore>,
+        storage: &Arc<SegmentedStore>,
     ) -> StrataResult<TransactionContext> {
         let txn_id = self.manager.next_txn_id().map_err(StrataError::from)?;
 
@@ -469,8 +469,8 @@ impl TransactionCoordinator {
 mod tests {
     use super::*;
 
-    fn create_test_storage() -> Arc<ShardedStore> {
-        Arc::new(ShardedStore::new())
+    fn create_test_storage() -> Arc<SegmentedStore> {
+        Arc::new(SegmentedStore::new())
     }
 
     #[test]
@@ -501,7 +501,7 @@ mod tests {
         };
 
         let result = RecoveryResult {
-            storage: ShardedStore::new(),
+            storage: SegmentedStore::new(),
             txn_manager: TransactionManager::new(100),
             stats,
         };
@@ -788,7 +788,7 @@ mod tests {
         use std::thread;
 
         let coordinator = Arc::new(TransactionCoordinator::new(0));
-        let storage = Arc::new(ShardedStore::new());
+        let storage = Arc::new(SegmentedStore::new());
         let branch_id = BranchId::new();
         let stop_flag = Arc::new(AtomicBool::new(false));
 
@@ -835,7 +835,7 @@ mod tests {
         use std::thread;
 
         let coordinator = Arc::new(TransactionCoordinator::new(0));
-        let storage = Arc::new(ShardedStore::new());
+        let storage = Arc::new(SegmentedStore::new());
         let branch_id = BranchId::new();
         let barrier = Arc::new(Barrier::new(10));
         let txn_ids = Arc::new(Mutex::new(Vec::new()));
@@ -905,7 +905,7 @@ mod tests {
         };
 
         let result = RecoveryResult {
-            storage: ShardedStore::new(),
+            storage: SegmentedStore::new(),
             txn_manager: TransactionManager::new(500),
             stats,
         };
@@ -1064,7 +1064,7 @@ mod tests {
         use std::thread;
 
         let coordinator = Arc::new(TransactionCoordinator::new(0));
-        let storage = Arc::new(ShardedStore::new());
+        let storage = Arc::new(SegmentedStore::new());
         let branch_id = BranchId::new();
 
         let iterations = 100;
@@ -1236,7 +1236,7 @@ mod tests {
         use std::thread;
 
         let coordinator = Arc::new(TransactionCoordinator::new(0));
-        let storage = Arc::new(ShardedStore::new());
+        let storage = Arc::new(SegmentedStore::new());
         let branch_id = BranchId::new();
         let should_stop = Arc::new(AtomicBool::new(false));
 
@@ -1534,7 +1534,7 @@ mod tests {
         use std::thread;
 
         let coordinator = Arc::new(TransactionCoordinator::new(100));
-        let storage = Arc::new(ShardedStore::new());
+        let storage = Arc::new(SegmentedStore::new());
         let branch_id = BranchId::new();
 
         // Allocate some versions first so gc_safe_version has something to track
@@ -1600,7 +1600,7 @@ mod tests {
     #[test]
     fn test_gc_safe_version_with_interleaved_version_bumps() {
         let coordinator = Arc::new(TransactionCoordinator::new(1));
-        let storage = Arc::new(ShardedStore::new());
+        let storage = Arc::new(SegmentedStore::new());
         let branch_id = BranchId::new();
 
         // Phase 1: Start 3 transactions, allocate versions between them

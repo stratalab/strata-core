@@ -4,7 +4,7 @@
 //! - TransactionContext: Read/write set tracking
 //! - TransactionManager: Atomic commit coordination
 //! - RecoveryCoordinator: Database recovery from WAL
-//! - Snapshot isolation via ShardedStore + start_version bound
+//! - Snapshot isolation via SegmentedStore + start_version bound
 //! - Conflict detection at commit time
 //! - Compare-and-swap (CAS) operations
 //! - WAL integration for durability

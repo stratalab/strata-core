@@ -2,10 +2,10 @@
 //!
 //! This crate provides in-memory data structures and on-disk segment files.
 //!
-//! - ShardedStore: DashMap + HashMap with MVCC version chains
+//! - SegmentedStore: memtable + immutable segments with MVCC
 //! - Memtable: concurrent skiplist write buffer (ordered by InternalKey)
 //! - KVSegment: immutable mmap'd sorted segment files with bloom filters
-//! - Lock-free reads via DashMap and SkipMap
+//! - Lock-free reads via SkipMap
 //! - Per-BranchId sharding (no cross-branch contention)
 //!
 //! Persistence and durability are handled by the `strata-durability` crate.
@@ -18,21 +18,21 @@ pub mod compaction;
 pub mod index;
 pub mod key_encoding;
 pub mod memtable;
+pub mod memory_stats;
 pub mod merge_iter;
 pub mod pressure;
 pub mod segment;
 pub mod segment_builder;
 pub mod segmented;
-pub mod sharded;
 pub mod stored_value;
 pub mod ttl;
 
 pub use bloom::BloomFilter;
 pub use compaction::CompactionIterator;
 pub use index::{BranchIndex, TypeIndex};
+pub use memory_stats::{BranchMemoryStats, StorageMemoryStats};
 pub use pressure::{MemoryPressure, PressureLevel};
 pub use segment::KVSegment;
 pub use segment_builder::{SegmentBuilder, SegmentMeta};
 pub use segmented::{CompactionResult, SegmentedStore};
-pub use sharded::{BranchMemoryStats, Shard, ShardedStore, StorageMemoryStats};
 pub use ttl::TTLIndex;

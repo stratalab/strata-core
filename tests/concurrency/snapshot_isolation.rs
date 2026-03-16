@@ -11,7 +11,7 @@ use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
-use strata_storage::sharded::ShardedStore;
+use strata_storage::SegmentedStore;
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
     let ns = Arc::new(Namespace::for_branch(branch_id));
@@ -24,7 +24,7 @@ fn create_test_key(branch_id: BranchId, name: &str) -> Key {
 
 #[test]
 fn snapshot_captures_state_at_creation() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "captured");
 
@@ -39,7 +39,7 @@ fn snapshot_captures_state_at_creation() {
 
 #[test]
 fn snapshot_is_immutable() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "immutable");
 
@@ -62,7 +62,7 @@ fn snapshot_is_immutable() {
 
 #[test]
 fn snapshot_version_reflects_creation_time() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     store.set_version(42);
     assert_eq!(store.version(), 42);
 }
@@ -73,7 +73,7 @@ fn snapshot_version_reflects_creation_time() {
 
 #[test]
 fn repeated_reads_return_same_value() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "repeat");
 
@@ -94,7 +94,7 @@ fn repeated_reads_return_same_value() {
 
 #[test]
 fn missing_key_consistently_returns_none() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "missing");
 
@@ -163,7 +163,7 @@ fn write_then_delete_sees_delete() {
 
 #[test]
 fn snapshot_scan_prefix_returns_matching_keys() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let ns = Arc::new(Namespace::for_branch(branch_id));
 
@@ -189,7 +189,7 @@ fn snapshot_scan_prefix_returns_matching_keys() {
 
 #[test]
 fn snapshot_scan_empty_prefix() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let ns = Arc::new(Namespace::for_branch(branch_id));
 
@@ -205,7 +205,7 @@ fn snapshot_scan_empty_prefix() {
 
 #[test]
 fn store_can_be_shared_via_arc() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "shared");
 
@@ -223,7 +223,7 @@ fn store_can_be_shared_via_arc() {
 
 #[test]
 fn versioned_reads_are_independent() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "independent");
 
@@ -258,15 +258,15 @@ fn sharded_store_is_send_and_sync() {
     fn assert_send<T: Send>() {}
     fn assert_sync<T: Sync>() {}
 
-    assert_send::<ShardedStore>();
-    assert_sync::<ShardedStore>();
+    assert_send::<SegmentedStore>();
+    assert_sync::<SegmentedStore>();
 }
 
 #[test]
 fn snapshot_concurrent_reads() {
     use std::thread;
 
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "concurrent");
 
@@ -300,13 +300,13 @@ fn snapshot_concurrent_reads() {
 
 #[test]
 fn empty_store_creation() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     assert_eq!(store.version(), 0);
 }
 
 #[test]
 fn empty_store_get_returns_none() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "any");
 
@@ -316,7 +316,7 @@ fn empty_store_get_returns_none() {
 
 #[test]
 fn empty_store_scan_returns_empty() {
-    let store = ShardedStore::new();
+    let store = SegmentedStore::new();
     let branch_id = BranchId::new();
     let ns = Arc::new(Namespace::for_branch(branch_id));
     let prefix = Key::new_kv(ns, "any");
@@ -334,7 +334,7 @@ fn empty_store_scan_returns_empty() {
 /// TransactionContext API.
 #[test]
 fn transaction_context_ignores_concurrent_store_writes() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "isolation");
 
@@ -369,7 +369,7 @@ fn transaction_context_ignores_concurrent_store_writes() {
 /// snapshot version boundary.
 #[test]
 fn transaction_context_scan_ignores_concurrent_writes() {
-    let store = Arc::new(ShardedStore::new());
+    let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
     let ns = Arc::new(Namespace::for_branch(branch_id));
 

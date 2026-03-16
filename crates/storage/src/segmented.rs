@@ -11,6 +11,7 @@
 use crate::compaction::CompactionIterator;
 use crate::key_encoding::{encode_typed_key, InternalKey};
 use crate::memtable::{Memtable, MemtableEntry};
+use crate::memory_stats::{BranchMemoryStats, StorageMemoryStats};
 use crate::merge_iter::{MergeIterator, MvccIterator};
 use crate::pressure::{MemoryPressure, PressureLevel};
 use crate::segment::{KVSegment, SegmentEntry};
@@ -19,12 +20,12 @@ use crate::segment_builder::SegmentBuilder;
 use dashmap::DashMap;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use strata_core::traits::{Storage, WriteMode};
-use strata_core::types::{BranchId, Key};
+use strata_core::types::{BranchId, Key, TypeTag};
 use strata_core::value::Value;
 use strata_core::{StrataResult, Timestamp, VersionedValue};
 
@@ -92,6 +93,10 @@ pub struct SegmentedStore {
     pressure: MemoryPressure,
     /// Branches currently in bulk load mode (rotation deferred).
     bulk_load_branches: DashMap<BranchId, ()>,
+    /// Maximum number of branches (0 = unlimited, advisory only).
+    max_branches: AtomicUsize,
+    /// Maximum versions to keep per key (0 = unlimited, pruned at compaction).
+    max_versions_per_key: AtomicUsize,
 }
 
 impl SegmentedStore {
@@ -108,6 +113,8 @@ impl SegmentedStore {
             next_segment_id: AtomicU64::new(1),
             pressure: MemoryPressure::disabled(),
             bulk_load_branches: DashMap::new(),
+            max_branches: AtomicUsize::new(0),
+            max_versions_per_key: AtomicUsize::new(0),
         }
     }
 
@@ -125,6 +132,8 @@ impl SegmentedStore {
             next_segment_id: AtomicU64::new(1),
             pressure: MemoryPressure::disabled(),
             bulk_load_branches: DashMap::new(),
+            max_branches: AtomicUsize::new(0),
+            max_versions_per_key: AtomicUsize::new(0),
         }
     }
 
@@ -142,11 +151,13 @@ impl SegmentedStore {
             next_segment_id: AtomicU64::new(1),
             pressure,
             bulk_load_branches: DashMap::new(),
+            max_branches: AtomicUsize::new(0),
+            max_versions_per_key: AtomicUsize::new(0),
         }
     }
 
     // ========================================================================
-    // Inherent methods (match ShardedStore API for test compatibility)
+    // Inherent methods
     // ========================================================================
 
     /// Get current version.
@@ -236,6 +247,275 @@ impl SegmentedStore {
             Some((key, entry.to_versioned(commit_id)))
         })
         .collect()
+    }
+
+    // ========================================================================
+    // Engine-facing API
+    // ========================================================================
+
+    /// Set maximum number of branches (0 = unlimited, advisory only).
+    pub fn set_max_branches(&self, max: usize) {
+        self.max_branches.store(max, Ordering::Relaxed);
+    }
+
+    /// Set maximum versions to keep per key (0 = unlimited).
+    /// Pruning happens at compaction time, not at write time.
+    pub fn set_max_versions_per_key(&self, max: usize) {
+        self.max_versions_per_key.store(max, Ordering::Relaxed);
+    }
+
+    /// Direct single-key read returning only the Value (no VersionedValue).
+    pub fn get_value_direct(&self, key: &Key) -> Option<Value> {
+        let branch_id = key.namespace.branch_id;
+        let branch = self.branches.get(&branch_id)?;
+        let (_commit_id, entry) = Self::get_versioned_from_branch(&branch, key, u64::MAX)?;
+        if entry.is_tombstone || entry.is_expired() {
+            return None;
+        }
+        Some(entry.value)
+    }
+
+    /// List all live entries for a branch filtered by type tag.
+    pub fn list_by_type(
+        &self,
+        branch_id: &BranchId,
+        type_tag: TypeTag,
+    ) -> Vec<(Key, VersionedValue)> {
+        self.list_branch(branch_id)
+            .into_iter()
+            .filter(|(key, _)| key.type_tag == type_tag)
+            .collect()
+    }
+
+    /// List entries filtered by type tag with timestamp ≤ max_ts.
+    ///
+    /// Point-in-time query: for each key, finds the latest version whose
+    /// timestamp ≤ max_ts, ignoring newer versions entirely.
+    ///
+    /// **Limitation:** On-disk segments (v1 format) do not store timestamps.
+    /// Flushed entries appear with timestamp=0 and will always match any
+    /// `max_ts` query. Results are only fully correct for memtable-resident data.
+    pub fn list_by_type_at_timestamp(
+        &self,
+        branch_id: &BranchId,
+        type_tag: TypeTag,
+        max_ts: u64,
+    ) -> Vec<(Key, VersionedValue)> {
+        let branch = match self.branches.get(branch_id) {
+            Some(b) => b,
+            None => return Vec::new(),
+        };
+
+        let mut sources: Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> = Vec::new();
+        let active_entries: Vec<_> = branch.active.iter_all().collect();
+        sources.push(Box::new(active_entries.into_iter()));
+        for frozen in &branch.frozen {
+            let entries: Vec<_> = frozen.iter_all().collect();
+            sources.push(Box::new(entries.into_iter()));
+        }
+        for seg in &branch.segments {
+            let entries: Vec<_> = seg
+                .iter_seek_all()
+                .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
+                .collect();
+            sources.push(Box::new(entries.into_iter()));
+        }
+
+        let merge = MergeIterator::new(sources);
+        let mut results: Vec<(Key, VersionedValue)> = Vec::new();
+        let mut last_typed_key: Option<Vec<u8>> = None;
+        let mut found_for_current = false;
+
+        for (ik, entry) in merge {
+            let tk = ik.typed_key_prefix().to_vec();
+            if last_typed_key.as_ref() != Some(&tk) {
+                last_typed_key = Some(tk);
+                found_for_current = false;
+            }
+            if found_for_current {
+                continue;
+            }
+            if entry.is_expired() || entry.timestamp.as_micros() > max_ts {
+                continue;
+            }
+            found_for_current = true;
+            if entry.is_tombstone {
+                continue;
+            }
+            if let Some((key, commit_id)) = ik.decode() {
+                if key.type_tag == type_tag {
+                    results.push((key, entry.to_versioned(commit_id)));
+                }
+            }
+        }
+        results
+    }
+
+    /// Get the latest entry for a key where timestamp ≤ max_ts.
+    ///
+    /// **Limitation:** On-disk segments (v1 format) do not store timestamps.
+    /// Flushed entries appear with timestamp=0 and will always match.
+    pub fn get_at_timestamp(
+        &self,
+        key: &Key,
+        max_timestamp: u64,
+    ) -> StrataResult<Option<VersionedValue>> {
+        let branch_id = key.namespace.branch_id;
+        let branch = match self.branches.get(&branch_id) {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        let all_versions = Self::get_all_versions_from_branch(&branch, key);
+        for (commit_id, entry) in all_versions {
+            if entry.is_expired() {
+                continue;
+            }
+            if entry.timestamp.as_micros() <= max_timestamp {
+                if entry.is_tombstone {
+                    return Ok(None);
+                }
+                return Ok(Some(entry.to_versioned(commit_id)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Scan keys matching a prefix at or before the given timestamp.
+    ///
+    /// For each key, finds the latest version whose timestamp ≤ max_timestamp.
+    ///
+    /// **Limitation:** On-disk segments (v1 format) do not store timestamps.
+    /// Flushed entries appear with timestamp=0 and will always match.
+    pub fn scan_prefix_at_timestamp(
+        &self,
+        prefix: &Key,
+        max_timestamp: u64,
+    ) -> StrataResult<Vec<(Key, VersionedValue)>> {
+        let branch_id = prefix.namespace.branch_id;
+        let branch = match self.branches.get(&branch_id) {
+            Some(b) => b,
+            None => return Ok(Vec::new()),
+        };
+
+        let mut sources: Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> = Vec::new();
+        let active_entries: Vec<_> = branch.active.iter_prefix(prefix).collect();
+        sources.push(Box::new(active_entries.into_iter()));
+        for frozen in &branch.frozen {
+            let entries: Vec<_> = frozen.iter_prefix(prefix).collect();
+            sources.push(Box::new(entries.into_iter()));
+        }
+        for seg in &branch.segments {
+            let entries: Vec<_> = seg
+                .iter_seek(prefix)
+                .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
+                .collect();
+            sources.push(Box::new(entries.into_iter()));
+        }
+
+        let merge = MergeIterator::new(sources);
+        let mut results: Vec<(Key, VersionedValue)> = Vec::new();
+        let mut last_typed_key: Option<Vec<u8>> = None;
+        let mut found_for_current = false;
+
+        for (ik, entry) in merge {
+            let tk = ik.typed_key_prefix().to_vec();
+            if last_typed_key.as_ref() != Some(&tk) {
+                last_typed_key = Some(tk);
+                found_for_current = false;
+            }
+            if found_for_current {
+                continue;
+            }
+            if entry.is_expired() || entry.timestamp.as_micros() > max_timestamp {
+                continue;
+            }
+            found_for_current = true;
+            if entry.is_tombstone {
+                continue;
+            }
+            if let Some((key, commit_id)) = ik.decode() {
+                results.push((key, entry.to_versioned(commit_id)));
+            }
+        }
+        Ok(results)
+    }
+
+    /// Get the available time range for a branch.
+    ///
+    /// Returns `(oldest_ts, latest_ts)` in microseconds since epoch.
+    /// Returns `None` if the branch has no data.
+    pub fn time_range(&self, branch_id: BranchId) -> StrataResult<Option<(u64, u64)>> {
+        let entries = self.list_branch(&branch_id);
+        if entries.is_empty() {
+            return Ok(None);
+        }
+        let mut min_ts = u64::MAX;
+        let mut max_ts = 0u64;
+        for (_, vv) in &entries {
+            let ts = vv.timestamp.as_micros();
+            min_ts = min_ts.min(ts);
+            max_ts = max_ts.max(ts);
+        }
+        Ok(Some((min_ts, max_ts)))
+    }
+
+    /// Garbage collect old versions for a branch.
+    /// SegmentedStore prunes via compaction — this is a no-op stub.
+    pub fn gc_branch(&self, _branch_id: &BranchId, _min_version: u64) -> usize {
+        0
+    }
+
+    /// Expire TTL keys.
+    /// SegmentedStore handles TTL at read time and during compaction — this is a no-op stub.
+    pub fn expire_ttl_keys(&self, _now: u64) -> usize {
+        0
+    }
+
+    /// Get `(entry_count, total_version_count, btree_built)` for a branch.
+    ///
+    /// SegmentedStore does not use BTreeSet indexes, so `btree_built` is always false.
+    pub fn shard_stats_detailed(&self, branch_id: &BranchId) -> Option<(usize, usize, bool)> {
+        let branch = self.branches.get(branch_id)?;
+        let entry_count = self.list_branch_inner(&branch).len();
+        let mut total_versions = branch.active.len();
+        for frozen in &branch.frozen {
+            total_versions += frozen.len();
+        }
+        for seg in &branch.segments {
+            total_versions += seg.entry_count() as usize;
+        }
+        Some((entry_count, total_versions, false))
+    }
+
+    /// Memory usage statistics.
+    pub fn memory_stats(&self) -> StorageMemoryStats {
+        let mut total_entries = 0usize;
+        let mut estimated_bytes = 0usize;
+        let mut per_branch = Vec::new();
+
+        for entry in self.branches.iter() {
+            let branch_id = *entry.key();
+            let branch = entry.value();
+            let active_bytes = branch.active.approx_bytes() as usize;
+            let frozen_bytes: usize = branch.frozen.iter().map(|f| f.approx_bytes() as usize).sum();
+            let branch_bytes = active_bytes + frozen_bytes;
+            let count = self.list_branch_inner(branch).len();
+            total_entries += count;
+            estimated_bytes += branch_bytes;
+            per_branch.push(BranchMemoryStats {
+                branch_id,
+                entry_count: count,
+                has_btree_index: false,
+                estimated_bytes: branch_bytes,
+            });
+        }
+
+        StorageMemoryStats {
+            total_branches: self.branches.len(),
+            total_entries,
+            estimated_bytes,
+            per_branch,
+        }
     }
 
     // ========================================================================
@@ -2669,5 +2949,170 @@ mod tests {
             store.get_versioned(&kv_key("normal"), u64::MAX).unwrap().unwrap().value,
             Value::Int(2)
         );
+    }
+
+    // ===== Engine-facing API tests =====
+
+    #[test]
+    fn get_value_direct_returns_latest() {
+        let store = SegmentedStore::new();
+        seed(&store, kv_key("k"), Value::Int(10), 1);
+        seed(&store, kv_key("k"), Value::Int(20), 2);
+        assert_eq!(store.get_value_direct(&kv_key("k")), Some(Value::Int(20)));
+    }
+
+    #[test]
+    fn get_value_direct_skips_tombstone() {
+        let store = SegmentedStore::new();
+        seed(&store, kv_key("k"), Value::Int(10), 1);
+        store.delete_with_version(&kv_key("k"), 2).unwrap();
+        assert_eq!(store.get_value_direct(&kv_key("k")), None);
+    }
+
+    #[test]
+    fn get_value_direct_nonexistent() {
+        let store = SegmentedStore::new();
+        assert_eq!(store.get_value_direct(&kv_key("k")), None);
+    }
+
+    #[test]
+    fn list_by_type_filters_correctly() {
+        let store = SegmentedStore::new();
+        let b = branch();
+        seed(&store, kv_key("k1"), Value::Int(1), 1);
+        let state_key = Key::new(ns(), TypeTag::State, "s1".as_bytes().to_vec());
+        seed(&store, state_key, Value::Int(2), 2);
+
+        let kv_entries = store.list_by_type(&b, TypeTag::KV);
+        assert_eq!(kv_entries.len(), 1);
+        assert_eq!(kv_entries[0].1.value, Value::Int(1));
+
+        let state_entries = store.list_by_type(&b, TypeTag::State);
+        assert_eq!(state_entries.len(), 1);
+        assert_eq!(state_entries[0].1.value, Value::Int(2));
+    }
+
+    #[test]
+    fn get_at_timestamp_sees_old_version() {
+        let store = SegmentedStore::new();
+        seed(&store, kv_key("k"), Value::Int(10), 1);
+        // Record timestamp after first write
+        let ts_after_v1 = Timestamp::now().as_micros();
+        // Small sleep to ensure timestamp ordering
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        seed(&store, kv_key("k"), Value::Int(20), 2);
+
+        // Query at ts_after_v1 should see v1 (Int(10))
+        let result = store.get_at_timestamp(&kv_key("k"), ts_after_v1).unwrap();
+        assert!(result.is_some(), "should find version at snapshot timestamp");
+        assert_eq!(result.unwrap().value, Value::Int(10));
+
+        // Query at current time should see v2 (Int(20))
+        let result_now = store
+            .get_at_timestamp(&kv_key("k"), Timestamp::now().as_micros())
+            .unwrap();
+        assert_eq!(result_now.unwrap().value, Value::Int(20));
+    }
+
+    #[test]
+    fn get_at_timestamp_nonexistent_branch() {
+        let store = SegmentedStore::new();
+        let result = store.get_at_timestamp(&kv_key("k"), u64::MAX).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_at_timestamp_respects_tombstone() {
+        let store = SegmentedStore::new();
+        seed(&store, kv_key("k"), Value::Int(10), 1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store.delete_with_version(&kv_key("k"), 2).unwrap();
+
+        // Query at current time should return None (tombstone)
+        let result = store
+            .get_at_timestamp(&kv_key("k"), Timestamp::now().as_micros())
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn scan_prefix_at_timestamp_filters() {
+        let store = SegmentedStore::new();
+        seed(&store, kv_key("user:1"), Value::Int(1), 1);
+        let ts_after = Timestamp::now().as_micros();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        seed(&store, kv_key("user:2"), Value::Int(2), 2);
+
+        // At ts_after, only user:1 should be visible
+        let prefix = kv_key("user:");
+        let results = store.scan_prefix_at_timestamp(&prefix, ts_after).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.value, Value::Int(1));
+    }
+
+    #[test]
+    fn time_range_returns_min_max() {
+        let store = SegmentedStore::new();
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        seed(&store, kv_key("b"), Value::Int(2), 2);
+
+        let range = store.time_range(branch()).unwrap();
+        assert!(range.is_some());
+        let (min_ts, max_ts) = range.unwrap();
+        assert!(min_ts <= max_ts);
+        assert!(min_ts > 0);
+    }
+
+    #[test]
+    fn time_range_empty_branch() {
+        let store = SegmentedStore::new();
+        assert!(store.time_range(branch()).unwrap().is_none());
+    }
+
+    #[test]
+    fn gc_branch_is_noop() {
+        let store = SegmentedStore::new();
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        assert_eq!(store.gc_branch(&branch(), 100), 0);
+    }
+
+    #[test]
+    fn set_max_branches_stores_value() {
+        let store = SegmentedStore::new();
+        store.set_max_branches(42);
+        assert_eq!(store.max_branches.load(Ordering::Relaxed), 42);
+    }
+
+    #[test]
+    fn memory_stats_basic() {
+        let store = SegmentedStore::new();
+        seed(&store, kv_key("k1"), Value::Int(1), 1);
+        seed(&store, kv_key("k2"), Value::Int(2), 2);
+
+        let stats = store.memory_stats();
+        assert_eq!(stats.total_branches, 1);
+        assert_eq!(stats.total_entries, 2);
+        assert!(stats.estimated_bytes > 0);
+        assert_eq!(stats.per_branch.len(), 1);
+        assert_eq!(stats.per_branch[0].entry_count, 2);
+    }
+
+    #[test]
+    fn shard_stats_detailed_counts() {
+        let store = SegmentedStore::new();
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        seed(&store, kv_key("k"), Value::Int(2), 2);
+
+        let (entries, versions, btree) = store.shard_stats_detailed(&branch()).unwrap();
+        assert_eq!(entries, 1, "1 logical key");
+        assert_eq!(versions, 2, "2 versions of that key");
+        assert!(!btree);
+    }
+
+    #[test]
+    fn shard_stats_detailed_missing_branch() {
+        let store = SegmentedStore::new();
+        assert!(store.shard_stats_detailed(&BranchId::new()).is_none());
     }
 }

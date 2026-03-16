@@ -3,7 +3,7 @@
 //! ## Design: STATELESS FACADE
 //!
 //! JsonStore holds ONLY `Arc<Database>`. No internal state, no caches,
-//! no maps, no locks. All data lives in ShardedStore via Key::new_json().
+//! no maps, no locks. All data lives in SegmentedStore via Key::new_json().
 //!
 //! ## Branch Isolation
 //!
@@ -23,7 +23,7 @@
 //! ## Architectural Rules
 //!
 //! This implementation follows the architectural rules:
-//! 1. JSON lives in ShardedStore via Key::new_json()
+//! 1. JSON lives in SegmentedStore via Key::new_json()
 //! 2. JsonStore is stateless (Arc<Database> only)
 //! 3. JSON extends TransactionContext (no separate type)
 //! 4. Path semantics in API layer (not storage)
@@ -60,7 +60,7 @@ fn limit_error_to_error(e: JsonLimitError) -> StrataError {
 
 /// Internal representation of a JSON document
 ///
-/// Stored as serialized bytes in ShardedStore.
+/// Stored as serialized bytes in SegmentedStore.
 /// Version is used for optimistic concurrency control.
 ///
 /// # Design
@@ -137,14 +137,14 @@ impl JsonDoc {
 
 /// JSON document storage primitive
 ///
-/// STATELESS FACADE over Database - all state lives in unified ShardedStore.
+/// STATELESS FACADE over Database - all state lives in unified SegmentedStore.
 /// Multiple JsonStore instances on same Database are safe.
 ///
 /// # Design
 ///
 /// JsonStore does NOT own storage. It is a facade that:
 /// - Uses `Arc<Database>` for all operations
-/// - Stores documents via `Key::new_json()` in ShardedStore
+/// - Stores documents via `Key::new_json()` in SegmentedStore
 /// - Uses MVCC versioned reads for fast path
 /// - Participates in cross-primitive transactions
 ///
