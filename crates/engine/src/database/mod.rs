@@ -1744,26 +1744,37 @@ impl Database {
                                 // Update flush watermark and truncate WAL
                                 Self::update_flush_watermark(&storage, &data_dir, &wal_dir);
 
-                                // Post-flush: check if compaction is needed
-                                if storage.should_compact(&branch_id, 4) {
-                                    match storage.compact_branch(&branch_id, 0) {
-                                        Ok(Some(result)) => {
-                                            tracing::debug!(
-                                                target: "strata::compact",
-                                                ?branch_id,
-                                                segments_merged = result.segments_merged,
-                                                entries_pruned = result.entries_pruned,
-                                                "Compaction complete"
-                                            );
-                                        }
-                                        Ok(None) => {}
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                target: "strata::compact",
-                                                ?branch_id,
-                                                error = %e,
-                                                "Background compaction failed"
-                                            );
+                                // Post-flush: tiered compaction — group segments
+                                // by size, merge within tiers
+                                let sizes = storage.segment_file_sizes(&branch_id);
+                                if sizes.len() >= 4 {
+                                    let scheduler = strata_storage::CompactionScheduler::default();
+                                    let candidates = scheduler.pick_candidates(&sizes);
+                                    if let Some(candidate) = candidates.first() {
+                                        match storage.compact_tier(
+                                            &branch_id,
+                                            &candidate.segment_indices,
+                                            0,
+                                        ) {
+                                            Ok(Some(result)) => {
+                                                tracing::debug!(
+                                                    target: "strata::compact",
+                                                    ?branch_id,
+                                                    tier = candidate.tier,
+                                                    segments_merged = result.segments_merged,
+                                                    entries_pruned = result.entries_pruned,
+                                                    "Tiered compaction complete"
+                                                );
+                                            }
+                                            Ok(None) => {}
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    target: "strata::compact",
+                                                    ?branch_id,
+                                                    error = %e,
+                                                    "Background tiered compaction failed"
+                                                );
+                                            }
                                         }
                                     }
                                 }

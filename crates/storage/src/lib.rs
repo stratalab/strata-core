@@ -28,7 +28,7 @@ pub mod stored_value;
 pub mod ttl;
 
 pub use bloom::BloomFilter;
-pub use compaction::CompactionIterator;
+pub use compaction::{CompactionIterator, CompactionScheduler, TierMergeCandidate};
 pub use index::{BranchIndex, TypeIndex};
 pub use memory_stats::{BranchMemoryStats, StorageMemoryStats};
 pub use pressure::{MemoryPressure, PressureLevel};
