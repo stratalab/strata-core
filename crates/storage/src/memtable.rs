@@ -326,8 +326,8 @@ impl ApproximateSize for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_core::types::{BranchId, Namespace, TypeTag};
     use std::sync::Arc;
+    use strata_core::types::{BranchId, Namespace, TypeTag};
 
     fn branch() -> BranchId {
         BranchId::from_bytes([1; 16])
@@ -469,12 +469,7 @@ mod tests {
     fn prefix_scan_does_not_cross_type_tags() {
         let mt = Memtable::new(0);
         mt.put(&key_typed(TypeTag::KV, "k1"), 1, Value::Int(1), false);
-        mt.put(
-            &key_typed(TypeTag::Event, "k1"),
-            1,
-            Value::Int(2),
-            false,
-        );
+        mt.put(&key_typed(TypeTag::Event, "k1"), 1, Value::Int(2), false);
 
         // Prefix scan for KV type should not return Event entries
         let prefix = key_typed(TypeTag::KV, "k");

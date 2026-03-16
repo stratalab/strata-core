@@ -13,8 +13,8 @@ use crate::bloom::BloomFilter;
 use crate::key_encoding::{encode_typed_key, encode_typed_key_prefix, InternalKey};
 use crate::segment_builder::{
     decode_entry, parse_footer, parse_framed_block, parse_header, parse_index_block,
-    parse_properties_block, Footer, IndexEntry, KVHeader, PropertiesBlock, FOOTER_SZ, FRAME_OVERHEAD,
-    HEADER_SIZE,
+    parse_properties_block, Footer, IndexEntry, KVHeader, PropertiesBlock, FOOTER_SZ,
+    FRAME_OVERHEAD, HEADER_SIZE,
 };
 use strata_core::types::Key;
 use strata_core::value::Value;
@@ -77,21 +77,22 @@ impl KVSegment {
         }
 
         // Parse header
-        let header_bytes: &[u8; HEADER_SIZE] = mmap[..HEADER_SIZE].try_into().map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "header size mismatch")
-        })?;
-        let header = parse_header(header_bytes).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "invalid segment header")
-        })?;
+        let header_bytes: &[u8; HEADER_SIZE] = mmap[..HEADER_SIZE]
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "header size mismatch"))?;
+        let header = parse_header(header_bytes)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid segment header"))?;
 
         // Parse footer
         let footer_start = mmap.len() - FOOTER_SZ;
-        let footer_bytes: &[u8; FOOTER_SZ] =
-            mmap[footer_start..].try_into().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "footer size mismatch")
-            })?;
+        let footer_bytes: &[u8; FOOTER_SZ] = mmap[footer_start..]
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "footer size mismatch"))?;
         let footer = parse_footer(footer_bytes).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "invalid segment footer (bad magic)")
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid segment footer (bad magic)",
+            )
         })?;
 
         // Helper: validate block offset + length fits within the mmap.
@@ -114,14 +115,16 @@ impl KVSegment {
             };
 
         // Parse index block
-        let (idx_start, idx_end) =
-            check_block_bounds(footer.index_block_offset, footer.index_block_len, "index block")?;
+        let (idx_start, idx_end) = check_block_bounds(
+            footer.index_block_offset,
+            footer.index_block_len,
+            "index block",
+        )?;
         let (_, idx_data) = parse_framed_block(&mmap[idx_start..idx_end]).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "index block CRC mismatch")
         })?;
-        let index = parse_index_block(idx_data).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "malformed index block")
-        })?;
+        let index = parse_index_block(idx_data)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed index block"))?;
 
         // Parse bloom filter block
         let (bloom_start, bloom_end) = check_block_bounds(
@@ -133,9 +136,8 @@ impl KVSegment {
             parse_framed_block(&mmap[bloom_start..bloom_end]).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "bloom block CRC mismatch")
             })?;
-        let bloom = BloomFilter::from_bytes(bloom_data).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "malformed bloom filter")
-        })?;
+        let bloom = BloomFilter::from_bytes(bloom_data)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed bloom filter"))?;
 
         // Parse properties block
         let (props_start, props_end) = check_block_bounds(
@@ -191,7 +193,10 @@ impl KVSegment {
         let seek_ik = InternalKey::encode(key, u64::MAX);
         let seek_bytes = seek_ik.as_bytes();
 
-        let block_idx = match self.index.binary_search_by(|e| e.key.as_slice().cmp(seek_bytes)) {
+        let block_idx = match self
+            .index
+            .binary_search_by(|e| e.key.as_slice().cmp(seek_bytes))
+        {
             Ok(i) => i,
             Err(0) => 0, // key may still be in the first block
             Err(i) => i - 1,
@@ -419,8 +424,8 @@ mod tests {
     use super::*;
     use crate::memtable::Memtable;
     use crate::segment_builder::SegmentBuilder;
-    use strata_core::types::{BranchId, Namespace, TypeTag};
     use std::sync::Arc;
+    use strata_core::types::{BranchId, Namespace, TypeTag};
 
     fn branch() -> BranchId {
         BranchId::from_bytes([1; 16])
@@ -687,12 +692,7 @@ mod tests {
         mt.put(&kv_key("bool"), 1, Value::Bool(true), false);
         mt.put(&kv_key("int"), 1, Value::Int(42), false);
         mt.put(&kv_key("float"), 1, Value::Float(3.14), false);
-        mt.put(
-            &kv_key("string"),
-            1,
-            Value::String("hello".into()),
-            false,
-        );
+        mt.put(&kv_key("string"), 1, Value::String("hello".into()), false);
         mt.put(
             &kv_key("bytes"),
             1,
@@ -750,19 +750,13 @@ mod tests {
         assert_eq!(seg.entry_count(), 500);
 
         // Look up specific keys
-        let e = seg
-            .point_lookup(&kv_key("key_000000"), u64::MAX)
-            .unwrap();
+        let e = seg.point_lookup(&kv_key("key_000000"), u64::MAX).unwrap();
         assert_eq!(e.commit_id, 1);
 
-        let e = seg
-            .point_lookup(&kv_key("key_000250"), u64::MAX)
-            .unwrap();
+        let e = seg.point_lookup(&kv_key("key_000250"), u64::MAX).unwrap();
         assert_eq!(e.commit_id, 251);
 
-        let e = seg
-            .point_lookup(&kv_key("key_000499"), u64::MAX)
-            .unwrap();
+        let e = seg.point_lookup(&kv_key("key_000499"), u64::MAX).unwrap();
         assert_eq!(e.commit_id, 500);
 
         // Non-existent key
@@ -812,9 +806,8 @@ mod tests {
         // Data block starts at HEADER_SIZE. The CRC is the last 4 bytes of the framed block.
         // Frame: type(1) + codec(1) + reserved(2) + data_len(4) + data(N) + crc(4).
         // Read data_len to find the CRC offset.
-        let data_len = u32::from_le_bytes(
-            data[HEADER_SIZE + 4..HEADER_SIZE + 8].try_into().unwrap(),
-        ) as usize;
+        let data_len =
+            u32::from_le_bytes(data[HEADER_SIZE + 4..HEADER_SIZE + 8].try_into().unwrap()) as usize;
         let crc_offset = HEADER_SIZE + 8 + data_len;
 
         let mut corrupt = data.clone();
@@ -859,9 +852,7 @@ mod tests {
         let path = dir.path().join("empty.sst");
 
         let builder = SegmentBuilder::default();
-        builder
-            .build_from_iter(std::iter::empty(), &path)
-            .unwrap();
+        builder.build_from_iter(std::iter::empty(), &path).unwrap();
 
         let seg = KVSegment::open(&path).unwrap();
         assert_eq!(seg.entry_count(), 0);
@@ -929,10 +920,9 @@ mod tests {
         // Verify every entry via point lookup
         for i in 0..n {
             let k = kv_key(&format!("k_{:08}", i));
-            let e = seg.point_lookup(&k, u64::MAX).expect(&format!(
-                "point lookup failed for k_{:08}",
-                i
-            ));
+            let e = seg
+                .point_lookup(&k, u64::MAX)
+                .expect(&format!("point lookup failed for k_{:08}", i));
             assert_eq!(e.value, Value::Int(i as i64));
             assert_eq!(e.commit_id, i as u64 + 1);
         }

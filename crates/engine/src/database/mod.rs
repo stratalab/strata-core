@@ -1034,7 +1034,9 @@ impl Database {
     /// Returns `(safe_point, versions_pruned, ttl_entries_expired)`.
     pub fn run_maintenance(&self) -> (u64, usize, usize) {
         let (safe_point, pruned) = self.run_gc();
-        let expired = self.storage.expire_ttl_keys(strata_core::Timestamp::now().as_micros());
+        let expired = self
+            .storage
+            .expire_ttl_keys(strata_core::Timestamp::now().as_micros());
         (safe_point, pruned, expired)
     }
 

@@ -10,8 +10,8 @@
 
 use crate::compaction::CompactionIterator;
 use crate::key_encoding::{encode_typed_key, InternalKey};
-use crate::memtable::{Memtable, MemtableEntry};
 use crate::memory_stats::{BranchMemoryStats, StorageMemoryStats};
+use crate::memtable::{Memtable, MemtableEntry};
 use crate::merge_iter::{MergeIterator, MvccIterator};
 use crate::pressure::{MemoryPressure, PressureLevel};
 use crate::segment::{KVSegment, SegmentEntry};
@@ -497,7 +497,11 @@ impl SegmentedStore {
             let branch_id = *entry.key();
             let branch = entry.value();
             let active_bytes = branch.active.approx_bytes() as usize;
-            let frozen_bytes: usize = branch.frozen.iter().map(|f| f.approx_bytes() as usize).sum();
+            let frozen_bytes: usize = branch
+                .frozen
+                .iter()
+                .map(|f| f.approx_bytes() as usize)
+                .sum();
             let branch_bytes = active_bytes + frozen_bytes;
             let count = self.list_branch_inner(branch).len();
             total_entries += count;
@@ -640,16 +644,12 @@ impl SegmentedStore {
 
     /// Number of frozen memtables for a branch (test helper).
     pub fn branch_frozen_count(&self, branch_id: &BranchId) -> usize {
-        self.branches
-            .get(branch_id)
-            .map_or(0, |b| b.frozen.len())
+        self.branches.get(branch_id).map_or(0, |b| b.frozen.len())
     }
 
     /// Number of on-disk segments for a branch (test helper).
     pub fn branch_segment_count(&self, branch_id: &BranchId) -> usize {
-        self.branches
-            .get(branch_id)
-            .map_or(0, |b| b.segments.len())
+        self.branches.get(branch_id).map_or(0, |b| b.segments.len())
     }
 
     /// Return the maximum commit_id across all flushed segments for a branch.
@@ -657,11 +657,7 @@ impl SegmentedStore {
     /// Returns `None` if the branch has no segments.
     pub fn max_flushed_commit(&self, branch_id: &BranchId) -> Option<u64> {
         let branch = self.branches.get(branch_id)?;
-        branch
-            .segments
-            .iter()
-            .map(|s| s.commit_range().1)
-            .max()
+        branch.segments.iter().map(|s| s.commit_range().1).max()
     }
 
     /// Get the segments directory (if any).
@@ -760,7 +756,9 @@ impl SegmentedStore {
             info.segments_loaded += branch_segments.len();
             branch.segments.extend(branch_segments);
             // Re-sort after extending in case there were existing segments
-            branch.segments.sort_by(|a, b| b.commit_range().1.cmp(&a.commit_range().1));
+            branch
+                .segments
+                .sort_by(|a, b| b.commit_range().1.cmp(&a.commit_range().1));
 
             info.branches_recovered += 1;
         }
@@ -872,9 +870,9 @@ impl SegmentedStore {
                 .entry(*branch_id)
                 .or_insert_with(BranchState::new);
             old_seg_count = branch.segments.len();
-            branch.segments.retain(|s| {
-                !old_segments.iter().any(|old| Arc::ptr_eq(s, old))
-            });
+            branch
+                .segments
+                .retain(|s| !old_segments.iter().any(|old| Arc::ptr_eq(s, old)));
             // Compacted segment goes at the end (oldest — covers the range
             // of all old segments). Any concurrent segments are newer and
             // already at the front.
@@ -1019,10 +1017,7 @@ impl SegmentedStore {
     }
 
     /// Collect all versions of a key across all sources in a branch.
-    fn get_all_versions_from_branch(
-        branch: &BranchState,
-        key: &Key,
-    ) -> Vec<(u64, MemtableEntry)> {
+    fn get_all_versions_from_branch(branch: &BranchState, key: &Key) -> Vec<(u64, MemtableEntry)> {
         let mut all_versions = Vec::new();
 
         // Active memtable
@@ -1253,11 +1248,7 @@ impl Storage for SegmentedStore {
         Ok(())
     }
 
-    fn apply_batch(
-        &self,
-        writes: Vec<(Key, Value, WriteMode)>,
-        version: u64,
-    ) -> StrataResult<()> {
+    fn apply_batch(&self, writes: Vec<(Key, Value, WriteMode)>, version: u64) -> StrataResult<()> {
         if writes.is_empty() {
             return Ok(());
         }
@@ -1425,7 +1416,10 @@ mod tests {
     fn put_then_get() {
         let store = SegmentedStore::new();
         seed(&store, kv_key("k"), Value::Int(42), 1);
-        let result = store.get_versioned(&kv_key("k"), u64::MAX).unwrap().unwrap();
+        let result = store
+            .get_versioned(&kv_key("k"), u64::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(result.value, Value::Int(42));
         assert_eq!(result.version.as_u64(), 1);
     }
@@ -1433,7 +1427,10 @@ mod tests {
     #[test]
     fn get_nonexistent_returns_none() {
         let store = SegmentedStore::new();
-        assert!(store.get_versioned(&kv_key("k"), u64::MAX).unwrap().is_none());
+        assert!(store
+            .get_versioned(&kv_key("k"), u64::MAX)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1441,7 +1438,10 @@ mod tests {
         let store = SegmentedStore::new();
         seed(&store, kv_key("k"), Value::Int(42), 1);
         store.delete_with_version(&kv_key("k"), 2).unwrap();
-        assert!(store.get_versioned(&kv_key("k"), u64::MAX).unwrap().is_none());
+        assert!(store
+            .get_versioned(&kv_key("k"), u64::MAX)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1677,7 +1677,7 @@ mod tests {
             value: Value::Int(42),
             is_tombstone: false,
             timestamp: Timestamp::from_micros(0), // ancient
-            ttl_ms: 1, // 1ms TTL — definitely expired
+            ttl_ms: 1,                            // 1ms TTL — definitely expired
         };
         branch.active.put_entry(&key, 1, entry);
         drop(branch);
@@ -1710,8 +1710,7 @@ mod tests {
                 let s = Arc::clone(&store);
                 std::thread::spawn(move || {
                     for i in 0..100u64 {
-                        let result =
-                            s.get_versioned(&kv_key(&format!("k{}", i)), u64::MAX);
+                        let result = s.get_versioned(&kv_key(&format!("k{}", i)), u64::MAX);
                         assert!(result.unwrap().is_some());
                     }
                 })
@@ -1822,7 +1821,12 @@ mod tests {
         let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
 
         for i in 1..=100u64 {
-            seed(&store, kv_key(&format!("k{:04}", i)), Value::Int(i as i64), i);
+            seed(
+                &store,
+                kv_key(&format!("k{:04}", i)),
+                Value::Int(i as i64),
+                i,
+            );
         }
 
         assert!(store.rotate_memtable(&branch()));
@@ -1909,11 +1913,19 @@ mod tests {
         seed(&store, kv_key("new"), Value::Int(2), 2);
 
         assert_eq!(
-            store.get_versioned(&kv_key("old"), u64::MAX).unwrap().unwrap().value,
+            store
+                .get_versioned(&kv_key("old"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             Value::Int(1),
         );
         assert_eq!(
-            store.get_versioned(&kv_key("new"), u64::MAX).unwrap().unwrap().value,
+            store
+                .get_versioned(&kv_key("new"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             Value::Int(2),
         );
     }
@@ -2139,7 +2151,12 @@ mod tests {
         let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
 
         for i in 1..=50u64 {
-            seed(&store, kv_key(&format!("k{:04}", i)), Value::Int(i as i64), i);
+            seed(
+                &store,
+                kv_key(&format!("k{:04}", i)),
+                Value::Int(i as i64),
+                i,
+            );
         }
         store.rotate_memtable(&branch());
         store.flush_oldest_frozen(&branch()).unwrap();
@@ -2215,7 +2232,10 @@ mod tests {
         let info = store2.recover_segments().unwrap();
         assert_eq!(info.segments_loaded, 1);
         assert_eq!(info.errors_skipped, 1);
-        assert!(store2.get_versioned(&kv_key("k"), u64::MAX).unwrap().is_some());
+        assert!(store2
+            .get_versioned(&kv_key("k"), u64::MAX)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -2223,7 +2243,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
         let info = store.recover_segments().unwrap();
-        assert_eq!(info, super::RecoverSegmentsInfo { branches_recovered: 0, segments_loaded: 0, errors_skipped: 0 });
+        assert_eq!(
+            info,
+            super::RecoverSegmentsInfo {
+                branches_recovered: 0,
+                segments_loaded: 0,
+                errors_skipped: 0
+            }
+        );
     }
 
     #[test]
@@ -2241,7 +2268,12 @@ mod tests {
         for cycle in 0..3u64 {
             let base = cycle * 10 + 1;
             for i in 0..5u64 {
-                seed(&store, kv_key(&format!("c{}k{}", cycle, i)), Value::Int((base + i) as i64), base + i);
+                seed(
+                    &store,
+                    kv_key(&format!("c{}k{}", cycle, i)),
+                    Value::Int((base + i) as i64),
+                    base + i,
+                );
             }
             store.rotate_memtable(&branch());
             store.flush_oldest_frozen(&branch()).unwrap();
@@ -2308,7 +2340,11 @@ mod tests {
 
         assert_eq!(store.branch_frozen_count(&branch()), 2);
         assert_eq!(
-            store.get_versioned(&kv_key("k"), u64::MAX).unwrap().unwrap().value,
+            store
+                .get_versioned(&kv_key("k"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             Value::Int(3),
         );
         assert_eq!(
@@ -2345,8 +2381,22 @@ mod tests {
         assert_eq!(result.entries_pruned, 0);
         assert_eq!(store.branch_segment_count(&b), 1);
 
-        assert_eq!(store.get_versioned(&kv_key("a"), u64::MAX).unwrap().unwrap().value, Value::Int(1));
-        assert_eq!(store.get_versioned(&kv_key("b"), u64::MAX).unwrap().unwrap().value, Value::Int(2));
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("a"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(1)
+        );
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("b"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(2)
+        );
     }
 
     #[test]
@@ -2367,8 +2417,18 @@ mod tests {
         assert_eq!(result.output_entries, 2);
         assert_eq!(result.entries_pruned, 0);
 
-        assert_eq!(store.get_versioned(&kv_key("k"), u64::MAX).unwrap().unwrap().value, Value::Int(2));
-        assert_eq!(store.get_versioned(&kv_key("k"), 1).unwrap().unwrap().value, Value::Int(1));
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("k"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(2)
+        );
+        assert_eq!(
+            store.get_versioned(&kv_key("k"), 1).unwrap().unwrap().value,
+            Value::Int(1)
+        );
     }
 
     #[test]
@@ -2391,8 +2451,18 @@ mod tests {
         assert_eq!(result.entries_pruned, 1);
 
         // Verify the correct versions survived
-        assert_eq!(store.get_versioned(&kv_key("k"), u64::MAX).unwrap().unwrap().value, Value::Int(3));
-        assert_eq!(store.get_versioned(&kv_key("k"), 2).unwrap().unwrap().value, Value::Int(2));
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("k"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(3)
+        );
+        assert_eq!(
+            store.get_versioned(&kv_key("k"), 2).unwrap().unwrap().value,
+            Value::Int(2)
+        );
         // Version 1 was pruned — reading at snapshot 1 should return nothing
         assert!(store.get_versioned(&kv_key("k"), 1).unwrap().is_none());
     }
@@ -2512,9 +2582,30 @@ mod tests {
 
         store.compact_branch(&b, 0).unwrap();
 
-        assert_eq!(store.get_versioned(&kv_key("a"), u64::MAX).unwrap().unwrap().value, Value::Int(2));
-        assert_eq!(store.get_versioned(&kv_key("b"), u64::MAX).unwrap().unwrap().value, Value::Int(10));
-        assert_eq!(store.get_versioned(&kv_key("c"), u64::MAX).unwrap().unwrap().value, Value::Int(20));
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("a"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(2)
+        );
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("b"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(10)
+        );
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("c"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(20)
+        );
 
         let prefix_key = Key::new(ns(), TypeTag::KV, Vec::new());
         let results = store.scan_prefix(&prefix_key, u64::MAX).unwrap();
@@ -2552,9 +2643,26 @@ mod tests {
         assert_eq!(result.entries_pruned, 1); // a@1
 
         // Verify reads are correct
-        assert_eq!(store.get_versioned(&kv_key("a"), u64::MAX).unwrap().unwrap().value, Value::Int(3));
-        assert_eq!(store.get_versioned(&kv_key("a"), 2).unwrap().unwrap().value, Value::Int(2));
-        assert_eq!(store.get_versioned(&kv_key("b"), u64::MAX).unwrap().unwrap().value, Value::Int(10));
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("a"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(3)
+        );
+        assert_eq!(
+            store.get_versioned(&kv_key("a"), 2).unwrap().unwrap().value,
+            Value::Int(2)
+        );
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("b"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(10)
+        );
     }
 
     // ===== Memory pressure tests =====
@@ -2595,7 +2703,12 @@ mod tests {
         let bytes1 = store.total_memtable_bytes();
         assert!(bytes1 > 0);
 
-        seed(&store, Key::new(ns2, TypeTag::KV, b"x".to_vec()), Value::Int(2), 2);
+        seed(
+            &store,
+            Key::new(ns2, TypeTag::KV, b"x".to_vec()),
+            Value::Int(2),
+            2,
+        );
         let bytes2 = store.total_memtable_bytes();
         assert!(bytes2 > bytes1);
 
@@ -2632,7 +2745,11 @@ mod tests {
             );
         }
         let level = store.pressure_level();
-        assert!(level >= PressureLevel::Warning, "expected at least Warning, got {:?}", level);
+        assert!(
+            level >= PressureLevel::Warning,
+            "expected at least Warning, got {:?}",
+            level
+        );
     }
 
     #[test]
@@ -2705,7 +2822,11 @@ mod tests {
 
         for commit in 1..=3u64 {
             assert_eq!(
-                store.get_versioned(&kv_key(&format!("k{}", commit)), u64::MAX).unwrap().unwrap().value,
+                store
+                    .get_versioned(&kv_key(&format!("k{}", commit)), u64::MAX)
+                    .unwrap()
+                    .unwrap()
+                    .value,
                 Value::Int(commit as i64),
             );
         }
@@ -2737,13 +2858,37 @@ mod tests {
         assert_eq!(store.branch_segment_count(&b), 1);
 
         // Memtable data visible
-        assert_eq!(store.get_versioned(&kv_key("c"), u64::MAX).unwrap().unwrap().value, Value::Int(3));
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("c"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(3)
+        );
         // Memtable update shadows segment version
-        assert_eq!(store.get_versioned(&kv_key("a"), u64::MAX).unwrap().unwrap().value, Value::Int(10));
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("a"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(10)
+        );
         // Old segment version still readable at old snapshot
-        assert_eq!(store.get_versioned(&kv_key("a"), 1).unwrap().unwrap().value, Value::Int(1));
+        assert_eq!(
+            store.get_versioned(&kv_key("a"), 1).unwrap().unwrap().value,
+            Value::Int(1)
+        );
         // Segment-only data still readable
-        assert_eq!(store.get_versioned(&kv_key("b"), u64::MAX).unwrap().unwrap().value, Value::Int(2));
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("b"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(2)
+        );
     }
 
     #[test]
@@ -2784,10 +2929,38 @@ mod tests {
         assert_eq!(store.branch_segment_count(&b), 1);
 
         // All data still readable
-        assert_eq!(store.get_versioned(&kv_key("a"), u64::MAX).unwrap().unwrap().value, Value::Int(1));
-        assert_eq!(store.get_versioned(&kv_key("b"), u64::MAX).unwrap().unwrap().value, Value::Int(2));
-        assert_eq!(store.get_versioned(&kv_key("c"), u64::MAX).unwrap().unwrap().value, Value::Int(3));
-        assert_eq!(store.get_versioned(&kv_key("d"), u64::MAX).unwrap().unwrap().value, Value::Int(4));
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("a"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(1)
+        );
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("b"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(2)
+        );
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("c"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(3)
+        );
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("d"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(4)
+        );
     }
 
     // ========================================================================
@@ -2860,9 +3033,16 @@ mod tests {
         let deletes = vec![kv_key("a")];
         store.delete_batch(deletes, 2).unwrap();
 
-        assert!(store.get_versioned(&kv_key("a"), u64::MAX).unwrap().is_none());
+        assert!(store
+            .get_versioned(&kv_key("a"), u64::MAX)
+            .unwrap()
+            .is_none());
         assert_eq!(
-            store.get_versioned(&kv_key("b"), u64::MAX).unwrap().unwrap().value,
+            store
+                .get_versioned(&kv_key("b"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             Value::Int(2)
         );
     }
@@ -2890,14 +3070,22 @@ mod tests {
 
         // Data should be readable even during bulk load
         assert_eq!(
-            store.get_versioned(&kv_key("a"), u64::MAX).unwrap().unwrap().value,
+            store
+                .get_versioned(&kv_key("a"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             Value::Int(1)
         );
 
         store.end_bulk_load(&b).unwrap();
 
         assert_eq!(
-            store.get_versioned(&kv_key("b"), u64::MAX).unwrap().unwrap().value,
+            store
+                .get_versioned(&kv_key("b"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             Value::Int(2)
         );
     }
@@ -2914,7 +3102,12 @@ mod tests {
 
         // Write many entries — should NOT rotate during bulk load
         for i in 0..100 {
-            seed(&store, kv_key(&format!("k{}", i)), Value::Int(i), (i + 1) as u64);
+            seed(
+                &store,
+                kv_key(&format!("k{}", i)),
+                Value::Int(i),
+                (i + 1) as u64,
+            );
         }
 
         // No frozen memtables — everything in active
@@ -2925,7 +3118,10 @@ mod tests {
 
         // After end_bulk_load, data is still readable
         for i in 0..100 {
-            assert!(store.get_versioned(&kv_key(&format!("k{}", i)), u64::MAX).unwrap().is_some());
+            assert!(store
+                .get_versioned(&kv_key(&format!("k{}", i)), u64::MAX)
+                .unwrap()
+                .is_some());
         }
     }
 
@@ -2942,11 +3138,19 @@ mod tests {
         seed(&store, kv_key("normal"), Value::Int(2), 2);
 
         assert_eq!(
-            store.get_versioned(&kv_key("bulk"), u64::MAX).unwrap().unwrap().value,
+            store
+                .get_versioned(&kv_key("bulk"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             Value::Int(1)
         );
         assert_eq!(
-            store.get_versioned(&kv_key("normal"), u64::MAX).unwrap().unwrap().value,
+            store
+                .get_versioned(&kv_key("normal"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             Value::Int(2)
         );
     }
@@ -3004,7 +3208,10 @@ mod tests {
 
         // Query at ts_after_v1 should see v1 (Int(10))
         let result = store.get_at_timestamp(&kv_key("k"), ts_after_v1).unwrap();
-        assert!(result.is_some(), "should find version at snapshot timestamp");
+        assert!(
+            result.is_some(),
+            "should find version at snapshot timestamp"
+        );
         assert_eq!(result.unwrap().value, Value::Int(10));
 
         // Query at current time should see v2 (Int(20))

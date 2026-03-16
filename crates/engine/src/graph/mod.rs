@@ -1208,7 +1208,13 @@ impl GraphStore {
             let link_type_cache = self.load_link_type_cache(branch_id, graph)?;
             for (src, dst, edge_type, data) in edges {
                 self.validate_edge_cached(
-                    branch_id, graph, src, dst, edge_type, data, &link_type_cache,
+                    branch_id,
+                    graph,
+                    src,
+                    dst,
+                    edge_type,
+                    data,
+                    &link_type_cache,
                 )?;
             }
         }
@@ -1235,8 +1241,7 @@ impl GraphStore {
         ns: &std::sync::Arc<strata_core::types::Namespace>,
     ) -> StrataResult<usize> {
         // Collect unique node IDs for existence checks
-        let mut unique_nodes: std::collections::HashSet<&str> =
-            std::collections::HashSet::new();
+        let mut unique_nodes: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for (src, dst, _, _) in edges {
             unique_nodes.insert(src.as_str());
             unique_nodes.insert(dst.as_str());
@@ -3802,9 +3807,12 @@ mod tests {
         gs.add_node(b, "g", "A", NodeData::default()).unwrap();
         // B does not exist — should fail atomically
 
-        let edges = vec![
-            ("A".to_string(), "B".to_string(), "KNOWS".to_string(), EdgeData::default()),
-        ];
+        let edges = vec![(
+            "A".to_string(),
+            "B".to_string(),
+            "KNOWS".to_string(),
+            EdgeData::default(),
+        )];
 
         let result = gs.batch_add_edges(b, "g", &edges, None);
         assert!(result.is_err());
@@ -3827,9 +3835,24 @@ mod tests {
 
         // Multiple edges from same source
         let edges = vec![
-            ("A".to_string(), "B".to_string(), "KNOWS".to_string(), EdgeData::default()),
-            ("A".to_string(), "C".to_string(), "KNOWS".to_string(), EdgeData::default()),
-            ("A".to_string(), "D".to_string(), "LIKES".to_string(), EdgeData::default()),
+            (
+                "A".to_string(),
+                "B".to_string(),
+                "KNOWS".to_string(),
+                EdgeData::default(),
+            ),
+            (
+                "A".to_string(),
+                "C".to_string(),
+                "KNOWS".to_string(),
+                EdgeData::default(),
+            ),
+            (
+                "A".to_string(),
+                "D".to_string(),
+                "LIKES".to_string(),
+                EdgeData::default(),
+            ),
         ];
 
         gs.batch_add_edges(b, "g", &edges, None).unwrap();
@@ -3849,8 +3872,18 @@ mod tests {
         gs.add_node(b, "g", "C", NodeData::default()).unwrap();
 
         let edges = vec![
-            ("A".to_string(), "C".to_string(), "KNOWS".to_string(), EdgeData::default()),
-            ("B".to_string(), "C".to_string(), "KNOWS".to_string(), EdgeData::default()),
+            (
+                "A".to_string(),
+                "C".to_string(),
+                "KNOWS".to_string(),
+                EdgeData::default(),
+            ),
+            (
+                "B".to_string(),
+                "C".to_string(),
+                "KNOWS".to_string(),
+                EdgeData::default(),
+            ),
         ];
 
         gs.batch_add_edges(b, "g", &edges, None).unwrap();
@@ -3869,9 +3902,12 @@ mod tests {
         gs.add_node(b, "g", "A", NodeData::default()).unwrap();
         // "X" does not exist
 
-        let edges = vec![
-            ("A".to_string(), "X".to_string(), "KNOWS".to_string(), EdgeData::default()),
-        ];
+        let edges = vec![(
+            "A".to_string(),
+            "X".to_string(),
+            "KNOWS".to_string(),
+            EdgeData::default(),
+        )];
 
         let result = gs.batch_add_edges(b, "g", &edges, None);
         assert!(result.is_err());
@@ -3889,9 +3925,24 @@ mod tests {
         gs.add_node(b, "g", "C", NodeData::default()).unwrap();
 
         let edges = vec![
-            ("A".to_string(), "B".to_string(), "KNOWS".to_string(), EdgeData::default()),
-            ("A".to_string(), "C".to_string(), "KNOWS".to_string(), EdgeData::default()),
-            ("B".to_string(), "C".to_string(), "LIKES".to_string(), EdgeData::default()),
+            (
+                "A".to_string(),
+                "B".to_string(),
+                "KNOWS".to_string(),
+                EdgeData::default(),
+            ),
+            (
+                "A".to_string(),
+                "C".to_string(),
+                "KNOWS".to_string(),
+                EdgeData::default(),
+            ),
+            (
+                "B".to_string(),
+                "C".to_string(),
+                "LIKES".to_string(),
+                EdgeData::default(),
+            ),
         ];
 
         gs.batch_add_edges(b, "g", &edges, None).unwrap();
@@ -3924,15 +3975,21 @@ mod tests {
         gs.create_graph(b, "g", None).unwrap();
 
         // Invalid edge type (empty)
-        let edges = vec![
-            ("A".to_string(), "B".to_string(), "".to_string(), EdgeData::default()),
-        ];
+        let edges = vec![(
+            "A".to_string(),
+            "B".to_string(),
+            "".to_string(),
+            EdgeData::default(),
+        )];
         assert!(gs.batch_add_edges(b, "g", &edges, None).is_err());
 
         // Invalid node ID (contains slash)
-        let edges = vec![
-            ("A/B".to_string(), "C".to_string(), "KNOWS".to_string(), EdgeData::default()),
-        ];
+        let edges = vec![(
+            "A/B".to_string(),
+            "C".to_string(),
+            "KNOWS".to_string(),
+            EdgeData::default(),
+        )];
         assert!(gs.batch_add_edges(b, "g", &edges, None).is_err());
     }
 
@@ -3949,9 +4006,7 @@ mod tests {
             weight: 0.5,
             properties: Some(serde_json::json!({"since": 2020})),
         };
-        let edges = vec![
-            ("A".to_string(), "B".to_string(), "KNOWS".to_string(), data),
-        ];
+        let edges = vec![("A".to_string(), "B".to_string(), "KNOWS".to_string(), data)];
 
         gs.batch_add_edges(b, "g", &edges, None).unwrap();
 
@@ -3970,9 +4025,24 @@ mod tests {
         gs.add_node(b, "g", "B", NodeData::default()).unwrap();
 
         let edges = vec![
-            ("A".to_string(), "B".to_string(), "KNOWS".to_string(), EdgeData::default()),
-            ("A".to_string(), "B".to_string(), "LIKES".to_string(), EdgeData::default()),
-            ("B".to_string(), "A".to_string(), "FOLLOWS".to_string(), EdgeData::default()),
+            (
+                "A".to_string(),
+                "B".to_string(),
+                "KNOWS".to_string(),
+                EdgeData::default(),
+            ),
+            (
+                "A".to_string(),
+                "B".to_string(),
+                "LIKES".to_string(),
+                EdgeData::default(),
+            ),
+            (
+                "B".to_string(),
+                "A".to_string(),
+                "FOLLOWS".to_string(),
+                EdgeData::default(),
+            ),
         ];
 
         gs.batch_add_edges(b, "g", &edges, None).unwrap();
@@ -3997,9 +4067,12 @@ mod tests {
             .unwrap();
 
         // Add more edges via batch — should append, not replace
-        let edges = vec![
-            ("A".to_string(), "C".to_string(), "KNOWS".to_string(), EdgeData::default()),
-        ];
+        let edges = vec![(
+            "A".to_string(),
+            "C".to_string(),
+            "KNOWS".to_string(),
+            EdgeData::default(),
+        )];
         gs.batch_add_edges(b, "g", &edges, None).unwrap();
 
         // Both edges should exist
@@ -4057,9 +4130,12 @@ mod tests {
         gs.add_node(b, "g", "A", NodeData::default()).unwrap();
         gs.add_node(b, "g", "B", NodeData::default()).unwrap();
 
-        let edges = vec![
-            ("A".to_string(), "B".to_string(), "E".to_string(), EdgeData::default()),
-        ];
+        let edges = vec![(
+            "A".to_string(),
+            "B".to_string(),
+            "E".to_string(),
+            EdgeData::default(),
+        )];
 
         // chunk_size=0 should not panic — clamped to 1
         let inserted = gs.batch_add_edges(b, "g", &edges, Some(0)).unwrap();
@@ -4079,9 +4155,24 @@ mod tests {
 
         // 3 edges with chunk_size=2 → 2 chunks (2 + 1)
         let edges = vec![
-            ("A".to_string(), "B".to_string(), "E1".to_string(), EdgeData::default()),
-            ("A".to_string(), "C".to_string(), "E2".to_string(), EdgeData::default()),
-            ("B".to_string(), "C".to_string(), "E3".to_string(), EdgeData::default()),
+            (
+                "A".to_string(),
+                "B".to_string(),
+                "E1".to_string(),
+                EdgeData::default(),
+            ),
+            (
+                "A".to_string(),
+                "C".to_string(),
+                "E2".to_string(),
+                EdgeData::default(),
+            ),
+            (
+                "B".to_string(),
+                "C".to_string(),
+                "E3".to_string(),
+                EdgeData::default(),
+            ),
         ];
 
         let inserted = gs.batch_add_edges(b, "g", &edges, Some(2)).unwrap();
@@ -4115,13 +4206,8 @@ mod tests {
                     gs.create_graph(branch, "g", None).unwrap();
 
                     for i in 0..entries_per_thread {
-                        gs.add_node(
-                            branch,
-                            "g",
-                            &format!("n{}", i),
-                            NodeData::default(),
-                        )
-                        .unwrap();
+                        gs.add_node(branch, "g", &format!("n{}", i), NodeData::default())
+                            .unwrap();
                     }
                     entries_per_thread
                 })
@@ -4155,13 +4241,8 @@ mod tests {
 
                     // Each branch gets unique node names
                     for i in 0..100 {
-                        gs.add_node(
-                            branch,
-                            "g",
-                            &format!("t{}_n{}", t, i),
-                            NodeData::default(),
-                        )
-                        .unwrap();
+                        gs.add_node(branch, "g", &format!("t{}_n{}", t, i), NodeData::default())
+                            .unwrap();
                     }
                 })
             })

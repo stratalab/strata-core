@@ -176,7 +176,11 @@ impl Manifest {
         // Flushed-through commit ID — v2+ only
         let flushed_through_commit_id = if format_version >= 2 && cursor + 8 <= bytes.len() - 4 {
             let val = u64::from_le_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
-            if val > 0 { Some(val) } else { None }
+            if val > 0 {
+                Some(val)
+            } else {
+                None
+            }
         } else {
             None
         };

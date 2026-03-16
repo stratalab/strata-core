@@ -1757,12 +1757,18 @@ mod tests {
         let key2 = create_test_key(&ns, "with_wal");
         let mut txn2 = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
         txn2.put(key2.clone(), Value::Int(2)).unwrap();
-        manager.commit(&mut txn2, store.as_ref(), Some(&mut wal)).unwrap();
+        manager
+            .commit(&mut txn2, store.as_ref(), Some(&mut wal))
+            .unwrap();
 
         // WAL should have exactly 1 record (from the normal commit)
         let reader = strata_durability::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
-        assert_eq!(result.records.len(), 1, "Bulk load should not write WAL records");
+        assert_eq!(
+            result.records.len(),
+            1,
+            "Bulk load should not write WAL records"
+        );
     }
 
     #[test]
@@ -1785,7 +1791,9 @@ mod tests {
         let key2 = create_test_key(&ns, "k2");
         let mut txn2 = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
         txn2.put(key2.clone(), Value::Int(2)).unwrap();
-        manager.commit(&mut txn2, store.as_ref(), Some(&mut wal)).unwrap();
+        manager
+            .commit(&mut txn2, store.as_ref(), Some(&mut wal))
+            .unwrap();
 
         // Both values readable
         assert_eq!(

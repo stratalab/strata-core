@@ -176,11 +176,7 @@ pub trait Storage: Send + Sync {
     /// branch guards once per branch instead of per entry).
     ///
     /// All writes share the same `version` (same transaction commit version).
-    fn apply_batch(
-        &self,
-        writes: Vec<(Key, Value, WriteMode)>,
-        version: u64,
-    ) -> StrataResult<()> {
+    fn apply_batch(&self, writes: Vec<(Key, Value, WriteMode)>, version: u64) -> StrataResult<()> {
         for (key, value, mode) in writes {
             self.put_with_version_mode(key, value, version, None, mode)?;
         }

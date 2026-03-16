@@ -1421,8 +1421,7 @@ impl TransactionContext {
         let cas_count = self.cas_set.len();
 
         // Collect puts (write_set + CAS) into a single batch — drain for zero-copy moves.
-        let mut writes: Vec<(Key, Value, WriteMode)> =
-            Vec::with_capacity(puts_count + cas_count);
+        let mut writes: Vec<(Key, Value, WriteMode)> = Vec::with_capacity(puts_count + cas_count);
 
         for (key, value) in self.write_set.drain() {
             let mode = self

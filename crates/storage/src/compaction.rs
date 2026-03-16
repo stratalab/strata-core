@@ -89,10 +89,10 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for CompactionIt
 mod tests {
     use super::*;
     use crate::merge_iter::MergeIterator;
+    use std::sync::Arc;
     use strata_core::types::{BranchId, Key, Namespace, TypeTag};
     use strata_core::value::Value;
     use strata_core::Timestamp;
-    use std::sync::Arc;
 
     fn branch() -> BranchId {
         BranchId::from_bytes([1; 16])
@@ -238,9 +238,7 @@ mod tests {
     #[test]
     fn compaction_only_below_floor_tombstone_drops_all() {
         // Key with only a tombstone below floor — fully cleaned up
-        let items = vec![
-            (InternalKey::encode(&key("k"), 3), tombstone()),
-        ];
+        let items = vec![(InternalKey::encode(&key("k"), 3), tombstone())];
         let result = compact(items, 10);
         assert!(result.is_empty());
     }

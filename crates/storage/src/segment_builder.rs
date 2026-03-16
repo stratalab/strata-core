@@ -627,8 +627,8 @@ pub(crate) const FRAME_OVERHEAD: usize = BLOCK_FRAME_OVERHEAD;
 mod tests {
     use super::*;
     use crate::memtable::Memtable;
-    use strata_core::types::{BranchId, Key, Namespace, TypeTag};
     use std::sync::Arc;
+    use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 
     fn branch() -> BranchId {
         BranchId::from_bytes([1; 16])
@@ -666,9 +666,7 @@ mod tests {
         let path = dir.path().join("empty.sst");
 
         let builder = SegmentBuilder::default();
-        let meta = builder
-            .build_from_iter(std::iter::empty(), &path)
-            .unwrap();
+        let meta = builder.build_from_iter(std::iter::empty(), &path).unwrap();
 
         assert_eq!(meta.entry_count, 0);
         assert!(path.exists());

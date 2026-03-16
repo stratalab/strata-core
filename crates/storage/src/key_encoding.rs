@@ -24,8 +24,8 @@
 //! byte-stuffed) instead of length prefixes, because varint length prefixes
 //! break lexicographic byte ordering.
 
-use strata_core::types::{Key, Namespace, TypeTag};
 use std::sync::Arc;
+use strata_core::types::{Key, Namespace, TypeTag};
 
 // ---------------------------------------------------------------------------
 // Byte-stuffed encoding (order-preserving for arbitrary binary data)
@@ -88,9 +88,8 @@ fn decode_escaped(src: &[u8]) -> Option<(Vec<u8>, usize)> {
 /// The encoding preserves the lexicographic ordering of `Key`:
 /// namespace (branch_id, then space) → type_tag → user_key.
 pub fn encode_typed_key(key: &Key) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(
-        16 + key.namespace.space.len() + 1 + 1 + key.user_key.len() + 2,
-    );
+    let mut buf =
+        Vec::with_capacity(16 + key.namespace.space.len() + 1 + 1 + key.user_key.len() + 2);
     // Branch ID: 16 bytes, big-endian UUID
     buf.extend_from_slice(key.namespace.branch_id.as_bytes());
     // Space: null-terminated (space names are validated identifiers, no 0x00)

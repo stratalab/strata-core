@@ -131,10 +131,10 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for MvccIterator
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use strata_core::types::{BranchId, Key, Namespace, TypeTag};
     use strata_core::value::Value;
     use strata_core::Timestamp;
-    use std::sync::Arc;
 
     fn branch() -> BranchId {
         BranchId::from_bytes([1; 16])

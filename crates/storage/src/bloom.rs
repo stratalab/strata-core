@@ -53,8 +53,7 @@ impl BloomFilter {
             let h1 = crc32fast::hash(key) as u64;
             let h2 = fnv1a(key);
             for i in 0..k {
-                let bit_pos =
-                    (h1.wrapping_add((i as u64).wrapping_mul(h2))) % (actual_bits as u64);
+                let bit_pos = (h1.wrapping_add((i as u64).wrapping_mul(h2))) % (actual_bits as u64);
                 bits[bit_pos as usize / 8] |= 1 << (bit_pos as usize % 8);
             }
         }
@@ -78,8 +77,7 @@ impl BloomFilter {
         let h1 = crc32fast::hash(key) as u64;
         let h2 = fnv1a(key);
         for i in 0..self.num_hash_fns {
-            let bit_pos =
-                (h1.wrapping_add((i as u64).wrapping_mul(h2))) % (actual_bits as u64);
+            let bit_pos = (h1.wrapping_add((i as u64).wrapping_mul(h2))) % (actual_bits as u64);
             if self.bits[bit_pos as usize / 8] & (1 << (bit_pos as usize % 8)) == 0 {
                 return false;
             }
@@ -109,10 +107,7 @@ impl BloomFilter {
             return None;
         }
         let bits = data[4..].to_vec();
-        Some(Self {
-            bits,
-            num_hash_fns,
-        })
+        Some(Self { bits, num_hash_fns })
     }
 }
 
@@ -135,11 +130,7 @@ mod tests {
         let filter = BloomFilter::build(&key_refs, 10);
 
         for key in &keys {
-            assert!(
-                filter.maybe_contains(key),
-                "false negative for {:?}",
-                key
-            );
+            assert!(filter.maybe_contains(key), "false negative for {:?}", key);
         }
     }
 
