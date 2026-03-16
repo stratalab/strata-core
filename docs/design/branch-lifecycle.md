@@ -1,6 +1,6 @@
 # Branch Lifecycle: DAG Tracking, Status Management, and Metadata
 
-**Status:** Implementation Plan
+**Status:** Epics 1–2 implemented; remaining epics deferred
 **Issue:** #1462
 **Date:** 2026-03-15
 

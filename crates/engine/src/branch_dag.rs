@@ -1,8 +1,16 @@
 //! Branch DAG infrastructure for the `_system_` branch.
 //!
 //! Reserves the `_system_` namespace, auto-creates the system branch and
-//! `_branch_dag` graph on database init, and provides helpers for seeding
-//! default branch nodes.
+//! `_branch_dag` graph on database init, seeds the "default" branch node,
+//! and records branch lifecycle events (creation, forks, merges, deletion)
+//! as nodes and edges in the DAG.
+//!
+//! Write helpers (`dag_add_branch`, `dag_record_fork`, `dag_record_merge`,
+//! `dag_set_status`, `dag_mark_deleted`, `dag_set_message`) are called
+//! best-effort from executor handlers — failures are logged, never propagated.
+//!
+//! Read helpers (`dag_get_status`, `dag_get_branch_info`, `find_children`)
+//! assemble branch lineage from the graph.
 
 use std::fmt;
 use std::sync::Arc;

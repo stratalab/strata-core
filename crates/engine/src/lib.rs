@@ -153,5 +153,8 @@ pub use branch_ops::{
     ForkInfo, MergeInfo, MergeStrategy, SpaceDiff,
 };
 
+// Re-export branch_dag types at crate root
+pub use branch_dag::{DagBranchInfo, DagBranchStatus, DagEventId, ForkRecord, MergeRecord};
+
 #[cfg(feature = "perf-trace")]
 pub use instrumentation::{PerfBreakdown, PerfStats};

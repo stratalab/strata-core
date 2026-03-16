@@ -3,6 +3,7 @@
 **Issue:** #1462
 **Date:** 2026-03-15
 **Companion:** `docs/design/branch-lifecycle.md` (PRD)
+**Status:** Epics 1–2 implemented. Epics 3–5 (write guards, info/listing, consistency checks) deferred — add as needed.
 
 ---
 
