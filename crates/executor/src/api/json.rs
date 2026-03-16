@@ -202,4 +202,93 @@ impl Strata {
             }),
         }
     }
+
+    // =========================================================================
+    // JSON as_of Variant
+    // =========================================================================
+
+    /// Get a JSON value at a path at a specific point in time.
+    ///
+    /// `as_of` is a timestamp in microseconds since epoch.
+    pub fn json_get_as_of(
+        &self,
+        key: &str,
+        path: &str,
+        as_of: Option<u64>,
+    ) -> Result<Option<Value>> {
+        match self.executor.execute(Command::JsonGet {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            key: key.to_string(),
+            path: path.to_string(),
+            as_of,
+        })? {
+            Output::MaybeVersioned(v) => Ok(v.map(|vv| vv.value)),
+            Output::Maybe(v) => Ok(v),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for JsonGet".into(),
+            }),
+        }
+    }
+
+    // =========================================================================
+    // JSON Batch Operations
+    // =========================================================================
+
+    /// Batch set multiple JSON documents in a single transaction.
+    ///
+    /// Returns per-item results positionally mapped to the input entries.
+    pub fn json_batch_set(
+        &self,
+        entries: Vec<crate::types::BatchJsonEntry>,
+    ) -> Result<Vec<crate::types::BatchItemResult>> {
+        match self.executor.execute(Command::JsonBatchSet {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            entries,
+        })? {
+            Output::BatchResults(results) => Ok(results),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for JsonBatchSet".into(),
+            }),
+        }
+    }
+
+    /// Batch get multiple JSON document values.
+    ///
+    /// Returns per-item results positionally mapped to the input entries.
+    pub fn json_batch_get(
+        &self,
+        entries: Vec<crate::types::BatchJsonGetEntry>,
+    ) -> Result<Vec<crate::types::BatchGetItemResult>> {
+        match self.executor.execute(Command::JsonBatchGet {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            entries,
+        })? {
+            Output::BatchGetResults(results) => Ok(results),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for JsonBatchGet".into(),
+            }),
+        }
+    }
+
+    /// Batch delete multiple JSON documents or paths.
+    ///
+    /// Returns per-item results positionally mapped to the input entries.
+    pub fn json_batch_delete(
+        &self,
+        entries: Vec<crate::types::BatchJsonDeleteEntry>,
+    ) -> Result<Vec<crate::types::BatchItemResult>> {
+        match self.executor.execute(Command::JsonBatchDelete {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            entries,
+        })? {
+            Output::BatchResults(results) => Ok(results),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for JsonBatchDelete".into(),
+            }),
+        }
+    }
 }

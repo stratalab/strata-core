@@ -133,4 +133,49 @@ impl Strata {
             }),
         }
     }
+
+    // =========================================================================
+    // State as_of Variant
+    // =========================================================================
+
+    /// Read a state cell value at a specific point in time.
+    ///
+    /// `as_of` is a timestamp in microseconds since epoch.
+    pub fn state_get_as_of(&self, cell: &str, as_of: Option<u64>) -> Result<Option<Value>> {
+        match self.executor.execute(Command::StateGet {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            cell: cell.to_string(),
+            as_of,
+        })? {
+            Output::MaybeVersioned(v) => Ok(v.map(|vv| vv.value)),
+            Output::Maybe(v) => Ok(v),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for StateGet".into(),
+            }),
+        }
+    }
+
+    // =========================================================================
+    // State Batch Operations
+    // =========================================================================
+
+    /// Batch set multiple state cells in a single transaction.
+    ///
+    /// Returns per-item results positionally mapped to the input entries.
+    pub fn state_batch_set(
+        &self,
+        entries: Vec<crate::types::BatchStateEntry>,
+    ) -> Result<Vec<crate::types::BatchItemResult>> {
+        match self.executor.execute(Command::StateBatchSet {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            entries,
+        })? {
+            Output::BatchResults(results) => Ok(results),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for StateBatchSet".into(),
+            }),
+        }
+    }
 }
