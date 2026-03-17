@@ -1815,47 +1815,20 @@ impl Database {
             return;
         }
 
-        // Flush ALL branches so every branch's latest data is in segments.
-        // This ensures the watermark reflects the true minimum across all
-        // branches, including low-write branches like _system_ that never
-        // trigger automatic rotation.
-        for bid in &branch_ids {
-            storage.rotate_memtable(bid);
-            // Flush all frozen memtables for this branch (not just the oldest)
-            loop {
-                match storage.flush_oldest_frozen(bid) {
-                    Ok(true) => continue, // More frozen to flush
-                    Ok(false) => break,   // Done
-                    Err(e) => {
-                        tracing::debug!(
-                            target: "strata::flush",
-                            ?bid,
-                            error = %e,
-                            "Force-flush failed, skipping WAL truncation"
-                        );
-                        return; // Can't guarantee this branch's data is safe
-                    }
-                }
-            }
-        }
-
-        // Compute watermark: min of max_flushed_commit across all branches.
-        // After flushing above, every branch with data has segments.
+        // Compute watermark: min of max_flushed_commit across branches
+        // that participate in the flush pipeline (have segments).
+        // Branches with no segments (e.g. _system_) are excluded — their
+        // data is small and replayed from WAL on recovery.
         let mut watermark = u64::MAX;
         let mut has_any_segments = false;
         for bid in &branch_ids {
-            match storage.max_flushed_commit(bid) {
-                Some(0) => {} // Empty segment — no real data, skip
-                Some(commit) => {
+            if let Some(commit) = storage.max_flushed_commit(bid) {
+                if commit > 0 {
                     watermark = watermark.min(commit);
                     has_any_segments = true;
                 }
-                None => {
-                    if storage.has_frozen(bid) {
-                        return; // Unflushed data — WAL needed
-                    }
-                }
             }
+            // Branches with no segments are intentionally excluded
         }
         if !has_any_segments || watermark == u64::MAX {
             return;
