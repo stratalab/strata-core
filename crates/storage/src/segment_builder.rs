@@ -1266,6 +1266,30 @@ impl SplittingSegmentBuilder {
         I: Iterator<Item = (InternalKey, MemtableEntry)>,
         F: Fn(usize) -> std::path::PathBuf,
     {
+        self.build_split_with_predicate(iter, path_fn, |_| false)
+    }
+
+    /// Build one or more segment files, with an additional split predicate.
+    ///
+    /// In addition to splitting at `target_file_size` boundaries, the caller
+    /// can supply a `should_split` predicate that receives the typed_key_prefix
+    /// of each new logical key.  When the predicate returns `true`, a split is
+    /// forced even if the current segment hasn't reached `target_file_size`.
+    ///
+    /// This is used for grandparent-aware splitting during leveled compaction:
+    /// the predicate tracks cumulative overlap with L+2 files and forces a
+    /// split when the overlap exceeds a threshold.
+    pub fn build_split_with_predicate<I, F, P>(
+        &self,
+        iter: I,
+        path_fn: F,
+        mut should_split: P,
+    ) -> io::Result<Vec<(std::path::PathBuf, SegmentMeta)>>
+    where
+        I: Iterator<Item = (InternalKey, MemtableEntry)>,
+        F: Fn(usize) -> std::path::PathBuf,
+        P: FnMut(&[u8]) -> bool,
+    {
         let mut results: Vec<(std::path::PathBuf, SegmentMeta)> = Vec::new();
         let mut split_idx: usize = 0;
 
@@ -1279,8 +1303,8 @@ impl SplittingSegmentBuilder {
 
             // At a key boundary (new logical key), check if we should split
             if last_typed_key.as_ref() != Some(&typed_key)
-                && current_bytes >= self.target_file_size
                 && !current_entries.is_empty()
+                && (current_bytes >= self.target_file_size || should_split(&typed_key))
             {
                 let path = path_fn(split_idx);
                 let meta = self
