@@ -12,9 +12,9 @@
 use crate::bloom::BloomFilter;
 use crate::key_encoding::{encode_typed_key, encode_typed_key_prefix, InternalKey};
 use crate::segment_builder::{
-    decode_entry, parse_footer, parse_framed_block, parse_header, parse_index_block,
-    parse_properties_block, Footer, IndexEntry, KVHeader, PropertiesBlock, FOOTER_SZ,
-    FRAME_OVERHEAD, HEADER_SIZE,
+    decode_entry, decode_entry_header_ref, decode_entry_value, parse_footer, parse_framed_block,
+    parse_header, parse_index_block, parse_properties_block, EntryHeader, Footer, IndexEntry,
+    KVHeader, PropertiesBlock, FOOTER_SZ, FRAME_OVERHEAD, HEADER_SIZE,
 };
 use strata_core::types::Key;
 use strata_core::value::Value;
@@ -332,6 +332,13 @@ impl KVSegment {
     }
 
     /// Scan a single data block for the newest version of a typed key at or below snapshot.
+    ///
+    /// Uses zero-copy two-phase decoding:
+    /// 1. Parse key bytes + metadata WITHOUT allocating (EntryHeaderRef)
+    /// 2. Only allocate + deserialize value for the matching entry
+    ///
+    /// This eliminates ~32 wasted bincode::deserialize calls and ~32 Vec
+    /// allocations per block lookup.
     fn scan_block_for_key(
         &self,
         ie: &IndexEntry,
@@ -339,31 +346,40 @@ impl KVSegment {
         snapshot_commit: u64,
     ) -> Option<SegmentEntry> {
         let block_data = self.read_data_block(ie)?;
+        let data = &**block_data;
         let mut pos = 0;
-        while pos < block_data.len() {
-            let (ik, is_tomb, value, timestamp, ttl_ms, consumed) =
-                decode_entry(&block_data[pos..])?;
-            pos += consumed;
+        while pos < data.len() {
+            // Phase 1: zero-copy key decode (no allocation)
+            let ref_header = decode_entry_header_ref(&data[pos..])?;
+            let entry_data_start = pos;
+            pos += ref_header.total_len;
 
-            // Check if this entry matches our typed key
-            if ik.typed_key_prefix() != typed_key {
-                // If we've already seen our key and moved past it, stop
-                if ik.typed_key_prefix() > typed_key {
+            if ref_header.typed_key_prefix() != typed_key {
+                if ref_header.typed_key_prefix() > typed_key {
                     break;
                 }
                 continue;
             }
 
-            let commit_id = ik.commit_id();
+            let commit_id = ref_header.commit_id();
             if commit_id <= snapshot_commit {
-                // Due to descending commit_id ordering, the first match
-                // is the newest visible version.
+                // Phase 2: allocate + deserialize ONLY for the match
+                let header = EntryHeader {
+                    ik: InternalKey::try_from_bytes(ref_header.ik_bytes.to_vec())?,
+                    is_tombstone: ref_header.is_tombstone,
+                    timestamp: ref_header.timestamp,
+                    ttl_ms: ref_header.ttl_ms,
+                    value_start: ref_header.value_start,
+                    value_len: ref_header.value_len,
+                    total_len: ref_header.total_len,
+                };
+                let value = decode_entry_value(&data[entry_data_start..], &header)?;
                 return Some(SegmentEntry {
                     value,
-                    is_tombstone: is_tomb,
+                    is_tombstone: header.is_tombstone,
                     commit_id,
-                    timestamp,
-                    ttl_ms,
+                    timestamp: header.timestamp,
+                    ttl_ms: header.ttl_ms,
                 });
             }
         }
