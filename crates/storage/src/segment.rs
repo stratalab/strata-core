@@ -59,6 +59,8 @@ pub struct KVSegment {
     bloom: BloomFilter,
     #[allow(dead_code)] // used by future compaction/GC
     props: PropertiesBlock,
+    /// Path to the .sst file (for cleanup after compaction).
+    file_path: std::path::PathBuf,
 }
 
 impl KVSegment {
@@ -164,6 +166,7 @@ impl KVSegment {
             index,
             bloom,
             props,
+            file_path: path.to_path_buf(),
         })
     }
 
@@ -271,6 +274,11 @@ impl KVSegment {
     /// File size in bytes (from the underlying mmap).
     pub fn file_size(&self) -> u64 {
         self.mmap.len() as u64
+    }
+
+    /// Path to the .sst file on disk.
+    pub fn file_path(&self) -> &std::path::Path {
+        &self.file_path
     }
 
     // -----------------------------------------------------------------------

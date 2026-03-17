@@ -915,17 +915,14 @@ impl SegmentedStore {
 
         // Open the newly written segment.
         let new_segment = KVSegment::open(&seg_path)?;
-        let new_seg_filename = format!("{}.sst", seg_id);
 
         // Swap: remove only the segments we compacted, insert the new one.
         // Any segments added by concurrent flushes (not in old_segments) are kept.
-        let old_seg_count;
         {
             let mut branch = self
                 .branches
                 .entry(*branch_id)
                 .or_insert_with(BranchState::new);
-            old_seg_count = branch.segments.len();
             branch
                 .segments
                 .retain(|s| !old_segments.iter().any(|old| Arc::ptr_eq(s, old)));
@@ -935,45 +932,9 @@ impl SegmentedStore {
             branch.segments.push(Arc::new(new_segment));
         }
 
-        // File cleanup: only delete .sst files for the segments we compacted.
-        // Build a set of filenames to keep (new segment + any concurrent segments).
-        // We know old segments used IDs allocated before `seg_id`, so their
-        // filenames differ from `new_seg_filename`. We enumerate the directory
-        // and only remove files that are NOT the new segment and that existed
-        // before compaction started (i.e., have a numeric stem < seg_id).
-        if old_seg_count == segments_merged {
-            // Fast path: no concurrent segments appeared, safe to delete all
-            // .sst files except the new one.
-            if let Ok(dir_entries) = std::fs::read_dir(&branch_dir) {
-                for entry in dir_entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) == Some("sst") {
-                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            if name != new_seg_filename {
-                                let _ = std::fs::remove_file(&path);
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            // Concurrent segments appeared — only delete files whose numeric
-            // stem is < seg_id (these belonged to the old segments we merged).
-            if let Ok(dir_entries) = std::fs::read_dir(&branch_dir) {
-                for entry in dir_entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) != Some("sst") {
-                        continue;
-                    }
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        if let Ok(file_id) = stem.parse::<u64>() {
-                            if file_id < seg_id {
-                                let _ = std::fs::remove_file(&path);
-                            }
-                        }
-                    }
-                }
-            }
+        // Delete old segment files that were merged.
+        for seg in &old_segments {
+            let _ = std::fs::remove_file(seg.file_path());
         }
 
         let entries_pruned = total_input_entries.saturating_sub(meta.entry_count);
@@ -1093,13 +1054,10 @@ impl SegmentedStore {
             branch.segments.push(Arc::new(new_segment));
         }
 
-        // File cleanup: KVSegment doesn't track its file path, so we can't
-        // identify exactly which files to delete without also deleting files
-        // belonging to retained segments from other tiers. Orphaned .sst files
-        // are inert (not loaded by recover_segments since it only adds files
-        // it can open, and they're cleaned up by the next compact_branch call).
-        //
-        // TODO: Track file path on KVSegment to enable precise tier cleanup.
+        // Delete old segment files that were merged.
+        for seg in &selected_segments {
+            let _ = std::fs::remove_file(seg.file_path());
+        }
 
         let entries_pruned = total_input_entries.saturating_sub(meta.entry_count);
 
@@ -3774,5 +3732,120 @@ mod tests {
         seed(&store, kv_key("a"), Value::Int(1), 1);
         let other_branch = BranchId::from_bytes([99; 16]);
         assert_eq!(store.time_range(other_branch).unwrap(), None);
+    }
+
+    #[test]
+    fn compact_tier_deletes_old_segment_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let seg_dir = dir.path().join("segments");
+        let store = SegmentedStore::with_dir(seg_dir.clone(), 4096);
+        let b = branch();
+
+        for i in 0..500u64 {
+            seed(
+                &store,
+                kv_key(&format!("key_{:06}", i)),
+                Value::String("x".repeat(80)),
+                i + 1,
+            );
+        }
+        while store.flush_oldest_frozen(&b).unwrap() {}
+        assert!(store.branch_segment_count(&b) > 4);
+
+        let sizes = store.segment_file_sizes(&b);
+        let scheduler = crate::compaction::CompactionScheduler::default();
+        let candidates = scheduler.pick_candidates(&sizes);
+        store
+            .compact_tier(&b, &candidates[0].segment_indices, 0)
+            .unwrap();
+
+        // SST files on disk should match in-memory segment count (no orphans)
+        let branch_hex = format!("{:032x}", u128::from_be_bytes(*b.as_bytes()));
+        let branch_dir = seg_dir.join(&branch_hex);
+        let file_count = std::fs::read_dir(&branch_dir)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .ok()
+                    .and_then(|e| e.path().extension().map(|ext| ext == "sst"))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(file_count, store.branch_segment_count(&b));
+    }
+
+    #[test]
+    fn diagnostic_segment_layout_at_scale() {
+        let dir = tempfile::tempdir().unwrap();
+        // 4KB write buffer to force frequent rotation at small scale
+        let store = SegmentedStore::with_dir(dir.path().join("segments"), 4096);
+        let b = branch();
+
+        // Write 1000 keys (~100 bytes each → ~100KB total → ~25 rotations)
+        for i in 0..1000u64 {
+            seed(
+                &store,
+                kv_key(&format!("key_{:06}", i)),
+                Value::String("x".repeat(80)),
+                i + 1,
+            );
+        }
+
+        let frozen_before = store.branch_frozen_count(&b);
+        // Flush all frozen
+        while store.flush_oldest_frozen(&b).unwrap() {}
+        let segments_after_flush = store.branch_segment_count(&b);
+        let sizes_after_flush = store.segment_file_sizes(&b);
+
+        eprintln!("=== Diagnostic: Segment Layout ===");
+        eprintln!("Frozen before flush: {}", frozen_before);
+        eprintln!("Segments after flush: {}", segments_after_flush);
+        eprintln!("Segment sizes: {:?}", sizes_after_flush);
+
+        // Now simulate what the engine does: tiered compaction
+        let scheduler = crate::compaction::CompactionScheduler::default();
+        let candidates = scheduler.pick_candidates(&sizes_after_flush);
+        eprintln!("Compaction candidates: {} tiers eligible", candidates.len());
+        for c in &candidates {
+            eprintln!(
+                "  Tier {}: {} segments (indices {:?})",
+                c.tier,
+                c.segment_indices.len(),
+                c.segment_indices
+            );
+        }
+
+        // Run tier compaction if available
+        if let Some(candidate) = candidates.first() {
+            let result = store
+                .compact_tier(&b, &candidate.segment_indices, 0)
+                .unwrap();
+            eprintln!(
+                "After tier compaction: segments={}, result={:?}",
+                store.branch_segment_count(&b),
+                result
+            );
+        }
+
+        // Check final state
+        let final_sizes = store.segment_file_sizes(&b);
+        eprintln!("Final segments: {}", final_sizes.len());
+        eprintln!("Final sizes: {:?}", final_sizes);
+
+        // Verify data is intact
+        for i in [0u64, 500, 999] {
+            assert!(store
+                .get_versioned(&kv_key(&format!("key_{:06}", i)), u64::MAX)
+                .unwrap()
+                .is_some());
+        }
+
+        // The real question: how many segments accumulate?
+        // With proper compaction, should be O(log(N)) not O(N)
+        assert!(
+            final_sizes.len() <= 20,
+            "Too many segments: {} (expected <= 20 for 1000 keys)",
+            final_sizes.len()
+        );
     }
 }
