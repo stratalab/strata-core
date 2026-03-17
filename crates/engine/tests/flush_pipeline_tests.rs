@@ -405,3 +405,51 @@ fn lifecycle_wal_truncation_after_flush() {
 
     assert_eq!(compact_info.snapshot_watermark, Some(max_commit));
 }
+
+#[test]
+fn multi_level_compaction_cascades() {
+    let dir = tempfile::tempdir().unwrap();
+    let segments_dir = dir.path().join("segments");
+    let store = SegmentedStore::with_dir(segments_dir, 0);
+    let b = branch();
+
+    // Flush several L0 segments, then compact L0 → L1
+    for commit in 1..=5u64 {
+        let key = kv_key(&format!("k{:04}", commit));
+        seed(&store, key, Value::Int(commit as i64), commit);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+    }
+    assert_eq!(store.l0_segment_count(&b), 5);
+
+    // L0 → L1
+    let r = store.compact_level(&b, 0, 0).unwrap().unwrap();
+    assert_eq!(r.segments_merged, 5);
+    assert_eq!(store.l0_segment_count(&b), 0);
+    assert_eq!(store.level_segment_count(&b, 1), 1);
+
+    // L1 → L2 (trivial move — single file, no overlap in L2)
+    let r = store.compact_level(&b, 1, 0).unwrap().unwrap();
+    assert_eq!(r.segments_merged, 1);
+    assert_eq!(r.output_entries, 5);
+    assert_eq!(r.entries_pruned, 0);
+    assert_eq!(store.level_segment_count(&b, 1), 0);
+    assert_eq!(store.level_segment_count(&b, 2), 1);
+
+    // L2 → L3 (trivial move)
+    let r = store.compact_level(&b, 2, 0).unwrap().unwrap();
+    assert_eq!(r.segments_merged, 1);
+    assert_eq!(r.output_entries, 5);
+    assert_eq!(r.entries_pruned, 0);
+    assert_eq!(store.level_segment_count(&b, 2), 0);
+    assert_eq!(store.level_segment_count(&b, 3), 1);
+
+    // All data still readable after cascading through levels
+    for i in 1..=5u64 {
+        let result = store
+            .get_versioned(&kv_key(&format!("k{:04}", i)), u64::MAX)
+            .unwrap()
+            .unwrap_or_else(|| panic!("key k{:04} missing after cascade", i));
+        assert_eq!(result.value, Value::Int(i as i64));
+    }
+}

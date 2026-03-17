@@ -1755,20 +1755,17 @@ impl Database {
                                 // Update flush watermark and truncate WAL
                                 Self::update_flush_watermark(&storage, &data_dir, &wal_dir);
 
-                                // Post-flush: compact L0 → L1 when enough
-                                // L0 segments accumulate. Produces non-overlapping
-                                // L1 segments for O(log N) point lookups.
+                                // Post-flush: compact L0 → L1 when ≥ 4 L0 segments
                                 if storage.l0_segment_count(&branch_id) >= 4 {
-                                    match storage.compact_l0_to_l1(&branch_id, 0) {
+                                    match storage.compact_level(&branch_id, 0, 0) {
                                         Ok(Some(result)) => {
                                             tracing::debug!(
                                                 target: "strata::compact",
                                                 ?branch_id,
+                                                level = 0,
                                                 segments_merged = result.segments_merged,
                                                 entries_pruned = result.entries_pruned,
-                                                l0 = storage.l0_segment_count(&branch_id),
-                                                l1 = storage.l1_segment_count(&branch_id),
-                                                "L0 → L1 compaction complete"
+                                                "compaction complete"
                                             );
                                         }
                                         Ok(None) => {}
@@ -1776,11 +1773,44 @@ impl Database {
                                             tracing::warn!(
                                                 target: "strata::compact",
                                                 ?branch_id,
+                                                level = 0,
                                                 error = %e,
-                                                "Background L0 → L1 compaction failed"
+                                                "compaction failed"
                                             );
                                         }
                                     }
+                                }
+
+                                // L1-L5 → L(n+1): trigger when level bytes exceed threshold.
+                                // Mirrors storage::LEVEL_BASE_BYTES (256MB) and
+                                // LEVEL_MULTIPLIER (10×) for each subsequent level.
+                                let mut level_target: u64 = 256 << 20;
+                                for level in 1..6 {
+                                    if storage.level_bytes(&branch_id, level) > level_target {
+                                        match storage.compact_level(&branch_id, level, 0) {
+                                            Ok(Some(result)) => {
+                                                tracing::debug!(
+                                                    target: "strata::compact",
+                                                    ?branch_id,
+                                                    level,
+                                                    segments_merged = result.segments_merged,
+                                                    entries_pruned = result.entries_pruned,
+                                                    "compaction complete"
+                                                );
+                                            }
+                                            Ok(None) => {}
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    target: "strata::compact",
+                                                    ?branch_id,
+                                                    level,
+                                                    error = %e,
+                                                    "compaction failed"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    level_target *= 10;
                                 }
                             }
                             Ok(false) => {}
