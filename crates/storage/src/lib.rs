@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod block_cache;
 pub mod bloom;
 pub mod compaction;
 pub mod index;
