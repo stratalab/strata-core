@@ -279,10 +279,58 @@ fn encode_entry(ik: &InternalKey, entry: &MemtableEntry, buf: &mut Vec<u8>) {
     }
 }
 
-/// Decode a single entry from a data block at the given offset.
+/// Decoded entry header — key + metadata without value deserialization.
+pub(crate) struct EntryHeader {
+    pub ik: InternalKey,
+    pub is_tombstone: bool,
+    pub timestamp: u64,
+    pub ttl_ms: u64,
+    /// Byte offset where the value bytes start (within the data slice).
+    pub value_start: usize,
+    /// Length of the value bytes.
+    pub value_len: usize,
+    /// Total bytes consumed by this entry.
+    pub total_len: usize,
+}
+
+/// Zero-copy entry header — borrows key bytes from the block data.
 ///
-/// Returns `(internal_key, is_tombstone, value, timestamp_micros, ttl_ms, bytes_consumed)`.
-pub(crate) fn decode_entry(data: &[u8]) -> Option<(InternalKey, bool, Value, u64, u64, usize)> {
+/// Used by `scan_block_for_key` to compare keys without allocating
+/// an `InternalKey` for every entry. Only the matching entry's key
+/// is promoted to an owned `InternalKey`.
+pub(crate) struct EntryHeaderRef<'a> {
+    /// Raw InternalKey bytes (borrowed from block data).
+    pub ik_bytes: &'a [u8],
+    pub is_tombstone: bool,
+    pub timestamp: u64,
+    pub ttl_ms: u64,
+    pub value_start: usize,
+    pub value_len: usize,
+    pub total_len: usize,
+}
+
+impl<'a> EntryHeaderRef<'a> {
+    /// Typed key prefix (everything except trailing 8-byte commit_id).
+    #[inline]
+    pub fn typed_key_prefix(&self) -> &[u8] {
+        &self.ik_bytes[..self.ik_bytes.len() - 8]
+    }
+
+    /// Extract commit_id from the trailing 8 bytes.
+    #[inline]
+    pub fn commit_id(&self) -> u64 {
+        let len = self.ik_bytes.len();
+        let bytes: [u8; 8] = self.ik_bytes[len - 8..].try_into().unwrap();
+        !u64::from_be_bytes(bytes)
+    }
+}
+
+/// Decode entry header with zero-copy key reference into `data`.
+///
+/// Parses InternalKey bytes, value_kind, timestamp, ttl_ms, and value_len,
+/// but does NOT deserialize value bytes. Borrows key bytes directly from
+/// `data` — no allocation.
+pub(crate) fn decode_entry_header_ref(data: &[u8]) -> Option<EntryHeaderRef<'_>> {
     if data.len() < 4 {
         return None;
     }
@@ -290,10 +338,10 @@ pub(crate) fn decode_entry(data: &[u8]) -> Option<(InternalKey, bool, Value, u64
 
     let ik_len = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
     pos += 4;
-    if pos + ik_len > data.len() {
+    if pos + ik_len > data.len() || ik_len < 28 {
         return None;
     }
-    let ik = InternalKey::try_from_bytes(data[pos..pos + ik_len].to_vec())?;
+    let ik_bytes = &data[pos..pos + ik_len];
     pos += ik_len;
 
     if pos >= data.len() {
@@ -302,7 +350,6 @@ pub(crate) fn decode_entry(data: &[u8]) -> Option<(InternalKey, bool, Value, u64
     let value_kind = data[pos];
     pos += 1;
 
-    // Read timestamp and ttl_ms after value_kind
     if pos + 16 > data.len() {
         return None;
     }
@@ -317,21 +364,72 @@ pub(crate) fn decode_entry(data: &[u8]) -> Option<(InternalKey, bool, Value, u64
     let value_len = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
     pos += 4;
 
-    if value_kind == VALUE_KIND_DEL {
-        return Some((ik, true, Value::Null, timestamp, ttl_ms, pos));
-    }
+    let is_tombstone = value_kind == VALUE_KIND_DEL;
+    let value_start = pos;
 
-    if value_kind != VALUE_KIND_PUT {
-        return None; // unknown value_kind
-    }
-
-    if pos + value_len > data.len() {
+    if !is_tombstone && value_kind != VALUE_KIND_PUT {
         return None;
     }
-    let value: Value = bincode::deserialize(&data[pos..pos + value_len]).ok()?;
-    pos += value_len;
 
-    Some((ik, false, value, timestamp, ttl_ms, pos))
+    if !is_tombstone {
+        if pos + value_len > data.len() {
+            return None;
+        }
+        pos += value_len;
+    }
+
+    Some(EntryHeaderRef {
+        ik_bytes,
+        is_tombstone,
+        timestamp,
+        ttl_ms,
+        value_start,
+        value_len,
+        total_len: pos,
+    })
+}
+
+/// Deserialize value bytes from a previously decoded entry header.
+///
+/// Call ONLY for the matching entry after key comparison confirms a match.
+pub(crate) fn decode_entry_value(data: &[u8], header: &EntryHeader) -> Option<Value> {
+    if header.is_tombstone {
+        return Some(Value::Null);
+    }
+    let end = header.value_start + header.value_len;
+    if end > data.len() {
+        return None;
+    }
+    bincode::deserialize(&data[header.value_start..end]).ok()
+}
+
+/// Decode a single entry from a data block at the given offset.
+///
+/// Returns `(internal_key, is_tombstone, value, timestamp_micros, ttl_ms, bytes_consumed)`.
+///
+/// Full decode path used by iterators. For point lookups, prefer
+/// `decode_entry_header_ref` + `decode_entry_value`.
+pub(crate) fn decode_entry(data: &[u8]) -> Option<(InternalKey, bool, Value, u64, u64, usize)> {
+    let ref_header = decode_entry_header_ref(data)?;
+    let ik = InternalKey::try_from_bytes(ref_header.ik_bytes.to_vec())?;
+    let header = EntryHeader {
+        ik,
+        is_tombstone: ref_header.is_tombstone,
+        timestamp: ref_header.timestamp,
+        ttl_ms: ref_header.ttl_ms,
+        value_start: ref_header.value_start,
+        value_len: ref_header.value_len,
+        total_len: ref_header.total_len,
+    };
+    let value = decode_entry_value(data, &header)?;
+    Some((
+        header.ik,
+        header.is_tombstone,
+        value,
+        header.timestamp,
+        header.ttl_ms,
+        header.total_len,
+    ))
 }
 
 // ---------------------------------------------------------------------------
