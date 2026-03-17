@@ -466,10 +466,12 @@ impl SegmentedStore {
     /// Returns `(oldest_ts, latest_ts)` in microseconds since epoch.
     /// Returns `None` if the branch has no data.
     ///
-    /// This is an O(1) operation using cached atomic min/max timestamps
-    /// updated on every write. The range includes timestamps from all
-    /// writes (puts, deletes, tombstones), so it may extend beyond the
-    /// range of currently live (non-deleted) entries.
+    /// O(1) when timestamps have been tracked (normal write path).
+    /// Falls back to scanning live entries after recovery from segments
+    /// (where WAL was truncated and timestamps weren't replayed).
+    ///
+    /// The O(1) fast path includes timestamps from all writes (puts,
+    /// deletes, tombstones). The fallback path only scans live entries.
     pub fn time_range(&self, branch_id: BranchId) -> StrataResult<Option<(u64, u64)>> {
         let branch = match self.branches.get(&branch_id) {
             Some(b) => b,
@@ -477,10 +479,27 @@ impl SegmentedStore {
         };
         let min_ts = branch.min_timestamp.load(Ordering::Relaxed);
         let max_ts = branch.max_timestamp.load(Ordering::Relaxed);
-        if min_ts == u64::MAX {
-            return Ok(None); // No data written
+        if min_ts != u64::MAX {
+            return Ok(Some((min_ts, max_ts)));
         }
-        Ok(Some((min_ts, max_ts)))
+
+        // Fallback: atomics not populated (e.g. after recovery from segments
+        // where WAL was truncated). Scan entries to find actual range.
+        let entries = self.list_branch_inner(&branch);
+        if entries.is_empty() {
+            return Ok(None);
+        }
+        let mut scan_min = u64::MAX;
+        let mut scan_max = 0u64;
+        for (_, vv) in &entries {
+            let ts = vv.timestamp.as_micros();
+            scan_min = scan_min.min(ts);
+            scan_max = scan_max.max(ts);
+        }
+        // Populate atomics so subsequent calls are O(1)
+        branch.min_timestamp.fetch_min(scan_min, Ordering::Relaxed);
+        branch.max_timestamp.fetch_max(scan_max, Ordering::Relaxed);
+        Ok(Some((scan_min, scan_max)))
     }
 
     /// Garbage collect old versions for a branch.
@@ -1074,41 +1093,13 @@ impl SegmentedStore {
             branch.segments.push(Arc::new(new_segment));
         }
 
-        // File cleanup: delete old segment files that were merged.
-        // Old segments used IDs allocated before `seg_id`, so their filenames
-        // have numeric stems < seg_id. We only remove files that belonged to
-        // the segments we merged.
-        if let Ok(dir_entries) = std::fs::read_dir(&branch_dir) {
-            for entry in dir_entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("sst") {
-                    continue;
-                }
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    if let Ok(file_id) = stem.parse::<u64>() {
-                        // Only delete files with IDs that are no longer referenced.
-                        // The new segment has id == seg_id, and any segment not in
-                        // selected_segments is still live. We can safely delete files
-                        // whose id < seg_id AND that are not still referenced by the
-                        // branch's remaining segments.
-                        if file_id < seg_id && file_id != seg_id {
-                            // Check if this file_id is still referenced by a remaining segment.
-                            // We do this conservatively: only delete if the file_id
-                            // matches one we originally selected for compaction.
-                            // Since we don't track file_id on KVSegment, we use the
-                            // heuristic that all pre-existing files with id < seg_id
-                            // that are NOT the new output belong to either:
-                            // (a) segments we merged — safe to delete, or
-                            // (b) segments from other tiers — must keep.
-                            //
-                            // To be safe, we skip cleanup here and let the next
-                            // full compact_branch handle it. The files are harmless
-                            // (not loaded since not in the segment list).
-                        }
-                    }
-                }
-            }
-        }
+        // File cleanup: KVSegment doesn't track its file path, so we can't
+        // identify exactly which files to delete without also deleting files
+        // belonging to retained segments from other tiers. Orphaned .sst files
+        // are inert (not loaded by recover_segments since it only adds files
+        // it can open, and they're cleaned up by the next compact_branch call).
+        //
+        // TODO: Track file path on KVSegment to enable precise tier cleanup.
 
         let entries_pruned = total_input_entries.saturating_sub(meta.entry_count);
 
