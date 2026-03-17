@@ -1045,20 +1045,8 @@ impl SegmentedStore {
         std::fs::create_dir_all(&branch_dir)?;
         let seg_path = branch_dir.join(format!("{}.sst", seg_id));
 
-        // Build sorted source iterators from each segment (oldest → newest
-        // doesn't matter for MergeIterator ordering, but we use the same
-        // order as flush: index 0 = newest).
-        let sources: Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> = old_segments
-            .iter()
-            .map(|seg| {
-                let entries: Vec<_> = seg
-                    .iter_seek_all()
-                    .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
-                    .collect();
-                Box::new(entries.into_iter())
-                    as Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>
-            })
-            .collect();
+        // Build streaming source iterators from each segment.
+        let sources = streaming_sources(&old_segments);
 
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
@@ -1185,18 +1173,7 @@ impl SegmentedStore {
         std::fs::create_dir_all(&branch_dir)?;
         let seg_path = branch_dir.join(format!("{}.sst", seg_id));
 
-        let sources: Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> =
-            selected_segments
-                .iter()
-                .map(|seg| {
-                    let entries: Vec<_> = seg
-                        .iter_seek_all()
-                        .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
-                        .collect();
-                    Box::new(entries.into_iter())
-                        as Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>
-                })
-                .collect();
+        let sources = streaming_sources(&selected_segments);
 
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
@@ -1355,49 +1332,37 @@ impl SegmentedStore {
             .map(|s| s.entry_count())
             .sum();
 
-        // Build merge sources: L0 + overlapping L1
-        let mut input_segments: Vec<&Arc<KVSegment>> = Vec::new();
-        for seg in &l0_segs {
-            input_segments.push(seg);
-        }
-        for seg in &overlapping_l1 {
-            input_segments.push(seg);
-        }
+        // Build streaming merge sources: L0 + overlapping L1
+        let mut all_inputs: Vec<Arc<KVSegment>> = Vec::new();
+        all_inputs.extend(l0_segs.iter().cloned());
+        all_inputs.extend(overlapping_l1.iter().cloned());
 
-        let sources: Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> = input_segments
-            .iter()
-            .map(|seg| {
-                let entries: Vec<_> = seg
-                    .iter_seek_all()
-                    .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
-                    .collect();
-                Box::new(entries.into_iter())
-                    as Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>
-            })
-            .collect();
-
+        let sources = streaming_sources(&all_inputs);
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
         let compaction_iter =
             CompactionIterator::new(merge, prune_floor).with_max_versions(max_versions);
 
-        // Build output segment
-        let seg_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
+        // Build output segments, splitting at target file size
         let branch_hex = hex_encode_branch(branch_id);
         let branch_dir = segments_dir.join(&branch_hex);
         std::fs::create_dir_all(&branch_dir)?;
-        let seg_path = branch_dir.join(format!("{}.sst", seg_id));
 
-        let builder = SegmentBuilder::default();
-        let meta = builder.build_from_iter(compaction_iter, &seg_path)?;
+        let next_id = &self.next_segment_id;
+        let splitting_builder = crate::segment_builder::SplittingSegmentBuilder::default();
+        let outputs = splitting_builder.build_split(compaction_iter, |_split_idx| {
+            let id = next_id.fetch_add(1, Ordering::Relaxed);
+            branch_dir.join(format!("{}.sst", id))
+        })?;
 
-        // If the compaction produced an empty segment, skip L1 insertion
-        let new_l1_segment = if meta.entry_count > 0 {
-            Some(Arc::new(KVSegment::open(&seg_path)?))
-        } else {
-            let _ = std::fs::remove_file(&seg_path);
-            None
-        };
+        let output_entries: u64 = outputs.iter().map(|(_, m)| m.entry_count).sum();
+        let output_file_size: u64 = outputs.iter().map(|(_, m)| m.file_size).sum();
+
+        // Open all output segments
+        let mut new_l1_segments: Vec<Arc<KVSegment>> = Vec::new();
+        for (path, _meta) in &outputs {
+            new_l1_segments.push(Arc::new(KVSegment::open(path)?));
+        }
 
         // Atomic swap: L0 = only concurrently-flushed segments, L1 = non-overlapping + new
         {
@@ -1415,11 +1380,9 @@ impl SegmentedStore {
                 .cloned()
                 .collect();
 
-            // Build new L1: non-overlapping + new segment, sorted by key range
+            // Build new L1: non-overlapping preserved + new output segments, sorted
             let mut new_l1: Vec<Arc<KVSegment>> = non_overlapping_l1;
-            if let Some(seg) = new_l1_segment {
-                new_l1.push(seg);
-            }
+            new_l1.extend(new_l1_segments);
             // Sort L1 by key_range min ascending
             new_l1.sort_by(|a, b| a.key_range().0.cmp(b.key_range().0));
 
@@ -1443,16 +1406,11 @@ impl SegmentedStore {
         // Write manifest
         self.write_branch_manifest(branch_id);
 
-        let entries_pruned = total_input_entries.saturating_sub(meta.entry_count);
-        let output_file_size = if meta.entry_count > 0 {
-            meta.file_size
-        } else {
-            0 // file was deleted
-        };
+        let entries_pruned = total_input_entries.saturating_sub(output_entries);
 
         Ok(Some(CompactionResult {
             segments_merged,
-            output_entries: meta.entry_count,
+            output_entries,
             entries_pruned,
             output_file_size,
         }))
@@ -2044,6 +2002,24 @@ fn segment_entry_to_memtable_entry(se: SegmentEntry) -> MemtableEntry {
         timestamp: Timestamp::from_micros(se.timestamp),
         ttl_ms: se.ttl_ms,
     }
+}
+
+/// Build streaming merge sources from segments (no `.collect()`).
+///
+/// Uses `OwnedSegmentIter` to stream entries block-by-block instead of
+/// materializing all entries in memory. Reduces compaction memory from
+/// O(total entries) to O(num_segments × block_size).
+fn streaming_sources(
+    segments: &[Arc<KVSegment>],
+) -> Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> {
+    segments
+        .iter()
+        .map(|seg| {
+            let iter = crate::segment::OwnedSegmentIter::new(Arc::clone(seg));
+            Box::new(iter.map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se))))
+                as Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -5015,5 +4991,94 @@ mod tests {
             .get_versioned(&kv_key("a"), u64::MAX)
             .unwrap()
             .is_some());
+    }
+
+    // ========================================================================
+    // Streaming compaction + multi-segment output tests (Epic 23)
+    // ========================================================================
+
+    #[test]
+    fn compact_l0_to_l1_streaming_correctness() {
+        // Verify streaming compaction produces same results as before
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        // Write enough data across multiple flushes
+        for batch in 0..5u64 {
+            for i in 0..50u64 {
+                let key = kv_key(&format!("key_{:06}", batch * 50 + i));
+                seed(
+                    &store,
+                    key,
+                    Value::String(format!("val_{}", batch * 50 + i)),
+                    batch * 50 + i + 1,
+                );
+            }
+            store.rotate_memtable(&b);
+            store.flush_oldest_frozen(&b).unwrap();
+        }
+
+        assert_eq!(store.l0_segment_count(&b), 5);
+        store.compact_l0_to_l1(&b, 0).unwrap();
+        assert_eq!(store.l0_segment_count(&b), 0);
+        assert!(store.l1_segment_count(&b) >= 1);
+
+        // All 250 entries should be readable
+        for i in 0..250u64 {
+            let result = store
+                .get_versioned(&kv_key(&format!("key_{:06}", i)), u64::MAX)
+                .unwrap();
+            assert!(result.is_some(), "key_{:06} should be readable", i);
+        }
+
+        // Prefix scan should find all entries
+        let prefix = Key::new(ns(), TypeTag::KV, "key_".as_bytes().to_vec());
+        let results = store.scan_prefix(&prefix, u64::MAX).unwrap();
+        assert_eq!(results.len(), 250);
+    }
+
+    #[test]
+    fn compact_l0_to_l1_with_splitting_builder() {
+        // Verify compact_l0_to_l1 works with the SplittingSegmentBuilder path.
+        // With 400 entries × ~250B = ~100KB (well under 64MB target),
+        // this produces 1 L1 segment. Splitting is tested directly in
+        // segment_builder::tests::splitting_builder_respects_target_size.
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        for batch in 0..4u64 {
+            for i in 0..100u64 {
+                let key = kv_key(&format!("k{:06}", batch * 100 + i));
+                seed(
+                    &store,
+                    key,
+                    Value::String("x".repeat(200)),
+                    batch * 100 + i + 1,
+                );
+            }
+            store.rotate_memtable(&b);
+            store.flush_oldest_frozen(&b).unwrap();
+        }
+
+        assert_eq!(store.l0_segment_count(&b), 4);
+
+        let result = store.compact_l0_to_l1(&b, 0).unwrap().unwrap();
+        assert_eq!(result.output_entries, 400);
+        assert_eq!(store.l0_segment_count(&b), 0);
+        assert_eq!(store.l1_segment_count(&b), 1);
+
+        // All data correct
+        for i in 0..400u64 {
+            assert!(
+                store
+                    .get_versioned(&kv_key(&format!("k{:06}", i)), u64::MAX)
+                    .unwrap()
+                    .is_some(),
+                "k{:06} missing",
+                i
+            );
+        }
     }
 }
