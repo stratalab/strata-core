@@ -3,7 +3,7 @@
 //! `SegmentedStore` is a `Storage` trait implementation that combines:
 //! - Per-branch active memtable (writable, lock-free SkipMap)
 //! - Per-branch frozen memtables (immutable, pending flush)
-//! - Per-branch KV segments (on-disk, mmap'd)
+//! - Per-branch KV segments (on-disk, pread + block cache)
 //!
 //! Read path: active → frozen (newest first) → segments (newest first).
 //! The first match for a key at commit_id ≤ snapshot wins.

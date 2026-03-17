@@ -4,7 +4,7 @@
 //!
 //! - SegmentedStore: memtable + immutable segments with MVCC
 //! - Memtable: concurrent skiplist write buffer (ordered by InternalKey)
-//! - KVSegment: immutable mmap'd sorted segment files with bloom filters
+//! - KVSegment: immutable sorted segment files with pread I/O + block cache
 //! - Lock-free reads via SkipMap
 //! - Per-BranchId sharding (no cross-branch contention)
 //!
