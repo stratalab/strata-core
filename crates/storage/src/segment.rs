@@ -12,9 +12,10 @@
 use crate::bloom::BloomFilter;
 use crate::key_encoding::{encode_typed_key, encode_typed_key_prefix, InternalKey};
 use crate::segment_builder::{
-    decode_entry, parse_footer, parse_framed_block, parse_header, parse_index_block,
-    parse_properties_block, Footer, IndexEntry, KVHeader, PropertiesBlock, FOOTER_SZ,
-    FRAME_OVERHEAD, HEADER_SIZE,
+    decode_entry, decode_entry_header_ref, decode_entry_value, parse_footer, parse_framed_block,
+    parse_header, parse_index_block, parse_properties_block, parse_restart_region, restart_point,
+    EntryHeader, Footer, IndexEntry, KVHeader, PropertiesBlock, FOOTER_SZ, FRAME_OVERHEAD,
+    HEADER_SIZE,
 };
 use strata_core::types::Key;
 use strata_core::value::Value;
@@ -263,6 +264,7 @@ impl KVSegment {
             block_idx: start_block,
             block_offset: 0,
             block_data: None,
+            entries_end: 0,
             done: false,
         }
     }
@@ -270,6 +272,14 @@ impl KVSegment {
     /// The `(commit_min, commit_max)` range for this segment.
     pub fn commit_range(&self) -> (u64, u64) {
         (self.header.commit_min, self.header.commit_max)
+    }
+
+    /// The `(key_min, key_max)` range for this segment (InternalKey bytes).
+    ///
+    /// Returns the first and last InternalKey stored in the properties block.
+    /// Used by leveled compaction to binary-search L1 segments by key range.
+    pub fn key_range(&self) -> (&[u8], &[u8]) {
+        (&self.props.key_min, &self.props.key_max)
     }
 
     /// Total entry count (all versions).
@@ -332,6 +342,15 @@ impl KVSegment {
     }
 
     /// Scan a single data block for the newest version of a typed key at or below snapshot.
+    ///
+    /// Uses zero-copy two-phase decoding:
+    /// 1. Parse key bytes + metadata from block data WITHOUT allocating (EntryHeaderRef)
+    /// 2. Only allocate + deserialize value for the matching entry
+    ///
+    /// When the block contains a restart point trailer (all newly-built blocks do),
+    /// binary search narrows the scan to a single restart interval (~16 entries)
+    /// before falling back to linear scan. This reduces average comparisons from
+    /// ~32 to ~4 (binary) + ~8 (linear) per block.
     fn scan_block_for_key(
         &self,
         ie: &IndexEntry,
@@ -339,36 +358,106 @@ impl KVSegment {
         snapshot_commit: u64,
     ) -> Option<SegmentEntry> {
         let block_data = self.read_data_block(ie)?;
-        let mut pos = 0;
-        while pos < block_data.len() {
-            let (ik, is_tomb, value, timestamp, ttl_ms, consumed) =
-                decode_entry(&block_data[pos..])?;
-            pos += consumed;
+        let data = &**block_data;
 
-            // Check if this entry matches our typed key
-            if ik.typed_key_prefix() != typed_key {
-                // If we've already seen our key and moved past it, stop
-                if ik.typed_key_prefix() > typed_key {
+        // Determine the entry data boundary. If the block has a restart trailer,
+        // entries end before the restart array; otherwise entries span the full block.
+        let (scan_start, entries_end) = match parse_restart_region(data) {
+            Some(region) => {
+                // Binary search on restart points to find the interval containing
+                // typed_key. Each restart point is the byte offset of the first
+                // entry in that interval.
+                let start = self.binary_search_restart_points(data, &region, typed_key);
+                (start, region.entries_end)
+            }
+            None => {
+                // Legacy block without restart points — linear scan everything.
+                (0usize, data.len())
+            }
+        };
+
+        // Linear scan within the narrowed interval
+        let mut pos = scan_start;
+        while pos < entries_end {
+            let ref_header = decode_entry_header_ref(&data[pos..])?;
+            let entry_data_start = pos;
+            pos += ref_header.total_len;
+
+            if ref_header.typed_key_prefix() != typed_key {
+                if ref_header.typed_key_prefix() > typed_key {
                     break;
                 }
                 continue;
             }
 
-            let commit_id = ik.commit_id();
+            let commit_id = ref_header.commit_id();
             if commit_id <= snapshot_commit {
-                // Due to descending commit_id ordering, the first match
-                // is the newest visible version.
+                let header = EntryHeader {
+                    ik: InternalKey::try_from_bytes(ref_header.ik_bytes.to_vec())?,
+                    is_tombstone: ref_header.is_tombstone,
+                    timestamp: ref_header.timestamp,
+                    ttl_ms: ref_header.ttl_ms,
+                    value_start: ref_header.value_start,
+                    value_len: ref_header.value_len,
+                    total_len: ref_header.total_len,
+                };
+                let value = decode_entry_value(&data[entry_data_start..], &header)?;
                 return Some(SegmentEntry {
                     value,
-                    is_tombstone: is_tomb,
+                    is_tombstone: header.is_tombstone,
                     commit_id,
-                    timestamp,
-                    ttl_ms,
+                    timestamp: header.timestamp,
+                    ttl_ms: header.ttl_ms,
                 });
             }
         }
 
         None
+    }
+
+    /// Binary search on restart points to find the scan start offset.
+    ///
+    /// Returns the byte offset of the restart point whose first key is <=
+    /// the target typed_key. The caller should linear-scan from this offset.
+    ///
+    /// The search finds the LAST restart point whose first entry's typed_key
+    /// is <= typed_key. Because entries are sorted, the target key (if present)
+    /// must be in the interval starting at that restart point.
+    fn binary_search_restart_points(
+        &self,
+        data: &[u8],
+        region: &crate::segment_builder::RestartRegion,
+        typed_key: &[u8],
+    ) -> usize {
+        let mut left = 0usize;
+        let mut right = region.num_restarts; // exclusive upper bound
+
+        while left < right {
+            let mid = left + (right - left) / 2;
+            let offset = restart_point(data, region, mid) as usize;
+            match decode_entry_header_ref(&data[offset..region.entries_end]) {
+                Some(ref_header) => {
+                    if ref_header.typed_key_prefix() <= typed_key {
+                        left = mid + 1;
+                    } else {
+                        right = mid;
+                    }
+                }
+                None => {
+                    // Corrupt entry at this restart point — give up on binary
+                    // search and fall back to scanning from the beginning.
+                    return 0;
+                }
+            }
+        }
+
+        // `left` is now the first restart point whose key > typed_key.
+        // We want the one before it (the last one whose key <= typed_key).
+        if left == 0 {
+            0
+        } else {
+            restart_point(data, region, left - 1) as usize
+        }
     }
 
     /// Iterate ALL entries in the segment, in InternalKey order.
@@ -381,6 +470,7 @@ impl KVSegment {
             block_idx: 0,
             block_offset: 0,
             block_data: None,
+            entries_end: 0,
             done: self.index.is_empty(),
         }
     }
@@ -397,6 +487,8 @@ pub struct SegmentIter<'a> {
     block_idx: usize,
     block_offset: usize,
     block_data: Option<Arc<Vec<u8>>>,
+    /// Byte offset where entry data ends in the current block (before restart trailer).
+    entries_end: usize,
     done: bool,
 }
 
@@ -418,6 +510,12 @@ impl<'a> Iterator for SegmentIter<'a> {
                 let ie = &self.segment.index[self.block_idx];
                 match self.segment.read_data_block(ie) {
                     Some(data) => {
+                        // Determine where entry data ends (before restart trailer)
+                        let end = match parse_restart_region(&data) {
+                            Some(region) => region.entries_end,
+                            None => data.len(),
+                        };
+                        self.entries_end = end;
                         self.block_data = Some(data);
                         self.block_offset = 0;
                     }
@@ -430,14 +528,14 @@ impl<'a> Iterator for SegmentIter<'a> {
 
             let data = self.block_data.as_ref().unwrap();
 
-            if self.block_offset >= data.len() {
+            if self.block_offset >= self.entries_end {
                 // Move to next block
                 self.block_data = None;
                 self.block_idx += 1;
                 continue;
             }
 
-            match decode_entry(&data[self.block_offset..]) {
+            match decode_entry(&data[self.block_offset..self.entries_end]) {
                 Some((ik, is_tomb, value, timestamp, ttl_ms, consumed)) => {
                     self.block_offset += consumed;
 

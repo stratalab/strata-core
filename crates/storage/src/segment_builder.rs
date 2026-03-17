@@ -54,6 +54,13 @@ const BLOCK_FRAME_OVERHEAD: usize = 12;
 const VALUE_KIND_PUT: u8 = 1;
 const VALUE_KIND_DEL: u8 = 2;
 
+/// Number of entries between restart points within a data block.
+///
+/// Every `RESTART_INTERVAL`-th entry records its byte offset into a trailer
+/// array at the end of the block, enabling binary search within the block
+/// instead of a full linear scan.
+pub(crate) const RESTART_INTERVAL: usize = 16;
+
 // ---------------------------------------------------------------------------
 // SegmentMeta — returned after building a segment
 // ---------------------------------------------------------------------------
@@ -132,6 +139,10 @@ impl SegmentBuilder {
         // Track current block's first key
         let mut block_first_key: Option<Vec<u8>> = None;
 
+        // Restart point tracking for binary search within blocks
+        let mut restart_offsets: Vec<u32> = Vec::new();
+        let mut entries_in_block: usize = 0;
+
         let mut file_offset = KV_HEADER_SIZE as u64;
 
         for (ik, entry) in iter {
@@ -155,12 +166,23 @@ impl SegmentBuilder {
                 block_first_key = Some(ik.as_bytes().to_vec());
             }
 
+            // Record restart point before encoding the entry
+            if entries_in_block % RESTART_INTERVAL == 0 {
+                restart_offsets.push(block_buf.len() as u32);
+            }
+
             // Encode entry into block buffer
             encode_entry(&ik, &entry, &mut block_buf);
             entry_count += 1;
+            entries_in_block += 1;
 
             // Flush block when it reaches target size
             if block_buf.len() >= self.data_block_size {
+                // Append restart point trailer to block data
+                append_restart_trailer(&restart_offsets, &mut block_buf);
+                restart_offsets.clear();
+                entries_in_block = 0;
+
                 let bfk = block_first_key.take().unwrap();
                 let framed_size =
                     write_framed_block_compressed(&mut w, BLOCK_TYPE_DATA, &block_buf, true)?;
@@ -173,6 +195,10 @@ impl SegmentBuilder {
 
         // Flush final partial block
         if !block_buf.is_empty() {
+            // Append restart point trailer to block data
+            append_restart_trailer(&restart_offsets, &mut block_buf);
+            restart_offsets.clear();
+
             let bfk = block_first_key.take().unwrap_or_default();
             let framed_size =
                 write_framed_block_compressed(&mut w, BLOCK_TYPE_DATA, &block_buf, true)?;
@@ -279,10 +305,82 @@ fn encode_entry(ik: &InternalKey, entry: &MemtableEntry, buf: &mut Vec<u8>) {
     }
 }
 
-/// Decode a single entry from a data block at the given offset.
+/// Decoded entry header — key + metadata without value deserialization.
 ///
-/// Returns `(internal_key, is_tombstone, value, timestamp_micros, ttl_ms, bytes_consumed)`.
-pub(crate) fn decode_entry(data: &[u8]) -> Option<(InternalKey, bool, Value, u64, u64, usize)> {
+/// Used by `scan_block_for_key` to skip non-matching entries without
+/// the cost of `bincode::deserialize` on their values.
+pub(crate) struct EntryHeader {
+    pub ik: InternalKey,
+    pub is_tombstone: bool,
+    pub timestamp: u64,
+    pub ttl_ms: u64,
+    /// Byte offset where the value bytes start (within the block slice).
+    pub value_start: usize,
+    /// Length of the value bytes.
+    pub value_len: usize,
+    /// Total bytes consumed by this entry (header + key + value).
+    pub total_len: usize,
+}
+
+/// Decode only the key and metadata from an entry, skipping value bytes.
+///
+/// This is the fast path for block scanning — parses the InternalKey,
+/// value_kind, timestamp, ttl_ms, and value_len, but does NOT call
+/// `bincode::deserialize` on the value bytes. Just skips over them.
+///
+/// Returns `None` on truncation or corruption.
+pub(crate) fn decode_entry_header(data: &[u8]) -> Option<EntryHeader> {
+    let ref_header = decode_entry_header_ref(data)?;
+    let ik = InternalKey::try_from_bytes(ref_header.ik_bytes.to_vec())?;
+    Some(EntryHeader {
+        ik,
+        is_tombstone: ref_header.is_tombstone,
+        timestamp: ref_header.timestamp,
+        ttl_ms: ref_header.ttl_ms,
+        value_start: ref_header.value_start,
+        value_len: ref_header.value_len,
+        total_len: ref_header.total_len,
+    })
+}
+
+/// Zero-copy entry header — borrows key bytes from the block data.
+///
+/// Used by `scan_block_for_key` to compare keys without allocating
+/// an `InternalKey` for every entry in the block. Only the matching
+/// entry's key is promoted to an owned `InternalKey`.
+pub(crate) struct EntryHeaderRef<'a> {
+    /// Raw InternalKey bytes (borrowed from block data).
+    pub ik_bytes: &'a [u8],
+    pub is_tombstone: bool,
+    pub timestamp: u64,
+    pub ttl_ms: u64,
+    pub value_start: usize,
+    pub value_len: usize,
+    pub total_len: usize,
+}
+
+impl<'a> EntryHeaderRef<'a> {
+    /// Typed key prefix (everything except trailing 8-byte commit_id).
+    #[inline]
+    pub fn typed_key_prefix(&self) -> &[u8] {
+        &self.ik_bytes[..self.ik_bytes.len() - 8]
+    }
+
+    /// Extract commit_id from the trailing 8 bytes.
+    #[inline]
+    pub fn commit_id(&self) -> u64 {
+        let len = self.ik_bytes.len();
+        let bytes: [u8; 8] = self.ik_bytes[len - 8..].try_into().unwrap();
+        !u64::from_be_bytes(bytes)
+    }
+}
+
+/// Decode entry header with zero-copy key reference into `data`.
+///
+/// Unlike `decode_entry_header`, this does NOT allocate a `Vec<u8>` for
+/// the InternalKey — it borrows bytes directly from the block data.
+/// ~50 bytes of allocation saved per entry scan.
+pub(crate) fn decode_entry_header_ref(data: &[u8]) -> Option<EntryHeaderRef<'_>> {
     if data.len() < 4 {
         return None;
     }
@@ -290,10 +388,10 @@ pub(crate) fn decode_entry(data: &[u8]) -> Option<(InternalKey, bool, Value, u64
 
     let ik_len = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
     pos += 4;
-    if pos + ik_len > data.len() {
+    if pos + ik_len > data.len() || ik_len < 28 {
         return None;
     }
-    let ik = InternalKey::try_from_bytes(data[pos..pos + ik_len].to_vec())?;
+    let ik_bytes = &data[pos..pos + ik_len];
     pos += ik_len;
 
     if pos >= data.len() {
@@ -302,7 +400,6 @@ pub(crate) fn decode_entry(data: &[u8]) -> Option<(InternalKey, bool, Value, u64
     let value_kind = data[pos];
     pos += 1;
 
-    // Read timestamp and ttl_ms after value_kind
     if pos + 16 > data.len() {
         return None;
     }
@@ -317,21 +414,142 @@ pub(crate) fn decode_entry(data: &[u8]) -> Option<(InternalKey, bool, Value, u64
     let value_len = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
     pos += 4;
 
-    if value_kind == VALUE_KIND_DEL {
-        return Some((ik, true, Value::Null, timestamp, ttl_ms, pos));
-    }
+    let is_tombstone = value_kind == VALUE_KIND_DEL;
+    let value_start = pos;
 
-    if value_kind != VALUE_KIND_PUT {
-        return None; // unknown value_kind
-    }
-
-    if pos + value_len > data.len() {
+    if !is_tombstone && value_kind != VALUE_KIND_PUT {
         return None;
     }
-    let value: Value = bincode::deserialize(&data[pos..pos + value_len]).ok()?;
-    pos += value_len;
 
-    Some((ik, false, value, timestamp, ttl_ms, pos))
+    if !is_tombstone {
+        if pos + value_len > data.len() {
+            return None;
+        }
+        pos += value_len;
+    }
+
+    Some(EntryHeaderRef {
+        ik_bytes,
+        is_tombstone,
+        timestamp,
+        ttl_ms,
+        value_start,
+        value_len,
+        total_len: pos,
+    })
+}
+
+/// Deserialize the value bytes from a previously decoded entry header.
+///
+/// Call this ONLY for the matching entry after `decode_entry_header`
+/// confirmed the key matches.
+pub(crate) fn decode_entry_value(data: &[u8], header: &EntryHeader) -> Option<Value> {
+    if header.is_tombstone {
+        return Some(Value::Null);
+    }
+    let end = header.value_start + header.value_len;
+    if end > data.len() {
+        return None;
+    }
+    bincode::deserialize(&data[header.value_start..end]).ok()
+}
+
+/// Decode a single entry from a data block at the given offset.
+///
+/// Returns `(internal_key, is_tombstone, value, timestamp_micros, ttl_ms, bytes_consumed)`.
+///
+/// This is the full decode path used by iterators that need every value.
+/// For point lookups, prefer `decode_entry_header` + `decode_entry_value`.
+pub(crate) fn decode_entry(data: &[u8]) -> Option<(InternalKey, bool, Value, u64, u64, usize)> {
+    let header = decode_entry_header(data)?;
+    let value = decode_entry_value(data, &header)?;
+    Some((
+        header.ik,
+        header.is_tombstone,
+        value,
+        header.timestamp,
+        header.ttl_ms,
+        header.total_len,
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Restart point encoding / parsing
+// ---------------------------------------------------------------------------
+
+/// Append the restart point trailer to a block buffer.
+///
+/// Layout appended to the end of the entry data:
+/// ```text
+/// | restart_offsets: [u32 LE; num_restarts] | num_restarts: u32 LE |
+/// ```
+fn append_restart_trailer(restart_offsets: &[u32], buf: &mut Vec<u8>) {
+    for offset in restart_offsets {
+        buf.extend_from_slice(&offset.to_le_bytes());
+    }
+    buf.extend_from_slice(&(restart_offsets.len() as u32).to_le_bytes());
+}
+
+/// Parsed restart region from the end of a data block.
+///
+/// Tells the reader where entry data ends and provides the restart
+/// offset array for binary search within the block.
+pub(crate) struct RestartRegion {
+    /// Byte offset where entry data ends (= start of restart array).
+    pub entries_end: usize,
+    /// Byte offset within the block data where the restart array begins.
+    pub restarts_offset: usize,
+    /// Number of restart points.
+    pub num_restarts: usize,
+}
+
+/// Parse the restart point trailer from the end of a data block.
+///
+/// Returns `None` if the block does not contain a valid restart trailer
+/// (e.g., blocks written before this optimization). Callers should fall
+/// back to linear scan of the entire block in that case.
+pub(crate) fn parse_restart_region(data: &[u8]) -> Option<RestartRegion> {
+    // Need at least 4 bytes for num_restarts
+    if data.len() < 4 {
+        return None;
+    }
+    let num_restarts = u32::from_le_bytes(data[data.len() - 4..].try_into().ok()?) as usize;
+
+    // Sanity check: num_restarts must be > 0, and the restart array + count
+    // must fit in the block. Each entry is at minimum ~28 bytes (ik_len) so
+    // the block can hold at most data.len()/28 entries and thus at most
+    // data.len()/(28*RESTART_INTERVAL) restart points. Use a generous bound.
+    if num_restarts == 0 {
+        return None;
+    }
+    let trailer_size = num_restarts * 4 + 4; // offsets + count
+    if trailer_size > data.len() {
+        return None;
+    }
+    let restarts_offset = data.len() - trailer_size;
+
+    // Validate that the first restart offset is 0 (the first entry in any
+    // block always starts at byte 0). This distinguishes blocks WITH restart
+    // trailers from old blocks where the last 4 bytes happen to decode as
+    // a nonzero "num_restarts".
+    let first_offset =
+        u32::from_le_bytes(data[restarts_offset..restarts_offset + 4].try_into().ok()?);
+    if first_offset != 0 {
+        return None;
+    }
+
+    Some(RestartRegion {
+        entries_end: restarts_offset,
+        restarts_offset,
+        num_restarts,
+    })
+}
+
+/// Read a single restart offset from the restart region.
+#[inline]
+pub(crate) fn restart_point(data: &[u8], region: &RestartRegion, i: usize) -> u32 {
+    let pos = region.restarts_offset + i * 4;
+    u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap())
 }
 
 // ---------------------------------------------------------------------------
@@ -1015,5 +1233,57 @@ mod tests {
         // Also verify iteration works across compressed blocks
         let all: Vec<_> = seg.iter_seek_all().collect();
         assert_eq!(all.len(), 500);
+    }
+
+    #[test]
+    fn decode_entry_header_skips_value_bytes() {
+        let ik = InternalKey::encode(&key("test"), 42);
+        let entry = MemtableEntry {
+            value: Value::String("a]long value that should not be deserialized".into()),
+            is_tombstone: false,
+            timestamp: strata_core::Timestamp::from_micros(999),
+            ttl_ms: 5000,
+        };
+
+        let mut buf = Vec::new();
+        encode_entry(&ik, &entry, &mut buf);
+
+        // Header decode should succeed and skip value bytes
+        let header = decode_entry_header(&buf).unwrap();
+        assert_eq!(header.ik.commit_id(), 42);
+        assert!(!header.is_tombstone);
+        assert_eq!(header.timestamp, 999);
+        assert_eq!(header.ttl_ms, 5000);
+        assert!(header.value_len > 0);
+        assert_eq!(header.total_len, buf.len());
+
+        // Value decode should produce the original value
+        let value = decode_entry_value(&buf, &header).unwrap();
+        assert_eq!(
+            value,
+            Value::String("a]long value that should not be deserialized".into())
+        );
+    }
+
+    #[test]
+    fn decode_entry_header_tombstone() {
+        let ik = InternalKey::encode(&key("del"), 10);
+        let entry = MemtableEntry {
+            value: Value::Null,
+            is_tombstone: true,
+            timestamp: strata_core::Timestamp::from_micros(500),
+            ttl_ms: 0,
+        };
+
+        let mut buf = Vec::new();
+        encode_entry(&ik, &entry, &mut buf);
+
+        let header = decode_entry_header(&buf).unwrap();
+        assert!(header.is_tombstone);
+        assert_eq!(header.value_len, 0);
+        assert_eq!(header.total_len, buf.len());
+
+        let value = decode_entry_value(&buf, &header).unwrap();
+        assert_eq!(value, Value::Null);
     }
 }

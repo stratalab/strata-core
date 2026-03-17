@@ -1744,37 +1744,28 @@ impl Database {
                                 // Update flush watermark and truncate WAL
                                 Self::update_flush_watermark(&storage, &data_dir, &wal_dir);
 
-                                // Post-flush: tiered compaction — group segments
-                                // by size, merge within tiers
-                                let sizes = storage.segment_file_sizes(&branch_id);
-                                if sizes.len() >= 4 {
-                                    let scheduler = strata_storage::CompactionScheduler::default();
-                                    let candidates = scheduler.pick_candidates(&sizes);
-                                    if let Some(candidate) = candidates.first() {
-                                        match storage.compact_tier(
-                                            &branch_id,
-                                            &candidate.segment_indices,
-                                            0,
-                                        ) {
-                                            Ok(Some(result)) => {
-                                                tracing::debug!(
-                                                    target: "strata::compact",
-                                                    ?branch_id,
-                                                    tier = candidate.tier,
-                                                    segments_merged = result.segments_merged,
-                                                    entries_pruned = result.entries_pruned,
-                                                    "Tiered compaction complete"
-                                                );
-                                            }
-                                            Ok(None) => {}
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    target: "strata::compact",
-                                                    ?branch_id,
-                                                    error = %e,
-                                                    "Background tiered compaction failed"
-                                                );
-                                            }
+                                // Post-flush: leveled compaction — when L0 has
+                                // >= 4 segments, merge all L0 + L1 into a single
+                                // L1 segment with non-overlapping key ranges.
+                                if storage.l0_segment_count(&branch_id) >= 4 {
+                                    match storage.compact_l0_to_l1(&branch_id, 0) {
+                                        Ok(Some(result)) => {
+                                            tracing::debug!(
+                                                target: "strata::compact",
+                                                ?branch_id,
+                                                segments_merged = result.segments_merged,
+                                                entries_pruned = result.entries_pruned,
+                                                "L0→L1 leveled compaction complete"
+                                            );
+                                        }
+                                        Ok(None) => {}
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                target: "strata::compact",
+                                                ?branch_id,
+                                                error = %e,
+                                                "Background L0→L1 compaction failed"
+                                            );
                                         }
                                     }
                                 }
