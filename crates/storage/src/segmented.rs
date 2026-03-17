@@ -17,6 +17,7 @@ use crate::pressure::{MemoryPressure, PressureLevel};
 use crate::segment::{KVSegment, SegmentEntry};
 use crate::segment_builder::SegmentBuilder;
 
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use std::io;
 use std::path::PathBuf;
@@ -47,6 +48,41 @@ pub struct CompactionResult {
 }
 
 // ---------------------------------------------------------------------------
+// SegmentVersion
+// ---------------------------------------------------------------------------
+
+/// Immutable snapshot of a branch's on-disk segments.
+///
+/// Wrapped in `ArcSwap` so that segment list mutations (flush, compaction)
+/// are atomic single-pointer swaps — readers never see a partial state.
+struct SegmentVersion {
+    /// L0 segments: overlapping, newest first.
+    l0_segments: Vec<Arc<KVSegment>>,
+    /// L1 segments: non-overlapping, sorted by key range (populated in Epic 22).
+    l1_segments: Vec<Arc<KVSegment>>,
+}
+
+impl SegmentVersion {
+    fn new() -> Self {
+        Self {
+            l0_segments: Vec::new(),
+            l1_segments: Vec::new(),
+        }
+    }
+
+    /// Iterate over all segments (L0 then L1).
+    #[allow(dead_code)]
+    fn all_segments(&self) -> impl Iterator<Item = &Arc<KVSegment>> {
+        self.l0_segments.iter().chain(self.l1_segments.iter())
+    }
+
+    /// Total number of segments across all levels.
+    fn total_segment_count(&self) -> usize {
+        self.l0_segments.len() + self.l1_segments.len()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // BranchState
 // ---------------------------------------------------------------------------
 
@@ -56,8 +92,8 @@ struct BranchState {
     active: Memtable,
     /// Frozen memtables, newest first.  Immutable, pending flush.
     frozen: Vec<Arc<Memtable>>,
-    /// On-disk KV segments, newest first.
-    segments: Vec<Arc<KVSegment>>,
+    /// On-disk segment version (atomic swap for lock-free reads).
+    version: ArcSwap<SegmentVersion>,
     /// Minimum timestamp seen across all writes (for O(1) time_range).
     min_timestamp: AtomicU64,
     /// Maximum timestamp seen across all writes (for O(1) time_range).
@@ -69,7 +105,7 @@ impl BranchState {
         Self {
             active: Memtable::new(0),
             frozen: Vec::new(),
-            segments: Vec::new(),
+            version: ArcSwap::from_pointee(SegmentVersion::new()),
             min_timestamp: AtomicU64::new(u64::MAX),
             max_timestamp: AtomicU64::new(0),
         }
@@ -244,7 +280,8 @@ impl SegmentedStore {
         }
 
         // Segments (newest first) — convert SegmentEntry to MemtableEntry
-        for seg in &branch.segments {
+        let ver = branch.version.load();
+        for seg in &ver.l0_segments {
             let entries: Vec<_> = seg
                 .iter_seek_all()
                 .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
@@ -336,7 +373,8 @@ impl SegmentedStore {
             let entries: Vec<_> = frozen.iter_all().collect();
             sources.push(Box::new(entries.into_iter()));
         }
-        for seg in &branch.segments {
+        let ver = branch.version.load();
+        for seg in &ver.l0_segments {
             let entries: Vec<_> = seg
                 .iter_seek_all()
                 .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
@@ -425,7 +463,8 @@ impl SegmentedStore {
             let entries: Vec<_> = frozen.iter_prefix(prefix).collect();
             sources.push(Box::new(entries.into_iter()));
         }
-        for seg in &branch.segments {
+        let ver = branch.version.load();
+        for seg in &ver.l0_segments {
             let entries: Vec<_> = seg
                 .iter_seek(prefix)
                 .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
@@ -524,7 +563,8 @@ impl SegmentedStore {
         for frozen in &branch.frozen {
             total_versions += frozen.len();
         }
-        for seg in &branch.segments {
+        let ver = branch.version.load();
+        for seg in &ver.l0_segments {
             total_versions += seg.entry_count() as usize;
         }
         Some((entry_count, total_versions, false))
@@ -675,7 +715,15 @@ impl SegmentedStore {
                 self.total_frozen_count.fetch_sub(1, Ordering::Relaxed);
             }
         }
-        branch.segments.insert(0, Arc::new(segment));
+        // Build new version with the new segment prepended (newest first).
+        let old_ver = branch.version.load();
+        let mut new_l0 = Vec::with_capacity(old_ver.l0_segments.len() + 1);
+        new_l0.push(Arc::new(segment));
+        new_l0.extend(old_ver.l0_segments.iter().cloned());
+        branch.version.store(Arc::new(SegmentVersion {
+            l0_segments: new_l0,
+            l1_segments: old_ver.l1_segments.clone(),
+        }));
 
         Ok(true)
     }
@@ -694,7 +742,18 @@ impl SegmentedStore {
 
     /// Number of on-disk segments for a branch (test helper).
     pub fn branch_segment_count(&self, branch_id: &BranchId) -> usize {
-        self.branches.get(branch_id).map_or(0, |b| b.segments.len())
+        self.branches
+            .get(branch_id)
+            .map_or(0, |b| b.version.load().total_segment_count())
+    }
+
+    /// Number of L0 segments for a branch.
+    ///
+    /// Used by compaction triggers to decide when to compact L0 → L1.
+    pub fn l0_segment_count(&self, branch_id: &BranchId) -> usize {
+        self.branches
+            .get(branch_id)
+            .map_or(0, |b| b.version.load().l0_segments.len())
     }
 
     /// Return the maximum commit_id across all flushed segments for a branch.
@@ -702,7 +761,8 @@ impl SegmentedStore {
     /// Returns `None` if the branch has no segments.
     pub fn max_flushed_commit(&self, branch_id: &BranchId) -> Option<u64> {
         let branch = self.branches.get(branch_id)?;
-        branch.segments.iter().map(|s| s.commit_range().1).max()
+        let ver = branch.version.load();
+        ver.l0_segments.iter().map(|s| s.commit_range().1).max()
     }
 
     /// Get the segments directory (if any).
@@ -793,17 +853,22 @@ impl SegmentedStore {
             // Sort by commit_max descending (newest first)
             branch_segments.sort_by(|a, b| b.commit_range().1.cmp(&a.commit_range().1));
 
-            let mut branch = self
+            let branch = self
                 .branches
                 .entry(branch_id)
                 .or_insert_with(BranchState::new);
 
             info.segments_loaded += branch_segments.len();
-            branch.segments.extend(branch_segments);
-            // Re-sort after extending in case there were existing segments
-            branch
-                .segments
-                .sort_by(|a, b| b.commit_range().1.cmp(&a.commit_range().1));
+            // Build new version: merge existing L0 segments with recovered ones,
+            // then re-sort by commit_max descending (newest first).
+            let old_ver = branch.version.load();
+            let mut new_l0 = old_ver.l0_segments.clone();
+            new_l0.extend(branch_segments);
+            new_l0.sort_by(|a, b| b.commit_range().1.cmp(&a.commit_range().1));
+            branch.version.store(Arc::new(SegmentVersion {
+                l0_segments: new_l0,
+                l1_segments: old_ver.l1_segments.clone(),
+            }));
 
             info.branches_recovered += 1;
         }
@@ -872,10 +937,11 @@ impl SegmentedStore {
                 Some(b) => b,
                 None => return Ok(None),
             };
-            if branch.segments.len() < 2 {
+            let ver = branch.version.load_full();
+            if ver.l0_segments.len() < 2 {
                 return Ok(None);
             }
-            let segs: Vec<Arc<KVSegment>> = branch.segments.iter().map(Arc::clone).collect();
+            let segs: Vec<Arc<KVSegment>> = ver.l0_segments.clone();
             let total: u64 = segs.iter().map(|s| s.entry_count()).sum();
             (segs, total)
             // DashMap guard drops here
@@ -919,17 +985,25 @@ impl SegmentedStore {
         // Swap: remove only the segments we compacted, insert the new one.
         // Any segments added by concurrent flushes (not in old_segments) are kept.
         {
-            let mut branch = self
+            let branch = self
                 .branches
                 .entry(*branch_id)
                 .or_insert_with(BranchState::new);
-            branch
-                .segments
-                .retain(|s| !old_segments.iter().any(|old| Arc::ptr_eq(s, old)));
+            let cur_ver = branch.version.load();
+            let mut new_l0: Vec<Arc<KVSegment>> = cur_ver
+                .l0_segments
+                .iter()
+                .filter(|s| !old_segments.iter().any(|old| Arc::ptr_eq(s, old)))
+                .cloned()
+                .collect();
             // Compacted segment goes at the end (oldest — covers the range
             // of all old segments). Any concurrent segments are newer and
             // already at the front.
-            branch.segments.push(Arc::new(new_segment));
+            new_l0.push(Arc::new(new_segment));
+            branch.version.store(Arc::new(SegmentVersion {
+                l0_segments: new_l0,
+                l1_segments: cur_ver.l1_segments.clone(),
+            }));
         }
 
         // Delete old segment files and invalidate their cached blocks.
@@ -953,7 +1027,7 @@ impl SegmentedStore {
     pub fn should_compact(&self, branch_id: &BranchId, segment_threshold: usize) -> bool {
         self.branches
             .get(branch_id)
-            .is_some_and(|b| b.segments.len() >= segment_threshold)
+            .is_some_and(|b| b.version.load().l0_segments.len() >= segment_threshold)
     }
 
     /// Get file sizes of all segments for a branch.
@@ -965,7 +1039,8 @@ impl SegmentedStore {
             Some(b) => b,
             None => return Vec::new(),
         };
-        branch.segments.iter().map(|s| s.file_size()).collect()
+        let ver = branch.version.load();
+        ver.l0_segments.iter().map(|s| s.file_size()).collect()
     }
 
     /// Compact a specific subset of segments for a branch (tier-based compaction).
@@ -994,9 +1069,10 @@ impl SegmentedStore {
                 Some(b) => b,
                 None => return Ok(None),
             };
+            let ver = branch.version.load_full();
             let mut segs: Vec<Arc<KVSegment>> = Vec::new();
             for &idx in segment_indices {
-                if let Some(seg) = branch.segments.get(idx) {
+                if let Some(seg) = ver.l0_segments.get(idx) {
                     segs.push(Arc::clone(seg));
                 }
             }
@@ -1043,17 +1119,25 @@ impl SegmentedStore {
         // Swap: remove only the segments we compacted, insert the new one.
         // Any segments added by concurrent flushes (not in selected_segments) are kept.
         {
-            let mut branch = self
+            let branch = self
                 .branches
                 .entry(*branch_id)
                 .or_insert_with(BranchState::new);
-            branch
-                .segments
-                .retain(|s| !selected_segments.iter().any(|old| Arc::ptr_eq(s, old)));
+            let cur_ver = branch.version.load();
+            let mut new_l0: Vec<Arc<KVSegment>> = cur_ver
+                .l0_segments
+                .iter()
+                .filter(|s| !selected_segments.iter().any(|old| Arc::ptr_eq(s, old)))
+                .cloned()
+                .collect();
             // Compacted segment goes at the end (oldest — covers the range
             // of all compacted segments). Any concurrent segments are newer
             // and already at the front.
-            branch.segments.push(Arc::new(new_segment));
+            new_l0.push(Arc::new(new_segment));
+            branch.version.store(Arc::new(SegmentVersion {
+                l0_segments: new_l0,
+                l1_segments: cur_ver.l1_segments.clone(),
+            }));
         }
 
         // Delete old segment files and invalidate their cached blocks.
@@ -1155,7 +1239,8 @@ impl SegmentedStore {
         }
 
         // 3. Segments (newest first)
-        for seg in &branch.segments {
+        let ver = branch.version.load();
+        for seg in &ver.l0_segments {
             if let Some(se) = seg.point_lookup(key, max_version) {
                 let commit_id = se.commit_id;
                 return Some((commit_id, segment_entry_to_memtable_entry(se)));
@@ -1179,7 +1264,8 @@ impl SegmentedStore {
 
         // Segments
         let typed_key = encode_typed_key(key);
-        for seg in &branch.segments {
+        let ver = branch.version.load();
+        for seg in &ver.l0_segments {
             for (ik, se) in seg.iter_seek(key) {
                 if ik.typed_key_prefix() != typed_key.as_slice() {
                     break;
@@ -1212,7 +1298,8 @@ impl SegmentedStore {
         }
 
         // Segments (newest first)
-        for seg in &branch.segments {
+        let ver = branch.version.load();
+        for seg in &ver.l0_segments {
             let entries: Vec<_> = seg
                 .iter_seek(prefix)
                 .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
@@ -2447,8 +2534,9 @@ mod tests {
         assert_eq!(info.segments_loaded, 3);
 
         let branch = store2.branches.get(&branch()).unwrap();
-        assert!(branch.segments[0].commit_range().1 >= branch.segments[1].commit_range().1);
-        assert!(branch.segments[1].commit_range().1 >= branch.segments[2].commit_range().1);
+        let ver = branch.version.load();
+        assert!(ver.l0_segments[0].commit_range().1 >= ver.l0_segments[1].commit_range().1);
+        assert!(ver.l0_segments[1].commit_range().1 >= ver.l0_segments[2].commit_range().1);
     }
 
     #[test]
@@ -3851,5 +3939,44 @@ mod tests {
             "Too many segments: {} (expected <= 20 for 1000 keys)",
             final_sizes.len()
         );
+    }
+
+    #[test]
+    fn l0_segment_count_tracks_flushes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 64);
+        let bid = branch();
+
+        assert_eq!(store.l0_segment_count(&bid), 0);
+
+        // Write enough data to trigger rotation, then flush.
+        for i in 0..10 {
+            seed(
+                &store,
+                kv_key(&format!("k{i}")),
+                Value::Int(i as i64),
+                (i + 1) as u64,
+            );
+        }
+        store.rotate_memtable(&bid);
+        store.flush_oldest_frozen(&bid).unwrap();
+
+        assert_eq!(store.l0_segment_count(&bid), 1);
+        assert_eq!(store.branch_segment_count(&bid), 1);
+
+        // Flush a second segment.
+        for i in 10..20 {
+            seed(
+                &store,
+                kv_key(&format!("k{i}")),
+                Value::Int(i as i64),
+                (i + 1) as u64,
+            );
+        }
+        store.rotate_memtable(&bid);
+        store.flush_oldest_frozen(&bid).unwrap();
+
+        assert_eq!(store.l0_segment_count(&bid), 2);
+        assert_eq!(store.branch_segment_count(&bid), 2);
     }
 }

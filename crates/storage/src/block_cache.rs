@@ -465,7 +465,7 @@ pub fn auto_detect_capacity() -> usize {
         if let Ok(contents) = std::fs::read_to_string("/proc/meminfo") {
             for line in contents.lines() {
                 if let Some(rest) = line.strip_prefix("MemAvailable:") {
-                    if let Some(kb_str) = rest.trim().split_whitespace().next() {
+                    if let Some(kb_str) = rest.split_whitespace().next() {
                         if let Ok(kb) = kb_str.parse::<usize>() {
                             let quarter = (kb * 1024) / 4;
                             return quarter.max(256 * 1024 * 1024);
@@ -563,7 +563,10 @@ mod tests {
             "3rd insert should have evicted one entry"
         );
         // Verify the evicted entry is gone and the newest is present
-        assert!(cache.get(keys[0], 0).is_none(), "LRU entry should be evicted");
+        assert!(
+            cache.get(keys[0], 0).is_none(),
+            "LRU entry should be evicted"
+        );
         assert!(cache.get(keys[2], 0).is_some(), "newest entry should exist");
     }
 
@@ -717,7 +720,10 @@ mod tests {
         cache.insert(keys[2], 0, vec![0xC; 30]);
 
         // A and C should be present, B should be gone
-        assert!(cache.get(keys[0], 0).is_some(), "A should survive (was MRU)");
+        assert!(
+            cache.get(keys[0], 0).is_some(),
+            "A should survive (was MRU)"
+        );
         assert!(
             cache.get(keys[1], 0).is_none(),
             "B should be evicted (was LRU)"
