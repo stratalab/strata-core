@@ -115,7 +115,10 @@ impl RecoveryCoordinator {
             .iter_all(&self.wal_dir)
             .map_err(|e| strata_core::StrataError::storage(format!("WAL read failed: {}", e)))?;
 
-        for record in records_iter {
+        for record_result in records_iter {
+            let record = record_result.map_err(|e| {
+                strata_core::StrataError::storage(format!("WAL segment read failed: {}", e))
+            })?;
             max_txn_id = max_txn_id.max(record.txn_id);
 
             let payload = TransactionPayload::from_bytes(&record.writeset).map_err(|e| {

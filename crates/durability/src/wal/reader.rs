@@ -448,15 +448,15 @@ pub struct WalRecordIterator {
 }
 
 impl Iterator for WalRecordIterator {
-    type Item = WalRecord;
+    type Item = Result<WalRecord, WalReaderError>;
 
-    fn next(&mut self) -> Option<WalRecord> {
+    fn next(&mut self) -> Option<Result<WalRecord, WalReaderError>> {
         loop {
             // Yield from current segment's records
             if self.current_record_idx < self.current_records.len() {
                 let idx = self.current_record_idx;
                 self.current_record_idx += 1;
-                return Some(self.current_records[idx].clone());
+                return Some(Ok(self.current_records[idx].clone()));
             }
 
             // Free the previous segment's records before loading the next
@@ -479,16 +479,7 @@ impl Iterator for WalRecordIterator {
                     self.current_record_idx = 0;
                 }
                 Err(e) => {
-                    // Skip corrupt/unreadable segments during recovery.
-                    // Log a warning so silent data loss is observable.
-                    tracing::warn!(
-                        target: "strata::recovery",
-                        segment = seg_num,
-                        error = %e,
-                        "Skipping unreadable WAL segment during streaming recovery"
-                    );
-                    self.current_records.clear();
-                    self.current_record_idx = 0;
+                    return Some(Err(e));
                 }
             }
         }
@@ -1363,7 +1354,11 @@ mod tests {
         let read_all_records = read_all_result.records;
 
         // Collect via iter_all
-        let iter_all_records: Vec<WalRecord> = reader.iter_all(&wal_dir).unwrap().collect();
+        let iter_all_records: Vec<WalRecord> = reader
+            .iter_all(&wal_dir)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
 
         // Must produce identical records in the same order
         assert_eq!(read_all_records.len(), iter_all_records.len());
@@ -1385,7 +1380,11 @@ mod tests {
         WalSegment::create(&wal_dir, 1, [1u8; 16]).unwrap();
 
         let reader = WalReader::new();
-        let iter_records: Vec<WalRecord> = reader.iter_all(&wal_dir).unwrap().collect();
+        let iter_records: Vec<WalRecord> = reader
+            .iter_all(&wal_dir)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
         assert!(iter_records.is_empty());
     }
 
@@ -1421,7 +1420,11 @@ mod tests {
 
         // Verify iter_all matches read_all across multiple segments
         let read_all_records = reader.read_all(&wal_dir).unwrap().records;
-        let iter_all_records: Vec<WalRecord> = reader.iter_all(&wal_dir).unwrap().collect();
+        let iter_all_records: Vec<WalRecord> = reader
+            .iter_all(&wal_dir)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
 
         assert_eq!(read_all_records.len(), iter_all_records.len());
         for (a, b) in read_all_records.iter().zip(iter_all_records.iter()) {
@@ -1451,8 +1454,14 @@ mod tests {
 
         let reader = WalReader::new();
 
-        // iter_all should still yield the 3 valid records
-        let iter_records: Vec<WalRecord> = reader.iter_all(&wal_dir).unwrap().collect();
+        // iter_all should still yield the 3 valid records (partial record
+        // at end of a valid segment is not an error — read_segment stops
+        // at the first invalid record and returns what it could parse).
+        let iter_records: Vec<WalRecord> = reader
+            .iter_all(&wal_dir)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
         assert_eq!(iter_records.len(), 3);
         for (i, record) in iter_records.iter().enumerate() {
             assert_eq!(record.txn_id, (i + 1) as u64);
