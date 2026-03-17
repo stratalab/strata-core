@@ -1,0 +1,274 @@
+//! Binary manifest for level persistence.
+//!
+//! Format:
+//! ```text
+//! "STRAMFST" (8B magic) | u16 version | 6B reserved | u32 entry_count
+//! For each entry: u16 filename_len | filename bytes | u8 level
+//! u32 CRC32 (over everything before CRC)
+//! ```
+
+use std::io;
+use std::path::Path;
+
+/// Magic bytes for segment manifest: "STRAMFST"
+const MANIFEST_MAGIC: [u8; 8] = *b"STRAMFST";
+
+/// Current manifest version.
+const MANIFEST_VERSION: u16 = 1;
+
+/// Fixed header size: 8 (magic) + 2 (version) + 6 (reserved) + 4 (entry_count) = 20
+const HEADER_SIZE: usize = 20;
+
+/// Manifest file name.
+const MANIFEST_FILENAME: &str = "segments.manifest";
+
+/// A single entry in the manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestEntry {
+    /// Filename of the segment (e.g., "42.sst").
+    pub filename: String,
+    /// Level: 0 = L0, 1 = L1.
+    pub level: u8,
+}
+
+/// Parsed segment manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentManifest {
+    /// Entries in the manifest.
+    pub entries: Vec<ManifestEntry>,
+}
+
+/// Write a manifest file to `dir/segments.manifest` atomically (temp + rename).
+pub fn write_manifest(dir: &Path, entries: &[ManifestEntry]) -> io::Result<()> {
+    let mut buf = Vec::with_capacity(HEADER_SIZE + entries.len() * 20 + 4);
+
+    // Header
+    buf.extend_from_slice(&MANIFEST_MAGIC);
+    buf.extend_from_slice(&MANIFEST_VERSION.to_le_bytes());
+    buf.extend_from_slice(&[0u8; 6]); // reserved
+    buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+
+    // Entries
+    for entry in entries {
+        let name_bytes = entry.filename.as_bytes();
+        buf.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+        buf.extend_from_slice(name_bytes);
+        buf.push(entry.level);
+    }
+
+    // CRC32 over everything before CRC
+    let crc = crc32fast::hash(&buf);
+    buf.extend_from_slice(&crc.to_le_bytes());
+
+    // Atomic write: temp file + rename
+    let final_path = dir.join(MANIFEST_FILENAME);
+    let tmp_path = dir.join(format!("{}.tmp", MANIFEST_FILENAME));
+    std::fs::write(&tmp_path, &buf)?;
+    std::fs::rename(&tmp_path, &final_path)?;
+
+    Ok(())
+}
+
+/// Read a manifest file from `dir/segments.manifest`.
+///
+/// Returns `Ok(None)` if the file does not exist.
+/// Returns `Err` if the file exists but is corrupt (bad magic, truncated, bad CRC).
+pub fn read_manifest(dir: &Path) -> io::Result<Option<SegmentManifest>> {
+    let path = dir.join(MANIFEST_FILENAME);
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+
+    if data.len() < HEADER_SIZE + 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "manifest too short",
+        ));
+    }
+
+    // Verify CRC
+    let crc_offset = data.len() - 4;
+    let stored_crc = u32::from_le_bytes(data[crc_offset..].try_into().unwrap());
+    let computed_crc = crc32fast::hash(&data[..crc_offset]);
+    if stored_crc != computed_crc {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "manifest CRC mismatch",
+        ));
+    }
+
+    // Verify magic
+    if data[..8] != MANIFEST_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "manifest bad magic",
+        ));
+    }
+
+    // Parse header
+    let _version = u16::from_le_bytes(data[8..10].try_into().unwrap());
+    // skip 6 reserved bytes
+    let entry_count = u32::from_le_bytes(data[16..20].try_into().unwrap()) as usize;
+
+    // Sanity check: each entry is at least 3 bytes (u16 name_len + u8 level).
+    let max_possible = (crc_offset - HEADER_SIZE) / 3;
+    if entry_count > max_possible {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "manifest entry_count exceeds file capacity",
+        ));
+    }
+
+    // Parse entries
+    let mut pos = HEADER_SIZE;
+    let mut entries = Vec::with_capacity(entry_count);
+    for _ in 0..entry_count {
+        if pos + 2 > crc_offset {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "manifest truncated (filename_len)",
+            ));
+        }
+        let name_len = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
+        pos += 2;
+
+        if pos + name_len + 1 > crc_offset {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "manifest truncated (entry data)",
+            ));
+        }
+        let filename = String::from_utf8(data[pos..pos + name_len].to_vec()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "manifest non-UTF8 filename")
+        })?;
+        pos += name_len;
+
+        let level = data[pos];
+        pos += 1;
+
+        entries.push(ManifestEntry { filename, level });
+    }
+
+    Ok(Some(SegmentManifest { entries }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries = vec![
+            ManifestEntry {
+                filename: "1.sst".into(),
+                level: 0,
+            },
+            ManifestEntry {
+                filename: "2.sst".into(),
+                level: 1,
+            },
+            ManifestEntry {
+                filename: "42.sst".into(),
+                level: 1,
+            },
+        ];
+
+        write_manifest(dir.path(), &entries).unwrap();
+        let result = read_manifest(dir.path()).unwrap().unwrap();
+        assert_eq!(result.entries, entries);
+    }
+
+    #[test]
+    fn manifest_missing_file_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = read_manifest(dir.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn manifest_corrupt_magic() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries = vec![ManifestEntry {
+            filename: "1.sst".into(),
+            level: 0,
+        }];
+        write_manifest(dir.path(), &entries).unwrap();
+
+        // Corrupt the magic
+        let path = dir.path().join(MANIFEST_FILENAME);
+        let mut data = std::fs::read(&path).unwrap();
+        data[0] = b'X';
+        // Also fix CRC so we hit magic check, not CRC check
+        let crc = crc32fast::hash(&data[..data.len() - 4]);
+        let crc_offset = data.len() - 4;
+        data[crc_offset..].copy_from_slice(&crc.to_le_bytes());
+        std::fs::write(&path, &data).unwrap();
+
+        let result = read_manifest(dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn manifest_corrupt_crc() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries = vec![ManifestEntry {
+            filename: "1.sst".into(),
+            level: 0,
+        }];
+        write_manifest(dir.path(), &entries).unwrap();
+
+        // Corrupt a data byte (CRC won't match)
+        let path = dir.path().join(MANIFEST_FILENAME);
+        let mut data = std::fs::read(&path).unwrap();
+        data[10] ^= 0xFF;
+        std::fs::write(&path, &data).unwrap();
+
+        let result = read_manifest(dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn manifest_empty_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries: Vec<ManifestEntry> = vec![];
+
+        write_manifest(dir.path(), &entries).unwrap();
+        let result = read_manifest(dir.path()).unwrap().unwrap();
+        assert!(result.entries.is_empty());
+    }
+
+    #[test]
+    fn manifest_multiple_levels() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries = vec![
+            ManifestEntry {
+                filename: "10.sst".into(),
+                level: 0,
+            },
+            ManifestEntry {
+                filename: "5.sst".into(),
+                level: 0,
+            },
+            ManifestEntry {
+                filename: "3.sst".into(),
+                level: 1,
+            },
+            ManifestEntry {
+                filename: "1.sst".into(),
+                level: 1,
+            },
+        ];
+
+        write_manifest(dir.path(), &entries).unwrap();
+        let result = read_manifest(dir.path()).unwrap().unwrap();
+        assert_eq!(result.entries, entries);
+
+        let l0_count = result.entries.iter().filter(|e| e.level == 0).count();
+        let l1_count = result.entries.iter().filter(|e| e.level == 1).count();
+        assert_eq!(l0_count, 2);
+        assert_eq!(l1_count, 2);
+    }
+}

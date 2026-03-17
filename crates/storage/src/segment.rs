@@ -66,7 +66,6 @@ pub struct KVSegment {
     footer: Footer,
     index: Vec<IndexEntry>,
     bloom: BloomFilter,
-    #[allow(dead_code)] // used by future compaction/GC
     props: PropertiesBlock,
     /// Path to the .sst file (for cleanup after compaction).
     file_path: std::path::PathBuf,
@@ -293,6 +292,14 @@ impl KVSegment {
     /// Total entry count (all versions).
     pub fn entry_count(&self) -> u64 {
         self.header.entry_count
+    }
+
+    /// Key range of this segment: `(key_min, key_max)` from the properties block.
+    ///
+    /// These are full `InternalKey` bytes (typed_key_prefix + commit_id).
+    /// Returns `(&[], &[])` for empty segments.
+    pub fn key_range(&self) -> (&[u8], &[u8]) {
+        (&self.props.key_min, &self.props.key_max)
     }
 
     /// File size in bytes.
@@ -1180,5 +1187,58 @@ mod tests {
             "compressed segment should be much smaller than raw data; got {} bytes",
             seg.file_size(),
         );
+    }
+
+    // ===== key_range tests =====
+
+    #[test]
+    fn key_range_single_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kr.sst");
+
+        let mt = Memtable::new(0);
+        mt.put(&kv_key("only"), 1, Value::Int(1), false);
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        let (min, max) = seg.key_range();
+        assert_eq!(min, max, "single entry should have min == max");
+        assert!(!min.is_empty());
+    }
+
+    #[test]
+    fn key_range_multiple_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kr_multi.sst");
+
+        let mt = Memtable::new(0);
+        mt.put(&kv_key("aaa"), 1, Value::Int(1), false);
+        mt.put(&kv_key("zzz"), 2, Value::Int(2), false);
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        let (min, max) = seg.key_range();
+        assert!(
+            min < max,
+            "min should be less than max for multiple entries"
+        );
+        assert!(!min.is_empty());
+        assert!(!max.is_empty());
+    }
+
+    #[test]
+    fn key_range_empty_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kr_empty.sst");
+
+        let builder = SegmentBuilder::default();
+        builder.build_from_iter(std::iter::empty(), &path).unwrap();
+
+        let seg = KVSegment::open(&path).unwrap();
+        let (min, max) = seg.key_range();
+        assert!(min.is_empty());
+        assert!(max.is_empty());
     }
 }
