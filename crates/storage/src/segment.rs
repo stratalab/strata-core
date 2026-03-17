@@ -123,22 +123,21 @@ impl KVSegment {
         })?;
 
         // Helper: validate block offset + length fits within the file.
-        let check_block_bounds =
-            |offset: u64, len: u32, name: &str| -> io::Result<(u64, usize)> {
-                let end = offset.checked_add(len as u64).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("{} offset+len overflows", name),
-                    )
-                })?;
-                if end > file_size {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("{} extends past end of file", name),
-                    ));
-                }
-                Ok((offset, len as usize))
-            };
+        let check_block_bounds = |offset: u64, len: u32, name: &str| -> io::Result<(u64, usize)> {
+            let end = offset.checked_add(len as u64).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{} offset+len overflows", name),
+                )
+            })?;
+            if end > file_size {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{} extends past end of file", name),
+                ));
+            }
+            Ok((offset, len as usize))
+        };
 
         // Parse index block via pread
         let (idx_off, idx_len) = check_block_bounds(

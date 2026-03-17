@@ -3951,7 +3951,12 @@ mod tests {
 
         // Write enough data to trigger rotation, then flush.
         for i in 0..10 {
-            seed(&store, kv_key(&format!("k{i}")), Value::Int(i as i64), (i + 1) as u64);
+            seed(
+                &store,
+                kv_key(&format!("k{i}")),
+                Value::Int(i as i64),
+                (i + 1) as u64,
+            );
         }
         store.rotate_memtable(&bid);
         store.flush_oldest_frozen(&bid).unwrap();
@@ -3961,7 +3966,12 @@ mod tests {
 
         // Flush a second segment.
         for i in 10..20 {
-            seed(&store, kv_key(&format!("k{i}")), Value::Int(i as i64), (i + 1) as u64);
+            seed(
+                &store,
+                kv_key(&format!("k{i}")),
+                Value::Int(i as i64),
+                (i + 1) as u64,
+            );
         }
         store.rotate_memtable(&bid);
         store.flush_oldest_frozen(&bid).unwrap();
