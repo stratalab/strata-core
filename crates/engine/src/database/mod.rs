@@ -614,6 +614,17 @@ impl Database {
             cfg.storage.max_write_buffer_entries,
         );
 
+        // Configure block cache capacity before any segment reads
+        {
+            use strata_storage::block_cache;
+            let cache_bytes = if cfg.storage.block_cache_size > 0 {
+                cfg.storage.block_cache_size
+            } else {
+                block_cache::auto_detect_capacity()
+            };
+            block_cache::set_global_capacity(cache_bytes);
+        }
+
         // Apply storage resource limits from config
         let storage = Arc::new(result.storage);
         storage.set_max_branches(cfg.storage.max_branches);

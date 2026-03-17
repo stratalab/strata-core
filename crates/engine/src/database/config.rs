@@ -67,6 +67,10 @@ pub struct StorageConfig {
     /// versions exceeding this limit. Explicit KeepLast(n) overrides.
     #[serde(default)]
     pub max_versions_per_key: usize,
+    /// Block cache size in bytes. Caches decompressed segment data blocks.
+    /// Default: 0 (auto-detect from available RAM: max(256 MiB, available / 4)).
+    #[serde(default)]
+    pub block_cache_size: usize,
     /// Memtable write buffer size in bytes. When a branch's active memtable
     /// exceeds this threshold, it is frozen and a new active memtable is swapped in.
     /// Default: 128 MiB. Set to 0 to disable automatic rotation.
@@ -100,6 +104,7 @@ impl Default for StorageConfig {
             max_branches: default_max_branches(),
             max_write_buffer_entries: default_max_write_buffer_entries(),
             max_versions_per_key: 0,
+            block_cache_size: 0,
             write_buffer_size: default_write_buffer_size(),
             max_immutable_memtables: default_max_immutable_memtables(),
         }
@@ -292,6 +297,7 @@ auto_embed = false
 # max_branches = 1024
 # max_write_buffer_entries = 500000
 # max_versions_per_key = 0    # 0 = unlimited; set to e.g. 100 to cap MVCC history
+# block_cache_size = 0          # 0 = auto (max(256 MiB, available_ram / 4))
 # write_buffer_size = 134217728  # 128 MiB; memtable rotation threshold
 # max_immutable_memtables = 4   # max frozen memtables per branch before write stalling
 "#
