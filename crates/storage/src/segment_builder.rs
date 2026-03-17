@@ -1114,4 +1114,227 @@ mod tests {
         let all: Vec<_> = seg.iter_seek_all().collect();
         assert_eq!(all.len(), 500);
     }
+
+    // ===== SplittingSegmentBuilder tests =====
+
+    #[test]
+    fn splitting_builder_single_file_if_small() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mt = Memtable::new(0);
+        for i in 0..10u32 {
+            mt.put(
+                &key(&format!("k{:04}", i)),
+                i as u64 + 1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+
+        let builder = SplittingSegmentBuilder::new(64 * 1024 * 1024); // 64MB
+        let outputs = builder
+            .build_split(mt.iter_all(), |idx| dir.path().join(format!("{}.sst", idx)))
+            .unwrap();
+
+        assert_eq!(outputs.len(), 1, "small input should produce 1 file");
+        assert_eq!(outputs[0].1.entry_count, 10);
+
+        let seg = crate::segment::KVSegment::open(&outputs[0].0).unwrap();
+        assert_eq!(seg.entry_count(), 10);
+    }
+
+    #[test]
+    fn splitting_builder_respects_target_size() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create enough data to exceed a tiny target
+        let mt = Memtable::new(0);
+        for i in 0..1000u32 {
+            mt.put(
+                &key(&format!("k{:06}", i)),
+                i as u64 + 1,
+                Value::String("x".repeat(500)),
+                false,
+            );
+        }
+        mt.freeze();
+
+        // 10KB target — should produce many files
+        let builder = SplittingSegmentBuilder::new(10 * 1024);
+        let outputs = builder
+            .build_split(mt.iter_all(), |idx| dir.path().join(format!("{}.sst", idx)))
+            .unwrap();
+
+        assert!(
+            outputs.len() > 1,
+            "should produce multiple files with 10KB target, got {}",
+            outputs.len()
+        );
+
+        // Total entries across all files should match input
+        let total_entries: u64 = outputs.iter().map(|(_, m)| m.entry_count).sum();
+        assert_eq!(total_entries, 1000);
+
+        // Each file should be openable and readable
+        for (path, meta) in &outputs {
+            let seg = crate::segment::KVSegment::open(path).unwrap();
+            assert_eq!(seg.entry_count(), meta.entry_count);
+        }
+    }
+
+    #[test]
+    fn splitting_builder_splits_at_key_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create entries with multiple versions per key
+        let mt = Memtable::new(0);
+        for i in 0..100u32 {
+            let k = key(&format!("k{:04}", i));
+            mt.put(&k, i as u64 * 2 + 1, Value::Int(1), false);
+            mt.put(&k, i as u64 * 2 + 2, Value::Int(2), false);
+        }
+        mt.freeze();
+
+        // Tiny target to force many splits
+        let builder = SplittingSegmentBuilder::new(1024);
+        let outputs = builder
+            .build_split(mt.iter_all(), |idx| dir.path().join(format!("{}.sst", idx)))
+            .unwrap();
+
+        assert!(outputs.len() > 1);
+
+        // Verify no key is split across files: each file's max key_prefix
+        // should differ from the next file's min key_prefix
+        for i in 1..outputs.len() {
+            let prev_seg = crate::segment::KVSegment::open(&outputs[i - 1].0).unwrap();
+            let curr_seg = crate::segment::KVSegment::open(&outputs[i].0).unwrap();
+            let (_, prev_max) = prev_seg.key_range();
+            let (curr_min, _) = curr_seg.key_range();
+            // Strip commit_id to compare typed_key_prefix
+            if prev_max.len() >= 8 && curr_min.len() >= 8 {
+                let prev_prefix = &prev_max[..prev_max.len() - 8];
+                let curr_prefix = &curr_min[..curr_min.len() - 8];
+                assert!(
+                    prev_prefix < curr_prefix,
+                    "keys should not span file boundaries"
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SplittingSegmentBuilder — splits output at target file size
+// ---------------------------------------------------------------------------
+
+/// Builds multiple segment files, splitting at `target_file_size` boundaries.
+///
+/// Wraps `SegmentBuilder` and automatically finalizes the current segment
+/// and starts a new one when the output exceeds the target size. Splits
+/// only at key boundaries (never between versions of the same logical key).
+pub struct SplittingSegmentBuilder {
+    /// Underlying builder configuration.
+    inner: SegmentBuilder,
+    /// Target file size in bytes (default 64MB).
+    pub target_file_size: u64,
+}
+
+impl SplittingSegmentBuilder {
+    /// Create a new splitting builder with the given target file size.
+    pub fn new(target_file_size: u64) -> Self {
+        Self {
+            inner: SegmentBuilder::default(),
+            target_file_size,
+        }
+    }
+
+    /// Build one or more segment files from a sorted iterator.
+    ///
+    /// Returns `(path, metadata)` for each output segment. The `path_fn`
+    /// closure is called with a split index (0, 1, 2, ...) to generate
+    /// the path for each output segment.
+    ///
+    /// Split points are chosen at logical key boundaries — all versions
+    /// of a given key stay in the same segment.
+    pub fn build_split<I, F>(
+        &self,
+        iter: I,
+        path_fn: F,
+    ) -> io::Result<Vec<(std::path::PathBuf, SegmentMeta)>>
+    where
+        I: Iterator<Item = (InternalKey, MemtableEntry)>,
+        F: Fn(usize) -> std::path::PathBuf,
+    {
+        let mut results: Vec<(std::path::PathBuf, SegmentMeta)> = Vec::new();
+        let mut split_idx: usize = 0;
+
+        // Buffer entries for the current segment
+        let mut current_entries: Vec<(InternalKey, MemtableEntry)> = Vec::new();
+        let mut current_bytes: u64 = 0;
+        let mut last_typed_key: Option<Vec<u8>> = None;
+
+        for (ik, entry) in iter {
+            let typed_key = ik.typed_key_prefix().to_vec();
+
+            // At a key boundary (new logical key), check if we should split
+            if last_typed_key.as_ref() != Some(&typed_key)
+                && current_bytes >= self.target_file_size
+                && !current_entries.is_empty()
+            {
+                let path = path_fn(split_idx);
+                let meta = self
+                    .inner
+                    .build_from_iter(current_entries.drain(..), &path)?;
+                if meta.entry_count > 0 {
+                    results.push((path, meta));
+                    split_idx += 1;
+                }
+                current_bytes = 0;
+            }
+
+            last_typed_key = Some(typed_key);
+
+            // Estimate entry size: ik + 25 bytes header + value
+            let entry_size = ik.as_bytes().len() as u64 + 25 + estimate_value_size(&entry);
+            current_bytes += entry_size;
+            current_entries.push((ik, entry));
+        }
+
+        // Flush remaining entries
+        if !current_entries.is_empty() {
+            let path = path_fn(split_idx);
+            let meta = self
+                .inner
+                .build_from_iter(current_entries.drain(..), &path)?;
+            if meta.entry_count > 0 {
+                results.push((path, meta));
+            }
+        }
+
+        Ok(results)
+    }
+}
+
+impl Default for SplittingSegmentBuilder {
+    fn default() -> Self {
+        Self::new(64 * 1024 * 1024) // 64MB
+    }
+}
+
+/// Estimate serialized value size without actually serializing.
+fn estimate_value_size(entry: &MemtableEntry) -> u64 {
+    if entry.is_tombstone {
+        0
+    } else {
+        match &entry.value {
+            strata_core::value::Value::Null => 1,
+            strata_core::value::Value::Bool(_) => 2,
+            strata_core::value::Value::Int(_) => 9,
+            strata_core::value::Value::Float(_) => 9,
+            strata_core::value::Value::String(s) => 8 + s.len() as u64,
+            strata_core::value::Value::Bytes(b) => 8 + b.len() as u64,
+            _ => 64, // arrays, objects — rough estimate
+        }
+    }
 }

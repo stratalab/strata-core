@@ -34,7 +34,7 @@ pub use compaction::{CompactionIterator, CompactionScheduler, TierMergeCandidate
 pub use index::{BranchIndex, TypeIndex};
 pub use memory_stats::{BranchMemoryStats, StorageMemoryStats};
 pub use pressure::{MemoryPressure, PressureLevel};
-pub use segment::KVSegment;
-pub use segment_builder::{SegmentBuilder, SegmentMeta};
+pub use segment::{KVSegment, OwnedSegmentIter};
+pub use segment_builder::{SegmentBuilder, SegmentMeta, SplittingSegmentBuilder};
 pub use segmented::{CompactionResult, SegmentedStore};
 pub use ttl::TTLIndex;

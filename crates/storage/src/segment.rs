@@ -523,6 +523,96 @@ impl<'a> Iterator for SegmentIter<'a> {
 }
 
 // ---------------------------------------------------------------------------
+// OwnedSegmentIter — streaming iterator with Arc ownership
+// ---------------------------------------------------------------------------
+
+/// Streaming iterator that owns its segment via `Arc`.
+///
+/// Unlike `SegmentIter` (which borrows `&KVSegment`), this can be passed
+/// to `MergeIterator` without materializing all entries via `.collect()`.
+/// This reduces compaction memory from O(total entries) to O(block size).
+pub struct OwnedSegmentIter {
+    segment: Arc<KVSegment>,
+    block_idx: usize,
+    block_offset: usize,
+    block_data: Option<Arc<Vec<u8>>>,
+    done: bool,
+}
+
+impl OwnedSegmentIter {
+    /// Create a streaming iterator over all entries in the segment.
+    pub fn new(segment: Arc<KVSegment>) -> Self {
+        let done = segment.index.is_empty();
+        Self {
+            segment,
+            block_idx: 0,
+            block_offset: 0,
+            block_data: None,
+            done,
+        }
+    }
+}
+
+impl Iterator for OwnedSegmentIter {
+    type Item = (InternalKey, SegmentEntry);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.done {
+                return None;
+            }
+
+            if self.block_data.is_none() {
+                if self.block_idx >= self.segment.index.len() {
+                    self.done = true;
+                    return None;
+                }
+                let ie = &self.segment.index[self.block_idx];
+                match self.segment.read_data_block(ie) {
+                    Some(data) => {
+                        self.block_data = Some(data);
+                        self.block_offset = 0;
+                    }
+                    None => {
+                        self.done = true;
+                        return None;
+                    }
+                }
+            }
+
+            let data = self.block_data.as_ref().unwrap();
+
+            if self.block_offset >= data.len() {
+                self.block_data = None;
+                self.block_idx += 1;
+                continue;
+            }
+
+            match decode_entry(&data[self.block_offset..]) {
+                Some((ik, is_tomb, value, timestamp, ttl_ms, consumed)) => {
+                    self.block_offset += consumed;
+                    let commit_id = ik.commit_id();
+                    return Some((
+                        ik,
+                        SegmentEntry {
+                            value,
+                            is_tombstone: is_tomb,
+                            commit_id,
+                            timestamp,
+                            ttl_ms,
+                        },
+                    ));
+                }
+                None => {
+                    self.done = true;
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1240,5 +1330,53 @@ mod tests {
         let (min, max) = seg.key_range();
         assert!(min.is_empty());
         assert!(max.is_empty());
+    }
+
+    // ===== OwnedSegmentIter tests =====
+
+    #[test]
+    fn owned_iter_matches_borrowed_iter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owned.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..100u32 {
+            mt.put(
+                &kv_key(&format!("key_{:04}", i)),
+                i as u64 + 1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        let seg = Arc::new(KVSegment::open(&path).unwrap());
+
+        // Collect from borrowed iter
+        let borrowed: Vec<_> = seg.iter_seek_all().collect();
+
+        // Collect from owned iter
+        let owned: Vec<_> = super::OwnedSegmentIter::new(Arc::clone(&seg)).collect();
+
+        assert_eq!(borrowed.len(), owned.len());
+        for (b, o) in borrowed.iter().zip(owned.iter()) {
+            assert_eq!(b.0.as_bytes(), o.0.as_bytes());
+            assert_eq!(b.1.commit_id, o.1.commit_id);
+            assert_eq!(b.1.value, o.1.value);
+        }
+    }
+
+    #[test]
+    fn owned_iter_empty_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owned_empty.sst");
+
+        let builder = SegmentBuilder::default();
+        builder.build_from_iter(std::iter::empty(), &path).unwrap();
+
+        let seg = Arc::new(KVSegment::open(&path).unwrap());
+        let entries: Vec<_> = super::OwnedSegmentIter::new(seg).collect();
+        assert!(entries.is_empty());
     }
 }
