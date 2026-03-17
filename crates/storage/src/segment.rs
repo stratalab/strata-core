@@ -1,4 +1,4 @@
-//! KV segment reader — opens mmap'd segment files for queries.
+//! KV segment reader — opens segment files for queries via pread + block cache.
 //!
 //! A `KVSegment` is an immutable sorted file produced by [`SegmentBuilder`].
 //! It supports:
@@ -6,6 +6,13 @@
 //! - **Point lookups** via bloom filter + index block binary search + block scan
 //! - **Prefix scans** via ordered iteration from a seek position
 //! - **MVCC filtering** via per-entry commit_id
+//!
+//! ## I/O model
+//!
+//! Segment metadata (header, footer, index, bloom, properties) is loaded into
+//! memory at open time via `pread`. Data blocks are read on demand via `pread`
+//! and cached in the global [`BlockCache`](crate::block_cache). This avoids
+//! mmap page-fault overhead and OS double-caching.
 //!
 //! [`SegmentBuilder`]: crate::segment_builder::SegmentBuilder
 
@@ -19,8 +26,8 @@ use crate::segment_builder::{
 use strata_core::types::Key;
 use strata_core::value::Value;
 
-use memmap2::Mmap;
 use std::io;
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -47,12 +54,13 @@ pub struct SegmentEntry {
 // KVSegment
 // ---------------------------------------------------------------------------
 
-/// An immutable, mmap'd KV segment file.
+/// An immutable KV segment file backed by pread + block cache.
 ///
 /// Opened via [`KVSegment::open`], provides point lookups and prefix iteration
 /// with MVCC snapshot filtering.
 pub struct KVSegment {
-    mmap: Mmap,
+    /// Open file handle for pread I/O.
+    file: std::fs::File,
     header: KVHeader,
     #[allow(dead_code)] // used by future compaction/GC
     footer: Footer,
@@ -64,37 +72,47 @@ pub struct KVSegment {
     file_path: std::path::PathBuf,
     /// Hash of file_path for block cache keying.
     file_id: u64,
+    /// File size in bytes.
+    file_size: u64,
+}
+
+/// Read exactly `len` bytes at `offset` from a file via pread.
+fn pread_exact(file: &std::fs::File, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; len];
+    file.read_exact_at(&mut buf, offset)?;
+    Ok(buf)
 }
 
 impl KVSegment {
     /// Open and parse a KV segment file.
     ///
-    /// Validates header magic, footer magic, and block checksums on the
-    /// metadata blocks (index, bloom, properties). Data block CRCs are
-    /// checked lazily on access.
+    /// Reads metadata (header, footer, index, bloom, properties) into memory
+    /// via pread at open time. Data blocks are read on demand.
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = std::fs::File::open(path)?;
-        // SAFETY: The file is immutable after creation. We hold no mutable
-        // references. The mmap lifetime is tied to this struct.
-        let mmap = unsafe { Mmap::map(&file)? };
+        let file_size = file.metadata()?.len();
 
-        if mmap.len() < HEADER_SIZE + FOOTER_SZ {
+        if file_size < (HEADER_SIZE + FOOTER_SZ) as u64 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "segment file too small",
             ));
         }
 
-        // Parse header
-        let header_bytes: &[u8; HEADER_SIZE] = mmap[..HEADER_SIZE]
+        // Parse header via pread
+        let header_buf = pread_exact(&file, 0, HEADER_SIZE)?;
+        let header_bytes: &[u8; HEADER_SIZE] = header_buf
+            .as_slice()
             .try_into()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "header size mismatch"))?;
         let header = parse_header(header_bytes)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid segment header"))?;
 
-        // Parse footer
-        let footer_start = mmap.len() - FOOTER_SZ;
-        let footer_bytes: &[u8; FOOTER_SZ] = mmap[footer_start..]
+        // Parse footer via pread (last FOOTER_SZ bytes)
+        let footer_offset = file_size - FOOTER_SZ as u64;
+        let footer_buf = pread_exact(&file, footer_offset, FOOTER_SZ)?;
+        let footer_bytes: &[u8; FOOTER_SZ] = footer_buf
+            .as_slice()
             .try_into()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "footer size mismatch"))?;
         let footer = parse_footer(footer_bytes).ok_or_else(|| {
@@ -104,60 +122,60 @@ impl KVSegment {
             )
         })?;
 
-        // Helper: validate block offset + length fits within the mmap.
+        // Helper: validate block offset + length fits within the file.
         let check_block_bounds =
-            |offset: u64, len: u32, name: &str| -> io::Result<(usize, usize)> {
-                let start = offset as usize;
-                let end = start.checked_add(len as usize).ok_or_else(|| {
+            |offset: u64, len: u32, name: &str| -> io::Result<(u64, usize)> {
+                let end = offset.checked_add(len as u64).ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("{} offset+len overflows", name),
                     )
                 })?;
-                if end > mmap.len() {
+                if end > file_size {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("{} extends past end of file", name),
                     ));
                 }
-                Ok((start, end))
+                Ok((offset, len as usize))
             };
 
-        // Parse index block
-        let (idx_start, idx_end) = check_block_bounds(
+        // Parse index block via pread
+        let (idx_off, idx_len) = check_block_bounds(
             footer.index_block_offset,
             footer.index_block_len,
             "index block",
         )?;
-        let (_, idx_data) = parse_framed_block(&mmap[idx_start..idx_end]).ok_or_else(|| {
+        let idx_buf = pread_exact(&file, idx_off, idx_len)?;
+        let (_, idx_data) = parse_framed_block(&idx_buf).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "index block CRC mismatch")
         })?;
         let index = parse_index_block(idx_data)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed index block"))?;
 
-        // Parse bloom filter block
-        let (bloom_start, bloom_end) = check_block_bounds(
+        // Parse bloom filter block via pread
+        let (bloom_off, bloom_len) = check_block_bounds(
             footer.filter_block_offset,
             footer.filter_block_len,
             "bloom block",
         )?;
-        let (_, bloom_data) =
-            parse_framed_block(&mmap[bloom_start..bloom_end]).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "bloom block CRC mismatch")
-            })?;
+        let bloom_buf = pread_exact(&file, bloom_off, bloom_len)?;
+        let (_, bloom_data) = parse_framed_block(&bloom_buf).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "bloom block CRC mismatch")
+        })?;
         let bloom = BloomFilter::from_bytes(bloom_data)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed bloom filter"))?;
 
-        // Parse properties block
-        let (props_start, props_end) = check_block_bounds(
+        // Parse properties block via pread
+        let (props_off, props_len) = check_block_bounds(
             footer.props_block_offset,
             footer.props_block_len,
             "properties block",
         )?;
-        let (_, props_data) =
-            parse_framed_block(&mmap[props_start..props_end]).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "properties block CRC mismatch")
-            })?;
+        let props_buf = pread_exact(&file, props_off, props_len)?;
+        let (_, props_data) = parse_framed_block(&props_buf).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "properties block CRC mismatch")
+        })?;
         let props = parse_properties_block(props_data).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "malformed properties block")
         })?;
@@ -165,7 +183,7 @@ impl KVSegment {
         let file_path = path.to_path_buf();
         let file_id = crate::block_cache::file_path_hash(&file_path);
         Ok(Self {
-            mmap,
+            file,
             header,
             footer,
             index,
@@ -173,6 +191,7 @@ impl KVSegment {
             props,
             file_path,
             file_id,
+            file_size,
         })
     }
 
@@ -277,9 +296,9 @@ impl KVSegment {
         self.header.entry_count
     }
 
-    /// File size in bytes (from the underlying mmap).
+    /// File size in bytes.
     pub fn file_size(&self) -> u64 {
-        self.mmap.len() as u64
+        self.file_size
     }
 
     /// File identity hash (for block cache keying and invalidation).
@@ -299,7 +318,7 @@ impl KVSegment {
     /// Read and verify a data block, checking the global block cache first.
     ///
     /// On cache hit, returns the cached decompressed block (zero decompression cost).
-    /// On cache miss, reads from mmap, decompresses if needed, caches, and returns.
+    /// On cache miss, reads from file via pread, decompresses if needed, caches, and returns.
     fn read_data_block(&self, ie: &IndexEntry) -> Option<Arc<Vec<u8>>> {
         let cache = crate::block_cache::global_cache();
         let block_offset = ie.block_offset;
@@ -309,17 +328,24 @@ impl KVSegment {
             return Some(cached);
         }
 
-        // Cache miss: read from mmap and decompress
-        let start = block_offset as usize;
+        // Cache miss: pread from file and decompress
         let framed_len = FRAME_OVERHEAD + ie.block_data_len as usize;
-        let end = start + framed_len;
-        if end > self.mmap.len() {
-            return None;
-        }
+        let raw = match pread_exact(&self.file, block_offset, framed_len) {
+            Ok(buf) => buf,
+            Err(e) => {
+                tracing::warn!(
+                    path = %self.file_path.display(),
+                    offset = block_offset,
+                    len = framed_len,
+                    error = %e,
+                    "pread failed reading data block"
+                );
+                return None;
+            }
+        };
 
-        let raw = &self.mmap[start..end];
         let codec_byte = raw[1];
-        let (_, data) = parse_framed_block(raw)?;
+        let (_, data) = parse_framed_block(&raw)?;
 
         let decompressed = match codec_byte {
             0 => data.to_vec(),                // Uncompressed
