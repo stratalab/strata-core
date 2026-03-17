@@ -22,6 +22,7 @@ use strata_core::value::Value;
 use memmap2::Mmap;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // SegmentEntry — what queries return
@@ -61,6 +62,8 @@ pub struct KVSegment {
     props: PropertiesBlock,
     /// Path to the .sst file (for cleanup after compaction).
     file_path: std::path::PathBuf,
+    /// Hash of file_path for block cache keying.
+    file_id: u64,
 }
 
 impl KVSegment {
@@ -159,6 +162,8 @@ impl KVSegment {
             io::Error::new(io::ErrorKind::InvalidData, "malformed properties block")
         })?;
 
+        let file_path = path.to_path_buf();
+        let file_id = crate::block_cache::file_path_hash(&file_path);
         Ok(Self {
             mmap,
             header,
@@ -166,7 +171,8 @@ impl KVSegment {
             index,
             bloom,
             props,
-            file_path: path.to_path_buf(),
+            file_path,
+            file_id,
         })
     }
 
@@ -276,6 +282,11 @@ impl KVSegment {
         self.mmap.len() as u64
     }
 
+    /// File identity hash (for block cache keying and invalidation).
+    pub fn file_id(&self) -> u64 {
+        self.file_id
+    }
+
     /// Path to the .sst file on disk.
     pub fn file_path(&self) -> &std::path::Path {
         &self.file_path
@@ -285,14 +296,21 @@ impl KVSegment {
     // Internal helpers
     // -----------------------------------------------------------------------
 
-    /// Read and verify a data block from the mmap, returning its payload.
+    /// Read and verify a data block, checking the global block cache first.
     ///
-    /// Checks the codec byte in the block frame header:
-    /// - 0 = uncompressed (return data as-is)
-    /// - 1 = zstd compressed (decompress before returning)
-    /// - other = unknown codec (return None)
-    fn read_data_block(&self, ie: &IndexEntry) -> Option<Vec<u8>> {
-        let start = ie.block_offset as usize;
+    /// On cache hit, returns the cached decompressed block (zero decompression cost).
+    /// On cache miss, reads from mmap, decompresses if needed, caches, and returns.
+    fn read_data_block(&self, ie: &IndexEntry) -> Option<Arc<Vec<u8>>> {
+        let cache = crate::block_cache::global_cache();
+        let block_offset = ie.block_offset;
+
+        // Check cache first
+        if let Some(cached) = cache.get(self.file_id, block_offset) {
+            return Some(cached);
+        }
+
+        // Cache miss: read from mmap and decompress
+        let start = block_offset as usize;
         let framed_len = FRAME_OVERHEAD + ie.block_data_len as usize;
         let end = start + framed_len;
         if end > self.mmap.len() {
@@ -303,11 +321,14 @@ impl KVSegment {
         let codec_byte = raw[1];
         let (_, data) = parse_framed_block(raw)?;
 
-        match codec_byte {
-            0 => Some(data.to_vec()),         // Uncompressed
-            1 => zstd::decode_all(data).ok(), // Zstd
-            _ => None,                        // Unknown codec
-        }
+        let decompressed = match codec_byte {
+            0 => data.to_vec(),                // Uncompressed
+            1 => zstd::decode_all(data).ok()?, // Zstd
+            _ => return None,                  // Unknown codec
+        };
+
+        // Cache the decompressed block
+        Some(cache.insert(self.file_id, block_offset, decompressed))
     }
 
     /// Scan a single data block for the newest version of a typed key at or below snapshot.
@@ -375,7 +396,7 @@ pub struct SegmentIter<'a> {
     prefix_bytes: Vec<u8>,
     block_idx: usize,
     block_offset: usize,
-    block_data: Option<Vec<u8>>,
+    block_data: Option<Arc<Vec<u8>>>,
     done: bool,
 }
 

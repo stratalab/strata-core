@@ -932,8 +932,10 @@ impl SegmentedStore {
             branch.segments.push(Arc::new(new_segment));
         }
 
-        // Delete old segment files that were merged.
+        // Delete old segment files and invalidate their cached blocks.
+        let cache = crate::block_cache::global_cache();
         for seg in &old_segments {
+            cache.invalidate_file(seg.file_id());
             let _ = std::fs::remove_file(seg.file_path());
         }
 
@@ -1054,8 +1056,10 @@ impl SegmentedStore {
             branch.segments.push(Arc::new(new_segment));
         }
 
-        // Delete old segment files that were merged.
+        // Delete old segment files and invalidate their cached blocks.
+        let cache = crate::block_cache::global_cache();
         for seg in &selected_segments {
+            cache.invalidate_file(seg.file_id());
             let _ = std::fs::remove_file(seg.file_path());
         }
 
