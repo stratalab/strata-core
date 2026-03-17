@@ -18,6 +18,7 @@ pub mod bloom;
 pub mod compaction;
 pub mod index;
 pub mod key_encoding;
+pub mod manifest;
 pub mod memory_stats;
 pub mod memtable;
 pub mod merge_iter;

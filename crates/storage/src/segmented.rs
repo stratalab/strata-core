@@ -279,9 +279,18 @@ impl SegmentedStore {
             sources.push(Box::new(entries.into_iter()));
         }
 
-        // Segments (newest first) — convert SegmentEntry to MemtableEntry
+        // L0 segments (newest first) — convert SegmentEntry to MemtableEntry
         let ver = branch.version.load();
         for seg in &ver.l0_segments {
+            let entries: Vec<_> = seg
+                .iter_seek_all()
+                .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
+                .collect();
+            sources.push(Box::new(entries.into_iter()));
+        }
+
+        // L1 segments (sorted by key range)
+        for seg in &ver.l1_segments {
             let entries: Vec<_> = seg
                 .iter_seek_all()
                 .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
@@ -381,6 +390,13 @@ impl SegmentedStore {
                 .collect();
             sources.push(Box::new(entries.into_iter()));
         }
+        for seg in &ver.l1_segments {
+            let entries: Vec<_> = seg
+                .iter_seek_all()
+                .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
+                .collect();
+            sources.push(Box::new(entries.into_iter()));
+        }
 
         let merge = MergeIterator::new(sources);
         let mut results: Vec<(Key, VersionedValue)> = Vec::new();
@@ -465,6 +481,13 @@ impl SegmentedStore {
         }
         let ver = branch.version.load();
         for seg in &ver.l0_segments {
+            let entries: Vec<_> = seg
+                .iter_seek(prefix)
+                .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
+                .collect();
+            sources.push(Box::new(entries.into_iter()));
+        }
+        for seg in &ver.l1_segments {
             let entries: Vec<_> = seg
                 .iter_seek(prefix)
                 .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
@@ -565,6 +588,9 @@ impl SegmentedStore {
         }
         let ver = branch.version.load();
         for seg in &ver.l0_segments {
+            total_versions += seg.entry_count() as usize;
+        }
+        for seg in &ver.l1_segments {
             total_versions += seg.entry_count() as usize;
         }
         Some((entry_count, total_versions, false))
@@ -725,6 +751,10 @@ impl SegmentedStore {
             l1_segments: old_ver.l1_segments.clone(),
         }));
 
+        // Persist level assignments
+        drop(branch);
+        self.write_branch_manifest(branch_id);
+
         Ok(true)
     }
 
@@ -756,13 +786,24 @@ impl SegmentedStore {
             .map_or(0, |b| b.version.load().l0_segments.len())
     }
 
+    /// Number of L1 segments for a branch.
+    pub fn l1_segment_count(&self, branch_id: &BranchId) -> usize {
+        self.branches
+            .get(branch_id)
+            .map_or(0, |b| b.version.load().l1_segments.len())
+    }
+
     /// Return the maximum commit_id across all flushed segments for a branch.
     ///
     /// Returns `None` if the branch has no segments.
     pub fn max_flushed_commit(&self, branch_id: &BranchId) -> Option<u64> {
         let branch = self.branches.get(branch_id)?;
         let ver = branch.version.load();
-        ver.l0_segments.iter().map(|s| s.commit_range().1).max()
+        ver.l0_segments
+            .iter()
+            .chain(ver.l1_segments.iter())
+            .map(|s| s.commit_range().1)
+            .max()
     }
 
     /// Get the segments directory (if any).
@@ -850,8 +891,51 @@ impl SegmentedStore {
                 continue;
             }
 
-            // Sort by commit_max descending (newest first)
-            branch_segments.sort_by(|a, b| b.commit_range().1.cmp(&a.commit_range().1));
+            // Try to read manifest for level assignments
+            let manifest = match crate::manifest::read_manifest(&path) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(
+                        branch = %dir_name,
+                        error = %e,
+                        "corrupt manifest, falling back to all-L0"
+                    );
+                    None
+                }
+            };
+
+            // Partition segments into L0/L1 based on manifest
+            let (mut new_l0, mut new_l1) = if let Some(manifest) = manifest {
+                let mut l0 = Vec::new();
+                let mut l1 = Vec::new();
+                for seg in branch_segments.iter() {
+                    let filename = seg
+                        .file_path()
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("");
+                    let level = manifest
+                        .entries
+                        .iter()
+                        .find(|e| e.filename == filename)
+                        .map(|e| e.level)
+                        .unwrap_or(0); // unknown → L0
+                    if level == 1 {
+                        l1.push(Arc::clone(seg));
+                    } else {
+                        l0.push(Arc::clone(seg));
+                    }
+                }
+                (l0, l1)
+            } else {
+                // No manifest → all segments go to L0 (backward compat)
+                (branch_segments.clone(), Vec::new())
+            };
+
+            // L0: sorted by commit_max descending (newest first)
+            new_l0.sort_by(|a, b| b.commit_range().1.cmp(&a.commit_range().1));
+            // L1: sorted by key_range min ascending
+            new_l1.sort_by(|a, b| a.key_range().0.cmp(b.key_range().0));
 
             let branch = self
                 .branches
@@ -859,15 +943,20 @@ impl SegmentedStore {
                 .or_insert_with(BranchState::new);
 
             info.segments_loaded += branch_segments.len();
-            // Build new version: merge existing L0 segments with recovered ones,
-            // then re-sort by commit_max descending (newest first).
+
+            // Build new version: merge existing segments with recovered ones
             let old_ver = branch.version.load();
-            let mut new_l0 = old_ver.l0_segments.clone();
-            new_l0.extend(branch_segments);
-            new_l0.sort_by(|a, b| b.commit_range().1.cmp(&a.commit_range().1));
+            let mut merged_l0 = old_ver.l0_segments.clone();
+            merged_l0.extend(new_l0);
+            merged_l0.sort_by(|a, b| b.commit_range().1.cmp(&a.commit_range().1));
+
+            let mut merged_l1 = old_ver.l1_segments.clone();
+            merged_l1.extend(new_l1);
+            merged_l1.sort_by(|a, b| a.key_range().0.cmp(b.key_range().0));
+
             branch.version.store(Arc::new(SegmentVersion {
-                l0_segments: new_l0,
-                l1_segments: old_ver.l1_segments.clone(),
+                l0_segments: merged_l0,
+                l1_segments: merged_l1,
             }));
 
             info.branches_recovered += 1;
@@ -1013,6 +1102,9 @@ impl SegmentedStore {
             let _ = std::fs::remove_file(seg.file_path());
         }
 
+        // Persist level assignments
+        self.write_branch_manifest(branch_id);
+
         let entries_pruned = total_input_entries.saturating_sub(meta.entry_count);
 
         Ok(Some(CompactionResult {
@@ -1147,6 +1239,9 @@ impl SegmentedStore {
             let _ = std::fs::remove_file(seg.file_path());
         }
 
+        // Persist level assignments
+        self.write_branch_manifest(branch_id);
+
         let entries_pruned = total_input_entries.saturating_sub(meta.entry_count);
 
         Ok(Some(CompactionResult {
@@ -1155,6 +1250,253 @@ impl SegmentedStore {
             entries_pruned,
             output_file_size: meta.file_size,
         }))
+    }
+
+    /// Compact all L0 segments into L1, merging with overlapping L1 segments.
+    ///
+    /// Returns `Ok(None)` if there is nothing to compact (ephemeral mode,
+    /// branch missing, or L0 is empty). Returns `Ok(Some(result))` with
+    /// compaction statistics on success.
+    ///
+    /// The output L1 is non-overlapping because we merge ALL L0 segments
+    /// plus all overlapping L1 segments into a single output segment.
+    pub fn compact_l0_to_l1(
+        &self,
+        branch_id: &BranchId,
+        prune_floor: u64,
+    ) -> io::Result<Option<CompactionResult>> {
+        let segments_dir = match &self.segments_dir {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+
+        // Snapshot current version.
+        let (l0_segs, l1_segs) = {
+            let branch = match self.branches.get(branch_id) {
+                Some(b) => b,
+                None => return Ok(None),
+            };
+            let ver = branch.version.load_full();
+            if ver.l0_segments.is_empty() {
+                return Ok(None);
+            }
+            let l0: Vec<Arc<KVSegment>> = ver.l0_segments.clone();
+            let l1: Vec<Arc<KVSegment>> = ver.l1_segments.clone();
+            (l0, l1)
+        };
+
+        // Compute overall L0 key range.
+        let mut l0_min: Option<Vec<u8>> = None;
+        let mut l0_max: Option<Vec<u8>> = None;
+        for seg in &l0_segs {
+            let (seg_min, seg_max) = seg.key_range();
+            if seg_min.is_empty() && seg_max.is_empty() {
+                continue; // empty segment
+            }
+            let seg_min_prefix = if seg_min.len() >= 8 {
+                &seg_min[..seg_min.len() - 8]
+            } else {
+                seg_min
+            };
+            let seg_max_prefix = if seg_max.len() >= 8 {
+                &seg_max[..seg_max.len() - 8]
+            } else {
+                seg_max
+            };
+            match &l0_min {
+                None => l0_min = Some(seg_min_prefix.to_vec()),
+                Some(cur) => {
+                    if seg_min_prefix < cur.as_slice() {
+                        l0_min = Some(seg_min_prefix.to_vec());
+                    }
+                }
+            }
+            match &l0_max {
+                None => l0_max = Some(seg_max_prefix.to_vec()),
+                Some(cur) => {
+                    if seg_max_prefix > cur.as_slice() {
+                        l0_max = Some(seg_max_prefix.to_vec());
+                    }
+                }
+            }
+        }
+
+        // Partition L1 into overlapping vs non-overlapping with L0 range.
+        let (overlapping_l1, non_overlapping_l1): (Vec<_>, Vec<_>) =
+            if let (Some(l0_min), Some(l0_max)) = (&l0_min, &l0_max) {
+                l1_segs.iter().cloned().partition(|seg| {
+                    let (seg_min, seg_max) = seg.key_range();
+                    if seg_min.is_empty() && seg_max.is_empty() {
+                        return false;
+                    }
+                    let seg_min_prefix = if seg_min.len() >= 8 {
+                        &seg_min[..seg_min.len() - 8]
+                    } else {
+                        seg_min
+                    };
+                    let seg_max_prefix = if seg_max.len() >= 8 {
+                        &seg_max[..seg_max.len() - 8]
+                    } else {
+                        seg_max
+                    };
+                    // Overlapping if ranges intersect
+                    seg_min_prefix <= l0_max.as_slice() && seg_max_prefix >= l0_min.as_slice()
+                })
+            } else {
+                // No valid L0 key range (all empty segments)
+                (Vec::new(), l1_segs.clone())
+            };
+
+        // Count actual input segments and entries (L0 + overlapping L1 only).
+        let segments_merged = l0_segs.len() + overlapping_l1.len();
+        let total_input_entries: u64 = l0_segs
+            .iter()
+            .chain(overlapping_l1.iter())
+            .map(|s| s.entry_count())
+            .sum();
+
+        // Build merge sources: L0 + overlapping L1
+        let mut input_segments: Vec<&Arc<KVSegment>> = Vec::new();
+        for seg in &l0_segs {
+            input_segments.push(seg);
+        }
+        for seg in &overlapping_l1 {
+            input_segments.push(seg);
+        }
+
+        let sources: Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> = input_segments
+            .iter()
+            .map(|seg| {
+                let entries: Vec<_> = seg
+                    .iter_seek_all()
+                    .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
+                    .collect();
+                Box::new(entries.into_iter())
+                    as Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>
+            })
+            .collect();
+
+        let merge = MergeIterator::new(sources);
+        let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
+        let compaction_iter =
+            CompactionIterator::new(merge, prune_floor).with_max_versions(max_versions);
+
+        // Build output segment
+        let seg_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
+        let branch_hex = hex_encode_branch(branch_id);
+        let branch_dir = segments_dir.join(&branch_hex);
+        std::fs::create_dir_all(&branch_dir)?;
+        let seg_path = branch_dir.join(format!("{}.sst", seg_id));
+
+        let builder = SegmentBuilder::default();
+        let meta = builder.build_from_iter(compaction_iter, &seg_path)?;
+
+        // If the compaction produced an empty segment, skip L1 insertion
+        let new_l1_segment = if meta.entry_count > 0 {
+            Some(Arc::new(KVSegment::open(&seg_path)?))
+        } else {
+            let _ = std::fs::remove_file(&seg_path);
+            None
+        };
+
+        // Atomic swap: L0 = only concurrently-flushed segments, L1 = non-overlapping + new
+        {
+            let branch = self
+                .branches
+                .entry(*branch_id)
+                .or_insert_with(BranchState::new);
+            let cur_ver = branch.version.load();
+
+            // Keep only L0 segments that were added concurrently (not in our snapshot)
+            let new_l0: Vec<Arc<KVSegment>> = cur_ver
+                .l0_segments
+                .iter()
+                .filter(|s| !l0_segs.iter().any(|old| Arc::ptr_eq(s, old)))
+                .cloned()
+                .collect();
+
+            // Build new L1: non-overlapping + new segment, sorted by key range
+            let mut new_l1: Vec<Arc<KVSegment>> = non_overlapping_l1;
+            if let Some(seg) = new_l1_segment {
+                new_l1.push(seg);
+            }
+            // Sort L1 by key_range min ascending
+            new_l1.sort_by(|a, b| a.key_range().0.cmp(b.key_range().0));
+
+            branch.version.store(Arc::new(SegmentVersion {
+                l0_segments: new_l0,
+                l1_segments: new_l1,
+            }));
+        }
+
+        // Delete old files and invalidate cache
+        let cache = crate::block_cache::global_cache();
+        for seg in &l0_segs {
+            cache.invalidate_file(seg.file_id());
+            let _ = std::fs::remove_file(seg.file_path());
+        }
+        for seg in &overlapping_l1 {
+            cache.invalidate_file(seg.file_id());
+            let _ = std::fs::remove_file(seg.file_path());
+        }
+
+        // Write manifest
+        self.write_branch_manifest(branch_id);
+
+        let entries_pruned = total_input_entries.saturating_sub(meta.entry_count);
+        let output_file_size = if meta.entry_count > 0 {
+            meta.file_size
+        } else {
+            0 // file was deleted
+        };
+
+        Ok(Some(CompactionResult {
+            segments_merged,
+            output_entries: meta.entry_count,
+            entries_pruned,
+            output_file_size,
+        }))
+    }
+
+    /// Write the manifest file for a branch, reflecting current L0/L1 levels.
+    fn write_branch_manifest(&self, branch_id: &BranchId) {
+        let segments_dir = match &self.segments_dir {
+            Some(d) => d,
+            None => return,
+        };
+        let branch = match self.branches.get(branch_id) {
+            Some(b) => b,
+            None => return,
+        };
+        let ver = branch.version.load();
+        let branch_hex = hex_encode_branch(branch_id);
+        let branch_dir = segments_dir.join(&branch_hex);
+
+        let mut entries = Vec::new();
+        for seg in &ver.l0_segments {
+            if let Some(name) = seg.file_path().file_name().and_then(|n| n.to_str()) {
+                entries.push(crate::manifest::ManifestEntry {
+                    filename: name.to_string(),
+                    level: 0,
+                });
+            }
+        }
+        for seg in &ver.l1_segments {
+            if let Some(name) = seg.file_path().file_name().and_then(|n| n.to_str()) {
+                entries.push(crate::manifest::ManifestEntry {
+                    filename: name.to_string(),
+                    level: 1,
+                });
+            }
+        }
+
+        if let Err(e) = crate::manifest::write_manifest(&branch_dir, &entries) {
+            tracing::warn!(
+                branch = %branch_hex,
+                error = %e,
+                "failed to write branch manifest"
+            );
+        }
     }
 
     // ========================================================================
@@ -1238,13 +1580,19 @@ impl SegmentedStore {
             }
         }
 
-        // 3. Segments (newest first)
+        // 3. L0 segments (newest first, overlapping — linear scan)
         let ver = branch.version.load();
         for seg in &ver.l0_segments {
             if let Some(se) = seg.point_lookup(key, max_version) {
                 let commit_id = se.commit_id;
                 return Some((commit_id, segment_entry_to_memtable_entry(se)));
             }
+        }
+
+        // 4. L1 segments (non-overlapping, sorted by key range — binary search)
+        if let Some(se) = point_lookup_l1(&ver.l1_segments, key, max_version) {
+            let commit_id = se.commit_id;
+            return Some((commit_id, segment_entry_to_memtable_entry(se)));
         }
 
         None
@@ -1262,10 +1610,20 @@ impl SegmentedStore {
             all_versions.extend(frozen.get_all_versions(key));
         }
 
-        // Segments
+        // L0 segments
         let typed_key = encode_typed_key(key);
         let ver = branch.version.load();
         for seg in &ver.l0_segments {
+            for (ik, se) in seg.iter_seek(key) {
+                if ik.typed_key_prefix() != typed_key.as_slice() {
+                    break;
+                }
+                all_versions.push((se.commit_id, segment_entry_to_memtable_entry(se)));
+            }
+        }
+
+        // L1 segments
+        for seg in &ver.l1_segments {
             for (ik, se) in seg.iter_seek(key) {
                 if ik.typed_key_prefix() != typed_key.as_slice() {
                     break;
@@ -1297,9 +1655,18 @@ impl SegmentedStore {
             sources.push(Box::new(entries.into_iter()));
         }
 
-        // Segments (newest first)
+        // L0 segments (newest first)
         let ver = branch.version.load();
         for seg in &ver.l0_segments {
+            let entries: Vec<_> = seg
+                .iter_seek(prefix)
+                .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
+                .collect();
+            sources.push(Box::new(entries.into_iter()));
+        }
+
+        // L1 segments (sorted by key range)
+        for seg in &ver.l1_segments {
             let entries: Vec<_> = seg
                 .iter_seek(prefix)
                 .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
@@ -1621,6 +1988,52 @@ fn hex_decode_branch(hex: &str) -> Option<BranchId> {
         bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
     }
     Some(BranchId::from_bytes(bytes))
+}
+
+/// Point lookup on L1 segments using binary search on key ranges.
+///
+/// L1 segments are non-overlapping and sorted by key range. For a given key,
+/// at most one L1 segment can contain it. We binary search on the
+/// `typed_key_prefix` portion of the key range bounds (stripping the trailing
+/// 8-byte commit_id).
+fn point_lookup_l1(
+    l1_segments: &[Arc<KVSegment>],
+    key: &Key,
+    max_version: u64,
+) -> Option<SegmentEntry> {
+    if l1_segments.is_empty() {
+        return None;
+    }
+
+    let typed_key = encode_typed_key(key);
+
+    // Binary search: find the segment whose key range could contain `key`.
+    // Each segment's key_range() returns full InternalKey bytes; we compare
+    // only the typed_key_prefix portion (everything except trailing 8 bytes).
+    let idx = l1_segments.partition_point(|seg| {
+        let (_, max_ik) = seg.key_range();
+        if max_ik.len() < 8 {
+            return true; // empty/invalid segment sorts before everything
+        }
+        let max_prefix = &max_ik[..max_ik.len() - 8];
+        max_prefix < typed_key.as_slice()
+    });
+
+    if idx >= l1_segments.len() {
+        return None;
+    }
+
+    // Verify the candidate segment's min key is ≤ our key
+    let seg = &l1_segments[idx];
+    let (min_ik, _) = seg.key_range();
+    if min_ik.len() >= 8 {
+        let min_prefix = &min_ik[..min_ik.len() - 8];
+        if min_prefix > typed_key.as_slice() {
+            return None; // key is before this segment's range
+        }
+    }
+
+    seg.point_lookup(key, max_version)
 }
 
 /// Convert a `SegmentEntry` into a `MemtableEntry` for the merge path.
@@ -3978,5 +4391,629 @@ mod tests {
 
         assert_eq!(store.l0_segment_count(&bid), 2);
         assert_eq!(store.branch_segment_count(&bid), 2);
+    }
+
+    // ========================================================================
+    // L0 → L1 compaction tests (Epic 22)
+    // ========================================================================
+
+    /// Helper: create a store, write entries, flush to L0 segments.
+    fn flush_data(
+        store: &SegmentedStore,
+        b: &BranchId,
+        keys: &[(&str, i64, u64)], // (key_name, value, commit)
+    ) {
+        for &(key_name, val, commit) in keys {
+            seed(store, kv_key(key_name), Value::Int(val), commit);
+        }
+        store.rotate_memtable(b);
+        store.flush_oldest_frozen(b).unwrap();
+    }
+
+    #[test]
+    fn compact_l0_to_l1_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        flush_data(&store, &b, &[("a", 1, 1), ("b", 2, 1)]);
+        flush_data(&store, &b, &[("c", 3, 2), ("d", 4, 2)]);
+        flush_data(&store, &b, &[("e", 5, 3)]);
+
+        assert_eq!(store.l0_segment_count(&b), 3);
+        assert_eq!(store.l1_segment_count(&b), 0);
+
+        let result = store.compact_l0_to_l1(&b, 0).unwrap().unwrap();
+        assert_eq!(result.segments_merged, 3);
+        assert_eq!(result.output_entries, 5);
+        assert_eq!(result.entries_pruned, 0);
+
+        assert_eq!(store.l0_segment_count(&b), 0);
+        assert_eq!(store.l1_segment_count(&b), 1);
+        assert_eq!(store.branch_segment_count(&b), 1);
+    }
+
+    #[test]
+    fn compact_l0_to_l1_merges_overlapping_l1() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        // First L0→L1: keys a,b
+        flush_data(&store, &b, &[("a", 1, 1), ("b", 2, 1)]);
+        store.compact_l0_to_l1(&b, 0).unwrap();
+        assert_eq!(store.l1_segment_count(&b), 1);
+
+        // New L0 with overlapping keys
+        flush_data(&store, &b, &[("a", 10, 2), ("c", 3, 2)]);
+        let result = store.compact_l0_to_l1(&b, 0).unwrap().unwrap();
+
+        // 1 L0 + 1 overlapping L1 merged; prune_floor=0 keeps all versions
+        assert_eq!(result.segments_merged, 2);
+        assert_eq!(result.output_entries, 4); // a@2, a@1, b@1, c@2
+        assert_eq!(result.entries_pruned, 0);
+
+        // Overlapping L1 was merged — still just 1 L1 segment
+        assert_eq!(store.l0_segment_count(&b), 0);
+        assert_eq!(store.l1_segment_count(&b), 1);
+
+        // All data correct
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("a"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(10)
+        );
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("b"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(2)
+        );
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("c"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(3)
+        );
+    }
+
+    #[test]
+    fn compact_l0_to_l1_preserves_non_overlapping_l1() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        // First L0→L1: keys x, y, z (high range)
+        flush_data(&store, &b, &[("x", 1, 1), ("y", 2, 1), ("z", 3, 1)]);
+        store.compact_l0_to_l1(&b, 0).unwrap();
+        assert_eq!(store.l1_segment_count(&b), 1);
+
+        // New L0 with disjoint keys a, b (low range, no overlap with x-z)
+        flush_data(&store, &b, &[("a", 10, 2), ("b", 20, 2)]);
+        let result = store.compact_l0_to_l1(&b, 0).unwrap().unwrap();
+
+        // Only 1 L0 segment merged (no overlapping L1)
+        assert_eq!(result.segments_merged, 1);
+        assert_eq!(result.output_entries, 2);
+        assert_eq!(result.entries_pruned, 0);
+
+        // Non-overlapping L1 preserved + new L1 = 2 L1 segments
+        assert_eq!(store.l0_segment_count(&b), 0);
+        assert_eq!(store.l1_segment_count(&b), 2);
+
+        // All data correct
+        for (key, val) in [("a", 10), ("b", 20), ("x", 1), ("y", 2), ("z", 3)] {
+            assert_eq!(
+                store
+                    .get_versioned(&kv_key(key), u64::MAX)
+                    .unwrap()
+                    .unwrap()
+                    .value,
+                Value::Int(val),
+                "key {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_l0_to_l1_prunes_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        flush_data(&store, &b, &[("k", 1, 1)]);
+        flush_data(&store, &b, &[("k", 2, 2)]);
+        flush_data(&store, &b, &[("k", 3, 3)]);
+
+        // prune_floor=3: keep v3 (above floor) + v2 (floor entry), prune v1
+        let result = store.compact_l0_to_l1(&b, 3).unwrap().unwrap();
+        assert_eq!(result.output_entries, 2);
+        assert_eq!(result.entries_pruned, 1);
+
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("k"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(3)
+        );
+        assert_eq!(
+            store.get_versioned(&kv_key("k"), 2).unwrap().unwrap().value,
+            Value::Int(2)
+        );
+        assert!(store.get_versioned(&kv_key("k"), 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn compact_l0_to_l1_empty_l0_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        // No rotation/flush → L0 is empty
+        assert!(store.compact_l0_to_l1(&b, 0).unwrap().is_none());
+    }
+
+    #[test]
+    fn compact_l0_to_l1_ephemeral_returns_none() {
+        let store = SegmentedStore::new();
+        let b = branch();
+        seed(&store, kv_key("k"), Value::Int(1), 1);
+        assert!(store.compact_l0_to_l1(&b, 0).unwrap().is_none());
+    }
+
+    #[test]
+    fn compact_l0_to_l1_deletes_old_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        flush_data(&store, &b, &[("a", 1, 1)]);
+        flush_data(&store, &b, &[("b", 2, 2)]);
+
+        let branch_dir = dir.path().join(hex_encode_branch(&b));
+        let count_sst = || -> usize {
+            std::fs::read_dir(&branch_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("sst"))
+                .count()
+        };
+        assert_eq!(count_sst(), 2);
+
+        store.compact_l0_to_l1(&b, 0).unwrap();
+        assert_eq!(count_sst(), 1); // 2 old deleted, 1 new created
+    }
+
+    #[test]
+    fn compact_l0_to_l1_concurrent_flush_preserves_new_l0() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        flush_data(&store, &b, &[("a", 1, 1)]);
+        flush_data(&store, &b, &[("b", 2, 2)]);
+
+        // Compact L0→L1
+        store.compact_l0_to_l1(&b, 0).unwrap();
+        assert_eq!(store.l0_segment_count(&b), 0);
+        assert_eq!(store.l1_segment_count(&b), 1);
+
+        // New L0 flush
+        flush_data(&store, &b, &[("c", 3, 3)]);
+        assert_eq!(store.l0_segment_count(&b), 1);
+
+        // All data still readable
+        assert!(store
+            .get_versioned(&kv_key("a"), u64::MAX)
+            .unwrap()
+            .is_some());
+        assert!(store
+            .get_versioned(&kv_key("b"), u64::MAX)
+            .unwrap()
+            .is_some());
+        assert!(store
+            .get_versioned(&kv_key("c"), u64::MAX)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn compact_l0_to_l1_data_correct_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        flush_data(&store, &b, &[("a", 1, 1), ("b", 10, 1)]);
+        flush_data(&store, &b, &[("a", 2, 2), ("c", 20, 2)]);
+
+        store.compact_l0_to_l1(&b, 0).unwrap();
+
+        // Point lookups
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("a"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(2)
+        );
+        assert_eq!(
+            store.get_versioned(&kv_key("a"), 1).unwrap().unwrap().value,
+            Value::Int(1)
+        );
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("b"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(10)
+        );
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("c"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(20)
+        );
+
+        // Prefix scan
+        let prefix_key = Key::new(ns(), TypeTag::KV, Vec::new());
+        let results = store.scan_prefix(&prefix_key, u64::MAX).unwrap();
+        assert_eq!(results.len(), 3);
+
+        // History
+        let history = store.get_history(&kv_key("a"), None, None).unwrap();
+        assert_eq!(history.len(), 2);
+    }
+
+    #[test]
+    fn compact_l0_to_l1_l1_sorted_invariant() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        // Create two non-overlapping L1 segments
+        flush_data(&store, &b, &[("x", 1, 1), ("y", 2, 1)]);
+        store.compact_l0_to_l1(&b, 0).unwrap();
+
+        flush_data(&store, &b, &[("a", 3, 2), ("b", 4, 2)]);
+        store.compact_l0_to_l1(&b, 0).unwrap();
+
+        assert_eq!(store.l1_segment_count(&b), 2);
+
+        // Verify L1 segments are sorted by key range
+        let branch_state = store.branches.get(&b).unwrap();
+        let ver = branch_state.version.load();
+        for i in 1..ver.l1_segments.len() {
+            let prev_max = ver.l1_segments[i - 1].key_range().1;
+            let cur_min = ver.l1_segments[i].key_range().0;
+            assert!(
+                prev_max <= cur_min,
+                "L1 segments should be sorted by key range"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_l0_to_l1_repeated() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        // First round
+        flush_data(&store, &b, &[("a", 1, 1), ("b", 2, 1)]);
+        store.compact_l0_to_l1(&b, 0).unwrap();
+        assert_eq!(store.l1_segment_count(&b), 1);
+
+        // Second round — new L0 overlaps L1
+        flush_data(&store, &b, &[("a", 10, 2), ("c", 3, 2)]);
+        store.compact_l0_to_l1(&b, 0).unwrap();
+        assert_eq!(store.l0_segment_count(&b), 0);
+        assert_eq!(store.l1_segment_count(&b), 1);
+
+        // Third round — new disjoint L0
+        flush_data(&store, &b, &[("z", 99, 3)]);
+        store.compact_l0_to_l1(&b, 0).unwrap();
+        assert_eq!(store.l0_segment_count(&b), 0);
+        assert_eq!(store.l1_segment_count(&b), 2);
+
+        // All data correct
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("a"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(10)
+        );
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("z"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(99)
+        );
+    }
+
+    #[test]
+    fn compact_l0_to_l1_writes_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        flush_data(&store, &b, &[("a", 1, 1)]);
+        flush_data(&store, &b, &[("b", 2, 2)]);
+        store.compact_l0_to_l1(&b, 0).unwrap();
+
+        let branch_dir = dir.path().join(hex_encode_branch(&b));
+        let manifest = crate::manifest::read_manifest(&branch_dir).unwrap();
+        assert!(manifest.is_some(), "manifest should exist after compaction");
+        let manifest = manifest.unwrap();
+        assert!(!manifest.entries.is_empty());
+
+        // All entries should be L1 (no L0 left)
+        for entry in &manifest.entries {
+            assert_eq!(entry.level, 1, "all segments should be L1 after compaction");
+        }
+    }
+
+    // ========================================================================
+    // Read path L1 tests
+    // ========================================================================
+
+    #[test]
+    fn point_lookup_reads_l1_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        flush_data(&store, &b, &[("k1", 1, 1), ("k2", 2, 2)]);
+        store.compact_l0_to_l1(&b, 0).unwrap();
+        assert_eq!(store.l0_segment_count(&b), 0);
+        assert_eq!(store.l1_segment_count(&b), 1);
+
+        // Data in L1 only
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("k1"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(1)
+        );
+        assert_eq!(
+            store
+                .get_versioned(&kv_key("k2"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
+            Value::Int(2)
+        );
+        assert!(store
+            .get_versioned(&kv_key("nonexistent"), u64::MAX)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn scan_prefix_includes_l1() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        flush_data(&store, &b, &[("item/a", 1, 1), ("item/b", 2, 1)]);
+        store.compact_l0_to_l1(&b, 0).unwrap();
+
+        // Add to memtable (L0)
+        seed(&store, kv_key("item/c"), Value::Int(3), 2);
+
+        let prefix = Key::new(ns(), TypeTag::KV, "item/".as_bytes().to_vec());
+        let results = store.scan_prefix(&prefix, u64::MAX).unwrap();
+        assert_eq!(results.len(), 3); // 2 from L1 + 1 from memtable
+    }
+
+    #[test]
+    fn list_branch_includes_l1() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        flush_data(&store, &b, &[("a", 1, 1), ("b", 2, 2)]);
+        store.compact_l0_to_l1(&b, 0).unwrap();
+
+        let entries = store.list_branch(&b);
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn l1_binary_search_correct_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        // Create 3 non-overlapping L1 segments
+        flush_data(&store, &b, &[("a", 1, 1), ("b", 2, 1)]);
+        store.compact_l0_to_l1(&b, 0).unwrap();
+
+        flush_data(&store, &b, &[("m", 3, 2), ("n", 4, 2)]);
+        store.compact_l0_to_l1(&b, 0).unwrap();
+
+        flush_data(&store, &b, &[("x", 5, 3), ("y", 6, 3)]);
+        store.compact_l0_to_l1(&b, 0).unwrap();
+
+        assert_eq!(store.l1_segment_count(&b), 3);
+
+        // Each key should find the correct L1 segment
+        for (key, val) in [("a", 1), ("b", 2), ("m", 3), ("n", 4), ("x", 5), ("y", 6)] {
+            assert_eq!(
+                store
+                    .get_versioned(&kv_key(key), u64::MAX)
+                    .unwrap()
+                    .unwrap()
+                    .value,
+                Value::Int(val),
+                "key {key}"
+            );
+        }
+
+        // Keys not in any segment
+        assert!(store
+            .get_versioned(&kv_key("c"), u64::MAX)
+            .unwrap()
+            .is_none());
+        assert!(store
+            .get_versioned(&kv_key("p"), u64::MAX)
+            .unwrap()
+            .is_none());
+        assert!(store
+            .get_versioned(&kv_key("zzz"), u64::MAX)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn max_flushed_commit_includes_l1() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        flush_data(&store, &b, &[("a", 1, 5), ("b", 2, 10)]);
+        store.compact_l0_to_l1(&b, 0).unwrap();
+        assert_eq!(store.l0_segment_count(&b), 0);
+
+        // max_flushed_commit should still work with L1 only
+        assert_eq!(store.max_flushed_commit(&b), Some(10));
+    }
+
+    #[test]
+    fn shard_stats_includes_l1() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        flush_data(&store, &b, &[("a", 1, 1), ("b", 2, 2), ("c", 3, 3)]);
+        store.compact_l0_to_l1(&b, 0).unwrap();
+
+        let (entry_count, total_versions, _) = store.shard_stats_detailed(&b).unwrap();
+        assert_eq!(entry_count, 3); // 3 live entries
+        assert_eq!(total_versions, 3); // 3 versions in L1
+    }
+
+    // ========================================================================
+    // Recovery with manifest tests
+    // ========================================================================
+
+    #[test]
+    fn recover_with_manifest_restores_levels() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        // Create L0 and compact to L1
+        flush_data(&store, &b, &[("a", 1, 1), ("b", 2, 2)]);
+        flush_data(&store, &b, &[("c", 3, 3)]);
+        store.compact_l0_to_l1(&b, 0).unwrap();
+
+        // Add another L0 segment
+        flush_data(&store, &b, &[("d", 4, 4)]);
+
+        assert_eq!(store.l0_segment_count(&b), 1);
+        assert_eq!(store.l1_segment_count(&b), 1);
+
+        // Recover into a fresh store
+        let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let info = store2.recover_segments().unwrap();
+        assert_eq!(info.segments_loaded, 2);
+
+        // Levels restored from manifest
+        assert_eq!(store2.l0_segment_count(&b), 1);
+        assert_eq!(store2.l1_segment_count(&b), 1);
+
+        // All data correct
+        for (key, val) in [("a", 1), ("b", 2), ("c", 3), ("d", 4)] {
+            assert_eq!(
+                store2
+                    .get_versioned(&kv_key(key), u64::MAX)
+                    .unwrap()
+                    .unwrap()
+                    .value,
+                Value::Int(val),
+                "key {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn recover_without_manifest_all_l0() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        flush_data(&store, &b, &[("a", 1, 1)]);
+        flush_data(&store, &b, &[("b", 2, 2)]);
+
+        // Delete the manifest file
+        let branch_dir = dir.path().join(hex_encode_branch(&b));
+        let manifest_path = branch_dir.join("segments.manifest");
+        if manifest_path.exists() {
+            std::fs::remove_file(&manifest_path).unwrap();
+        }
+
+        // Recover — all segments go to L0 (backward compat)
+        let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        store2.recover_segments().unwrap();
+
+        assert_eq!(store2.l0_segment_count(&b), 2);
+        assert_eq!(store2.l1_segment_count(&b), 0);
+
+        // Data still correct
+        assert!(store2
+            .get_versioned(&kv_key("a"), u64::MAX)
+            .unwrap()
+            .is_some());
+        assert!(store2
+            .get_versioned(&kv_key("b"), u64::MAX)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn recover_manifest_corrupt_falls_back_to_l0() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        flush_data(&store, &b, &[("a", 1, 1)]);
+        store.compact_l0_to_l1(&b, 0).unwrap();
+
+        // Corrupt the manifest
+        let branch_dir = dir.path().join(hex_encode_branch(&b));
+        let manifest_path = branch_dir.join("segments.manifest");
+        std::fs::write(&manifest_path, b"corrupted data!").unwrap();
+
+        // Recover — corrupt manifest falls back to all-L0
+        let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        store2.recover_segments().unwrap();
+
+        assert_eq!(store2.l0_segment_count(&b), 1);
+        assert_eq!(store2.l1_segment_count(&b), 0);
+
+        // Data still correct
+        assert!(store2
+            .get_versioned(&kv_key("a"), u64::MAX)
+            .unwrap()
+            .is_some());
     }
 }
