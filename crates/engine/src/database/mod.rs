@@ -1755,37 +1755,30 @@ impl Database {
                                 // Update flush watermark and truncate WAL
                                 Self::update_flush_watermark(&storage, &data_dir, &wal_dir);
 
-                                // Post-flush: tiered compaction — group segments
-                                // by size, merge within tiers
-                                let sizes = storage.segment_file_sizes(&branch_id);
-                                if sizes.len() >= 4 {
-                                    let scheduler = strata_storage::CompactionScheduler::default();
-                                    let candidates = scheduler.pick_candidates(&sizes);
-                                    if let Some(candidate) = candidates.first() {
-                                        match storage.compact_tier(
-                                            &branch_id,
-                                            &candidate.segment_indices,
-                                            0,
-                                        ) {
-                                            Ok(Some(result)) => {
-                                                tracing::debug!(
-                                                    target: "strata::compact",
-                                                    ?branch_id,
-                                                    tier = candidate.tier,
-                                                    segments_merged = result.segments_merged,
-                                                    entries_pruned = result.entries_pruned,
-                                                    "Tiered compaction complete"
-                                                );
-                                            }
-                                            Ok(None) => {}
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    target: "strata::compact",
-                                                    ?branch_id,
-                                                    error = %e,
-                                                    "Background tiered compaction failed"
-                                                );
-                                            }
+                                // Post-flush: compact L0 → L1 when enough
+                                // L0 segments accumulate. Produces non-overlapping
+                                // L1 segments for O(log N) point lookups.
+                                if storage.l0_segment_count(&branch_id) >= 4 {
+                                    match storage.compact_l0_to_l1(&branch_id, 0) {
+                                        Ok(Some(result)) => {
+                                            tracing::debug!(
+                                                target: "strata::compact",
+                                                ?branch_id,
+                                                segments_merged = result.segments_merged,
+                                                entries_pruned = result.entries_pruned,
+                                                l0 = storage.l0_segment_count(&branch_id),
+                                                l1 = storage.l1_segment_count(&branch_id),
+                                                "L0 → L1 compaction complete"
+                                            );
+                                        }
+                                        Ok(None) => {}
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                target: "strata::compact",
+                                                ?branch_id,
+                                                error = %e,
+                                                "Background L0 → L1 compaction failed"
+                                            );
                                         }
                                     }
                                 }
