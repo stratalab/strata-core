@@ -1755,62 +1755,36 @@ impl Database {
                                 // Update flush watermark and truncate WAL
                                 Self::update_flush_watermark(&storage, &data_dir, &wal_dir);
 
-                                // Post-flush: compact L0 → L1 when ≥ 4 L0 segments
-                                if storage.l0_segment_count(&branch_id) >= 4 {
-                                    match storage.compact_level(&branch_id, 0, 0) {
+                                // Post-flush: run adaptive compaction until no level
+                                // is over target (dynamic level sizing).
+                                let mut compactions = 0;
+                                loop {
+                                    match storage.pick_and_compact(&branch_id, 0) {
                                         Ok(Some(result)) => {
                                             tracing::debug!(
                                                 target: "strata::compact",
                                                 ?branch_id,
-                                                level = 0,
-                                                segments_merged = result.segments_merged,
-                                                entries_pruned = result.entries_pruned,
+                                                level = result.level,
+                                                segments_merged = result.compaction.segments_merged,
+                                                entries_pruned = result.compaction.entries_pruned,
                                                 "compaction complete"
                                             );
+                                            compactions += 1;
+                                            if compactions >= 16 {
+                                                break;
+                                            }
                                         }
-                                        Ok(None) => {}
+                                        Ok(None) => break,
                                         Err(e) => {
                                             tracing::warn!(
                                                 target: "strata::compact",
                                                 ?branch_id,
-                                                level = 0,
                                                 error = %e,
                                                 "compaction failed"
                                             );
+                                            break;
                                         }
                                     }
-                                }
-
-                                // L1-L5 → L(n+1): trigger when level bytes exceed threshold.
-                                // Mirrors storage::LEVEL_BASE_BYTES (256MB) and
-                                // LEVEL_MULTIPLIER (10×) for each subsequent level.
-                                let mut level_target: u64 = 256 << 20;
-                                for level in 1..6 {
-                                    if storage.level_bytes(&branch_id, level) > level_target {
-                                        match storage.compact_level(&branch_id, level, 0) {
-                                            Ok(Some(result)) => {
-                                                tracing::debug!(
-                                                    target: "strata::compact",
-                                                    ?branch_id,
-                                                    level,
-                                                    segments_merged = result.segments_merged,
-                                                    entries_pruned = result.entries_pruned,
-                                                    "compaction complete"
-                                                );
-                                            }
-                                            Ok(None) => {}
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    target: "strata::compact",
-                                                    ?branch_id,
-                                                    level,
-                                                    error = %e,
-                                                    "compaction failed"
-                                                );
-                                            }
-                                        }
-                                    }
-                                    level_target *= 10;
                                 }
                             }
                             Ok(false) => {}
