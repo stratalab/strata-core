@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::process;
 use std::{env, fs};
 
-use strata_executor::{AccessMode, Command, OpenOptions, Output, Strata};
+use strata_executor::{AccessMode, Command, IpcServer, OpenOptions, Output, Strata};
 
 use commands::build_cli;
 use format::{
@@ -38,6 +38,21 @@ fn main() {
     }
     if let Some(("uninstall", sub)) = matches.subcommand() {
         run_uninstall(sub.get_flag("yes"));
+        return;
+    }
+
+    // Handle up/down before opening database (they manage lifecycle themselves)
+    let db_path_str = matches
+        .get_one::<String>("db")
+        .map(|s| s.as_str())
+        .unwrap_or(".strata");
+    if let Some(("up", sub)) = matches.subcommand() {
+        let foreground = sub.get_flag("foreground");
+        run_up(db_path_str, foreground);
+        return;
+    }
+    if matches.subcommand_name() == Some("down") {
+        run_down(db_path_str);
         return;
     }
 
@@ -341,6 +356,159 @@ fn run_shell_mode(matches: &clap::ArgMatches, state: &mut SessionState, mode: Ou
         Err(e) => {
             eprintln!("(error) {}", e);
             1
+        }
+    }
+}
+
+fn run_up(db_path: &str, foreground: bool) {
+    let data_dir = PathBuf::from(db_path);
+
+    // Check if server is already running
+    let pid_path = data_dir.join("strata.pid");
+    if pid_path.exists() {
+        if let Ok(pid_str) = fs::read_to_string(&pid_path) {
+            if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                // Check if process is still alive
+                let alive = unsafe { libc::kill(pid, 0) == 0 };
+                if alive {
+                    eprintln!("Strata server already running (pid {})", pid);
+                    process::exit(1);
+                }
+                // Stale PID file — clean up
+                let _ = fs::remove_file(&pid_path);
+            }
+        }
+    }
+
+    // Open the database
+    let db = match Strata::open(db_path) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Failed to open database: {}", e);
+            process::exit(1);
+        }
+    };
+
+    let database = db.database();
+    let access_mode = db.access_mode();
+
+    if foreground {
+        // Foreground mode: start server and block
+        match IpcServer::start(&data_dir, database, access_mode) {
+            Ok(mut server) => {
+                eprintln!("Strata server started (pid {})", process::id());
+                eprintln!("Listening on {}", server.socket_path().display());
+                eprintln!("Press Ctrl+C to stop.");
+
+                // Block on SIGTERM/SIGINT
+                let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+                let r = running.clone();
+                ctrlc_handler(r);
+
+                while running.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+
+                server.shutdown();
+                eprintln!("\nStrata server stopped.");
+            }
+            Err(e) => {
+                eprintln!("Failed to start IPC server: {}", e);
+                process::exit(1);
+            }
+        }
+    } else {
+        // Daemon mode: fork using daemonize
+        let log_path = data_dir.join("strata.log");
+        let stdout = std::fs::File::create(&log_path).unwrap_or_else(|e| {
+            eprintln!("Failed to create log file: {}", e);
+            process::exit(1);
+        });
+        // Restrict log file to owner-only
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600));
+        }
+        let stderr = stdout.try_clone().unwrap();
+
+        let pid_file_path = data_dir.join("strata.pid");
+        let daemonize = daemonize::Daemonize::new()
+            .working_directory(&data_dir)
+            .stdout(stdout)
+            .stderr(stderr);
+
+        // Print before daemonizing (parent process, still has terminal)
+        eprintln!(
+            "Starting Strata server in background...\nPID file: {}",
+            pid_file_path.display()
+        );
+
+        match daemonize.start() {
+            Ok(()) => {
+                // We are now in the child process
+                match IpcServer::start(&data_dir, database, access_mode) {
+                    Ok(mut server) => {
+                        let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+                        let r = running.clone();
+                        ctrlc_handler(r);
+
+                        while running.load(std::sync::atomic::Ordering::SeqCst) {
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                        }
+
+                        server.shutdown();
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to start IPC server: {}", e);
+                        process::exit(1);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to daemonize: {}", e);
+                process::exit(1);
+            }
+        }
+    }
+}
+
+fn ctrlc_handler(running: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    // Store the Arc's inner pointer in a static AtomicPtr for signal-safe access.
+    // The Arc is leaked intentionally so the pointer remains valid for the
+    // process lifetime (signal handlers can fire at any time).
+    let ptr = std::sync::Arc::into_raw(running) as *mut std::sync::atomic::AtomicBool;
+    RUNNING_PTR.store(ptr, std::sync::atomic::Ordering::SeqCst);
+    unsafe {
+        libc::signal(libc::SIGTERM, handle_signal as libc::sighandler_t);
+        libc::signal(libc::SIGINT, handle_signal as libc::sighandler_t);
+    }
+}
+
+static RUNNING_PTR: std::sync::atomic::AtomicPtr<std::sync::atomic::AtomicBool> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+extern "C" fn handle_signal(_: libc::c_int) {
+    let ptr = RUNNING_PTR.load(std::sync::atomic::Ordering::SeqCst);
+    if !ptr.is_null() {
+        // SAFETY: ptr was set from Arc::into_raw and is valid for process lifetime.
+        // AtomicBool::store is async-signal-safe (just an atomic write).
+        unsafe {
+            (*ptr).store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+fn run_down(db_path: &str) {
+    let data_dir = PathBuf::from(db_path);
+
+    match IpcServer::stop(&data_dir) {
+        Ok(()) => {
+            eprintln!("Strata server stopped.");
+        }
+        Err(e) => {
+            eprintln!("Failed to stop server: {}", e);
+            process::exit(1);
         }
     }
 }

@@ -29,8 +29,9 @@
 //! db.branches().merge("experiment-2", "main", MergeStrategy::LastWriterWins)?;
 //! ```
 
+use crate::ipc::Backend;
 use crate::types::BranchId;
-use crate::{Command, Error, Executor, Output, Result};
+use crate::{Command, Error, Output, Result};
 use strata_engine::branch_ops::{BranchDiffResult, ForkInfo, MergeInfo, MergeStrategy};
 
 /// Handle for branch management operations.
@@ -38,17 +39,17 @@ use strata_engine::branch_ops::{BranchDiffResult, ForkInfo, MergeInfo, MergeStra
 /// Obtained via [`Strata::branches()`]. Provides the "power API" for branch
 /// management including listing, creating, deleting, forking, diffing, and merging.
 pub struct Branches<'a> {
-    executor: &'a Executor,
+    backend: &'a Backend,
 }
 
 impl<'a> Branches<'a> {
-    pub(crate) fn new(executor: &'a Executor) -> Self {
-        Self { executor }
+    pub(crate) fn new(backend: &'a Backend) -> Self {
+        Self { backend }
     }
 
     /// List all branch names.
     pub fn list(&self) -> Result<Vec<String>> {
-        match self.executor.execute(Command::BranchList {
+        match self.backend.execute(Command::BranchList {
             state: None,
             limit: None,
             offset: None,
@@ -64,7 +65,7 @@ impl<'a> Branches<'a> {
 
     /// Check if a branch exists.
     pub fn exists(&self, name: &str) -> Result<bool> {
-        match self.executor.execute(Command::BranchExists {
+        match self.backend.execute(Command::BranchExists {
             branch: BranchId::from(name),
         })? {
             Output::Bool(exists) => Ok(exists),
@@ -76,7 +77,7 @@ impl<'a> Branches<'a> {
 
     /// Create a new empty branch.
     pub fn create(&self, name: &str) -> Result<()> {
-        match self.executor.execute(Command::BranchCreate {
+        match self.backend.execute(Command::BranchCreate {
             branch_id: Some(name.to_string()),
             metadata: None,
         })? {
@@ -95,7 +96,7 @@ impl<'a> Branches<'a> {
             });
         }
 
-        match self.executor.execute(Command::BranchDelete {
+        match self.backend.execute(Command::BranchDelete {
             branch: BranchId::from(name),
         })? {
             Output::Unit => Ok(()),
@@ -107,7 +108,7 @@ impl<'a> Branches<'a> {
 
     /// Fork a branch, creating a copy with all its data.
     pub fn fork(&self, source: &str, destination: &str) -> Result<ForkInfo> {
-        match self.executor.execute(Command::BranchFork {
+        match self.backend.execute(Command::BranchFork {
             source: source.to_string(),
             destination: destination.to_string(),
             message: None,
@@ -128,7 +129,7 @@ impl<'a> Branches<'a> {
         message: Option<String>,
         creator: Option<String>,
     ) -> Result<ForkInfo> {
-        match self.executor.execute(Command::BranchFork {
+        match self.backend.execute(Command::BranchFork {
             source: source.to_string(),
             destination: destination.to_string(),
             message,
@@ -143,7 +144,7 @@ impl<'a> Branches<'a> {
 
     /// Compare two branches and return their differences.
     pub fn diff(&self, branch_a: &str, branch_b: &str) -> Result<BranchDiffResult> {
-        match self.executor.execute(Command::BranchDiff {
+        match self.backend.execute(Command::BranchDiff {
             branch_a: branch_a.to_string(),
             branch_b: branch_b.to_string(),
             filter_primitives: None,
@@ -171,7 +172,7 @@ impl<'a> Branches<'a> {
         } else {
             (None, None)
         };
-        match self.executor.execute(Command::BranchDiff {
+        match self.backend.execute(Command::BranchDiff {
             branch_a: branch_a.to_string(),
             branch_b: branch_b.to_string(),
             filter_primitives,
@@ -187,7 +188,7 @@ impl<'a> Branches<'a> {
 
     /// Merge data from source branch into target branch.
     pub fn merge(&self, source: &str, target: &str, strategy: MergeStrategy) -> Result<MergeInfo> {
-        match self.executor.execute(Command::BranchMerge {
+        match self.backend.execute(Command::BranchMerge {
             source: source.to_string(),
             target: target.to_string(),
             strategy,
@@ -210,7 +211,7 @@ impl<'a> Branches<'a> {
         message: Option<String>,
         creator: Option<String>,
     ) -> Result<MergeInfo> {
-        match self.executor.execute(Command::BranchMerge {
+        match self.backend.execute(Command::BranchMerge {
             source: source.to_string(),
             target: target.to_string(),
             strategy,

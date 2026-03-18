@@ -50,5 +50,8 @@ strsim = { workspace = true }
 # Logging
 tracing = { workspace = true }
 
+# Unix signals for IPC server
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -13,7 +13,7 @@ impl Strata {
 
     /// Append an event to the log.
     pub fn event_append(&self, event_type: &str, payload: Value) -> Result<u64> {
-        match self.executor.execute(Command::EventAppend {
+        match self.execute_cmd(Command::EventAppend {
             branch: self.branch_id(),
             space: self.space_id(),
             event_type: event_type.to_string(),
@@ -28,7 +28,7 @@ impl Strata {
 
     /// Read a specific event by sequence number.
     pub fn event_get(&self, sequence: u64) -> Result<Option<VersionedValue>> {
-        match self.executor.execute(Command::EventGet {
+        match self.execute_cmd(Command::EventGet {
             branch: self.branch_id(),
             space: self.space_id(),
             sequence,
@@ -43,7 +43,7 @@ impl Strata {
 
     /// Read all events of a specific type.
     pub fn event_get_by_type(&self, event_type: &str) -> Result<Vec<VersionedValue>> {
-        match self.executor.execute(Command::EventGetByType {
+        match self.execute_cmd(Command::EventGetByType {
             branch: self.branch_id(),
             space: self.space_id(),
             event_type: event_type.to_string(),
@@ -60,7 +60,7 @@ impl Strata {
 
     /// Get the total count of events in the log.
     pub fn event_len(&self) -> Result<u64> {
-        match self.executor.execute(Command::EventLen {
+        match self.execute_cmd(Command::EventLen {
             branch: self.branch_id(),
             space: self.space_id(),
         })? {
@@ -83,7 +83,7 @@ impl Strata {
         sequence: u64,
         as_of: Option<u64>,
     ) -> Result<Option<VersionedValue>> {
-        match self.executor.execute(Command::EventGet {
+        match self.execute_cmd(Command::EventGet {
             branch: self.branch_id(),
             space: self.space_id(),
             sequence,
@@ -107,7 +107,7 @@ impl Strata {
         &self,
         entries: Vec<crate::types::BatchEventEntry>,
     ) -> Result<Vec<crate::types::BatchItemResult>> {
-        match self.executor.execute(Command::EventBatchAppend {
+        match self.execute_cmd(Command::EventBatchAppend {
             branch: self.branch_id(),
             space: self.space_id(),
             entries,
@@ -131,7 +131,7 @@ impl Strata {
         after_sequence: Option<u64>,
         as_of: Option<u64>,
     ) -> Result<Vec<VersionedValue>> {
-        match self.executor.execute(Command::EventGetByType {
+        match self.execute_cmd(Command::EventGetByType {
             branch: self.branch_id(),
             space: self.space_id(),
             event_type: event_type.to_string(),

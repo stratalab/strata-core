@@ -55,7 +55,7 @@ impl Strata {
     /// db.json_set("config", "$.debug", false)?;
     /// ```
     pub fn json_set(&self, key: &str, path: &str, value: impl Into<Value>) -> Result<u64> {
-        match self.executor.execute(Command::JsonSet {
+        match self.execute_cmd(Command::JsonSet {
             branch: self.branch_id(),
             space: self.space_id(),
             key: key.to_string(),
@@ -90,7 +90,7 @@ impl Strata {
     /// let debug = db.json_get("config", "$.debug")?;
     /// ```
     pub fn json_get(&self, key: &str, path: &str) -> Result<Option<Value>> {
-        match self.executor.execute(Command::JsonGet {
+        match self.execute_cmd(Command::JsonGet {
             branch: self.branch_id(),
             space: self.space_id(),
             key: key.to_string(),
@@ -110,7 +110,7 @@ impl Strata {
     /// Returns all versions of the document, newest first, or None if the
     /// document doesn't exist.
     pub fn json_getv(&self, key: &str) -> Result<Option<Vec<crate::types::VersionedValue>>> {
-        match self.executor.execute(Command::JsonGetv {
+        match self.execute_cmd(Command::JsonGetv {
             branch: self.branch_id(),
             space: self.space_id(),
             key: key.to_string(),
@@ -146,7 +146,7 @@ impl Strata {
     /// db.json_delete("config", "$")?;
     /// ```
     pub fn json_delete(&self, key: &str, path: &str) -> Result<u64> {
-        match self.executor.execute(Command::JsonDelete {
+        match self.execute_cmd(Command::JsonDelete {
             branch: self.branch_id(),
             space: self.space_id(),
             key: key.to_string(),
@@ -188,7 +188,7 @@ impl Strata {
         cursor: Option<String>,
         limit: u64,
     ) -> Result<(Vec<String>, Option<String>)> {
-        match self.executor.execute(Command::JsonList {
+        match self.execute_cmd(Command::JsonList {
             branch: self.branch_id(),
             space: self.space_id(),
             prefix,
@@ -216,7 +216,7 @@ impl Strata {
         path: &str,
         as_of: Option<u64>,
     ) -> Result<Option<Value>> {
-        match self.executor.execute(Command::JsonGet {
+        match self.execute_cmd(Command::JsonGet {
             branch: self.branch_id(),
             space: self.space_id(),
             key: key.to_string(),
@@ -241,7 +241,7 @@ impl Strata {
         limit: u64,
         as_of: Option<u64>,
     ) -> Result<(Vec<String>, Option<String>)> {
-        match self.executor.execute(Command::JsonList {
+        match self.execute_cmd(Command::JsonList {
             branch: self.branch_id(),
             space: self.space_id(),
             prefix,
@@ -267,7 +267,7 @@ impl Strata {
         &self,
         entries: Vec<crate::types::BatchJsonEntry>,
     ) -> Result<Vec<crate::types::BatchItemResult>> {
-        match self.executor.execute(Command::JsonBatchSet {
+        match self.execute_cmd(Command::JsonBatchSet {
             branch: self.branch_id(),
             space: self.space_id(),
             entries,
@@ -286,7 +286,7 @@ impl Strata {
         &self,
         entries: Vec<crate::types::BatchJsonGetEntry>,
     ) -> Result<Vec<crate::types::BatchGetItemResult>> {
-        match self.executor.execute(Command::JsonBatchGet {
+        match self.execute_cmd(Command::JsonBatchGet {
             branch: self.branch_id(),
             space: self.space_id(),
             entries,
@@ -305,7 +305,7 @@ impl Strata {
         &self,
         entries: Vec<crate::types::BatchJsonDeleteEntry>,
     ) -> Result<Vec<crate::types::BatchItemResult>> {
-        match self.executor.execute(Command::JsonBatchDelete {
+        match self.execute_cmd(Command::JsonBatchDelete {
             branch: self.branch_id(),
             space: self.space_id(),
             entries,

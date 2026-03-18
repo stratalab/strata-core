@@ -22,7 +22,7 @@ impl Strata {
         graph: &str,
         cascade_policy: Option<&str>,
     ) -> Result<()> {
-        match self.executor.execute(Command::GraphCreate {
+        match self.execute_cmd(Command::GraphCreate {
             branch: self.branch_id(),
             graph: graph.to_string(),
             cascade_policy: cascade_policy.map(|s| s.to_string()),
@@ -36,7 +36,7 @@ impl Strata {
 
     /// Delete a graph and all its nodes/edges.
     pub fn graph_delete(&self, graph: &str) -> Result<()> {
-        match self.executor.execute(Command::GraphDelete {
+        match self.execute_cmd(Command::GraphDelete {
             branch: self.branch_id(),
             graph: graph.to_string(),
         })? {
@@ -49,7 +49,7 @@ impl Strata {
 
     /// List all graph names on the current branch.
     pub fn graph_list(&self) -> Result<Vec<String>> {
-        match self.executor.execute(Command::GraphList {
+        match self.execute_cmd(Command::GraphList {
             branch: self.branch_id(),
         })? {
             Output::Keys(names) => Ok(names),
@@ -61,7 +61,7 @@ impl Strata {
 
     /// Get graph metadata as a Value, or None if graph doesn't exist.
     pub fn graph_get_meta(&self, graph: &str) -> Result<Option<Value>> {
-        match self.executor.execute(Command::GraphGetMeta {
+        match self.execute_cmd(Command::GraphGetMeta {
             branch: self.branch_id(),
             graph: graph.to_string(),
         })? {
@@ -98,7 +98,7 @@ impl Strata {
         properties: Option<Value>,
         object_type: Option<&str>,
     ) -> Result<()> {
-        match self.executor.execute(Command::GraphAddNode {
+        match self.execute_cmd(Command::GraphAddNode {
             branch: self.branch_id(),
             graph: graph.to_string(),
             node_id: node_id.to_string(),
@@ -115,7 +115,7 @@ impl Strata {
 
     /// Get a node's data as a Value, or None if it doesn't exist.
     pub fn graph_get_node(&self, graph: &str, node_id: &str) -> Result<Option<Value>> {
-        match self.executor.execute(Command::GraphGetNode {
+        match self.execute_cmd(Command::GraphGetNode {
             branch: self.branch_id(),
             graph: graph.to_string(),
             node_id: node_id.to_string(),
@@ -129,7 +129,7 @@ impl Strata {
 
     /// Remove a node and all its incident edges.
     pub fn graph_remove_node(&self, graph: &str, node_id: &str) -> Result<()> {
-        match self.executor.execute(Command::GraphRemoveNode {
+        match self.execute_cmd(Command::GraphRemoveNode {
             branch: self.branch_id(),
             graph: graph.to_string(),
             node_id: node_id.to_string(),
@@ -143,7 +143,7 @@ impl Strata {
 
     /// List all node IDs in a graph.
     pub fn graph_list_nodes(&self, graph: &str) -> Result<Vec<String>> {
-        match self.executor.execute(Command::GraphListNodes {
+        match self.execute_cmd(Command::GraphListNodes {
             branch: self.branch_id(),
             graph: graph.to_string(),
         })? {
@@ -163,7 +163,7 @@ impl Strata {
         limit: usize,
         cursor: Option<&str>,
     ) -> Result<(Vec<String>, Option<String>)> {
-        match self.executor.execute(Command::GraphListNodesPaginated {
+        match self.execute_cmd(Command::GraphListNodesPaginated {
             branch: self.branch_id(),
             graph: graph.to_string(),
             limit,
@@ -190,7 +190,7 @@ impl Strata {
         weight: Option<f64>,
         properties: Option<Value>,
     ) -> Result<()> {
-        match self.executor.execute(Command::GraphAddEdge {
+        match self.execute_cmd(Command::GraphAddEdge {
             branch: self.branch_id(),
             graph: graph.to_string(),
             src: src.to_string(),
@@ -214,7 +214,7 @@ impl Strata {
         dst: &str,
         edge_type: &str,
     ) -> Result<()> {
-        match self.executor.execute(Command::GraphRemoveEdge {
+        match self.execute_cmd(Command::GraphRemoveEdge {
             branch: self.branch_id(),
             graph: graph.to_string(),
             src: src.to_string(),
@@ -269,7 +269,7 @@ impl Strata {
             )
             .collect();
 
-        match self.executor.execute(Command::GraphBulkInsert {
+        match self.execute_cmd(Command::GraphBulkInsert {
             branch: self.branch_id(),
             graph: graph.to_string(),
             nodes: bulk_nodes,
@@ -299,7 +299,7 @@ impl Strata {
         edges: Vec<crate::types::BulkGraphEdge>,
         chunk_size: Option<usize>,
     ) -> Result<(u64, u64)> {
-        match self.executor.execute(Command::GraphBulkInsert {
+        match self.execute_cmd(Command::GraphBulkInsert {
             branch: self.branch_id(),
             graph: graph.to_string(),
             nodes,
@@ -330,7 +330,7 @@ impl Strata {
         direction: &str,
         edge_type: Option<&str>,
     ) -> Result<Vec<GraphNeighborHit>> {
-        match self.executor.execute(Command::GraphNeighbors {
+        match self.execute_cmd(Command::GraphNeighbors {
             branch: self.branch_id(),
             graph: graph.to_string(),
             node_id: node_id.to_string(),
@@ -354,7 +354,7 @@ impl Strata {
         edge_types: Option<Vec<String>>,
         direction: Option<&str>,
     ) -> Result<GraphBfsResult> {
-        match self.executor.execute(Command::GraphBfs {
+        match self.execute_cmd(Command::GraphBfs {
             branch: self.branch_id(),
             graph: graph.to_string(),
             start: start.to_string(),
@@ -378,7 +378,7 @@ impl Strata {
     ///
     /// `definition` must be a Value::Map with at least a `"name"` field.
     pub fn graph_define_object_type(&self, graph: &str, definition: Value) -> Result<()> {
-        match self.executor.execute(Command::GraphDefineObjectType {
+        match self.execute_cmd(Command::GraphDefineObjectType {
             branch: self.branch_id(),
             graph: graph.to_string(),
             definition,
@@ -392,7 +392,7 @@ impl Strata {
 
     /// Get an object type definition by name, or None if not defined.
     pub fn graph_get_object_type(&self, graph: &str, name: &str) -> Result<Option<Value>> {
-        match self.executor.execute(Command::GraphGetObjectType {
+        match self.execute_cmd(Command::GraphGetObjectType {
             branch: self.branch_id(),
             graph: graph.to_string(),
             name: name.to_string(),
@@ -406,7 +406,7 @@ impl Strata {
 
     /// List all object type names in the graph's ontology.
     pub fn graph_list_object_types(&self, graph: &str) -> Result<Vec<String>> {
-        match self.executor.execute(Command::GraphListObjectTypes {
+        match self.execute_cmd(Command::GraphListObjectTypes {
             branch: self.branch_id(),
             graph: graph.to_string(),
         })? {
@@ -419,7 +419,7 @@ impl Strata {
 
     /// Delete an object type definition (only in draft mode).
     pub fn graph_delete_object_type(&self, graph: &str, name: &str) -> Result<()> {
-        match self.executor.execute(Command::GraphDeleteObjectType {
+        match self.execute_cmd(Command::GraphDeleteObjectType {
             branch: self.branch_id(),
             graph: graph.to_string(),
             name: name.to_string(),
@@ -435,7 +435,7 @@ impl Strata {
     ///
     /// `definition` must be a Value::Map with `"name"`, `"source"`, and `"target"` fields.
     pub fn graph_define_link_type(&self, graph: &str, definition: Value) -> Result<()> {
-        match self.executor.execute(Command::GraphDefineLinkType {
+        match self.execute_cmd(Command::GraphDefineLinkType {
             branch: self.branch_id(),
             graph: graph.to_string(),
             definition,
@@ -449,7 +449,7 @@ impl Strata {
 
     /// Get a link type definition by name, or None if not defined.
     pub fn graph_get_link_type(&self, graph: &str, name: &str) -> Result<Option<Value>> {
-        match self.executor.execute(Command::GraphGetLinkType {
+        match self.execute_cmd(Command::GraphGetLinkType {
             branch: self.branch_id(),
             graph: graph.to_string(),
             name: name.to_string(),
@@ -463,7 +463,7 @@ impl Strata {
 
     /// List all link type names in the graph's ontology.
     pub fn graph_list_link_types(&self, graph: &str) -> Result<Vec<String>> {
-        match self.executor.execute(Command::GraphListLinkTypes {
+        match self.execute_cmd(Command::GraphListLinkTypes {
             branch: self.branch_id(),
             graph: graph.to_string(),
         })? {
@@ -476,7 +476,7 @@ impl Strata {
 
     /// Delete a link type definition (only in draft mode).
     pub fn graph_delete_link_type(&self, graph: &str, name: &str) -> Result<()> {
-        match self.executor.execute(Command::GraphDeleteLinkType {
+        match self.execute_cmd(Command::GraphDeleteLinkType {
             branch: self.branch_id(),
             graph: graph.to_string(),
             name: name.to_string(),
@@ -490,7 +490,7 @@ impl Strata {
 
     /// Freeze the graph's ontology, enabling validation on writes.
     pub fn graph_freeze_ontology(&self, graph: &str) -> Result<()> {
-        match self.executor.execute(Command::GraphFreezeOntology {
+        match self.execute_cmd(Command::GraphFreezeOntology {
             branch: self.branch_id(),
             graph: graph.to_string(),
         })? {
@@ -503,7 +503,7 @@ impl Strata {
 
     /// Get the ontology status ("draft", "frozen"), or None if no ontology.
     pub fn graph_ontology_status(&self, graph: &str) -> Result<Option<Value>> {
-        match self.executor.execute(Command::GraphOntologyStatus {
+        match self.execute_cmd(Command::GraphOntologyStatus {
             branch: self.branch_id(),
             graph: graph.to_string(),
         })? {
@@ -518,7 +518,7 @@ impl Strata {
     ///
     /// Returns None if no ontology is defined on the graph.
     pub fn graph_ontology_summary(&self, graph: &str) -> Result<Option<Value>> {
-        match self.executor.execute(Command::GraphOntologySummary {
+        match self.execute_cmd(Command::GraphOntologySummary {
             branch: self.branch_id(),
             graph: graph.to_string(),
         })? {
@@ -531,7 +531,7 @@ impl Strata {
 
     /// List all ontology type names (both object and link types).
     pub fn graph_list_ontology_types(&self, graph: &str) -> Result<Vec<String>> {
-        match self.executor.execute(Command::GraphListOntologyTypes {
+        match self.execute_cmd(Command::GraphListOntologyTypes {
             branch: self.branch_id(),
             graph: graph.to_string(),
         })? {
@@ -544,7 +544,7 @@ impl Strata {
 
     /// Get all node IDs with a given object type.
     pub fn graph_nodes_by_type(&self, graph: &str, object_type: &str) -> Result<Vec<String>> {
-        match self.executor.execute(Command::GraphNodesByType {
+        match self.execute_cmd(Command::GraphNodesByType {
             branch: self.branch_id(),
             graph: graph.to_string(),
             object_type: object_type.to_string(),
@@ -567,7 +567,7 @@ impl Strata {
         top_n: Option<usize>,
         include_all: Option<bool>,
     ) -> Result<GraphGroupSummary> {
-        match self.executor.execute(Command::GraphWcc {
+        match self.execute_cmd(Command::GraphWcc {
             branch: self.branch_id(),
             graph: graph.to_string(),
             top_n,
@@ -589,7 +589,7 @@ impl Strata {
         top_n: Option<usize>,
         include_all: Option<bool>,
     ) -> Result<GraphGroupSummary> {
-        match self.executor.execute(Command::GraphCdlp {
+        match self.execute_cmd(Command::GraphCdlp {
             branch: self.branch_id(),
             graph: graph.to_string(),
             max_iterations,
@@ -614,7 +614,7 @@ impl Strata {
         top_n: Option<usize>,
         include_all: Option<bool>,
     ) -> Result<GraphScoreSummary> {
-        match self.executor.execute(Command::GraphPagerank {
+        match self.execute_cmd(Command::GraphPagerank {
             branch: self.branch_id(),
             graph: graph.to_string(),
             damping,
@@ -637,7 +637,7 @@ impl Strata {
         top_n: Option<usize>,
         include_all: Option<bool>,
     ) -> Result<GraphScoreSummary> {
-        match self.executor.execute(Command::GraphLcc {
+        match self.execute_cmd(Command::GraphLcc {
             branch: self.branch_id(),
             graph: graph.to_string(),
             top_n,
@@ -659,7 +659,7 @@ impl Strata {
         top_n: Option<usize>,
         include_all: Option<bool>,
     ) -> Result<GraphScoreSummary> {
-        match self.executor.execute(Command::GraphSssp {
+        match self.execute_cmd(Command::GraphSssp {
             branch: self.branch_id(),
             graph: graph.to_string(),
             source: source.to_string(),

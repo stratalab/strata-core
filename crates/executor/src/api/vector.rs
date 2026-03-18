@@ -18,7 +18,7 @@ impl Strata {
         dimension: u64,
         metric: DistanceMetric,
     ) -> Result<u64> {
-        match self.executor.execute(Command::VectorCreateCollection {
+        match self.execute_cmd(Command::VectorCreateCollection {
             branch: self.branch_id(),
             space: self.space_id(),
             collection: collection.to_string(),
@@ -34,7 +34,7 @@ impl Strata {
 
     /// Delete a collection.
     pub fn vector_delete_collection(&self, collection: &str) -> Result<bool> {
-        match self.executor.execute(Command::VectorDeleteCollection {
+        match self.execute_cmd(Command::VectorDeleteCollection {
             branch: self.branch_id(),
             space: self.space_id(),
             collection: collection.to_string(),
@@ -48,7 +48,7 @@ impl Strata {
 
     /// List all collections.
     pub fn vector_list_collections(&self) -> Result<Vec<CollectionInfo>> {
-        match self.executor.execute(Command::VectorListCollections {
+        match self.execute_cmd(Command::VectorListCollections {
             branch: self.branch_id(),
             space: self.space_id(),
         })? {
@@ -67,7 +67,7 @@ impl Strata {
         vector: Vec<f32>,
         metadata: Option<Value>,
     ) -> Result<u64> {
-        match self.executor.execute(Command::VectorUpsert {
+        match self.execute_cmd(Command::VectorUpsert {
             branch: self.branch_id(),
             space: self.space_id(),
             collection: collection.to_string(),
@@ -84,7 +84,7 @@ impl Strata {
 
     /// Get a vector by key.
     pub fn vector_get(&self, collection: &str, key: &str) -> Result<Option<VersionedVectorData>> {
-        match self.executor.execute(Command::VectorGet {
+        match self.execute_cmd(Command::VectorGet {
             branch: self.branch_id(),
             space: self.space_id(),
             collection: collection.to_string(),
@@ -100,7 +100,7 @@ impl Strata {
 
     /// Delete a vector.
     pub fn vector_delete(&self, collection: &str, key: &str) -> Result<bool> {
-        match self.executor.execute(Command::VectorDelete {
+        match self.execute_cmd(Command::VectorDelete {
             branch: self.branch_id(),
             space: self.space_id(),
             collection: collection.to_string(),
@@ -115,7 +115,7 @@ impl Strata {
 
     /// Get detailed statistics for a single collection.
     pub fn vector_collection_stats(&self, collection: &str) -> Result<CollectionInfo> {
-        match self.executor.execute(Command::VectorCollectionStats {
+        match self.execute_cmd(Command::VectorCollectionStats {
             branch: self.branch_id(),
             space: self.space_id(),
             collection: collection.to_string(),
@@ -135,7 +135,7 @@ impl Strata {
         collection: &str,
         entries: Vec<crate::types::BatchVectorEntry>,
     ) -> Result<Vec<u64>> {
-        match self.executor.execute(Command::VectorBatchUpsert {
+        match self.execute_cmd(Command::VectorBatchUpsert {
             branch: self.branch_id(),
             space: self.space_id(),
             collection: collection.to_string(),
@@ -155,7 +155,7 @@ impl Strata {
         query: Vec<f32>,
         k: u64,
     ) -> Result<Vec<VectorMatch>> {
-        match self.executor.execute(Command::VectorSearch {
+        match self.execute_cmd(Command::VectorSearch {
             branch: self.branch_id(),
             space: self.space_id(),
             collection: collection.to_string(),
@@ -182,7 +182,7 @@ impl Strata {
         metric: Option<DistanceMetric>,
         as_of: Option<u64>,
     ) -> Result<Vec<VectorMatch>> {
-        match self.executor.execute(Command::VectorSearch {
+        match self.execute_cmd(Command::VectorSearch {
             branch: self.branch_id(),
             space: self.space_id(),
             collection: collection.to_string(),
@@ -208,7 +208,7 @@ impl Strata {
         key: &str,
         as_of: Option<u64>,
     ) -> Result<Option<VersionedVectorData>> {
-        match self.executor.execute(Command::VectorGet {
+        match self.execute_cmd(Command::VectorGet {
             branch: self.branch_id(),
             space: self.space_id(),
             collection: collection.to_string(),

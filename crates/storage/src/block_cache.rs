@@ -564,6 +564,7 @@ pub fn file_path_hash(path: &std::path::Path) -> u64 {
 /// Caps the auto-detect result to prevent the cache from crowding out
 /// memtables, segment metadata, and application memory. Users needing
 /// a larger cache can set `block_cache_size` explicitly in config.
+#[allow(dead_code)]
 const MAX_AUTO_CACHE_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
 /// Auto-detect a reasonable cache capacity based on available system memory.
