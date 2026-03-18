@@ -33,7 +33,13 @@ const KV_HEADER_MAGIC: [u8; 8] = *b"STRAKV\0\0";
 const FOOTER_MAGIC: [u8; 8] = *b"STRAKEND";
 
 /// Current format version.
-const FORMAT_VERSION: u16 = 2;
+const FORMAT_VERSION: u16 = 3;
+
+/// Number of entries between restart points within a data block.
+/// Entry 0 always gets a restart point; subsequent restarts are placed every
+/// RESTART_INTERVAL entries. Binary search over restart points replaces
+/// a full linear scan, reducing from ~30 to ~4+8 comparisons per lookup.
+const RESTART_INTERVAL: usize = 16;
 
 /// Fixed header size in bytes.
 const KV_HEADER_SIZE: usize = 64;
@@ -132,6 +138,10 @@ impl SegmentBuilder {
         // Track current block's first key
         let mut block_first_key: Option<Vec<u8>> = None;
 
+        // Restart point tracking (v3 format)
+        let mut block_entry_count: usize = 0;
+        let mut restart_offsets: Vec<u32> = vec![0]; // entry 0 always at offset 0
+
         let mut file_offset = KV_HEADER_SIZE as u64;
 
         for (ik, entry) in iter {
@@ -155,12 +165,21 @@ impl SegmentBuilder {
                 block_first_key = Some(ik.as_bytes().to_vec());
             }
 
+            // Record restart point if this entry starts a new interval
+            if block_entry_count > 0 && block_entry_count % RESTART_INTERVAL == 0 {
+                restart_offsets.push(block_buf.len() as u32);
+            }
+
             // Encode entry into block buffer
             encode_entry(&ik, &entry, &mut block_buf);
             entry_count += 1;
+            block_entry_count += 1;
 
             // Flush block when it reaches target size
             if block_buf.len() >= self.data_block_size {
+                // Append restart trailer before compression
+                append_restart_trailer(&mut block_buf, &restart_offsets);
+
                 let bfk = block_first_key.take().unwrap();
                 let framed_size =
                     write_framed_block_compressed(&mut w, BLOCK_TYPE_DATA, &block_buf, true)?;
@@ -168,11 +187,17 @@ impl SegmentBuilder {
                 index_entries.push((bfk, file_offset, on_disk_data_len));
                 file_offset += framed_size as u64;
                 block_buf.clear();
+                restart_offsets.clear();
+                restart_offsets.push(0);
+                block_entry_count = 0;
             }
         }
 
         // Flush final partial block
         if !block_buf.is_empty() {
+            // Append restart trailer before compression
+            append_restart_trailer(&mut block_buf, &restart_offsets);
+
             let bfk = block_first_key.take().unwrap_or_default();
             let framed_size =
                 write_framed_block_compressed(&mut w, BLOCK_TYPE_DATA, &block_buf, true)?;
@@ -277,6 +302,17 @@ fn encode_entry(ik: &InternalKey, entry: &MemtableEntry, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&(value_bytes.len() as u32).to_le_bytes());
         buf.extend_from_slice(&value_bytes);
     }
+}
+
+/// Append restart point trailer to a data block buffer.
+///
+/// Format: `[restart_0: u32 LE] ... [restart_K: u32 LE] [num_restarts: u32 LE]`
+/// The trailer is appended in-place before compression.
+fn append_restart_trailer(buf: &mut Vec<u8>, restart_offsets: &[u32]) {
+    for &offset in restart_offsets {
+        buf.extend_from_slice(&offset.to_le_bytes());
+    }
+    buf.extend_from_slice(&(restart_offsets.len() as u32).to_le_bytes());
 }
 
 /// Decoded entry header — key + metadata without value deserialization.
@@ -681,7 +717,7 @@ pub(crate) fn parse_header(data: &[u8; KV_HEADER_SIZE]) -> Option<KVHeader> {
         return None;
     }
     let format_version = u16::from_le_bytes(data[8..10].try_into().ok()?);
-    if format_version != FORMAT_VERSION {
+    if !(2..=FORMAT_VERSION).contains(&format_version) {
         return None;
     }
     let commit_min = u64::from_le_bytes(data[16..24].try_into().ok()?);
@@ -1221,6 +1257,86 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ===== Restart point tests (v3 format) =====
+
+    #[test]
+    fn restart_trailer_roundtrip() {
+        // Build a block buffer manually and verify trailer offsets
+        let mut buf = Vec::new();
+        let mut offsets = vec![0u32];
+        let mut entry_count = 0usize;
+
+        // Write 32 entries, capturing offsets at restart boundaries
+        for i in 0..32u32 {
+            if entry_count > 0 && entry_count % RESTART_INTERVAL == 0 {
+                offsets.push(buf.len() as u32);
+            }
+            let k = key(&format!("k{:04}", i));
+            let ik = InternalKey::encode(&k, i as u64 + 1);
+            let entry = MemtableEntry {
+                value: Value::Int(i as i64),
+                is_tombstone: false,
+                timestamp: strata_core::Timestamp::now(),
+                ttl_ms: 0,
+            };
+            encode_entry(&ik, &entry, &mut buf);
+            entry_count += 1;
+        }
+
+        assert_eq!(offsets.len(), 2); // offsets at entry 0 and entry 16
+
+        // Append trailer
+        let data_end = buf.len();
+        append_restart_trailer(&mut buf, &offsets);
+
+        // Verify trailer can be parsed
+        let (parsed_data_end, num_restarts) = crate::segment::parse_restart_trailer(&buf).unwrap();
+        assert_eq!(parsed_data_end, data_end);
+        assert_eq!(num_restarts, 2);
+    }
+
+    #[test]
+    fn restart_interval_boundaries() {
+        use crate::segment::parse_restart_trailer;
+
+        let build_and_count_restarts = |n: u32| -> usize {
+            let mut buf = Vec::new();
+            let mut offsets = vec![0u32];
+            let mut count = 0usize;
+            for i in 0..n {
+                if count > 0 && count % RESTART_INTERVAL == 0 {
+                    offsets.push(buf.len() as u32);
+                }
+                let k = key(&format!("k{:04}", i));
+                let ik = InternalKey::encode(&k, i as u64 + 1);
+                let entry = MemtableEntry {
+                    value: Value::Int(i as i64),
+                    is_tombstone: false,
+                    timestamp: strata_core::Timestamp::now(),
+                    ttl_ms: 0,
+                };
+                encode_entry(&ik, &entry, &mut buf);
+                count += 1;
+            }
+            append_restart_trailer(&mut buf, &offsets);
+            let (_, num) = parse_restart_trailer(&buf).unwrap();
+            num
+        };
+
+        // 1 entry → 1 restart (at offset 0)
+        assert_eq!(build_and_count_restarts(1), 1);
+        // 16 entries → 1 restart (at offset 0; entry 16 would be the next)
+        assert_eq!(build_and_count_restarts(16), 1);
+        // 17 entries → 2 restarts (at entry 0 and entry 16)
+        assert_eq!(build_and_count_restarts(17), 2);
+        // 32 entries → 2 restarts (at entry 0 and entry 16)
+        assert_eq!(build_and_count_restarts(32), 2);
+        // 33 entries → 3 restarts (at entry 0, 16, 32)
+        assert_eq!(build_and_count_restarts(33), 3);
+        // 48 entries → 3 restarts (at entry 0, 16, 32)
+        assert_eq!(build_and_count_restarts(48), 3);
     }
 }
 

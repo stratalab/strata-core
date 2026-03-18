@@ -279,6 +279,7 @@ impl KVSegment {
             prefix_bytes,
             block_idx: start_block,
             block_offset: 0,
+            block_data_end: 0,
             block_data: None,
             done: false,
         }
@@ -369,8 +370,8 @@ impl KVSegment {
     /// 1. Parse key bytes + metadata WITHOUT allocating (EntryHeaderRef)
     /// 2. Only allocate + deserialize value for the matching entry
     ///
-    /// This eliminates ~32 wasted bincode::deserialize calls and ~32 Vec
-    /// allocations per block lookup.
+    /// For v3 blocks, binary-searches the restart point array to skip most
+    /// entries, then linear-scans only the ~16-entry interval.
     fn scan_block_for_key(
         &self,
         ie: &IndexEntry,
@@ -379,10 +380,36 @@ impl KVSegment {
     ) -> Option<SegmentEntry> {
         let block_data = self.read_data_block(ie)?;
         let data = &**block_data;
-        let mut pos = 0;
-        while pos < data.len() {
-            // Phase 1: zero-copy key decode (no allocation)
-            let ref_header = decode_entry_header_ref(&data[pos..])?;
+
+        // Determine scan bounds based on format version
+        let (scan_start, data_end) = if self.header.format_version >= 3 {
+            if let Some((de, num_restarts)) = parse_restart_trailer(data) {
+                // Binary search restart points for the interval containing typed_key
+                let start = binary_search_restarts(data, de, num_restarts, typed_key);
+                (start, de)
+            } else {
+                // Malformed trailer — fall back to full linear scan
+                (0, data.len())
+            }
+        } else {
+            (0, data.len())
+        };
+
+        self.linear_scan_block(data, scan_start, data_end, typed_key, snapshot_commit)
+    }
+
+    /// Linear scan entries in `data[start..end]` for `typed_key` at or below `snapshot_commit`.
+    fn linear_scan_block(
+        &self,
+        data: &[u8],
+        start: usize,
+        end: usize,
+        typed_key: &[u8],
+        snapshot_commit: u64,
+    ) -> Option<SegmentEntry> {
+        let mut pos = start;
+        while pos < end {
+            let ref_header = decode_entry_header_ref(&data[pos..end])?;
             let entry_data_start = pos;
             pos += ref_header.total_len;
 
@@ -395,7 +422,6 @@ impl KVSegment {
 
             let commit_id = ref_header.commit_id();
             if commit_id <= snapshot_commit {
-                // Phase 2: allocate + deserialize ONLY for the match
                 let header = EntryHeader {
                     ik: InternalKey::try_from_bytes(ref_header.ik_bytes.to_vec())?,
                     is_tombstone: ref_header.is_tombstone,
@@ -405,7 +431,7 @@ impl KVSegment {
                     value_len: ref_header.value_len,
                     total_len: ref_header.total_len,
                 };
-                let value = decode_entry_value(&data[entry_data_start..], &header)?;
+                let value = decode_entry_value(&data[entry_data_start..end], &header)?;
                 return Some(SegmentEntry {
                     value,
                     is_tombstone: header.is_tombstone,
@@ -428,10 +454,90 @@ impl KVSegment {
             prefix_bytes: Vec::new(), // empty prefix matches everything
             block_idx: 0,
             block_offset: 0,
+            block_data_end: 0,
             block_data: None,
             done: self.index.is_empty(),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Restart point helpers (v3 format)
+// ---------------------------------------------------------------------------
+
+/// Parse the restart trailer from a decompressed data block.
+///
+/// Returns `(data_end, num_restarts)` where `data_end` is the byte offset
+/// where entry data ends (i.e. the start of the restart array).
+pub(crate) fn parse_restart_trailer(data: &[u8]) -> Option<(usize, usize)> {
+    if data.len() < 4 {
+        return None;
+    }
+    let num = u32::from_le_bytes(data[data.len() - 4..].try_into().ok()?) as usize;
+    if num == 0 || num > data.len() / 4 {
+        return None; // 0 restarts invalid; num > data.len()/4 can't fit
+    }
+    let trailer_size = (1 + num) * 4; // num_restarts offsets + count
+    if trailer_size > data.len() {
+        return None;
+    }
+    Some((data.len() - trailer_size, num))
+}
+
+/// Read the i-th restart offset from the trailer.
+#[inline]
+fn restart_offset_at(data: &[u8], data_end: usize, index: usize) -> u32 {
+    let off = data_end + index * 4;
+    u32::from_le_bytes(data[off..off + 4].try_into().unwrap())
+}
+
+/// Binary search restart points to find the interval containing `typed_key`.
+///
+/// Returns the byte offset to start linear scanning from. Matches the
+/// LevelDB `Block::Iter::Seek` pattern: find the last restart whose key
+/// is ≤ the target, then linear scan from there.
+fn binary_search_restarts(
+    data: &[u8],
+    data_end: usize,
+    num_restarts: usize,
+    typed_key: &[u8],
+) -> usize {
+    let mut left = 0usize;
+    let mut right = num_restarts - 1;
+
+    while left < right {
+        let mid = (left + right + 1) / 2;
+        let offset = restart_offset_at(data, data_end, mid) as usize;
+        if offset < data_end {
+            if let Some(hdr) = decode_entry_header_ref(&data[offset..data_end]) {
+                if hdr.typed_key_prefix() < typed_key {
+                    left = mid;
+                } else {
+                    right = mid - 1;
+                }
+            } else {
+                // Corrupt entry at restart point — be conservative
+                right = mid - 1;
+            }
+        } else {
+            // Corrupt offset — skip this restart point
+            right = mid - 1;
+        }
+    }
+
+    let start = restart_offset_at(data, data_end, left) as usize;
+    // Clamp to data_end so the caller's linear scan safely produces no results
+    start.min(data_end)
+}
+
+/// Compute `data_end` for a block, handling both v2 (no trailer) and v3 (with trailer).
+fn block_data_end(data: &[u8], format_version: u16) -> usize {
+    if format_version >= 3 {
+        if let Some((de, _)) = parse_restart_trailer(data) {
+            return de;
+        }
+    }
+    data.len()
 }
 
 // ---------------------------------------------------------------------------
@@ -444,6 +550,8 @@ pub struct SegmentIter<'a> {
     prefix_bytes: Vec<u8>,
     block_idx: usize,
     block_offset: usize,
+    /// End of entry data in the current block (excludes restart trailer for v3).
+    block_data_end: usize,
     block_data: Option<Arc<Vec<u8>>>,
     done: bool,
 }
@@ -466,6 +574,8 @@ impl<'a> Iterator for SegmentIter<'a> {
                 let ie = &self.segment.index[self.block_idx];
                 match self.segment.read_data_block(ie) {
                     Some(data) => {
+                        let de = block_data_end(&data, self.segment.header.format_version);
+                        self.block_data_end = de;
                         self.block_data = Some(data);
                         self.block_offset = 0;
                     }
@@ -478,14 +588,14 @@ impl<'a> Iterator for SegmentIter<'a> {
 
             let data = self.block_data.as_ref().unwrap();
 
-            if self.block_offset >= data.len() {
+            if self.block_offset >= self.block_data_end {
                 // Move to next block
                 self.block_data = None;
                 self.block_idx += 1;
                 continue;
             }
 
-            match decode_entry(&data[self.block_offset..]) {
+            match decode_entry(&data[self.block_offset..self.block_data_end]) {
                 Some((ik, is_tomb, value, timestamp, ttl_ms, consumed)) => {
                     self.block_offset += consumed;
 
@@ -535,6 +645,8 @@ pub struct OwnedSegmentIter {
     segment: Arc<KVSegment>,
     block_idx: usize,
     block_offset: usize,
+    /// End of entry data in the current block (excludes restart trailer for v3).
+    block_data_end: usize,
     block_data: Option<Arc<Vec<u8>>>,
     done: bool,
 }
@@ -547,6 +659,7 @@ impl OwnedSegmentIter {
             segment,
             block_idx: 0,
             block_offset: 0,
+            block_data_end: 0,
             block_data: None,
             done,
         }
@@ -570,6 +683,8 @@ impl Iterator for OwnedSegmentIter {
                 let ie = &self.segment.index[self.block_idx];
                 match self.segment.read_data_block(ie) {
                     Some(data) => {
+                        let de = block_data_end(&data, self.segment.header.format_version);
+                        self.block_data_end = de;
                         self.block_data = Some(data);
                         self.block_offset = 0;
                     }
@@ -582,13 +697,13 @@ impl Iterator for OwnedSegmentIter {
 
             let data = self.block_data.as_ref().unwrap();
 
-            if self.block_offset >= data.len() {
+            if self.block_offset >= self.block_data_end {
                 self.block_data = None;
                 self.block_idx += 1;
                 continue;
             }
 
-            match decode_entry(&data[self.block_offset..]) {
+            match decode_entry(&data[self.block_offset..self.block_data_end]) {
                 Some((ik, is_tomb, value, timestamp, ttl_ms, consumed)) => {
                     self.block_offset += consumed;
                     let commit_id = ik.commit_id();
@@ -1378,5 +1493,303 @@ mod tests {
         let seg = Arc::new(KVSegment::open(&path).unwrap());
         let entries: Vec<_> = super::OwnedSegmentIter::new(seg).collect();
         assert!(entries.is_empty());
+    }
+
+    // ===== Restart point binary search tests (v3 format) =====
+
+    #[test]
+    fn binary_search_first_interval() {
+        // Key in entries 0-15 found correctly via binary search
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("restart_first.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..48u32 {
+            mt.put(
+                &kv_key(&format!("k_{:04}", i)),
+                i as u64 + 1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+        // Use large block size so all entries fit in one block
+        build_segment(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        // Look up a key in the first interval (entries 0-15)
+        let e = seg.point_lookup(&kv_key("k_0005"), u64::MAX).unwrap();
+        assert_eq!(e.value, Value::Int(5));
+        assert_eq!(e.commit_id, 6);
+    }
+
+    #[test]
+    fn binary_search_last_interval() {
+        // Key in last interval found correctly
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("restart_last.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..48u32 {
+            mt.put(
+                &kv_key(&format!("k_{:04}", i)),
+                i as u64 + 1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        // Key in last interval (entries 32-47)
+        let e = seg.point_lookup(&kv_key("k_0045"), u64::MAX).unwrap();
+        assert_eq!(e.value, Value::Int(45));
+    }
+
+    #[test]
+    fn binary_search_at_restart_boundary() {
+        // Key exactly at restart point entry 16
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("restart_boundary.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..48u32 {
+            mt.put(
+                &kv_key(&format!("k_{:04}", i)),
+                i as u64 + 1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        // Entry 16 is exactly at a restart point
+        let e = seg.point_lookup(&kv_key("k_0016"), u64::MAX).unwrap();
+        assert_eq!(e.value, Value::Int(16));
+        assert_eq!(e.commit_id, 17);
+    }
+
+    #[test]
+    fn binary_search_mvcc_versions() {
+        // 5 versions of same key, correct version returned
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("restart_mvcc.sst");
+
+        let mt = Memtable::new(0);
+        // Insert many unique keys to push MVCC versions across restart boundaries
+        for i in 0..30u32 {
+            mt.put(
+                &kv_key(&format!("a_{:04}", i)),
+                1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        // 5 versions of key "b_0000" — entries 30-34 span restart boundary at 32
+        for v in 1..=5u64 {
+            mt.put(&kv_key("b_0000"), v, Value::Int(v as i64 * 10), false);
+        }
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+
+        // Snapshot at 5: see version 5
+        let e = seg.point_lookup(&kv_key("b_0000"), 5).unwrap();
+        assert_eq!(e.value, Value::Int(50));
+        assert_eq!(e.commit_id, 5);
+
+        // Snapshot at 3: see version 3
+        let e = seg.point_lookup(&kv_key("b_0000"), 3).unwrap();
+        assert_eq!(e.value, Value::Int(30));
+        assert_eq!(e.commit_id, 3);
+
+        // Snapshot at 1: see version 1
+        let e = seg.point_lookup(&kv_key("b_0000"), 1).unwrap();
+        assert_eq!(e.value, Value::Int(10));
+    }
+
+    #[test]
+    fn binary_search_missing_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("restart_miss.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..48u32 {
+            mt.put(
+                &kv_key(&format!("k_{:04}", i)),
+                i as u64 + 1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        assert!(seg.point_lookup(&kv_key("zzz_missing"), u64::MAX).is_none());
+        assert!(seg.point_lookup(&kv_key("aaa_missing"), u64::MAX).is_none());
+    }
+
+    #[test]
+    fn v3_iter_respects_data_end() {
+        // Verify that iterators stop at data_end and don't parse restart trailer as entries
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("restart_iter.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..48u32 {
+            mt.put(
+                &kv_key(&format!("k_{:04}", i)),
+                i as u64 + 1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        let all: Vec<_> = seg.iter_seek_all().collect();
+        assert_eq!(all.len(), 48, "iterator should yield exactly 48 entries");
+
+        // Verify ordering
+        for i in 1..all.len() {
+            assert!(all[i - 1].0 < all[i].0, "entries must be in order");
+        }
+    }
+
+    #[test]
+    fn v3_multi_block_binary_search() {
+        // Binary search works correctly across multiple blocks
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("restart_multi.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..500u32 {
+            let k = kv_key(&format!("key_{:06}", i));
+            let val = Value::String(format!("value_{}", "x".repeat(50)));
+            mt.put(&k, i as u64 + 1, val, false);
+        }
+        mt.freeze();
+        build_segment_small_blocks(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        assert_eq!(seg.entry_count(), 500);
+
+        // Verify lookups across different blocks
+        let e = seg.point_lookup(&kv_key("key_000000"), u64::MAX).unwrap();
+        assert_eq!(e.commit_id, 1);
+
+        let e = seg.point_lookup(&kv_key("key_000250"), u64::MAX).unwrap();
+        assert_eq!(e.commit_id, 251);
+
+        let e = seg.point_lookup(&kv_key("key_000499"), u64::MAX).unwrap();
+        assert_eq!(e.commit_id, 500);
+
+        assert!(seg.point_lookup(&kv_key("key_999999"), u64::MAX).is_none());
+
+        // Verify iteration yields all entries
+        let all: Vec<_> = seg.iter_seek_all().collect();
+        assert_eq!(all.len(), 500);
+    }
+
+    #[test]
+    fn v2_fallback_linear_scan() {
+        // Build a v3 segment, then patch the header to v2 to simulate a legacy file.
+        // The reader must fall back to linear scan and still return correct results.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v2_compat.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..48u32 {
+            mt.put(
+                &kv_key(&format!("k_{:04}", i)),
+                i as u64 + 1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        // Patch format_version in the header from 3 to 2 (bytes 8..10 LE)
+        let mut raw = std::fs::read(&path).unwrap();
+        raw[8] = 2;
+        raw[9] = 0;
+        let v2_path = dir.path().join("v2_patched.sst");
+        std::fs::write(&v2_path, &raw).unwrap();
+
+        let seg = KVSegment::open(&v2_path).unwrap();
+        assert_eq!(seg.header.format_version, 2);
+
+        // Point lookups still work (linear scan ignores restart trailer)
+        let e = seg.point_lookup(&kv_key("k_0005"), u64::MAX).unwrap();
+        assert_eq!(e.value, Value::Int(5));
+
+        let e = seg.point_lookup(&kv_key("k_0045"), u64::MAX).unwrap();
+        assert_eq!(e.value, Value::Int(45));
+
+        assert!(seg.point_lookup(&kv_key("zzz"), u64::MAX).is_none());
+
+        // Iteration still works — but will include restart trailer bytes as
+        // "entries" and fail to parse them, stopping iteration early. For a
+        // genuine v2 file (no trailer), iteration would yield all entries.
+        // With a patched v2 header over v3 data, the iterator hits the trailer
+        // and stops. This is expected and safe — it returns a truncated but
+        // correct prefix of entries.
+    }
+
+    #[test]
+    fn compaction_output_has_restart_points() {
+        // Segments produced by compaction (via SplittingSegmentBuilder → SegmentBuilder)
+        // should be v3 with restart trailers.
+        use crate::segment_builder::SplittingSegmentBuilder;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..100u32 {
+            mt.put(
+                &kv_key(&format!("k_{:04}", i)),
+                i as u64 + 1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        // Read entries from the input segment
+        let seg = KVSegment::open(&path).unwrap();
+        let entries: Vec<_> = seg.iter_seek_all().collect();
+
+        // Re-build via SplittingSegmentBuilder (used by compaction)
+        let out_dir = dir.path().join("compacted");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let splitter = SplittingSegmentBuilder::default();
+        let iter = entries.iter().map(|(ik, se)| {
+            let me = crate::memtable::MemtableEntry {
+                value: se.value.clone(),
+                is_tombstone: se.is_tombstone,
+                timestamp: strata_core::Timestamp::from_micros(se.timestamp),
+                ttl_ms: se.ttl_ms,
+            };
+            (ik.clone(), me)
+        });
+        let results = splitter
+            .build_split(iter, |idx| out_dir.join(format!("{:06}.sst", idx)))
+            .unwrap();
+
+        // Verify output is v3 and readable
+        for (p, meta) in &results {
+            let out_seg = KVSegment::open(p).unwrap();
+            assert_eq!(out_seg.header.format_version, 3);
+            assert_eq!(out_seg.entry_count(), meta.entry_count);
+        }
     }
 }
