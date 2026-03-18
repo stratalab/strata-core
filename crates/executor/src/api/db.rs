@@ -219,9 +219,7 @@ impl Strata {
     ///
     /// Persisted to `strata.toml` for disk-backed databases.
     pub fn set_auto_embed(&self, enabled: bool) -> Result<()> {
-        match self
-            .execute_cmd(Command::ConfigSetAutoEmbed { enabled })?
-        {
+        match self.execute_cmd(Command::ConfigSetAutoEmbed { enabled })? {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for ConfigSetAutoEmbed".into(),

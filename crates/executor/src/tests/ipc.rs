@@ -1,9 +1,9 @@
 //! IPC integration tests.
 
-use crate::ipc::wire;
+use crate::ipc::client::IpcClient;
 use crate::ipc::protocol::{self, Request, Response};
 use crate::ipc::server::IpcServer;
-use crate::ipc::client::IpcClient;
+use crate::ipc::wire;
 use crate::{Command, Output, Value};
 use strata_engine::Database;
 use strata_security::AccessMode;
@@ -32,7 +32,10 @@ fn wire_round_trip_various_sizes() {
 
 #[test]
 fn protocol_ping_round_trip() {
-    let req = Request { id: 1, command: Command::Ping };
+    let req = Request {
+        id: 1,
+        command: Command::Ping,
+    };
     let bytes = protocol::encode(&req).unwrap();
     let decoded: Request = protocol::decode(&bytes).unwrap();
     assert_eq!(decoded.id, 1);
@@ -66,7 +69,9 @@ fn protocol_kv_put_round_trip() {
 fn protocol_response_ok_round_trip() {
     let resp = Response {
         id: 1,
-        result: Ok(Output::Pong { version: "0.6.0".into() }),
+        result: Ok(Output::Pong {
+            version: "0.6.0".into(),
+        }),
     };
     let bytes = protocol::encode(&resp).unwrap();
     let decoded: Response = protocol::decode(&bytes).unwrap();
@@ -98,10 +103,12 @@ fn setup_server() -> (tempfile::TempDir, IpcServer) {
     // Ensure default branch
     {
         let executor = crate::Executor::new(db.clone());
-        executor.execute(Command::BranchCreate {
-            branch_id: Some("default".to_string()),
-            metadata: None,
-        }).ok(); // ignore if exists
+        executor
+            .execute(Command::BranchCreate {
+                branch_id: Some("default".to_string()),
+                metadata: None,
+            })
+            .ok(); // ignore if exists
     }
 
     let server = IpcServer::start(dir.path(), db, AccessMode::ReadWrite).unwrap();
@@ -131,12 +138,14 @@ fn ipc_kv_put_get() {
     let mut client = IpcClient::connect(&socket_path).unwrap();
 
     // Put
-    let result = client.execute(Command::KvPut {
-        branch: None,
-        space: None,
-        key: "greeting".to_string(),
-        value: Value::String("hello".into()),
-    }).unwrap();
+    let result = client
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "greeting".to_string(),
+            value: Value::String("hello".into()),
+        })
+        .unwrap();
     match result {
         Output::WriteResult { key, version } => {
             assert_eq!(key, "greeting");
@@ -146,12 +155,14 @@ fn ipc_kv_put_get() {
     }
 
     // Get
-    let result = client.execute(Command::KvGet {
-        branch: None,
-        space: None,
-        key: "greeting".to_string(),
-        as_of: None,
-    }).unwrap();
+    let result = client
+        .execute(Command::KvGet {
+            branch: None,
+            space: None,
+            key: "greeting".to_string(),
+            as_of: None,
+        })
+        .unwrap();
     match result {
         Output::MaybeVersioned(Some(vv)) => {
             assert_eq!(vv.value, Value::String("hello".into()));
@@ -170,19 +181,23 @@ fn ipc_transaction() {
     let mut client = IpcClient::connect(&socket_path).unwrap();
 
     // Begin transaction
-    let result = client.execute(Command::TxnBegin {
-        branch: None,
-        options: None,
-    }).unwrap();
+    let result = client
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
     assert!(matches!(result, Output::TxnBegun));
 
     // Put within transaction
-    client.execute(Command::KvPut {
-        branch: None,
-        space: None,
-        key: "txn_key".to_string(),
-        value: Value::Int(42),
-    }).unwrap();
+    client
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "txn_key".to_string(),
+            value: Value::Int(42),
+        })
+        .unwrap();
 
     // Commit
     let result = client.execute(Command::TxnCommit).unwrap();
@@ -192,12 +207,14 @@ fn ipc_transaction() {
     }
 
     // Verify data persisted
-    let result = client.execute(Command::KvGet {
-        branch: None,
-        space: None,
-        key: "txn_key".to_string(),
-        as_of: None,
-    }).unwrap();
+    let result = client
+        .execute(Command::KvGet {
+            branch: None,
+            space: None,
+            key: "txn_key".to_string(),
+            as_of: None,
+        })
+        .unwrap();
     match result {
         Output::MaybeVersioned(Some(vv)) => {
             assert_eq!(vv.value, Value::Int(42));
@@ -217,20 +234,24 @@ fn ipc_multiple_clients() {
     let mut client2 = IpcClient::connect(&socket_path).unwrap();
 
     // Client 1 writes
-    client1.execute(Command::KvPut {
-        branch: None,
-        space: None,
-        key: "from_client1".to_string(),
-        value: Value::String("one".into()),
-    }).unwrap();
+    client1
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "from_client1".to_string(),
+            value: Value::String("one".into()),
+        })
+        .unwrap();
 
     // Client 2 reads
-    let result = client2.execute(Command::KvGet {
-        branch: None,
-        space: None,
-        key: "from_client1".to_string(),
-        as_of: None,
-    }).unwrap();
+    let result = client2
+        .execute(Command::KvGet {
+            branch: None,
+            space: None,
+            key: "from_client1".to_string(),
+            as_of: None,
+        })
+        .unwrap();
     match result {
         Output::MaybeVersioned(Some(vv)) => {
             assert_eq!(vv.value, Value::String("one".into()));
@@ -283,10 +304,12 @@ fn ipc_stale_socket_cleanup() {
     // Server should clean up stale socket and start successfully
     let db = Database::open(dir.path()).unwrap();
     let executor = crate::Executor::new(db.clone());
-    executor.execute(Command::BranchCreate {
-        branch_id: Some("default".to_string()),
-        metadata: None,
-    }).ok();
+    executor
+        .execute(Command::BranchCreate {
+            branch_id: Some("default".to_string()),
+            metadata: None,
+        })
+        .ok();
 
     let mut server = IpcServer::start(dir.path(), db, AccessMode::ReadWrite).unwrap();
 
@@ -355,12 +378,14 @@ fn ipc_concurrent_writers() {
                 let mut client = IpcClient::connect(&path).unwrap();
                 for j in 0..10 {
                     let key = format!("thread{}_{}", i, j);
-                    client.execute(Command::KvPut {
-                        branch: None,
-                        space: None,
-                        key: key.clone(),
-                        value: Value::Int((i * 10 + j) as i64),
-                    }).unwrap();
+                    client
+                        .execute(Command::KvPut {
+                            branch: None,
+                            space: None,
+                            key: key.clone(),
+                            value: Value::Int((i * 10 + j) as i64),
+                        })
+                        .unwrap();
                 }
             })
         })
@@ -375,12 +400,14 @@ fn ipc_concurrent_writers() {
     for i in 0..5 {
         for j in 0..10 {
             let key = format!("thread{}_{}", i, j);
-            let result = client.execute(Command::KvGet {
-                branch: None,
-                space: None,
-                key,
-                as_of: None,
-            }).unwrap();
+            let result = client
+                .execute(Command::KvGet {
+                    branch: None,
+                    space: None,
+                    key,
+                    as_of: None,
+                })
+                .unwrap();
             match result {
                 Output::MaybeVersioned(Some(vv)) => {
                     assert_eq!(vv.value, Value::Int((i * 10 + j) as i64));
@@ -401,23 +428,32 @@ fn ipc_transaction_rollback() {
     let mut client = IpcClient::connect(&socket_path).unwrap();
 
     // Begin + put + rollback
-    client.execute(Command::TxnBegin { branch: None, options: None }).unwrap();
-    client.execute(Command::KvPut {
-        branch: None,
-        space: None,
-        key: "rollback_key".to_string(),
-        value: Value::String("should_not_exist".into()),
-    }).unwrap();
+    client
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    client
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "rollback_key".to_string(),
+            value: Value::String("should_not_exist".into()),
+        })
+        .unwrap();
     let result = client.execute(Command::TxnRollback).unwrap();
     assert!(matches!(result, Output::TxnAborted));
 
     // Key should not exist
-    let result = client.execute(Command::KvGet {
-        branch: None,
-        space: None,
-        key: "rollback_key".to_string(),
-        as_of: None,
-    }).unwrap();
+    let result = client
+        .execute(Command::KvGet {
+            branch: None,
+            space: None,
+            key: "rollback_key".to_string(),
+            as_of: None,
+        })
+        .unwrap();
     match result {
         Output::MaybeVersioned(None) | Output::Maybe(None) => {}
         _ => panic!("expected None after rollback"),
@@ -481,19 +517,23 @@ fn ipc_large_value() {
 
     // 1 MB value
     let large_value = "x".repeat(1024 * 1024);
-    client.execute(Command::KvPut {
-        branch: None,
-        space: None,
-        key: "big_key".to_string(),
-        value: Value::String(large_value.clone()),
-    }).unwrap();
+    client
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "big_key".to_string(),
+            value: Value::String(large_value.clone()),
+        })
+        .unwrap();
 
-    let result = client.execute(Command::KvGet {
-        branch: None,
-        space: None,
-        key: "big_key".to_string(),
-        as_of: None,
-    }).unwrap();
+    let result = client
+        .execute(Command::KvGet {
+            branch: None,
+            space: None,
+            key: "big_key".to_string(),
+            as_of: None,
+        })
+        .unwrap();
     match result {
         Output::MaybeVersioned(Some(vv)) => {
             assert_eq!(vv.value, Value::String(large_value));

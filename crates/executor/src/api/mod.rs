@@ -157,12 +157,13 @@ impl Strata {
         let config_path = data_dir.join(strata_engine::database::config::CONFIG_FILE_NAME);
         strata_engine::database::config::StrataConfig::write_default_if_missing(&config_path)
             .map_err(|e| Error::Internal {
-            reason: format!("Failed to write default config: {}", e),
-        })?;
-        let cfg = strata_engine::database::config::StrataConfig::from_file(&config_path)
-            .map_err(|e| Error::Internal {
-                reason: format!("Failed to read config: {}", e),
+                reason: format!("Failed to write default config: {}", e),
             })?;
+        let cfg = strata_engine::database::config::StrataConfig::from_file(&config_path).map_err(
+            |e| Error::Internal {
+                reason: format!("Failed to read config: {}", e),
+            },
+        )?;
 
         let access_mode = opts.access_mode;
 
@@ -195,9 +196,11 @@ impl Strata {
                                     data_dir: data_dir.clone(),
                                 };
                                 // Verify connectivity with a ping
-                                backend.execute(Command::Ping).map_err(|_| Error::Internal {
-                                    reason: "Connected to IPC server but ping failed".into(),
-                                })?;
+                                backend
+                                    .execute(Command::Ping)
+                                    .map_err(|_| Error::Internal {
+                                        reason: "Connected to IPC server but ping failed".into(),
+                                    })?;
                                 return Ok(Self {
                                     backend,
                                     current_branch: BranchId::default(),
@@ -209,16 +212,25 @@ impl Strata {
                                 // Stale socket — try to clean up and retry
                                 let _ = std::fs::remove_file(&socket_path);
                                 // Re-read config for retry
-                                let cfg2 = strata_engine::database::config::StrataConfig::from_file(&config_path)
-                                    .map_err(|e| Error::Internal {
-                                        reason: format!("Failed to read config: {}", e),
+                                let cfg2 =
+                                    strata_engine::database::config::StrataConfig::from_file(
+                                        &config_path,
+                                    )
+                                    .map_err(|e| {
+                                        Error::Internal {
+                                            reason: format!("Failed to read config: {}", e),
+                                        }
                                     })?;
                                 match Database::open_with_config(&data_dir, cfg2) {
                                     Ok(db) => {
                                         let executor = Executor::new_with_mode(db, access_mode);
                                         match access_mode {
-                                            AccessMode::ReadWrite => Self::ensure_default_branch(&executor)?,
-                                            AccessMode::ReadOnly => Self::verify_default_branch(&executor)?,
+                                            AccessMode::ReadWrite => {
+                                                Self::ensure_default_branch(&executor)?
+                                            }
+                                            AccessMode::ReadOnly => {
+                                                Self::verify_default_branch(&executor)?
+                                            }
                                         }
                                         return Ok(Self {
                                             backend: Backend::Local { executor },
@@ -229,11 +241,10 @@ impl Strata {
                                     }
                                     Err(_) => {
                                         return Err(Error::Internal {
-                                            reason: format!(
-                                                "Database is locked by another process. \
+                                            reason: "Database is locked by another process. \
                                                  Run `strata up` to enable shared access, \
                                                  or use --follower for read-only access."
-                                            ),
+                                                .into(),
                                         });
                                     }
                                 }
@@ -241,11 +252,10 @@ impl Strata {
                         }
                     } else {
                         return Err(Error::Internal {
-                            reason: format!(
-                                "Database is locked by another process. \
+                            reason: "Database is locked by another process. \
                                  Run `strata up` to enable shared access, \
                                  or use --follower for read-only access."
-                            ),
+                                .into(),
                         });
                     }
                 }
@@ -429,11 +439,6 @@ impl Strata {
     /// Execute a command through the backend (local or IPC).
     pub(crate) fn execute_cmd(&self, cmd: Command) -> Result<Output> {
         self.backend.execute(cmd)
-    }
-
-    /// Execute an internal command (bypasses system branch guard for local).
-    pub(crate) fn execute_internal(&self, cmd: Command) -> Result<Output> {
-        self.backend.execute_internal(cmd)
     }
 
     /// Get WAL durability counters for diagnostics.

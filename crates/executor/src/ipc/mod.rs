@@ -77,14 +77,6 @@ impl Backend {
         }
     }
 
-    /// Get the access mode.
-    pub(crate) fn access_mode(&self) -> AccessMode {
-        match self {
-            Backend::Local { executor } => executor.access_mode(),
-            Backend::Ipc { access_mode, .. } => *access_mode,
-        }
-    }
-
     /// Get a reference to the local executor, if this is a local backend.
     ///
     /// # Panics

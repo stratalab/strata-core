@@ -449,8 +449,7 @@ fn run_up(db_path: &str, foreground: bool) {
                 // We are now in the child process
                 match IpcServer::start(&data_dir, database, access_mode) {
                     Ok(mut server) => {
-                        let running =
-                            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+                        let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
                         let r = running.clone();
                         ctrlc_handler(r);
 
