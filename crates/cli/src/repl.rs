@@ -41,6 +41,8 @@ pub fn run_repl(state: &mut SessionState, mode: OutputMode) {
         let _ = rl.load_history(path);
     }
 
+    print_welcome();
+
     loop {
         let prompt = state.prompt();
         match rl.readline(&prompt) {
@@ -403,6 +405,17 @@ fn execute_action(matches: &clap::ArgMatches, state: &mut SessionState, mode: Ou
             false
         }
     }
+}
+
+fn print_welcome() {
+    let version = env!("CARGO_PKG_VERSION");
+    eprintln!("Strata v{version} — type 'help' for commands, 'quit' to exit.");
+    eprintln!();
+    eprintln!("  Quick start:");
+    eprintln!("    kv put greeting \"hello world\"    Store a value");
+    eprintln!("    kv get greeting                   Retrieve it");
+    eprintln!("    search \"hello\"                    Search across all data");
+    eprintln!();
 }
 
 fn history_file() -> Option<String> {

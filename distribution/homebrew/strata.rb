@@ -1,7 +1,7 @@
 class Strata < Formula
   desc "Production-grade embedded database for AI agents"
   homepage "https://stratadb.org"
-  version "0.6.0"
+  version "PLACEHOLDER"
   license "Apache-2.0"
 
   on_macos do
@@ -16,6 +16,10 @@ class Strata < Formula
   end
 
   on_linux do
+    on_arm do
+      url "https://github.com/strata-ai-labs/strata-core/releases/download/v#{version}/strata-v#{version}-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "PLACEHOLDER"
+    end
     on_intel do
       url "https://github.com/strata-ai-labs/strata-core/releases/download/v#{version}/strata-v#{version}-x86_64-unknown-linux-gnu.tar.gz"
       sha256 "PLACEHOLDER"

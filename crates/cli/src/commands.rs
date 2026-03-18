@@ -11,6 +11,7 @@ use clap::{Arg, Command};
 pub fn build_cli() -> Command {
     Command::new("strata")
         .about("Redis-inspired CLI for the Strata database")
+        .version(env!("CARGO_PKG_VERSION"))
         .subcommand_required(false)
         .arg(
             Arg::new("db")
