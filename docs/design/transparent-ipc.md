@@ -3,11 +3,22 @@
 ## Problem
 
 Strata is an embedded database — only one process can hold the write lock at a time.
-When `strata ai` is running in one terminal, `strata kv get` in another terminal fails
-with "database is already in use by another process."
+In practice, multiple processes need concurrent write access to the same database:
 
-This is the correct behavior for an embedded database, but it creates a poor user
-experience. The user shouldn't have to think about which terminal holds the lock.
+```
+strata ai (Node SDK)  ──┐
+Python script (PyO3)  ──┤── all need write access to the same .strata/
+CLI (strata kv put)   ──┤
+Another Node app      ──┘
+```
+
+Today, whichever process opens the database first holds the exclusive `.lock`,
+and every other process gets "database is already in use by another process."
+
+This is the correct behavior for an embedded database, but it creates a poor
+user experience. A user running `strata ai` in one terminal can't run
+`strata kv get` in another. A Python analytics script can't read while the
+Node-based AI agent is writing.
 
 ## Design: Implicit Host-Client Model
 
@@ -22,22 +33,68 @@ When a subsequent process tries to open the same database:
 - If yes: enters **client mode** — sends commands over the socket
 - If no: reports the existing "database in use" error
 
-The user never starts a server. The user never configures ports. The CLI
-just figures it out.
+The user never starts a server. The user never configures ports. Any process
+that opens the database — CLI, Node SDK, Python SDK — just figures it out.
 
 ```
-# Terminal 1 — becomes the host automatically
+# Terminal 1 — strata ai (Node SDK) becomes the host
 $ strata ai
 > Building knowledge graph...
 
-# Terminal 2 — becomes a client transparently
+# Terminal 2 — CLI becomes a client transparently
 $ strata kv get greeting
 "hello world"
 
-# Terminal 3 — another client, writes forwarded to host
-$ strata kv put status "running"
-OK
+# Terminal 3 — Python script, also a transparent client
+$ python3 -c "
+from strata import Strata
+db = Strata('.strata')  # detects lock, connects via socket
+print(db.kv.get('greeting'))
+"
+hello world
 ```
+
+## Multi-SDK Requirements
+
+The IPC layer must live in the **engine/executor crate**, not the CLI.
+This is because all SDKs embed the database via FFI:
+
+- **Node SDK** (`strata-node`): napi-rs bindings → Rust executor
+- **Python SDK** (`strata-python`): PyO3 bindings → Rust executor
+- **CLI** (`strata-cli`): direct Rust
+
+All three call `Strata::open()` which calls `Database::open()` in the engine.
+The socket server and client must be wired into this path so every SDK gets
+IPC for free:
+
+```
+Strata::open(path)
+  └── Database::open(path)
+        ├── try_lock_exclusive() → success → spawn socket server → return DB
+        └── try_lock_exclusive() → LOCKED
+              ├── connect(strata.sock) → success → return IPC-backed handle
+              └── connect failed → error "database in use"
+```
+
+### SDK-Transparent API
+
+The `Strata` / `Session` API must work identically regardless of whether the
+database is local or IPC-backed:
+
+```rust
+// Direct (host process)
+let db = Strata::open(".strata")?;
+let session = db.session();
+session.execute(Command::KvPut { ... })?;
+
+// IPC (client process) — same API, different backing
+let db = Strata::open(".strata")?;  // transparently connects via socket
+let session = db.session();
+session.execute(Command::KvPut { ... })?;  // serialized over socket
+```
+
+Node and Python SDKs call into the same Rust `Strata::open()`, so they
+inherit this behavior without any SDK-side changes.
 
 ## Wire Protocol
 
@@ -90,7 +147,7 @@ uncommitted transaction, matching the existing behavior).
 
 ## Host Lifecycle
 
-### Startup (in Database::open or CLI open path)
+### Startup (in Database::open)
 
 1. Acquire `.lock` (existing behavior)
 2. Create Unix socket at `<data_dir>/strata.sock`
@@ -110,35 +167,6 @@ If a process crashes without cleanup, `strata.sock` may remain on disk.
 Detection: attempt `connect()` — if it fails with `ConnectionRefused`,
 the socket is stale. Delete it and proceed with normal open.
 
-## Client Mode in CLI
-
-In `open_database()` (cli/src/main.rs):
-
-```
-fn open_database(matches, path) -> Result<Strata, String> {
-    // Try normal open first
-    match Strata::open_with(path, opts) {
-        Ok(db) => Ok(db),
-        Err(e) if e.is_locked() => {
-            // Database is held by another process — try IPC
-            let sock = Path::new(path).join("strata.sock");
-            if sock.exists() {
-                // Enter client mode
-                Ok(Strata::connect(sock)?)
-            } else {
-                Err(e)  // No socket — real lock conflict
-            }
-        }
-        Err(e) => Err(e),
-    }
-}
-```
-
-The `Strata::connect()` constructor returns a `Strata` handle backed by
-a socket connection instead of a local database. The `Session::execute()`
-method serializes the command, sends it over the socket, and deserializes
-the response. From the CLI's perspective, it's the same `Strata` API.
-
 ## Implementation Layers
 
 ### Layer 1: Wire Protocol (`crates/executor/src/ipc/`)
@@ -155,12 +183,13 @@ the response. From the CLI's perspective, it's the same `Strata` API.
 ### Layer 3: Socket Client (`crates/executor/src/ipc/`)
 
 - `client.rs` — `IpcSession` implementing the same execute interface
-- `Strata::connect(sock_path)` constructor
+- Returns a `Strata` handle backed by socket I/O instead of local DB
+- SDKs (Node, Python) get this for free via their existing FFI bindings
 
-### Layer 4: CLI Integration (`crates/cli/src/main.rs`)
+### Layer 4: Transparent Fallback (`crates/executor/src/api/`)
 
-- Transparent fallback in `open_database()`
-- No changes to command dispatch, REPL, or output formatting
+- `Strata::open()` attempts direct open, falls back to IPC on lock conflict
+- No changes needed in CLI, Node SDK, or Python SDK
 
 ## What This Does NOT Change
 
@@ -169,6 +198,7 @@ the response. From the CLI's perspective, it's the same `Strata` API.
 - `--follower` mode still works independently (read-only, no socket)
 - No network exposure — Unix socket with filesystem permissions only
 - No configuration — fully automatic
+- SDK APIs unchanged — `Strata::open()` works the same way
 
 ## Limitations
 
@@ -180,6 +210,10 @@ the response. From the CLI's perspective, it's the same `Strata` API.
 - **Single host** — Only one host process per database. Multiple clients
   can connect, but writes are serialized through the host's single writer.
   This matches the embedded model.
+- **Host process exit** — When the host exits, all client connections break.
+  Clients get an I/O error and must reconnect (which means reopening the
+  database — one of them becomes the new host). This is acceptable for
+  the expected use case.
 
 ## Performance Considerations
 
@@ -187,7 +221,7 @@ the response. From the CLI's perspective, it's the same `Strata` API.
   (negligible compared to disk I/O for writes)
 - **Serialization**: MessagePack is ~10x faster than JSON for serde
 - **Connection cost**: One thread per connection on the host. For the
-  expected use case (2-3 concurrent CLI sessions), this is fine.
+  expected use case (2-3 concurrent SDK sessions), this is fine.
   If needed, can migrate to async (tokio) later.
 
 ## Alternatives Considered
