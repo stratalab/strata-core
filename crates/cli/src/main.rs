@@ -12,8 +12,10 @@ mod repl;
 mod state;
 mod value;
 
-use std::io::IsTerminal;
+use std::io::{self, IsTerminal, Write};
+use std::path::PathBuf;
 use std::process;
+use std::{env, fs};
 
 use strata_executor::{AccessMode, Command, OpenOptions, Output, Strata};
 
@@ -29,9 +31,13 @@ fn main() {
     let cli = build_cli();
     let matches = cli.get_matches();
 
-    // Handle `setup` subcommand before opening any database.
+    // Handle subcommands that don't need a database.
     if matches.subcommand_name() == Some("setup") {
         run_setup();
+        return;
+    }
+    if let Some(("uninstall", sub)) = matches.subcommand() {
+        run_uninstall(sub.get_flag("yes"));
         return;
     }
 
@@ -336,6 +342,130 @@ fn run_shell_mode(matches: &clap::ArgMatches, state: &mut SessionState, mode: Ou
             1
         }
     }
+}
+
+fn run_uninstall(skip_confirm: bool) {
+    let home = match env::var("HOME") {
+        Ok(h) => PathBuf::from(h),
+        Err(_) => {
+            eprintln!("Could not determine home directory.");
+            process::exit(1);
+        }
+    };
+
+    let strata_dir = home.join(".strata");
+    let legacy_model_dir = home.join(".stratadb");
+    let history_file = home.join(".strata_history");
+
+    // Show what will be removed
+    eprintln!("This will remove:");
+    eprintln!();
+    if strata_dir.exists() {
+        eprintln!("  ~/.strata/          Binary, models, and configuration");
+    }
+    if legacy_model_dir.exists() {
+        eprintln!("  ~/.stratadb/        Legacy model files");
+    }
+    if history_file.exists() {
+        eprintln!("  ~/.strata_history   REPL history");
+    }
+    eprintln!("  PATH entries        From shell configuration files");
+    eprintln!();
+    eprintln!("Note: Per-project database directories (.strata/ in your projects)");
+    eprintln!("will NOT be removed. Delete those manually if needed.");
+    eprintln!();
+
+    if !skip_confirm {
+        eprint!("Continue? [y/N] ");
+        io::stderr().flush().unwrap();
+        let mut answer = String::new();
+        if io::stdin().read_line(&mut answer).is_err() || !answer.trim().eq_ignore_ascii_case("y") {
+            eprintln!("Aborted.");
+            return;
+        }
+    }
+
+    // Remove ~/.strata/ (binary + models + config)
+    if strata_dir.exists() {
+        match fs::remove_dir_all(&strata_dir) {
+            Ok(()) => eprintln!("  Removed ~/.strata/"),
+            Err(e) => eprintln!("  Warning: could not remove ~/.strata/: {}", e),
+        }
+    }
+
+    // Remove ~/.stratadb/ (legacy model dir)
+    if legacy_model_dir.exists() {
+        match fs::remove_dir_all(&legacy_model_dir) {
+            Ok(()) => eprintln!("  Removed ~/.stratadb/"),
+            Err(e) => eprintln!("  Warning: could not remove ~/.stratadb/: {}", e),
+        }
+    }
+
+    // Remove ~/.strata_history
+    if history_file.exists() {
+        match fs::remove_file(&history_file) {
+            Ok(()) => eprintln!("  Removed ~/.strata_history"),
+            Err(e) => eprintln!("  Warning: could not remove ~/.strata_history: {}", e),
+        }
+    }
+
+    // Clean PATH entries from shell configs
+    let strata_path_marker = home.join(".strata/bin").to_string_lossy().to_string();
+    let shell_configs = [
+        home.join(".zshrc"),
+        home.join(".bashrc"),
+        home.join(".bash_profile"),
+        home.join(".profile"),
+        home.join(".config/fish/config.fish"),
+    ];
+
+    for config_path in &shell_configs {
+        if !config_path.exists() {
+            continue;
+        }
+        let contents = match fs::read_to_string(config_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if !contents.contains(&strata_path_marker) {
+            continue;
+        }
+
+        // Remove the "# Strata" comment and the line following it
+        let filtered: Vec<&str> = contents
+            .lines()
+            .collect::<Vec<_>>()
+            .windows(1)
+            .filter_map(|w| {
+                let line = w[0];
+                if line.trim() == "# Strata" || line.contains(&strata_path_marker) {
+                    None
+                } else {
+                    Some(line)
+                }
+            })
+            .collect();
+
+        // Trim trailing blank lines that were left behind
+        let mut result: Vec<&str> = filtered.into_iter().collect();
+        while result.last() == Some(&"") {
+            result.pop();
+        }
+        let mut new_contents = result.join("\n");
+        new_contents.push('\n');
+
+        match fs::write(config_path, &new_contents) {
+            Ok(()) => eprintln!("  Cleaned PATH from {}", config_path.display()),
+            Err(e) => eprintln!(
+                "  Warning: could not update {}: {}",
+                config_path.display(),
+                e
+            ),
+        }
+    }
+
+    eprintln!();
+    eprintln!("Strata has been uninstalled. Restart your shell to apply PATH changes.");
 }
 
 fn run_setup() {

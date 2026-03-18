@@ -94,6 +94,7 @@ pub fn build_cli() -> Command {
         .subcommand(build_describe())
         .subcommand(build_search())
         .subcommand(build_setup())
+        .subcommand(build_uninstall())
         .subcommand(build_configure_model())
         .subcommand(build_embed())
         .subcommand(build_models())
@@ -820,6 +821,18 @@ fn build_search() -> Command {
 
 fn build_setup() -> Command {
     Command::new("setup").about("Download model files for auto-embedding")
+}
+
+fn build_uninstall() -> Command {
+    Command::new("uninstall")
+        .about("Remove Strata from this system")
+        .arg(
+            Arg::new("yes")
+                .long("yes")
+                .short('y')
+                .help("Skip confirmation prompt")
+                .action(clap::ArgAction::SetTrue),
+        )
 }
 
 // =========================================================================
