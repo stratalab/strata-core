@@ -50,8 +50,14 @@ fn main() {
         OutputMode::Human
     };
 
+    // Resolve database path
+    let db_path = matches
+        .get_one::<String>("db")
+        .map(|s| s.as_str())
+        .unwrap_or(".strata");
+
     // Open database
-    let db = match open_database(&matches) {
+    let db = match open_database(&matches, db_path) {
         Ok(db) => db,
         Err(e) => {
             eprintln!("{}", e);
@@ -78,7 +84,7 @@ fn main() {
         process::exit(exit_code);
     } else if std::io::stdin().is_terminal() {
         // REPL mode
-        repl::run_repl(&mut state, output_mode);
+        repl::run_repl(&mut state, output_mode, db_path);
     } else {
         // Pipe mode
         let exit_code = repl::run_pipe(&mut state, output_mode);
@@ -86,7 +92,7 @@ fn main() {
     }
 }
 
-fn open_database(matches: &clap::ArgMatches) -> Result<Strata, String> {
+fn open_database(matches: &clap::ArgMatches, path: &str) -> Result<Strata, String> {
     let read_only = matches.get_flag("read-only");
     let use_cache = matches.get_flag("cache");
     let follower = matches.get_flag("follower");
@@ -94,10 +100,6 @@ fn open_database(matches: &clap::ArgMatches) -> Result<Strata, String> {
     if use_cache {
         Strata::cache().map_err(|e| format!("Failed to open cache database: {}", e))
     } else {
-        let path = matches
-            .get_one::<String>("db")
-            .map(|s| s.as_str())
-            .unwrap_or(".strata");
 
         let mut opts = OpenOptions::new();
 
