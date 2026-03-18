@@ -55,5 +55,13 @@
 //! Internal crates (storage, concurrency, durability, engine) are not exposed.
 //! Only the public API surface in this crate is stable.
 
+// Use jemalloc for better memory return behavior under heavy alloc/free churn.
+// glibc malloc retains freed pages in the process address space, causing RSS to
+// grow monotonically under transaction workloads. jemalloc uses madvise(MADV_DONTNEED)
+// to return pages promptly.
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 // Re-export the public API from strata-executor
 pub use strata_executor::*;

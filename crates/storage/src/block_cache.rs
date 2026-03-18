@@ -455,9 +455,17 @@ pub fn file_path_hash(path: &std::path::Path) -> u64 {
     hasher.finish()
 }
 
+/// Maximum auto-detected block cache size (4 GiB).
+///
+/// Caps the auto-detect result to prevent the cache from crowding out
+/// memtables, segment metadata, and application memory. Users needing
+/// a larger cache can set `block_cache_size` explicitly in config.
+const MAX_AUTO_CACHE_BYTES: usize = 4 * 1024 * 1024 * 1024;
+
 /// Auto-detect a reasonable cache capacity based on available system memory.
 ///
-/// On Linux, reads `/proc/meminfo` and returns `max(256 MiB, available_ram / 4)`.
+/// On Linux, reads `/proc/meminfo` and returns
+/// `clamp(available_ram / 4, 256 MiB, 4 GiB)`.
 /// On other platforms (or if detection fails), returns 256 MiB.
 pub fn auto_detect_capacity() -> usize {
     #[cfg(target_os = "linux")]
@@ -468,7 +476,7 @@ pub fn auto_detect_capacity() -> usize {
                     if let Some(kb_str) = rest.split_whitespace().next() {
                         if let Ok(kb) = kb_str.parse::<usize>() {
                             let quarter = (kb * 1024) / 4;
-                            return quarter.max(256 * 1024 * 1024);
+                            return quarter.clamp(256 * 1024 * 1024, MAX_AUTO_CACHE_BYTES);
                         }
                     }
                 }
