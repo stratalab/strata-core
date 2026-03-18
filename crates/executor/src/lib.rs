@@ -54,6 +54,7 @@ mod command;
 mod convert;
 mod error;
 mod executor;
+pub(crate) mod ipc;
 pub(crate) mod json;
 mod output;
 mod session;
@@ -79,6 +80,7 @@ pub use api::{
 pub use command::Command;
 pub use error::Error;
 pub use executor::Executor;
+pub use ipc::IpcServer;
 pub use output::{EmbedStatusInfo, Output};
 pub use session::Session;
 pub use types::*;

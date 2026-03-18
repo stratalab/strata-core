@@ -10,7 +10,7 @@ impl Strata {
 
     /// List all spaces in the current branch.
     pub fn space_list(&self) -> Result<Vec<String>> {
-        match self.executor.execute(Command::SpaceList {
+        match self.execute_cmd(Command::SpaceList {
             branch: self.branch_id(),
         })? {
             Output::SpaceList(spaces) => Ok(spaces),
@@ -22,7 +22,7 @@ impl Strata {
 
     /// Create a space in the current branch.
     pub fn space_create(&self, name: &str) -> Result<()> {
-        match self.executor.execute(Command::SpaceCreate {
+        match self.execute_cmd(Command::SpaceCreate {
             branch: self.branch_id(),
             space: name.to_string(),
         })? {
@@ -37,7 +37,7 @@ impl Strata {
     ///
     /// If `force` is true, deletes even if the space is non-empty.
     pub fn space_delete(&self, name: &str, force: bool) -> Result<()> {
-        match self.executor.execute(Command::SpaceDelete {
+        match self.execute_cmd(Command::SpaceDelete {
             branch: self.branch_id(),
             space: name.to_string(),
             force,
@@ -51,7 +51,7 @@ impl Strata {
 
     /// Check if a space exists in the current branch.
     pub fn space_exists(&self, name: &str) -> Result<bool> {
-        match self.executor.execute(Command::SpaceExists {
+        match self.execute_cmd(Command::SpaceExists {
             branch: self.branch_id(),
             space: name.to_string(),
         })? {

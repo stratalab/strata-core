@@ -21,6 +21,8 @@ cloud = ["anthropic", "openai", "google"]
 strata-executor = { path = "../executor" }
 strata-intelligence = { path = "../intelligence", features = ["embed"], optional = true }
 clap = { version = "4", features = ["string"] }
+daemonize = "0.5"
+libc = "0.2"
 rustyline = { version = "15", features = ["with-file-history"] }
 shlex = "1"
 serde_json = { workspace = true }

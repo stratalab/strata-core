@@ -33,6 +33,7 @@ use crate::bridge::{
     value_to_json,
 };
 use crate::convert::convert_result;
+use crate::ipc::IpcClient;
 use crate::types::BranchId;
 use crate::{Command, Error, Executor, Output, Result};
 
@@ -44,11 +45,17 @@ use crate::{Command, Error, Executor, Output, Result};
 /// route through the engine's `Transaction<'a>` / `TransactionOps` trait,
 /// while non-transactional commands (Branch, Vector, DB) still delegate to
 /// the `Executor`.
+///
+/// For IPC mode, the session delegates all commands (including transactions)
+/// to the server via a dedicated IPC connection. The server creates a
+/// per-connection Session, so transaction state is managed server-side.
 pub struct Session {
     executor: Executor,
     db: Arc<Database>,
     txn_ctx: Option<TransactionContext>,
     txn_branch_id: Option<strata_core::types::BranchId>,
+    /// Optional IPC client for remote sessions.
+    ipc_client: Option<IpcClient>,
 }
 
 impl Session {
@@ -59,6 +66,7 @@ impl Session {
             db,
             txn_ctx: None,
             txn_branch_id: None,
+            ipc_client: None,
         }
     }
 
@@ -69,6 +77,27 @@ impl Session {
             db,
             txn_ctx: None,
             txn_branch_id: None,
+            ipc_client: None,
+        }
+    }
+
+    /// Create a new IPC-backed session.
+    ///
+    /// All commands (including transaction lifecycle) are sent over the IPC
+    /// connection. The server creates a per-connection Session, so transaction
+    /// state is managed server-side.
+    pub fn new_ipc(client: IpcClient, access_mode: AccessMode) -> Self {
+        // We need a dummy Database for the executor, but for IPC sessions
+        // the executor is never used — all commands go through the IPC client.
+        // Database::cache() is a lightweight in-memory DB used only as a placeholder.
+        let db = Database::cache()
+            .expect("failed to create in-memory placeholder DB (out of memory?)");
+        Self {
+            executor: Executor::new_with_mode(db.clone(), access_mode),
+            db,
+            txn_ctx: None,
+            txn_branch_id: None,
+            ipc_client: Some(client),
         }
     }
 
@@ -79,6 +108,11 @@ impl Session {
 
     /// Execute a command, routing through the active transaction when appropriate.
     pub fn execute(&mut self, mut cmd: Command) -> Result<Output> {
+        // IPC sessions delegate everything to the server
+        if let Some(ref mut client) = self.ipc_client {
+            return client.execute(cmd);
+        }
+
         if self.executor.access_mode() == AccessMode::ReadOnly && cmd.is_write() {
             let hint = if self.db.is_follower() {
                 Some("This database is a read-only follower. Writes must go through the primary instance.".to_string())

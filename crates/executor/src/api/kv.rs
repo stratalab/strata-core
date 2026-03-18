@@ -29,7 +29,7 @@ impl Strata {
     /// db.kv_put("active", true)?;
     /// ```
     pub fn kv_put(&self, key: &str, value: impl Into<Value>) -> Result<u64> {
-        match self.executor.execute(Command::KvPut {
+        match self.execute_cmd(Command::KvPut {
             branch: self.branch_id(),
             space: self.space_id(),
             key: key.to_string(),
@@ -48,7 +48,7 @@ impl Strata {
     ///
     /// Reads from the current branch context.
     pub fn kv_get(&self, key: &str) -> Result<Option<Value>> {
-        match self.executor.execute(Command::KvGet {
+        match self.execute_cmd(Command::KvGet {
             branch: self.branch_id(),
             space: self.space_id(),
             key: key.to_string(),
@@ -68,7 +68,7 @@ impl Strata {
     ///
     /// Deletes from the current branch context.
     pub fn kv_delete(&self, key: &str) -> Result<bool> {
-        match self.executor.execute(Command::KvDelete {
+        match self.execute_cmd(Command::KvDelete {
             branch: self.branch_id(),
             space: self.space_id(),
             key: key.to_string(),
@@ -96,7 +96,7 @@ impl Strata {
     /// assert_eq!(history[0].value, Value::Int(3)); // newest first
     /// ```
     pub fn kv_getv(&self, key: &str) -> Result<Option<Vec<crate::types::VersionedValue>>> {
-        match self.executor.execute(Command::KvGetv {
+        match self.execute_cmd(Command::KvGetv {
             branch: self.branch_id(),
             space: self.space_id(),
             key: key.to_string(),
@@ -115,7 +115,7 @@ impl Strata {
     ///
     /// Lists from the current branch context.
     pub fn kv_list(&self, prefix: Option<&str>) -> Result<Vec<String>> {
-        match self.executor.execute(Command::KvList {
+        match self.execute_cmd(Command::KvList {
             branch: self.branch_id(),
             space: self.space_id(),
             prefix: prefix.map(|s| s.to_string()),
@@ -138,7 +138,7 @@ impl Strata {
     ///
     /// `as_of` is a timestamp in microseconds since epoch.
     pub fn kv_get_as_of(&self, key: &str, as_of: Option<u64>) -> Result<Option<Value>> {
-        match self.executor.execute(Command::KvGet {
+        match self.execute_cmd(Command::KvGet {
             branch: self.branch_id(),
             space: self.space_id(),
             key: key.to_string(),
@@ -163,7 +163,7 @@ impl Strata {
         limit: Option<u64>,
         as_of: Option<u64>,
     ) -> Result<Vec<String>> {
-        match self.executor.execute(Command::KvList {
+        match self.execute_cmd(Command::KvList {
             branch: self.branch_id(),
             space: self.space_id(),
             prefix: prefix.map(|s| s.to_string()),
@@ -189,7 +189,7 @@ impl Strata {
         &self,
         entries: Vec<crate::types::BatchKvEntry>,
     ) -> Result<Vec<crate::types::BatchItemResult>> {
-        match self.executor.execute(Command::KvBatchPut {
+        match self.execute_cmd(Command::KvBatchPut {
             branch: self.branch_id(),
             space: self.space_id(),
             entries,

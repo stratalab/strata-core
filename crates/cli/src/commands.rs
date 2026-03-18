@@ -103,6 +103,8 @@ pub fn build_cli() -> Command {
         .subcommand(build_detokenize())
         .subcommand(build_graph())
         .subcommand(build_config())
+        .subcommand(build_up())
+        .subcommand(build_down())
 }
 
 /// Build a command tree for REPL mode (no global flags).
@@ -1408,4 +1410,29 @@ fn build_config() -> Command {
                 .arg(Arg::new("key").required(true).help("Configuration key")),
         )
         .subcommand(Command::new("list").about("Show all configuration values"))
+}
+
+fn build_up() -> Command {
+    Command::new("up")
+        .about("Start IPC server for shared database access")
+        .long_about(
+            "Start a background daemon that holds the database and listens on a Unix socket.\n\
+             Other processes can then access the database concurrently via IPC.\n\
+             Similar to `docker compose up -d`.",
+        )
+        .arg(
+            Arg::new("foreground")
+                .long("fg")
+                .help("Run in foreground (for debugging, systemd, or Docker)")
+                .action(clap::ArgAction::SetTrue),
+        )
+}
+
+fn build_down() -> Command {
+    Command::new("down")
+        .about("Stop the IPC server")
+        .long_about(
+            "Stop a running Strata IPC server by reading the PID file and sending SIGTERM.\n\
+             Cleans up the socket and PID files.",
+        )
 }

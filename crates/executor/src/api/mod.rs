@@ -64,6 +64,7 @@ use strata_security::{AccessMode, OpenOptions};
 
 use std::sync::Once;
 
+use crate::ipc::{Backend, IpcClient};
 use crate::types::BranchId;
 use crate::{Command, Error, Executor, Output, Result, Session};
 
@@ -91,7 +92,7 @@ fn ensure_vector_recovery() {
 ///
 /// Use `create_branch()` to create new branches and `set_branch()` to switch between them.
 pub struct Strata {
-    executor: Executor,
+    backend: Backend,
     current_branch: BranchId,
     current_space: String,
     access_mode: AccessMode,
@@ -132,51 +133,127 @@ impl Strata {
 
         let data_dir = path.as_ref().to_path_buf();
 
-        let db = if opts.follower {
+        if opts.follower {
             // Follower mode: read-only, never write to the database directory
-            Database::open_follower(&data_dir).map_err(|e| Error::Internal {
+            let db = Database::open_follower(&data_dir).map_err(|e| Error::Internal {
                 reason: format!("Failed to open database (follower): {}", e),
-            })?
-        } else {
-            std::fs::create_dir_all(&data_dir).map_err(|e| Error::Internal {
-                reason: format!("Failed to create data directory: {}", e),
             })?;
-
-            // Read existing config (or defaults)
-            let config_path = data_dir.join(strata_engine::database::config::CONFIG_FILE_NAME);
-            strata_engine::database::config::StrataConfig::write_default_if_missing(&config_path)
-                .map_err(|e| Error::Internal {
-                reason: format!("Failed to write default config: {}", e),
-            })?;
-            let cfg = strata_engine::database::config::StrataConfig::from_file(&config_path)
-                .map_err(|e| Error::Internal {
-                    reason: format!("Failed to read config: {}", e),
-                })?;
-
-            Database::open_with_config(&data_dir, cfg).map_err(|e| Error::Internal {
-                reason: format!("Failed to open database: {}", e),
-            })?
-        };
-
-        // Force ReadOnly for follower mode
-        let access_mode = if opts.follower {
-            AccessMode::ReadOnly
-        } else {
-            opts.access_mode
-        };
-        let executor = Executor::new_with_mode(db, access_mode);
-
-        match access_mode {
-            AccessMode::ReadWrite => Self::ensure_default_branch(&executor)?,
-            AccessMode::ReadOnly => Self::verify_default_branch(&executor)?,
+            let access_mode = AccessMode::ReadOnly;
+            let executor = Executor::new_with_mode(db, access_mode);
+            Self::verify_default_branch(&executor)?;
+            return Ok(Self {
+                backend: Backend::Local { executor },
+                current_branch: BranchId::default(),
+                current_space: "default".to_string(),
+                access_mode,
+            });
         }
 
-        Ok(Self {
-            executor,
-            current_branch: BranchId::default(),
-            current_space: "default".to_string(),
-            access_mode,
-        })
+        std::fs::create_dir_all(&data_dir).map_err(|e| Error::Internal {
+            reason: format!("Failed to create data directory: {}", e),
+        })?;
+
+        // Read existing config (or defaults)
+        let config_path = data_dir.join(strata_engine::database::config::CONFIG_FILE_NAME);
+        strata_engine::database::config::StrataConfig::write_default_if_missing(&config_path)
+            .map_err(|e| Error::Internal {
+            reason: format!("Failed to write default config: {}", e),
+        })?;
+        let cfg = strata_engine::database::config::StrataConfig::from_file(&config_path)
+            .map_err(|e| Error::Internal {
+                reason: format!("Failed to read config: {}", e),
+            })?;
+
+        let access_mode = opts.access_mode;
+
+        // Try to open the database directly
+        match Database::open_with_config(&data_dir, cfg) {
+            Ok(db) => {
+                let executor = Executor::new_with_mode(db, access_mode);
+                match access_mode {
+                    AccessMode::ReadWrite => Self::ensure_default_branch(&executor)?,
+                    AccessMode::ReadOnly => Self::verify_default_branch(&executor)?,
+                }
+                Ok(Self {
+                    backend: Backend::Local { executor },
+                    current_branch: BranchId::default(),
+                    current_space: "default".to_string(),
+                    access_mode,
+                })
+            }
+            Err(e) => {
+                let err_msg = format!("{}", e);
+                // If the error is a lock error, try IPC fallback
+                if err_msg.contains("already in use by another process") {
+                    let socket_path = data_dir.join("strata.sock");
+                    if socket_path.exists() {
+                        match IpcClient::connect(&socket_path) {
+                            Ok(client) => {
+                                let backend = Backend::Ipc {
+                                    client: std::sync::Mutex::new(client),
+                                    access_mode,
+                                    data_dir: data_dir.clone(),
+                                };
+                                // Verify connectivity with a ping
+                                backend.execute(Command::Ping).map_err(|_| Error::Internal {
+                                    reason: "Connected to IPC server but ping failed".into(),
+                                })?;
+                                return Ok(Self {
+                                    backend,
+                                    current_branch: BranchId::default(),
+                                    current_space: "default".to_string(),
+                                    access_mode,
+                                });
+                            }
+                            Err(_) => {
+                                // Stale socket — try to clean up and retry
+                                let _ = std::fs::remove_file(&socket_path);
+                                // Re-read config for retry
+                                let cfg2 = strata_engine::database::config::StrataConfig::from_file(&config_path)
+                                    .map_err(|e| Error::Internal {
+                                        reason: format!("Failed to read config: {}", e),
+                                    })?;
+                                match Database::open_with_config(&data_dir, cfg2) {
+                                    Ok(db) => {
+                                        let executor = Executor::new_with_mode(db, access_mode);
+                                        match access_mode {
+                                            AccessMode::ReadWrite => Self::ensure_default_branch(&executor)?,
+                                            AccessMode::ReadOnly => Self::verify_default_branch(&executor)?,
+                                        }
+                                        return Ok(Self {
+                                            backend: Backend::Local { executor },
+                                            current_branch: BranchId::default(),
+                                            current_space: "default".to_string(),
+                                            access_mode,
+                                        });
+                                    }
+                                    Err(_) => {
+                                        return Err(Error::Internal {
+                                            reason: format!(
+                                                "Database is locked by another process. \
+                                                 Run `strata up` to enable shared access, \
+                                                 or use --follower for read-only access."
+                                            ),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        return Err(Error::Internal {
+                            reason: format!(
+                                "Database is locked by another process. \
+                                 Run `strata up` to enable shared access, \
+                                 or use --follower for read-only access."
+                            ),
+                        });
+                    }
+                }
+                Err(Error::Internal {
+                    reason: format!("Failed to open database: {}", e),
+                })
+            }
+        }
     }
 
     /// Create an ephemeral in-memory database.
@@ -200,7 +277,7 @@ impl Strata {
         Self::ensure_default_branch(&executor)?;
 
         Ok(Self {
-            executor,
+            backend: Backend::Local { executor },
             current_branch: BranchId::default(),
             current_space: "default".to_string(),
             access_mode: AccessMode::ReadWrite,
@@ -223,8 +300,32 @@ impl Strata {
     /// });
     /// ```
     pub fn new_handle(&self) -> Result<Self> {
-        let db = self.database();
-        Self::from_database_with_mode(db, self.access_mode)
+        match &self.backend {
+            Backend::Local { .. } => {
+                let db = self.database();
+                Self::from_database_with_mode(db, self.access_mode)
+            }
+            Backend::Ipc {
+                client,
+                access_mode,
+                data_dir,
+            } => {
+                let c = client.lock().unwrap_or_else(|e| e.into_inner());
+                let new_client = c.connect_new().map_err(|e| Error::Io {
+                    reason: format!("Failed to open new IPC connection: {}", e),
+                })?;
+                Ok(Self {
+                    backend: Backend::Ipc {
+                        client: std::sync::Mutex::new(new_client),
+                        access_mode: *access_mode,
+                        data_dir: data_dir.clone(),
+                    },
+                    current_branch: BranchId::default(),
+                    current_space: "default".to_string(),
+                    access_mode: *access_mode,
+                })
+            }
+        }
     }
 
     /// Create a new Strata instance from an existing database.
@@ -247,7 +348,7 @@ impl Strata {
         }
 
         Ok(Self {
-            executor,
+            backend: Backend::Local { executor },
             current_branch: BranchId::default(),
             current_space: "default".to_string(),
             access_mode,
@@ -297,13 +398,22 @@ impl Strata {
     }
 
     /// Get the underlying executor for direct command execution.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this Strata instance is connected via IPC rather than
+    /// running with a local database. Use `execute_cmd()` instead.
     pub fn executor(&self) -> &Executor {
-        &self.executor
+        self.backend.executor()
     }
 
     /// Get a clone of the underlying database handle.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this Strata instance is connected via IPC.
     pub fn database(&self) -> Arc<Database> {
-        self.executor.primitives().db.clone()
+        self.backend.executor().primitives().db.clone()
     }
 
     /// Returns the access mode of this database handle.
@@ -311,11 +421,26 @@ impl Strata {
         self.access_mode
     }
 
+    /// Returns true if this handle is connected via IPC to a remote server.
+    pub fn is_ipc(&self) -> bool {
+        !self.backend.is_local()
+    }
+
+    /// Execute a command through the backend (local or IPC).
+    pub(crate) fn execute_cmd(&self, cmd: Command) -> Result<Output> {
+        self.backend.execute(cmd)
+    }
+
+    /// Execute an internal command (bypasses system branch guard for local).
+    pub(crate) fn execute_internal(&self, cmd: Command) -> Result<Output> {
+        self.backend.execute_internal(cmd)
+    }
+
     /// Get WAL durability counters for diagnostics.
     ///
     /// Returns the current WAL counters (default zeroes for cache databases).
     pub fn durability_counters(&self) -> Result<strata_engine::WalCounters> {
-        match self.executor.execute(Command::DurabilityCounters)? {
+        match self.execute_cmd(Command::DurabilityCounters)? {
             Output::DurabilityCounters(c) => Ok(c),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for DurabilityCounters".into(),
@@ -344,7 +469,7 @@ impl Strata {
     /// db.branches().fork("default", "experiment-copy")?;
     /// ```
     pub fn branches(&self) -> Branches<'_> {
-        Branches::new(&self.executor)
+        Branches::new(&self.backend)
     }
 
     /// Get a handle to the `_system_` branch for internal operations.
@@ -356,7 +481,7 @@ impl Strata {
     /// Intended for internal consumers (e.g., strata-ai) that need to
     /// store private workspace data in the user's database.
     pub fn system_branch(&self) -> SystemBranch<'_> {
-        SystemBranch::new(&self.executor)
+        SystemBranch::new(&self.backend)
     }
 
     /// Create a new [`Session`] for interactive transaction support.
@@ -365,7 +490,29 @@ impl Strata {
     /// optional open transaction across multiple `execute()` calls.
     /// The session inherits the access mode of this handle.
     pub fn session(&self) -> Session {
-        Session::new_with_mode(self.database(), self.access_mode)
+        match &self.backend {
+            Backend::Local { .. } => Session::new_with_mode(self.database(), self.access_mode),
+            Backend::Ipc {
+                client,
+                access_mode,
+                data_dir: _,
+            } => {
+                // For IPC, each session is a new connection (server creates
+                // a per-connection Session automatically)
+                let c = client.lock().unwrap_or_else(|e| e.into_inner());
+                let new_client = c.connect_new().unwrap_or_else(|e| {
+                    // This shouldn't normally fail — the server is reachable
+                    // since we have an existing connection. Log and propagate.
+                    tracing::error!("Failed to create new IPC connection for session: {}", e);
+                    panic!(
+                        "Failed to create new IPC connection for session: {}. \
+                         The IPC server may have shut down.",
+                        e
+                    );
+                });
+                Session::new_ipc(new_client, *access_mode)
+            }
+        }
     }
 
     // =========================================================================
@@ -534,7 +681,7 @@ impl Strata {
 
     /// List all spaces in the current branch.
     pub fn list_spaces(&self) -> Result<Vec<String>> {
-        match self.executor.execute(Command::SpaceList {
+        match self.execute_cmd(Command::SpaceList {
             branch: self.branch_id(),
         })? {
             Output::SpaceList(spaces) => Ok(spaces),
@@ -555,7 +702,7 @@ impl Strata {
                 reason: "Cannot delete the default space".into(),
             });
         }
-        match self.executor.execute(Command::SpaceDelete {
+        match self.execute_cmd(Command::SpaceDelete {
             branch: self.branch_id(),
             space: space.to_string(),
             force: false,
@@ -574,7 +721,7 @@ impl Strata {
                 reason: "Cannot delete the default space".into(),
             });
         }
-        match self.executor.execute(Command::SpaceDelete {
+        match self.execute_cmd(Command::SpaceDelete {
             branch: self.branch_id(),
             space: space.to_string(),
             force: true,
@@ -1617,7 +1764,7 @@ mod tests {
         assert!(!branches.iter().any(|b| b.starts_with("_system")));
 
         // Direct access to _system_ via user API should fail
-        let result = db.executor.execute(Command::KvGet {
+        let result = db.executor().execute(Command::KvGet {
             branch: Some(BranchId::from("_system_")),
             space: Some("default".to_string()),
             key: "secret".to_string(),

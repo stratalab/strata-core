@@ -11,3 +11,4 @@ pub mod search;
 pub mod serialization;
 pub mod session;
 pub mod spaces;
+pub mod ipc;

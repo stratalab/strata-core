@@ -10,7 +10,7 @@ impl Strata {
 
     /// Set a state cell value (unconditional write).
     pub fn state_set(&self, cell: &str, value: impl Into<Value>) -> Result<u64> {
-        match self.executor.execute(Command::StateSet {
+        match self.execute_cmd(Command::StateSet {
             branch: self.branch_id(),
             space: self.space_id(),
             cell: cell.to_string(),
@@ -25,7 +25,7 @@ impl Strata {
 
     /// Read a state cell value.
     pub fn state_get(&self, cell: &str) -> Result<Option<Value>> {
-        match self.executor.execute(Command::StateGet {
+        match self.execute_cmd(Command::StateGet {
             branch: self.branch_id(),
             space: self.space_id(),
             cell: cell.to_string(),
@@ -44,7 +44,7 @@ impl Strata {
     /// Returns all versions of the cell, newest first, or None if the cell
     /// doesn't exist.
     pub fn state_getv(&self, cell: &str) -> Result<Option<Vec<crate::types::VersionedValue>>> {
-        match self.executor.execute(Command::StateGetv {
+        match self.execute_cmd(Command::StateGetv {
             branch: self.branch_id(),
             space: self.space_id(),
             as_of: None,
@@ -64,7 +64,7 @@ impl Strata {
         expected_counter: Option<u64>,
         value: impl Into<Value>,
     ) -> Result<Option<u64>> {
-        match self.executor.execute(Command::StateCas {
+        match self.execute_cmd(Command::StateCas {
             branch: self.branch_id(),
             space: self.space_id(),
             cell: cell.to_string(),
@@ -88,7 +88,7 @@ impl Strata {
 
     /// Initialize a state cell (only if it doesn't exist).
     pub fn state_init(&self, cell: &str, value: impl Into<Value>) -> Result<u64> {
-        match self.executor.execute(Command::StateInit {
+        match self.execute_cmd(Command::StateInit {
             branch: self.branch_id(),
             space: self.space_id(),
             cell: cell.to_string(),
@@ -105,7 +105,7 @@ impl Strata {
     ///
     /// Returns `true` if the cell existed and was deleted, `false` if it didn't exist.
     pub fn state_delete(&self, cell: &str) -> Result<bool> {
-        match self.executor.execute(Command::StateDelete {
+        match self.execute_cmd(Command::StateDelete {
             branch: self.branch_id(),
             space: self.space_id(),
             cell: cell.to_string(),
@@ -121,7 +121,7 @@ impl Strata {
     ///
     /// Returns all cell names, optionally filtered by prefix.
     pub fn state_list(&self, prefix: Option<&str>) -> Result<Vec<String>> {
-        match self.executor.execute(Command::StateList {
+        match self.execute_cmd(Command::StateList {
             branch: self.branch_id(),
             space: self.space_id(),
             prefix: prefix.map(|s| s.to_string()),
@@ -142,7 +142,7 @@ impl Strata {
     ///
     /// `as_of` is a timestamp in microseconds since epoch.
     pub fn state_get_as_of(&self, cell: &str, as_of: Option<u64>) -> Result<Option<Value>> {
-        match self.executor.execute(Command::StateGet {
+        match self.execute_cmd(Command::StateGet {
             branch: self.branch_id(),
             space: self.space_id(),
             cell: cell.to_string(),
@@ -164,7 +164,7 @@ impl Strata {
         prefix: Option<&str>,
         as_of: Option<u64>,
     ) -> Result<Vec<String>> {
-        match self.executor.execute(Command::StateList {
+        match self.execute_cmd(Command::StateList {
             branch: self.branch_id(),
             space: self.space_id(),
             prefix: prefix.map(|s| s.to_string()),
@@ -188,7 +188,7 @@ impl Strata {
         &self,
         entries: Vec<crate::types::BatchStateEntry>,
     ) -> Result<Vec<crate::types::BatchItemResult>> {
-        match self.executor.execute(Command::StateBatchSet {
+        match self.execute_cmd(Command::StateBatchSet {
             branch: self.branch_id(),
             space: self.space_id(),
             entries,

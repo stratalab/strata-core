@@ -8,8 +8,9 @@
 
 use strata_engine::branch_dag::SYSTEM_BRANCH;
 
+use crate::ipc::Backend;
 use crate::types::{BranchId, VersionedValue};
-use crate::{Command, Error, Executor, Output, Result, Value};
+use crate::{Command, Error, Output, Result, Value};
 
 /// Handle for internal operations on the `_system_` branch.
 ///
@@ -21,12 +22,12 @@ use crate::{Command, Error, Executor, Output, Result, Value};
 /// internal consumers (e.g., strata-ai) that need to store private workspace
 /// data alongside the user's database.
 pub struct SystemBranch<'a> {
-    executor: &'a Executor,
+    backend: &'a Backend,
 }
 
 impl<'a> SystemBranch<'a> {
-    pub(crate) fn new(executor: &'a Executor) -> Self {
-        Self { executor }
+    pub(crate) fn new(backend: &'a Backend) -> Self {
+        Self { backend }
     }
 
     fn branch_id(&self) -> Option<BranchId> {
@@ -43,7 +44,7 @@ impl<'a> SystemBranch<'a> {
 
     /// Put a value in the system branch KV store.
     pub fn kv_put(&self, key: &str, value: impl Into<Value>) -> Result<u64> {
-        match self.executor.execute_internal(Command::KvPut {
+        match self.backend.execute_internal(Command::KvPut {
             branch: self.branch_id(),
             space: self.space_id(),
             key: key.to_string(),
@@ -58,7 +59,7 @@ impl<'a> SystemBranch<'a> {
 
     /// Get a value from the system branch KV store.
     pub fn kv_get(&self, key: &str) -> Result<Option<Value>> {
-        match self.executor.execute_internal(Command::KvGet {
+        match self.backend.execute_internal(Command::KvGet {
             branch: self.branch_id(),
             space: self.space_id(),
             key: key.to_string(),
@@ -74,7 +75,7 @@ impl<'a> SystemBranch<'a> {
 
     /// Delete a key from the system branch KV store.
     pub fn kv_delete(&self, key: &str) -> Result<bool> {
-        match self.executor.execute_internal(Command::KvDelete {
+        match self.backend.execute_internal(Command::KvDelete {
             branch: self.branch_id(),
             space: self.space_id(),
             key: key.to_string(),
@@ -88,7 +89,7 @@ impl<'a> SystemBranch<'a> {
 
     /// List keys in the system branch KV store.
     pub fn kv_list(&self, prefix: Option<&str>) -> Result<Vec<String>> {
-        match self.executor.execute_internal(Command::KvList {
+        match self.backend.execute_internal(Command::KvList {
             branch: self.branch_id(),
             space: self.space_id(),
             prefix: prefix.map(|s| s.to_string()),
@@ -111,7 +112,7 @@ impl<'a> SystemBranch<'a> {
     ///
     /// Use `"$"` as the path to set the entire document.
     pub fn json_set(&self, key: &str, path: &str, value: impl Into<Value>) -> Result<u64> {
-        match self.executor.execute_internal(Command::JsonSet {
+        match self.backend.execute_internal(Command::JsonSet {
             branch: self.branch_id(),
             space: self.space_id(),
             key: key.to_string(),
@@ -129,7 +130,7 @@ impl<'a> SystemBranch<'a> {
     ///
     /// Use `"$"` as the path to get the entire document.
     pub fn json_get(&self, key: &str, path: &str) -> Result<Option<Value>> {
-        match self.executor.execute_internal(Command::JsonGet {
+        match self.backend.execute_internal(Command::JsonGet {
             branch: self.branch_id(),
             space: self.space_id(),
             key: key.to_string(),
@@ -146,7 +147,7 @@ impl<'a> SystemBranch<'a> {
 
     /// Delete a JSON value at a path from the system branch.
     pub fn json_delete(&self, key: &str, path: &str) -> Result<u64> {
-        match self.executor.execute_internal(Command::JsonDelete {
+        match self.backend.execute_internal(Command::JsonDelete {
             branch: self.branch_id(),
             space: self.space_id(),
             key: key.to_string(),
@@ -165,7 +166,7 @@ impl<'a> SystemBranch<'a> {
 
     /// Set a state cell in the system branch.
     pub fn state_set(&self, cell: &str, value: impl Into<Value>) -> Result<u64> {
-        match self.executor.execute_internal(Command::StateSet {
+        match self.backend.execute_internal(Command::StateSet {
             branch: self.branch_id(),
             space: self.space_id(),
             cell: cell.to_string(),
@@ -180,7 +181,7 @@ impl<'a> SystemBranch<'a> {
 
     /// Get a state cell from the system branch.
     pub fn state_get(&self, cell: &str) -> Result<Option<Value>> {
-        match self.executor.execute_internal(Command::StateGet {
+        match self.backend.execute_internal(Command::StateGet {
             branch: self.branch_id(),
             space: self.space_id(),
             cell: cell.to_string(),
@@ -200,7 +201,7 @@ impl<'a> SystemBranch<'a> {
 
     /// Append an event to the system branch event log.
     pub fn event_append(&self, event_type: &str, payload: Value) -> Result<u64> {
-        match self.executor.execute_internal(Command::EventAppend {
+        match self.backend.execute_internal(Command::EventAppend {
             branch: self.branch_id(),
             space: self.space_id(),
             event_type: event_type.to_string(),
@@ -215,7 +216,7 @@ impl<'a> SystemBranch<'a> {
 
     /// Read an event by sequence number from the system branch.
     pub fn event_get(&self, sequence: u64) -> Result<Option<VersionedValue>> {
-        match self.executor.execute_internal(Command::EventGet {
+        match self.backend.execute_internal(Command::EventGet {
             branch: self.branch_id(),
             space: self.space_id(),
             sequence,

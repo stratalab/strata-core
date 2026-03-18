@@ -24,7 +24,7 @@ impl Strata {
         branch_id: Option<String>,
         metadata: Option<Value>,
     ) -> Result<(BranchInfo, u64)> {
-        match self.executor.execute(Command::BranchCreate {
+        match self.execute_cmd(Command::BranchCreate {
             branch_id,
             metadata,
         })? {
@@ -40,7 +40,7 @@ impl Strata {
     /// # Returns
     /// `Some(VersionedBranchInfo)` if the branch exists, `None` otherwise.
     pub fn branch_get(&self, name: &str) -> Result<Option<VersionedBranchInfo>> {
-        match self.executor.execute(Command::BranchGet {
+        match self.execute_cmd(Command::BranchGet {
             branch: BranchId::from(name),
         })? {
             Output::MaybeBranchInfo(info) => Ok(info),
@@ -62,7 +62,7 @@ impl Strata {
         limit: Option<u64>,
         offset: Option<u64>,
     ) -> Result<Vec<VersionedBranchInfo>> {
-        match self.executor.execute(Command::BranchList {
+        match self.execute_cmd(Command::BranchList {
             state,
             limit,
             offset,
@@ -76,7 +76,7 @@ impl Strata {
 
     /// Check if a branch exists.
     pub fn branch_exists(&self, name: &str) -> Result<bool> {
-        match self.executor.execute(Command::BranchExists {
+        match self.execute_cmd(Command::BranchExists {
             branch: BranchId::from(name),
         })? {
             Output::Bool(exists) => Ok(exists),
@@ -94,7 +94,7 @@ impl Strata {
     ///
     /// USE WITH CAUTION - this is irreversible!
     pub fn branch_delete(&self, name: &str) -> Result<()> {
-        match self.executor.execute(Command::BranchDelete {
+        match self.execute_cmd(Command::BranchDelete {
             branch: BranchId::from(name),
         })? {
             Output::Unit => Ok(()),
