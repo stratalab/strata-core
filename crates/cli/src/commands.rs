@@ -17,7 +17,7 @@ pub fn build_cli() -> Command {
             Arg::new("db")
                 .long("db")
                 .value_name("PATH")
-                .help("Database path (default: .strata)")
+                .help("Database path (default: ~/Documents/Strata)")
                 .global(true),
         )
         .arg(

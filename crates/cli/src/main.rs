@@ -94,10 +94,11 @@ fn open_database(matches: &clap::ArgMatches) -> Result<Strata, String> {
     if use_cache {
         Strata::cache().map_err(|e| format!("Failed to open cache database: {}", e))
     } else {
+        let default_path = default_db_path();
         let path = matches
             .get_one::<String>("db")
-            .map(|s| s.as_str())
-            .unwrap_or(".strata");
+            .map(|s| s.to_string())
+            .unwrap_or(default_path);
 
         let mut opts = OpenOptions::new();
 
@@ -341,6 +342,18 @@ fn run_shell_mode(matches: &clap::ArgMatches, state: &mut SessionState, mode: Ou
             eprintln!("(error) {}", e);
             1
         }
+    }
+}
+
+/// Default database path: `~/Documents/Strata`.
+/// Falls back to `.strata` if `$HOME` is not set.
+fn default_db_path() -> String {
+    match env::var("HOME") {
+        Ok(home) => {
+            let path = PathBuf::from(home).join("Documents").join("Strata");
+            path.to_string_lossy().to_string()
+        }
+        Err(_) => ".strata".to_string(),
     }
 }
 
