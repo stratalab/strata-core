@@ -766,8 +766,9 @@ impl SegmentedStore {
         let builder = SegmentBuilder::default();
         builder.build_from_iter(frozen_mt.iter_all(), &seg_path)?;
 
-        // Open the newly written segment.
+        // Open the newly written segment and pin its bloom partitions (L0).
         let segment = KVSegment::open(&seg_path)?;
+        segment.pin_bloom_partitions();
 
         // Atomically: remove the frozen memtable we just flushed and install
         // the segment, under a single DashMap guard.
@@ -987,6 +988,10 @@ impl SegmentedStore {
 
             // L0: sorted by commit_max descending (newest first)
             level_segs[0].sort_by(|a, b| b.commit_range().1.cmp(&a.commit_range().1));
+            // Pin L0 bloom partitions so they're never evicted
+            for seg in &level_segs[0] {
+                seg.pin_bloom_partitions();
+            }
             // L1+: sorted by key_range min ascending
             for level in level_segs.iter_mut().skip(1) {
                 level.sort_by(|a, b| a.key_range().0.cmp(b.key_range().0));

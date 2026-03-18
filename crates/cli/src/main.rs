@@ -100,7 +100,6 @@ fn open_database(matches: &clap::ArgMatches, path: &str) -> Result<Strata, Strin
     if use_cache {
         Strata::cache().map_err(|e| format!("Failed to open cache database: {}", e))
     } else {
-
         let mut opts = OpenOptions::new();
 
         if read_only || follower {
