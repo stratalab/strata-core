@@ -25,7 +25,7 @@ use crate::parse::{
 use crate::state::SessionState;
 
 /// Run the interactive REPL.
-pub fn run_repl(state: &mut SessionState, mode: OutputMode) {
+pub fn run_repl(state: &mut SessionState, mode: OutputMode, db_path: &str) {
     let config = Config::builder()
         .history_ignore_space(true)
         .completion_type(CompletionType::List)
@@ -40,6 +40,8 @@ pub fn run_repl(state: &mut SessionState, mode: OutputMode) {
     if let Some(ref path) = history_path {
         let _ = rl.load_history(path);
     }
+
+    print_welcome(db_path);
 
     loop {
         let prompt = state.prompt();
@@ -403,6 +405,18 @@ fn execute_action(matches: &clap::ArgMatches, state: &mut SessionState, mode: Ou
             false
         }
     }
+}
+
+fn print_welcome(db_path: &str) {
+    let version = env!("CARGO_PKG_VERSION");
+    eprintln!("Strata v{version} — type 'help' for commands, 'quit' to exit.");
+    eprintln!("Database: {db_path}");
+    eprintln!();
+    eprintln!("  Quick start:");
+    eprintln!("    kv put greeting \"hello world\"    Store a value");
+    eprintln!("    kv get greeting                   Retrieve it");
+    eprintln!("    search \"hello\"                    Search across all data");
+    eprintln!();
 }
 
 fn history_file() -> Option<String> {
