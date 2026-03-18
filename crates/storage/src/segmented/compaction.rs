@@ -1,0 +1,946 @@
+//! Compaction scheduling and execution for the segmented store.
+//!
+//! Contains:
+//! - Dynamic level targets (`recalculate_level_targets`)
+//! - Compaction scoring (`compute_compaction_scores`, `pick_and_compact`)
+//! - Compaction methods (`compact_branch`, `compact_tier`, `compact_l0_to_l1`,
+//!   `compact_level`)
+//! - Multi-level compaction helpers
+
+use super::*;
+
+/// Per-level byte targets, computed dynamically from actual data sizes.
+#[derive(Debug, Clone)]
+pub(super) struct LevelTargets {
+    pub(super) max_bytes: [u64; NUM_LEVELS],
+}
+
+/// Compute adaptive per-level byte targets from actual level sizes.
+///
+/// Algorithm (inspired by RocksDB `CalculateBaseBytes`):
+/// 1. Start with static geometric baseline: L1=256MB, L2=2.56GB, etc.
+/// 2. Find the largest non-L0 level by actual bytes.
+/// 3. If that level exceeds its static target, anchor at the actual size and
+///    recompute backward using the multiplier, with `LEVEL_BASE_BYTES` as a
+///    floor for every level.
+/// 4. Recompute forward from anchor for levels beyond it.
+pub(super) fn recalculate_level_targets(level_bytes: &[u64; NUM_LEVELS]) -> LevelTargets {
+    // Static geometric baseline: L0 unused (count-based), L1=256MB, L2=2.56GB, ...
+    let mut max_bytes = [0u64; NUM_LEVELS];
+    max_bytes[0] = 0; // L0 uses count-based trigger, not size
+    let mut target = LEVEL_BASE_BYTES;
+    for slot in max_bytes.iter_mut().skip(1) {
+        *slot = target;
+        target = target.saturating_mul(LEVEL_MULTIPLIER);
+    }
+
+    // Find the largest non-L0 level that exceeds its static target
+    let mut anchor_level = 0usize;
+    let mut anchor_excess: u64 = 0;
+    for level in 1..NUM_LEVELS {
+        if level_bytes[level] > max_bytes[level] && level_bytes[level] > anchor_excess {
+            anchor_level = level;
+            anchor_excess = level_bytes[level];
+        }
+    }
+
+    if anchor_level == 0 {
+        // No level exceeds its static target — use baseline
+        return LevelTargets { max_bytes };
+    }
+
+    // Anchor at the actual size
+    max_bytes[anchor_level] = anchor_excess;
+
+    // Recompute backward from anchor (divide by multiplier, floored at LEVEL_BASE_BYTES)
+    let mut t = anchor_excess;
+    for level in (1..anchor_level).rev() {
+        t /= LEVEL_MULTIPLIER;
+        max_bytes[level] = t.max(LEVEL_BASE_BYTES);
+    }
+
+    // Recompute forward from anchor (multiply)
+    t = anchor_excess;
+    for slot in &mut max_bytes[(anchor_level + 1)..NUM_LEVELS] {
+        t = t.saturating_mul(LEVEL_MULTIPLIER);
+        *slot = t;
+    }
+
+    LevelTargets { max_bytes }
+}
+
+impl SegmentedStore {
+    /// Compute compaction scores for all levels of a branch.
+    ///
+    /// - L0: `score = file_count / L0_COMPACTION_TRIGGER`
+    /// - L1..L(N-2): `score = actual_bytes / target_bytes` (last level excluded)
+    ///
+    /// Returns scores sorted by descending score (highest priority first).
+    pub fn compute_compaction_scores(&self, branch_id: &BranchId) -> Vec<CompactionScore> {
+        let branch = match self.branches.get(branch_id) {
+            Some(b) => b,
+            None => return Vec::new(),
+        };
+        let ver = branch.version.load();
+
+        // Gather actual bytes per level
+        let mut actual_bytes = [0u64; NUM_LEVELS];
+        for (level, segs) in ver.levels.iter().enumerate() {
+            actual_bytes[level] = segs.iter().map(|s| s.file_size()).sum();
+        }
+
+        let targets = recalculate_level_targets(&actual_bytes);
+
+        let mut scores = Vec::new();
+
+        // L0: count-based
+        let l0_count = ver.l0_segments().len();
+        scores.push(CompactionScore {
+            level: 0,
+            score: l0_count as f64 / L0_COMPACTION_TRIGGER as f64,
+        });
+
+        // L1 through L(N-2) — exclude last level (can't compact further)
+        for (level, &bytes) in actual_bytes.iter().enumerate().take(NUM_LEVELS - 1).skip(1) {
+            let target = targets.max_bytes[level];
+            if target > 0 {
+                scores.push(CompactionScore {
+                    level,
+                    score: bytes as f64 / target as f64,
+                });
+            }
+        }
+
+        scores.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scores
+    }
+
+    /// Pick the highest-scoring level that needs compaction and compact it.
+    ///
+    /// Returns `Ok(Some(result))` if a compaction was performed, `Ok(None)` if
+    /// no level is over target, or `Err` on I/O failure.
+    pub fn pick_and_compact(
+        &self,
+        branch_id: &BranchId,
+        prune_floor: u64,
+    ) -> io::Result<Option<PickAndCompactResult>> {
+        if self.segments_dir.is_none() {
+            return Ok(None);
+        }
+
+        let scores = self.compute_compaction_scores(branch_id);
+
+        for cs in &scores {
+            if cs.score < 1.0 {
+                break; // sorted descending — no more levels over target
+            }
+            if let Some(compaction) = self.compact_level(branch_id, cs.level, prune_floor)? {
+                return Ok(Some(PickAndCompactResult {
+                    level: cs.level,
+                    compaction,
+                }));
+            }
+        }
+
+        Ok(None)
+    }
+
+    // ========================================================================
+    // Compaction
+    // ========================================================================
+
+    /// Compact all segments for a branch into a single segment, pruning old versions.
+    ///
+    /// Returns `Ok(None)` if there is nothing to compact (ephemeral mode,
+    /// branch missing, or fewer than 2 segments). Returns `Ok(Some(result))`
+    /// with compaction statistics on success.
+    ///
+    /// Versions with `commit_id < prune_floor` are pruned (at most one per
+    /// logical key survives). Dead tombstones below the floor are removed
+    /// entirely. When `prune_floor == 0`, no versions are pruned.
+    ///
+    /// # Concurrent flush safety
+    ///
+    /// If a concurrent `flush_oldest_frozen` inserts a new segment for the
+    /// same branch while compaction is running, the new segment is preserved.
+    /// The caller should still serialize flush and compact for a given branch
+    /// when possible, to avoid repeated compaction of freshly-flushed data.
+    pub fn compact_branch(
+        &self,
+        branch_id: &BranchId,
+        prune_floor: u64,
+    ) -> io::Result<Option<CompactionResult>> {
+        let segments_dir = match &self.segments_dir {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+
+        // Snapshot current segments under a read guard.
+        let (old_segments, total_input_entries) = {
+            let branch = match self.branches.get(branch_id) {
+                Some(b) => b,
+                None => return Ok(None),
+            };
+            let ver = branch.version.load_full();
+            if ver.l0_segments().len() < 2 {
+                return Ok(None);
+            }
+            let segs: Vec<Arc<KVSegment>> = ver.l0_segments().to_vec();
+            let total: u64 = segs.iter().map(|s| s.entry_count()).sum();
+            (segs, total)
+            // DashMap guard drops here
+        };
+
+        let segments_merged = old_segments.len();
+
+        // Build compaction (no lock held — I/O heavy).
+        let seg_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
+        let branch_hex = hex_encode_branch(branch_id);
+        let branch_dir = segments_dir.join(&branch_hex);
+        std::fs::create_dir_all(&branch_dir)?;
+        let seg_path = branch_dir.join(format!("{}.sst", seg_id));
+
+        // Build streaming source iterators from each segment.
+        let sources = streaming_sources(&old_segments);
+
+        let merge = MergeIterator::new(sources);
+        let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
+        let compaction_iter =
+            CompactionIterator::new(merge, prune_floor).with_max_versions(max_versions);
+
+        let builder = SegmentBuilder::default();
+        let meta = builder.build_from_iter(compaction_iter, &seg_path)?;
+
+        // Open the newly written segment.
+        let new_segment = KVSegment::open(&seg_path)?;
+
+        // Swap: remove only the segments we compacted, insert the new one.
+        // Any segments added by concurrent flushes (not in old_segments) are kept.
+        {
+            let branch = self
+                .branches
+                .entry(*branch_id)
+                .or_insert_with(BranchState::new);
+            let cur_ver = branch.version.load();
+            let mut new_l0: Vec<Arc<KVSegment>> = cur_ver
+                .l0_segments()
+                .iter()
+                .filter(|s| !old_segments.iter().any(|old| Arc::ptr_eq(s, old)))
+                .cloned()
+                .collect();
+            // Compacted segment goes at the end (oldest — covers the range
+            // of all old segments). Any concurrent segments are newer and
+            // already at the front.
+            new_l0.push(Arc::new(new_segment));
+            let mut new_levels = cur_ver.levels.clone();
+            new_levels[0] = new_l0;
+            branch
+                .version
+                .store(Arc::new(SegmentVersion { levels: new_levels }));
+        }
+
+        // Persist manifest BEFORE deleting old files — if we crash after
+        // delete but before manifest write, recovery would reference missing
+        // segments. Writing manifest first ensures crash recovery can always
+        // find the new compacted segment.
+        self.write_branch_manifest(branch_id);
+
+        // Now safe to delete old segment files and invalidate cached blocks.
+        let cache = crate::block_cache::global_cache();
+        for seg in &old_segments {
+            cache.invalidate_file(seg.file_id());
+            let _ = std::fs::remove_file(seg.file_path());
+        }
+
+        let entries_pruned = total_input_entries.saturating_sub(meta.entry_count);
+
+        Ok(Some(CompactionResult {
+            segments_merged,
+            output_entries: meta.entry_count,
+            entries_pruned,
+            output_file_size: meta.file_size,
+        }))
+    }
+
+    /// Returns `true` if the branch has more than `threshold` segments.
+    pub fn should_compact(&self, branch_id: &BranchId, segment_threshold: usize) -> bool {
+        self.branches
+            .get(branch_id)
+            .is_some_and(|b| b.version.load().l0_segments().len() >= segment_threshold)
+    }
+
+    /// Get file sizes of all segments for a branch.
+    ///
+    /// Returns sizes in the same order as the branch's segment list (newest first).
+    /// Used by `CompactionScheduler` to assign segments to tiers.
+    pub fn segment_file_sizes(&self, branch_id: &BranchId) -> Vec<u64> {
+        let branch = match self.branches.get(branch_id) {
+            Some(b) => b,
+            None => return Vec::new(),
+        };
+        let ver = branch.version.load();
+        ver.l0_segments().iter().map(|s| s.file_size()).collect()
+    }
+
+    /// Compact a specific subset of segments for a branch (tier-based compaction).
+    ///
+    /// Unlike `compact_branch()` which merges all segments, this merges only
+    /// the segments at the given indices. Returns `Ok(None)` if fewer than 2
+    /// segments are selected or if the branch/segments don't exist.
+    pub fn compact_tier(
+        &self,
+        branch_id: &BranchId,
+        segment_indices: &[usize],
+        prune_floor: u64,
+    ) -> io::Result<Option<CompactionResult>> {
+        if segment_indices.len() < 2 {
+            return Ok(None);
+        }
+
+        let segments_dir = match &self.segments_dir {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+
+        // Snapshot selected segments under a read guard.
+        let (selected_segments, total_input_entries) = {
+            let branch = match self.branches.get(branch_id) {
+                Some(b) => b,
+                None => return Ok(None),
+            };
+            let ver = branch.version.load_full();
+            let mut segs: Vec<Arc<KVSegment>> = Vec::new();
+            for &idx in segment_indices {
+                if let Some(seg) = ver.l0_segments().get(idx) {
+                    segs.push(Arc::clone(seg));
+                }
+            }
+            if segs.len() < 2 {
+                return Ok(None);
+            }
+            let total: u64 = segs.iter().map(|s| s.entry_count()).sum();
+            (segs, total)
+            // DashMap guard drops here
+        };
+
+        let segments_merged = selected_segments.len();
+
+        // Build compaction output (no lock held — I/O heavy)
+        let seg_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
+        let branch_hex = hex_encode_branch(branch_id);
+        let branch_dir = segments_dir.join(&branch_hex);
+        std::fs::create_dir_all(&branch_dir)?;
+        let seg_path = branch_dir.join(format!("{}.sst", seg_id));
+
+        let sources = streaming_sources(&selected_segments);
+
+        let merge = MergeIterator::new(sources);
+        let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
+        let compaction_iter =
+            CompactionIterator::new(merge, prune_floor).with_max_versions(max_versions);
+
+        let builder = SegmentBuilder::default();
+        let meta = builder.build_from_iter(compaction_iter, &seg_path)?;
+
+        let new_segment = KVSegment::open(&seg_path)?;
+
+        // Swap: remove only the segments we compacted, insert the new one.
+        // Any segments added by concurrent flushes (not in selected_segments) are kept.
+        {
+            let branch = self
+                .branches
+                .entry(*branch_id)
+                .or_insert_with(BranchState::new);
+            let cur_ver = branch.version.load();
+            let mut new_l0: Vec<Arc<KVSegment>> = cur_ver
+                .l0_segments()
+                .iter()
+                .filter(|s| !selected_segments.iter().any(|old| Arc::ptr_eq(s, old)))
+                .cloned()
+                .collect();
+            // Compacted segment goes at the end (oldest — covers the range
+            // of all compacted segments). Any concurrent segments are newer
+            // and already at the front.
+            new_l0.push(Arc::new(new_segment));
+            let mut new_levels = cur_ver.levels.clone();
+            new_levels[0] = new_l0;
+            branch
+                .version
+                .store(Arc::new(SegmentVersion { levels: new_levels }));
+        }
+
+        // Persist manifest BEFORE deleting old files (crash safety).
+        self.write_branch_manifest(branch_id);
+
+        let cache = crate::block_cache::global_cache();
+        for seg in &selected_segments {
+            cache.invalidate_file(seg.file_id());
+            let _ = std::fs::remove_file(seg.file_path());
+        }
+
+        let entries_pruned = total_input_entries.saturating_sub(meta.entry_count);
+
+        Ok(Some(CompactionResult {
+            segments_merged,
+            output_entries: meta.entry_count,
+            entries_pruned,
+            output_file_size: meta.file_size,
+        }))
+    }
+
+    /// Compact all L0 segments into L1, merging with overlapping L1 segments.
+    ///
+    /// Returns `Ok(None)` if there is nothing to compact (ephemeral mode,
+    /// branch missing, or L0 is empty). Returns `Ok(Some(result))` with
+    /// compaction statistics on success.
+    ///
+    /// The output L1 is non-overlapping because we merge ALL L0 segments
+    /// plus all overlapping L1 segments into a single output segment.
+    pub fn compact_l0_to_l1(
+        &self,
+        branch_id: &BranchId,
+        prune_floor: u64,
+    ) -> io::Result<Option<CompactionResult>> {
+        let segments_dir = match &self.segments_dir {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+
+        // Snapshot current version.
+        let (l0_segs, l1_segs) = {
+            let branch = match self.branches.get(branch_id) {
+                Some(b) => b,
+                None => return Ok(None),
+            };
+            let ver = branch.version.load_full();
+            if ver.l0_segments().is_empty() {
+                return Ok(None);
+            }
+            let l0: Vec<Arc<KVSegment>> = ver.l0_segments().to_vec();
+            let l1: Vec<Arc<KVSegment>> = ver.l1_segments().to_vec();
+            (l0, l1)
+        };
+
+        // Compute overall L0 key range.
+        let mut l0_min: Option<Vec<u8>> = None;
+        let mut l0_max: Option<Vec<u8>> = None;
+        for seg in &l0_segs {
+            let (seg_min, seg_max) = seg.key_range();
+            if seg_min.is_empty() && seg_max.is_empty() {
+                continue; // empty segment
+            }
+            let seg_min_prefix = if seg_min.len() >= 8 {
+                &seg_min[..seg_min.len() - 8]
+            } else {
+                seg_min
+            };
+            let seg_max_prefix = if seg_max.len() >= 8 {
+                &seg_max[..seg_max.len() - 8]
+            } else {
+                seg_max
+            };
+            match &l0_min {
+                None => l0_min = Some(seg_min_prefix.to_vec()),
+                Some(cur) => {
+                    if seg_min_prefix < cur.as_slice() {
+                        l0_min = Some(seg_min_prefix.to_vec());
+                    }
+                }
+            }
+            match &l0_max {
+                None => l0_max = Some(seg_max_prefix.to_vec()),
+                Some(cur) => {
+                    if seg_max_prefix > cur.as_slice() {
+                        l0_max = Some(seg_max_prefix.to_vec());
+                    }
+                }
+            }
+        }
+
+        // Partition L1 into overlapping vs non-overlapping with L0 range.
+        let (overlapping_l1, non_overlapping_l1): (Vec<_>, Vec<_>) =
+            if let (Some(l0_min), Some(l0_max)) = (&l0_min, &l0_max) {
+                l1_segs.iter().cloned().partition(|seg| {
+                    let (seg_min, seg_max) = seg.key_range();
+                    if seg_min.is_empty() && seg_max.is_empty() {
+                        return false;
+                    }
+                    let seg_min_prefix = if seg_min.len() >= 8 {
+                        &seg_min[..seg_min.len() - 8]
+                    } else {
+                        seg_min
+                    };
+                    let seg_max_prefix = if seg_max.len() >= 8 {
+                        &seg_max[..seg_max.len() - 8]
+                    } else {
+                        seg_max
+                    };
+                    // Overlapping if ranges intersect
+                    seg_min_prefix <= l0_max.as_slice() && seg_max_prefix >= l0_min.as_slice()
+                })
+            } else {
+                // No valid L0 key range (all empty segments)
+                (Vec::new(), l1_segs.clone())
+            };
+
+        // Count actual input segments and entries (L0 + overlapping L1 only).
+        let segments_merged = l0_segs.len() + overlapping_l1.len();
+        let total_input_entries: u64 = l0_segs
+            .iter()
+            .chain(overlapping_l1.iter())
+            .map(|s| s.entry_count())
+            .sum();
+
+        // Build streaming merge sources: L0 + overlapping L1
+        let mut all_inputs: Vec<Arc<KVSegment>> = Vec::new();
+        all_inputs.extend(l0_segs.iter().cloned());
+        all_inputs.extend(overlapping_l1.iter().cloned());
+
+        let sources = streaming_sources(&all_inputs);
+        let merge = MergeIterator::new(sources);
+        let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
+        let compaction_iter =
+            CompactionIterator::new(merge, prune_floor).with_max_versions(max_versions);
+
+        // Build output segments, splitting at target file size
+        let branch_hex = hex_encode_branch(branch_id);
+        let branch_dir = segments_dir.join(&branch_hex);
+        std::fs::create_dir_all(&branch_dir)?;
+
+        let next_id = &self.next_segment_id;
+        let splitting_builder = crate::segment_builder::SplittingSegmentBuilder::default();
+        let outputs = splitting_builder.build_split(compaction_iter, |_split_idx| {
+            let id = next_id.fetch_add(1, Ordering::Relaxed);
+            branch_dir.join(format!("{}.sst", id))
+        })?;
+
+        let output_entries: u64 = outputs.iter().map(|(_, m)| m.entry_count).sum();
+        let output_file_size: u64 = outputs.iter().map(|(_, m)| m.file_size).sum();
+
+        // Open all output segments
+        let mut new_l1_segments: Vec<Arc<KVSegment>> = Vec::new();
+        for (path, _meta) in &outputs {
+            new_l1_segments.push(Arc::new(KVSegment::open(path)?));
+        }
+
+        // Atomic swap: L0 = only concurrently-flushed segments, L1 = non-overlapping + new
+        {
+            let branch = self
+                .branches
+                .entry(*branch_id)
+                .or_insert_with(BranchState::new);
+            let cur_ver = branch.version.load();
+
+            // Keep only L0 segments that were added concurrently (not in our snapshot)
+            let new_l0: Vec<Arc<KVSegment>> = cur_ver
+                .l0_segments()
+                .iter()
+                .filter(|s| !l0_segs.iter().any(|old| Arc::ptr_eq(s, old)))
+                .cloned()
+                .collect();
+
+            // Build new L1: non-overlapping preserved + new output segments, sorted
+            let mut new_l1: Vec<Arc<KVSegment>> = non_overlapping_l1;
+            new_l1.extend(new_l1_segments);
+            // Sort L1 by key_range min ascending
+            new_l1.sort_by(|a, b| a.key_range().0.cmp(b.key_range().0));
+
+            let mut new_levels = cur_ver.levels.clone();
+            new_levels[0] = new_l0;
+            new_levels[1] = new_l1;
+            branch
+                .version
+                .store(Arc::new(SegmentVersion { levels: new_levels }));
+        }
+
+        // Persist manifest BEFORE deleting old files (crash safety).
+        self.write_branch_manifest(branch_id);
+
+        // Now safe to delete old files and invalidate cache.
+        let cache = crate::block_cache::global_cache();
+        for seg in &l0_segs {
+            cache.invalidate_file(seg.file_id());
+            let _ = std::fs::remove_file(seg.file_path());
+        }
+        for seg in &overlapping_l1 {
+            cache.invalidate_file(seg.file_id());
+            let _ = std::fs::remove_file(seg.file_path());
+        }
+
+        let entries_pruned = total_input_entries.saturating_sub(output_entries);
+
+        Ok(Some(CompactionResult {
+            segments_merged,
+            output_entries,
+            entries_pruned,
+            output_file_size,
+        }))
+    }
+
+    /// Compact one level into the next (L_n → L_{n+1}).
+    ///
+    /// Picks an input file from `levels[level]` using round-robin via
+    /// `compact_pointers`, finds overlapping files in `levels[level+1]`,
+    /// merges them via streaming compaction, and writes output files to
+    /// `levels[level+1]`.
+    ///
+    /// Returns `Ok(None)` if there is nothing to compact (ephemeral mode,
+    /// branch missing, empty level, or `level >= NUM_LEVELS - 1`).
+    ///
+    /// For L0, all overlapping L0 files are included as inputs (since L0
+    /// files can overlap each other).
+    pub fn compact_level(
+        &self,
+        branch_id: &BranchId,
+        level: usize,
+        prune_floor: u64,
+    ) -> io::Result<Option<CompactionResult>> {
+        if level >= NUM_LEVELS - 1 {
+            return Ok(None); // can't compact the last level further
+        }
+
+        let segments_dir = match &self.segments_dir {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+
+        // ── 1. Snapshot current version and pick input file(s) ──────────
+        let (input_segs, overlap_segs, grandparent_segs, _non_overlap_next) = {
+            let branch = match self.branches.get(branch_id) {
+                Some(b) => b,
+                None => return Ok(None),
+            };
+            let ver = branch.version.load_full();
+
+            if ver.levels.get(level).map_or(true, |l| l.is_empty()) {
+                return Ok(None);
+            }
+
+            let level_segs = &ver.levels[level];
+
+            // Pick input file via compact_pointer (round-robin)
+            let pick_idx = if level == 0 {
+                0 // for L0 we always start with first, then expand
+            } else {
+                let pointer = branch.compact_pointers.get(level).and_then(|p| p.as_ref());
+                match pointer {
+                    Some(ptr) => {
+                        // Find first file whose max key > pointer
+                        level_segs
+                            .iter()
+                            .position(|seg| {
+                                let (_, max_ik) = seg.key_range();
+                                let max_prefix = typed_key_prefix_of(max_ik);
+                                max_prefix > ptr.as_slice()
+                            })
+                            .unwrap_or(0) // wrap around
+                    }
+                    None => 0,
+                }
+            };
+
+            // Collect input segments
+            let inputs = if level == 0 {
+                // L0: always compact ALL L0 files (they can overlap arbitrarily)
+                level_segs.to_vec()
+            } else {
+                vec![Arc::clone(&level_segs[pick_idx])]
+            };
+
+            // Compute key range of all inputs
+            let (input_min, input_max) = compute_key_range(&inputs);
+
+            // Find overlapping files in level+1
+            let next_level = ver.levels.get(level + 1).cloned().unwrap_or_default();
+            let (overlap, non_overlap) = partition_overlapping(&next_level, &input_min, &input_max);
+
+            // Track grandparent files (level+2) for output splitting
+            let grandparents = if level + 2 < ver.levels.len() {
+                let gp_level = &ver.levels[level + 2];
+                let (gp_overlap, _) = partition_overlapping(gp_level, &input_min, &input_max);
+                gp_overlap
+            } else {
+                Vec::new()
+            };
+
+            (inputs, overlap, grandparents, non_overlap)
+        };
+
+        // ── 2. Check for trivial move ───────────────────────────────────
+        if level > 0
+            && input_segs.len() == 1
+            && overlap_segs.is_empty()
+            && grandparent_bytes_in_range(&grandparent_segs, &input_segs) <= MAX_GRANDPARENT_OVERLAP
+        {
+            // Metadata-only move: shift file to level+1 without I/O
+            let moved_seg = Arc::clone(&input_segs[0]);
+            let mut branch = self
+                .branches
+                .entry(*branch_id)
+                .or_insert_with(BranchState::new);
+            let cur_ver = branch.version.load();
+            let mut new_levels = cur_ver.levels.clone();
+
+            // Remove from current level
+            new_levels[level].retain(|s| !Arc::ptr_eq(s, &moved_seg));
+
+            // Add to next level, maintaining sort order
+            new_levels[level + 1].push(moved_seg);
+            new_levels[level + 1].sort_by(|a, b| a.key_range().0.cmp(b.key_range().0));
+
+            // Update compact pointer
+            let (_, input_max) = compute_key_range(&input_segs);
+            branch.compact_pointers[level] = Some(input_max);
+
+            branch
+                .version
+                .store(Arc::new(SegmentVersion { levels: new_levels }));
+            drop(branch);
+            self.write_branch_manifest(branch_id);
+
+            return Ok(Some(CompactionResult {
+                segments_merged: 1,
+                output_entries: input_segs[0].entry_count(),
+                entries_pruned: 0,
+                output_file_size: input_segs[0].file_size(),
+            }));
+        }
+
+        // ── 3. Merge inputs via streaming compaction ────────────────────
+        let segments_merged = input_segs.len() + overlap_segs.len();
+        let total_input_entries: u64 = input_segs
+            .iter()
+            .chain(overlap_segs.iter())
+            .map(|s| s.entry_count())
+            .sum();
+
+        let mut all_inputs: Vec<Arc<KVSegment>> = Vec::new();
+        all_inputs.extend(input_segs.iter().cloned());
+        all_inputs.extend(overlap_segs.iter().cloned());
+
+        let sources = streaming_sources(&all_inputs);
+        let merge = MergeIterator::new(sources);
+        let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
+        let compaction_iter =
+            CompactionIterator::new(merge, prune_floor).with_max_versions(max_versions);
+
+        let branch_hex = hex_encode_branch(branch_id);
+        let branch_dir = segments_dir.join(&branch_hex);
+        std::fs::create_dir_all(&branch_dir)?;
+
+        let next_id = &self.next_segment_id;
+        let splitting_builder = crate::segment_builder::SplittingSegmentBuilder::default();
+
+        // Build grandparent-aware split predicate.
+        //
+        // Tracks cumulative overlap: each time the output key advances past a
+        // grandparent file's max key, that grandparent's file size is added to
+        // `gp_overlap_bytes`.  When the total exceeds MAX_GRANDPARENT_OVERLAP,
+        // a split is forced and the counter resets.  This limits how many
+        // grandparent files a single output segment will overlap during the
+        // *next* compaction (L+1 → L+2).
+        let gp_segs = grandparent_segs;
+        let mut gp_idx: usize = 0;
+        let mut gp_overlap_bytes: u64 = 0;
+        let should_split = move |typed_key: &[u8]| -> bool {
+            // Advance grandparent index past segments whose max < current key,
+            // accumulating each crossed grandparent's file size.
+            while gp_idx < gp_segs.len() {
+                let (_, gp_max) = gp_segs[gp_idx].key_range();
+                let gp_max_p = typed_key_prefix_of(gp_max);
+                if gp_max_p < typed_key {
+                    // Output key has passed this grandparent — count it
+                    gp_overlap_bytes += gp_segs[gp_idx].file_size();
+                    gp_idx += 1;
+                } else {
+                    break;
+                }
+            }
+            if gp_overlap_bytes > MAX_GRANDPARENT_OVERLAP {
+                gp_overlap_bytes = 0;
+                return true;
+            }
+            false
+        };
+
+        let outputs = splitting_builder.build_split_with_predicate(
+            compaction_iter,
+            |_split_idx| {
+                let id = next_id.fetch_add(1, Ordering::Relaxed);
+                branch_dir.join(format!("{}.sst", id))
+            },
+            should_split,
+        )?;
+
+        let output_entries: u64 = outputs.iter().map(|(_, m)| m.entry_count).sum();
+        let output_file_size: u64 = outputs.iter().map(|(_, m)| m.file_size).sum();
+
+        // Open all output segments
+        let mut new_output_segments: Vec<Arc<KVSegment>> = Vec::new();
+        for (path, _meta) in &outputs {
+            new_output_segments.push(Arc::new(KVSegment::open(path)?));
+        }
+
+        // ── 4. Atomic version swap ─────────────────────────────────────
+        {
+            let mut branch = self
+                .branches
+                .entry(*branch_id)
+                .or_insert_with(BranchState::new);
+            let cur_ver = branch.version.load();
+            let mut new_levels = cur_ver.levels.clone();
+
+            // Remove input files from levels[level]
+            new_levels[level].retain(|s| !input_segs.iter().any(|old| Arc::ptr_eq(s, old)));
+
+            // Remove overlapping files from levels[level+1]
+            new_levels[level + 1].retain(|s| !overlap_segs.iter().any(|old| Arc::ptr_eq(s, old)));
+
+            // Add output files to levels[level+1], sort by key range
+            new_levels[level + 1].extend(new_output_segments);
+            new_levels[level + 1].sort_by(|a, b| a.key_range().0.cmp(b.key_range().0));
+
+            // Update compact pointer
+            let (_, input_max) = compute_key_range(&input_segs);
+            branch.compact_pointers[level] = Some(input_max);
+
+            branch
+                .version
+                .store(Arc::new(SegmentVersion { levels: new_levels }));
+        }
+
+        // ── 5. Cleanup ─────────────────────────────────────────────────
+        // Persist manifest BEFORE deleting old files (crash safety).
+        self.write_branch_manifest(branch_id);
+
+        let cache = crate::block_cache::global_cache();
+        for seg in &input_segs {
+            cache.invalidate_file(seg.file_id());
+            let _ = std::fs::remove_file(seg.file_path());
+        }
+        for seg in &overlap_segs {
+            cache.invalidate_file(seg.file_id());
+            let _ = std::fs::remove_file(seg.file_path());
+        }
+
+        let entries_pruned = total_input_entries.saturating_sub(output_entries);
+
+        Ok(Some(CompactionResult {
+            segments_merged,
+            output_entries,
+            entries_pruned,
+            output_file_size,
+        }))
+    }
+}
+
+fn streaming_sources(
+    segments: &[Arc<KVSegment>],
+) -> Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> {
+    segments
+        .iter()
+        .map(|seg| {
+            let iter = crate::segment::OwnedSegmentIter::new(Arc::clone(seg));
+            Box::new(iter.map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se))))
+                as Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Multi-level compaction helpers
+// ---------------------------------------------------------------------------
+
+/// Extract the typed_key_prefix from an InternalKey byte slice.
+///
+/// InternalKey format: `typed_key_prefix || commit_id (8 bytes)`.
+/// Returns the full slice if shorter than 8 bytes.
+#[inline]
+fn typed_key_prefix_of(ik_bytes: &[u8]) -> &[u8] {
+    if ik_bytes.len() >= 8 {
+        &ik_bytes[..ik_bytes.len() - 8]
+    } else {
+        ik_bytes
+    }
+}
+
+/// Compute the overall typed_key_prefix range across a set of segments.
+///
+/// Returns `(min_prefix, max_prefix)` as owned byte vectors.
+fn compute_key_range(segments: &[Arc<KVSegment>]) -> (Vec<u8>, Vec<u8>) {
+    let mut overall_min: Option<Vec<u8>> = None;
+    let mut overall_max: Option<Vec<u8>> = None;
+    for seg in segments {
+        let (seg_min, seg_max) = seg.key_range();
+        if seg_min.is_empty() && seg_max.is_empty() {
+            continue;
+        }
+        let min_p = typed_key_prefix_of(seg_min).to_vec();
+        let max_p = typed_key_prefix_of(seg_max).to_vec();
+        overall_min = Some(match overall_min {
+            None => min_p,
+            Some(cur) => {
+                if min_p < cur {
+                    min_p
+                } else {
+                    cur
+                }
+            }
+        });
+        overall_max = Some(match overall_max {
+            None => max_p,
+            Some(cur) => {
+                if max_p > cur {
+                    max_p
+                } else {
+                    cur
+                }
+            }
+        });
+    }
+    (
+        overall_min.unwrap_or_default(),
+        overall_max.unwrap_or_default(),
+    )
+}
+
+/// Partition a sorted, non-overlapping level into segments that overlap
+/// `[range_min, range_max]` and those that don't.
+fn partition_overlapping(
+    level_segs: &[Arc<KVSegment>],
+    range_min: &[u8],
+    range_max: &[u8],
+) -> (Vec<Arc<KVSegment>>, Vec<Arc<KVSegment>>) {
+    let mut overlapping = Vec::new();
+    let mut non_overlapping = Vec::new();
+    for seg in level_segs {
+        let (seg_min, seg_max) = seg.key_range();
+        if seg_min.is_empty() && seg_max.is_empty() {
+            non_overlapping.push(Arc::clone(seg));
+            continue;
+        }
+        let seg_min_p = typed_key_prefix_of(seg_min);
+        let seg_max_p = typed_key_prefix_of(seg_max);
+        if seg_min_p <= range_max && seg_max_p >= range_min {
+            overlapping.push(Arc::clone(seg));
+        } else {
+            non_overlapping.push(Arc::clone(seg));
+        }
+    }
+    (overlapping, non_overlapping)
+}
+
+/// Compute total file size of grandparent segments overlapping with a set of
+/// input segments.
+fn grandparent_bytes_in_range(grandparents: &[Arc<KVSegment>], inputs: &[Arc<KVSegment>]) -> u64 {
+    if grandparents.is_empty() || inputs.is_empty() {
+        return 0;
+    }
+    let (input_min, input_max) = compute_key_range(inputs);
+    let (overlap, _) = partition_overlapping(grandparents, &input_min, &input_max);
+    overlap.iter().map(|s| s.file_size()).sum()
+}
