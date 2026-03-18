@@ -97,7 +97,8 @@ debug = false
 inherits = "release"
 
 [features]
-default = []
+default = ["jemalloc"]
+jemalloc = ["dep:tikv-jemallocator"]
 perf-trace = []  # Enable per-layer timing instrumentation for M4
 # Basic comparison benchmarks (redb, LMDB, SQLite)
 comparison-benchmarks = ["dep:redb", "dep:heed", "dep:rusqlite"]
@@ -115,6 +116,7 @@ strata-executor = { path = "crates/executor" }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
+tikv-jemallocator = { version = "0.6", optional = true }
 
 # Optional SOTA comparison dependencies (enable with --features=comparison-benchmarks)
 redb = { version = "2.0", optional = true }
