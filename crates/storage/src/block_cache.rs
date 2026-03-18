@@ -10,8 +10,9 @@
 //! on different shards never contend. Within each shard, a `HashMap` provides
 //! O(1) key lookup and a doubly-linked list provides O(1) LRU eviction.
 //!
-//! Two priority tiers (HIGH for index/bloom blocks, LOW for data blocks)
-//! ensure metadata stays cached under memory pressure.
+//! Three priority tiers (PINNED for L0 bloom partitions, HIGH for
+//! index/bloom blocks, LOW for data blocks) ensure metadata stays cached
+//! under memory pressure.
 //!
 //! Cache key: `(file_id, block_offset)` where file_id is derived from the
 //! file path hash. This ensures distinct segments never collide even if they
@@ -40,14 +41,16 @@ struct CacheKey {
 /// Priority tier for cached blocks.
 ///
 /// HIGH priority blocks (index, bloom filters) are evicted only when no
-/// LOW priority blocks remain. This keeps hot metadata resident even
-/// under data-block churn.
+/// LOW priority blocks remain. PINNED blocks (L0 bloom partitions) are
+/// never evicted — they stay resident until explicitly demoted or invalidated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
     /// Data blocks — evicted first under memory pressure.
     Low,
     /// Index and bloom filter blocks — evicted last.
     High,
+    /// L0 bloom partitions — never evicted by LRU pressure.
+    Pinned,
 }
 
 // ---------------------------------------------------------------------------
@@ -178,8 +181,8 @@ impl Drop for LruList {
 
 /// One of 16 independently-locked cache shards.
 ///
-/// Each shard maintains two LRU lists (LOW and HIGH priority) and a HashMap
-/// for O(1) key-to-node lookup.
+/// Each shard maintains three LRU lists (LOW, HIGH, and PINNED priority)
+/// and a HashMap for O(1) key-to-node lookup.
 struct LruShard {
     /// Maps cache keys to their LRU nodes. Provides O(1) lookup.
     /// The HashMap owns the node pointers (freed in `Drop`).
@@ -188,10 +191,16 @@ struct LruShard {
     low: LruList,
     /// LRU list for HIGH priority (index/bloom) blocks. Evicted last.
     high: LruList,
+    /// LRU list for PINNED priority (L0 bloom partitions). Never evicted.
+    pinned: LruList,
     /// Current total size of cached data in this shard.
     current_bytes: usize,
+    /// Current total size of pinned data in this shard.
+    pinned_bytes: usize,
     /// Maximum capacity for this shard.
     capacity_bytes: usize,
+    /// Maximum budget for pinned data in this shard (10% of capacity).
+    pinned_budget: usize,
 }
 
 // SAFETY: node pointers in `map` are only accessed while the shard mutex is held.
@@ -203,8 +212,11 @@ impl LruShard {
             map: HashMap::new(),
             low: LruList::new(),
             high: LruList::new(),
+            pinned: LruList::new(),
             current_bytes: 0,
+            pinned_bytes: 0,
             capacity_bytes,
+            pinned_budget: capacity_bytes / 10,
         }
     }
 
@@ -250,8 +262,8 @@ impl Drop for LruShard {
 /// Thread-safe sharded LRU block cache for decompressed segment data blocks.
 ///
 /// 16 shards, each independently locked. Lookups, inserts, and evictions are
-/// all O(1). Two priority tiers keep index/bloom metadata resident under
-/// data-block churn.
+/// all O(1). Three priority tiers (Pinned > High > Low) keep metadata resident
+/// under data-block churn.
 pub struct BlockCache {
     shards: Vec<parking_lot::Mutex<LruShard>>,
     total_capacity: usize,
@@ -272,6 +284,10 @@ pub struct BlockCacheStats {
     pub size_bytes: usize,
     /// Maximum capacity in bytes.
     pub capacity_bytes: usize,
+    /// Current total size of pinned data in bytes.
+    pub pinned_bytes: usize,
+    /// Current number of pinned entries.
+    pub pinned_entries: usize,
 }
 
 impl BlockCache {
@@ -320,6 +336,7 @@ impl BlockCache {
                 match (*node).priority {
                     Priority::Low => shard.low.push_front(node),
                     Priority::High => shard.high.push_front(node),
+                    Priority::Pinned => shard.pinned.push_front(node),
                 }
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 Some(Arc::clone(&(*node).data))
@@ -371,6 +388,17 @@ impl BlockCache {
             }
         }
 
+        // For Pinned: check budget, fall back to High if exceeded
+        let effective_priority = if priority == Priority::Pinned {
+            if shard.pinned_bytes + size <= shard.pinned_budget {
+                Priority::Pinned
+            } else {
+                Priority::High
+            }
+        } else {
+            priority
+        };
+
         // Evict until there's room
         shard.evict_for(size);
 
@@ -379,15 +407,19 @@ impl BlockCache {
             key,
             data: Arc::clone(&data),
             size,
-            priority,
+            priority: effective_priority,
             prev: ptr::null_mut(),
             next: ptr::null_mut(),
         }));
 
         unsafe {
-            match priority {
+            match effective_priority {
                 Priority::Low => shard.low.push_front(node),
                 Priority::High => shard.high.push_front(node),
+                Priority::Pinned => {
+                    shard.pinned.push_front(node);
+                    shard.pinned_bytes += size;
+                }
             }
         }
         shard.map.insert(key, node);
@@ -413,8 +445,69 @@ impl BlockCache {
                 if let Some(node) = shard.map.remove(&key) {
                     unsafe {
                         shard.current_bytes = shard.current_bytes.saturating_sub((*node).size);
+                        if (*node).priority == Priority::Pinned {
+                            shard.pinned_bytes = shard.pinned_bytes.saturating_sub((*node).size);
+                        }
                         LruList::remove(node);
                         drop(Box::from_raw(node));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Promote an existing cache entry to Pinned priority.
+    ///
+    /// Returns `true` if the entry was found and promoted, `false` if
+    /// the entry was not found or the pinned budget would be exceeded.
+    pub fn promote_to_pinned(&self, file_id: u64, block_offset: u64) -> bool {
+        let key = CacheKey {
+            file_id,
+            block_offset,
+        };
+        let mut shard = self.shards[Self::shard_index(&key)].lock();
+        if let Some(&node) = shard.map.get(&key) {
+            unsafe {
+                if (*node).priority == Priority::Pinned {
+                    return true; // already pinned
+                }
+                let size = (*node).size;
+                if shard.pinned_bytes + size > shard.pinned_budget {
+                    return false; // budget exceeded
+                }
+                LruList::remove(node);
+                (*node).priority = Priority::Pinned;
+                shard.pinned.push_front(node);
+                shard.pinned_bytes += size;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Demote all Pinned entries for a given file to High priority.
+    ///
+    /// Called when a segment moves out of L0 (e.g. after compaction).
+    pub fn demote_file(&self, file_id: u64) {
+        for mutex in &self.shards {
+            let mut shard = mutex.lock();
+            let keys: Vec<CacheKey> = shard
+                .map
+                .keys()
+                .filter(|k| k.file_id == file_id)
+                .copied()
+                .collect();
+            for key in keys {
+                if let Some(&node) = shard.map.get(&key) {
+                    unsafe {
+                        if (*node).priority == Priority::Pinned {
+                            let size = (*node).size;
+                            LruList::remove(node);
+                            (*node).priority = Priority::High;
+                            shard.high.push_front(node);
+                            shard.pinned_bytes = shard.pinned_bytes.saturating_sub(size);
+                        }
                     }
                 }
             }
@@ -425,10 +518,19 @@ impl BlockCache {
     pub fn stats(&self) -> BlockCacheStats {
         let mut total_entries = 0;
         let mut total_bytes = 0;
+        let mut total_pinned_bytes = 0;
+        let mut total_pinned_entries = 0;
         for mutex in &self.shards {
             let shard = mutex.lock();
             total_entries += shard.map.len();
             total_bytes += shard.current_bytes;
+            total_pinned_bytes += shard.pinned_bytes;
+            // Count pinned entries by scanning for Pinned priority nodes
+            for &node in shard.map.values() {
+                if unsafe { (*node).priority == Priority::Pinned } {
+                    total_pinned_entries += 1;
+                }
+            }
         }
         BlockCacheStats {
             hits: self.hits.load(Ordering::Relaxed),
@@ -436,6 +538,8 @@ impl BlockCache {
             entries: total_entries,
             size_bytes: total_bytes,
             capacity_bytes: self.total_capacity,
+            pinned_bytes: total_pinned_bytes,
+            pinned_entries: total_pinned_entries,
         }
     }
 }
@@ -773,5 +877,169 @@ mod tests {
             "auto-detect should return at least 256 MiB, got {}",
             cap
         );
+    }
+
+    /// Helper: find `count` file_ids that map to a given shard.
+    fn find_keys_in_shard(target_shard: usize, count: usize) -> Vec<u64> {
+        let mut keys = Vec::new();
+        for fid in 0u64..10000 {
+            let key = CacheKey {
+                file_id: fid,
+                block_offset: 0,
+            };
+            if BlockCache::shard_index(&key) == target_shard {
+                keys.push(fid);
+                if keys.len() >= count {
+                    break;
+                }
+            }
+        }
+        keys
+    }
+
+    #[test]
+    fn pinned_entries_survive_eviction() {
+        // 100 bytes per shard
+        let cache = BlockCache::new(16 * 100);
+
+        // Find keys in the same shard
+        let keys = find_keys_in_shard(0, 6);
+
+        // Pin one entry (10 bytes, well within 10% budget of 10 bytes)
+        cache.insert_with_priority(keys[0], 0, vec![0xAA; 8], Priority::Pinned);
+
+        // Fill the shard with LOW entries to trigger eviction
+        for &fid in &keys[1..6] {
+            cache.insert(fid, 0, vec![0xBB; 30]);
+        }
+
+        // Pinned entry should survive
+        assert!(
+            cache.get(keys[0], 0).is_some(),
+            "pinned entry should survive eviction"
+        );
+        assert_eq!(&*cache.get(keys[0], 0).unwrap(), &vec![0xAA; 8]);
+    }
+
+    #[test]
+    fn pinned_budget_enforced() {
+        // 100 bytes per shard → pinned budget = 10 bytes
+        let cache = BlockCache::new(16 * 100);
+
+        let keys = find_keys_in_shard(0, 6);
+
+        // First pinned entry (8 bytes) — fits in budget (8 <= 10)
+        cache.insert_with_priority(keys[0], 0, vec![0xAA; 8], Priority::Pinned);
+        let stats = cache.stats();
+        assert_eq!(stats.pinned_entries, 1);
+        assert_eq!(stats.pinned_bytes, 8);
+
+        // Second pinned entry (8 bytes) — exceeds budget (8+8=16 > 10), falls back to High
+        cache.insert_with_priority(keys[1], 0, vec![0xBB; 8], Priority::Pinned);
+        let stats = cache.stats();
+        assert_eq!(
+            stats.pinned_entries, 1,
+            "second entry should NOT be pinned (budget exceeded)"
+        );
+        assert_eq!(stats.pinned_bytes, 8, "pinned_bytes unchanged");
+
+        // Fill shard to force eviction of non-pinned entries
+        for &fid in &keys[2..6] {
+            cache.insert(fid, 0, vec![0xCC; 30]);
+        }
+
+        // First entry (truly pinned) survives
+        assert!(
+            cache.get(keys[0], 0).is_some(),
+            "truly pinned entry survives"
+        );
+        assert_eq!(&*cache.get(keys[0], 0).unwrap(), &vec![0xAA; 8]);
+    }
+
+    #[test]
+    fn promote_to_pinned_works() {
+        // 200 bytes per shard → pinned budget = 20 bytes
+        let cache = BlockCache::new(16 * 200);
+
+        let keys = find_keys_in_shard(0, 6);
+
+        // Insert as High
+        cache.insert_with_priority(keys[0], 0, vec![0xAA; 10], Priority::High);
+
+        // Promote to Pinned
+        assert!(cache.promote_to_pinned(keys[0], 0));
+
+        // Fill shard to evict everything evictable
+        for &fid in &keys[1..6] {
+            cache.insert(fid, 0, vec![0xBB; 50]);
+        }
+
+        // Promoted entry should survive
+        assert!(
+            cache.get(keys[0], 0).is_some(),
+            "promoted-to-pinned entry survives eviction"
+        );
+    }
+
+    #[test]
+    fn demote_file_moves_to_high() {
+        let cache = BlockCache::new(16 * 200);
+
+        let keys = find_keys_in_shard(0, 3);
+
+        // Pin entry for file_id keys[0]
+        cache.insert_with_priority(keys[0], 0, vec![0xAA; 10], Priority::Pinned);
+
+        let stats = cache.stats();
+        assert_eq!(stats.pinned_entries, 1);
+        assert_eq!(stats.pinned_bytes, 10);
+
+        // Demote file
+        cache.demote_file(keys[0]);
+
+        let stats = cache.stats();
+        assert_eq!(stats.pinned_entries, 0, "no pinned entries after demote");
+        assert_eq!(stats.pinned_bytes, 0, "no pinned bytes after demote");
+
+        // Entry should still exist (now as High), accessible via get()
+        let val = cache.get(keys[0], 0);
+        assert!(
+            val.is_some(),
+            "entry survives demote (still cached as High)"
+        );
+        assert_eq!(&*val.unwrap(), &vec![0xAA; 10]);
+
+        // Verify that entries can be re-promoted after demote
+        assert!(
+            cache.promote_to_pinned(keys[0], 0),
+            "should be able to re-promote after demote"
+        );
+        let stats = cache.stats();
+        assert_eq!(stats.pinned_entries, 1, "re-promoted entry is pinned again");
+    }
+
+    #[test]
+    fn invalidate_file_handles_pinned() {
+        let cache = BlockCache::new(16 * 200);
+
+        // Pin entries for file 42
+        cache.insert_with_priority(42, 0, vec![0xAA; 10], Priority::Pinned);
+        cache.insert_with_priority(42, 100, vec![0xBB; 10], Priority::Pinned);
+        cache.insert(99, 0, vec![0xCC; 10]);
+
+        let stats = cache.stats();
+        assert!(stats.pinned_bytes > 0);
+
+        // Invalidate file 42
+        cache.invalidate_file(42);
+
+        let stats = cache.stats();
+        assert_eq!(
+            stats.pinned_bytes, 0,
+            "pinned_bytes decremented after invalidate"
+        );
+        assert!(cache.get(42, 0).is_none());
+        assert!(cache.get(42, 100).is_none());
+        assert!(cache.get(99, 0).is_some(), "other file unaffected");
     }
 }

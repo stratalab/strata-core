@@ -9,20 +9,22 @@
 //!
 //! ## I/O model
 //!
-//! Segment metadata (header, footer, index, bloom, properties) is loaded into
-//! memory at open time via `pread`. Data blocks are read on demand via `pread`
-//! and cached in the global [`BlockCache`](crate::block_cache). This avoids
-//! mmap page-fault overhead and OS double-caching.
+//! Segment metadata (header, footer, index, filter index, properties) is loaded
+//! into memory at open time via `pread`. Bloom filter partitions and data blocks
+//! are read on demand via `pread` and cached in the global
+//! [`BlockCache`](crate::block_cache). This avoids mmap page-fault overhead
+//! and OS double-caching.
 //!
 //! [`SegmentBuilder`]: crate::segment_builder::SegmentBuilder
 
+use crate::block_cache::{self, Priority};
 use crate::bloom::BloomFilter;
 use crate::key_encoding::{encode_typed_key, encode_typed_key_prefix, InternalKey};
 use crate::segment_builder::{
     decode_entry, decode_entry_header_ref, decode_entry_header_ref_v4, decode_entry_header_v4,
-    decode_entry_v4, decode_entry_value, parse_footer, parse_framed_block, parse_header,
-    parse_index_block, parse_properties_block, EntryHeader, Footer, IndexEntry, KVHeader,
-    PropertiesBlock, FOOTER_SZ, FRAME_OVERHEAD, HEADER_SIZE,
+    decode_entry_v4, decode_entry_value, parse_filter_index, parse_footer, parse_framed_block,
+    parse_header, parse_index_block, parse_properties_block, EntryHeader, FilterIndexEntry, Footer,
+    IndexEntry, KVHeader, PropertiesBlock, FOOTER_SZ, FRAME_OVERHEAD, HEADER_SIZE,
 };
 use strata_core::types::Key;
 use strata_core::value::Value;
@@ -55,6 +57,15 @@ pub struct SegmentEntry {
 // KVSegment
 // ---------------------------------------------------------------------------
 
+/// Partitioned bloom filter — loaded on demand through the block cache.
+///
+/// Only the filter index (small) is kept in memory. Individual ~4KB bloom
+/// partitions are loaded from disk via pread + block cache on each lookup.
+struct PartitionedBloom {
+    /// Top-level index mapping key ranges → partition offsets.
+    index: Vec<FilterIndexEntry>,
+}
+
 /// An immutable KV segment file backed by pread + block cache.
 ///
 /// Opened via [`KVSegment::open`], provides point lookups and prefix iteration
@@ -66,7 +77,7 @@ pub struct KVSegment {
     #[allow(dead_code)] // used by future compaction/GC
     footer: Footer,
     index: Vec<IndexEntry>,
-    bloom: BloomFilter,
+    bloom: PartitionedBloom,
     props: PropertiesBlock,
     /// Path to the .sst file (for cleanup after compaction).
     file_path: std::path::PathBuf,
@@ -86,8 +97,9 @@ fn pread_exact(file: &std::fs::File, offset: u64, len: usize) -> io::Result<Vec<
 impl KVSegment {
     /// Open and parse a KV segment file.
     ///
-    /// Reads metadata (header, footer, index, bloom, properties) into memory
-    /// via pread at open time. Data blocks are read on demand.
+    /// Reads metadata (header, footer, index, filter index, properties) into
+    /// memory at open time via pread. Bloom partitions and data blocks are
+    /// read on demand through the block cache.
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = std::fs::File::open(path)?;
         let file_size = file.metadata()?.len();
@@ -152,18 +164,24 @@ impl KVSegment {
         let index = parse_index_block(idx_data)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed index block"))?;
 
-        // Parse bloom filter block via pread
-        let (bloom_off, bloom_len) = check_block_bounds(
+        // Parse filter index block via pread (v5 partitioned bloom)
+        let (fi_off, fi_len) = check_block_bounds(
             footer.filter_block_offset,
             footer.filter_block_len,
-            "bloom block",
+            "filter index block",
         )?;
-        let bloom_buf = pread_exact(&file, bloom_off, bloom_len)?;
-        let (_, bloom_data) = parse_framed_block(&bloom_buf).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "bloom block CRC mismatch")
+        let fi_buf = pread_exact(&file, fi_off, fi_len)?;
+        let (_, fi_data) = parse_framed_block(&fi_buf).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "filter index block CRC mismatch",
+            )
         })?;
-        let bloom = BloomFilter::from_bytes(bloom_data)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed bloom filter"))?;
+        let filter_index = parse_filter_index(fi_data)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed filter index"))?;
+        let bloom = PartitionedBloom {
+            index: filter_index,
+        };
 
         // Parse properties block via pread
         let (props_off, props_len) = check_block_bounds(
@@ -199,7 +217,7 @@ impl KVSegment {
     /// Returns `false` if the key definitely does not exist in this segment.
     pub fn bloom_maybe_contains(&self, key: &Key) -> bool {
         let typed = encode_typed_key(key);
-        self.bloom.maybe_contains(&typed)
+        self.partitioned_bloom_check(&typed)
     }
 
     /// Point lookup: find the newest version of `key` with commit_id ≤ `snapshot_commit`.
@@ -326,9 +344,92 @@ impl KVSegment {
         self.header.format_version
     }
 
+    /// Pin all bloom partitions in the block cache with Pinned priority.
+    ///
+    /// Called for L0 segments so their bloom partitions are never evicted.
+    pub fn pin_bloom_partitions(&self) {
+        let cache = block_cache::global_cache();
+        for entry in &self.bloom.index {
+            if cache.get(self.file_id, entry.block_offset).is_none() {
+                // Load partition from disk and insert as Pinned
+                if let Ok(raw) = pread_exact(
+                    &self.file,
+                    entry.block_offset,
+                    entry.block_data_len as usize,
+                ) {
+                    if let Some((_, data)) = parse_framed_block(&raw) {
+                        cache.insert_with_priority(
+                            self.file_id,
+                            entry.block_offset,
+                            data.to_vec(),
+                            Priority::Pinned,
+                        );
+                    }
+                }
+            }
+            // Unconditionally promote: handles both the case where the entry
+            // was already cached (at High from a prior lookup) and the TOCTOU
+            // race where a concurrent bloom check inserted at High between
+            // our get() and insert_with_priority() above.
+            cache.promote_to_pinned(self.file_id, entry.block_offset);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
+
+    /// Check the partitioned bloom filter for a typed key.
+    ///
+    /// Binary searches the filter index, loads the relevant partition from
+    /// the block cache (pread on miss), and checks the bloom filter.
+    /// Returns `true` on I/O error or malformed data (safe default).
+    fn partitioned_bloom_check(&self, typed_key: &[u8]) -> bool {
+        if self.bloom.index.is_empty() {
+            return true; // no bloom info → assume key might exist
+        }
+
+        // Binary search for the partition covering this key
+        let idx = self
+            .bloom
+            .index
+            .partition_point(|e| e.max_key.as_slice() < typed_key);
+        if idx >= self.bloom.index.len() {
+            return false; // key is beyond all partitions
+        }
+        let entry = &self.bloom.index[idx];
+
+        // Load partition from block cache (cache miss → pread)
+        let cache = block_cache::global_cache();
+        let data = if let Some(cached) = cache.get(self.file_id, entry.block_offset) {
+            cached
+        } else {
+            // Cache miss: pread from file
+            let raw = match pread_exact(
+                &self.file,
+                entry.block_offset,
+                entry.block_data_len as usize,
+            ) {
+                Ok(buf) => buf,
+                Err(_) => return true, // I/O error → assume might exist
+            };
+            let (_, data) = match parse_framed_block(&raw) {
+                Some(parsed) => parsed,
+                None => return true, // corrupt → assume might exist
+            };
+            cache.insert_with_priority(
+                self.file_id,
+                entry.block_offset,
+                data.to_vec(),
+                Priority::High,
+            )
+        };
+
+        match BloomFilter::from_bytes(&data) {
+            Some(bloom) => bloom.maybe_contains(typed_key),
+            None => true, // malformed bloom → assume might exist
+        }
+    }
 
     /// Read and verify a data block, checking the global block cache first.
     ///
@@ -1894,7 +1995,7 @@ mod tests {
         // Verify output is v4 and readable
         for (p, meta) in &results {
             let out_seg = KVSegment::open(p).unwrap();
-            assert_eq!(out_seg.header.format_version, 4);
+            assert_eq!(out_seg.header.format_version, 5);
             assert_eq!(out_seg.entry_count(), meta.entry_count);
         }
     }
@@ -1918,7 +2019,7 @@ mod tests {
         build_segment_small_blocks(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
-        assert_eq!(seg.header.format_version, 4);
+        assert_eq!(seg.header.format_version, 5);
 
         // Point lookup every entry via binary search
         for i in 0..500u32 {
@@ -1948,7 +2049,7 @@ mod tests {
         build_segment_small_blocks(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
-        assert_eq!(seg.header.format_version, 4);
+        assert_eq!(seg.header.format_version, 5);
 
         let all: Vec<_> = seg.iter_seek(&kv_key("item_")).collect();
         assert_eq!(all.len(), 200);
@@ -2024,7 +2125,7 @@ mod tests {
         builder.build_from_iter(iter, &v4_path).unwrap();
 
         let v4_seg = KVSegment::open(&v4_path).unwrap();
-        assert_eq!(v4_seg.header.format_version, 4);
+        assert_eq!(v4_seg.header.format_version, 5);
 
         // Verify all entries readable
         for i in 0..50u32 {
@@ -2069,5 +2170,132 @@ mod tests {
         for i in 1..all.len() {
             assert!(all[i - 1].0 < all[i].0);
         }
+    }
+
+    // ===== Partitioned bloom filter tests =====
+
+    #[test]
+    fn partitioned_bloom_no_false_negatives() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..10_000u32 {
+            mt.put(
+                &kv_key(&format!("key_{:06}", i)),
+                1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        for i in 0..10_000u32 {
+            assert!(
+                seg.bloom_maybe_contains(&kv_key(&format!("key_{:06}", i))),
+                "false negative for key_{:06}",
+                i,
+            );
+        }
+    }
+
+    #[test]
+    fn partitioned_bloom_multiple_partitions() {
+        // Use 256-byte blocks so many data blocks are created,
+        // forcing multiple bloom partitions (1 per 16 data blocks).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..2000u32 {
+            mt.put(
+                &kv_key(&format!("item_{:06}", i)),
+                1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+        build_segment_small_blocks(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+
+        // Verify multiple partitions were created
+        assert!(
+            seg.bloom.index.len() > 1,
+            "expected multiple bloom partitions, got {}",
+            seg.bloom.index.len()
+        );
+
+        // All keys should be found (no false negatives)
+        for i in 0..2000u32 {
+            let k = kv_key(&format!("item_{:06}", i));
+            assert!(
+                seg.bloom_maybe_contains(&k),
+                "false negative for item_{:06}",
+                i
+            );
+        }
+
+        // Point lookups should all succeed
+        for i in 0..2000u32 {
+            let k = kv_key(&format!("item_{:06}", i));
+            let e = seg.point_lookup(&k, u64::MAX);
+            assert!(e.is_some(), "point lookup failed for item_{:06}", i);
+            assert_eq!(e.unwrap().value, Value::Int(i as i64));
+        }
+    }
+
+    #[test]
+    fn partitioned_bloom_loads_one_partition() {
+        // Verify that bloom lookups work correctly with multiple partitions:
+        // existing keys return true, keys beyond all partitions return false.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..2000u32 {
+            mt.put(
+                &kv_key(&format!("item_{:06}", i)),
+                1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+        build_segment_small_blocks(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        let num_partitions = seg.bloom.index.len();
+        assert!(num_partitions > 1, "need multiple partitions for this test");
+
+        // Existing key returns true
+        let k = kv_key("item_001000");
+        assert!(seg.bloom_maybe_contains(&k));
+
+        // Non-existent key beyond all partitions should return false
+        let k = kv_key("zzz_not_exist");
+        assert!(!seg.bloom_maybe_contains(&k));
+
+        // Non-existent key within key range may return true (false positive)
+        // or false — either is acceptable for a bloom filter. Just verify no panic.
+        let _result = seg.bloom_maybe_contains(&kv_key("item_999999"));
+    }
+
+    #[test]
+    fn partitioned_bloom_roundtrip_empty_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.sst");
+
+        let builder = SegmentBuilder::default();
+        builder.build_from_iter(std::iter::empty(), &path).unwrap();
+
+        let seg = KVSegment::open(&path).unwrap();
+        assert_eq!(seg.entry_count(), 0);
+        // Empty segment: bloom check returns true (no filter info)
+        assert!(seg.bloom.index.is_empty());
+        assert!(seg.bloom_maybe_contains(&kv_key("anything")));
     }
 }

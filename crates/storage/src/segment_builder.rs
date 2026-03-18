@@ -6,8 +6,9 @@
 //! ```text
 //! | KVHeader (64 bytes)       |
 //! | DataBlock 0..N-1          |
+//! | BloomPartition 0..K-1     |
+//! | FilterIndexBlock          |
 //! | IndexBlock                |
-//! | BloomFilterBlock          |
 //! | PropertiesBlock           |
 //! | Footer (56 bytes)         |
 //! ```
@@ -33,7 +34,7 @@ const KV_HEADER_MAGIC: [u8; 8] = *b"STRAKV\0\0";
 const FOOTER_MAGIC: [u8; 8] = *b"STRAKEND";
 
 /// Current format version.
-const FORMAT_VERSION: u16 = 4;
+const FORMAT_VERSION: u16 = 5;
 
 /// Number of entries between restart points within a data block.
 /// Entry 0 always gets a restart point; subsequent restarts are placed every
@@ -52,6 +53,10 @@ const BLOCK_TYPE_DATA: u8 = 1;
 const BLOCK_TYPE_INDEX: u8 = 2;
 const BLOCK_TYPE_FILTER: u8 = 3;
 const BLOCK_TYPE_PROPS: u8 = 4;
+const BLOCK_TYPE_FILTER_INDEX: u8 = 5;
+
+/// Number of data blocks per bloom partition.
+const BLOOM_PARTITION_BLOCK_COUNT: usize = 16;
 
 /// Block frame overhead: type(1) + codec(1) + reserved(2) + data_len(4) + crc32(4) = 12
 const BLOCK_FRAME_OVERHEAD: usize = 12;
@@ -131,9 +136,11 @@ impl SegmentBuilder {
         // Index entries: (first_key_bytes, block_offset, block_data_len)
         let mut index_entries: Vec<(Vec<u8>, u64, u32)> = Vec::new();
 
-        // Bloom filter keys (TypedKeyBytes, deduplicated)
-        let mut bloom_keys: Vec<Vec<u8>> = Vec::new();
+        // Partitioned bloom: keys per partition, max typed_key per partition
+        let mut partition_bloom_keys: Vec<Vec<Vec<u8>>> = vec![Vec::new()];
+        let mut partition_max_keys: Vec<Vec<u8>> = vec![Vec::new()];
         let mut last_typed_key: Option<Vec<u8>> = None;
+        let mut data_block_count: usize = 0;
 
         // Track current block's first key
         let mut block_first_key: Option<Vec<u8>> = None;
@@ -157,10 +164,11 @@ impl SegmentBuilder {
             }
             last_key = Some(ik.as_bytes().to_vec());
 
-            // Collect unique typed keys for bloom filter
+            // Collect unique typed keys for partitioned bloom filter
             let typed = ik.typed_key_prefix().to_vec();
             if last_typed_key.as_ref() != Some(&typed) {
-                bloom_keys.push(typed.clone());
+                partition_bloom_keys.last_mut().unwrap().push(typed.clone());
+                *partition_max_keys.last_mut().unwrap() = typed.clone();
                 last_typed_key = Some(typed);
             }
 
@@ -197,6 +205,14 @@ impl SegmentBuilder {
                 restart_offsets.push(0);
                 block_entry_count = 0;
                 prev_key.clear();
+
+                data_block_count += 1;
+
+                // Rotate to a new bloom partition every BLOOM_PARTITION_BLOCK_COUNT blocks
+                if data_block_count % BLOOM_PARTITION_BLOCK_COUNT == 0 {
+                    partition_bloom_keys.push(Vec::new());
+                    partition_max_keys.push(Vec::new());
+                }
             }
         }
 
@@ -220,23 +236,41 @@ impl SegmentBuilder {
             commit_max = 0;
         }
 
-        // 2. Write IndexBlock
+        // 2. Write bloom partition blocks
+        let mut filter_index_entries: Vec<FilterIndexEntry> = Vec::new();
+        for (keys, max_key) in partition_bloom_keys.iter().zip(partition_max_keys.iter()) {
+            if keys.is_empty() {
+                continue;
+            }
+            let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+            let bloom = BloomFilter::build(&key_refs, self.bloom_bits_per_key);
+            let data = bloom.to_bytes();
+            let partition_offset = file_offset;
+            write_framed_block(&mut w, BLOCK_TYPE_FILTER, &data)?;
+            let framed_len = (BLOCK_FRAME_OVERHEAD + data.len()) as u32;
+            filter_index_entries.push(FilterIndexEntry {
+                max_key: max_key.clone(),
+                block_offset: partition_offset,
+                block_data_len: framed_len,
+            });
+            file_offset += framed_len as u64;
+        }
+
+        // 3. Write filter index block
+        let filter_block_offset = file_offset;
+        let filter_index_data = encode_filter_index(&filter_index_entries);
+        write_framed_block(&mut w, BLOCK_TYPE_FILTER_INDEX, &filter_index_data)?;
+        let filter_block_len = (BLOCK_FRAME_OVERHEAD + filter_index_data.len()) as u32;
+        file_offset += filter_block_len as u64;
+
+        // 4. Write IndexBlock
         let index_block_offset = file_offset;
         let index_data = encode_index_block(&index_entries);
         write_framed_block(&mut w, BLOCK_TYPE_INDEX, &index_data)?;
         let index_block_len = (BLOCK_FRAME_OVERHEAD + index_data.len()) as u32;
         file_offset += index_block_len as u64;
 
-        // 3. Write BloomFilterBlock
-        let filter_block_offset = file_offset;
-        let bloom_key_refs: Vec<&[u8]> = bloom_keys.iter().map(|k| k.as_slice()).collect();
-        let bloom = BloomFilter::build(&bloom_key_refs, self.bloom_bits_per_key);
-        let bloom_data = bloom.to_bytes();
-        write_framed_block(&mut w, BLOCK_TYPE_FILTER, &bloom_data)?;
-        let filter_block_len = (BLOCK_FRAME_OVERHEAD + bloom_data.len()) as u32;
-        file_offset += filter_block_len as u64;
-
-        // 4. Write PropertiesBlock
+        // 5. Write PropertiesBlock
         let props_block_offset = file_offset;
         let props_data = encode_properties(
             entry_count,
@@ -249,7 +283,7 @@ impl SegmentBuilder {
         let props_block_len = (BLOCK_FRAME_OVERHEAD + props_data.len()) as u32;
         file_offset += props_block_len as u64;
 
-        // 5. Write Footer
+        // 6. Write Footer
         let footer = encode_footer(
             index_block_offset,
             index_block_len,
@@ -261,17 +295,17 @@ impl SegmentBuilder {
         w.write_all(&footer)?;
         file_offset += FOOTER_SIZE as u64;
 
-        // 6. Backfill header
+        // 7. Backfill header
         w.seek(SeekFrom::Start(0))?;
         let header = encode_header(entry_count, commit_min, commit_max, self.data_block_size);
         w.write_all(&header)?;
 
-        // 7. Flush and sync
+        // 8. Flush and sync
         w.flush()?;
         w.get_ref().sync_all()?;
         drop(w);
 
-        // 8. Atomic rename
+        // 9. Atomic rename
         std::fs::rename(&tmp_path, path)?;
 
         Ok(SegmentMeta {
@@ -283,7 +317,8 @@ impl SegmentBuilder {
     }
 }
 
-/// Test-only: build a v3 segment (no prefix compression) for backward-compat testing.
+/// Test-only: build a segment with v3 entry encoding (no prefix compression)
+/// but v5 partitioned bloom format, for backward-compat testing.
 #[cfg(test)]
 impl SegmentBuilder {
     pub(crate) fn build_from_iter_v3<I>(&self, iter: I, path: &Path) -> io::Result<SegmentMeta>
@@ -307,8 +342,10 @@ impl SegmentBuilder {
         let mut last_key: Option<Vec<u8>> = None;
         let mut block_buf = Vec::with_capacity(self.data_block_size + 1024);
         let mut index_entries: Vec<(Vec<u8>, u64, u32)> = Vec::new();
-        let mut bloom_keys: Vec<Vec<u8>> = Vec::new();
+        let mut partition_bloom_keys: Vec<Vec<Vec<u8>>> = vec![Vec::new()];
+        let mut partition_max_keys: Vec<Vec<u8>> = vec![Vec::new()];
         let mut last_typed_key: Option<Vec<u8>> = None;
+        let mut data_block_count: usize = 0;
         let mut block_first_key: Option<Vec<u8>> = None;
         let mut block_entry_count: usize = 0;
         let mut restart_offsets: Vec<u32> = vec![0];
@@ -324,7 +361,8 @@ impl SegmentBuilder {
             last_key = Some(ik.as_bytes().to_vec());
             let typed = ik.typed_key_prefix().to_vec();
             if last_typed_key.as_ref() != Some(&typed) {
-                bloom_keys.push(typed.clone());
+                partition_bloom_keys.last_mut().unwrap().push(typed.clone());
+                *partition_max_keys.last_mut().unwrap() = typed.clone();
                 last_typed_key = Some(typed);
             }
             if block_first_key.is_none() {
@@ -349,6 +387,12 @@ impl SegmentBuilder {
                 restart_offsets.clear();
                 restart_offsets.push(0);
                 block_entry_count = 0;
+
+                data_block_count += 1;
+                if data_block_count % BLOOM_PARTITION_BLOCK_COUNT == 0 {
+                    partition_bloom_keys.push(Vec::new());
+                    partition_max_keys.push(Vec::new());
+                }
             }
         }
         if !block_buf.is_empty() {
@@ -366,19 +410,38 @@ impl SegmentBuilder {
             commit_max = 0;
         }
 
+        // Write bloom partition blocks
+        let mut filter_index_entries: Vec<FilterIndexEntry> = Vec::new();
+        for (keys, max_key) in partition_bloom_keys.iter().zip(partition_max_keys.iter()) {
+            if keys.is_empty() {
+                continue;
+            }
+            let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+            let bloom = BloomFilter::build(&key_refs, self.bloom_bits_per_key);
+            let data = bloom.to_bytes();
+            let partition_offset = file_offset;
+            write_framed_block(&mut w, BLOCK_TYPE_FILTER, &data)?;
+            let framed_len = (BLOCK_FRAME_OVERHEAD + data.len()) as u32;
+            filter_index_entries.push(FilterIndexEntry {
+                max_key: max_key.clone(),
+                block_offset: partition_offset,
+                block_data_len: framed_len,
+            });
+            file_offset += framed_len as u64;
+        }
+
+        // Write filter index block
+        let filter_block_offset = file_offset;
+        let filter_index_data = encode_filter_index(&filter_index_entries);
+        write_framed_block(&mut w, BLOCK_TYPE_FILTER_INDEX, &filter_index_data)?;
+        let filter_block_len = (BLOCK_FRAME_OVERHEAD + filter_index_data.len()) as u32;
+        file_offset += filter_block_len as u64;
+
         let index_block_offset = file_offset;
         let index_data = encode_index_block(&index_entries);
         write_framed_block(&mut w, BLOCK_TYPE_INDEX, &index_data)?;
         let index_block_len = (BLOCK_FRAME_OVERHEAD + index_data.len()) as u32;
         file_offset += index_block_len as u64;
-
-        let filter_block_offset = file_offset;
-        let bloom_key_refs: Vec<&[u8]> = bloom_keys.iter().map(|k| k.as_slice()).collect();
-        let bloom = BloomFilter::build(&bloom_key_refs, self.bloom_bits_per_key);
-        let bloom_data = bloom.to_bytes();
-        write_framed_block(&mut w, BLOCK_TYPE_FILTER, &bloom_data)?;
-        let filter_block_len = (BLOCK_FRAME_OVERHEAD + bloom_data.len()) as u32;
-        file_offset += filter_block_len as u64;
 
         let props_block_offset = file_offset;
         let props_data = encode_properties(
@@ -403,7 +466,7 @@ impl SegmentBuilder {
         w.write_all(&footer)?;
         file_offset += FOOTER_SIZE as u64;
 
-        // Write header with format_version = 3
+        // Write header with format_version = 3 (v3 entry encoding)
         w.seek(SeekFrom::Start(0))?;
         let mut h = [0u8; KV_HEADER_SIZE];
         h[0..8].copy_from_slice(&KV_HEADER_MAGIC);
@@ -426,6 +489,68 @@ impl SegmentBuilder {
             file_size: file_offset,
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Partitioned bloom filter index
+// ---------------------------------------------------------------------------
+
+/// An entry in the filter index block, mapping a key range to a bloom partition.
+#[derive(Debug, Clone)]
+pub(crate) struct FilterIndexEntry {
+    /// Max typed_key_prefix covered by this bloom partition.
+    pub max_key: Vec<u8>,
+    /// File offset of the framed bloom partition block.
+    pub block_offset: u64,
+    /// Total on-disk size of the framed bloom partition block (including frame overhead).
+    pub block_data_len: u32,
+}
+
+/// Encode a filter index block.
+///
+/// Format: `[count: u32 LE] [key_len: u32][key_bytes][offset: u64][data_len: u32] ...`
+fn encode_filter_index(entries: &[FilterIndexEntry]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for e in entries {
+        buf.extend_from_slice(&(e.max_key.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&e.max_key);
+        buf.extend_from_slice(&e.block_offset.to_le_bytes());
+        buf.extend_from_slice(&e.block_data_len.to_le_bytes());
+    }
+    buf
+}
+
+/// Parse a filter index block into entries.
+pub(crate) fn parse_filter_index(data: &[u8]) -> Option<Vec<FilterIndexEntry>> {
+    if data.len() < 4 {
+        return None;
+    }
+    let count = u32::from_le_bytes(data[..4].try_into().ok()?) as usize;
+    let mut pos = 4;
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        if pos + 4 > data.len() {
+            return None;
+        }
+        let key_len = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
+        pos += 4;
+        if pos + key_len + 8 + 4 > data.len() {
+            return None;
+        }
+        let max_key = data[pos..pos + key_len].to_vec();
+        pos += key_len;
+        let block_offset = u64::from_le_bytes(data[pos..pos + 8].try_into().ok()?);
+        pos += 8;
+        let block_data_len = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?);
+        pos += 4;
+        entries.push(FilterIndexEntry {
+            max_key,
+            block_offset,
+            block_data_len,
+        });
+    }
+    Some(entries)
 }
 
 // ---------------------------------------------------------------------------
@@ -1949,7 +2074,7 @@ mod tests {
         builder.build_from_iter(mt.iter_all(), &path).unwrap();
 
         let seg = KVSegment::open(&path).unwrap();
-        assert_eq!(seg.format_version(), 4);
+        assert_eq!(seg.format_version(), 5);
 
         // Point lookup every entry
         for i in 0..100u32 {
