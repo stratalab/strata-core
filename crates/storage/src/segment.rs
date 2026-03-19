@@ -1024,6 +1024,7 @@ mod tests {
         let builder = SegmentBuilder {
             data_block_size: 256,
             bloom_bits_per_key: 10,
+            compression: crate::segment_builder::CompressionCodec::default(),
         };
         builder.build_from_iter(mt.iter_all(), path).unwrap();
     }
@@ -1490,6 +1491,7 @@ mod tests {
         let builder = SegmentBuilder {
             data_block_size: 4096,
             bloom_bits_per_key: 10,
+            compression: crate::segment_builder::CompressionCodec::default(),
         };
         builder.build_from_iter(mt.iter_all(), &path).unwrap();
 
@@ -1639,6 +1641,7 @@ mod tests {
         let builder = SegmentBuilder {
             data_block_size: 4096,
             bloom_bits_per_key: 10,
+            compression: crate::segment_builder::CompressionCodec::default(),
         };
         let meta = builder.build_from_iter(mt.iter_all(), &path).unwrap();
         assert_eq!(meta.entry_count, 200);

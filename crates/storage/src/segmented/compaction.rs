@@ -212,7 +212,8 @@ impl SegmentedStore {
         let compaction_iter =
             CompactionIterator::new(merge, prune_floor).with_max_versions(max_versions);
 
-        let builder = SegmentBuilder::default();
+        let builder = SegmentBuilder::default()
+            .with_compression(crate::segment_builder::CompressionCodec::None);
         let meta = builder.build_from_iter(compaction_iter, &seg_path)?;
 
         // Open the newly written segment.
@@ -343,7 +344,8 @@ impl SegmentedStore {
         let compaction_iter =
             CompactionIterator::new(merge, prune_floor).with_max_versions(max_versions);
 
-        let builder = SegmentBuilder::default();
+        let builder = SegmentBuilder::default()
+            .with_compression(crate::segment_builder::CompressionCodec::None);
         let meta = builder.build_from_iter(compaction_iter, &seg_path)?;
 
         let new_segment = KVSegment::open(&seg_path)?;
@@ -513,8 +515,10 @@ impl SegmentedStore {
 
         let next_id = &self.next_segment_id;
         let bloom_bits = super::bloom_bits_for_level(1, 10);
-        let splitting_builder =
-            crate::segment_builder::SplittingSegmentBuilder::default().with_bloom_bits(bloom_bits);
+        let compression = super::compression_for_level(1);
+        let splitting_builder = crate::segment_builder::SplittingSegmentBuilder::default()
+            .with_bloom_bits(bloom_bits)
+            .with_compression(compression);
         let outputs = splitting_builder.build_split(compaction_iter, |_split_idx| {
             let id = next_id.fetch_add(1, Ordering::Relaxed);
             branch_dir.join(format!("{}.sst", id))
@@ -736,8 +740,10 @@ impl SegmentedStore {
 
         let next_id = &self.next_segment_id;
         let bloom_bits = super::bloom_bits_for_level(level + 1, 10);
-        let splitting_builder =
-            crate::segment_builder::SplittingSegmentBuilder::default().with_bloom_bits(bloom_bits);
+        let compression = super::compression_for_level(level + 1);
+        let splitting_builder = crate::segment_builder::SplittingSegmentBuilder::default()
+            .with_bloom_bits(bloom_bits)
+            .with_compression(compression);
 
         // Build grandparent-aware split predicate.
         //

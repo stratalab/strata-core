@@ -35,6 +35,6 @@ pub use index::{BranchIndex, TypeIndex};
 pub use memory_stats::{BranchMemoryStats, StorageMemoryStats};
 pub use pressure::{MemoryPressure, PressureLevel};
 pub use segment::{KVSegment, OwnedSegmentIter};
-pub use segment_builder::{SegmentBuilder, SegmentMeta, SplittingSegmentBuilder};
+pub use segment_builder::{CompressionCodec, SegmentBuilder, SegmentMeta, SplittingSegmentBuilder};
 pub use segmented::{CompactionResult, PickAndCompactResult, SegmentedStore};
 pub use ttl::TTLIndex;

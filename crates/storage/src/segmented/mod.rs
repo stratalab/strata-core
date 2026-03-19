@@ -68,6 +68,20 @@ pub(crate) fn bloom_bits_for_level(level: usize, base_bits: usize) -> usize {
     (base_bits + bonus).min(20) // Cap at 20 bits/key
 }
 
+/// Per-level compression strategy.
+///
+/// - L0–L2 (hot): No compression — eliminates decompression CPU on the read hot path.
+/// - L3–L5 (warm): Zstd level 3 — balanced compression ratio vs speed.
+/// - L6+ (cold): Zstd level 6 — better compression for rarely-read bottommost data.
+pub(crate) fn compression_for_level(level: usize) -> crate::segment_builder::CompressionCodec {
+    use crate::segment_builder::CompressionCodec;
+    match level {
+        0..=2 => CompressionCodec::None,
+        3..=5 => CompressionCodec::Zstd(3),
+        _ => CompressionCodec::Zstd(6),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Compaction scheduling types
 // ---------------------------------------------------------------------------
@@ -778,7 +792,8 @@ impl SegmentedStore {
         let branch_dir = segments_dir.join(&branch_hex);
         std::fs::create_dir_all(&branch_dir)?;
         let seg_path = branch_dir.join(format!("{}.sst", seg_id));
-        let builder = SegmentBuilder::default();
+        let builder = SegmentBuilder::default()
+            .with_compression(crate::segment_builder::CompressionCodec::None);
         builder.build_from_iter(frozen_mt.iter_all(), &seg_path)?;
 
         // Open the newly written segment and pin its bloom partitions (L0).
