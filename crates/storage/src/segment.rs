@@ -25,6 +25,7 @@ use crate::segment_builder::{
     decode_entry_v4, decode_entry_value, parse_filter_index, parse_footer, parse_framed_block,
     parse_header, parse_index_block, parse_properties_block, EntryHeader, FilterIndexEntry, Footer,
     IndexEntry, KVHeader, PropertiesBlock, FOOTER_SZ, FRAME_OVERHEAD, HEADER_SIZE,
+    IDX_TYPE_PARTITIONED,
 };
 use strata_core::types::Key;
 use strata_core::value::Value;
@@ -66,6 +67,15 @@ struct PartitionedBloom {
     index: Vec<FilterIndexEntry>,
 }
 
+/// Two-level or monolithic index for a segment.
+enum SegmentIndex {
+    /// All index entries loaded in memory (small segments or legacy format).
+    Monolithic(Vec<IndexEntry>),
+    /// Two-level partitioned index: only the top-level is memory-resident.
+    /// Sub-index partitions are loaded on-demand through the block cache.
+    Partitioned { top_level: Vec<IndexEntry> },
+}
+
 /// An immutable KV segment file backed by pread + block cache.
 ///
 /// Opened via [`KVSegment::open`], provides point lookups and prefix iteration
@@ -76,7 +86,7 @@ pub struct KVSegment {
     header: KVHeader,
     #[allow(dead_code)] // used by future compaction/GC
     footer: Footer,
-    index: Vec<IndexEntry>,
+    index: SegmentIndex,
     bloom: PartitionedBloom,
     props: PropertiesBlock,
     /// Path to the .sst file (for cleanup after compaction).
@@ -161,8 +171,15 @@ impl KVSegment {
         let (_, idx_data) = parse_framed_block(&idx_buf).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "index block CRC mismatch")
         })?;
-        let index = parse_index_block(idx_data)
+        let index_entries = parse_index_block(idx_data)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed index block"))?;
+        let index = if footer.index_type == IDX_TYPE_PARTITIONED {
+            SegmentIndex::Partitioned {
+                top_level: index_entries,
+            }
+        } else {
+            SegmentIndex::Monolithic(index_entries)
+        };
 
         // Parse filter index block via pread (v5 partitioned bloom)
         let (fi_off, fi_len) = check_block_bounds(
@@ -232,44 +249,73 @@ impl KVSegment {
         }
 
         let typed_key = encode_typed_key(key);
-
-        // 2. Find candidate data block via binary search on index.
-        //
-        // Index keys are shortened separators (or full InternalKey bytes for
-        // legacy/unshortened entries).  The seek key `(key, u64::MAX)` sorts
-        // BEFORE all actual entries for that key due to descending commit_id
-        // encoding.  Err(0) does NOT mean the key is absent — it may be in
-        // block 0.  The forward scan below handles off-by-one from the binary
-        // search when index keys are separators (upper bounds) rather than
-        // first keys.
         let seek_ik = InternalKey::encode(key, u64::MAX);
         let seek_bytes = seek_ik.as_bytes();
 
-        let block_idx = match self
-            .index
-            .binary_search_by(|e| e.key.as_slice().cmp(seek_bytes))
-        {
+        match &self.index {
+            SegmentIndex::Monolithic(entries) => {
+                self.point_lookup_with_index(entries, &typed_key, seek_bytes, snapshot_commit)
+            }
+            SegmentIndex::Partitioned { top_level } => {
+                // Binary search top-level to find which sub-index partition
+                let part_idx =
+                    match top_level.binary_search_by(|e| e.key.as_slice().cmp(seek_bytes)) {
+                        Ok(i) => i,
+                        Err(0) => 0,
+                        Err(i) => i - 1,
+                    };
+
+                // Check this partition and possibly the next (boundary spanning)
+                for pi in part_idx..top_level.len() {
+                    if pi > part_idx {
+                        let prev_key = &top_level[pi - 1].key;
+                        if prev_key.len() >= 8 {
+                            let prefix = &prev_key[..prev_key.len() - 8];
+                            if prefix > typed_key.as_slice() {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    if let Some(sub_entries) = self.load_sub_index(&top_level[pi]) {
+                        if let Some(entry) = self.point_lookup_with_index(
+                            &sub_entries,
+                            &typed_key,
+                            seek_bytes,
+                            snapshot_commit,
+                        ) {
+                            return Some(entry);
+                        }
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Shared point lookup logic over a flat index entry slice.
+    fn point_lookup_with_index(
+        &self,
+        index: &[IndexEntry],
+        typed_key: &[u8],
+        seek_bytes: &[u8],
+        snapshot_commit: u64,
+    ) -> Option<SegmentEntry> {
+        let block_idx = match index.binary_search_by(|e| e.key.as_slice().cmp(seek_bytes)) {
             Ok(i) => i,
-            Err(0) => 0, // key may still be in the first block
+            Err(0) => 0,
             Err(i) => i - 1,
         };
 
-        // Scan this block (and possibly the next if the key spans a block boundary)
-        for bi in block_idx..self.index.len() {
-            let ie = &self.index[bi];
+        for bi in block_idx..index.len() {
+            let ie = &index[bi];
 
-            // Check whether we can stop scanning.  Index keys are shortened
-            // separators: index[bi-1] is an upper bound for block bi-1 and a
-            // lower bound for block bi.  If its prefix is already past our
-            // typed_key, no later block can contain the key.
-            //
-            // This works for both shortened separators AND legacy full-key
-            // index entries (raw byte comparison is valid for both).
             if bi > block_idx {
-                let prev_key = &self.index[bi - 1].key;
+                let prev_key = &index[bi - 1].key;
                 if prev_key.len() >= 8 {
                     let prefix = &prev_key[..prev_key.len() - 8];
-                    if prefix > typed_key.as_slice() {
+                    if prefix > typed_key {
                         break;
                     }
                 } else {
@@ -277,11 +323,10 @@ impl KVSegment {
                 }
             }
 
-            if let Some(entry) = self.scan_block_for_key(ie, &typed_key, snapshot_commit) {
+            if let Some(entry) = self.scan_block_for_key(ie, typed_key, snapshot_commit) {
                 return Some(entry);
             }
         }
-
         None
     }
 
@@ -294,24 +339,58 @@ impl KVSegment {
         let seek_ik = InternalKey::encode(prefix, u64::MAX);
         let seek_bytes = seek_ik.as_bytes().to_vec();
 
-        // Find the starting block
-        let start_block = match self
-            .index
-            .binary_search_by(|e| e.key.as_slice().cmp(seek_bytes.as_slice()))
-        {
-            Ok(i) => i,
-            Err(0) => 0,
-            Err(i) => i - 1,
+        let (partition_idx, block_within_partition, current_sub_index, done) = match &self.index {
+            SegmentIndex::Monolithic(entries) => {
+                if entries.is_empty() {
+                    (0, 0, Vec::new(), true)
+                } else {
+                    let start = match entries
+                        .binary_search_by(|e| e.key.as_slice().cmp(seek_bytes.as_slice()))
+                    {
+                        Ok(i) => i,
+                        Err(0) => 0,
+                        Err(i) => i - 1,
+                    };
+                    (0, start, entries.clone(), false)
+                }
+            }
+            SegmentIndex::Partitioned { top_level } => {
+                if top_level.is_empty() {
+                    (0, 0, Vec::new(), true)
+                } else {
+                    let part = match top_level
+                        .binary_search_by(|e| e.key.as_slice().cmp(seek_bytes.as_slice()))
+                    {
+                        Ok(i) => i,
+                        Err(0) => 0,
+                        Err(i) => i - 1,
+                    };
+                    if let Some(sub) = self.load_sub_index(&top_level[part]) {
+                        let block_in = match sub
+                            .binary_search_by(|e| e.key.as_slice().cmp(seek_bytes.as_slice()))
+                        {
+                            Ok(i) => i,
+                            Err(0) => 0,
+                            Err(i) => i - 1,
+                        };
+                        (part, block_in, sub, false)
+                    } else {
+                        (0, 0, Vec::new(), true)
+                    }
+                }
+            }
         };
 
         SegmentIter {
             segment: self,
             prefix_bytes,
-            block_idx: start_block,
+            partition_idx,
+            block_within_partition,
+            current_sub_index,
             block_offset: 0,
             block_data_end: 0,
             block_data: None,
-            done: false,
+            done,
             prev_key: Vec::new(),
         }
     }
@@ -355,6 +434,15 @@ impl KVSegment {
         self.header.format_version
     }
 
+    /// Number of entries in the top-level index (or monolithic index).
+    #[cfg(test)]
+    fn index_entry_count(&self) -> usize {
+        match &self.index {
+            SegmentIndex::Monolithic(entries) => entries.len(),
+            SegmentIndex::Partitioned { top_level } => top_level.len(),
+        }
+    }
+
     /// Pin all bloom partitions in the block cache with Pinned priority.
     ///
     /// Called for L0 segments so their bloom partitions are never evicted.
@@ -389,6 +477,34 @@ impl KVSegment {
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
+
+    /// Load a sub-index partition from disk / block cache.
+    ///
+    /// Follows the same pattern as `partitioned_bloom_check`: check cache
+    /// first, pread on miss, insert at High priority.
+    fn load_sub_index(&self, entry: &IndexEntry) -> Option<Vec<IndexEntry>> {
+        let cache = block_cache::global_cache();
+        let data = if let Some(cached) = cache.get(self.file_id, entry.block_offset) {
+            cached
+        } else {
+            // block_data_len already includes frame overhead (same convention
+            // as FilterIndexEntry / partitioned bloom).
+            let raw = pread_exact(
+                &self.file,
+                entry.block_offset,
+                entry.block_data_len as usize,
+            )
+            .ok()?;
+            let (_, data) = parse_framed_block(&raw)?;
+            cache.insert_with_priority(
+                self.file_id,
+                entry.block_offset,
+                data.to_vec(),
+                Priority::High,
+            )
+        };
+        parse_index_block(&data)
+    }
 
     /// Check the partitioned bloom filter for a typed key.
     ///
@@ -647,14 +763,28 @@ impl KVSegment {
     ///
     /// Used by `SegmentedStore::list_branch` to scan every entry.
     pub fn iter_seek_all(&self) -> SegmentIter<'_> {
+        let (current_sub_index, done) = match &self.index {
+            SegmentIndex::Monolithic(entries) => (entries.clone(), entries.is_empty()),
+            SegmentIndex::Partitioned { top_level } => {
+                if top_level.is_empty() {
+                    (Vec::new(), true)
+                } else if let Some(sub) = self.load_sub_index(&top_level[0]) {
+                    (sub, false)
+                } else {
+                    (Vec::new(), true)
+                }
+            }
+        };
         SegmentIter {
             segment: self,
             prefix_bytes: Vec::new(), // empty prefix matches everything
-            block_idx: 0,
+            partition_idx: 0,
+            block_within_partition: 0,
+            current_sub_index,
             block_offset: 0,
             block_data_end: 0,
             block_data: None,
-            done: self.index.is_empty(),
+            done,
             prev_key: Vec::new(),
         }
     }
@@ -788,7 +918,9 @@ fn block_data_end(data: &[u8], format_version: u16) -> usize {
 pub struct SegmentIter<'a> {
     segment: &'a KVSegment,
     prefix_bytes: Vec<u8>,
-    block_idx: usize,
+    partition_idx: usize,
+    block_within_partition: usize,
+    current_sub_index: Vec<IndexEntry>,
     block_offset: usize,
     /// End of entry data in the current block (excludes restart trailer for v3+).
     block_data_end: usize,
@@ -796,6 +928,28 @@ pub struct SegmentIter<'a> {
     done: bool,
     /// Buffer for v4 prefix-compressed key reconstruction (reused across entries).
     prev_key: Vec<u8>,
+}
+
+impl<'a> SegmentIter<'a> {
+    /// Advance to the next partition. Returns `false` if no more partitions.
+    fn advance_partition(&mut self) -> bool {
+        match &self.segment.index {
+            SegmentIndex::Monolithic(_) => false, // single partition, already exhausted
+            SegmentIndex::Partitioned { top_level } => {
+                self.partition_idx += 1;
+                if self.partition_idx >= top_level.len() {
+                    return false;
+                }
+                if let Some(sub) = self.segment.load_sub_index(&top_level[self.partition_idx]) {
+                    self.current_sub_index = sub;
+                    self.block_within_partition = 0;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
 }
 
 impl<'a> Iterator for SegmentIter<'a> {
@@ -809,11 +963,14 @@ impl<'a> Iterator for SegmentIter<'a> {
 
             // Load current block if needed
             if self.block_data.is_none() {
-                if self.block_idx >= self.segment.index.len() {
+                // Advance partition if we've exhausted the current sub-index
+                if self.block_within_partition >= self.current_sub_index.len()
+                    && !self.advance_partition()
+                {
                     self.done = true;
                     return None;
                 }
-                let ie = &self.segment.index[self.block_idx];
+                let ie = &self.current_sub_index[self.block_within_partition];
                 match self.segment.read_data_block(ie) {
                     Some(data) => {
                         let de = block_data_end(&data, self.segment.header.format_version);
@@ -834,7 +991,7 @@ impl<'a> Iterator for SegmentIter<'a> {
             if self.block_offset >= self.block_data_end {
                 // Move to next block
                 self.block_data = None;
-                self.block_idx += 1;
+                self.block_within_partition += 1;
                 continue;
             }
 
@@ -896,7 +1053,9 @@ impl<'a> Iterator for SegmentIter<'a> {
 /// This reduces compaction memory from O(total entries) to O(block size).
 pub struct OwnedSegmentIter {
     segment: Arc<KVSegment>,
-    block_idx: usize,
+    partition_idx: usize,
+    block_within_partition: usize,
+    current_sub_index: Vec<IndexEntry>,
     block_offset: usize,
     /// End of entry data in the current block (excludes restart trailer for v3+).
     block_data_end: usize,
@@ -904,21 +1063,64 @@ pub struct OwnedSegmentIter {
     done: bool,
     /// Buffer for v4 prefix-compressed key reconstruction (reused across entries).
     prev_key: Vec<u8>,
+    /// Monotonically increasing global block counter (for ThrottledSegmentIter).
+    global_block_idx: usize,
 }
 
 impl OwnedSegmentIter {
     /// Create a streaming iterator over all entries in the segment.
     pub fn new(segment: Arc<KVSegment>) -> Self {
-        let done = segment.index.is_empty();
+        let (current_sub_index, done) = match &segment.index {
+            SegmentIndex::Monolithic(entries) => (entries.clone(), entries.is_empty()),
+            SegmentIndex::Partitioned { top_level } => {
+                if top_level.is_empty() {
+                    (Vec::new(), true)
+                } else if let Some(sub) = segment.load_sub_index(&top_level[0]) {
+                    (sub, false)
+                } else {
+                    (Vec::new(), true)
+                }
+            }
+        };
         Self {
             segment,
-            block_idx: 0,
+            partition_idx: 0,
+            block_within_partition: 0,
+            current_sub_index,
             block_offset: 0,
             block_data_end: 0,
             block_data: None,
             done,
             prev_key: Vec::new(),
+            global_block_idx: 0,
         }
+    }
+
+    /// Advance to the next partition. Returns `false` if no more partitions.
+    fn advance_partition(&mut self) -> bool {
+        match &self.segment.index {
+            SegmentIndex::Monolithic(_) => false,
+            SegmentIndex::Partitioned { top_level } => {
+                self.partition_idx += 1;
+                if self.partition_idx >= top_level.len() {
+                    return false;
+                }
+                if let Some(sub) = self.segment.load_sub_index(&top_level[self.partition_idx]) {
+                    self.current_sub_index = sub;
+                    self.block_within_partition = 0;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+}
+
+impl OwnedSegmentIter {
+    /// Return a monotonically increasing block index (used by `ThrottledSegmentIter`).
+    pub(crate) fn current_block_idx(&self) -> usize {
+        self.global_block_idx
     }
 }
 
@@ -939,11 +1141,13 @@ impl Iterator for OwnedSegmentIter {
             }
 
             if self.block_data.is_none() {
-                if self.block_idx >= self.segment.index.len() {
+                if self.block_within_partition >= self.current_sub_index.len()
+                    && !self.advance_partition()
+                {
                     self.done = true;
                     return None;
                 }
-                let ie = &self.segment.index[self.block_idx];
+                let ie = &self.current_sub_index[self.block_within_partition];
                 match self.segment.read_data_block(ie) {
                     Some(data) => {
                         let de = block_data_end(&data, self.segment.header.format_version);
@@ -963,7 +1167,8 @@ impl Iterator for OwnedSegmentIter {
 
             if self.block_offset >= self.block_data_end {
                 self.block_data = None;
-                self.block_idx += 1;
+                self.block_within_partition += 1;
+                self.global_block_idx += 1;
                 continue;
             }
 
@@ -2111,7 +2316,7 @@ mod tests {
         // Verify output is v4 and readable
         for (p, meta) in &results {
             let out_seg = KVSegment::open(p).unwrap();
-            assert_eq!(out_seg.header.format_version, 6);
+            assert_eq!(out_seg.header.format_version, 7);
             assert_eq!(out_seg.entry_count(), meta.entry_count);
         }
     }
@@ -2135,7 +2340,7 @@ mod tests {
         build_segment_small_blocks(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
-        assert_eq!(seg.header.format_version, 6);
+        assert_eq!(seg.header.format_version, 7);
 
         // Point lookup every entry via binary search
         for i in 0..500u32 {
@@ -2165,7 +2370,7 @@ mod tests {
         build_segment_small_blocks(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
-        assert_eq!(seg.header.format_version, 6);
+        assert_eq!(seg.header.format_version, 7);
 
         let all: Vec<_> = seg.iter_seek(&kv_key("item_")).collect();
         assert_eq!(all.len(), 200);
@@ -2241,7 +2446,7 @@ mod tests {
         builder.build_from_iter(iter, &v4_path).unwrap();
 
         let v4_seg = KVSegment::open(&v4_path).unwrap();
-        assert_eq!(v4_seg.header.format_version, 6);
+        assert_eq!(v4_seg.header.format_version, 7);
 
         // Verify all entries readable
         for i in 0..50u32 {
@@ -2433,9 +2638,9 @@ mod tests {
         build_segment_small_blocks(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
-        assert_eq!(seg.header.format_version, 6);
+        assert_eq!(seg.header.format_version, 7);
         // Must span multiple blocks
-        assert!(seg.index.len() > 1, "expected multi-block segment");
+        assert!(seg.index_entry_count() > 1, "expected multi-block segment");
 
         // Lookup every key from first, middle, and last blocks
         for i in 0..500u32 {
@@ -2618,7 +2823,7 @@ mod tests {
         build_segment_small_blocks(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
-        assert!(seg.index.len() > 1, "expected multi-block segment");
+        assert!(seg.index_entry_count() > 1, "expected multi-block segment");
 
         let all: Vec<_> = seg.iter_seek_all().collect();
         assert_eq!(all.len(), 200, "iterator should yield all 200 entries");
@@ -2770,5 +2975,500 @@ mod tests {
                 "beta value should be >= 1000"
             );
         }
+    }
+
+    // ===== Partitioned index tests (Epic 35) =====
+
+    fn build_segment_tiny_blocks(mt: &Memtable, path: &Path) {
+        let builder = SegmentBuilder {
+            data_block_size: 128,
+            bloom_bits_per_key: 10,
+            compression: crate::segment_builder::CompressionCodec::None,
+            rate_limiter: None,
+        };
+        builder.build_from_iter(mt.iter_all(), path).unwrap();
+    }
+
+    #[test]
+    fn partitioned_index_point_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("part_point.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..1000u32 {
+            let k = kv_key(&format!("pk_{:06}", i));
+            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+        }
+        mt.freeze();
+        build_segment_tiny_blocks(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        assert_eq!(seg.format_version(), 7);
+        assert!(
+            matches!(&seg.index, SegmentIndex::Partitioned { .. }),
+            "expected partitioned index"
+        );
+
+        // Verify every point lookup
+        for i in 0..1000u32 {
+            let k = kv_key(&format!("pk_{:06}", i));
+            let e = seg
+                .point_lookup(&k, u64::MAX)
+                .unwrap_or_else(|| panic!("key pk_{:06} not found", i));
+            assert_eq!(e.value, Value::Int(i as i64));
+            assert_eq!(e.commit_id, i as u64 + 1);
+        }
+
+        // Missing keys return None
+        assert!(seg.point_lookup(&kv_key("pk_999999"), u64::MAX).is_none());
+        assert!(seg.point_lookup(&kv_key("zz_missing"), u64::MAX).is_none());
+    }
+
+    #[test]
+    fn partitioned_index_iter_seek() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("part_seek.sst");
+
+        let mt = Memtable::new(0);
+        // Insert entries with two prefixes to test prefix scan across partitions
+        for i in 0..500u32 {
+            let k = kv_key(&format!("aa_{:06}", i));
+            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+        }
+        for i in 0..500u32 {
+            let k = kv_key(&format!("bb_{:06}", i));
+            mt.put(&k, i as u64 + 1001, Value::Int(i as i64 + 1000), false);
+        }
+        mt.freeze();
+        build_segment_tiny_blocks(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        assert!(matches!(&seg.index, SegmentIndex::Partitioned { .. }));
+
+        // Prefix scan for "aa_" should yield all 500 entries with correct values
+        let aa: Vec<_> = seg.iter_seek(&kv_key("aa_")).collect();
+        assert_eq!(aa.len(), 500, "expected 500 aa_ entries");
+        for (idx, (ik, se)) in aa.iter().enumerate() {
+            assert_eq!(se.value, Value::Int(idx as i64));
+            assert_eq!(se.commit_id, idx as u64 + 1);
+            let tkp = ik.typed_key_prefix();
+            let expected = format!("aa_{:06}", idx);
+            assert!(
+                tkp.windows(expected.len())
+                    .any(|w| w == expected.as_bytes()),
+                "aa entry {} has wrong key",
+                idx
+            );
+        }
+
+        // Verify ordering
+        for i in 0..aa.len() - 1 {
+            assert!(aa[i].0.as_bytes() <= aa[i + 1].0.as_bytes());
+        }
+
+        // Prefix scan for "bb_" should yield all 500 entries with correct values
+        let bb: Vec<_> = seg.iter_seek(&kv_key("bb_")).collect();
+        assert_eq!(bb.len(), 500, "expected 500 bb_ entries");
+        for (idx, (_, se)) in bb.iter().enumerate() {
+            assert_eq!(se.value, Value::Int(idx as i64 + 1000));
+            assert_eq!(se.commit_id, idx as u64 + 1001);
+        }
+    }
+
+    #[test]
+    fn partitioned_index_full_iter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("part_full.sst");
+
+        let mt = Memtable::new(0);
+        let n = 800u32;
+        for i in 0..n {
+            let k = kv_key(&format!("fi_{:06}", i));
+            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+        }
+        mt.freeze();
+        build_segment_tiny_blocks(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        assert!(matches!(&seg.index, SegmentIndex::Partitioned { .. }));
+
+        let all: Vec<_> = seg.iter_seek_all().collect();
+        assert_eq!(all.len(), n as usize);
+
+        // Verify correct ordering AND values for every entry
+        for (idx, (ik, se)) in all.iter().enumerate() {
+            assert_eq!(
+                se.value,
+                Value::Int(idx as i64),
+                "wrong value at idx {}",
+                idx
+            );
+            assert_eq!(se.commit_id, idx as u64 + 1, "wrong commit at idx {}", idx);
+            let tkp = ik.typed_key_prefix();
+            let expected = format!("fi_{:06}", idx);
+            assert!(
+                tkp.windows(expected.len())
+                    .any(|w| w == expected.as_bytes()),
+                "entry {} has wrong key",
+                idx
+            );
+        }
+
+        // Verify ordering
+        for i in 0..all.len() - 1 {
+            assert!(all[i].0.as_bytes() <= all[i + 1].0.as_bytes());
+        }
+    }
+
+    #[test]
+    fn partitioned_small_segment_monolithic() {
+        // A small segment should fall back to monolithic index
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("part_mono.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..10u32 {
+            let k = kv_key(&format!("sm_{:04}", i));
+            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+        }
+        mt.freeze();
+        build_segment_tiny_blocks(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        assert_eq!(seg.format_version(), 7);
+        assert!(
+            matches!(&seg.index, SegmentIndex::Monolithic(_)),
+            "expected monolithic index for small segment"
+        );
+
+        // Point lookups still work
+        for i in 0..10u32 {
+            let k = kv_key(&format!("sm_{:04}", i));
+            let e = seg.point_lookup(&k, u64::MAX).unwrap();
+            assert_eq!(e.value, Value::Int(i as i64));
+        }
+
+        // Full iteration works
+        let all: Vec<_> = seg.iter_seek_all().collect();
+        assert_eq!(all.len(), 10);
+    }
+
+    #[test]
+    fn partitioned_index_owned_iter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("part_owned.sst");
+
+        let mt = Memtable::new(0);
+        let n = 800u32;
+        for i in 0..n {
+            let k = kv_key(&format!("oi_{:06}", i));
+            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+        }
+        mt.freeze();
+        build_segment_tiny_blocks(&mt, &path);
+
+        let seg = Arc::new(KVSegment::open(&path).unwrap());
+        assert!(matches!(&seg.index, SegmentIndex::Partitioned { .. }));
+
+        let iter = OwnedSegmentIter::new(seg);
+        let all: Vec<_> = iter.collect();
+        assert_eq!(all.len(), n as usize);
+
+        // Verify correct ordering AND values
+        for (idx, (_, se)) in all.iter().enumerate() {
+            assert_eq!(
+                se.value,
+                Value::Int(idx as i64),
+                "wrong value at idx {}",
+                idx
+            );
+            assert_eq!(se.commit_id, idx as u64 + 1, "wrong commit at idx {}", idx);
+        }
+        for i in 0..all.len() - 1 {
+            assert!(all[i].0.as_bytes() <= all[i + 1].0.as_bytes());
+        }
+    }
+
+    #[test]
+    fn format_version_7_in_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v7.sst");
+
+        let mt = Memtable::new(0);
+        mt.put(&kv_key("a"), 1, Value::Int(1), false);
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        assert_eq!(seg.format_version(), 7);
+    }
+
+    #[test]
+    fn partitioned_index_mvcc_snapshot() {
+        // Multiple versions of same key across partitioned segments
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("part_mvcc.sst");
+
+        let mt = Memtable::new(0);
+        // Write enough entries to force partitioning, with multiple versions
+        for i in 0..500u32 {
+            let k = kv_key(&format!("mv_{:06}", i));
+            mt.put(&k, 1, Value::Int(i as i64), false); // version 1
+            mt.put(&k, 5, Value::Int(i as i64 + 1000), false); // version 5
+        }
+        mt.freeze();
+        build_segment_tiny_blocks(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        assert!(matches!(&seg.index, SegmentIndex::Partitioned { .. }));
+
+        // Snapshot at commit 1 should see original values
+        for i in 0..500u32 {
+            let k = kv_key(&format!("mv_{:06}", i));
+            let e = seg
+                .point_lookup(&k, 1)
+                .unwrap_or_else(|| panic!("key mv_{:06} not found at snapshot 1", i));
+            assert_eq!(
+                e.value,
+                Value::Int(i as i64),
+                "wrong value at snapshot 1 for key {}",
+                i
+            );
+            assert_eq!(e.commit_id, 1);
+        }
+
+        // Snapshot at commit 5 should see updated values
+        for i in 0..500u32 {
+            let k = kv_key(&format!("mv_{:06}", i));
+            let e = seg
+                .point_lookup(&k, 5)
+                .unwrap_or_else(|| panic!("key mv_{:06} not found at snapshot 5", i));
+            assert_eq!(
+                e.value,
+                Value::Int(i as i64 + 1000),
+                "wrong value at snapshot 5 for key {}",
+                i
+            );
+            assert_eq!(e.commit_id, 5);
+        }
+
+        // Snapshot at commit 0 should find nothing
+        let k = kv_key("mv_000000");
+        assert!(seg.point_lookup(&k, 0).is_none());
+    }
+
+    #[test]
+    fn partitioned_index_tombstones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("part_tomb.sst");
+
+        let mt = Memtable::new(0);
+        // Write enough entries to force partitioning, with some tombstones
+        for i in 0..500u32 {
+            let k = kv_key(&format!("tb_{:06}", i));
+            mt.put(&k, 1, Value::Int(i as i64), false);
+            // Delete even-numbered keys at commit 2
+            if i % 2 == 0 {
+                mt.put(&k, 2, Value::Null, true);
+            }
+        }
+        mt.freeze();
+        build_segment_tiny_blocks(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        assert!(matches!(&seg.index, SegmentIndex::Partitioned { .. }));
+
+        // At snapshot 2: even keys should be tombstones, odd keys should be values
+        for i in 0..500u32 {
+            let k = kv_key(&format!("tb_{:06}", i));
+            let e = seg
+                .point_lookup(&k, u64::MAX)
+                .unwrap_or_else(|| panic!("key tb_{:06} not found", i));
+            if i % 2 == 0 {
+                assert!(e.is_tombstone, "key {} should be tombstone", i);
+                assert_eq!(e.commit_id, 2);
+            } else {
+                assert!(!e.is_tombstone, "key {} should not be tombstone", i);
+                assert_eq!(e.value, Value::Int(i as i64));
+                assert_eq!(e.commit_id, 1);
+            }
+        }
+
+        // At snapshot 1: all keys should be non-tombstone values
+        for i in (0..500u32).step_by(50) {
+            let k = kv_key(&format!("tb_{:06}", i));
+            let e = seg.point_lookup(&k, 1).unwrap();
+            assert!(!e.is_tombstone);
+            assert_eq!(e.value, Value::Int(i as i64));
+        }
+    }
+
+    #[test]
+    fn partitioned_index_boundary_crossing_iter() {
+        // Verify iteration seamlessly crosses partition boundaries by
+        // confirming no entries are dropped at the boundary.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("part_boundary.sst");
+
+        let mt = Memtable::new(0);
+        // Use enough entries to get several partitions
+        let n = 1500u32;
+        for i in 0..n {
+            let k = kv_key(&format!("bd_{:06}", i));
+            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+        }
+        mt.freeze();
+        build_segment_tiny_blocks(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        assert!(matches!(&seg.index, SegmentIndex::Partitioned { .. }));
+
+        // Verify the top-level has multiple partitions
+        let num_partitions = match &seg.index {
+            SegmentIndex::Partitioned { top_level } => top_level.len(),
+            _ => panic!("expected partitioned"),
+        };
+        assert!(
+            num_partitions >= 3,
+            "expected at least 3 partitions, got {}",
+            num_partitions
+        );
+
+        // Full iteration must yield exactly n entries with no gaps
+        let all: Vec<_> = seg.iter_seek_all().collect();
+        assert_eq!(all.len(), n as usize);
+        for (idx, (_, se)) in all.iter().enumerate() {
+            assert_eq!(
+                se.value,
+                Value::Int(idx as i64),
+                "gap or reorder at idx {}",
+                idx
+            );
+        }
+
+        // Compare SegmentIter vs OwnedSegmentIter — must produce identical results
+        let owned_iter = OwnedSegmentIter::new(Arc::new(KVSegment::open(&path).unwrap()));
+        let owned_all: Vec<_> = owned_iter.collect();
+        assert_eq!(all.len(), owned_all.len());
+        for (i, ((ik1, se1), (ik2, se2))) in all.iter().zip(owned_all.iter()).enumerate() {
+            assert_eq!(ik1.as_bytes(), ik2.as_bytes(), "key mismatch at {}", i);
+            assert_eq!(se1.value, se2.value, "value mismatch at {}", i);
+        }
+    }
+
+    #[test]
+    fn partitioned_footer_index_type_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Partitioned segment
+        let path_part = dir.path().join("ft_part.sst");
+        let mt = Memtable::new(0);
+        for i in 0..1000u32 {
+            let k = kv_key(&format!("ft_{:06}", i));
+            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+        }
+        mt.freeze();
+        build_segment_tiny_blocks(&mt, &path_part);
+
+        let seg = KVSegment::open(&path_part).unwrap();
+        assert_eq!(seg.footer.index_type, 1); // INDEX_TYPE_PARTITIONED
+
+        // Monolithic segment
+        let path_mono = dir.path().join("ft_mono.sst");
+        let mt2 = Memtable::new(0);
+        mt2.put(&kv_key("a"), 1, Value::Int(1), false);
+        mt2.freeze();
+        build_segment(&mt2, &path_mono);
+
+        let seg2 = KVSegment::open(&path_mono).unwrap();
+        assert_eq!(seg2.footer.index_type, 0); // INDEX_TYPE_MONOLITHIC
+    }
+
+    #[test]
+    fn partitioned_index_boundary_at_129_blocks() {
+        // 129 data blocks is the minimum for partitioned (128+1 → 2 chunks).
+        // Use a block size that makes each entry fill exactly one block so we
+        // can control the block count precisely.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("part_129.sst");
+
+        // With 64-byte block size + CompressionCodec::None, each entry (~70-80
+        // bytes of InternalKey + value) forces a new block. We need at least
+        // 129 entries → 129 blocks to trigger the 2-chunk threshold.
+        let mt = Memtable::new(0);
+        for i in 0..200u32 {
+            let k = kv_key(&format!("b129_{:06}", i));
+            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+        }
+        mt.freeze();
+
+        let builder = SegmentBuilder {
+            data_block_size: 64, // very small to ensure many blocks
+            bloom_bits_per_key: 10,
+            compression: crate::segment_builder::CompressionCodec::None,
+            rate_limiter: None,
+        };
+        builder.build_from_iter(mt.iter_all(), &path).unwrap();
+
+        let seg = KVSegment::open(&path).unwrap();
+        // With 200 entries at 64B block size, we should definitely exceed 128 blocks
+        assert!(
+            matches!(&seg.index, SegmentIndex::Partitioned { top_level } if top_level.len() >= 2),
+            "expected partitioned index with >=2 partitions"
+        );
+
+        // All point lookups work
+        for i in 0..200u32 {
+            let k = kv_key(&format!("b129_{:06}", i));
+            let e = seg
+                .point_lookup(&k, u64::MAX)
+                .unwrap_or_else(|| panic!("key b129_{:06} not found", i));
+            assert_eq!(e.value, Value::Int(i as i64));
+        }
+
+        // Full iteration yields all entries
+        let all: Vec<_> = seg.iter_seek_all().collect();
+        assert_eq!(all.len(), 200);
+        for (idx, (_, se)) in all.iter().enumerate() {
+            assert_eq!(se.value, Value::Int(idx as i64));
+        }
+    }
+
+    #[test]
+    fn partitioned_index_v3_compat_stays_monolithic() {
+        // v3 segments (created by build_from_iter_v3) should always open as
+        // monolithic since v3 builder always writes INDEX_TYPE_MONOLITHIC.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v3_compat.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..50u32 {
+            let k = kv_key(&format!("v3c_{:04}", i));
+            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+        }
+        mt.freeze();
+
+        let builder = SegmentBuilder {
+            data_block_size: 128,
+            bloom_bits_per_key: 10,
+            compression: crate::segment_builder::CompressionCodec::None,
+            rate_limiter: None,
+        };
+        builder.build_from_iter_v3(mt.iter_all(), &path).unwrap();
+
+        let seg = KVSegment::open(&path).unwrap();
+        assert_eq!(seg.header.format_version, 3);
+        assert!(matches!(&seg.index, SegmentIndex::Monolithic(_)));
+
+        // Point lookups work on v3 segment
+        for i in 0..50u32 {
+            let k = kv_key(&format!("v3c_{:04}", i));
+            let e = seg.point_lookup(&k, u64::MAX).unwrap();
+            assert_eq!(e.value, Value::Int(i as i64));
+        }
+
+        // Iteration works on v3 segment
+        let all: Vec<_> = seg.iter_seek_all().collect();
+        assert_eq!(all.len(), 50);
     }
 }
