@@ -113,6 +113,8 @@ pub struct SegmentBuilder {
     pub bloom_bits_per_key: usize,
     /// Compression codec for data blocks.
     pub compression: CompressionCodec,
+    /// Optional rate limiter for throttling data block writes (compaction).
+    pub rate_limiter: Option<std::sync::Arc<crate::rate_limiter::RateLimiter>>,
 }
 
 impl Default for SegmentBuilder {
@@ -121,6 +123,7 @@ impl Default for SegmentBuilder {
             data_block_size: 64 * 1024, // 64 KiB
             bloom_bits_per_key: 10,
             compression: CompressionCodec::default(),
+            rate_limiter: None,
         }
     }
 }
@@ -135,6 +138,15 @@ impl SegmentBuilder {
     /// Set the compression codec for data blocks.
     pub fn with_compression(mut self, codec: CompressionCodec) -> Self {
         self.compression = codec;
+        self
+    }
+
+    /// Set a rate limiter for throttling data block writes during compaction.
+    pub fn with_rate_limiter(
+        mut self,
+        limiter: std::sync::Arc<crate::rate_limiter::RateLimiter>,
+    ) -> Self {
+        self.rate_limiter = Some(limiter);
         self
     }
 
@@ -264,6 +276,9 @@ impl SegmentBuilder {
                     self.compression,
                 )?;
                 let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
+                if let Some(ref limiter) = self.rate_limiter {
+                    limiter.acquire(framed_size as u64);
+                }
                 pending_index = Some((block_last, file_offset, on_disk_data_len));
                 file_offset += framed_size as u64;
                 block_buf.clear();
@@ -306,6 +321,9 @@ impl SegmentBuilder {
                 self.compression,
             )?;
             let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
+            if let Some(ref limiter) = self.rate_limiter {
+                limiter.acquire(framed_size as u64);
+            }
             let shortened = shorten_final_index_key(&block_last);
             index_entries.push((shortened, file_offset, on_disk_data_len));
             file_offset += framed_size as u64;
@@ -1728,6 +1746,7 @@ mod tests {
             data_block_size: 4096, // small blocks for test
             bloom_bits_per_key: 10,
             compression: CompressionCodec::default(),
+            rate_limiter: None,
         };
         let meta = builder.build_from_iter(mt.iter_all(), &path).unwrap();
         assert_eq!(meta.entry_count, 2000);
@@ -1881,6 +1900,7 @@ mod tests {
             data_block_size: 4096,
             bloom_bits_per_key: 10,
             compression: CompressionCodec::default(),
+            rate_limiter: None,
         };
         let meta = builder.build_from_iter(mt.iter_all(), &path).unwrap();
         assert_eq!(meta.entry_count, 500);
@@ -2535,6 +2555,7 @@ mod tests {
             data_block_size: 512,
             bloom_bits_per_key: 10,
             compression: CompressionCodec::default(),
+            rate_limiter: None,
         };
         builder.build_from_iter(mt.iter_all(), &path).unwrap();
 
@@ -2568,6 +2589,7 @@ mod tests {
             data_block_size: 512,
             bloom_bits_per_key: 10,
             compression: CompressionCodec::default(),
+            rate_limiter: None,
         };
         builder.build_from_iter(mt.iter_all(), &path).unwrap();
 
@@ -2624,6 +2646,7 @@ mod tests {
             data_block_size: 512,
             bloom_bits_per_key: 10,
             compression: CompressionCodec::default(),
+            rate_limiter: None,
         };
         builder.build_from_iter(mt.iter_all(), &path).unwrap();
 
@@ -2674,6 +2697,7 @@ mod tests {
             data_block_size: 512,
             bloom_bits_per_key: 10,
             compression: CompressionCodec::default(),
+            rate_limiter: None,
         };
 
         let path_v3 = dir.path().join("full_keys.sst");
@@ -2724,6 +2748,7 @@ mod tests {
             data_block_size: 512,
             bloom_bits_per_key: 10,
             compression: CompressionCodec::None,
+            rate_limiter: None,
         };
         builder_none
             .build_from_iter(mt.iter_all(), &path_none)
@@ -2733,6 +2758,7 @@ mod tests {
             data_block_size: 512,
             bloom_bits_per_key: 10,
             compression: CompressionCodec::Zstd(3),
+            rate_limiter: None,
         };
         builder_zstd
             .build_from_iter(mt.iter_all(), &path_zstd)
@@ -2791,6 +2817,7 @@ mod tests {
                 data_block_size: 512,
                 bloom_bits_per_key: 10,
                 compression: CompressionCodec::Zstd(zstd_level),
+                rate_limiter: None,
             };
             builder.build_from_iter(mt.iter_all(), &path).unwrap();
 
@@ -2835,6 +2862,7 @@ mod tests {
                 data_block_size: 512,
                 bloom_bits_per_key: 10,
                 compression: CompressionCodec::Zstd(zstd_level),
+                rate_limiter: None,
             };
             builder.build_from_iter(mt.iter_all(), &path).unwrap();
             sizes.push((zstd_level, std::fs::metadata(&path).unwrap().len()));
@@ -2922,6 +2950,15 @@ impl SplittingSegmentBuilder {
     /// Set the compression codec for output segments.
     pub fn with_compression(mut self, codec: CompressionCodec) -> Self {
         self.inner.compression = codec;
+        self
+    }
+
+    /// Set a rate limiter for throttling data block writes during compaction.
+    pub fn with_rate_limiter(
+        mut self,
+        limiter: std::sync::Arc<crate::rate_limiter::RateLimiter>,
+    ) -> Self {
+        self.inner.rate_limiter = Some(limiter);
         self
     }
 

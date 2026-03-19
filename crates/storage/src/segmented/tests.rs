@@ -3889,3 +3889,188 @@ fn compression_for_level_returns_expected_codecs() {
     assert_eq!(compression_for_level(6), CompressionCodec::Zstd(6));
     assert_eq!(compression_for_level(7), CompressionCodec::Zstd(6));
 }
+
+// ===== Rate limiter integration tests =====
+
+/// Helper: write many keys to produce multi-block segments (each ~64KiB block).
+/// Writes `count` keys with 1KiB values so ~64 keys per block.
+fn seed_many(store: &SegmentedStore, prefix: &str, count: usize, version: u64) {
+    let big_value = Value::Bytes(vec![0xAB; 1024]);
+    for i in 0..count {
+        seed(
+            store,
+            kv_key(&format!("{}{:06}", prefix, i)),
+            big_value.clone(),
+            version,
+        );
+    }
+}
+
+#[test]
+fn compaction_with_rate_limiter_multi_block() {
+    // Write enough data to span multiple data blocks (64KiB each),
+    // so the rate limiter is actually invoked for block transitions on
+    // both the read and write paths.
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let b = branch();
+
+    store.set_compaction_rate_limit(50 * 1024 * 1024); // 50 MB/s (fast enough to not stall)
+
+    // ~200 keys × 1KiB ≈ 200KiB → ~3 data blocks per segment
+    seed_many(&store, "a", 200, 1);
+    store.rotate_memtable(&b);
+    store.flush_oldest_frozen(&b).unwrap();
+
+    seed_many(&store, "b", 200, 2);
+    store.rotate_memtable(&b);
+    store.flush_oldest_frozen(&b).unwrap();
+
+    assert_eq!(store.branch_segment_count(&b), 2);
+
+    let result = store.compact_branch(&b, 0).unwrap().unwrap();
+    assert_eq!(result.segments_merged, 2);
+    assert_eq!(result.output_entries, 400);
+    assert_eq!(result.entries_pruned, 0);
+    assert_eq!(store.branch_segment_count(&b), 1);
+
+    // Verify data integrity: spot-check first, last, and middle keys
+    assert!(store
+        .get_versioned(&kv_key("a000000"), u64::MAX)
+        .unwrap()
+        .is_some());
+    assert!(store
+        .get_versioned(&kv_key("a000199"), u64::MAX)
+        .unwrap()
+        .is_some());
+    assert!(store
+        .get_versioned(&kv_key("b000100"), u64::MAX)
+        .unwrap()
+        .is_some());
+    assert!(store
+        .get_versioned(&kv_key("b000199"), u64::MAX)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn rate_limiter_disabled_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let b = branch();
+
+    // No rate limiter set — compaction should work normally
+    seed_many(&store, "x", 100, 1);
+    store.rotate_memtable(&b);
+    store.flush_oldest_frozen(&b).unwrap();
+
+    seed_many(&store, "y", 100, 2);
+    store.rotate_memtable(&b);
+    store.flush_oldest_frozen(&b).unwrap();
+
+    let result = store.compact_branch(&b, 0).unwrap().unwrap();
+    assert_eq!(result.segments_merged, 2);
+    assert_eq!(result.output_entries, 200);
+
+    assert!(store
+        .get_versioned(&kv_key("x000000"), u64::MAX)
+        .unwrap()
+        .is_some());
+    assert!(store
+        .get_versioned(&kv_key("y000099"), u64::MAX)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn set_compaction_rate_limit_zero_disables() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let b = branch();
+
+    // Enable then disable
+    store.set_compaction_rate_limit(1_000_000);
+    store.set_compaction_rate_limit(0);
+
+    seed_many(&store, "z", 100, 1);
+    store.rotate_memtable(&b);
+    store.flush_oldest_frozen(&b).unwrap();
+
+    seed_many(&store, "w", 100, 2);
+    store.rotate_memtable(&b);
+    store.flush_oldest_frozen(&b).unwrap();
+
+    // Compaction with no limiter should complete quickly and correctly
+    let result = store.compact_branch(&b, 0).unwrap().unwrap();
+    assert_eq!(result.segments_merged, 2);
+    assert_eq!(result.output_entries, 200);
+}
+
+#[test]
+fn rate_limiter_l0_to_l1_compaction() {
+    // Verify the rate limiter is threaded through the L0→L1 path.
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let b = branch();
+
+    store.set_compaction_rate_limit(50 * 1024 * 1024);
+
+    for i in 0..4 {
+        seed_many(&store, &format!("l0seg{}", i), 50, (i + 1) as u64);
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+    }
+
+    let result = store.compact_l0_to_l1(&b, 0).unwrap().unwrap();
+    assert_eq!(result.segments_merged, 4);
+    assert_eq!(result.output_entries, 200);
+
+    // Spot-check data after L0→L1 compaction
+    assert!(store
+        .get_versioned(&kv_key("l0seg0000000"), u64::MAX)
+        .unwrap()
+        .is_some());
+    assert!(store
+        .get_versioned(&kv_key("l0seg3000049"), u64::MAX)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn rate_limited_compaction_preserves_prune_semantics() {
+    // Verify that version pruning still works correctly with the limiter active.
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let b = branch();
+
+    store.set_compaction_rate_limit(50 * 1024 * 1024);
+
+    // Write two versions of the same keys (v1 and v5)
+    seed_many(&store, "k", 100, 1);
+    store.rotate_memtable(&b);
+    store.flush_oldest_frozen(&b).unwrap();
+
+    seed_many(&store, "k", 100, 5);
+    store.rotate_memtable(&b);
+    store.flush_oldest_frozen(&b).unwrap();
+
+    // prune_floor=6: both v1 and v5 are below floor.
+    // Only the newest below-floor version (v5) survives per key; v1 is pruned.
+    let result = store.compact_branch(&b, 6).unwrap().unwrap();
+    assert_eq!(result.segments_merged, 2);
+    assert_eq!(result.output_entries, 100); // only v5 per key survives
+    assert_eq!(result.entries_pruned, 100);
+
+    // Version 5 still readable
+    let val = store
+        .get_versioned(&kv_key("k000050"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(val.version.as_u64(), 5);
+
+    // Version 1 was pruned
+    assert!(store
+        .get_versioned(&kv_key("k000050"), 1)
+        .unwrap()
+        .is_none());
+}
