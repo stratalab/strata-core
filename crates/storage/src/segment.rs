@@ -922,6 +922,13 @@ impl OwnedSegmentIter {
     }
 }
 
+impl OwnedSegmentIter {
+    /// Return the current data block index (used by `ThrottledSegmentIter`).
+    pub(crate) fn current_block_idx(&self) -> usize {
+        self.block_idx
+    }
+}
+
 impl Iterator for OwnedSegmentIter {
     type Item = (InternalKey, SegmentEntry);
 
@@ -995,6 +1002,47 @@ impl Iterator for OwnedSegmentIter {
 }
 
 // ---------------------------------------------------------------------------
+// ThrottledSegmentIter — rate-limited wrapper for compaction reads
+// ---------------------------------------------------------------------------
+
+/// Wraps an [`OwnedSegmentIter`] and charges a [`RateLimiter`] each time a
+/// new data block is loaded. Used during compaction to throttle read I/O.
+pub(crate) struct ThrottledSegmentIter {
+    inner: OwnedSegmentIter,
+    limiter: std::sync::Arc<crate::rate_limiter::RateLimiter>,
+    last_block_idx: usize,
+}
+
+impl ThrottledSegmentIter {
+    pub(crate) fn new(
+        inner: OwnedSegmentIter,
+        limiter: std::sync::Arc<crate::rate_limiter::RateLimiter>,
+    ) -> Self {
+        Self {
+            // Use usize::MAX so the first block load (block_idx == 0) is charged.
+            last_block_idx: usize::MAX,
+            inner,
+            limiter,
+        }
+    }
+}
+
+impl Iterator for ThrottledSegmentIter {
+    type Item = (InternalKey, SegmentEntry);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let result = self.inner.next()?;
+        let cur = self.inner.current_block_idx();
+        if cur != self.last_block_idx {
+            // Charge ~64 KiB per block transition (matches default data_block_size).
+            self.limiter.acquire(64 * 1024);
+            self.last_block_idx = cur;
+        }
+        Some(result)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1025,6 +1073,7 @@ mod tests {
             data_block_size: 256,
             bloom_bits_per_key: 10,
             compression: crate::segment_builder::CompressionCodec::default(),
+            rate_limiter: None,
         };
         builder.build_from_iter(mt.iter_all(), path).unwrap();
     }
@@ -1492,6 +1541,7 @@ mod tests {
             data_block_size: 4096,
             bloom_bits_per_key: 10,
             compression: crate::segment_builder::CompressionCodec::default(),
+            rate_limiter: None,
         };
         builder.build_from_iter(mt.iter_all(), &path).unwrap();
 
@@ -1642,6 +1692,7 @@ mod tests {
             data_block_size: 4096,
             bloom_bits_per_key: 10,
             compression: crate::segment_builder::CompressionCodec::default(),
+            rate_limiter: None,
         };
         let meta = builder.build_from_iter(mt.iter_all(), &path).unwrap();
         assert_eq!(meta.entry_count, 200);

@@ -251,6 +251,8 @@ pub struct SegmentedStore {
     total_frozen_count: AtomicUsize,
     /// Maximum frozen memtables per branch before rotation is skipped (0 = unlimited).
     max_immutable_memtables: AtomicUsize,
+    /// Optional rate limiter for compaction I/O (read + write).
+    compaction_rate_limiter: arc_swap::ArcSwapOption<crate::rate_limiter::RateLimiter>,
 }
 
 impl SegmentedStore {
@@ -271,6 +273,7 @@ impl SegmentedStore {
             max_versions_per_key: AtomicUsize::new(0),
             total_frozen_count: AtomicUsize::new(0),
             max_immutable_memtables: AtomicUsize::new(0),
+            compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
         }
     }
 
@@ -292,6 +295,7 @@ impl SegmentedStore {
             max_versions_per_key: AtomicUsize::new(0),
             total_frozen_count: AtomicUsize::new(0),
             max_immutable_memtables: AtomicUsize::new(0),
+            compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
         }
     }
 
@@ -313,6 +317,7 @@ impl SegmentedStore {
             max_versions_per_key: AtomicUsize::new(0),
             total_frozen_count: AtomicUsize::new(0),
             max_immutable_memtables: AtomicUsize::new(0),
+            compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
         }
     }
 
@@ -340,6 +345,21 @@ impl SegmentedStore {
     /// Set version (used during recovery).
     pub fn set_version(&self, version: u64) {
         self.version.store(version, Ordering::Release);
+    }
+
+    /// Set (or clear) the compaction I/O rate limit.
+    ///
+    /// When `bytes_per_sec > 0`, compaction reads and writes are throttled to
+    /// at most that rate. When `bytes_per_sec == 0`, the rate limiter is
+    /// removed and compaction runs at full speed (the default).
+    pub fn set_compaction_rate_limit(&self, bytes_per_sec: u64) {
+        if bytes_per_sec == 0 {
+            self.compaction_rate_limiter.store(None);
+        } else {
+            self.compaction_rate_limiter.store(Some(std::sync::Arc::new(
+                crate::rate_limiter::RateLimiter::new(bytes_per_sec),
+            )));
+        }
     }
 
     /// Iterate over all branch IDs that have data.

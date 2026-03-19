@@ -195,15 +195,19 @@ impl SegmentedStore {
         let seg_path = branch_dir.join(format!("{}.sst", seg_id));
 
         // Build streaming source iterators from each segment.
-        let sources = streaming_sources(&old_segments);
+        let limiter = self.compaction_rate_limiter.load_full();
+        let sources = streaming_sources(&old_segments, &limiter);
 
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
         let compaction_iter =
             CompactionIterator::new(merge, prune_floor).with_max_versions(max_versions);
 
-        let builder = SegmentBuilder::default()
+        let mut builder = SegmentBuilder::default()
             .with_compression(crate::segment_builder::CompressionCodec::None);
+        if let Some(ref l) = limiter {
+            builder = builder.with_rate_limiter(Arc::clone(l));
+        }
         let meta = builder.build_from_iter(compaction_iter, &seg_path)?;
 
         // Open the newly written segment.
@@ -328,15 +332,19 @@ impl SegmentedStore {
         std::fs::create_dir_all(&branch_dir)?;
         let seg_path = branch_dir.join(format!("{}.sst", seg_id));
 
-        let sources = streaming_sources(&selected_segments);
+        let limiter = self.compaction_rate_limiter.load_full();
+        let sources = streaming_sources(&selected_segments, &limiter);
 
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
         let compaction_iter =
             CompactionIterator::new(merge, prune_floor).with_max_versions(max_versions);
 
-        let builder = SegmentBuilder::default()
+        let mut builder = SegmentBuilder::default()
             .with_compression(crate::segment_builder::CompressionCodec::None);
+        if let Some(ref l) = limiter {
+            builder = builder.with_rate_limiter(Arc::clone(l));
+        }
         let meta = builder.build_from_iter(compaction_iter, &seg_path)?;
 
         let new_segment = KVSegment::open(&seg_path)?;
@@ -494,7 +502,8 @@ impl SegmentedStore {
         all_inputs.extend(l0_segs.iter().cloned());
         all_inputs.extend(overlapping_l1.iter().cloned());
 
-        let sources = streaming_sources(&all_inputs);
+        let limiter = self.compaction_rate_limiter.load_full();
+        let sources = streaming_sources(&all_inputs, &limiter);
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
         let compaction_iter =
@@ -508,9 +517,12 @@ impl SegmentedStore {
         let next_id = &self.next_segment_id;
         let bloom_bits = super::bloom_bits_for_level(1, 10);
         let compression = super::compression_for_level(1);
-        let splitting_builder = crate::segment_builder::SplittingSegmentBuilder::default()
+        let mut splitting_builder = crate::segment_builder::SplittingSegmentBuilder::default()
             .with_bloom_bits(bloom_bits)
             .with_compression(compression);
+        if let Some(ref l) = limiter {
+            splitting_builder = splitting_builder.with_rate_limiter(Arc::clone(l));
+        }
         let outputs = splitting_builder.build_split(compaction_iter, |_split_idx| {
             let id = next_id.fetch_add(1, Ordering::Relaxed);
             branch_dir.join(format!("{}.sst", id))
@@ -722,7 +734,8 @@ impl SegmentedStore {
         all_inputs.extend(input_segs.iter().cloned());
         all_inputs.extend(overlap_segs.iter().cloned());
 
-        let sources = streaming_sources(&all_inputs);
+        let limiter = self.compaction_rate_limiter.load_full();
+        let sources = streaming_sources(&all_inputs, &limiter);
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
         let compaction_iter =
@@ -735,9 +748,12 @@ impl SegmentedStore {
         let next_id = &self.next_segment_id;
         let bloom_bits = super::bloom_bits_for_level(level + 1, 10);
         let compression = super::compression_for_level(level + 1);
-        let splitting_builder = crate::segment_builder::SplittingSegmentBuilder::default()
+        let mut splitting_builder = crate::segment_builder::SplittingSegmentBuilder::default()
             .with_bloom_bits(bloom_bits)
             .with_compression(compression);
+        if let Some(ref l) = limiter {
+            splitting_builder = splitting_builder.with_rate_limiter(Arc::clone(l));
+        }
 
         // Build grandparent-aware split predicate.
         //
@@ -845,13 +861,21 @@ impl SegmentedStore {
 
 fn streaming_sources(
     segments: &[Arc<KVSegment>],
+    rate_limiter: &Option<Arc<crate::rate_limiter::RateLimiter>>,
 ) -> Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> {
     segments
         .iter()
         .map(|seg| {
-            let iter = crate::segment::OwnedSegmentIter::new(Arc::clone(seg));
-            Box::new(iter.map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se))))
-                as Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>
+            let owned = crate::segment::OwnedSegmentIter::new(Arc::clone(seg));
+            if let Some(ref limiter) = rate_limiter {
+                let throttled =
+                    crate::segment::ThrottledSegmentIter::new(owned, Arc::clone(limiter));
+                Box::new(throttled.map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se))))
+                    as Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>
+            } else {
+                Box::new(owned.map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se))))
+                    as Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>
+            }
         })
         .collect()
 }
