@@ -502,18 +502,33 @@ impl KVSegment {
         let data = &**block_data;
         let fv = self.header.format_version;
 
+        // Strip hash index if present (v6+)
+        let (block, hash_index) = strip_hash_index(data, fv);
+
         // Determine scan bounds based on format version
         let (scan_start, data_end) = if fv >= 3 {
-            if let Some((de, num_restarts)) = parse_restart_trailer(data) {
-                // Binary search restart points for the interval containing typed_key
-                let start = binary_search_restarts(data, de, num_restarts, typed_key, fv);
-                (start, de)
+            if let Some((de, num_restarts)) = parse_restart_trailer(block) {
+                let start = if let Some(ref hi) = hash_index {
+                    // O(1) hash lookup for the restart interval
+                    let h = xxhash_rust::xxh3::xxh3_64(typed_key) as usize;
+                    let bucket = h % hi.num_buckets;
+                    let interval = hi.buckets[bucket];
+                    if interval != 0xFF && (interval as usize) < num_restarts {
+                        restart_offset_at(block, de, interval as usize) as usize
+                    } else {
+                        // Empty bucket or out of range: fall back to binary search
+                        binary_search_restarts(block, de, num_restarts, typed_key, fv)
+                    }
+                } else {
+                    binary_search_restarts(block, de, num_restarts, typed_key, fv)
+                };
+                (start.min(de), de)
             } else {
                 // Malformed trailer — fall back to full linear scan
-                (0, data.len())
+                (0, block.len())
             }
         } else {
-            (0, data.len())
+            (0, block.len())
         };
 
         if fv >= 4 {
@@ -719,10 +734,46 @@ fn binary_search_restarts(
     start.min(data_end)
 }
 
-/// Compute `data_end` for a block, handling both v2 (no trailer) and v3 (with trailer).
+/// Hash index parsed from the end of a data block (v6+).
+struct HashIndex<'a> {
+    buckets: &'a [u8],
+    num_buckets: usize,
+}
+
+/// Strip hash index from the end of block data if present.
+///
+/// Returns the data without hash index and the hash index (if any).
+/// The hash index sentinel is `0x01` as the last byte of the decompressed block.
+fn strip_hash_index(data: &[u8], format_version: u16) -> (&[u8], Option<HashIndex<'_>>) {
+    // Hash index only in v6+, minimum size: 1 bucket + 2 (num_buckets) + 1 (sentinel) = 4
+    // Plus at least 4 bytes for the restart trailer before it.
+    if format_version < 6 || data.len() < 8 || data[data.len() - 1] != 0x01 {
+        return (data, None);
+    }
+    let num_buckets =
+        u16::from_le_bytes(data[data.len() - 3..data.len() - 1].try_into().unwrap()) as usize;
+    if num_buckets == 0 {
+        return (data, None);
+    }
+    let hash_size = num_buckets + 2 + 1; // buckets + u16 + sentinel
+    if hash_size + 4 > data.len() {
+        // need at least 4 bytes for restart trailer
+        return (data, None);
+    }
+    let hash_start = data.len() - hash_size;
+    let hi = HashIndex {
+        buckets: &data[hash_start..hash_start + num_buckets],
+        num_buckets,
+    };
+    (&data[..hash_start], Some(hi))
+}
+
+/// Compute `data_end` for a block, handling both v2 (no trailer) and v3+ (with trailer).
+/// For v6+, also strips the hash index before parsing the restart trailer.
 fn block_data_end(data: &[u8], format_version: u16) -> usize {
     if format_version >= 3 {
-        if let Some((de, _)) = parse_restart_trailer(data) {
+        let (block, _) = strip_hash_index(data, format_version);
+        if let Some((de, _)) = parse_restart_trailer(block) {
             return de;
         }
     }
@@ -2006,7 +2057,7 @@ mod tests {
         // Verify output is v4 and readable
         for (p, meta) in &results {
             let out_seg = KVSegment::open(p).unwrap();
-            assert_eq!(out_seg.header.format_version, 5);
+            assert_eq!(out_seg.header.format_version, 6);
             assert_eq!(out_seg.entry_count(), meta.entry_count);
         }
     }
@@ -2030,7 +2081,7 @@ mod tests {
         build_segment_small_blocks(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
-        assert_eq!(seg.header.format_version, 5);
+        assert_eq!(seg.header.format_version, 6);
 
         // Point lookup every entry via binary search
         for i in 0..500u32 {
@@ -2060,7 +2111,7 @@ mod tests {
         build_segment_small_blocks(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
-        assert_eq!(seg.header.format_version, 5);
+        assert_eq!(seg.header.format_version, 6);
 
         let all: Vec<_> = seg.iter_seek(&kv_key("item_")).collect();
         assert_eq!(all.len(), 200);
@@ -2136,7 +2187,7 @@ mod tests {
         builder.build_from_iter(iter, &v4_path).unwrap();
 
         let v4_seg = KVSegment::open(&v4_path).unwrap();
-        assert_eq!(v4_seg.header.format_version, 5);
+        assert_eq!(v4_seg.header.format_version, 6);
 
         // Verify all entries readable
         for i in 0..50u32 {
@@ -2308,5 +2359,362 @@ mod tests {
         // Empty segment: bloom check returns true (no filter info)
         assert!(seg.bloom.index.is_empty());
         assert!(seg.bloom_maybe_contains(&kv_key("anything")));
+    }
+
+    // ===== Hash index (v6) tests =====
+
+    #[test]
+    fn hash_index_roundtrip_multi_block() {
+        // Multi-block segment: 500 keys with small blocks forces many blocks,
+        // each with its own hash index. Verifies every key is found.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hash_rt.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..500u32 {
+            let k = kv_key(&format!("hk_{:06}", i));
+            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+        }
+        mt.freeze();
+        build_segment_small_blocks(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        assert_eq!(seg.header.format_version, 6);
+        // Must span multiple blocks
+        assert!(seg.index.len() > 1, "expected multi-block segment");
+
+        // Lookup every key from first, middle, and last blocks
+        for i in 0..500u32 {
+            let k = kv_key(&format!("hk_{:06}", i));
+            let e = seg
+                .point_lookup(&k, u64::MAX)
+                .unwrap_or_else(|| panic!("key hk_{:06} not found", i));
+            assert_eq!(e.value, Value::Int(i as i64));
+            assert_eq!(e.commit_id, i as u64 + 1);
+        }
+    }
+
+    #[test]
+    fn hash_index_missing_key_in_populated_block() {
+        // Build a segment with many keys. Look up keys that don't exist but
+        // whose hash may collide with existing bucket entries.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hash_miss.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..100u32 {
+            let k = kv_key(&format!("exist_{:04}", i));
+            mt.put(&k, 1, Value::Int(i as i64), false);
+        }
+        mt.freeze();
+        build_segment_small_blocks(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+
+        // Keys that don't exist — various positions relative to existing keys
+        assert!(seg.point_lookup(&kv_key("aaa"), u64::MAX).is_none()); // before all
+        assert!(seg.point_lookup(&kv_key("exist_0050x"), u64::MAX).is_none()); // between
+        assert!(seg.point_lookup(&kv_key("zzz"), u64::MAX).is_none()); // after all
+                                                                       // Keys with similar prefixes to stress hash collisions
+        for i in 0..50u32 {
+            let k = kv_key(&format!("exist_{:04}_GHOST", i));
+            assert!(
+                seg.point_lookup(&k, u64::MAX).is_none(),
+                "ghost key exist_{:04}_GHOST should not exist",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn hash_index_collision_fallback() {
+        // With many keys in small blocks, hash collisions are inevitable.
+        // Verify: (a) all present keys found, (b) absent keys not found.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hash_coll.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..500u32 {
+            let k = kv_key(&format!("col_{:06}", i));
+            mt.put(&k, 1, Value::Int(i as i64), false);
+        }
+        mt.freeze();
+        build_segment_small_blocks(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+
+        // (a) All present keys must be found with correct values
+        for i in 0..500u32 {
+            let k = kv_key(&format!("col_{:06}", i));
+            let e = seg
+                .point_lookup(&k, u64::MAX)
+                .unwrap_or_else(|| panic!("key col_{:06} not found", i));
+            assert_eq!(e.value, Value::Int(i as i64));
+        }
+
+        // (b) Absent keys in the same key-space must not be found
+        for i in 500..600u32 {
+            let k = kv_key(&format!("col_{:06}", i));
+            assert!(
+                seg.point_lookup(&k, u64::MAX).is_none(),
+                "absent key col_{:06} should not be found",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn hash_index_space_overhead() {
+        // Verify hash index adds roughly 4-6% overhead per block.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hash_size.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..200u32 {
+            let k = kv_key(&format!("sz_{:06}", i));
+            mt.put(&k, 1, Value::Int(i as i64), false);
+        }
+        mt.freeze();
+
+        // Build v6 (with hash index)
+        let builder = SegmentBuilder::default();
+        let v6_meta = builder.build_from_iter(mt.iter_all(), &path).unwrap();
+
+        // Build v3 (without hash index) for comparison
+        let v3_path = dir.path().join("v3_size.sst");
+        let v3_meta = builder.build_from_iter_v3(mt.iter_all(), &v3_path).unwrap();
+
+        // Hash index overhead should be under 10%
+        let overhead = v6_meta.file_size as f64 / v3_meta.file_size as f64;
+        assert!(
+            overhead < 1.10,
+            "hash index overhead too large: v6={}, v3={}, ratio={:.3}",
+            v6_meta.file_size,
+            v3_meta.file_size,
+            overhead,
+        );
+    }
+
+    #[test]
+    fn hash_index_mvcc_versions() {
+        // Many versions of the same key spanning multiple restart intervals.
+        // All versions map to the same hash bucket, so the hash index must
+        // point to restart interval 0 and forward scan must reach all versions.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hash_mvcc.sst");
+
+        let mt = Memtable::new(0);
+        let k = kv_key("versioned");
+        // 50 versions → spans restart intervals 0..3 (at 16 entries per restart)
+        for commit in 1..=50u64 {
+            mt.put(&k, commit, Value::Int(commit as i64 * 10), false);
+        }
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+
+        // Verify specific snapshot points
+        let e = seg.point_lookup(&k, 1).unwrap();
+        assert_eq!(e.value, Value::Int(10));
+        assert_eq!(e.commit_id, 1);
+
+        let e = seg.point_lookup(&k, 25).unwrap();
+        assert_eq!(e.value, Value::Int(250));
+        assert_eq!(e.commit_id, 25);
+
+        let e = seg.point_lookup(&k, u64::MAX).unwrap();
+        assert_eq!(e.value, Value::Int(500));
+        assert_eq!(e.commit_id, 50);
+
+        // snapshot_commit=0 → no version visible
+        assert!(seg.point_lookup(&k, 0).is_none());
+    }
+
+    #[test]
+    fn hash_index_single_entry_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hash_single.sst");
+
+        let mt = Memtable::new(0);
+        mt.put(&kv_key("only"), 1, Value::Int(42), false);
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        let e = seg.point_lookup(&kv_key("only"), u64::MAX).unwrap();
+        assert_eq!(e.value, Value::Int(42));
+        // Absent key in single-entry segment
+        assert!(seg.point_lookup(&kv_key("nope"), u64::MAX).is_none());
+    }
+
+    #[test]
+    fn hash_index_iter_correct_data_end() {
+        // Iterator must correctly strip hash index and yield all entries
+        // with correct keys and values across multiple blocks.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hash_iter.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..200u32 {
+            let k = kv_key(&format!("it_{:04}", i));
+            mt.put(&k, 1, Value::Int(i as i64), false);
+        }
+        mt.freeze();
+        build_segment_small_blocks(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        assert!(seg.index.len() > 1, "expected multi-block segment");
+
+        let all: Vec<_> = seg.iter_seek_all().collect();
+        assert_eq!(all.len(), 200, "iterator should yield all 200 entries");
+
+        // Verify ordering AND values
+        for (idx, (ik, se)) in all.iter().enumerate() {
+            let expected_key = format!("it_{:04}", idx);
+            // Verify the typed_key_prefix contains the expected user key
+            let tkp = ik.typed_key_prefix();
+            assert!(
+                tkp.windows(expected_key.len())
+                    .any(|w| w == expected_key.as_bytes()),
+                "entry {} has wrong key",
+                idx
+            );
+            assert_eq!(
+                se.value,
+                Value::Int(idx as i64),
+                "entry {} has wrong value",
+                idx
+            );
+        }
+
+        // Verify strict ordering
+        for i in 1..all.len() {
+            assert!(all[i - 1].0 < all[i].0, "entries must be in order at {}", i);
+        }
+    }
+
+    #[test]
+    fn hash_index_tombstone() {
+        // Verify tombstones work correctly through hash-indexed lookup.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hash_tomb.sst");
+
+        let mt = Memtable::new(0);
+        mt.put(&kv_key("alive"), 1, Value::Int(1), false);
+        mt.put(&kv_key("dead"), 1, Value::Int(10), false);
+        mt.put(&kv_key("dead"), 2, Value::Null, true); // tombstone
+        mt.put(&kv_key("revived"), 1, Value::Int(20), false);
+        mt.put(&kv_key("revived"), 2, Value::Null, true);
+        mt.put(&kv_key("revived"), 3, Value::Int(30), false); // re-put after delete
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+
+        let e = seg.point_lookup(&kv_key("alive"), u64::MAX).unwrap();
+        assert_eq!(e.value, Value::Int(1));
+        assert!(!e.is_tombstone);
+
+        let e = seg.point_lookup(&kv_key("dead"), u64::MAX).unwrap();
+        assert!(e.is_tombstone);
+        assert_eq!(e.commit_id, 2);
+
+        // "dead" at snapshot 1 → see the value
+        let e = seg.point_lookup(&kv_key("dead"), 1).unwrap();
+        assert_eq!(e.value, Value::Int(10));
+        assert!(!e.is_tombstone);
+
+        // "revived" at latest → see the re-put
+        let e = seg.point_lookup(&kv_key("revived"), u64::MAX).unwrap();
+        assert_eq!(e.value, Value::Int(30));
+        assert!(!e.is_tombstone);
+
+        // "revived" at snapshot 2 → see tombstone
+        let e = seg.point_lookup(&kv_key("revived"), 2).unwrap();
+        assert!(e.is_tombstone);
+    }
+
+    #[test]
+    fn hash_index_v3_backward_compat() {
+        // A v3 segment (no hash index) must still be readable by the v6 reader.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v3_compat.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..50u32 {
+            let k = kv_key(&format!("bc_{:04}", i));
+            mt.put(&k, 1, Value::Int(i as i64), false);
+        }
+        mt.freeze();
+
+        let builder = SegmentBuilder::default();
+        builder.build_from_iter_v3(mt.iter_all(), &path).unwrap();
+
+        let seg = KVSegment::open(&path).unwrap();
+        assert_eq!(seg.header.format_version, 3);
+
+        // Point lookups must work (binary search path, no hash index)
+        for i in 0..50u32 {
+            let k = kv_key(&format!("bc_{:04}", i));
+            let e = seg
+                .point_lookup(&k, u64::MAX)
+                .unwrap_or_else(|| panic!("v3 key bc_{:04} not found", i));
+            assert_eq!(e.value, Value::Int(i as i64));
+        }
+
+        // Iterator must work
+        let all: Vec<_> = seg.iter_seek_all().collect();
+        assert_eq!(all.len(), 50);
+    }
+
+    #[test]
+    fn hash_index_prefix_scan_across_blocks() {
+        // Prefix scan via iter_seek must work across hash-indexed blocks.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hash_prefix.sst");
+
+        let mt = Memtable::new(0);
+        // Two groups: "alpha_*" and "beta_*"
+        for i in 0..100u32 {
+            mt.put(
+                &kv_key(&format!("alpha_{:04}", i)),
+                1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        for i in 0..100u32 {
+            mt.put(
+                &kv_key(&format!("beta_{:04}", i)),
+                1,
+                Value::Int(1000 + i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+        build_segment_small_blocks(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+
+        // Prefix scan for "alpha_" keys only
+        let alpha: Vec<_> = seg.iter_seek(&kv_key("alpha_")).collect();
+        assert_eq!(alpha.len(), 100, "expected 100 alpha keys");
+        for (_, se) in &alpha {
+            assert!(
+                matches!(se.value, Value::Int(v) if v < 1000),
+                "alpha value should be < 1000"
+            );
+        }
+
+        // Prefix scan for "beta_" keys only
+        let beta: Vec<_> = seg.iter_seek(&kv_key("beta_")).collect();
+        assert_eq!(beta.len(), 100, "expected 100 beta keys");
+        for (_, se) in &beta {
+            assert!(
+                matches!(se.value, Value::Int(v) if v >= 1000),
+                "beta value should be >= 1000"
+            );
+        }
     }
 }

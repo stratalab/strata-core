@@ -34,7 +34,7 @@ const KV_HEADER_MAGIC: [u8; 8] = *b"STRAKV\0\0";
 const FOOTER_MAGIC: [u8; 8] = *b"STRAKEND";
 
 /// Current format version.
-const FORMAT_VERSION: u16 = 5;
+const FORMAT_VERSION: u16 = 6;
 
 /// Number of entries between restart points within a data block.
 /// Entry 0 always gets a restart point; subsequent restarts are placed every
@@ -158,6 +158,10 @@ impl SegmentBuilder {
         // v4 prefix compression state
         let mut prev_key: Vec<u8> = Vec::new();
 
+        // Hash index: (xxh3_hash, restart_interval) per unique typed_key in block
+        let mut block_hash_entries: Vec<(u64, usize)> = Vec::new();
+        let mut block_typed_key_for_hash: Option<Vec<u8>> = None;
+
         let mut file_offset = KV_HEADER_SIZE as u64;
 
         // Pending index entry from previous block: (last_key, offset, data_len).
@@ -197,13 +201,24 @@ impl SegmentBuilder {
             encode_entry_v4(&prev_key, &ik, &entry, &mut block_buf, is_restart);
             prev_key.clear();
             prev_key.extend_from_slice(ik.as_bytes());
+
+            // Track hash index entry (before incrementing block_entry_count)
+            let restart_interval = block_entry_count / RESTART_INTERVAL;
+            let tkp = ik.typed_key_prefix();
+            if block_typed_key_for_hash.as_deref() != Some(tkp) {
+                let hash = xxhash_rust::xxh3::xxh3_64(tkp);
+                block_hash_entries.push((hash, restart_interval));
+                block_typed_key_for_hash = Some(tkp.to_vec());
+            }
+
             entry_count += 1;
             block_entry_count += 1;
 
             // Flush block when it reaches target size
             if block_buf.len() >= self.data_block_size {
-                // Append restart trailer before compression
+                // Append restart trailer and hash index before compression
                 append_restart_trailer(&mut block_buf, &restart_offsets);
+                append_hash_index(&mut block_buf, &block_hash_entries);
 
                 let bfk = block_first_key.take().unwrap();
                 let block_last = prev_key.clone(); // last key written to this block
@@ -224,6 +239,8 @@ impl SegmentBuilder {
                 restart_offsets.push(0);
                 block_entry_count = 0;
                 prev_key.clear();
+                block_hash_entries.clear();
+                block_typed_key_for_hash = None;
 
                 data_block_count += 1;
 
@@ -237,8 +254,9 @@ impl SegmentBuilder {
 
         // Flush final partial block
         if !block_buf.is_empty() {
-            // Append restart trailer before compression
+            // Append restart trailer and hash index before compression
             append_restart_trailer(&mut block_buf, &restart_offsets);
+            append_hash_index(&mut block_buf, &block_hash_entries);
 
             let bfk = block_first_key.take().unwrap_or_default();
             let block_last = prev_key.clone();
@@ -627,6 +645,32 @@ fn append_restart_trailer(buf: &mut Vec<u8>, restart_offsets: &[u32]) {
         buf.extend_from_slice(&offset.to_le_bytes());
     }
     buf.extend_from_slice(&(restart_offsets.len() as u32).to_le_bytes());
+}
+
+/// Append a hash index after the restart trailer.
+///
+/// Format: `[bucket_0..bucket_N: u8] [num_buckets: u16 LE] [0x01: sentinel]`
+///
+/// Each bucket holds a restart interval index (0-254) or `0xFF` (empty).
+/// Load factor 75%: `num_buckets = ceil(num_entries / 0.75)`.
+fn append_hash_index(buf: &mut Vec<u8>, entries: &[(u64, usize)]) {
+    if entries.is_empty() {
+        return;
+    }
+    let num_buckets = ((entries.len() as f64 / 0.75).ceil() as usize)
+        .max(1)
+        .min(u16::MAX as usize);
+    let mut buckets = vec![0xFFu8; num_buckets];
+    for &(hash, restart_idx) in entries {
+        let bucket = (hash as usize) % num_buckets;
+        if buckets[bucket] == 0xFF && restart_idx <= 254 {
+            buckets[bucket] = restart_idx as u8;
+        }
+        // Collision or restart_idx > 254: skip (reader falls back to binary search)
+    }
+    buf.extend_from_slice(&buckets);
+    buf.extend_from_slice(&(num_buckets as u16).to_le_bytes());
+    buf.push(0x01); // sentinel
 }
 
 /// Decoded entry header — key + metadata without value deserialization.
@@ -2190,7 +2234,7 @@ mod tests {
         builder.build_from_iter(mt.iter_all(), &path).unwrap();
 
         let seg = KVSegment::open(&path).unwrap();
-        assert_eq!(seg.format_version(), 5);
+        assert_eq!(seg.format_version(), 6);
 
         // Point lookup every entry
         for i in 0..100u32 {
@@ -2223,12 +2267,16 @@ mod tests {
         let v4_path = dir.path().join("v4.sst");
         let v4_meta = builder.build_from_iter(mt.iter_all(), &v4_path).unwrap();
 
-        // v4 should be smaller than v3
+        // v4 (with prefix compression) should be close to v3 in size.
+        // v6 adds a hash index (~4-5% overhead per block), so v4+hash may be
+        // slightly larger than v3 for small datasets. Check it's within 10%.
+        let ratio = v4_meta.file_size as f64 / v3_meta.file_size as f64;
         assert!(
-            v4_meta.file_size < v3_meta.file_size,
-            "v4 ({}) should be smaller than v3 ({})",
+            ratio < 1.10,
+            "v4/v6 ({}) should be within 10% of v3 ({}), ratio={:.3}",
             v4_meta.file_size,
             v3_meta.file_size,
+            ratio,
         );
     }
 
