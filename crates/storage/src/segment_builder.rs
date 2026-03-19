@@ -2308,10 +2308,7 @@ mod tests {
 
     #[test]
     fn test_shortest_successor_all_ff() {
-        assert_eq!(
-            shortest_successor(b"\xff\xff"),
-            b"\xff\xff".to_vec()
-        );
+        assert_eq!(shortest_successor(b"\xff\xff"), b"\xff\xff".to_vec());
     }
 
     #[test]
@@ -2372,10 +2369,10 @@ mod tests {
         // with different typed_key_prefix lengths never have the shorter one
         // sort before the longer one because commit_id bytes are near 0xFF).
         let cases: Vec<(&[u8], &[u8])> = vec![
-            (b"aaa", b"zzz"),   // large gap → shortened
-            (b"abc", b"abd"),   // adjacent → not shortened
-            (b"abc", b"abc"),   // identical prefix → not shortened (same commit_id scenario)
-            (b"tes", b"tex"),   // 's' vs 'x': shortened to "tet"
+            (b"aaa", b"zzz"),         // large gap → shortened
+            (b"abc", b"abd"),         // adjacent → not shortened
+            (b"abc", b"abc"),         // identical prefix → not shortened (same commit_id scenario)
+            (b"tes", b"tex"),         // 's' vs 'x': shortened to "tet"
             (b"key0042", b"key0100"), // realistic sequential keys with gap
         ];
         for (a_raw, b_raw) in cases {
@@ -2397,12 +2394,18 @@ mod tests {
             assert!(
                 sep.as_slice() >= a.as_slice(),
                 "separator {:?} must be >= a {:?} (prefixes {:?} vs {:?})",
-                sep, a, a_raw, b_raw
+                sep,
+                a,
+                a_raw,
+                b_raw
             );
             assert!(
                 sep.as_slice() < b.as_slice(),
                 "separator {:?} must be < b {:?} (prefixes {:?} vs {:?})",
-                sep, b, a_raw, b_raw
+                sep,
+                b,
+                a_raw,
+                b_raw
             );
         }
     }
@@ -2415,7 +2418,12 @@ mod tests {
 
         let mt = Memtable::new(0);
         for i in 0..200 {
-            mt.put(&key(&format!("key_{:04}", i)), i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(
+                &key(&format!("key_{:04}", i)),
+                i as u64 + 1,
+                Value::Int(i as i64),
+                false,
+            );
         }
         mt.freeze();
 
@@ -2483,7 +2491,12 @@ mod tests {
         let mt = Memtable::new(0);
         // 50 unique keys
         for i in 0..50 {
-            mt.put(&key(&format!("alpha_{:04}", i)), 1, Value::Int(i as i64), false);
+            mt.put(
+                &key(&format!("alpha_{:04}", i)),
+                1,
+                Value::Int(i as i64),
+                false,
+            );
         }
         // 100 versions of one key
         let hot = key("beta_hot");
@@ -2492,7 +2505,12 @@ mod tests {
         }
         // 50 more unique keys
         for i in 0..50 {
-            mt.put(&key(&format!("gamma_{:04}", i)), 1, Value::Int(i as i64), false);
+            mt.put(
+                &key(&format!("gamma_{:04}", i)),
+                1,
+                Value::Int(i as i64),
+                false,
+            );
         }
         mt.freeze();
 
