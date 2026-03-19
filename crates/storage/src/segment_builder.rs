@@ -6,9 +6,10 @@
 //! ```text
 //! | KVHeader (64 bytes)       |
 //! | DataBlock 0..N-1          |
+//! | SubIndexBlock 0..P-1      |  (v7 partitioned only; omitted for monolithic)
 //! | BloomPartition 0..K-1     |
 //! | FilterIndexBlock          |
-//! | IndexBlock                |
+//! | TopLevelIndex / IndexBlock|
 //! | PropertiesBlock           |
 //! | Footer (56 bytes)         |
 //! ```
@@ -34,7 +35,7 @@ const KV_HEADER_MAGIC: [u8; 8] = *b"STRAKV\0\0";
 const FOOTER_MAGIC: [u8; 8] = *b"STRAKEND";
 
 /// Current format version.
-const FORMAT_VERSION: u16 = 6;
+const FORMAT_VERSION: u16 = 7;
 
 /// Number of entries between restart points within a data block.
 /// Entry 0 always gets a restart point; subsequent restarts are placed every
@@ -54,6 +55,14 @@ const BLOCK_TYPE_INDEX: u8 = 2;
 const BLOCK_TYPE_FILTER: u8 = 3;
 const BLOCK_TYPE_PROPS: u8 = 4;
 const BLOCK_TYPE_FILTER_INDEX: u8 = 5;
+const BLOCK_TYPE_SUB_INDEX: u8 = 6;
+
+/// Number of data blocks per sub-index partition (partitioned index).
+const INDEX_PARTITION_BLOCK_COUNT: usize = 128;
+
+/// Index type tags for footer.
+const INDEX_TYPE_MONOLITHIC: u8 = 0;
+const INDEX_TYPE_PARTITIONED: u8 = 1;
 
 /// Number of data blocks per bloom partition.
 const BLOOM_PARTITION_BLOCK_COUNT: usize = 16;
@@ -342,7 +351,31 @@ impl SegmentBuilder {
             commit_max = 0;
         }
 
-        // 2. Write bloom partition blocks
+        // 2. Decide index type and write sub-index blocks if partitioned
+        let chunks: Vec<&[(Vec<u8>, u64, u32)]> =
+            index_entries.chunks(INDEX_PARTITION_BLOCK_COUNT).collect();
+        let use_partitioned = chunks.len() >= 2;
+        let index_type;
+
+        // For partitioned: write sub-index blocks first (before blooms),
+        // defer top-level index until after filter index.
+        let mut top_level_entries: Vec<(Vec<u8>, u64, u32)> = Vec::new();
+        if use_partitioned {
+            index_type = INDEX_TYPE_PARTITIONED;
+            for chunk in &chunks {
+                let last_key_in_chunk = chunk.last().unwrap().0.clone();
+                let sub_offset = file_offset;
+                let sub_data = encode_index_block(chunk);
+                write_framed_block(&mut w, BLOCK_TYPE_SUB_INDEX, &sub_data)?;
+                let sub_len = (BLOCK_FRAME_OVERHEAD + sub_data.len()) as u32;
+                file_offset += sub_len as u64;
+                top_level_entries.push((last_key_in_chunk, sub_offset, sub_len));
+            }
+        } else {
+            index_type = INDEX_TYPE_MONOLITHIC;
+        }
+
+        // 3. Write bloom partition blocks
         let mut filter_index_entries: Vec<FilterIndexEntry> = Vec::new();
         for (keys, max_key) in partition_bloom_keys.iter().zip(partition_max_keys.iter()) {
             if keys.is_empty() {
@@ -362,21 +395,31 @@ impl SegmentBuilder {
             file_offset += framed_len as u64;
         }
 
-        // 3. Write filter index block
+        // 4. Write filter index block
         let filter_block_offset = file_offset;
         let filter_index_data = encode_filter_index(&filter_index_entries);
         write_framed_block(&mut w, BLOCK_TYPE_FILTER_INDEX, &filter_index_data)?;
         let filter_block_len = (BLOCK_FRAME_OVERHEAD + filter_index_data.len()) as u32;
         file_offset += filter_block_len as u64;
 
-        // 4. Write IndexBlock
-        let index_block_offset = file_offset;
-        let index_data = encode_index_block(&index_entries);
-        write_framed_block(&mut w, BLOCK_TYPE_INDEX, &index_data)?;
-        let index_block_len = (BLOCK_FRAME_OVERHEAD + index_data.len()) as u32;
-        file_offset += index_block_len as u64;
+        // 5. Write top-level or monolithic index block
+        let (index_block_offset, index_block_len) = if use_partitioned {
+            let tl_offset = file_offset;
+            let tl_data = encode_index_block(&top_level_entries);
+            write_framed_block(&mut w, BLOCK_TYPE_INDEX, &tl_data)?;
+            let tl_len = (BLOCK_FRAME_OVERHEAD + tl_data.len()) as u32;
+            file_offset += tl_len as u64;
+            (tl_offset, tl_len)
+        } else {
+            let idx_offset = file_offset;
+            let index_data = encode_index_block(&index_entries);
+            write_framed_block(&mut w, BLOCK_TYPE_INDEX, &index_data)?;
+            let idx_len = (BLOCK_FRAME_OVERHEAD + index_data.len()) as u32;
+            file_offset += idx_len as u64;
+            (idx_offset, idx_len)
+        };
 
-        // 5. Write PropertiesBlock
+        // 6. Write PropertiesBlock
         let props_block_offset = file_offset;
         let props_data = encode_properties(
             entry_count,
@@ -389,7 +432,7 @@ impl SegmentBuilder {
         let props_block_len = (BLOCK_FRAME_OVERHEAD + props_data.len()) as u32;
         file_offset += props_block_len as u64;
 
-        // 6. Write Footer
+        // 7. Write Footer
         let footer = encode_footer(
             index_block_offset,
             index_block_len,
@@ -397,6 +440,7 @@ impl SegmentBuilder {
             filter_block_len,
             props_block_offset,
             props_block_len,
+            index_type,
         );
         w.write_all(&footer)?;
         file_offset += FOOTER_SIZE as u64;
@@ -576,6 +620,7 @@ impl SegmentBuilder {
             filter_block_len,
             props_block_offset,
             props_block_len,
+            INDEX_TYPE_MONOLITHIC,
         );
         w.write_all(&footer)?;
         file_offset += FOOTER_SIZE as u64;
@@ -1522,7 +1567,8 @@ pub(crate) struct KVHeader {
 /// filter_block_len: u32 LE
 /// props_block_offset: u64 LE
 /// props_block_len: u32 LE
-/// reserved: [u8; 12]
+/// index_type: u8             (0=monolithic, 1=partitioned)
+/// reserved: [u8; 11]
 /// magic: [u8; 8] — "STRAKEND"
 /// ```
 fn encode_footer(
@@ -1532,6 +1578,7 @@ fn encode_footer(
     filter_len: u32,
     props_offset: u64,
     props_len: u32,
+    index_type: u8,
 ) -> [u8; FOOTER_SIZE] {
     let mut f = [0u8; FOOTER_SIZE];
     f[0..8].copy_from_slice(&index_offset.to_le_bytes());
@@ -1540,7 +1587,8 @@ fn encode_footer(
     f[20..24].copy_from_slice(&filter_len.to_le_bytes());
     f[24..32].copy_from_slice(&props_offset.to_le_bytes());
     f[32..36].copy_from_slice(&props_len.to_le_bytes());
-    // 36..48: reserved
+    f[36] = index_type;
+    // 37..48: reserved
     f[48..56].copy_from_slice(&FOOTER_MAGIC);
     f
 }
@@ -1557,6 +1605,7 @@ pub(crate) fn parse_footer(data: &[u8; FOOTER_SIZE]) -> Option<Footer> {
         filter_block_len: u32::from_le_bytes(data[20..24].try_into().ok()?),
         props_block_offset: u64::from_le_bytes(data[24..32].try_into().ok()?),
         props_block_len: u32::from_le_bytes(data[32..36].try_into().ok()?),
+        index_type: data[36],
     })
 }
 
@@ -1569,12 +1618,14 @@ pub(crate) struct Footer {
     pub filter_block_len: u32,
     pub props_block_offset: u64,
     pub props_block_len: u32,
+    pub index_type: u8,
 }
 
 // Re-export constants for the segment reader.
 pub(crate) const HEADER_SIZE: usize = KV_HEADER_SIZE;
 pub(crate) const FOOTER_SZ: usize = FOOTER_SIZE;
 pub(crate) const FRAME_OVERHEAD: usize = BLOCK_FRAME_OVERHEAD;
+pub(crate) const IDX_TYPE_PARTITIONED: u8 = INDEX_TYPE_PARTITIONED;
 
 #[cfg(test)]
 mod tests {
@@ -1696,7 +1747,7 @@ mod tests {
 
     #[test]
     fn footer_roundtrip() {
-        let footer = encode_footer(1000, 200, 1200, 50, 1250, 80);
+        let footer = encode_footer(1000, 200, 1200, 50, 1250, 80, INDEX_TYPE_MONOLITHIC);
         let parsed = parse_footer(&footer).unwrap();
         assert_eq!(parsed.index_block_offset, 1000);
         assert_eq!(parsed.index_block_len, 200);
@@ -1704,11 +1755,12 @@ mod tests {
         assert_eq!(parsed.filter_block_len, 50);
         assert_eq!(parsed.props_block_offset, 1250);
         assert_eq!(parsed.props_block_len, 80);
+        assert_eq!(parsed.index_type, INDEX_TYPE_MONOLITHIC);
     }
 
     #[test]
     fn footer_rejects_bad_magic() {
-        let mut footer = encode_footer(0, 0, 0, 0, 0, 0);
+        let mut footer = encode_footer(0, 0, 0, 0, 0, 0, INDEX_TYPE_MONOLITHIC);
         footer[48] = b'X'; // corrupt magic
         assert!(parse_footer(&footer).is_none());
     }
@@ -2304,7 +2356,7 @@ mod tests {
         builder.build_from_iter(mt.iter_all(), &path).unwrap();
 
         let seg = KVSegment::open(&path).unwrap();
-        assert_eq!(seg.format_version(), 6);
+        assert_eq!(seg.format_version(), 7);
 
         // Point lookup every entry
         for i in 0..100u32 {
