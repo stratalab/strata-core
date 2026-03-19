@@ -53,6 +53,14 @@ const LEVEL_MULTIPLIER: u64 = 10;
 /// output split.  Set to 10 × TARGET_FILE_SIZE (640MB).
 const MAX_GRANDPARENT_OVERLAP: u64 = 10 * TARGET_FILE_SIZE;
 
+/// Minimum L1 target size for dynamic level sizing (1MB).
+/// Prevents degenerate zero-size targets on tiny embedded datasets.
+const MIN_BASE_BYTES: u64 = 1 << 20;
+
+/// Maximum L1 target size for dynamic level sizing.
+/// Equals LEVEL_BASE_BYTES (256MB) — the static default.
+const MAX_BASE_BYTES: u64 = LEVEL_BASE_BYTES;
+
 /// Monkey-optimal bloom bits per key for a given target level.
 ///
 /// Upper levels (checked on every read) get more bits for near-zero FPR.
@@ -184,6 +192,8 @@ struct BranchState {
     /// Per-level compact pointer for round-robin file selection.
     /// Each entry is the largest typed_key_prefix of the last compaction input.
     compact_pointers: Vec<Option<Vec<u8>>>,
+    /// Cached per-level byte targets, recomputed after compaction/flush.
+    level_targets: compaction::LevelTargets,
 }
 
 impl BranchState {
@@ -195,8 +205,19 @@ impl BranchState {
             min_timestamp: AtomicU64::new(u64::MAX),
             max_timestamp: AtomicU64::new(0),
             compact_pointers: vec![None; NUM_LEVELS],
+            level_targets: compaction::recalculate_level_targets(&[0u64; NUM_LEVELS]),
         }
     }
+}
+
+/// Recompute cached level targets from the current segment version.
+fn refresh_level_targets(branch: &mut BranchState) {
+    let ver = branch.version.load();
+    let mut actual_bytes = [0u64; NUM_LEVELS];
+    for (level, segs) in ver.levels.iter().enumerate() {
+        actual_bytes[level] = segs.iter().map(|s| s.file_size()).sum();
+    }
+    branch.level_targets = compaction::recalculate_level_targets(&actual_bytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -822,6 +843,7 @@ impl SegmentedStore {
         branch
             .version
             .store(Arc::new(SegmentVersion { levels: new_levels }));
+        refresh_level_targets(&mut branch);
 
         // Persist level assignments
         drop(branch);
@@ -1027,7 +1049,7 @@ impl SegmentedStore {
                 level.sort_by(|a, b| a.key_range().0.cmp(b.key_range().0));
             }
 
-            let branch = self
+            let mut branch = self
                 .branches
                 .entry(branch_id)
                 .or_insert_with(BranchState::new);
@@ -1053,6 +1075,7 @@ impl SegmentedStore {
             branch
                 .version
                 .store(Arc::new(SegmentVersion { levels: new_levels }));
+            refresh_level_targets(&mut branch);
 
             info.branches_recovered += 1;
         }
