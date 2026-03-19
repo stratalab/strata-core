@@ -53,6 +53,21 @@ const LEVEL_MULTIPLIER: u64 = 10;
 /// output split.  Set to 10 × TARGET_FILE_SIZE (640MB).
 const MAX_GRANDPARENT_OVERLAP: u64 = 10 * TARGET_FILE_SIZE;
 
+/// Monkey-optimal bloom bits per key for a given target level.
+///
+/// Upper levels (checked on every read) get more bits for near-zero FPR.
+/// Lower levels (checked rarely due to upper-level rejections) keep baseline.
+/// Formula: bits[l] = base + floor(log2(multiplier) * (max_level - 1 - level))
+/// With multiplier=10: log2(10) ≈ 3.3
+pub(crate) fn bloom_bits_for_level(level: usize, base_bits: usize) -> usize {
+    if level == 0 {
+        return base_bits; // L0 uses baseline (flushed from memtable, short-lived)
+    }
+    let max_level = NUM_LEVELS - 1; // 6
+    let bonus = (3.3 * (max_level.saturating_sub(level).saturating_sub(1)) as f64) as usize;
+    (base_bits + bonus).min(20) // Cap at 20 bits/key
+}
+
 // ---------------------------------------------------------------------------
 // Compaction scheduling types
 // ---------------------------------------------------------------------------
