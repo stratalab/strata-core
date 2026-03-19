@@ -17,53 +17,43 @@ pub(super) struct LevelTargets {
 
 /// Compute adaptive per-level byte targets from actual level sizes.
 ///
-/// Algorithm (inspired by RocksDB `CalculateBaseBytes`):
-/// 1. Start with static geometric baseline: L1=256MB, L2=2.56GB, etc.
-/// 2. Find the largest non-L0 level by actual bytes.
-/// 3. If that level exceeds its static target, anchor at the actual size and
-///    recompute backward using the multiplier, with `LEVEL_BASE_BYTES` as a
-///    floor for every level.
-/// 4. Recompute forward from anchor for levels beyond it.
+/// Algorithm (RocksDB `CalculateBaseBytes`):
+/// 1. Find the largest non-empty non-L0 level (the "bottom" level).
+/// 2. Compute base (L1 target) = bottom_bytes / multiplier^(bottom_level - 1).
+/// 3. Clamp base between MIN_BASE_BYTES (1MB) and MAX_BASE_BYTES (256MB).
+/// 4. Forward-compute all targets: target[i] = base * multiplier^(i-1).
+///
+/// For empty databases (no non-L0 data), uses MIN_BASE_BYTES as base.
 pub(super) fn recalculate_level_targets(level_bytes: &[u64; NUM_LEVELS]) -> LevelTargets {
-    // Static geometric baseline: L0 unused (count-based), L1=256MB, L2=2.56GB, ...
     let mut max_bytes = [0u64; NUM_LEVELS];
-    max_bytes[0] = 0; // L0 uses count-based trigger, not size
-    let mut target = LEVEL_BASE_BYTES;
-    for slot in max_bytes.iter_mut().skip(1) {
-        *slot = target;
-        target = target.saturating_mul(LEVEL_MULTIPLIER);
-    }
+    max_bytes[0] = 0; // L0 uses count-based trigger
 
-    // Find the largest non-L0 level that exceeds its static target
-    let mut anchor_level = 0usize;
-    let mut anchor_excess: u64 = 0;
-    for level in 1..NUM_LEVELS {
-        if level_bytes[level] > max_bytes[level] && level_bytes[level] > anchor_excess {
-            anchor_level = level;
-            anchor_excess = level_bytes[level];
+    // 1. Find the largest non-empty non-L0 level
+    let mut bottom_level = 0usize;
+    let mut bottom_bytes = 0u64;
+    for (level, &bytes) in level_bytes.iter().enumerate().skip(1) {
+        if bytes > bottom_bytes {
+            bottom_level = level;
+            bottom_bytes = bytes;
         }
     }
 
-    if anchor_level == 0 {
-        // No level exceeds its static target — use baseline
-        return LevelTargets { max_bytes };
-    }
+    // 2. Compute base
+    let base = if bottom_level == 0 {
+        MIN_BASE_BYTES
+    } else {
+        let mut b = bottom_bytes;
+        for _ in 1..bottom_level {
+            b /= LEVEL_MULTIPLIER;
+        }
+        b.clamp(MIN_BASE_BYTES, MAX_BASE_BYTES)
+    };
 
-    // Anchor at the actual size
-    max_bytes[anchor_level] = anchor_excess;
-
-    // Recompute backward from anchor (divide by multiplier, floored at LEVEL_BASE_BYTES)
-    let mut t = anchor_excess;
-    for level in (1..anchor_level).rev() {
-        t /= LEVEL_MULTIPLIER;
-        max_bytes[level] = t.max(LEVEL_BASE_BYTES);
-    }
-
-    // Recompute forward from anchor (multiply)
-    t = anchor_excess;
-    for slot in &mut max_bytes[(anchor_level + 1)..NUM_LEVELS] {
-        t = t.saturating_mul(LEVEL_MULTIPLIER);
-        *slot = t;
+    // 3. Forward-compute all targets
+    let mut target = base;
+    for slot in max_bytes.iter_mut().skip(1) {
+        *slot = target;
+        target = target.saturating_mul(LEVEL_MULTIPLIER);
     }
 
     LevelTargets { max_bytes }
@@ -89,7 +79,7 @@ impl SegmentedStore {
             actual_bytes[level] = segs.iter().map(|s| s.file_size()).sum();
         }
 
-        let targets = recalculate_level_targets(&actual_bytes);
+        let targets = &branch.level_targets;
 
         let mut scores = Vec::new();
 
@@ -222,7 +212,7 @@ impl SegmentedStore {
         // Swap: remove only the segments we compacted, insert the new one.
         // Any segments added by concurrent flushes (not in old_segments) are kept.
         {
-            let branch = self
+            let mut branch = self
                 .branches
                 .entry(*branch_id)
                 .or_insert_with(BranchState::new);
@@ -242,6 +232,7 @@ impl SegmentedStore {
             branch
                 .version
                 .store(Arc::new(SegmentVersion { levels: new_levels }));
+            refresh_level_targets(&mut branch);
         }
 
         // Persist manifest BEFORE deleting old files — if we crash after
@@ -353,7 +344,7 @@ impl SegmentedStore {
         // Swap: remove only the segments we compacted, insert the new one.
         // Any segments added by concurrent flushes (not in selected_segments) are kept.
         {
-            let branch = self
+            let mut branch = self
                 .branches
                 .entry(*branch_id)
                 .or_insert_with(BranchState::new);
@@ -373,6 +364,7 @@ impl SegmentedStore {
             branch
                 .version
                 .store(Arc::new(SegmentVersion { levels: new_levels }));
+            refresh_level_targets(&mut branch);
         }
 
         // Persist manifest BEFORE deleting old files (crash safety).
@@ -535,7 +527,7 @@ impl SegmentedStore {
 
         // Atomic swap: L0 = only concurrently-flushed segments, L1 = non-overlapping + new
         {
-            let branch = self
+            let mut branch = self
                 .branches
                 .entry(*branch_id)
                 .or_insert_with(BranchState::new);
@@ -561,6 +553,7 @@ impl SegmentedStore {
             branch
                 .version
                 .store(Arc::new(SegmentVersion { levels: new_levels }));
+            refresh_level_targets(&mut branch);
         }
 
         // Persist manifest BEFORE deleting old files (crash safety).
@@ -705,6 +698,7 @@ impl SegmentedStore {
             branch
                 .version
                 .store(Arc::new(SegmentVersion { levels: new_levels }));
+            refresh_level_targets(&mut branch);
             drop(branch);
             self.write_branch_manifest(branch_id);
 
@@ -821,6 +815,7 @@ impl SegmentedStore {
             branch
                 .version
                 .store(Arc::new(SegmentVersion { levels: new_levels }));
+            refresh_level_targets(&mut branch);
         }
 
         // ── 5. Cleanup ─────────────────────────────────────────────────
