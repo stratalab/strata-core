@@ -480,8 +480,14 @@ fn ctrlc_handler(running: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     let ptr = std::sync::Arc::into_raw(running) as *mut std::sync::atomic::AtomicBool;
     RUNNING_PTR.store(ptr, std::sync::atomic::Ordering::SeqCst);
     unsafe {
-        libc::signal(libc::SIGTERM, handle_signal as *const () as usize as libc::sighandler_t);
-        libc::signal(libc::SIGINT, handle_signal as *const () as usize as libc::sighandler_t);
+        libc::signal(
+            libc::SIGTERM,
+            handle_signal as *const () as usize as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            handle_signal as *const () as usize as libc::sighandler_t,
+        );
     }
 }
 
