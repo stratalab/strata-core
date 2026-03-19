@@ -83,6 +83,25 @@ pub struct SegmentMeta {
 }
 
 // ---------------------------------------------------------------------------
+// CompressionCodec
+// ---------------------------------------------------------------------------
+
+/// Compression strategy for data blocks within a segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressionCodec {
+    /// No compression (codec byte = 0x00). Best for hot levels (L0-L2).
+    None,
+    /// Zstd compression at the given level. Level 3 for warm (L3-L5), level 6 for cold (L6).
+    Zstd(i32),
+}
+
+impl Default for CompressionCodec {
+    fn default() -> Self {
+        CompressionCodec::Zstd(3)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SegmentBuilder
 // ---------------------------------------------------------------------------
 
@@ -92,6 +111,8 @@ pub struct SegmentBuilder {
     pub data_block_size: usize,
     /// Bloom filter bits per key.
     pub bloom_bits_per_key: usize,
+    /// Compression codec for data blocks.
+    pub compression: CompressionCodec,
 }
 
 impl Default for SegmentBuilder {
@@ -99,6 +120,7 @@ impl Default for SegmentBuilder {
         Self {
             data_block_size: 64 * 1024, // 64 KiB
             bloom_bits_per_key: 10,
+            compression: CompressionCodec::default(),
         }
     }
 }
@@ -107,6 +129,12 @@ impl SegmentBuilder {
     /// Set the bloom filter bits per key.
     pub fn with_bloom_bits(mut self, bits_per_key: usize) -> Self {
         self.bloom_bits_per_key = bits_per_key;
+        self
+    }
+
+    /// Set the compression codec for data blocks.
+    pub fn with_compression(mut self, codec: CompressionCodec) -> Self {
+        self.compression = codec;
         self
     }
 
@@ -229,8 +257,12 @@ impl SegmentBuilder {
                     index_entries.push((shortened, offset, len));
                 }
 
-                let framed_size =
-                    write_framed_block_compressed(&mut w, BLOCK_TYPE_DATA, &block_buf, true)?;
+                let framed_size = write_framed_block_compressed(
+                    &mut w,
+                    BLOCK_TYPE_DATA,
+                    &block_buf,
+                    self.compression,
+                )?;
                 let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
                 pending_index = Some((block_last, file_offset, on_disk_data_len));
                 file_offset += framed_size as u64;
@@ -267,8 +299,12 @@ impl SegmentBuilder {
                 index_entries.push((shortened, offset, len));
             }
 
-            let framed_size =
-                write_framed_block_compressed(&mut w, BLOCK_TYPE_DATA, &block_buf, true)?;
+            let framed_size = write_framed_block_compressed(
+                &mut w,
+                BLOCK_TYPE_DATA,
+                &block_buf,
+                self.compression,
+            )?;
             let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
             let shortened = shorten_final_index_key(&block_last);
             index_entries.push((shortened, file_offset, on_disk_data_len));
@@ -430,8 +466,12 @@ impl SegmentBuilder {
             if block_buf.len() >= self.data_block_size {
                 append_restart_trailer(&mut block_buf, &restart_offsets);
                 let bfk = block_first_key.take().unwrap();
-                let framed_size =
-                    write_framed_block_compressed(&mut w, BLOCK_TYPE_DATA, &block_buf, true)?;
+                let framed_size = write_framed_block_compressed(
+                    &mut w,
+                    BLOCK_TYPE_DATA,
+                    &block_buf,
+                    self.compression,
+                )?;
                 let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
                 index_entries.push((bfk, file_offset, on_disk_data_len));
                 file_offset += framed_size as u64;
@@ -450,8 +490,12 @@ impl SegmentBuilder {
         if !block_buf.is_empty() {
             append_restart_trailer(&mut block_buf, &restart_offsets);
             let bfk = block_first_key.take().unwrap_or_default();
-            let framed_size =
-                write_framed_block_compressed(&mut w, BLOCK_TYPE_DATA, &block_buf, true)?;
+            let framed_size = write_framed_block_compressed(
+                &mut w,
+                BLOCK_TYPE_DATA,
+                &block_buf,
+                self.compression,
+            )?;
             let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
             index_entries.push((bfk, file_offset, on_disk_data_len));
             file_offset += framed_size as u64;
@@ -1187,10 +1231,12 @@ fn write_framed_block<W: Write>(w: &mut W, block_type: u8, data: &[u8]) -> io::R
     Ok(())
 }
 
-/// Write a framed block with optional zstd compression.
+/// Write a framed block with the specified compression codec.
 ///
-/// When `compress` is true, compresses the data with zstd level 3.
-/// If compression doesn't reduce size, falls back to uncompressed.
+/// - `CompressionCodec::None` — writes uncompressed (codec byte 0).
+/// - `CompressionCodec::Zstd(level)` — compresses with zstd at the given level.
+///   Falls back to uncompressed if compression doesn't reduce size.
+///
 /// The codec byte in the frame header indicates the compression used:
 /// - 0 = uncompressed
 /// - 1 = zstd
@@ -1200,17 +1246,18 @@ fn write_framed_block_compressed<W: Write>(
     w: &mut W,
     block_type: u8,
     data: &[u8],
-    compress: bool,
+    codec: CompressionCodec,
 ) -> io::Result<usize> {
-    let (write_data, codec_byte) = if compress && !data.is_empty() {
-        match zstd::encode_all(std::io::Cursor::new(data), 3) {
-            Ok(compressed) if compressed.len() < data.len() => {
-                (compressed, 1u8) // zstd compressed
+    let (write_data, codec_byte) = match codec {
+        CompressionCodec::Zstd(level) if !data.is_empty() => {
+            match zstd::encode_all(std::io::Cursor::new(data), level) {
+                Ok(compressed) if compressed.len() < data.len() => {
+                    (compressed, 1u8) // zstd compressed
+                }
+                _ => (data.to_vec(), 0u8), // fallback to uncompressed
             }
-            _ => (data.to_vec(), 0u8), // fallback to uncompressed
         }
-    } else {
-        (data.to_vec(), 0u8)
+        _ => (data.to_vec(), 0u8),
     };
 
     w.write_all(&[block_type])?;
@@ -1515,6 +1562,7 @@ pub(crate) const FRAME_OVERHEAD: usize = BLOCK_FRAME_OVERHEAD;
 mod tests {
     use super::*;
     use crate::memtable::Memtable;
+    use crate::segment::KVSegment;
     use std::sync::Arc;
     use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 
@@ -1679,6 +1727,7 @@ mod tests {
         let builder = SegmentBuilder {
             data_block_size: 4096, // small blocks for test
             bloom_bits_per_key: 10,
+            compression: CompressionCodec::default(),
         };
         let meta = builder.build_from_iter(mt.iter_all(), &path).unwrap();
         assert_eq!(meta.entry_count, 2000);
@@ -1831,6 +1880,7 @@ mod tests {
         let builder = SegmentBuilder {
             data_block_size: 4096,
             bloom_bits_per_key: 10,
+            compression: CompressionCodec::default(),
         };
         let meta = builder.build_from_iter(mt.iter_all(), &path).unwrap();
         assert_eq!(meta.entry_count, 500);
@@ -2484,6 +2534,7 @@ mod tests {
         let builder = SegmentBuilder {
             data_block_size: 512,
             bloom_bits_per_key: 10,
+            compression: CompressionCodec::default(),
         };
         builder.build_from_iter(mt.iter_all(), &path).unwrap();
 
@@ -2516,6 +2567,7 @@ mod tests {
         let builder = SegmentBuilder {
             data_block_size: 512,
             bloom_bits_per_key: 10,
+            compression: CompressionCodec::default(),
         };
         builder.build_from_iter(mt.iter_all(), &path).unwrap();
 
@@ -2571,6 +2623,7 @@ mod tests {
         let builder = SegmentBuilder {
             data_block_size: 512,
             bloom_bits_per_key: 10,
+            compression: CompressionCodec::default(),
         };
         builder.build_from_iter(mt.iter_all(), &path).unwrap();
 
@@ -2620,6 +2673,7 @@ mod tests {
         let builder = SegmentBuilder {
             data_block_size: 512,
             bloom_bits_per_key: 10,
+            compression: CompressionCodec::default(),
         };
 
         let path_v3 = dir.path().join("full_keys.sst");
@@ -2647,6 +2701,189 @@ mod tests {
                 assert_eq!(e.unwrap().value, Value::Int(idx as i64));
                 idx += 1;
             }
+        }
+    }
+
+    #[test]
+    fn codec_none_roundtrip_multi_block() {
+        // Use small blocks (512B) + enough entries to span multiple data blocks,
+        // exercising cross-block iteration and point lookups with no compression.
+        let dir = tempfile::tempdir().unwrap();
+        let path_none = dir.path().join("none.sst");
+        let path_zstd = dir.path().join("zstd.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..200u64 {
+            // Long values to ensure data spans multiple 512B blocks
+            let val = Value::String(format!("value_{:06}_padding_to_inflate_size", i));
+            mt.put(&key(&format!("k_{:04}", i)), i + 1, val, false);
+        }
+        mt.freeze();
+
+        let builder_none = SegmentBuilder {
+            data_block_size: 512,
+            bloom_bits_per_key: 10,
+            compression: CompressionCodec::None,
+        };
+        builder_none
+            .build_from_iter(mt.iter_all(), &path_none)
+            .unwrap();
+
+        let builder_zstd = SegmentBuilder {
+            data_block_size: 512,
+            bloom_bits_per_key: 10,
+            compression: CompressionCodec::Zstd(3),
+        };
+        builder_zstd
+            .build_from_iter(mt.iter_all(), &path_zstd)
+            .unwrap();
+
+        // Uncompressed file should be larger than compressed
+        let none_size = std::fs::metadata(&path_none).unwrap().len();
+        let zstd_size = std::fs::metadata(&path_zstd).unwrap().len();
+        assert!(
+            none_size > zstd_size,
+            "Uncompressed ({}) should be larger than Zstd ({})",
+            none_size,
+            zstd_size
+        );
+
+        // Verify point lookups on the uncompressed segment
+        let seg = KVSegment::open(&path_none).unwrap();
+        for i in 0..200u64 {
+            let e = seg.point_lookup(&key(&format!("k_{:04}", i)), i + 1);
+            assert!(e.is_some(), "key k_{:04} not found with None codec", i);
+            let expected = Value::String(format!("value_{:06}_padding_to_inflate_size", i));
+            assert_eq!(e.unwrap().value, expected);
+        }
+
+        // Verify full iteration yields all entries
+        let iter = crate::segment::OwnedSegmentIter::new(Arc::new(seg));
+        let count = iter.count();
+        assert_eq!(count, 200, "Iterator should yield all 200 entries");
+
+        // Verify MVCC snapshot isolation: looking up a key at an older snapshot
+        // should not see newer versions
+        let seg = KVSegment::open(&path_none).unwrap();
+        let e = seg.point_lookup(&key("k_0100"), 50);
+        assert!(
+            e.is_none(),
+            "key k_0100 at commit 50 should not be visible (written at 101)"
+        );
+    }
+
+    #[test]
+    fn codec_zstd_levels_roundtrip_multi_block() {
+        // Test that different zstd levels all produce valid segments
+        // with correct data across multiple blocks.
+        for zstd_level in [1, 3, 6, 9] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("zstd_{}.sst", zstd_level));
+
+            let mt = Memtable::new(0);
+            for i in 0..200u64 {
+                let val = Value::String(format!("value_{:06}_padding_to_inflate_size", i));
+                mt.put(&key(&format!("k_{:04}", i)), i + 1, val, false);
+            }
+            mt.freeze();
+
+            let builder = SegmentBuilder {
+                data_block_size: 512,
+                bloom_bits_per_key: 10,
+                compression: CompressionCodec::Zstd(zstd_level),
+            };
+            builder.build_from_iter(mt.iter_all(), &path).unwrap();
+
+            let seg = KVSegment::open(&path).unwrap();
+
+            // Point lookups: first, last, and middle keys
+            for &i in &[0u64, 99, 199] {
+                let e = seg.point_lookup(&key(&format!("k_{:04}", i)), i + 1);
+                assert!(
+                    e.is_some(),
+                    "key k_{:04} not found with Zstd({})",
+                    i,
+                    zstd_level
+                );
+                let expected = Value::String(format!("value_{:06}_padding_to_inflate_size", i));
+                assert_eq!(e.unwrap().value, expected);
+            }
+
+            // Full iteration
+            let iter = crate::segment::OwnedSegmentIter::new(Arc::new(seg));
+            let count = iter.count();
+            assert_eq!(
+                count, 200,
+                "Zstd({}) iterator should yield all 200 entries",
+                zstd_level
+            );
+        }
+
+        // Higher zstd levels should produce smaller (or equal) files than lower levels
+        let dir = tempfile::tempdir().unwrap();
+        let mt = Memtable::new(0);
+        for i in 0..500u64 {
+            let val = Value::String(format!("value_{:08}_repeated_data_for_compression", i));
+            mt.put(&key(&format!("k_{:04}", i)), i + 1, val, false);
+        }
+        mt.freeze();
+
+        let mut sizes = Vec::new();
+        for zstd_level in [1, 3, 6] {
+            let path = dir.path().join(format!("size_cmp_{}.sst", zstd_level));
+            let builder = SegmentBuilder {
+                data_block_size: 512,
+                bloom_bits_per_key: 10,
+                compression: CompressionCodec::Zstd(zstd_level),
+            };
+            builder.build_from_iter(mt.iter_all(), &path).unwrap();
+            sizes.push((zstd_level, std::fs::metadata(&path).unwrap().len()));
+        }
+        // Level 6 should be <= level 1 (higher level = better compression)
+        assert!(
+            sizes[2].1 <= sizes[0].1,
+            "Zstd(6) size {} should be <= Zstd(1) size {}",
+            sizes[2].1,
+            sizes[0].1
+        );
+    }
+
+    #[test]
+    fn codec_none_with_tombstones() {
+        // Ensure tombstones round-trip correctly with no compression
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tombstones.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..20u64 {
+            mt.put(
+                &key(&format!("k_{:04}", i)),
+                i + 1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        // Tombstone every other key at a higher commit
+        for i in (0..20u64).step_by(2) {
+            mt.put(&key(&format!("k_{:04}", i)), 100 + i, Value::Null, true);
+        }
+        mt.freeze();
+
+        let builder = SegmentBuilder::default().with_compression(CompressionCodec::None);
+        builder.build_from_iter(mt.iter_all(), &path).unwrap();
+
+        let seg = KVSegment::open(&path).unwrap();
+        // Even keys should have tombstone at commit 100+i
+        for i in (0..20u64).step_by(2) {
+            let e = seg.point_lookup(&key(&format!("k_{:04}", i)), 200);
+            assert!(e.is_some(), "tombstone k_{:04} should be visible", i);
+            assert!(e.unwrap().is_tombstone, "k_{:04} should be a tombstone", i);
+        }
+        // Odd keys should still have their values
+        for i in (1..20u64).step_by(2) {
+            let e = seg.point_lookup(&key(&format!("k_{:04}", i)), 200);
+            assert!(e.is_some());
+            assert_eq!(e.unwrap().value, Value::Int(i as i64));
         }
     }
 }
@@ -2679,6 +2916,12 @@ impl SplittingSegmentBuilder {
     /// Set the bloom filter bits per key for output segments.
     pub fn with_bloom_bits(mut self, bits_per_key: usize) -> Self {
         self.inner.bloom_bits_per_key = bits_per_key;
+        self
+    }
+
+    /// Set the compression codec for output segments.
+    pub fn with_compression(mut self, codec: CompressionCodec) -> Self {
+        self.inner.compression = codec;
         self
     }
 

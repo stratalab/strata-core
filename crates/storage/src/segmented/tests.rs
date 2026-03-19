@@ -3713,3 +3713,23 @@ fn monkey_allocation_levels() {
     // L1 with base=8: 8 + 13 = 21 → capped at 20
     assert_eq!(bloom_bits_for_level(1, 8), 20);
 }
+
+#[test]
+fn compression_for_level_returns_expected_codecs() {
+    use super::compression_for_level;
+    use crate::segment_builder::CompressionCodec;
+
+    // L0-L2: hot levels, no compression
+    assert_eq!(compression_for_level(0), CompressionCodec::None);
+    assert_eq!(compression_for_level(1), CompressionCodec::None);
+    assert_eq!(compression_for_level(2), CompressionCodec::None);
+
+    // L3-L5: warm levels, Zstd level 3
+    assert_eq!(compression_for_level(3), CompressionCodec::Zstd(3));
+    assert_eq!(compression_for_level(4), CompressionCodec::Zstd(3));
+    assert_eq!(compression_for_level(5), CompressionCodec::Zstd(3));
+
+    // L6+: cold/bottommost, Zstd level 6
+    assert_eq!(compression_for_level(6), CompressionCodec::Zstd(6));
+    assert_eq!(compression_for_level(7), CompressionCodec::Zstd(6));
+}
