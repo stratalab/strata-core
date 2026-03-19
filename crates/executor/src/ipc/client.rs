@@ -52,10 +52,9 @@ impl IpcClient {
             reason: format!("IPC write error: {}", e),
         })?;
 
-        let response_frame =
-            wire::read_frame(&mut self.reader).map_err(|e| crate::Error::Io {
-                reason: format!("IPC read error: {}", e),
-            })?;
+        let response_frame = wire::read_frame(&mut self.reader).map_err(|e| crate::Error::Io {
+            reason: format!("IPC read error: {}", e),
+        })?;
 
         let response: Response =
             protocol::decode(&response_frame).map_err(|e| crate::Error::Internal {

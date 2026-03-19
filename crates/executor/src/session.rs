@@ -90,8 +90,8 @@ impl Session {
         // We need a dummy Database for the executor, but for IPC sessions
         // the executor is never used — all commands go through the IPC client.
         // Database::cache() is a lightweight in-memory DB used only as a placeholder.
-        let db = Database::cache()
-            .expect("failed to create in-memory placeholder DB (out of memory?)");
+        let db =
+            Database::cache().expect("failed to create in-memory placeholder DB (out of memory?)");
         Self {
             executor: Executor::new_with_mode(db.clone(), access_mode),
             db,
