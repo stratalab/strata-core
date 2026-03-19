@@ -104,6 +104,12 @@ impl Default for SegmentBuilder {
 }
 
 impl SegmentBuilder {
+    /// Set the bloom filter bits per key.
+    pub fn with_bloom_bits(mut self, bits_per_key: usize) -> Self {
+        self.bloom_bits_per_key = bits_per_key;
+        self
+    }
+
     /// Build a segment file from a sorted iterator of memtable entries.
     ///
     /// Writes to a temporary file then atomically renames to `path`.
@@ -2620,6 +2626,12 @@ impl SplittingSegmentBuilder {
             inner: SegmentBuilder::default(),
             target_file_size,
         }
+    }
+
+    /// Set the bloom filter bits per key for output segments.
+    pub fn with_bloom_bits(mut self, bits_per_key: usize) -> Self {
+        self.inner.bloom_bits_per_key = bits_per_key;
+        self
     }
 
     /// Build one or more segment files from a sorted iterator.

@@ -512,7 +512,9 @@ impl SegmentedStore {
         std::fs::create_dir_all(&branch_dir)?;
 
         let next_id = &self.next_segment_id;
-        let splitting_builder = crate::segment_builder::SplittingSegmentBuilder::default();
+        let bloom_bits = super::bloom_bits_for_level(1, 10);
+        let splitting_builder =
+            crate::segment_builder::SplittingSegmentBuilder::default().with_bloom_bits(bloom_bits);
         let outputs = splitting_builder.build_split(compaction_iter, |_split_idx| {
             let id = next_id.fetch_add(1, Ordering::Relaxed);
             branch_dir.join(format!("{}.sst", id))
@@ -733,7 +735,9 @@ impl SegmentedStore {
         std::fs::create_dir_all(&branch_dir)?;
 
         let next_id = &self.next_segment_id;
-        let splitting_builder = crate::segment_builder::SplittingSegmentBuilder::default();
+        let bloom_bits = super::bloom_bits_for_level(level + 1, 10);
+        let splitting_builder =
+            crate::segment_builder::SplittingSegmentBuilder::default().with_bloom_bits(bloom_bits);
 
         // Build grandparent-aware split predicate.
         //

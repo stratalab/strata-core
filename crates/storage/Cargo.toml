@@ -20,6 +20,7 @@ zstd = "0.13"
 parking_lot = { workspace = true }
 arc-swap = "1"
 tracing = { workspace = true }
+xxhash-rust = { workspace = true }
 
 [dev-dependencies]
 proptest = "1.7.0"

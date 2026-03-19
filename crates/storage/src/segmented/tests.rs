@@ -3677,3 +3677,39 @@ fn pick_and_compact_ephemeral_noop() {
     let result = store.pick_and_compact(&b, 0).unwrap();
     assert!(result.is_none());
 }
+
+#[test]
+fn monkey_allocation_levels() {
+    use super::bloom_bits_for_level;
+
+    // L0 always gets base bits (flushed from memtable, short-lived)
+    assert_eq!(bloom_bits_for_level(0, 10), 10);
+    // L1: bonus = floor(3.3 * (6-1-1)) = floor(3.3*4) = 13, 10+13=23 → capped at 20
+    assert_eq!(bloom_bits_for_level(1, 10), 20);
+    // L2: bonus = floor(3.3 * 3) = 9, so 10+9=19
+    assert_eq!(bloom_bits_for_level(2, 10), 19);
+    // L3: bonus = floor(3.3 * 2) = 6, so 10+6=16
+    assert_eq!(bloom_bits_for_level(3, 10), 16);
+    // L4: bonus = floor(3.3 * 1) = 3, so 10+3=13
+    assert_eq!(bloom_bits_for_level(4, 10), 13);
+    // L5: bonus = floor(3.3 * 0) = 0, so 10
+    assert_eq!(bloom_bits_for_level(5, 10), 10);
+    // L6: (6-1-6) saturates to 0, so 10
+    assert_eq!(bloom_bits_for_level(6, 10), 10);
+
+    // Monotonicity: upper levels always get >= lower levels
+    for level in 1..7 {
+        assert!(
+            bloom_bits_for_level(level, 10) >= bloom_bits_for_level(level + 1, 10),
+            "L{} should get >= bits than L{}",
+            level,
+            level + 1
+        );
+    }
+
+    // Different base_bits
+    assert_eq!(bloom_bits_for_level(0, 8), 8);
+    assert_eq!(bloom_bits_for_level(6, 8), 8);
+    // L1 with base=8: 8 + 13 = 21 → capped at 20
+    assert_eq!(bloom_bits_for_level(1, 8), 20);
+}
