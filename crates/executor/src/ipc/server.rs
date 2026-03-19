@@ -33,11 +33,7 @@ impl IpcServer {
     ///
     /// Spawns a listener thread that accepts connections. Each connection
     /// gets a dedicated handler thread with its own `Session`.
-    pub fn start(
-        data_dir: &Path,
-        db: Arc<Database>,
-        access_mode: AccessMode,
-    ) -> io::Result<Self> {
+    pub fn start(data_dir: &Path, db: Arc<Database>, access_mode: AccessMode) -> io::Result<Self> {
         let socket_path = data_dir.join("strata.sock");
         let pid_path = data_dir.join("strata.pid");
 
@@ -61,17 +57,18 @@ impl IpcServer {
         let shutdown_clone = shutdown.clone();
         let socket_path_clone = socket_path.clone();
 
-        let listener_handle = thread::Builder::new()
-            .name("ipc-listener".into())
-            .spawn(move || {
-                Self::listener_loop(
-                    listener,
-                    db,
-                    access_mode,
-                    shutdown_clone,
-                    socket_path_clone,
-                );
-            })?;
+        let listener_handle =
+            thread::Builder::new()
+                .name("ipc-listener".into())
+                .spawn(move || {
+                    Self::listener_loop(
+                        listener,
+                        db,
+                        access_mode,
+                        shutdown_clone,
+                        socket_path_clone,
+                    );
+                })?;
 
         Ok(Self {
             socket_path,
@@ -156,15 +153,16 @@ impl IpcServer {
                     // Set a read timeout so handler threads can check the
                     // shutdown flag periodically instead of blocking forever.
                     stream.set_nonblocking(false).ok();
-                    stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).ok();
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                        .ok();
                     let db = db.clone();
                     let shutdown = shutdown.clone();
                     match thread::Builder::new()
                         .name("ipc-handler".into())
                         .spawn(move || {
                             Self::handle_connection(stream, db, access_mode, shutdown);
-                        })
-                    {
+                        }) {
                         Ok(handle) => {
                             handler_threads.push(handle);
                         }

@@ -14,7 +14,10 @@ pub fn write_frame(stream: &mut impl Write, payload: &[u8]) -> io::Result<()> {
     if len > MAX_FRAME_SIZE as usize {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("frame payload too large: {} bytes (max {})", len, MAX_FRAME_SIZE),
+            format!(
+                "frame payload too large: {} bytes (max {})",
+                len, MAX_FRAME_SIZE
+            ),
         ));
     }
     let len_bytes = (len as u32).to_be_bytes();
