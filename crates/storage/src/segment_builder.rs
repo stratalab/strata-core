@@ -154,6 +154,11 @@ impl SegmentBuilder {
 
         let mut file_offset = KV_HEADER_SIZE as u64;
 
+        // Pending index entry from previous block: (last_key, offset, data_len).
+        // We defer index entry creation until the next block's first key is known,
+        // so we can shorten the index key to the shortest separator.
+        let mut pending_index: Option<(Vec<u8>, u64, u32)> = None;
+
         for (ik, entry) in iter {
             let commit_id = ik.commit_id();
             commit_min = commit_min.min(commit_id);
@@ -195,10 +200,18 @@ impl SegmentBuilder {
                 append_restart_trailer(&mut block_buf, &restart_offsets);
 
                 let bfk = block_first_key.take().unwrap();
+                let block_last = prev_key.clone(); // last key written to this block
+
+                // Resolve pending entry from previous block
+                if let Some((pending_last, offset, len)) = pending_index.take() {
+                    let shortened = shorten_index_key(&pending_last, &bfk);
+                    index_entries.push((shortened, offset, len));
+                }
+
                 let framed_size =
                     write_framed_block_compressed(&mut w, BLOCK_TYPE_DATA, &block_buf, true)?;
                 let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
-                index_entries.push((bfk, file_offset, on_disk_data_len));
+                pending_index = Some((block_last, file_offset, on_disk_data_len));
                 file_offset += framed_size as u64;
                 block_buf.clear();
                 restart_offsets.clear();
@@ -222,12 +235,27 @@ impl SegmentBuilder {
             append_restart_trailer(&mut block_buf, &restart_offsets);
 
             let bfk = block_first_key.take().unwrap_or_default();
+            let block_last = prev_key.clone();
+
+            // Resolve pending entry from previous block
+            if let Some((pending_last, offset, len)) = pending_index.take() {
+                let shortened = shorten_index_key(&pending_last, &bfk);
+                index_entries.push((shortened, offset, len));
+            }
+
             let framed_size =
                 write_framed_block_compressed(&mut w, BLOCK_TYPE_DATA, &block_buf, true)?;
             let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
-            index_entries.push((bfk, file_offset, on_disk_data_len));
+            let shortened = shorten_final_index_key(&block_last);
+            index_entries.push((shortened, file_offset, on_disk_data_len));
             file_offset += framed_size as u64;
             block_buf.clear();
+        }
+
+        // Handle trailing pending entry (single-block segment)
+        if let Some((pending_last, offset, len)) = pending_index.take() {
+            let shortened = shorten_final_index_key(&pending_last);
+            index_entries.push((shortened, offset, len));
         }
 
         // Handle empty segment
@@ -754,6 +782,88 @@ pub(crate) fn decode_entry(data: &[u8]) -> Option<(InternalKey, bool, Value, u64
 
 fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
     a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
+}
+
+// ---------------------------------------------------------------------------
+// Index key shortening (Epic 29)
+// ---------------------------------------------------------------------------
+
+/// Find the shortest separator between `a` and `b` such that `a <= result < b`.
+///
+/// RocksDB-style: at the first differing byte, if incrementing `a`'s byte
+/// still yields a value strictly less than `b`'s byte, truncate and return.
+fn shortest_separator(a: &[u8], b: &[u8]) -> Vec<u8> {
+    let prefix_len = common_prefix_len(a, b);
+
+    // a is a prefix of b, or they are equal — no shortening possible
+    if prefix_len >= a.len() || prefix_len >= b.len() {
+        return a.to_vec();
+    }
+
+    let diff_byte = a[prefix_len];
+    // Guard: avoid u8 overflow when diff_byte == 0xFF (can happen if a > b,
+    // which shouldn't occur but we want to be safe in debug builds).
+    if diff_byte < 0xFF && diff_byte + 1 < b[prefix_len] {
+        let mut result = a[..prefix_len + 1].to_vec();
+        *result.last_mut().unwrap() = diff_byte + 1;
+        result
+    } else {
+        a.to_vec()
+    }
+}
+
+/// Find the shortest key that is >= `a` by incrementing the first non-0xFF byte.
+///
+/// Used for the last block in a segment where there is no upper bound.
+fn shortest_successor(a: &[u8]) -> Vec<u8> {
+    for (i, &byte) in a.iter().enumerate() {
+        if byte != 0xFF {
+            let mut result = a[..i + 1].to_vec();
+            *result.last_mut().unwrap() = byte + 1;
+            return result;
+        }
+    }
+    // All 0xFF — return unchanged
+    a.to_vec()
+}
+
+/// Shorten an index key given the last key of the previous block and the first
+/// key of the next block. Operates on the typed_key_prefix portion (everything
+/// except trailing 8-byte commit_id) and re-appends `u64::MAX` as suffix.
+fn shorten_index_key(prev_last: &[u8], next_first: &[u8]) -> Vec<u8> {
+    if prev_last.len() < 8 || next_first.len() < 8 {
+        return prev_last.to_vec();
+    }
+    let a_prefix = &prev_last[..prev_last.len() - 8];
+    let b_prefix = &next_first[..next_first.len() - 8];
+    let shortened = shortest_separator(a_prefix, b_prefix);
+    if shortened.as_slice() == a_prefix {
+        // Prefix was NOT shortened (keys differ only in commit_id, or the
+        // differing byte was adjacent).  Fall back to the full original key
+        // to preserve the invariant: prev_last <= separator < next_first.
+        // Appending u64::MAX here would produce a separator > next_first
+        // when the typed_key_prefix portions are identical.
+        prev_last.to_vec()
+    } else {
+        // Prefix was genuinely shortened to a value strictly between the two
+        // prefixes.  Append u64::MAX (sorts before all real commit_ids in
+        // Strata's descending order) so the separator >= prev_last.
+        let mut result = shortened;
+        result.extend_from_slice(&(!0_u64).to_be_bytes());
+        result
+    }
+}
+
+/// Shorten the index key for the last block in a segment.
+/// Uses `shortest_successor` on the typed_key_prefix, re-appends `u64::MAX`.
+fn shorten_final_index_key(last_key: &[u8]) -> Vec<u8> {
+    if last_key.len() < 8 {
+        return last_key.to_vec();
+    }
+    let prefix = &last_key[..last_key.len() - 8];
+    let mut shortened = shortest_successor(prefix);
+    shortened.extend_from_slice(&(!0_u64).to_be_bytes());
+    shortened
 }
 
 fn encode_varint32(buf: &mut Vec<u8>, mut val: u32) {
@@ -2148,6 +2258,342 @@ mod tests {
         assert_eq!(e.commit_id, 1);
 
         assert!(seg.point_lookup(&k, 0).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Index key shortening tests (Epic 29)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_shortest_separator_basic() {
+        // a[2]=c, b[2]=e, c+1=d, d < e → true → "abd"
+        assert_eq!(shortest_separator(b"abcd", b"abef"), b"abd");
+    }
+
+    #[test]
+    fn test_shortest_separator_adjacent() {
+        // a[2]=c, b[2]=d, c+1=d, d < d → false → unchanged
+        assert_eq!(shortest_separator(b"abc", b"abd"), b"abc".to_vec());
+    }
+
+    #[test]
+    fn test_shortest_separator_prefix_relationship() {
+        // "foo" is a prefix of "foobar" → unchanged
+        assert_eq!(shortest_separator(b"foo", b"foobar"), b"foo".to_vec());
+    }
+
+    #[test]
+    fn test_shortest_separator_long_shared_prefix() {
+        let mut a = vec![b'x'; 32];
+        let mut b = vec![b'x'; 32];
+        a.push(b'a');
+        b.push(b'z');
+        let result = shortest_separator(&a, &b);
+        // a[32]=a, b[32]=z, a+1=b, b < z → true → 33 bytes with last = 'b'
+        assert_eq!(result.len(), 33);
+        assert_eq!(result[32], b'b');
+    }
+
+    #[test]
+    fn test_shortest_successor_basic() {
+        // First non-0xFF byte is 'a' at index 0, increment → 'b', truncate
+        assert_eq!(shortest_successor(b"abc"), b"b".to_vec());
+    }
+
+    #[test]
+    fn test_shortest_successor_trailing_ff() {
+        // First non-0xFF byte is 'a' at index 0, increment → 'b', truncate
+        assert_eq!(shortest_successor(b"ab\xff"), b"b".to_vec());
+    }
+
+    #[test]
+    fn test_shortest_successor_all_ff() {
+        assert_eq!(shortest_successor(b"\xff\xff"), b"\xff\xff".to_vec());
+    }
+
+    #[test]
+    fn test_shorten_index_key_preserves_suffix() {
+        let mut a = b"abcd".to_vec();
+        a.extend_from_slice(&42_u64.to_be_bytes());
+        let mut b = b"abef".to_vec();
+        b.extend_from_slice(&99_u64.to_be_bytes());
+
+        let result = shorten_index_key(&a, &b);
+        // Prefix shortened: "abd", then u64::MAX suffix
+        assert!(result.len() >= 8);
+        let suffix = &result[result.len() - 8..];
+        assert_eq!(suffix, &(!0_u64).to_be_bytes());
+        let prefix = &result[..result.len() - 8];
+        assert_eq!(prefix, b"abd");
+    }
+
+    #[test]
+    fn test_shorten_index_key_same_prefix_fallback() {
+        // When typed_key_prefix is identical (keys differ only in commit_id),
+        // shorten_index_key must fall back to the full prev_last key to
+        // preserve the invariant: separator < next_first.
+        let prefix = b"same_prefix";
+        let mut a = prefix.to_vec();
+        a.extend_from_slice(&(!50_u64).to_be_bytes()); // commit_id 50
+        let mut b = prefix.to_vec();
+        b.extend_from_slice(&(!49_u64).to_be_bytes()); // commit_id 49
+
+        let result = shorten_index_key(&a, &b);
+        // Must equal the full prev_last key, NOT prefix + u64::MAX
+        assert_eq!(result, a);
+        // Verify the invariant: a <= result < b
+        assert!(result.as_slice() >= a.as_slice());
+        assert!(result.as_slice() < b.as_slice());
+    }
+
+    #[test]
+    fn test_shorten_index_key_adjacent_byte_no_shorten() {
+        // Keys like "key_0005" vs "key_0006" differ by exactly 1 at the
+        // differing byte, so shortest_separator can't shorten. Must fall
+        // back to the full key.
+        let mut a = b"key_0005".to_vec();
+        a.extend_from_slice(&(!1_u64).to_be_bytes());
+        let mut b = b"key_0006".to_vec();
+        b.extend_from_slice(&(!2_u64).to_be_bytes());
+
+        let result = shorten_index_key(&a, &b);
+        // Can't shorten: '5'+1 = '6', '6' < '6' is false → full key
+        assert_eq!(result, a);
+    }
+
+    #[test]
+    fn test_shorten_index_key_invariant_holds() {
+        // Test the separator invariant for various key pairs.
+        // All prefixes must have equal length so that the appended commit_id
+        // suffix doesn't create byte-order anomalies (in real segments, keys
+        // with different typed_key_prefix lengths never have the shorter one
+        // sort before the longer one because commit_id bytes are near 0xFF).
+        let cases: Vec<(&[u8], &[u8])> = vec![
+            (b"aaa", b"zzz"),         // large gap → shortened
+            (b"abc", b"abd"),         // adjacent → not shortened
+            (b"abc", b"abc"),         // identical prefix → not shortened (same commit_id scenario)
+            (b"tes", b"tex"),         // 's' vs 'x': shortened to "tet"
+            (b"key0042", b"key0100"), // realistic sequential keys with gap
+        ];
+        for (a_raw, b_raw) in cases {
+            let mut a = a_raw.to_vec();
+            a.extend_from_slice(&(!10_u64).to_be_bytes());
+            let mut b = b_raw.to_vec();
+            b.extend_from_slice(&(!20_u64).to_be_bytes());
+
+            // Skip cases where a >= b (identical prefix with different commit_id
+            // ordering is handled by the same-prefix fallback path).
+            if a.as_slice() >= b.as_slice() {
+                // For same-prefix case, verify fallback gives a == separator
+                let sep = shorten_index_key(&a, &b);
+                assert_eq!(sep, a, "same-prefix case must return prev_last");
+                continue;
+            }
+
+            let sep = shorten_index_key(&a, &b);
+            assert!(
+                sep.as_slice() >= a.as_slice(),
+                "separator {:?} must be >= a {:?} (prefixes {:?} vs {:?})",
+                sep,
+                a,
+                a_raw,
+                b_raw
+            );
+            assert!(
+                sep.as_slice() < b.as_slice(),
+                "separator {:?} must be < b {:?} (prefixes {:?} vs {:?})",
+                sep,
+                b,
+                a_raw,
+                b_raw
+            );
+        }
+    }
+
+    #[test]
+    fn test_shorten_index_key_roundtrip_unique_keys() {
+        // Build a multi-block segment with unique keys, verify all lookups.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shortened.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..200 {
+            mt.put(
+                &key(&format!("key_{:04}", i)),
+                i as u64 + 1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+
+        let builder = SegmentBuilder {
+            data_block_size: 512,
+            bloom_bits_per_key: 10,
+        };
+        builder.build_from_iter(mt.iter_all(), &path).unwrap();
+
+        let seg = crate::segment::KVSegment::open(&path).unwrap();
+
+        for i in 0..200 {
+            let k = key(&format!("key_{:04}", i));
+            let e = seg.point_lookup(&k, i as u64 + 1);
+            assert!(e.is_some(), "key_{:04} not found", i);
+            assert_eq!(e.unwrap().value, Value::Int(i as i64));
+        }
+    }
+
+    #[test]
+    fn test_shorten_index_key_roundtrip_multi_version() {
+        // Critical edge case: many versions of the same key spanning multiple
+        // blocks. Adjacent blocks share the same typed_key_prefix, so the
+        // separator must fall back to the full key (not prefix + u64::MAX).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("multi_version.sst");
+
+        let mt = Memtable::new(0);
+        let k = key("hotkey");
+        // Write 200 versions of the same key → will span many 512-byte blocks
+        for commit in 1..=200_u64 {
+            mt.put(&k, commit, Value::Int(commit as i64), false);
+        }
+        mt.freeze();
+
+        let builder = SegmentBuilder {
+            data_block_size: 512,
+            bloom_bits_per_key: 10,
+        };
+        builder.build_from_iter(mt.iter_all(), &path).unwrap();
+
+        let seg = crate::segment::KVSegment::open(&path).unwrap();
+
+        // Verify every version is accessible at its own snapshot
+        for commit in 1..=200_u64 {
+            let e = seg.point_lookup(&k, commit);
+            assert!(e.is_some(), "commit {} not found", commit);
+            let entry = e.unwrap();
+            assert_eq!(entry.value, Value::Int(commit as i64));
+            assert_eq!(entry.commit_id, commit);
+        }
+
+        // Also verify the latest snapshot returns the newest version
+        let e = seg.point_lookup(&k, 200).unwrap();
+        assert_eq!(e.value, Value::Int(200));
+    }
+
+    #[test]
+    fn test_shorten_index_key_roundtrip_mixed() {
+        // Mix of unique keys and multi-version keys to exercise both
+        // shortening paths in the same segment.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.sst");
+
+        let mt = Memtable::new(0);
+        // 50 unique keys
+        for i in 0..50 {
+            mt.put(
+                &key(&format!("alpha_{:04}", i)),
+                1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        // 100 versions of one key
+        let hot = key("beta_hot");
+        for c in 1..=100_u64 {
+            mt.put(&hot, c, Value::Int(c as i64), false);
+        }
+        // 50 more unique keys
+        for i in 0..50 {
+            mt.put(
+                &key(&format!("gamma_{:04}", i)),
+                1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+
+        let builder = SegmentBuilder {
+            data_block_size: 512,
+            bloom_bits_per_key: 10,
+        };
+        builder.build_from_iter(mt.iter_all(), &path).unwrap();
+
+        let seg = crate::segment::KVSegment::open(&path).unwrap();
+
+        // Check unique alpha keys
+        for i in 0..50 {
+            let k = key(&format!("alpha_{:04}", i));
+            let e = seg.point_lookup(&k, 1);
+            assert!(e.is_some(), "alpha_{:04} not found", i);
+        }
+        // Check hot key versions
+        for c in 1..=100_u64 {
+            let e = seg.point_lookup(&hot, c);
+            assert!(e.is_some(), "beta_hot commit {} not found", c);
+            assert_eq!(e.unwrap().commit_id, c);
+        }
+        // Check unique gamma keys
+        for i in 0..50 {
+            let k = key(&format!("gamma_{:04}", i));
+            let e = seg.point_lookup(&k, 1);
+            assert!(e.is_some(), "gamma_{:04} not found", i);
+        }
+    }
+
+    #[test]
+    fn test_index_size_reduction() {
+        // Use keys with large gaps in the user key portion to ensure actual
+        // shortening occurs. Keys like "a_<pad>", "c_<pad>", "e_<pad>"...
+        // give gaps of 2 at the differing byte, enabling shortening.
+        let dir = tempfile::tempdir().unwrap();
+
+        let mt = Memtable::new(0);
+        let letters: Vec<char> = ('a'..='z').collect();
+        let mut idx = 0u64;
+        for &c1 in &letters {
+            for &c2 in &letters {
+                // Each key has a long suffix to inflate the full key size,
+                // making the shortening savings more visible.
+                let user_key = format!("{}{}_padding_to_make_key_longer_{:04}", c1, c2, idx);
+                mt.put(&key(&user_key), idx + 1, Value::Int(idx as i64), false);
+                idx += 1;
+            }
+        }
+        mt.freeze();
+
+        let builder = SegmentBuilder {
+            data_block_size: 512,
+            bloom_bits_per_key: 10,
+        };
+
+        let path_v3 = dir.path().join("full_keys.sst");
+        let meta_v3 = builder.build_from_iter_v3(mt.iter_all(), &path_v3).unwrap();
+
+        let path_v5 = dir.path().join("short_keys.sst");
+        let meta_v5 = builder.build_from_iter(mt.iter_all(), &path_v5).unwrap();
+
+        assert!(
+            meta_v5.file_size < meta_v3.file_size,
+            "shortened segment ({}) should be strictly smaller than full-key segment ({})",
+            meta_v5.file_size,
+            meta_v3.file_size,
+        );
+
+        // Verify the shortened segment is still fully readable
+        let seg = crate::segment::KVSegment::open(&path_v5).unwrap();
+        idx = 0;
+        for &c1 in &letters {
+            for &c2 in &letters {
+                let user_key = format!("{}{}_padding_to_make_key_longer_{:04}", c1, c2, idx);
+                let k = key(&user_key);
+                let e = seg.point_lookup(&k, idx + 1);
+                assert!(e.is_some(), "key {} not found", user_key);
+                assert_eq!(e.unwrap().value, Value::Int(idx as i64));
+                idx += 1;
+            }
+        }
     }
 }
 

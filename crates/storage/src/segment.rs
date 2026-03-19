@@ -235,10 +235,13 @@ impl KVSegment {
 
         // 2. Find candidate data block via binary search on index.
         //
-        // Index keys are full InternalKey bytes (first key of each block).
-        // Because InternalKey encodes commit_id in descending order, the seek
-        // key `(key, u64::MAX)` sorts BEFORE all actual entries for that key.
-        // So Err(0) does NOT mean the key is absent — it may be in block 0.
+        // Index keys are shortened separators (or full InternalKey bytes for
+        // legacy/unshortened entries).  The seek key `(key, u64::MAX)` sorts
+        // BEFORE all actual entries for that key due to descending commit_id
+        // encoding.  Err(0) does NOT mean the key is absent — it may be in
+        // block 0.  The forward scan below handles off-by-one from the binary
+        // search when index keys are separators (upper bounds) rather than
+        // first keys.
         let seek_ik = InternalKey::encode(key, u64::MAX);
         let seek_bytes = seek_ik.as_bytes();
 
@@ -255,13 +258,21 @@ impl KVSegment {
         for bi in block_idx..self.index.len() {
             let ie = &self.index[bi];
 
-            // If this block's first key has a typed_key_prefix > our typed_key, stop
+            // Check whether we can stop scanning.  Index keys are shortened
+            // separators: index[bi-1] is an upper bound for block bi-1 and a
+            // lower bound for block bi.  If its prefix is already past our
+            // typed_key, no later block can contain the key.
+            //
+            // This works for both shortened separators AND legacy full-key
+            // index entries (raw byte comparison is valid for both).
             if bi > block_idx {
-                let block_first_ik = match InternalKey::try_from_bytes(ie.key.clone()) {
-                    Some(ik) => ik,
-                    None => break, // Corrupt index key — stop scanning
-                };
-                if block_first_ik.typed_key_prefix() > typed_key.as_slice() {
+                let prev_key = &self.index[bi - 1].key;
+                if prev_key.len() >= 8 {
+                    let prefix = &prev_key[..prev_key.len() - 8];
+                    if prefix > typed_key.as_slice() {
+                        break;
+                    }
+                } else {
                     break;
                 }
             }
