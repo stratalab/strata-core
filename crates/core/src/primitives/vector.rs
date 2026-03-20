@@ -1380,7 +1380,11 @@ mod tests {
     #[test]
     fn test_float_eq_f32_roundtrip() {
         // Simulate f64 -> f32 -> f64 round-trip (MessagePack serialization)
-        let values = [0.1f64, 0.3, 0.95, 1.23456789, 100.7, 0.000001];
+        // Include positive, negative, small, and large values
+        let values = [
+            0.1f64, 0.3, 0.95, 1.23456789, 100.7, 0.000001, -0.95, -42.5, 1e10, -1e10, 0.00001,
+            99999.99,
+        ];
         for v in values {
             let roundtripped = v as f32 as f64;
             assert!(
@@ -1392,31 +1396,88 @@ mod tests {
 
     #[test]
     fn test_float_eq_rejects_different_values() {
+        // Values that should NOT match
         assert!(!float_eq(0.95, 0.96));
         assert!(!float_eq(42.0, 43.0));
         assert!(!float_eq(1.0, 2.0));
         assert!(!float_eq(0.0, 1.0));
+        assert!(!float_eq(-1.0, 1.0));
+        assert!(!float_eq(100.0, 101.0));
+        // Near zero: 0 vs 0.001 should NOT match (well above tolerance)
+        assert!(!float_eq(0.0, 0.001));
+        assert!(!float_eq(0.0, -0.001));
     }
 
     #[test]
     fn test_float_eq_near_zero() {
-        // Values near zero should use absolute tolerance
+        // Values very close to zero should match
         assert!(float_eq(0.0, 1e-7));
         assert!(float_eq(1e-7, 0.0));
+        assert!(float_eq(0.0, -1e-7));
+        // But not values clearly different from zero
+        assert!(!float_eq(0.0, 1e-5));
         assert!(!float_eq(0.0, 1.0));
+    }
+
+    #[test]
+    fn test_float_eq_symmetry() {
+        // float_eq must be symmetric: float_eq(a, b) == float_eq(b, a)
+        let pairs = [
+            (0.95, 0.95f64 as f32 as f64),
+            (0.0, 1e-7),
+            (42.0, 43.0),
+            (-1.0, -1.0f64 as f32 as f64),
+        ];
+        for (a, b) in pairs {
+            assert_eq!(
+                float_eq(a, b),
+                float_eq(b, a),
+                "float_eq must be symmetric for ({a}, {b})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_float_eq_integer_values_exact() {
+        // Integer values stored as f64 should always match exactly
+        // (f32 can represent integers up to 2^24 exactly)
+        for i in [0, 1, 42, 100, 1000, 16777216] {
+            let v = i as f64;
+            let roundtripped = v as f32 as f64;
+            assert!(
+                float_eq(v, roundtripped),
+                "integer {i} must survive f32 round-trip"
+            );
+        }
     }
 
     #[test]
     fn test_json_scalar_matches_f32_roundtrip() {
         // End-to-end: JsonScalar filter should match value after f32 round-trip
-        let original = 0.95f64;
-        let roundtripped = original as f32 as f64; // ~0.949999988079071
-        let scalar = JsonScalar::Number(original);
-        let json_val =
-            serde_json::Value::Number(serde_json::Number::from_f64(roundtripped).unwrap());
-        assert!(
-            scalar.matches_json(&json_val),
-            "JsonScalar::Number({original}) should match {roundtripped} after f32 round-trip"
-        );
+        // Test the specific values called out in the issue
+        let problematic_values = [0.1f64, 0.3, 0.95, -0.95, 1e5, 0.000123];
+        for original in problematic_values {
+            let roundtripped = original as f32 as f64;
+            let scalar = JsonScalar::Number(original);
+            let json_val =
+                serde_json::Value::Number(serde_json::Number::from_f64(roundtripped).unwrap());
+            assert!(
+                scalar.matches_json(&json_val),
+                "JsonScalar::Number({original}) should match {roundtripped} after f32 round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn test_json_scalar_rejects_clearly_different() {
+        // Ensure the tolerance doesn't cause false positives for different values
+        let scalar = JsonScalar::Number(42.0);
+        assert!(!scalar.matches_json(&serde_json::json!(43.0)));
+        assert!(!scalar.matches_json(&serde_json::json!(42.1)));
+        assert!(!scalar.matches_json(&serde_json::json!(41.9)));
+
+        let scalar_zero = JsonScalar::Number(0.0);
+        assert!(!scalar_zero.matches_json(&serde_json::json!(0.01)));
+        assert!(!scalar_zero.matches_json(&serde_json::json!(-0.01)));
     }
 }
