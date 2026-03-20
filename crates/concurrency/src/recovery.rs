@@ -258,6 +258,7 @@ mod tests {
     use super::*;
     use crate::payload::TransactionPayload;
     use std::sync::Arc;
+    use strata_core::traits::Storage;
     use strata_core::types::{BranchId, Key, Namespace};
     use strata_core::value::Value;
     use strata_durability::codec::IdentityCodec;
@@ -299,6 +300,31 @@ mod tests {
             txn_id,
             *branch_id.as_bytes(),
             now_micros(),
+            payload.to_bytes(),
+        );
+        wal.append(&record).unwrap();
+        wal.flush().unwrap();
+    }
+
+    /// Helper: write a committed transaction to the WAL with a specific timestamp
+    fn write_txn_with_timestamp(
+        wal: &mut WalWriter,
+        txn_id: u64,
+        branch_id: BranchId,
+        puts: Vec<(Key, Value)>,
+        deletes: Vec<Key>,
+        version: u64,
+        timestamp: u64,
+    ) {
+        let payload = TransactionPayload {
+            version,
+            puts,
+            deletes,
+        };
+        let record = WalRecord::new(
+            txn_id,
+            *branch_id.as_bytes(),
+            timestamp,
             payload.to_bytes(),
         );
         wal.append(&record).unwrap();
@@ -1048,5 +1074,199 @@ mod tests {
             assert_eq!(stored.value, Value::Int(i as i64 * 10));
             assert_eq!(stored.version.as_u64(), i);
         }
+    }
+
+    // ========================================
+    // Timestamp Preservation Tests (#1619)
+    // ========================================
+
+    #[test]
+    fn test_recovery_preserves_commit_timestamp() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        // Use a fixed timestamp far in the past (2020-01-01T00:00:00Z)
+        let original_ts: u64 = 1_577_836_800_000_000;
+
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            write_txn_with_timestamp(
+                &mut wal,
+                1,
+                branch_id,
+                vec![(Key::new_kv(ns.clone(), "key1"), Value::Int(42))],
+                vec![],
+                100,
+                original_ts,
+            );
+        }
+
+        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let result = coordinator.recover().unwrap();
+
+        // Verify the stored timestamp matches the original, NOT recovery time
+        let stored = result
+            .storage
+            .get_versioned(&Key::new_kv(ns, "key1"), u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.value, Value::Int(42));
+        assert_eq!(
+            stored.timestamp.as_micros(),
+            original_ts,
+            "Recovery should preserve the original commit timestamp, not use Timestamp::now()"
+        );
+    }
+
+    #[test]
+    fn test_recovery_preserves_different_timestamps_per_txn() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        let ts1: u64 = 1_000_000_000_000; // 1s in micros
+        let ts2: u64 = 2_000_000_000_000; // 2s in micros
+
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            write_txn_with_timestamp(
+                &mut wal,
+                1,
+                branch_id,
+                vec![(Key::new_kv(ns.clone(), "early"), Value::Int(1))],
+                vec![],
+                100,
+                ts1,
+            );
+            write_txn_with_timestamp(
+                &mut wal,
+                2,
+                branch_id,
+                vec![(Key::new_kv(ns.clone(), "later"), Value::Int(2))],
+                vec![],
+                200,
+                ts2,
+            );
+        }
+
+        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let result = coordinator.recover().unwrap();
+
+        let early = result
+            .storage
+            .get_versioned(&Key::new_kv(ns.clone(), "early"), u64::MAX)
+            .unwrap()
+            .unwrap();
+        let later = result
+            .storage
+            .get_versioned(&Key::new_kv(ns, "later"), u64::MAX)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(early.timestamp.as_micros(), ts1);
+        assert_eq!(later.timestamp.as_micros(), ts2);
+        assert!(
+            early.timestamp.as_micros() < later.timestamp.as_micros(),
+            "Recovered timestamps should preserve temporal ordering"
+        );
+    }
+
+    #[test]
+    fn test_recovery_delete_preserves_timestamp() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let original_ts: u64 = 1_577_836_800_000_000;
+
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            // Write then delete with a known timestamp
+            write_txn_with_timestamp(
+                &mut wal,
+                1,
+                branch_id,
+                vec![(Key::new_kv(ns.clone(), "to_delete"), Value::Int(1))],
+                vec![],
+                100,
+                original_ts,
+            );
+            write_txn_with_timestamp(
+                &mut wal,
+                2,
+                branch_id,
+                vec![],
+                vec![Key::new_kv(ns.clone(), "to_delete")],
+                200,
+                original_ts + 1_000_000, // 1 second later
+            );
+        }
+
+        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let result = coordinator.recover().unwrap();
+
+        // time_range should reflect the original timestamps, not recovery time
+        let range = result.storage.time_range(branch_id).unwrap();
+        assert!(range.is_some(), "Branch should have a time range");
+        let (min_ts, max_ts) = range.unwrap();
+        assert_eq!(min_ts, original_ts);
+        assert_eq!(max_ts, original_ts + 1_000_000);
+    }
+
+    #[test]
+    fn test_recovery_timestamp_not_clustered_at_now() {
+        // Regression test: before #1619 fix, all recovered entries would have
+        // timestamps clustered near Timestamp::now() (recovery time).
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        // Timestamps spread across different "days"
+        let day1: u64 = 1_577_836_800_000_000; // 2020-01-01
+        let day2: u64 = 1_577_923_200_000_000; // 2020-01-02
+
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            write_txn_with_timestamp(
+                &mut wal,
+                1,
+                branch_id,
+                vec![(Key::new_kv(ns.clone(), "day1_key"), Value::Int(1))],
+                vec![],
+                100,
+                day1,
+            );
+            write_txn_with_timestamp(
+                &mut wal,
+                2,
+                branch_id,
+                vec![(Key::new_kv(ns.clone(), "day2_key"), Value::Int(2))],
+                vec![],
+                200,
+                day2,
+            );
+        }
+
+        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let result = coordinator.recover().unwrap();
+
+        let range = result.storage.time_range(branch_id).unwrap().unwrap();
+        let span = range.1 - range.0;
+
+        // Original span is ~86400 seconds (1 day). If timestamps were clustered
+        // at recovery time, span would be near 0.
+        assert!(
+            span > 80_000_000_000, // > 80,000 seconds in micros
+            "Recovered time range span should reflect original data, not recovery time. Got span: {} micros",
+            span,
+        );
     }
 }
