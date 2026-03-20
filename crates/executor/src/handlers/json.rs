@@ -313,14 +313,7 @@ pub fn json_batch_set(
 
     // Merge engine results
     for (j, orig_idx) in orig_indices.iter().enumerate() {
-        match &engine_results[j] {
-            Ok(version) => {
-                results[*orig_idx].version = Some(extract_version(version));
-            }
-            Err(e) => {
-                results[*orig_idx].error = Some(e.clone());
-            }
-        }
+        results[*orig_idx].version = Some(extract_version(&engine_results[j]));
     }
 
     // Post-commit: fire embed hooks for successful items

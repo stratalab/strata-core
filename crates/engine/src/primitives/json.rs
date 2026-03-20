@@ -390,6 +390,7 @@ impl JsonStore {
                 let mut doc = Self::deserialize_doc(&stored)?;
                 set_at_path(&mut doc.value, path, value)
                     .map_err(|e| StrataError::invalid_input(format!("Path error: {}", e)))?;
+                doc.value.validate().map_err(limit_error_to_error)?;
                 doc.touch();
                 let serialized = Self::serialize_doc(&doc)?;
                 txn.put(key.clone(), serialized)?;
@@ -404,6 +405,7 @@ impl JsonStore {
                         .map_err(|e| StrataError::invalid_input(format!("Path error: {}", e)))?;
                     obj
                 };
+                initial.validate().map_err(limit_error_to_error)?;
                 let doc = JsonDoc::new(doc_id, initial);
                 let serialized = Self::serialize_doc(&doc)?;
                 txn.put(key.clone(), serialized)?;
@@ -451,7 +453,7 @@ impl JsonStore {
         branch_id: &BranchId,
         space: &str,
         entries: Vec<(String, JsonPath, JsonValue)>,
-    ) -> StrataResult<Vec<Result<Version, String>>> {
+    ) -> StrataResult<Vec<Version>> {
         if entries.is_empty() {
             return Ok(Vec::new());
         }
@@ -461,7 +463,7 @@ impl JsonStore {
             for (doc_id, path, value) in &entries {
                 let key = self.key_for(branch_id, space, doc_id);
                 let version = Self::set_in_txn(txn, &key, doc_id, path, value.clone(), true)?;
-                versions.push(Ok(version));
+                versions.push(version);
             }
             Ok(versions)
         })
@@ -1877,8 +1879,6 @@ mod tests {
             .batch_set_or_create(&branch_id, "default", entries)
             .unwrap();
         assert_eq!(results.len(), 2);
-        assert!(results[0].is_ok());
-        assert!(results[1].is_ok());
 
         // Verify persistence
         let v1 = store
@@ -1926,7 +1926,7 @@ mod tests {
         let results = store
             .batch_set_or_create(&branch_id, "default", entries)
             .unwrap();
-        assert_eq!(*results[0].as_ref().unwrap(), Version::counter(2));
+        assert_eq!(results[0], Version::counter(2));
 
         let v = store
             .get(&branch_id, "default", "existing", &JsonPath::root())
