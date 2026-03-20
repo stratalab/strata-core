@@ -1264,4 +1264,97 @@ mod tests {
             span,
         );
     }
+
+    #[test]
+    fn test_recovery_timestamp_zero() {
+        // Edge case: timestamp = 0 can occur if SystemTime::now() fails in
+        // now_micros() fallback. Recovery must handle it without panicking.
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            write_txn_with_timestamp(
+                &mut wal,
+                1,
+                branch_id,
+                vec![(Key::new_kv(ns.clone(), "zero_ts"), Value::Int(1))],
+                vec![],
+                100,
+                0, // timestamp = 0
+            );
+        }
+
+        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let result = coordinator.recover().unwrap();
+
+        let stored = result
+            .storage
+            .get_versioned(&Key::new_kv(ns, "zero_ts"), u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.value, Value::Int(1));
+        assert_eq!(
+            stored.timestamp.as_micros(),
+            0,
+            "Timestamp zero should be preserved, not replaced with now()"
+        );
+    }
+
+    #[test]
+    fn test_recovery_multiple_branches_independent_timestamps() {
+        // Verify each branch maintains independent min/max timestamp tracking
+        // after recovery.
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+
+        let branch_a = BranchId::new();
+        let branch_b = BranchId::new();
+        let ns_a = create_test_namespace(branch_a);
+        let ns_b = create_test_namespace(branch_b);
+
+        let ts_a: u64 = 1_000_000_000_000; // 1s in micros
+        let ts_b: u64 = 5_000_000_000_000; // 5s in micros
+
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            write_txn_with_timestamp(
+                &mut wal,
+                1,
+                branch_a,
+                vec![(Key::new_kv(ns_a.clone(), "key_a"), Value::Int(1))],
+                vec![],
+                100,
+                ts_a,
+            );
+            write_txn_with_timestamp(
+                &mut wal,
+                2,
+                branch_b,
+                vec![(Key::new_kv(ns_b.clone(), "key_b"), Value::Int(2))],
+                vec![],
+                200,
+                ts_b,
+            );
+        }
+
+        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let result = coordinator.recover().unwrap();
+
+        // Branch A's time_range should reflect ts_a only
+        let range_a = result.storage.time_range(branch_a).unwrap().unwrap();
+        assert_eq!(range_a.0, ts_a);
+        assert_eq!(range_a.1, ts_a);
+
+        // Branch B's time_range should reflect ts_b only
+        let range_b = result.storage.time_range(branch_b).unwrap().unwrap();
+        assert_eq!(range_b.0, ts_b);
+        assert_eq!(range_b.1, ts_b);
+
+        // Branches should not contaminate each other
+        assert_ne!(range_a.0, range_b.0);
+    }
 }
