@@ -29,16 +29,19 @@ use tracing::{debug, info, warn};
 ///
 /// # Memory Ordering
 ///
-/// The metric counters (active_count, total_started, total_committed, total_aborted)
+/// `active_count` uses Release on increment and AcqRel on decrement because
+/// it synchronizes `gc_safe_version` updates: when active_count drains to 0,
+/// gc_safe_version advances to allow GC of old versions.
+///
+/// The remaining metric counters (total_started, total_committed, total_aborted)
 /// use Relaxed ordering intentionally because:
 /// 1. They are purely observational metrics for monitoring/debugging
 /// 2. They do not synchronize any other memory operations
 /// 3. Approximate counts are acceptable for metrics purposes
-/// 4. The atomic operations (fetch_add/fetch_sub) guarantee no torn reads/writes
 pub struct TransactionCoordinator {
     /// Transaction manager for ID/version allocation
     manager: TransactionManager,
-    /// Active transaction count (for metrics) - uses Relaxed ordering
+    /// Active transaction count — uses Release/AcqRel for gc_safe_version sync
     active_count: AtomicU64,
     /// Total transactions started - uses Relaxed ordering
     total_started: AtomicU64,
