@@ -868,55 +868,89 @@ impl InvertedIndex {
         // during drain so no postings are inserted between iter() and remove().
         // The active_count check happens AFTER acquiring the lock to avoid a
         // TOCTOU race where concurrent indexing changes the count.
-        let _seal_guard = self.seal_lock.write().unwrap();
+        //
+        // The lock is released BEFORE disk I/O (write_to_file includes fsync
+        // which can block 10-400ms) so that concurrent indexing is not stalled
+        // during the flush. We copy the segment bytes inside the lock and write
+        // them to disk afterwards without holding any lock.
+        let flush_info = {
+            let _seal_guard = self.seal_lock.write().unwrap();
 
-        let active_count = self.active_doc_count.load(Ordering::Relaxed);
-        if active_count == 0 {
-            return;
-        }
+            let active_count = self.active_doc_count.load(Ordering::Relaxed);
+            if active_count == 0 {
+                return;
+            }
 
-        // Drain active segment into sorted term map
-        let mut term_postings: BTreeMap<String, Vec<PostingEntry>> = BTreeMap::new();
+            // Drain active segment into sorted term map
+            let mut term_postings: BTreeMap<String, Vec<PostingEntry>> = BTreeMap::new();
 
-        // Collect and remove all entries from active postings
-        let keys: Vec<String> = self.postings.iter().map(|r| r.key().clone()).collect();
-        for key in keys {
-            if let Some((term, posting_list)) = self.postings.remove(&key) {
-                if !posting_list.entries.is_empty() {
-                    term_postings.insert(term, posting_list.entries);
+            // Collect and remove all entries from active postings
+            let keys: Vec<String> = self.postings.iter().map(|r| r.key().clone()).collect();
+            for key in keys {
+                if let Some((term, posting_list)) = self.postings.remove(&key) {
+                    if !posting_list.entries.is_empty() {
+                        term_postings.insert(term, posting_list.entries);
+                    }
                 }
             }
-        }
-        self.doc_freqs.clear();
+            self.doc_freqs.clear();
 
-        // Compute total doc len from unique doc_ids in the drained postings.
-        // This is more accurate than iterating doc_lengths (which contains
-        // entries from prior seals too).
-        let mut seen_docs: HashSet<u32> = HashSet::new();
-        let mut active_total_doc_len: u64 = 0;
-        for entries in term_postings.values() {
-            for entry in entries {
-                if seen_docs.insert(entry.doc_id) {
-                    active_total_doc_len += entry.doc_len as u64;
+            // Compute total doc len from unique doc_ids in the drained postings.
+            // This is more accurate than iterating doc_lengths (which contains
+            // entries from prior seals too).
+            let mut seen_docs: HashSet<u32> = HashSet::new();
+            let mut active_total_doc_len: u64 = 0;
+            for entries in term_postings.values() {
+                for entry in entries {
+                    if seen_docs.insert(entry.doc_id) {
+                        active_total_doc_len += entry.doc_len as u64;
+                    }
                 }
             }
-        }
-        let actual_doc_count = seen_docs.len() as u32;
+            let actual_doc_count = seen_docs.len() as u32;
 
-        let segment_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
+            let segment_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
 
-        // Build the sealed segment
-        let seg = segment::build_sealed_segment(
-            segment_id,
-            term_postings,
-            actual_doc_count,
-            active_total_doc_len,
-        );
+            // Build the sealed segment
+            let seg = segment::build_sealed_segment(
+                segment_id,
+                term_postings,
+                actual_doc_count,
+                active_total_doc_len,
+            );
 
-        // Flush to disk if we have a data directory
-        if let Some(search_dir) = self.search_dir() {
+            // Copy segment bytes for disk flush before pushing (avoids holding
+            // any lock during fsync).
+            let flush = self.search_dir().map(|dir| {
+                let bytes = seg.data_bytes().to_vec();
+                (segment_id, dir, bytes)
+            });
+
+            // Add to sealed list while still holding the lock so queries see the
+            // segment as soon as the active postings are drained.
+            self.sealed.write().unwrap().push(seg);
+            self.active_doc_count.store(0, Ordering::Relaxed);
+
+            flush
+        };
+        // seal_lock released — concurrent indexing can resume while we flush.
+
+        // Flush to disk outside all locks (fsync is expensive).
+        if let Some((segment_id, search_dir, bytes)) = flush_info {
             let path = search_dir.join(format!("seg_{}.sidx", segment_id));
-            if let Err(e) = seg.write_to_file(&path) {
+            let dir = path.parent().unwrap_or(std::path::Path::new("."));
+            if let Err(e) = std::fs::create_dir_all(dir)
+                .and_then(|_| {
+                    let tmp_path = path.with_extension("sidx.tmp");
+                    std::fs::write(&tmp_path, &bytes)
+                        .and_then(|_| {
+                            let f = std::fs::File::open(&tmp_path)?;
+                            f.sync_all()?;
+                            Ok(())
+                        })
+                        .and_then(|_| std::fs::rename(path.with_extension("sidx.tmp"), &path))
+                })
+            {
                 tracing::warn!(
                     target: "strata::search",
                     segment_id = segment_id,
@@ -925,10 +959,6 @@ impl InvertedIndex {
                 );
             }
         }
-
-        // Add to sealed list
-        self.sealed.write().unwrap().push(seg);
-        self.active_doc_count.store(0, Ordering::Relaxed);
     }
 
     /// Freeze the entire index to disk for recovery.
@@ -3022,6 +3052,18 @@ mod tests {
             index.total_docs(),
             100,
             "total_docs should be 100 after concurrent remove/add/seal"
+        );
+
+        // Verify actual searchability — total_docs alone could mask posting loss.
+        // All surviving docs contain "hello", so query should return all 100.
+        let query = vec!["hello".to_string()];
+        let results = index.score_top_k(&query, &branch_id, 150, 0.9, 0.4);
+        assert_eq!(
+            results.len(),
+            100,
+            "All 100 surviving docs should be searchable via 'hello'. \
+             Found {}. This indicates posting corruption during concurrent remove/add/seal.",
+            results.len(),
         );
     }
 }

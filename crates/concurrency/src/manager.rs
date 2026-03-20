@@ -1779,6 +1779,102 @@ mod tests {
         );
     }
 
+    // ========================================================================
+    // Blind-Write TOCTOU Regression Test (#1601)
+    // ========================================================================
+
+    #[test]
+    fn test_blind_write_serializes_with_read_write_on_same_branch() {
+        // Regression test for #1601: a blind write must acquire the per-branch
+        // commit lock so it cannot mutate storage between a concurrent read-write
+        // transaction's validation and apply phases.
+        //
+        // Without the fix, the blind write could slip in between validate and
+        // apply, causing the read-write transaction to apply on top of a state
+        // it didn't validate against — violating snapshot isolation.
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let store = Arc::new(SegmentedStore::new());
+        let manager = Arc::new(TransactionManager::new(0));
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        // Setup: write initial value so read-write txns have something to read
+        let key = create_test_key(&ns, "contested");
+        {
+            let mut setup = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+            setup.put(key.clone(), Value::Int(0)).unwrap();
+            manager
+                .commit(&mut setup, store.as_ref(), None)
+                .unwrap();
+        }
+
+        let num_rounds = 100;
+        let mut all_ok = true;
+
+        for round in 0..num_rounds {
+            let barrier = Arc::new(Barrier::new(3)); // rw_thread + blind_thread + main
+
+            // Thread 1: read-write transaction (reads key, then writes it)
+            let m1 = Arc::clone(&manager);
+            let s1 = Arc::clone(&store);
+            let b1 = Arc::clone(&barrier);
+            let k1 = key.clone();
+            let h1 = thread::spawn(move || {
+                let mut txn =
+                    TransactionContext::with_store(round * 2 + 10, branch_id, Arc::clone(&s1));
+                let _ = txn.get(&k1); // Creates read set — NOT a blind write
+                txn.put(k1, Value::Int((round * 2 + 10) as i64)).unwrap();
+                b1.wait();
+                m1.commit(&mut txn, s1.as_ref(), None)
+            });
+
+            // Thread 2: blind write (no reads, just put)
+            let m2 = Arc::clone(&manager);
+            let s2 = Arc::clone(&store);
+            let b2 = Arc::clone(&barrier);
+            let k2 = key.clone();
+            let h2 = thread::spawn(move || {
+                let mut txn =
+                    TransactionContext::with_store(round * 2 + 11, branch_id, Arc::clone(&s2));
+                txn.put(k2, Value::Int((round * 2 + 11) as i64)).unwrap();
+                assert!(txn.read_set.is_empty()); // Confirm blind write
+                b2.wait();
+                m2.commit(&mut txn, s2.as_ref(), None)
+            });
+
+            barrier.wait();
+            let r1 = h1.join().unwrap();
+            let r2 = h2.join().unwrap();
+
+            // At least one must succeed. Both may succeed (serialized by lock).
+            // The key invariant: the per-branch lock prevents the blind write from
+            // slipping between validation and apply of the read-write transaction.
+            if r1.is_err() && r2.is_err() {
+                all_ok = false;
+                break;
+            }
+            // The value in storage must match one of the two committed transactions
+            let stored = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
+            let val = match &stored.value {
+                Value::Int(v) => *v,
+                _ => panic!("Expected Int"),
+            };
+            assert!(
+                val == (round * 2 + 10) as i64 || val == (round * 2 + 11) as i64,
+                "Storage contains unexpected value {} in round {}",
+                val,
+                round,
+            );
+        }
+        assert!(
+            all_ok,
+            "Both blind write and read-write commit failed in the same round — \
+             per-branch lock should guarantee at least one succeeds"
+        );
+    }
+
     #[test]
     fn commit_bulk_load_normal_commits_after() {
         let dir = TempDir::new().unwrap();

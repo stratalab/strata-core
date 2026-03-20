@@ -185,6 +185,11 @@ impl SealedSegment {
         self.segment_id
     }
 
+    /// Raw segment bytes (for copying before a lock-free disk flush).
+    pub fn data_bytes(&self) -> &[u8] {
+        self.data.as_bytes()
+    }
+
     /// Number of documents in this segment (including tombstoned)
     pub fn doc_count(&self) -> u32 {
         self.doc_count
