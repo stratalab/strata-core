@@ -26,8 +26,8 @@ use std::sync::Arc;
 /// Number of independent cache shards. Must be a power of two.
 const NUM_SHARDS: usize = 16;
 
-/// Default block cache capacity: 64 MiB.
-const DEFAULT_CAPACITY_BYTES: usize = 64 * 1024 * 1024;
+/// Default block cache capacity: 256 MiB.
+const DEFAULT_CAPACITY_BYTES: usize = 256 * 1024 * 1024;
 
 /// A cache key identifying a specific data block in a specific segment file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
