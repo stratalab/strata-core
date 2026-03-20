@@ -116,6 +116,79 @@ impl Default for EventLogMeta {
     }
 }
 
+/// Serialize a `Value` to canonical JSON bytes with deterministic key ordering.
+///
+/// `HashMap` iteration order is non-deterministic in Rust, so naive
+/// `serde_json::to_vec()` produces different byte sequences for the same
+/// logical object across runs or after deserialization. This function
+/// sorts object keys recursively to guarantee byte-identical output (#1612).
+fn canonical_json_bytes(value: &Value) -> Vec<u8> {
+    let mut buf = Vec::new();
+    write_canonical_json(value, &mut buf);
+    buf
+}
+
+/// Write canonical JSON for a `Value` into a buffer.
+///
+/// Object keys are sorted lexicographically (by UTF-8 bytes) at every level.
+/// All other types use their standard JSON representation.
+fn write_canonical_json(value: &Value, buf: &mut Vec<u8>) {
+    match value {
+        Value::Null => buf.extend_from_slice(b"null"),
+        Value::Bool(true) => buf.extend_from_slice(b"true"),
+        Value::Bool(false) => buf.extend_from_slice(b"false"),
+        Value::Int(i) => {
+            // itoa is faster, but format! is fine for correctness
+            let s = i.to_string();
+            buf.extend_from_slice(s.as_bytes());
+        }
+        Value::Float(f) => {
+            // serde_json's float formatting matches JSON spec
+            let json = serde_json::to_string(&serde_json::Number::from_f64(*f))
+                .unwrap_or_else(|_| "null".to_string());
+            buf.extend_from_slice(json.as_bytes());
+        }
+        Value::String(s) => {
+            // Use serde_json for proper escaping
+            let json = serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string());
+            buf.extend_from_slice(json.as_bytes());
+        }
+        Value::Bytes(b) => {
+            // Encode as base64 string, matching Value's serde impl
+            let encoded = strata_core::value::base64_encode_bytes(b);
+            let json = serde_json::to_string(&encoded).unwrap_or_else(|_| "\"\"".to_string());
+            buf.extend_from_slice(json.as_bytes());
+        }
+        Value::Array(arr) => {
+            buf.push(b'[');
+            for (i, elem) in arr.iter().enumerate() {
+                if i > 0 {
+                    buf.push(b',');
+                }
+                write_canonical_json(elem, buf);
+            }
+            buf.push(b']');
+        }
+        Value::Object(map) => {
+            // Sort keys for deterministic output (#1612)
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+
+            buf.push(b'{');
+            for (i, key) in keys.iter().enumerate() {
+                if i > 0 {
+                    buf.push(b',');
+                }
+                let key_json = serde_json::to_string(*key).unwrap_or_else(|_| "\"\"".to_string());
+                buf.extend_from_slice(key_json.as_bytes());
+                buf.push(b':');
+                write_canonical_json(&map[*key], buf);
+            }
+            buf.push(b'}');
+        }
+    }
+}
+
 /// Compute event hash using SHA-256
 ///
 /// Deterministic across platforms and Rust versions.
@@ -123,6 +196,9 @@ impl Default for EventLogMeta {
 ///
 /// This is the canonical hash function for event chain integrity.
 /// All code paths that compute event hashes MUST use this function.
+///
+/// Payload is serialized using canonical JSON with sorted object keys (#1612)
+/// to guarantee deterministic hashing regardless of HashMap iteration order.
 pub fn compute_event_hash(
     sequence: u64,
     event_type: &str,
@@ -142,8 +218,8 @@ pub fn compute_event_hash(
     // Timestamp (8 bytes, little-endian)
     hasher.update(timestamp.to_le_bytes());
 
-    // Payload as canonical JSON with length prefix
-    let payload_bytes = serde_json::to_vec(payload).unwrap_or_default();
+    // Payload as canonical JSON with sorted keys and length prefix (#1612)
+    let payload_bytes = canonical_json_bytes(payload);
     hasher.update((payload_bytes.len() as u32).to_le_bytes());
     hasher.update(&payload_bytes);
 
@@ -621,6 +697,105 @@ impl EventLog {
             Ok(filtered)
         })
     }
+    // ========== Chain Verification ==========
+
+    /// Verify the integrity of the hash chain for a branch+space.
+    ///
+    /// Reads every event from sequence 0..len in a **single transaction**
+    /// (atomic snapshot), recomputes each hash using `compute_event_hash()`,
+    /// and checks that:
+    /// 1. Each event's `prev_hash` matches the previous event's `hash`
+    /// 2. Each event's stored `hash` matches the recomputed hash
+    ///
+    /// Returns `ChainVerification` with the result (#1611).
+    ///
+    /// **Note on hash format change (#1612):** Events written before the
+    /// canonical JSON fix used `serde_json::to_vec` with non-deterministic
+    /// HashMap key ordering. Those hashes are inherently unverifiable after
+    /// deserialization (the original key order is lost). This method will
+    /// correctly verify events written after the fix, and may report hash
+    /// mismatches for older events with multi-key object payloads.
+    pub fn verify_chain(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+    ) -> StrataResult<strata_core::primitives::ChainVerification> {
+        use strata_core::primitives::ChainVerification;
+
+        let ns = self.namespace_for(branch_id, space);
+
+        self.db.transaction(*branch_id, |txn| {
+            // Read metadata to get chain length
+            let meta_key = Key::new_event_meta(ns.clone());
+            let meta: EventLogMeta = match txn.get(&meta_key)? {
+                Some(v) => from_stored_value(&v).unwrap_or_else(|_| EventLogMeta::default()),
+                None => return Ok(ChainVerification::valid(0)),
+            };
+
+            let length = meta.next_sequence;
+            if length == 0 {
+                return Ok(ChainVerification::valid(0));
+            }
+
+            let mut expected_prev_hash = [0u8; 32];
+
+            for seq in 0..length {
+                let event_key = Key::new_event(ns.clone(), seq);
+                let event: Event = match txn.get(&event_key)? {
+                    Some(v) => from_stored_value(&v)
+                        .map_err(|e| StrataError::serialization(e.to_string()))?,
+                    None => {
+                        return Ok(ChainVerification::invalid(
+                            length,
+                            seq,
+                            format!("missing event at sequence {}", seq),
+                        ));
+                    }
+                };
+
+                // Check prev_hash links to previous event's hash
+                if event.prev_hash != expected_prev_hash {
+                    return Ok(ChainVerification::invalid(
+                        length,
+                        seq,
+                        format!(
+                            "prev_hash mismatch at sequence {}: expected {:02x?}, got {:02x?}",
+                            seq,
+                            &expected_prev_hash[..4],
+                            &event.prev_hash[..4],
+                        ),
+                    ));
+                }
+
+                // Recompute hash and compare to stored hash
+                let recomputed = compute_event_hash(
+                    event.sequence,
+                    &event.event_type,
+                    &event.payload,
+                    event.timestamp.as_micros(),
+                    &event.prev_hash,
+                );
+
+                if event.hash != recomputed {
+                    return Ok(ChainVerification::invalid(
+                        length,
+                        seq,
+                        format!(
+                            "hash mismatch at sequence {}: stored {:02x?}, computed {:02x?}",
+                            seq,
+                            &event.hash[..4],
+                            &recomputed[..4],
+                        ),
+                    ));
+                }
+
+                expected_prev_hash = event.hash;
+            }
+
+            Ok(ChainVerification::valid(length))
+        })
+    }
+
     // ========== Time-Travel API ==========
 
     /// List events up to a given timestamp.
@@ -1241,6 +1416,194 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    // ========== Canonical JSON Tests (#1612) ==========
+
+    #[test]
+    fn test_canonical_json_sorts_object_keys() {
+        let payload = Value::object(HashMap::from([
+            ("z".to_string(), Value::Int(1)),
+            ("a".to_string(), Value::Int(2)),
+            ("m".to_string(), Value::Int(3)),
+        ]));
+        let bytes = canonical_json_bytes(&payload);
+        let json = String::from_utf8(bytes).unwrap();
+        assert_eq!(json, r#"{"a":2,"m":3,"z":1}"#);
+    }
+
+    #[test]
+    fn test_canonical_json_sorts_nested_objects() {
+        let inner = Value::object(HashMap::from([
+            ("b".to_string(), Value::Int(2)),
+            ("a".to_string(), Value::Int(1)),
+        ]));
+        let payload = Value::object(HashMap::from([
+            ("y".to_string(), inner),
+            ("x".to_string(), Value::Bool(true)),
+        ]));
+        let bytes = canonical_json_bytes(&payload);
+        let json = String::from_utf8(bytes).unwrap();
+        assert_eq!(json, r#"{"x":true,"y":{"a":1,"b":2}}"#);
+    }
+
+    #[test]
+    fn test_canonical_json_handles_all_value_types() {
+        let payload = Value::object(HashMap::from([
+            ("arr".to_string(), Value::array(vec![Value::Int(1), Value::Bool(false)])),
+            ("bool".to_string(), Value::Bool(true)),
+            ("float".to_string(), Value::Float(3.14)),
+            ("int".to_string(), Value::Int(42)),
+            ("null".to_string(), Value::Null),
+            ("str".to_string(), Value::String("hello".to_string())),
+        ]));
+        let bytes = canonical_json_bytes(&payload);
+        let json = String::from_utf8(bytes).unwrap();
+        // Keys should be sorted alphabetically
+        assert!(json.starts_with(r#"{"arr":[1,false],"bool":true,"#));
+    }
+
+    #[test]
+    fn test_canonical_json_empty_object() {
+        let payload = Value::object(HashMap::new());
+        let bytes = canonical_json_bytes(&payload);
+        assert_eq!(&bytes, b"{}");
+    }
+
+    #[test]
+    fn test_canonical_json_deterministic_across_calls() {
+        // Call many times — HashMap iteration order may vary
+        let payload = Value::object(HashMap::from([
+            ("d".to_string(), Value::Int(4)),
+            ("b".to_string(), Value::Int(2)),
+            ("e".to_string(), Value::Int(5)),
+            ("a".to_string(), Value::Int(1)),
+            ("c".to_string(), Value::Int(3)),
+        ]));
+
+        let first = canonical_json_bytes(&payload);
+        for _ in 0..100 {
+            assert_eq!(canonical_json_bytes(&payload), first);
+        }
+    }
+
+    #[test]
+    fn test_compute_hash_deterministic_with_multikey_payload() {
+        // The core bug from #1612: same payload must produce same hash
+        let payload = Value::object(HashMap::from([
+            ("zebra".to_string(), Value::Int(1)),
+            ("alpha".to_string(), Value::Int(2)),
+            ("mango".to_string(), Value::String("fruit".to_string())),
+        ]));
+
+        let hash1 = compute_event_hash(0, "test", &payload, 1000, &[0u8; 32]);
+        let hash2 = compute_event_hash(0, "test", &payload, 1000, &[0u8; 32]);
+        assert_eq!(hash1, hash2);
+
+        // Also verify after serialization roundtrip (simulates read from storage)
+        let serialized = serde_json::to_string(&payload).unwrap();
+        let deserialized: Value = serde_json::from_str(&serialized).unwrap();
+        let hash3 = compute_event_hash(0, "test", &deserialized, 1000, &[0u8; 32]);
+        assert_eq!(hash1, hash3, "Hash must be identical after serde roundtrip");
+    }
+
+    // ========== Chain Verification Tests (#1611) ==========
+
+    #[test]
+    fn test_verify_chain_empty_log() {
+        let (_temp, _db, log) = setup();
+        let branch_id = BranchId::new();
+
+        let result = log.verify_chain(&branch_id, "default").unwrap();
+        assert!(result.is_valid);
+        assert_eq!(result.length, 0);
+    }
+
+    #[test]
+    fn test_verify_chain_single_event() {
+        let (_temp, _db, log) = setup();
+        let branch_id = BranchId::new();
+
+        log.append(&branch_id, "default", "test", empty_payload())
+            .unwrap();
+
+        let result = log.verify_chain(&branch_id, "default").unwrap();
+        assert!(result.is_valid);
+        assert_eq!(result.length, 1);
+    }
+
+    #[test]
+    fn test_verify_chain_many_events() {
+        let (_temp, _db, log) = setup();
+        let branch_id = BranchId::new();
+
+        for i in 0..50 {
+            log.append(&branch_id, "default", "test", int_payload(i))
+                .unwrap();
+        }
+
+        let result = log.verify_chain(&branch_id, "default").unwrap();
+        assert!(result.is_valid);
+        assert_eq!(result.length, 50);
+    }
+
+    #[test]
+    fn test_verify_chain_with_multi_key_payloads() {
+        // Exercises the canonical JSON fix (#1612)
+        let (_temp, _db, log) = setup();
+        let branch_id = BranchId::new();
+
+        for i in 0..20 {
+            let payload = Value::object(HashMap::from([
+                ("z_key".to_string(), Value::Int(i)),
+                ("a_key".to_string(), Value::String(format!("event_{}", i))),
+                ("m_key".to_string(), Value::Bool(i % 2 == 0)),
+            ]));
+            log.append(&branch_id, "default", "multi", payload)
+                .unwrap();
+        }
+
+        let result = log.verify_chain(&branch_id, "default").unwrap();
+        assert!(result.is_valid, "verify_chain must pass with multi-key objects: {:?}", result.error);
+        assert_eq!(result.length, 20);
+    }
+
+    #[test]
+    fn test_verify_chain_after_batch_append() {
+        let (_temp, _db, log) = setup();
+        let branch_id = BranchId::new();
+
+        let entries = vec![
+            ("type_a".to_string(), int_payload(1)),
+            ("type_b".to_string(), int_payload(2)),
+            ("type_a".to_string(), int_payload(3)),
+        ];
+        log.batch_append(&branch_id, "default", entries).unwrap();
+
+        let result = log.verify_chain(&branch_id, "default").unwrap();
+        assert!(result.is_valid);
+        assert_eq!(result.length, 3);
+    }
+
+    #[test]
+    fn test_verify_chain_branch_isolation() {
+        let (_temp, _db, log) = setup();
+        let branch1 = BranchId::new();
+        let branch2 = BranchId::new();
+
+        log.append(&branch1, "default", "test", int_payload(1))
+            .unwrap();
+        log.append(&branch1, "default", "test", int_payload(2))
+            .unwrap();
+        log.append(&branch2, "default", "test", int_payload(100))
+            .unwrap();
+
+        let r1 = log.verify_chain(&branch1, "default").unwrap();
+        let r2 = log.verify_chain(&branch2, "default").unwrap();
+        assert!(r1.is_valid);
+        assert_eq!(r1.length, 2);
+        assert!(r2.is_valid);
+        assert_eq!(r2.length, 1);
     }
 
     // ========== Fast Path Tests ==========

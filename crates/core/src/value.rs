@@ -333,7 +333,7 @@ impl From<Value> for serde_json::Value {
             Value::String(s) => serde_json::Value::String(s),
             Value::Bytes(b) => {
                 // Encode bytes as base64 string for JSON compatibility
-                serde_json::Value::String(base64_encode(&b))
+                serde_json::Value::String(base64_encode_bytes(&b))
             }
             Value::Array(arr) => {
                 serde_json::Value::Array((*arr).into_iter().map(serde_json::Value::from).collect())
@@ -349,7 +349,10 @@ impl From<Value> for serde_json::Value {
 }
 
 /// Simple base64 encoding for bytes (no external dependency)
-fn base64_encode(data: &[u8]) -> String {
+///
+/// Public so that other crates (e.g., engine canonical JSON serializer) can
+/// produce the same encoding without duplicating the implementation.
+pub fn base64_encode_bytes(data: &[u8]) -> String {
     use std::fmt::Write;
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -829,18 +832,18 @@ mod tests {
 
     #[test]
     fn test_base64_encode_empty() {
-        assert_eq!(base64_encode(&[]), "");
+        assert_eq!(base64_encode_bytes(&[]), "");
     }
 
     #[test]
     fn test_base64_encode_known_vectors() {
         // RFC 4648 test vectors
-        assert_eq!(base64_encode(b"f"), "Zg==");
-        assert_eq!(base64_encode(b"fo"), "Zm8=");
-        assert_eq!(base64_encode(b"foo"), "Zm9v");
-        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
-        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
-        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64_encode_bytes(b"f"), "Zg==");
+        assert_eq!(base64_encode_bytes(b"fo"), "Zm8=");
+        assert_eq!(base64_encode_bytes(b"foo"), "Zm9v");
+        assert_eq!(base64_encode_bytes(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode_bytes(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode_bytes(b"foobar"), "Zm9vYmFy");
     }
 
     // ====================================================================
