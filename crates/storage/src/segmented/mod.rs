@@ -9,7 +9,7 @@
 //! The first match for a key at commit_id ≤ snapshot wins.
 
 use crate::compaction::CompactionIterator;
-use crate::key_encoding::{encode_typed_key, InternalKey};
+use crate::key_encoding::{encode_typed_key, encode_typed_key_prefix, InternalKey};
 use crate::memory_stats::{BranchMemoryStats, StorageMemoryStats};
 use crate::memtable::{Memtable, MemtableEntry};
 use crate::merge_iter::{MergeIterator, MvccIterator};
@@ -595,9 +595,23 @@ impl SegmentedStore {
             let entries: Vec<_> = frozen.iter_prefix(prefix).collect();
             sources.push(Box::new(entries.into_iter()));
         }
+        let prefix_bytes = encode_typed_key_prefix(prefix);
         let ver = branch.version.load();
         for level in &ver.levels {
             for seg in level {
+                let (seg_min, seg_max) = seg.key_range();
+                if seg_max.len() >= 8 && seg_min.len() >= 8 {
+                    let max_typed = &seg_max[..seg_max.len() - 8];
+                    let min_typed = &seg_min[..seg_min.len() - 8];
+                    if max_typed < prefix_bytes.as_slice() {
+                        continue;
+                    }
+                    if !min_typed.starts_with(&prefix_bytes)
+                        && min_typed > prefix_bytes.as_slice()
+                    {
+                        continue;
+                    }
+                }
                 let entries: Vec<_> = seg
                     .iter_seek(prefix)
                     .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
@@ -961,6 +975,16 @@ impl SegmentedStore {
     /// Number of L0 segments for a branch.
     ///
     /// Used by compaction triggers to decide when to compact L0 → L1.
+    /// Maximum L0 segment count across all branches.
+    pub fn max_l0_segment_count(&self) -> usize {
+        self.branches
+            .iter()
+            .map(|b| b.version.load().l0_segments().len())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Number of L0 segments for a branch.
     pub fn l0_segment_count(&self, branch_id: &BranchId) -> usize {
         self.branches
             .get(branch_id)
@@ -1345,10 +1369,33 @@ impl SegmentedStore {
             sources.push(Box::new(entries.into_iter()));
         }
 
-        // On-disk segments — all levels
+        // On-disk segments — skip segments whose key range doesn't overlap
+        // with the scan prefix.  This avoids loading sub-indexes from hundreds
+        // of non-overlapping segments (the old O(total_segments) bottleneck).
+        let prefix_bytes = encode_typed_key_prefix(prefix);
         let ver = branch.version.load();
         for level in &ver.levels {
             for seg in level {
+                let (seg_min, seg_max) = seg.key_range();
+                // key_range returns full InternalKey bytes; strip the
+                // trailing 8-byte commit_id to get the typed-key prefix.
+                if seg_max.len() >= 8 && seg_min.len() >= 8 {
+                    let max_typed = &seg_max[..seg_max.len() - 8];
+                    let min_typed = &seg_min[..seg_min.len() - 8];
+                    // Segment is entirely before the prefix range.
+                    if max_typed < prefix_bytes.as_slice() {
+                        continue;
+                    }
+                    // Segment is entirely after the prefix range: its min key
+                    // doesn't start with the prefix AND is lexicographically
+                    // greater than the prefix.
+                    if !min_typed.starts_with(&prefix_bytes)
+                        && min_typed > prefix_bytes.as_slice()
+                    {
+                        continue;
+                    }
+                }
+
                 let entries: Vec<_> = seg
                     .iter_seek(prefix)
                     .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))

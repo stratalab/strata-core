@@ -214,6 +214,12 @@ pub struct Database {
     /// Per-branch flag preventing duplicate compaction task submissions.
     compaction_pending: DashMap<BranchId, Arc<AtomicBool>>,
 
+    /// Condition variable signalled by compaction when L0 count drops.
+    /// Writers wait on this when L0 exceeds `l0_stop_writes_trigger`.
+    write_stall_cv: Arc<parking_lot::Condvar>,
+    /// Mutex paired with `write_stall_cv` (value is unused).
+    write_stall_mu: parking_lot::Mutex<()>,
+
     /// Exclusive lock file preventing concurrent process access to the same database.
     ///
     /// Held for the lifetime of the Database. Dropped automatically when the
@@ -497,6 +503,8 @@ impl Database {
             flush_handle: ParkingMutex::new(None), // No flush thread
             scheduler: Arc::new(BackgroundScheduler::new(4, 4096)),
             compaction_pending: DashMap::new(),
+            write_stall_cv: Arc::new(parking_lot::Condvar::new()),
+            write_stall_mu: parking_lot::Mutex::new(()),
             _lock_file: None, // No lock acquired
             wal_dir,
             wal_watermark,
@@ -671,6 +679,8 @@ impl Database {
             flush_handle: ParkingMutex::new(flush_handle),
             scheduler: Arc::new(BackgroundScheduler::new(4, 4096)),
             compaction_pending: DashMap::new(),
+            write_stall_cv: Arc::new(parking_lot::Condvar::new()),
+            write_stall_mu: parking_lot::Mutex::new(()),
             _lock_file: lock_file,
             wal_dir,
             wal_watermark,
@@ -749,6 +759,8 @@ impl Database {
             flush_handle: ParkingMutex::new(None),
             scheduler: Arc::new(BackgroundScheduler::new(4, 4096)),
             compaction_pending: DashMap::new(),
+            write_stall_cv: Arc::new(parking_lot::Condvar::new()),
+            write_stall_mu: parking_lot::Mutex::new(()),
             _lock_file: None, // No lock for ephemeral databases
             wal_dir: PathBuf::new(),
             wal_watermark: AtomicU64::new(0),
@@ -1754,6 +1766,7 @@ impl Database {
                 .entry(branch_id)
                 .or_insert_with(|| Arc::new(AtomicBool::new(false)))
                 .clone();
+            let stall_cv = Arc::clone(&self.write_stall_cv);
             let scheduler_ref = Arc::clone(&self.scheduler);
 
             // Flush task (High priority): drain ALL frozen memtables for this
@@ -1791,46 +1804,12 @@ impl Database {
                         if flushed_any
                             && !compaction_flag.swap(true, Ordering::AcqRel)
                         {
-                            let compact_storage = Arc::clone(&storage);
-                            let compact_flag = Arc::clone(&compaction_flag);
-                            let _ = scheduler_ref.submit(
-                                crate::background::TaskPriority::Normal,
-                                move || {
-                                    let mut compactions = 0;
-                                    loop {
-                                        match compact_storage
-                                            .pick_and_compact(&branch_id, 0)
-                                        {
-                                            Ok(Some(result)) => {
-                                                tracing::debug!(
-                                                    target: "strata::compact",
-                                                    ?branch_id,
-                                                    level = result.level,
-                                                    segments_merged =
-                                                        result.compaction.segments_merged,
-                                                    entries_pruned =
-                                                        result.compaction.entries_pruned,
-                                                    "compaction complete"
-                                                );
-                                                compactions += 1;
-                                                if compactions >= 16 {
-                                                    break;
-                                                }
-                                            }
-                                            Ok(None) => break,
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    target: "strata::compact",
-                                                    ?branch_id,
-                                                    error = %e,
-                                                    "compaction failed"
-                                                );
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    compact_flag.store(false, Ordering::Release);
-                                },
+                            Self::submit_compaction_task(
+                                &scheduler_ref,
+                                Arc::clone(&storage),
+                                branch_id,
+                                Arc::clone(&compaction_flag),
+                                Arc::clone(&stall_cv),
                             );
                         }
                     });
@@ -1847,12 +1826,43 @@ impl Database {
 
     /// Apply write backpressure when memtable memory exceeds safe limits.
     ///
-    /// Called after every write commit, outside any storage guards.  If the
-    /// total memtable footprint exceeds `write_buffer_size * (max_frozen + 2)`
-    /// we yield briefly (1 ms) to let background flushes drain.  This caps
-    /// the active memtable growth that would otherwise cause OOM.
+    /// RocksDB-style write backpressure based on L0 file count and memtable
+    /// pressure.  Called after every write commit, outside any storage guards.
+    ///
+    /// Three tiers (matching RocksDB semantics):
+    /// 1. L0 count >= `l0_stop_writes_trigger` → wait on condvar until
+    ///    compaction signals (complete stall).
+    /// 2. L0 count >= `l0_slowdown_writes_trigger` → yield 1 ms per write.
+    /// 3. Memtable bytes > threshold → yield 1 ms (OOM protection).
     #[inline]
     fn maybe_apply_write_backpressure(&self) {
+        let cfg = self.config.read();
+
+        // L0-based stalling (protects read latency)
+        let l0_stop = cfg.storage.l0_stop_writes_trigger;
+        let l0_slow = cfg.storage.l0_slowdown_writes_trigger;
+        drop(cfg); // release config lock before potential sleep
+
+        let l0_count = self.storage.max_l0_segment_count();
+
+        if l0_stop > 0 && l0_count >= l0_stop {
+            // Complete stall: wait on condvar until compaction drains L0.
+            // Also trigger compaction in case none is running.
+            self.schedule_flush_if_needed();
+            let mut guard = self.write_stall_mu.lock();
+            // Re-check after acquiring lock (compaction may have finished)
+            while self.storage.max_l0_segment_count() >= l0_stop {
+                self.write_stall_cv.wait_for(&mut guard, std::time::Duration::from_millis(10));
+            }
+            return;
+        }
+
+        if l0_slow > 0 && l0_count >= l0_slow {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            return;
+        }
+
+        // Memtable-based stalling (protects memory usage)
         let cfg = self.config.read();
         let wbs = cfg.storage.write_buffer_size as u64;
         let max_frozen = cfg.storage.max_immutable_memtables as u64;
@@ -1862,14 +1872,74 @@ impl Database {
         let threshold = wbs * (max_frozen + 2);
         let current = self.storage.total_memtable_bytes();
         if current > threshold {
-            tracing::debug!(
-                target: "strata::backpressure",
-                current_mb = current / (1024 * 1024),
-                threshold_mb = threshold / (1024 * 1024),
-                "write backpressure: memtable exceeds threshold, yielding"
-            );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+    }
+
+    /// Submit a compaction task that runs until all levels are below target,
+    /// then re-schedules itself if compaction produced work (to handle L0
+    /// segments added by concurrent flushes during the compaction).
+    ///
+    /// Signals `stall_cv` after each compaction round so that stalled writers
+    /// can re-check the L0 count and resume.
+    fn submit_compaction_task(
+        scheduler: &Arc<BackgroundScheduler>,
+        storage: Arc<SegmentedStore>,
+        branch_id: BranchId,
+        flag: Arc<AtomicBool>,
+        stall_cv: Arc<parking_lot::Condvar>,
+    ) {
+        let sched = Arc::clone(scheduler);
+        let cv = Arc::clone(&stall_cv);
+        let _ = scheduler.submit(
+            crate::background::TaskPriority::Normal,
+            move || {
+                let mut total_compactions = 0;
+                loop {
+                    match storage.pick_and_compact(&branch_id, 0) {
+                        Ok(Some(result)) => {
+                            tracing::debug!(
+                                target: "strata::compact",
+                                ?branch_id,
+                                level = result.level,
+                                segments_merged = result.compaction.segments_merged,
+                                entries_pruned = result.compaction.entries_pruned,
+                                "compaction complete"
+                            );
+                            // Wake stalled writers after each compaction round.
+                            cv.notify_all();
+                            total_compactions += 1;
+                            if total_compactions >= 32 {
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "strata::compact",
+                                ?branch_id,
+                                error = %e,
+                                "compaction failed"
+                            );
+                            break;
+                        }
+                    }
+                }
+
+                // If we hit the iteration cap, re-schedule to keep draining.
+                if total_compactions >= 32 {
+                    Self::submit_compaction_task(
+                        &sched,
+                        Arc::clone(&storage),
+                        branch_id,
+                        Arc::clone(&flag),
+                        cv,
+                    );
+                } else {
+                    flag.store(false, Ordering::Release);
+                }
+            },
+        );
     }
 
     /// Update the MANIFEST flush watermark and truncate WAL segments below it.
