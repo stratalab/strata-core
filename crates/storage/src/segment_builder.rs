@@ -467,189 +467,6 @@ impl SegmentBuilder {
     }
 }
 
-/// Test-only: build a segment with v3 entry encoding (no prefix compression)
-/// but v5 partitioned bloom format, for backward-compat testing.
-#[cfg(test)]
-impl SegmentBuilder {
-    pub(crate) fn build_from_iter_v3<I>(&self, iter: I, path: &Path) -> io::Result<SegmentMeta>
-    where
-        I: Iterator<Item = (InternalKey, MemtableEntry)>,
-    {
-        let parent = path.parent().unwrap_or(Path::new("."));
-        std::fs::create_dir_all(parent)?;
-
-        let tmp_path = path.with_extension("tmp");
-        let file = std::fs::File::create(&tmp_path)?;
-        let mut w = BufWriter::new(file);
-
-        let header_placeholder = [0u8; KV_HEADER_SIZE];
-        w.write_all(&header_placeholder)?;
-
-        let mut entry_count: u64 = 0;
-        let mut commit_min: u64 = u64::MAX;
-        let mut commit_max: u64 = 0;
-        let mut first_key: Option<Vec<u8>> = None;
-        let mut last_key: Option<Vec<u8>> = None;
-        let mut block_buf = Vec::with_capacity(self.data_block_size + 1024);
-        let mut index_entries: Vec<(Vec<u8>, u64, u32)> = Vec::new();
-        let mut partition_bloom_keys: Vec<Vec<Vec<u8>>> = vec![Vec::new()];
-        let mut partition_max_keys: Vec<Vec<u8>> = vec![Vec::new()];
-        let mut last_typed_key: Option<Vec<u8>> = None;
-        let mut data_block_count: usize = 0;
-        let mut block_first_key: Option<Vec<u8>> = None;
-        let mut block_entry_count: usize = 0;
-        let mut restart_offsets: Vec<u32> = vec![0];
-        let mut file_offset = KV_HEADER_SIZE as u64;
-
-        for (ik, entry) in iter {
-            let commit_id = ik.commit_id();
-            commit_min = commit_min.min(commit_id);
-            commit_max = commit_max.max(commit_id);
-            if first_key.is_none() {
-                first_key = Some(ik.as_bytes().to_vec());
-            }
-            last_key = Some(ik.as_bytes().to_vec());
-            let typed = ik.typed_key_prefix().to_vec();
-            if last_typed_key.as_ref() != Some(&typed) {
-                partition_bloom_keys.last_mut().unwrap().push(typed.clone());
-                *partition_max_keys.last_mut().unwrap() = typed.clone();
-                last_typed_key = Some(typed);
-            }
-            if block_first_key.is_none() {
-                block_first_key = Some(ik.as_bytes().to_vec());
-            }
-            if block_entry_count > 0 && block_entry_count % RESTART_INTERVAL == 0 {
-                restart_offsets.push(block_buf.len() as u32);
-            }
-            encode_entry(&ik, &entry, &mut block_buf);
-            entry_count += 1;
-            block_entry_count += 1;
-
-            if block_buf.len() >= self.data_block_size {
-                append_restart_trailer(&mut block_buf, &restart_offsets);
-                let bfk = block_first_key.take().unwrap();
-                let framed_size = write_framed_block_compressed(
-                    &mut w,
-                    BLOCK_TYPE_DATA,
-                    &block_buf,
-                    self.compression,
-                )?;
-                let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
-                index_entries.push((bfk, file_offset, on_disk_data_len));
-                file_offset += framed_size as u64;
-                block_buf.clear();
-                restart_offsets.clear();
-                restart_offsets.push(0);
-                block_entry_count = 0;
-
-                data_block_count += 1;
-                if data_block_count % BLOOM_PARTITION_BLOCK_COUNT == 0 {
-                    partition_bloom_keys.push(Vec::new());
-                    partition_max_keys.push(Vec::new());
-                }
-            }
-        }
-        if !block_buf.is_empty() {
-            append_restart_trailer(&mut block_buf, &restart_offsets);
-            let bfk = block_first_key.take().unwrap_or_default();
-            let framed_size = write_framed_block_compressed(
-                &mut w,
-                BLOCK_TYPE_DATA,
-                &block_buf,
-                self.compression,
-            )?;
-            let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
-            index_entries.push((bfk, file_offset, on_disk_data_len));
-            file_offset += framed_size as u64;
-            block_buf.clear();
-        }
-        if entry_count == 0 {
-            commit_min = 0;
-            commit_max = 0;
-        }
-
-        // Write bloom partition blocks
-        let mut filter_index_entries: Vec<FilterIndexEntry> = Vec::new();
-        for (keys, max_key) in partition_bloom_keys.iter().zip(partition_max_keys.iter()) {
-            if keys.is_empty() {
-                continue;
-            }
-            let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
-            let bloom = BloomFilter::build(&key_refs, self.bloom_bits_per_key);
-            let data = bloom.to_bytes();
-            let partition_offset = file_offset;
-            write_framed_block(&mut w, BLOCK_TYPE_FILTER, &data)?;
-            let framed_len = (BLOCK_FRAME_OVERHEAD + data.len()) as u32;
-            filter_index_entries.push(FilterIndexEntry {
-                max_key: max_key.clone(),
-                block_offset: partition_offset,
-                block_data_len: framed_len,
-            });
-            file_offset += framed_len as u64;
-        }
-
-        // Write filter index block
-        let filter_block_offset = file_offset;
-        let filter_index_data = encode_filter_index(&filter_index_entries);
-        write_framed_block(&mut w, BLOCK_TYPE_FILTER_INDEX, &filter_index_data)?;
-        let filter_block_len = (BLOCK_FRAME_OVERHEAD + filter_index_data.len()) as u32;
-        file_offset += filter_block_len as u64;
-
-        let index_block_offset = file_offset;
-        let index_data = encode_index_block(&index_entries);
-        write_framed_block(&mut w, BLOCK_TYPE_INDEX, &index_data)?;
-        let index_block_len = (BLOCK_FRAME_OVERHEAD + index_data.len()) as u32;
-        file_offset += index_block_len as u64;
-
-        let props_block_offset = file_offset;
-        let props_data = encode_properties(
-            entry_count,
-            commit_min,
-            commit_max,
-            first_key.as_deref().unwrap_or(&[]),
-            last_key.as_deref().unwrap_or(&[]),
-        );
-        write_framed_block(&mut w, BLOCK_TYPE_PROPS, &props_data)?;
-        let props_block_len = (BLOCK_FRAME_OVERHEAD + props_data.len()) as u32;
-        file_offset += props_block_len as u64;
-
-        let footer = encode_footer(
-            index_block_offset,
-            index_block_len,
-            filter_block_offset,
-            filter_block_len,
-            props_block_offset,
-            props_block_len,
-            INDEX_TYPE_MONOLITHIC,
-        );
-        w.write_all(&footer)?;
-        file_offset += FOOTER_SIZE as u64;
-
-        // Write header with format_version = 3 (v3 entry encoding)
-        w.seek(SeekFrom::Start(0))?;
-        let mut h = [0u8; KV_HEADER_SIZE];
-        h[0..8].copy_from_slice(&KV_HEADER_MAGIC);
-        h[8..10].copy_from_slice(&3u16.to_le_bytes()); // v3
-        h[16..24].copy_from_slice(&commit_min.to_le_bytes());
-        h[24..32].copy_from_slice(&commit_max.to_le_bytes());
-        h[32..40].copy_from_slice(&entry_count.to_le_bytes());
-        h[40..44].copy_from_slice(&(self.data_block_size as u32).to_le_bytes());
-        w.write_all(&h)?;
-
-        w.flush()?;
-        w.get_ref().sync_all()?;
-        drop(w);
-        std::fs::rename(&tmp_path, path)?;
-
-        Ok(SegmentMeta {
-            entry_count,
-            commit_min,
-            commit_max,
-            file_size: file_offset,
-        })
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Partitioned bloom filter index
 // ---------------------------------------------------------------------------
@@ -718,31 +535,6 @@ pub(crate) fn parse_filter_index(data: &[u8]) -> Option<Vec<FilterIndexEntry>> {
 
 /// Encode a single entry into a data block buffer (v2/v3 format, no prefix compression).
 ///
-/// v2 format: `| ik_len: u32 | ik_bytes | value_kind: u8 | timestamp: u64 LE | ttl_ms: u64 LE | value_len: u32 | value_bytes |`
-///
-/// Retained for v3 backward-compat testing and decode roundtrips.
-#[cfg(test)]
-fn encode_entry(ik: &InternalKey, entry: &MemtableEntry, buf: &mut Vec<u8>) {
-    let ik_bytes = ik.as_bytes();
-    buf.extend_from_slice(&(ik_bytes.len() as u32).to_le_bytes());
-    buf.extend_from_slice(ik_bytes);
-
-    if entry.is_tombstone {
-        buf.push(VALUE_KIND_DEL);
-        buf.extend_from_slice(&entry.timestamp.as_micros().to_le_bytes());
-        buf.extend_from_slice(&entry.ttl_ms.to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes());
-    } else {
-        buf.push(VALUE_KIND_PUT);
-        buf.extend_from_slice(&entry.timestamp.as_micros().to_le_bytes());
-        buf.extend_from_slice(&entry.ttl_ms.to_le_bytes());
-        let value_bytes =
-            bincode::serialize(&entry.value).expect("Value serialization should not fail");
-        buf.extend_from_slice(&(value_bytes.len() as u32).to_le_bytes());
-        buf.extend_from_slice(&value_bytes);
-    }
-}
-
 /// Append restart point trailer to a data block buffer.
 ///
 /// Format: `[restart_0: u32 LE] ... [restart_K: u32 LE] [num_restarts: u32 LE]`
@@ -782,7 +574,6 @@ fn append_hash_index(buf: &mut Vec<u8>, entries: &[(u64, usize)]) {
 
 /// Decoded entry header — key + metadata without value deserialization.
 pub(crate) struct EntryHeader {
-    pub ik: InternalKey,
     pub is_tombstone: bool,
     pub timestamp: u64,
     pub ttl_ms: u64,
@@ -790,24 +581,15 @@ pub(crate) struct EntryHeader {
     pub value_start: usize,
     /// Length of the value bytes.
     pub value_len: usize,
-    /// Total bytes consumed by this entry.
-    pub total_len: usize,
 }
 
 /// Zero-copy entry header — borrows key bytes from the block data.
 ///
-/// Used by `scan_block_for_key` to compare keys without allocating
-/// an `InternalKey` for every entry. Only the matching entry's key
-/// is promoted to an owned `InternalKey`.
+/// Used by `binary_search_restarts` to compare keys without allocating
+/// an `InternalKey` for every restart point.
 pub(crate) struct EntryHeaderRef<'a> {
     /// Raw InternalKey bytes (borrowed from block data).
     pub ik_bytes: &'a [u8],
-    pub is_tombstone: bool,
-    pub timestamp: u64,
-    pub ttl_ms: u64,
-    pub value_start: usize,
-    pub value_len: usize,
-    pub total_len: usize,
 }
 
 impl<'a> EntryHeaderRef<'a> {
@@ -816,78 +598,6 @@ impl<'a> EntryHeaderRef<'a> {
     pub fn typed_key_prefix(&self) -> &[u8] {
         &self.ik_bytes[..self.ik_bytes.len() - 8]
     }
-
-    /// Extract commit_id from the trailing 8 bytes.
-    #[inline]
-    pub fn commit_id(&self) -> u64 {
-        let len = self.ik_bytes.len();
-        let bytes: [u8; 8] = self.ik_bytes[len - 8..].try_into().unwrap();
-        !u64::from_be_bytes(bytes)
-    }
-}
-
-/// Decode entry header with zero-copy key reference into `data`.
-///
-/// Parses InternalKey bytes, value_kind, timestamp, ttl_ms, and value_len,
-/// but does NOT deserialize value bytes. Borrows key bytes directly from
-/// `data` — no allocation.
-pub(crate) fn decode_entry_header_ref(data: &[u8]) -> Option<EntryHeaderRef<'_>> {
-    if data.len() < 4 {
-        return None;
-    }
-    let mut pos = 0;
-
-    let ik_len = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
-    pos += 4;
-    if pos + ik_len > data.len() || ik_len < 28 {
-        return None;
-    }
-    let ik_bytes = &data[pos..pos + ik_len];
-    pos += ik_len;
-
-    if pos >= data.len() {
-        return None;
-    }
-    let value_kind = data[pos];
-    pos += 1;
-
-    if pos + 16 > data.len() {
-        return None;
-    }
-    let timestamp = u64::from_le_bytes(data[pos..pos + 8].try_into().ok()?);
-    pos += 8;
-    let ttl_ms = u64::from_le_bytes(data[pos..pos + 8].try_into().ok()?);
-    pos += 8;
-
-    if pos + 4 > data.len() {
-        return None;
-    }
-    let value_len = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
-    pos += 4;
-
-    let is_tombstone = value_kind == VALUE_KIND_DEL;
-    let value_start = pos;
-
-    if !is_tombstone && value_kind != VALUE_KIND_PUT {
-        return None;
-    }
-
-    if !is_tombstone {
-        if pos + value_len > data.len() {
-            return None;
-        }
-        pos += value_len;
-    }
-
-    Some(EntryHeaderRef {
-        ik_bytes,
-        is_tombstone,
-        timestamp,
-        ttl_ms,
-        value_start,
-        value_len,
-        total_len: pos,
-    })
 }
 
 /// Deserialize value bytes from a previously decoded entry header.
@@ -902,35 +612,6 @@ pub(crate) fn decode_entry_value(data: &[u8], header: &EntryHeader) -> Option<Va
         return None;
     }
     bincode::deserialize(&data[header.value_start..end]).ok()
-}
-
-/// Decode a single entry from a data block at the given offset.
-///
-/// Returns `(internal_key, is_tombstone, value, timestamp_micros, ttl_ms, bytes_consumed)`.
-///
-/// Full decode path used by iterators. For point lookups, prefer
-/// `decode_entry_header_ref` + `decode_entry_value`.
-pub(crate) fn decode_entry(data: &[u8]) -> Option<(InternalKey, bool, Value, u64, u64, usize)> {
-    let ref_header = decode_entry_header_ref(data)?;
-    let ik = InternalKey::try_from_bytes(ref_header.ik_bytes.to_vec())?;
-    let header = EntryHeader {
-        ik,
-        is_tombstone: ref_header.is_tombstone,
-        timestamp: ref_header.timestamp,
-        ttl_ms: ref_header.ttl_ms,
-        value_start: ref_header.value_start,
-        value_len: ref_header.value_len,
-        total_len: ref_header.total_len,
-    };
-    let value = decode_entry_value(data, &header)?;
-    Some((
-        header.ik,
-        header.is_tombstone,
-        value,
-        header.timestamp,
-        header.ttl_ms,
-        header.total_len,
-    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1210,10 +891,11 @@ pub(crate) fn decode_entry_v4(
     ))
 }
 
-/// Zero-copy decode of a v4 restart entry (where shared=0).
+/// Zero-copy decode of a v4 restart entry key (where shared=0).
 ///
-/// Returns `EntryHeaderRef` borrowing key bytes directly from the block data,
-/// just like `decode_entry_header_ref` for v3. Only valid at restart points.
+/// Returns `EntryHeaderRef` borrowing key bytes directly from the block data.
+/// Only valid at restart points where shared=0, so the key is self-contained.
+/// Used by `binary_search_restarts` for key comparison without allocation.
 pub(crate) fn decode_entry_header_ref_v4(data: &[u8]) -> Option<EntryHeaderRef<'_>> {
     let (shared, n1) = decode_varint32(data)?;
     if shared != 0 {
@@ -1230,51 +912,8 @@ pub(crate) fn decode_entry_header_ref_v4(data: &[u8]) -> Option<EntryHeaderRef<'
     if key_end > data.len() {
         return None;
     }
-    let ik_bytes = &data[key_start..key_end];
-
-    let mut pos = key_end;
-    if pos >= data.len() {
-        return None;
-    }
-    let value_kind = data[pos];
-    pos += 1;
-
-    if pos + 16 > data.len() {
-        return None;
-    }
-    let timestamp = u64::from_le_bytes(data[pos..pos + 8].try_into().ok()?);
-    pos += 8;
-    let ttl_ms = u64::from_le_bytes(data[pos..pos + 8].try_into().ok()?);
-    pos += 8;
-
-    if pos + 4 > data.len() {
-        return None;
-    }
-    let value_len = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
-    pos += 4;
-
-    let is_tombstone = value_kind == VALUE_KIND_DEL;
-    let value_start = pos;
-
-    if !is_tombstone && value_kind != VALUE_KIND_PUT {
-        return None;
-    }
-
-    if !is_tombstone {
-        if value_len > data.len() || pos + value_len > data.len() {
-            return None;
-        }
-        pos += value_len;
-    }
-
     Some(EntryHeaderRef {
-        ik_bytes,
-        is_tombstone,
-        timestamp,
-        ttl_ms,
-        value_start,
-        value_len,
-        total_len: pos,
+        ik_bytes: &data[key_start..key_end],
     })
 }
 
@@ -1693,49 +1332,6 @@ mod tests {
     }
 
     #[test]
-    fn entry_encode_decode_roundtrip() {
-        let ik = InternalKey::encode(&key("hello"), 42);
-        let entry = MemtableEntry {
-            value: Value::String("world".into()),
-            is_tombstone: false,
-            timestamp: strata_core::Timestamp::now(),
-            ttl_ms: 0,
-        };
-
-        let mut buf = Vec::new();
-        encode_entry(&ik, &entry, &mut buf);
-
-        let (decoded_ik, is_tomb, decoded_val, ts, ttl, consumed) = decode_entry(&buf).unwrap();
-        assert_eq!(decoded_ik, ik);
-        assert!(!is_tomb);
-        assert_eq!(decoded_val, Value::String("world".into()));
-        assert_eq!(ts, entry.timestamp.as_micros());
-        assert_eq!(ttl, 0);
-        assert_eq!(consumed, buf.len());
-    }
-
-    #[test]
-    fn tombstone_entry_roundtrip() {
-        let ik = InternalKey::encode(&key("gone"), 99);
-        let entry = MemtableEntry {
-            value: Value::Null,
-            is_tombstone: true,
-            timestamp: strata_core::Timestamp::now(),
-            ttl_ms: 0,
-        };
-
-        let mut buf = Vec::new();
-        encode_entry(&ik, &entry, &mut buf);
-
-        let (decoded_ik, is_tomb, _, ts, ttl, consumed) = decode_entry(&buf).unwrap();
-        assert_eq!(decoded_ik, ik);
-        assert!(is_tomb);
-        assert_eq!(ts, entry.timestamp.as_micros());
-        assert_eq!(ttl, 0);
-        assert_eq!(consumed, buf.len());
-    }
-
-    #[test]
     fn header_roundtrip() {
         let header = encode_header(100, 5, 42, 65536);
         let parsed = parse_header(&header).unwrap();
@@ -1803,53 +1399,6 @@ mod tests {
         let meta = builder.build_from_iter(mt.iter_all(), &path).unwrap();
         assert_eq!(meta.entry_count, 2000);
         assert!(meta.file_size > 4096); // must span multiple blocks
-    }
-
-    #[test]
-    fn v2_entry_encode_decode_with_timestamp_and_ttl() {
-        let ik = InternalKey::encode(&key("ts_key"), 7);
-        let ts = strata_core::Timestamp::from_micros(1_700_000_000_000_000);
-        let entry = MemtableEntry {
-            value: Value::String("with_ts".into()),
-            is_tombstone: false,
-            timestamp: ts,
-            ttl_ms: 30_000,
-        };
-
-        let mut buf = Vec::new();
-        encode_entry(&ik, &entry, &mut buf);
-
-        let (decoded_ik, is_tomb, decoded_val, decoded_ts, decoded_ttl, consumed) =
-            decode_entry(&buf).unwrap();
-        assert_eq!(decoded_ik, ik);
-        assert!(!is_tomb);
-        assert_eq!(decoded_val, Value::String("with_ts".into()));
-        assert_eq!(decoded_ts, 1_700_000_000_000_000);
-        assert_eq!(decoded_ttl, 30_000);
-        assert_eq!(consumed, buf.len());
-    }
-
-    #[test]
-    fn v2_tombstone_preserves_timestamp_and_ttl() {
-        let ik = InternalKey::encode(&key("del_key"), 10);
-        let ts = strata_core::Timestamp::from_micros(42_000_000);
-        let entry = MemtableEntry {
-            value: Value::Null,
-            is_tombstone: true,
-            timestamp: ts,
-            ttl_ms: 5_000,
-        };
-
-        let mut buf = Vec::new();
-        encode_entry(&ik, &entry, &mut buf);
-
-        let (decoded_ik, is_tomb, _, decoded_ts, decoded_ttl, consumed) =
-            decode_entry(&buf).unwrap();
-        assert_eq!(decoded_ik, ik);
-        assert!(is_tomb);
-        assert_eq!(decoded_ts, 42_000_000);
-        assert_eq!(decoded_ttl, 5_000);
-        assert_eq!(consumed, buf.len());
     }
 
     #[test]
@@ -2084,7 +1633,7 @@ mod tests {
         }
     }
 
-    // ===== Restart point tests (v3 format) =====
+    // ===== Restart point tests =====
 
     #[test]
     fn restart_trailer_roundtrip() {
@@ -2092,10 +1641,12 @@ mod tests {
         let mut buf = Vec::new();
         let mut offsets = vec![0u32];
         let mut entry_count = 0usize;
+        let mut prev_key = Vec::new();
 
         // Write 32 entries, capturing offsets at restart boundaries
         for i in 0..32u32 {
-            if entry_count > 0 && entry_count % RESTART_INTERVAL == 0 {
+            let is_restart = entry_count > 0 && entry_count % RESTART_INTERVAL == 0;
+            if is_restart {
                 offsets.push(buf.len() as u32);
             }
             let k = key(&format!("k{:04}", i));
@@ -2106,7 +1657,9 @@ mod tests {
                 timestamp: strata_core::Timestamp::now(),
                 ttl_ms: 0,
             };
-            encode_entry(&ik, &entry, &mut buf);
+            let is_restart_point = entry_count == 0 || is_restart;
+            encode_entry_v4(&prev_key, &ik, &entry, &mut buf, is_restart_point);
+            prev_key = ik.as_bytes().to_vec();
             entry_count += 1;
         }
 
@@ -2130,8 +1683,10 @@ mod tests {
             let mut buf = Vec::new();
             let mut offsets = vec![0u32];
             let mut count = 0usize;
+            let mut prev_key = Vec::new();
             for i in 0..n {
-                if count > 0 && count % RESTART_INTERVAL == 0 {
+                let is_restart = count > 0 && count % RESTART_INTERVAL == 0;
+                if is_restart {
                     offsets.push(buf.len() as u32);
                 }
                 let k = key(&format!("k{:04}", i));
@@ -2142,7 +1697,9 @@ mod tests {
                     timestamp: strata_core::Timestamp::now(),
                     ttl_ms: 0,
                 };
-                encode_entry(&ik, &entry, &mut buf);
+                let is_restart_point = count == 0 || is_restart;
+                encode_entry_v4(&prev_key, &ik, &entry, &mut buf, is_restart_point);
+                prev_key = ik.as_bytes().to_vec();
                 count += 1;
             }
             append_restart_trailer(&mut buf, &offsets);
@@ -2367,39 +1924,6 @@ mod tests {
             assert_eq!(e.value, Value::Int(i as i64));
             assert_eq!(e.commit_id, i as u64 + 1);
         }
-    }
-
-    #[test]
-    fn v4_compression_ratio() {
-        let mt = Memtable::new(0);
-        for i in 0..200u32 {
-            let k = key(&format!("key_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
-        }
-        mt.freeze();
-
-        let dir = tempfile::tempdir().unwrap();
-
-        // Build v3
-        let v3_path = dir.path().join("v3.sst");
-        let builder = SegmentBuilder::default();
-        let v3_meta = builder.build_from_iter_v3(mt.iter_all(), &v3_path).unwrap();
-
-        // Build v4
-        let v4_path = dir.path().join("v4.sst");
-        let v4_meta = builder.build_from_iter(mt.iter_all(), &v4_path).unwrap();
-
-        // v4 (with prefix compression) should be close to v3 in size.
-        // v6 adds a hash index (~4-5% overhead per block), so v4+hash may be
-        // slightly larger than v3 for small datasets. Check it's within 10%.
-        let ratio = v4_meta.file_size as f64 / v3_meta.file_size as f64;
-        assert!(
-            ratio < 1.10,
-            "v4/v6 ({}) should be within 10% of v3 ({}), ratio={:.3}",
-            v4_meta.file_size,
-            v3_meta.file_size,
-            ratio,
-        );
     }
 
     #[test]
@@ -2721,62 +2245,6 @@ mod tests {
             let k = key(&format!("gamma_{:04}", i));
             let e = seg.point_lookup(&k, 1);
             assert!(e.is_some(), "gamma_{:04} not found", i);
-        }
-    }
-
-    #[test]
-    fn test_index_size_reduction() {
-        // Use keys with large gaps in the user key portion to ensure actual
-        // shortening occurs. Keys like "a_<pad>", "c_<pad>", "e_<pad>"...
-        // give gaps of 2 at the differing byte, enabling shortening.
-        let dir = tempfile::tempdir().unwrap();
-
-        let mt = Memtable::new(0);
-        let letters: Vec<char> = ('a'..='z').collect();
-        let mut idx = 0u64;
-        for &c1 in &letters {
-            for &c2 in &letters {
-                // Each key has a long suffix to inflate the full key size,
-                // making the shortening savings more visible.
-                let user_key = format!("{}{}_padding_to_make_key_longer_{:04}", c1, c2, idx);
-                mt.put(&key(&user_key), idx + 1, Value::Int(idx as i64), false);
-                idx += 1;
-            }
-        }
-        mt.freeze();
-
-        let builder = SegmentBuilder {
-            data_block_size: 512,
-            bloom_bits_per_key: 10,
-            compression: CompressionCodec::default(),
-            rate_limiter: None,
-        };
-
-        let path_v3 = dir.path().join("full_keys.sst");
-        let meta_v3 = builder.build_from_iter_v3(mt.iter_all(), &path_v3).unwrap();
-
-        let path_v5 = dir.path().join("short_keys.sst");
-        let meta_v5 = builder.build_from_iter(mt.iter_all(), &path_v5).unwrap();
-
-        assert!(
-            meta_v5.file_size < meta_v3.file_size,
-            "shortened segment ({}) should be strictly smaller than full-key segment ({})",
-            meta_v5.file_size,
-            meta_v3.file_size,
-        );
-
-        // Verify the shortened segment is still fully readable
-        let seg = crate::segment::KVSegment::open(&path_v5).unwrap();
-        idx = 0;
-        for &c1 in &letters {
-            for &c2 in &letters {
-                let user_key = format!("{}{}_padding_to_make_key_longer_{:04}", c1, c2, idx);
-                let k = key(&user_key);
-                let e = seg.point_lookup(&k, idx + 1);
-                assert!(e.is_some(), "key {} not found", user_key);
-                assert_eq!(e.unwrap().value, Value::Int(idx as i64));
-                idx += 1;
-            }
         }
     }
 
