@@ -287,7 +287,10 @@ impl RecoveryCoordinator {
             let name = entry.file_name().to_string_lossy().to_string();
 
             // Match snap-NNNNNN.chk pattern
-            if let Some(id_str) = name.strip_prefix("snap-").and_then(|s| s.strip_suffix(".chk")) {
+            if let Some(id_str) = name
+                .strip_prefix("snap-")
+                .and_then(|s| s.strip_suffix(".chk"))
+            {
                 if let Ok(file_id) = id_str.parse::<u64>() {
                     let is_referenced = manifest_snapshot_id == Some(file_id);
                     if !is_referenced {

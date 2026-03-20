@@ -493,7 +493,11 @@ mod tests {
 
         // read_or_default now handles UnexpectedEof gracefully
         let (v, t) = cf.read_or_default().unwrap();
-        assert_eq!((v, t), (0, 0), "Truncated counter file should default to (0, 0)");
+        assert_eq!(
+            (v, t),
+            (0, 0),
+            "Truncated counter file should default to (0, 0)"
+        );
     }
 
     #[test]
@@ -506,7 +510,11 @@ mod tests {
 
         // read_or_default now handles UnexpectedEof gracefully
         let (v, t) = cf.read_or_default().unwrap();
-        assert_eq!((v, t), (0, 0), "Empty counter file should default to (0, 0)");
+        assert_eq!(
+            (v, t),
+            (0, 0),
+            "Empty counter file should default to (0, 0)"
+        );
     }
 
     #[test]

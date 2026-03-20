@@ -2882,7 +2882,6 @@ mod tests {
         index.enable();
         // Low threshold so seals happen frequently during the test
 
-
         let branch_id = BranchId::new();
         let num_threads = 4;
         let docs_per_thread = 200;
@@ -2958,7 +2957,6 @@ mod tests {
 
         let index = Arc::new(InvertedIndex::new());
         index.enable();
-
 
         let branch_id = BranchId::new();
 

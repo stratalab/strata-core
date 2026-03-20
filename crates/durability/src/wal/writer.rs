@@ -1584,7 +1584,8 @@ mod tests {
         for i in 1..=5 {
             writer.append(&make_record(i)).unwrap();
             assert_eq!(
-                writer.counters().sync_calls, i,
+                writer.counters().sync_calls,
+                i,
                 "batch_size=1 should sync on every write"
             );
         }

@@ -697,8 +697,7 @@ impl SegmentedStore {
             // Only bottommost compactions may safely drop tombstones, since
             // non-bottommost drops could resurrect values in deeper levels.
             let output_level = level + 1;
-            let bottommost = (output_level + 1..ver.levels.len())
-                .all(|l| ver.levels[l].is_empty());
+            let bottommost = (output_level + 1..ver.levels.len()).all(|l| ver.levels[l].is_empty());
 
             (inputs, overlap, grandparents, non_overlap, bottommost)
         };
