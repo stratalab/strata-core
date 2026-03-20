@@ -718,9 +718,9 @@ impl InvertedIndex {
             lengths[idx] = Some(doc_len);
         }
 
-        self.total_docs.fetch_add(1, Ordering::Relaxed);
+        self.total_docs.fetch_add(1, Ordering::Release);
         self.total_doc_len
-            .fetch_add(doc_len as usize, Ordering::Relaxed);
+            .fetch_add(doc_len as usize, Ordering::Release);
         self.active_doc_count.fetch_add(1, Ordering::Relaxed);
         self.version.fetch_add(1, Ordering::Release);
 
@@ -798,10 +798,10 @@ impl InvertedIndex {
 
         // Update global stats
         if active_removed || doc_len.is_some() {
-            self.total_docs.fetch_sub(1, Ordering::Relaxed);
+            self.total_docs.fetch_sub(1, Ordering::Release);
             if let Some(len) = doc_len {
                 self.total_doc_len
-                    .fetch_sub(len as usize, Ordering::Relaxed);
+                    .fetch_sub(len as usize, Ordering::Release);
             }
             if active_removed {
                 self.active_doc_count.fetch_sub(1, Ordering::Relaxed);
