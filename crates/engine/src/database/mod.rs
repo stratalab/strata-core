@@ -1200,22 +1200,20 @@ impl Database {
                 }
             }
 
-            // Apply puts
+            // Apply puts — use recovery method to preserve original commit timestamp
             for (key, value) in &payload.puts {
-                use strata_core::traits::{Storage, WriteMode};
-                self.storage.put_with_version_mode(
+                self.storage.put_recovery_entry(
                     key.clone(),
                     value.clone(),
                     payload.version,
-                    None,
-                    WriteMode::Append,
+                    record.timestamp,
                 )?;
             }
 
-            // Apply deletes
+            // Apply deletes with original timestamp
             for key in &payload.deletes {
-                use strata_core::traits::Storage;
-                Storage::delete_with_version(self.storage.as_ref(), key, payload.version)?;
+                self.storage
+                    .delete_recovery_entry(key, payload.version, record.timestamp)?;
             }
 
             // --- Update BM25 search index ---
