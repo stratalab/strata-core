@@ -975,6 +975,16 @@ impl SegmentedStore {
     /// Number of L0 segments for a branch.
     ///
     /// Used by compaction triggers to decide when to compact L0 → L1.
+    /// Maximum L0 segment count across all branches.
+    pub fn max_l0_segment_count(&self) -> usize {
+        self.branches
+            .iter()
+            .map(|b| b.version.load().l0_segments().len())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Number of L0 segments for a branch.
     pub fn l0_segment_count(&self, branch_id: &BranchId) -> usize {
         self.branches
             .get(branch_id)

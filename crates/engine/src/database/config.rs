@@ -80,6 +80,14 @@ pub struct StorageConfig {
     /// write stalling kicks in. Default: 4. Set to 0 for unlimited.
     #[serde(default = "default_max_immutable_memtables")]
     pub max_immutable_memtables: usize,
+    /// L0 file count that triggers write slowdown (1 ms yield per write).
+    /// Mirrors RocksDB's `level0_slowdown_writes_trigger`. Default: 20.
+    #[serde(default = "default_l0_slowdown_writes_trigger")]
+    pub l0_slowdown_writes_trigger: usize,
+    /// L0 file count that completely stalls writes until compaction catches up.
+    /// Mirrors RocksDB's `level0_stop_writes_trigger`. Default: 36.
+    #[serde(default = "default_l0_stop_writes_trigger")]
+    pub l0_stop_writes_trigger: usize,
 }
 
 fn default_max_branches() -> usize {
@@ -98,6 +106,14 @@ fn default_max_immutable_memtables() -> usize {
     4
 }
 
+fn default_l0_slowdown_writes_trigger() -> usize {
+    0 // disabled by default until compaction throughput improves
+}
+
+fn default_l0_stop_writes_trigger() -> usize {
+    0 // disabled by default until compaction throughput improves
+}
+
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
@@ -107,6 +123,8 @@ impl Default for StorageConfig {
             block_cache_size: 0,
             write_buffer_size: default_write_buffer_size(),
             max_immutable_memtables: default_max_immutable_memtables(),
+            l0_slowdown_writes_trigger: default_l0_slowdown_writes_trigger(),
+            l0_stop_writes_trigger: default_l0_stop_writes_trigger(),
         }
     }
 }
