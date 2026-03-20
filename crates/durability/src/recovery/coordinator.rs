@@ -182,12 +182,16 @@ impl RecoveryCoordinator {
         let active_segment = plan.manifest.active_wal_segment;
         let meta_rebuilt = self.rebuild_missing_metadata(active_segment)?;
 
+        // Clean up orphaned snapshot files (crash between write and MANIFEST update)
+        let orphans_removed = self.cleanup_orphaned_snapshots(plan.manifest.snapshot_id)?;
+
         Ok(RecoveryResult {
             manifest: plan.manifest,
             snapshot_watermark: effective_watermark,
             replay_stats,
             bytes_truncated: truncated,
             meta_files_rebuilt: meta_rebuilt,
+            orphaned_snapshots_removed: orphans_removed,
         })
     }
 
@@ -257,6 +261,53 @@ impl RecoveryCoordinator {
         }
 
         Ok(rebuilt)
+    }
+
+    /// Remove orphaned snapshot files not referenced by the MANIFEST.
+    ///
+    /// After a crash between snapshot write and MANIFEST update, `.chk`
+    /// files may remain on disk without a MANIFEST reference. This scans
+    /// the SNAPSHOTS directory and removes any `.chk` file whose
+    /// snapshot_id > manifest_snapshot_id (or all `.chk` files if no
+    /// snapshot is referenced).
+    pub fn cleanup_orphaned_snapshots(
+        &self,
+        manifest_snapshot_id: Option<u64>,
+    ) -> Result<usize, RecoveryError> {
+        let snap_dir = self.snapshots_dir();
+        if !snap_dir.exists() {
+            return Ok(0);
+        }
+
+        let referenced_id = manifest_snapshot_id.unwrap_or(0);
+        let mut removed = 0;
+
+        let entries = std::fs::read_dir(&snap_dir).map_err(RecoveryError::Io)?;
+        for entry in entries {
+            let entry = entry.map_err(RecoveryError::Io)?;
+            let name = entry.file_name().to_string_lossy().to_string();
+
+            // Match snap-NNNNNN.chk pattern
+            if let Some(id_str) = name.strip_prefix("snap-").and_then(|s| s.strip_suffix(".chk")) {
+                if let Ok(file_id) = id_str.parse::<u64>() {
+                    if file_id != referenced_id {
+                        if let Err(e) = std::fs::remove_file(entry.path()) {
+                            warn!(target: "strata::recovery",
+                                path = %entry.path().display(),
+                                error = %e,
+                                "Failed to remove orphaned snapshot");
+                        } else {
+                            info!(target: "strata::recovery",
+                                snapshot_id = file_id,
+                                "Removed orphaned snapshot file");
+                            removed += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(removed)
     }
 
     /// Truncate partial WAL records at the tail of the active segment
@@ -334,6 +385,8 @@ pub struct RecoveryResult {
     pub bytes_truncated: u64,
     /// Number of `.meta` sidecar files rebuilt during recovery
     pub meta_files_rebuilt: usize,
+    /// Number of orphaned `.chk` snapshot files removed during recovery
+    pub orphaned_snapshots_removed: usize,
 }
 
 /// Recovery errors
@@ -1156,5 +1209,53 @@ mod tests {
         assert!(result.snapshot_watermark.is_none());
         let expected: Vec<u64> = (1..=20).collect();
         assert_eq!(applied, expected);
+    }
+
+    #[test]
+    fn test_cleanup_orphaned_snapshots() {
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path();
+        setup_manifest(db_dir);
+
+        let snap_dir = db_dir.join("SNAPSHOTS");
+        std::fs::create_dir_all(&snap_dir).unwrap();
+
+        // Create the referenced snapshot (id=3) and some orphans
+        std::fs::write(snap_dir.join("snap-000003.chk"), b"referenced").unwrap();
+        std::fs::write(snap_dir.join("snap-000004.chk"), b"orphan").unwrap();
+        std::fs::write(snap_dir.join("snap-000005.chk"), b"orphan").unwrap();
+        std::fs::write(snap_dir.join("snap-000001.chk"), b"old").unwrap();
+        // Non-.chk files should not be touched
+        std::fs::write(snap_dir.join(".snap-000006.tmp"), b"temp").unwrap();
+
+        let coord = RecoveryCoordinator::new(db_dir.to_path_buf(), make_codec());
+        let removed = coord.cleanup_orphaned_snapshots(Some(3)).unwrap();
+        assert_eq!(removed, 3); // snap-000001, snap-000004, snap-000005
+
+        // Referenced snapshot survives
+        assert!(snap_dir.join("snap-000003.chk").exists());
+        // Orphans removed
+        assert!(!snap_dir.join("snap-000004.chk").exists());
+        assert!(!snap_dir.join("snap-000005.chk").exists());
+        assert!(!snap_dir.join("snap-000001.chk").exists());
+        // .tmp file untouched
+        assert!(snap_dir.join(".snap-000006.tmp").exists());
+    }
+
+    #[test]
+    fn test_cleanup_orphaned_snapshots_no_manifest_reference() {
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path();
+        setup_manifest(db_dir);
+
+        let snap_dir = db_dir.join("SNAPSHOTS");
+        std::fs::create_dir_all(&snap_dir).unwrap();
+        std::fs::write(snap_dir.join("snap-000001.chk"), b"orphan").unwrap();
+
+        let coord = RecoveryCoordinator::new(db_dir.to_path_buf(), make_codec());
+        // No snapshot referenced → all .chk files are orphaned
+        let removed = coord.cleanup_orphaned_snapshots(None).unwrap();
+        assert_eq!(removed, 1);
+        assert!(!snap_dir.join("snap-000001.chk").exists());
     }
 }
