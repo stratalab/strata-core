@@ -1568,4 +1568,25 @@ mod tests {
         writer.append(&make_record(6)).unwrap();
         assert_eq!(writer.counters().sync_calls, 2);
     }
+
+    #[test]
+    fn test_standard_mode_batch_size_one_syncs_every_write() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let mode = DurabilityMode::Standard {
+            interval_ms: 999_999,
+            batch_size: 1,
+        };
+        let mut writer = make_writer(&wal_dir, mode);
+
+        // Every write should trigger a sync
+        for i in 1..=5 {
+            writer.append(&make_record(i)).unwrap();
+            assert_eq!(
+                writer.counters().sync_calls, i,
+                "batch_size=1 should sync on every write"
+            );
+        }
+    }
 }

@@ -206,6 +206,13 @@ impl CounterFile {
         file.sync_all()?;
         drop(file);
         std::fs::rename(&tmp, &self.path)?;
+        // Sync parent directory to make the rename durable on crash
+        if let Some(parent) = self.path.parent() {
+            if parent.exists() {
+                let dir = File::open(parent)?;
+                dir.sync_all()?;
+            }
+        }
         Ok(())
     }
 }

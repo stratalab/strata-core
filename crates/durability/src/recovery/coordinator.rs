@@ -279,7 +279,6 @@ impl RecoveryCoordinator {
             return Ok(0);
         }
 
-        let referenced_id = manifest_snapshot_id.unwrap_or(0);
         let mut removed = 0;
 
         let entries = std::fs::read_dir(&snap_dir).map_err(RecoveryError::Io)?;
@@ -290,7 +289,8 @@ impl RecoveryCoordinator {
             // Match snap-NNNNNN.chk pattern
             if let Some(id_str) = name.strip_prefix("snap-").and_then(|s| s.strip_suffix(".chk")) {
                 if let Ok(file_id) = id_str.parse::<u64>() {
-                    if file_id != referenced_id {
+                    let is_referenced = manifest_snapshot_id == Some(file_id);
+                    if !is_referenced {
                         if let Err(e) = std::fs::remove_file(entry.path()) {
                             warn!(target: "strata::recovery",
                                 path = %entry.path().display(),
