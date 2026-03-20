@@ -1821,9 +1821,7 @@ mod tests {
         {
             let mut setup = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
             setup.put(key.clone(), Value::Int(0)).unwrap();
-            manager
-                .commit(&mut setup, store.as_ref(), None)
-                .unwrap();
+            manager.commit(&mut setup, store.as_ref(), None).unwrap();
         }
 
         let num_rounds = 100;

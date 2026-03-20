@@ -153,6 +153,7 @@ fn sorted_vec_insert(vec: &mut Vec<VectorId>, id: VectorId) {
 
 /// Remove from a sorted Vec. No-op if not present.
 #[inline]
+#[allow(dead_code)]
 fn sorted_vec_remove(vec: &mut Vec<VectorId>, id: VectorId) {
     if let Ok(pos) = vec.binary_search(&id) {
         vec.remove(pos);
@@ -870,7 +871,12 @@ impl HnswGraph {
         was_alive
     }
 
-    /// Remove a node and all its bidirectional connections from the graph (for updates)
+    /// Remove a node and all its bidirectional connections from the graph.
+    ///
+    /// **Warning:** This can fragment the graph if the node is a bridge between
+    /// subgraphs. Prefer `delete_with_timestamp()` + re-insert for updates, which
+    /// preserves the old node as a traversal waypoint. See issue #1608.
+    #[allow(dead_code)]
     pub(crate) fn remove_node(&mut self, id: VectorId) {
         if let Some(node) = self.nodes.remove(&id) {
             // Remove references to this node from all neighbors
@@ -1783,8 +1789,15 @@ impl VectorIndexBackend for HnswBackend {
         self.heap.upsert(id, embedding)?;
 
         if is_update {
-            // For updates, remove old graph connections and re-insert
-            self.graph.remove_node(id);
+            // Soft-delete the old node instead of removing it (#1608).
+            // remove_node() severs all bidirectional connections, which can fragment
+            // the graph if the node was a bridge between subgraphs. Soft-delete
+            // preserves the old node as a traversal waypoint (same strategy as
+            // SegmentedHnswBackend sealed segments). insert_into_graph below will
+            // replace the node entry with fresh outbound connections while the
+            // inbound edges from former neighbors are preserved, maintaining
+            // graph connectivity.
+            self.graph.delete_with_timestamp(id, created_at);
         }
 
         // Insert into graph with timestamp
@@ -2692,6 +2705,55 @@ mod tests {
         assert!(
             results_early.iter().all(|(id, _)| id.as_u64() == 10),
             "At ts=150 only VectorId(10) should be alive"
+        );
+    }
+
+    /// Regression test for #1608: updating a bridge node must not fragment the graph.
+    ///
+    /// Creates a chain topology A-B-C where B is the only path between A and C.
+    /// Updates B's embedding. Verifies that A and C are still reachable from the
+    /// entry point after the update (soft-delete preserves B as a waypoint).
+    #[test]
+    fn test_update_bridge_node_preserves_connectivity() {
+        let mut backend = make_backend(3, DistanceMetric::Cosine);
+
+        // Insert nodes that form a chain: A far from C, B in between
+        let a = VectorId::new(1);
+        let b = VectorId::new(2);
+        let c = VectorId::new(3);
+
+        backend.insert(a, &[1.0, 0.0, 0.0]).unwrap();
+        backend.insert(b, &[0.5, 0.5, 0.0]).unwrap();
+        backend.insert(c, &[0.0, 1.0, 0.0]).unwrap();
+
+        // All 3 should be searchable before the update
+        let results = backend.search(&[0.0, 1.0, 0.0], 3);
+        assert_eq!(
+            results.len(),
+            3,
+            "all 3 nodes should be reachable before update"
+        );
+
+        // Update B's embedding (triggers soft-delete + re-insert)
+        backend
+            .insert_with_timestamp(b, &[0.5, 0.5, 0.1], 100)
+            .unwrap();
+
+        // All 3 should still be searchable after the update
+        let results_after = backend.search(&[0.0, 1.0, 0.0], 3);
+        let found_ids: BTreeSet<_> = results_after.iter().map(|(id, _)| *id).collect();
+        assert!(
+            found_ids.contains(&a),
+            "node A should still be reachable after bridge node update"
+        );
+        assert!(
+            found_ids.contains(&c),
+            "node C should still be reachable after bridge node update"
+        );
+        assert_eq!(
+            results_after.len(),
+            3,
+            "all 3 nodes should be reachable after bridge node update"
         );
     }
 }

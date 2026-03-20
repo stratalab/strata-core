@@ -393,17 +393,39 @@ pub enum JsonScalar {
 }
 
 impl JsonScalar {
-    /// Check if this scalar matches a JSON value
+    /// Check if this scalar matches a JSON value.
+    ///
+    /// For numeric comparisons, uses a tolerance that accounts for
+    /// serialization round-trip precision loss (#1610). MessagePack may
+    /// store f64 values as f32 for compactness; the f32 round-trip
+    /// introduces relative error up to ~1.2e-7 (f32::EPSILON).
+    /// We use 1e-6 as a safe margin above f32::EPSILON.
     pub fn matches_json(&self, value: &serde_json::Value) -> bool {
         match (self, value) {
             (JsonScalar::Null, serde_json::Value::Null) => true,
             (JsonScalar::Bool(a), serde_json::Value::Bool(b)) => a == b,
             (JsonScalar::Number(a), serde_json::Value::Number(b)) => {
-                b.as_f64().is_some_and(|n| (a - n).abs() < f64::EPSILON)
+                b.as_f64().is_some_and(|n| float_eq(*a, n))
             }
             (JsonScalar::String(a), serde_json::Value::String(b)) => a == b,
             _ => false,
         }
+    }
+}
+
+/// Tolerant float equality that survives f64→f32→f64 serialization round-trips.
+/// Uses relative comparison for values with magnitude >= 1e-6, and absolute
+/// comparison for values near zero.
+fn float_eq(a: f64, b: f64) -> bool {
+    const ABS_TOL: f64 = 1e-6;
+    let diff = (a - b).abs();
+    let magnitude = a.abs().max(b.abs());
+    if magnitude < ABS_TOL {
+        // Near zero: use absolute tolerance
+        diff < ABS_TOL
+    } else {
+        // Use relative tolerance
+        diff / magnitude < ABS_TOL
     }
 }
 
@@ -1341,5 +1363,60 @@ mod tests {
         let c1 = VectorConfig::new(128, DistanceMetric::Cosine).unwrap();
         let c2 = VectorConfig::new(128, DistanceMetric::Euclidean).unwrap();
         assert_ne!(c1, c2);
+    }
+
+    // ================================================================
+    // Float comparison tolerance (#1610)
+    // ================================================================
+
+    #[test]
+    fn test_float_eq_exact() {
+        assert!(float_eq(0.95, 0.95));
+        assert!(float_eq(42.0, 42.0));
+        assert!(float_eq(0.0, 0.0));
+        assert!(float_eq(-1.5, -1.5));
+    }
+
+    #[test]
+    fn test_float_eq_f32_roundtrip() {
+        // Simulate f64 -> f32 -> f64 round-trip (MessagePack serialization)
+        let values = [0.1f64, 0.3, 0.95, 1.23456789, 100.7, 0.000001];
+        for v in values {
+            let roundtripped = v as f32 as f64;
+            assert!(
+                float_eq(v, roundtripped),
+                "float_eq({v}, {roundtripped}) should be true after f32 round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn test_float_eq_rejects_different_values() {
+        assert!(!float_eq(0.95, 0.96));
+        assert!(!float_eq(42.0, 43.0));
+        assert!(!float_eq(1.0, 2.0));
+        assert!(!float_eq(0.0, 1.0));
+    }
+
+    #[test]
+    fn test_float_eq_near_zero() {
+        // Values near zero should use absolute tolerance
+        assert!(float_eq(0.0, 1e-7));
+        assert!(float_eq(1e-7, 0.0));
+        assert!(!float_eq(0.0, 1.0));
+    }
+
+    #[test]
+    fn test_json_scalar_matches_f32_roundtrip() {
+        // End-to-end: JsonScalar filter should match value after f32 round-trip
+        let original = 0.95f64;
+        let roundtripped = original as f32 as f64; // ~0.949999988079071
+        let scalar = JsonScalar::Number(original);
+        let json_val =
+            serde_json::Value::Number(serde_json::Number::from_f64(roundtripped).unwrap());
+        assert!(
+            scalar.matches_json(&json_val),
+            "JsonScalar::Number({original}) should match {roundtripped} after f32 round-trip"
+        );
     }
 }
