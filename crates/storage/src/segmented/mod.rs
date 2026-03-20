@@ -484,7 +484,7 @@ impl SegmentedStore {
     /// Point-in-time query: for each key, finds the latest version whose
     /// timestamp ≤ max_ts, ignoring newer versions entirely.
     ///
-    /// **Note:** v2 segments store timestamps; v1 segments default to timestamp=0.
+    /// **Note:** Segments store timestamps; entries without explicit timestamps default to 0.
     pub fn list_by_type_at_timestamp(
         &self,
         branch_id: &BranchId,
@@ -546,7 +546,7 @@ impl SegmentedStore {
 
     /// Get the latest entry for a key where timestamp ≤ max_ts.
     ///
-    /// **Note:** v2 segments store timestamps; v1 segments default to timestamp=0.
+    /// **Note:** Segments store timestamps; entries without explicit timestamps default to 0.
     pub fn get_at_timestamp(
         &self,
         key: &Key,
@@ -576,7 +576,7 @@ impl SegmentedStore {
     ///
     /// For each key, finds the latest version whose timestamp ≤ max_timestamp.
     ///
-    /// **Note:** v2 segments store timestamps; v1 segments default to timestamp=0.
+    /// **Note:** Segments store timestamps; entries without explicit timestamps default to 0.
     pub fn scan_prefix_at_timestamp(
         &self,
         prefix: &Key,
