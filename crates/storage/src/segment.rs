@@ -1124,13 +1124,6 @@ impl OwnedSegmentIter {
     }
 }
 
-impl OwnedSegmentIter {
-    /// Return the current data block index (used by `ThrottledSegmentIter`).
-    pub(crate) fn current_block_idx(&self) -> usize {
-        self.block_idx
-    }
-}
-
 impl Iterator for OwnedSegmentIter {
     type Item = (InternalKey, SegmentEntry);
 
