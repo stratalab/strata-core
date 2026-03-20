@@ -667,10 +667,19 @@ impl JsonPath {
         for seg in &self.segments {
             match seg {
                 PathSegment::Key(k) => {
-                    if !result.is_empty() {
-                        result.push('.');
+                    let needs_quoting = k
+                        .chars()
+                        .any(|c| !(c.is_alphanumeric() || c == '_' || c == '-'));
+                    if needs_quoting {
+                        // Escape embedded double-quotes so roundtrip is safe.
+                        let escaped = k.replace('\\', "\\\\").replace('"', "\\\"");
+                        result.push_str(&format!("[\"{}\"]", escaped));
+                    } else {
+                        if !result.is_empty() {
+                            result.push('.');
+                        }
+                        result.push_str(k);
                     }
-                    result.push_str(k);
                 }
                 PathSegment::Index(i) => {
                     result.push('[');
@@ -720,27 +729,60 @@ impl FromStr for JsonPath {
             }
 
             if chars[i] == '[' {
-                // Array index segment
                 let start = i;
                 i += 1;
-                let idx_start = i;
 
-                // Find closing bracket
-                while i < chars.len() && chars[i] != ']' {
-                    i += 1;
+                if i < chars.len() && chars[i] == '"' {
+                    // Bracket-quote key segment: ["key with.dots"]
+                    i += 1; // skip opening quote
+                    let mut key = String::new();
+                    let key_start = i;
+                    while i < chars.len() && chars[i] != '"' {
+                        if chars[i] == '\\' && i + 1 < chars.len() {
+                            // Escaped character: \" or \\
+                            match chars[i + 1] {
+                                '"' | '\\' => {
+                                    key.push(chars[i + 1]);
+                                    i += 2;
+                                    continue;
+                                }
+                                _ => {} // not a recognized escape, treat backslash as literal
+                            }
+                        }
+                        key.push(chars[i]);
+                        i += 1;
+                    }
+                    if i >= chars.len() {
+                        return Err(PathParseError::UnclosedBracket(start));
+                    }
+                    if key.is_empty() {
+                        return Err(PathParseError::EmptyKey(key_start));
+                    }
+                    i += 1; // skip closing quote
+                    if i >= chars.len() || chars[i] != ']' {
+                        return Err(PathParseError::UnclosedBracket(start));
+                    }
+                    segments.push(PathSegment::Key(key));
+                    i += 1; // skip closing bracket
+                } else {
+                    // Array index segment: [0]
+                    let idx_start = i;
+                    while i < chars.len() && chars[i] != ']' {
+                        i += 1;
+                    }
+
+                    if i >= chars.len() {
+                        return Err(PathParseError::UnclosedBracket(start));
+                    }
+
+                    let idx_str: String = chars[idx_start..i].iter().collect();
+                    let idx = idx_str
+                        .parse::<usize>()
+                        .map_err(|_| PathParseError::InvalidIndex(idx_start, idx_str))?;
+
+                    segments.push(PathSegment::Index(idx));
+                    i += 1; // skip closing bracket
                 }
-
-                if i >= chars.len() {
-                    return Err(PathParseError::UnclosedBracket(start));
-                }
-
-                let idx_str: String = chars[idx_start..i].iter().collect();
-                let idx = idx_str
-                    .parse::<usize>()
-                    .map_err(|_| PathParseError::InvalidIndex(idx_start, idx_str))?;
-
-                segments.push(PathSegment::Index(idx));
-                i += 1; // Skip closing bracket
             } else if chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '-' {
                 // Key segment
                 let key_start = i;
@@ -1862,6 +1904,137 @@ mod tests {
     fn test_path_parse_error_empty_key() {
         let result: Result<JsonPath, _> = "user.".parse();
         assert!(matches!(result, Err(PathParseError::EmptyKey(_))));
+    }
+
+    #[test]
+    fn test_path_parse_bracket_quote_key() {
+        let path: JsonPath = r#"["a.b"]"#.parse().unwrap();
+        assert_eq!(path.len(), 1);
+        assert_eq!(path.segments(), &[PathSegment::Key("a.b".to_string())]);
+    }
+
+    #[test]
+    fn test_path_parse_bracket_quote_nested() {
+        let path: JsonPath = r#"root["a.b"]["c d"]"#.parse().unwrap();
+        assert_eq!(path.len(), 3);
+        assert_eq!(
+            path.segments(),
+            &[
+                PathSegment::Key("root".to_string()),
+                PathSegment::Key("a.b".to_string()),
+                PathSegment::Key("c d".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_path_parse_bracket_quote_mixed_with_index() {
+        let path: JsonPath = r#"items[0]["field.name"]"#.parse().unwrap();
+        assert_eq!(path.len(), 3);
+        assert_eq!(
+            path.segments(),
+            &[
+                PathSegment::Key("items".to_string()),
+                PathSegment::Index(0),
+                PathSegment::Key("field.name".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_path_parse_bracket_quote_empty_key_error() {
+        let result: Result<JsonPath, _> = r#"[""]"#.parse();
+        assert!(matches!(result, Err(PathParseError::EmptyKey(_))));
+    }
+
+    #[test]
+    fn test_path_parse_bracket_quote_unclosed() {
+        let result: Result<JsonPath, _> = r#"["abc"#.parse();
+        assert!(matches!(result, Err(PathParseError::UnclosedBracket(_))));
+    }
+
+    #[test]
+    fn test_path_bracket_quote_roundtrip() {
+        let path: JsonPath = r#"root["a.b"].normal["c d"]"#.parse().unwrap();
+        let s = path.to_path_string();
+        let reparsed: JsonPath = s.parse().unwrap();
+        assert_eq!(path, reparsed);
+    }
+
+    #[test]
+    fn test_path_to_string_bracket_quote_special_chars() {
+        let path = JsonPath::from_segments(vec![
+            PathSegment::Key("normal".to_string()),
+            PathSegment::Key("has.dot".to_string()),
+            PathSegment::Key("has space".to_string()),
+        ]);
+        assert_eq!(path.to_path_string(), r#"normal["has.dot"]["has space"]"#);
+    }
+
+    #[test]
+    fn test_path_parse_consecutive_bracket_quotes() {
+        let path: JsonPath = r#"["a.b"]["c.d"]"#.parse().unwrap();
+        assert_eq!(path.len(), 2);
+        assert_eq!(
+            path.segments(),
+            &[
+                PathSegment::Key("a.b".to_string()),
+                PathSegment::Key("c.d".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_path_parse_bracket_quote_key_with_bracket() {
+        // Key contains ']' character — parser scans for '"' not ']'
+        let path: JsonPath = r#"["a]b"]"#.parse().unwrap();
+        assert_eq!(path.segments(), &[PathSegment::Key("a]b".to_string())]);
+    }
+
+    #[test]
+    fn test_path_parse_dot_before_bracket_quote() {
+        let path: JsonPath = r#"root.["a.b"]"#.parse().unwrap();
+        assert_eq!(path.len(), 2);
+        assert_eq!(
+            path.segments(),
+            &[
+                PathSegment::Key("root".to_string()),
+                PathSegment::Key("a.b".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_path_bracket_quote_with_embedded_quotes() {
+        // Key containing double-quote, escaped as \"
+        let path: JsonPath = r#"["a\"b"]"#.parse().unwrap();
+        assert_eq!(path.segments(), &[PathSegment::Key("a\"b".to_string())]);
+    }
+
+    #[test]
+    fn test_path_bracket_quote_with_backslash() {
+        // Key containing literal backslash, escaped as \\
+        let path: JsonPath = r#"["a\\b"]"#.parse().unwrap();
+        assert_eq!(path.segments(), &[PathSegment::Key("a\\b".to_string())]);
+    }
+
+    #[test]
+    fn test_path_bracket_quote_embedded_quote_roundtrip() {
+        // Build key with embedded quote programmatically, verify roundtrip
+        let path = JsonPath::from_segments(vec![PathSegment::Key("a\"b".to_string())]);
+        let s = path.to_path_string();
+        assert_eq!(s, r#"["a\"b"]"#);
+        let reparsed: JsonPath = s.parse().unwrap();
+        assert_eq!(path, reparsed);
+    }
+
+    #[test]
+    fn test_path_bracket_quote_embedded_backslash_roundtrip() {
+        let path = JsonPath::from_segments(vec![PathSegment::Key("a\\b".to_string())]);
+        let s = path.to_path_string();
+        assert_eq!(s, r#"["a\\b"]"#);
+        let reparsed: JsonPath = s.parse().unwrap();
+        assert_eq!(path, reparsed);
     }
 
     #[test]
