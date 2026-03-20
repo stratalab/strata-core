@@ -611,6 +611,31 @@ impl TransactionContext {
         self.read_from_snapshot(key)
     }
 
+    /// Add a key to the read set without needing its value.
+    ///
+    /// Use this to protect cross-key invariants under snapshot isolation.
+    /// Write skew occurs when two transactions each read disjoint keys and
+    /// write to the other's key — both pass validation because their reads
+    /// are disjoint from each other's writes. `assert_read()` closes this
+    /// gap by adding the key to the read set, ensuring that a concurrent
+    /// write to that key triggers a validation conflict.
+    ///
+    /// # Example: Protecting "balance_a + balance_b >= 0"
+    ///
+    /// ```text
+    /// let a = txn.get(&key_a)?;
+    /// txn.assert_read(&key_b)?;      // ← prevents write skew
+    /// txn.put(key_a, new_value_a)?;
+    /// ```
+    ///
+    /// Without `assert_read(&key_b)`, a concurrent transaction could modify
+    /// `key_b` and both would commit, potentially violating the invariant.
+    pub fn assert_read(&mut self, key: &Key) -> StrataResult<()> {
+        self.ensure_active()?;
+        self.read_from_snapshot(key)?;
+        Ok(())
+    }
+
     /// Read from store and track in read_set
     ///
     /// This is the core read path that tracks reads for conflict detection.
@@ -842,7 +867,21 @@ impl TransactionContext {
     /// # Semantics
     /// - If the key was previously deleted in this txn, remove from delete_set
     /// - Add/overwrite in write_set (latest value wins)
-    /// - Writes are "blind" - no read_set entry unless you explicitly read first
+    /// - Writes are "blind" — no read_set entry unless you explicitly read first
+    ///
+    /// # Concurrency: Last-Writer-Wins
+    ///
+    /// A blind `put()` does NOT guarantee your value persists. If another
+    /// transaction also blind-writes the same key, both commit successfully
+    /// and the higher version wins at read time (last-writer-wins). Neither
+    /// transaction is notified of the other's write.
+    ///
+    /// To protect against lost updates:
+    /// - **Read-modify-write**: call `get()` before `put()` to add the key to
+    ///   the read set — a concurrent write will then cause a validation conflict.
+    /// - **Create-if-not-exists**: use `cas(key, 0, value)`.
+    /// - **Update-at-version**: use `cas(key, expected_version, value)`.
+    /// - **Cross-key invariants**: use `assert_read()` on all keys involved.
     ///
     /// # Errors
     /// Returns `StrataError::invalid_input` if transaction is not active.
@@ -870,6 +909,16 @@ impl TransactionContext {
             ));
         }
         self.check_write_limit(Some(&key))?;
+
+        // Reject if this key already has a CAS operation — mixing put and CAS
+        // on the same key is almost certainly a caller bug (CAS value would
+        // silently override the put value at commit time).
+        if self.cas_set.iter().any(|op| op.key == key) {
+            return Err(StrataError::invalid_input(format!(
+                "Cannot put() key that already has a cas() in this transaction: {:?}",
+                key
+            )));
+        }
 
         // Remove from delete_set if previously deleted in this txn
         self.delete_set.remove(&key);
@@ -981,6 +1030,15 @@ impl TransactionContext {
         }
         self.check_write_limit(None)?;
 
+        // Reject if this key already has a blind write — mixing CAS and put
+        // on the same key is almost certainly a caller bug.
+        if self.write_set.contains_key(&key) {
+            return Err(StrataError::invalid_input(format!(
+                "Cannot cas() key that already has a put() in this transaction: {:?}",
+                key
+            )));
+        }
+
         self.cas_set.push(CASOperation {
             key,
             expected_version,
@@ -1007,6 +1065,15 @@ impl TransactionContext {
             ));
         }
         self.check_write_limit(None)?;
+
+        // Reject if this key already has a blind write
+        if self.write_set.contains_key(&key) {
+            return Err(StrataError::invalid_input(format!(
+                "Cannot cas_with_read() key that already has a put() in this transaction: {:?}",
+                key
+            )));
+        }
+
         self.read_from_snapshot(&key)?;
         self.cas_set.push(CASOperation {
             key,
@@ -2353,5 +2420,118 @@ mod tests {
             txn.read_set.is_empty(),
             "read_set should be empty after scan_prefix in read-only mode"
         );
+    }
+
+    // ========================================================================
+    // put/CAS overlap detection (#1603)
+    // ========================================================================
+
+    #[test]
+    fn test_put_then_cas_same_key_rejected() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let store = empty_store();
+        let mut txn = TransactionContext::with_store(1, branch_id, store);
+
+        let key = test_key(&ns, "overlap");
+        txn.put(key.clone(), Value::Int(1)).unwrap();
+
+        let result = txn.cas(key, 0, Value::Int(2));
+        assert!(result.is_err(), "cas() after put() on same key should fail");
+        assert!(
+            format!("{}", result.unwrap_err()).contains("put()"),
+            "Error should mention conflicting put()"
+        );
+    }
+
+    #[test]
+    fn test_cas_then_put_same_key_rejected() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let store = empty_store();
+        let mut txn = TransactionContext::with_store(1, branch_id, store);
+
+        let key = test_key(&ns, "overlap");
+        txn.cas(key.clone(), 0, Value::Int(1)).unwrap();
+
+        let result = txn.put(key, Value::Int(2));
+        assert!(result.is_err(), "put() after cas() on same key should fail");
+        assert!(
+            format!("{}", result.unwrap_err()).contains("cas()"),
+            "Error should mention conflicting cas()"
+        );
+    }
+
+    #[test]
+    fn test_cas_with_read_then_put_same_key_rejected() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let key = test_key(&ns, "overlap");
+        let store = store_with_key(&key, Value::Int(42), 1);
+        let mut txn = TransactionContext::with_store(1, branch_id, store);
+
+        txn.cas_with_read(key.clone(), 1, Value::Int(99)).unwrap();
+
+        let result = txn.put(key, Value::Int(2));
+        assert!(
+            result.is_err(),
+            "put() after cas_with_read() on same key should fail"
+        );
+    }
+
+    #[test]
+    fn test_put_and_cas_different_keys_allowed() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let store = empty_store();
+        let mut txn = TransactionContext::with_store(1, branch_id, store);
+
+        let key_a = test_key(&ns, "a");
+        let key_b = test_key(&ns, "b");
+        txn.put(key_a, Value::Int(1)).unwrap();
+        txn.cas(key_b, 0, Value::Int(2)).unwrap();
+        // Different keys — should succeed
+    }
+
+    // ========================================================================
+    // assert_read for write skew protection (#1605)
+    // ========================================================================
+
+    #[test]
+    fn test_assert_read_adds_to_read_set() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let key = test_key(&ns, "guarded");
+        let store = store_with_key(&key, Value::Int(10), 5);
+        let mut txn = TransactionContext::with_store(1, branch_id, store);
+
+        assert!(txn.read_set.is_empty());
+        txn.assert_read(&key).unwrap();
+        assert_eq!(txn.read_set.len(), 1);
+        assert_eq!(*txn.read_set.get(&key).unwrap(), 5);
+    }
+
+    #[test]
+    fn test_assert_read_nonexistent_key_tracks_version_zero() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let store = empty_store();
+        let mut txn = TransactionContext::with_store(1, branch_id, store);
+
+        let key = test_key(&ns, "missing");
+        txn.assert_read(&key).unwrap();
+        assert_eq!(*txn.read_set.get(&key).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_assert_read_rejects_non_active() {
+        let ns = test_namespace();
+        let branch_id = BranchId::new();
+        let store = empty_store();
+        let mut txn = TransactionContext::with_store(1, branch_id, store);
+        txn.mark_aborted("test".to_string()).unwrap();
+
+        let key = test_key(&ns, "k1");
+        assert!(txn.assert_read(&key).is_err());
     }
 }
