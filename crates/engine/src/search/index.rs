@@ -337,8 +337,8 @@ impl InvertedIndex {
         self.doc_terms.write().unwrap().clear();
         self.doc_id_map.clear();
         self.sealed.write().unwrap().clear();
-        self.total_docs.store(0, Ordering::Relaxed);
-        self.total_doc_len.store(0, Ordering::Relaxed);
+        self.total_docs.store(0, Ordering::Release);
+        self.total_doc_len.store(0, Ordering::Release);
         self.active_doc_count.store(0, Ordering::Relaxed);
         self.sealing.store(false, Ordering::Relaxed);
         self.branch_ids.write().unwrap().clear();
@@ -693,45 +693,52 @@ impl InvertedIndex {
         // Hold seal_lock as reader so seal_active cannot drain postings
         // while we are inserting. Multiple index_document calls can proceed
         // concurrently (shared read lock).
-        let _seal_guard = self.seal_lock.read().unwrap();
-
-        // Update posting lists
-        for (term, tf) in tf_map {
-            let entry = PostingEntry::new(doc_id, tf, doc_len);
-
-            self.postings.entry(term.clone()).or_default().add(entry);
-
-            self.doc_freqs
-                .entry(term)
-                .and_modify(|c| *c += 1)
-                .or_insert(1);
-        }
-
-        // Store forward index (doc_id → terms) for O(terms) removal
+        //
+        // The guard MUST cover all mutations (postings, doc_freqs, doc_terms,
+        // doc_lengths, counters) so seal_active sees a consistent snapshot.
+        // It MUST be dropped before try_seal_active() which acquires write lock.
         {
-            let mut terms = self.doc_terms.write().unwrap();
-            let idx = doc_id as usize;
-            if idx >= terms.len() {
-                terms.resize(idx + 1, None);
-            }
-            terms[idx] = Some(term_names);
-        }
+            let _seal_guard = self.seal_lock.read().unwrap();
 
-        // Track document length for proper removal (fixes #608)
-        {
-            let mut lengths = self.doc_lengths.write().unwrap();
-            let idx = doc_id as usize;
-            if idx >= lengths.len() {
-                lengths.resize(idx + 1, None);
-            }
-            lengths[idx] = Some(doc_len);
-        }
+            // Update posting lists
+            for (term, tf) in tf_map {
+                let entry = PostingEntry::new(doc_id, tf, doc_len);
 
-        self.total_docs.fetch_add(1, Ordering::Release);
-        self.total_doc_len
-            .fetch_add(doc_len as usize, Ordering::Release);
-        self.active_doc_count.fetch_add(1, Ordering::Relaxed);
-        self.version.fetch_add(1, Ordering::Release);
+                self.postings.entry(term.clone()).or_default().add(entry);
+
+                self.doc_freqs
+                    .entry(term)
+                    .and_modify(|c| *c += 1)
+                    .or_insert(1);
+            }
+
+            // Store forward index (doc_id → terms) for O(terms) removal
+            {
+                let mut terms = self.doc_terms.write().unwrap();
+                let idx = doc_id as usize;
+                if idx >= terms.len() {
+                    terms.resize(idx + 1, None);
+                }
+                terms[idx] = Some(term_names);
+            }
+
+            // Track document length for proper removal (fixes #608)
+            {
+                let mut lengths = self.doc_lengths.write().unwrap();
+                let idx = doc_id as usize;
+                if idx >= lengths.len() {
+                    lengths.resize(idx + 1, None);
+                }
+                lengths[idx] = Some(doc_len);
+            }
+
+            self.total_docs.fetch_add(1, Ordering::Release);
+            self.total_doc_len
+                .fetch_add(doc_len as usize, Ordering::Release);
+            self.active_doc_count.fetch_add(1, Ordering::Relaxed);
+            self.version.fetch_add(1, Ordering::Release);
+        }
+        // seal_lock released — safe to call try_seal_active (acquires write lock)
 
         // Check if we should seal the active segment
         let active_count = self.active_doc_count.load(Ordering::Relaxed);
@@ -759,16 +766,10 @@ impl InvertedIndex {
             None => return, // Not indexed
         };
 
-        // Retrieve doc_len from global tracking (persists across seals)
-        let doc_len = {
-            let mut lengths = self.doc_lengths.write().unwrap();
-            let idx = doc_id as usize;
-            if idx < lengths.len() {
-                lengths[idx].take()
-            } else {
-                None
-            }
-        };
+        // Hold seal_lock as reader so seal_active cannot drain postings
+        // while we are removing.
+        // Lock ordering: seal_lock → doc_terms → doc_lengths (matches index_document).
+        let _seal_guard = self.seal_lock.read().unwrap();
 
         // Retrieve and clear forward index entry for this doc
         let terms = {
@@ -776,6 +777,17 @@ impl InvertedIndex {
             let idx = doc_id as usize;
             if idx < dt.len() {
                 dt[idx].take()
+            } else {
+                None
+            }
+        };
+
+        // Retrieve doc_len from global tracking (persists across seals)
+        let doc_len = {
+            let mut lengths = self.doc_lengths.write().unwrap();
+            let idx = doc_id as usize;
+            if idx < lengths.len() {
+                lengths[idx].take()
             } else {
                 None
             }
@@ -852,14 +864,16 @@ impl InvertedIndex {
     /// across seals, enabling re-index detection and accurate `total_doc_len`
     /// adjustment when removing docs from sealed segments.
     pub fn seal_active(&self) {
+        // Exclusive lock: block concurrent index_document/remove_document calls
+        // during drain so no postings are inserted between iter() and remove().
+        // The active_count check happens AFTER acquiring the lock to avoid a
+        // TOCTOU race where concurrent indexing changes the count.
+        let _seal_guard = self.seal_lock.write().unwrap();
+
         let active_count = self.active_doc_count.load(Ordering::Relaxed);
         if active_count == 0 {
             return;
         }
-
-        // Exclusive lock: block concurrent index_document calls during drain
-        // so no postings are inserted between iter() and remove().
-        let _seal_guard = self.seal_lock.write().unwrap();
 
         // Drain active segment into sorted term map
         let mut term_postings: BTreeMap<String, Vec<PostingEntry>> = BTreeMap::new();
@@ -999,11 +1013,11 @@ impl InvertedIndex {
         // Restore DocIdMap
         self.doc_id_map.restore_from_vec(data.doc_id_map);
 
-        // Restore global stats
+        // Restore global stats (Release to pair with Acquire loads in readers)
         self.total_docs
-            .store(data.total_docs as usize, Ordering::Relaxed);
+            .store(data.total_docs as usize, Ordering::Release);
         self.total_doc_len
-            .store(data.total_doc_len as usize, Ordering::Relaxed);
+            .store(data.total_doc_len as usize, Ordering::Release);
         self.next_segment_id
             .store(data.next_segment_id, Ordering::Relaxed);
 
@@ -2850,5 +2864,166 @@ mod tests {
         let query = vec!["alpha".to_string()];
         let result = index.score_top_k(&query, &branch_id, 10, 0.9, 0.4);
         assert_eq!(result.len(), 1);
+    }
+
+    // ========================================
+    // Concurrent seal + index tests (#1620)
+    // ========================================
+
+    #[test]
+    fn test_concurrent_index_and_seal_no_posting_loss() {
+        // Regression test for #1620: concurrent index_document and seal_active
+        // must not lose postings. Before the fix, the iterate-then-remove pattern
+        // in seal_active could race with concurrent inserts.
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let index = Arc::new(InvertedIndex::new());
+        index.enable();
+        // Low threshold so seals happen frequently during the test
+
+
+        let branch_id = BranchId::new();
+        let num_threads = 4;
+        let docs_per_thread = 200;
+        // +2: num_threads indexers + 1 sealer + 1 main thread
+        let barrier = Arc::new(Barrier::new(num_threads + 2));
+
+        let mut handles = Vec::new();
+
+        // Spawn indexer threads
+        for t in 0..num_threads {
+            let idx = Arc::clone(&index);
+            let bar = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                bar.wait();
+                for i in 0..docs_per_thread {
+                    let doc_name = format!("thread{}_doc{}", t, i);
+                    let doc_ref = EntityRef::Kv {
+                        branch_id,
+                        key: doc_name.clone(),
+                    };
+                    // Use "hello" — a common term present in all docs.
+                    // Tokenizer splits on word boundaries, lowercases, stems.
+                    let text = format!("hello world thread{} item{}", t, i);
+                    idx.index_document(&doc_ref, &text, None);
+                }
+            }));
+        }
+
+        // Spawn a sealer thread
+        let idx_seal = Arc::clone(&index);
+        let bar_seal = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            bar_seal.wait();
+            // Force multiple seals during concurrent indexing
+            for _ in 0..20 {
+                idx_seal.seal_active();
+                thread::yield_now();
+            }
+        }));
+
+        // Release all threads
+        barrier.wait();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Final seal to capture any remaining active postings
+        index.seal_active();
+
+        let total_expected = num_threads * docs_per_thread;
+
+        // Every document should be findable via "hello" (present in all docs)
+        let query = vec!["hello".to_string()];
+        let results = index.score_top_k(&query, &branch_id, total_expected + 10, 0.9, 0.4);
+        assert_eq!(
+            results.len(),
+            total_expected,
+            "All {} documents should be searchable after concurrent index+seal. \
+             Found {}. This indicates posting loss during seal.",
+            total_expected,
+            results.len(),
+        );
+
+        // total_docs should match
+        assert_eq!(index.total_docs(), total_expected);
+    }
+
+    #[test]
+    fn test_concurrent_index_remove_and_seal() {
+        // Verify remove_document doesn't race with seal_active
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let index = Arc::new(InvertedIndex::new());
+        index.enable();
+
+
+        let branch_id = BranchId::new();
+
+        // Pre-index 100 documents
+        let mut doc_refs = Vec::new();
+        for i in 0..100 {
+            let doc_ref = EntityRef::Kv {
+                branch_id,
+                key: format!("doc_{}", i),
+            };
+            index.index_document(&doc_ref, &format!("hello world item{}", i), None);
+            doc_refs.push(doc_ref);
+        }
+
+        // 4 participants: remover + adder + sealer + main thread
+        let barrier = Arc::new(Barrier::new(4));
+
+        // Thread 1: remove first 50 docs
+        let idx1 = Arc::clone(&index);
+        let bar1 = Arc::clone(&barrier);
+        let refs1 = doc_refs[..50].to_vec();
+        let h1 = thread::spawn(move || {
+            bar1.wait();
+            for doc_ref in &refs1 {
+                idx1.remove_document(doc_ref);
+            }
+        });
+
+        // Thread 2: add 50 new docs
+        let idx2 = Arc::clone(&index);
+        let bar2 = Arc::clone(&barrier);
+        let h2 = thread::spawn(move || {
+            bar2.wait();
+            for i in 100..150 {
+                let doc_ref = EntityRef::Kv {
+                    branch_id,
+                    key: format!("new_doc_{}", i),
+                };
+                idx2.index_document(&doc_ref, &format!("hello world extra{}", i), None);
+            }
+        });
+
+        // Thread 3: seal repeatedly
+        let idx3 = Arc::clone(&index);
+        let bar3 = Arc::clone(&barrier);
+        let h3 = thread::spawn(move || {
+            bar3.wait();
+            for _ in 0..10 {
+                idx3.seal_active();
+                thread::yield_now();
+            }
+        });
+
+        barrier.wait();
+        h1.join().unwrap();
+        h2.join().unwrap();
+        h3.join().unwrap();
+
+        index.seal_active();
+
+        // 100 original - 50 removed + 50 added = 100
+        assert_eq!(
+            index.total_docs(),
+            100,
+            "total_docs should be 100 after concurrent remove/add/seal"
+        );
     }
 }
