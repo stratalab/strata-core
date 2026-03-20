@@ -21,7 +21,7 @@ use crate::block_cache::{self, Priority};
 use crate::bloom::BloomFilter;
 use crate::key_encoding::{encode_typed_key, encode_typed_key_prefix, InternalKey};
 use crate::segment_builder::{
-    decode_entry_header_ref_v4, decode_entry_header_v4, decode_entry_v4, decode_entry_value,
+    decode_entry_header_ref, decode_scan_entry_header, decode_entry, decode_entry_value,
     parse_filter_index, parse_footer, parse_framed_block, parse_header, parse_index_block,
     parse_properties_block, EntryHeader, FilterIndexEntry, Footer, IndexEntry, KVHeader,
     PropertiesBlock, FOOTER_SZ, FRAME_OVERHEAD, HEADER_SIZE, IDX_TYPE_PARTITIONED,
@@ -180,7 +180,7 @@ impl KVSegment {
             SegmentIndex::Monolithic(index_entries)
         };
 
-        // Parse filter index block via pread (v5 partitioned bloom)
+        // Parse filter index block via pread (partitioned bloom)
         let (fi_off, fi_len) = check_block_bounds(
             footer.filter_block_offset,
             footer.filter_block_len,
@@ -605,8 +605,8 @@ impl KVSegment {
     /// 1. Parse key bytes + metadata WITHOUT allocating (EntryHeaderRef)
     /// 2. Only allocate + deserialize value for the matching entry
     ///
-    /// For v3 blocks, binary-searches the restart point array to skip most
-    /// entries, then linear-scans only the ~16-entry interval.
+    /// Binary-searches the restart point array to skip most entries,
+    /// then linear-scans only the ~16-entry interval.
     fn scan_block_for_key(
         &self,
         ie: &IndexEntry,
@@ -642,13 +642,13 @@ impl KVSegment {
             (0, block.len())
         };
 
-        self.linear_scan_block_v4(data, scan_start, data_end, typed_key, snapshot_commit)
+        self.linear_scan_block(data, scan_start, data_end, typed_key, snapshot_commit)
     }
 
     /// Linear scan entries in `data[start..end]` for `typed_key` at or below `snapshot_commit`.
     ///
-    /// v4 format: prefix-compressed keys. Reconstructs keys using `prev_key` buffer.
-    fn linear_scan_block_v4(
+    /// Prefix-compressed keys. Reconstructs keys using `prev_key` buffer.
+    fn linear_scan_block(
         &self,
         data: &[u8],
         start: usize,
@@ -660,7 +660,7 @@ impl KVSegment {
         let mut prev_key: Vec<u8> = Vec::new();
         while pos < end {
             let entry_data = &data[pos..end];
-            let hdr = decode_entry_header_v4(entry_data, &mut prev_key)?;
+            let hdr = decode_scan_entry_header(entry_data, &mut prev_key)?;
             let entry_start = pos;
             pos += hdr.total_len;
 
@@ -732,7 +732,7 @@ impl KVSegment {
 }
 
 // ---------------------------------------------------------------------------
-// Restart point helpers (v3 format)
+// Restart point helpers
 // ---------------------------------------------------------------------------
 
 /// Parse the restart trailer from a decompressed data block.
@@ -784,7 +784,7 @@ fn binary_search_restarts(
         let offset = restart_offset_at(data, data_end, mid) as usize;
         if offset < data_end {
             // At restart points, shared=0 always, so key is self-contained.
-            let cmp = decode_entry_header_ref_v4(&data[offset..data_end])
+            let cmp = decode_entry_header_ref(&data[offset..data_end])
                 .map(|hdr| hdr.typed_key_prefix() < typed_key);
             match cmp {
                 Some(true) => left = mid,
@@ -857,11 +857,11 @@ pub struct SegmentIter<'a> {
     block_within_partition: usize,
     current_sub_index: Vec<IndexEntry>,
     block_offset: usize,
-    /// End of entry data in the current block (excludes restart trailer for v3+).
+    /// End of entry data in the current block (excludes restart trailer).
     block_data_end: usize,
     block_data: Option<Arc<Vec<u8>>>,
     done: bool,
-    /// Buffer for v4 prefix-compressed key reconstruction (reused across entries).
+    /// Buffer for prefix-compressed key reconstruction (reused across entries).
     prev_key: Vec<u8>,
 }
 
@@ -930,7 +930,7 @@ impl<'a> Iterator for SegmentIter<'a> {
                 continue;
             }
 
-            let result = decode_entry_v4(
+            let result = decode_entry(
                 &data[self.block_offset..self.block_data_end],
                 &mut self.prev_key,
             );
@@ -987,11 +987,11 @@ pub struct OwnedSegmentIter {
     block_within_partition: usize,
     current_sub_index: Vec<IndexEntry>,
     block_offset: usize,
-    /// End of entry data in the current block (excludes restart trailer for v3+).
+    /// End of entry data in the current block (excludes restart trailer).
     block_data_end: usize,
     block_data: Option<Arc<Vec<u8>>>,
     done: bool,
-    /// Buffer for v4 prefix-compressed key reconstruction (reused across entries).
+    /// Buffer for prefix-compressed key reconstruction (reused across entries).
     prev_key: Vec<u8>,
     /// Monotonically increasing global block counter (for ThrottledSegmentIter).
     global_block_idx: usize,
@@ -1095,7 +1095,7 @@ impl Iterator for OwnedSegmentIter {
                 continue;
             }
 
-            let result = decode_entry_v4(
+            let result = decode_entry(
                 &data[self.block_offset..self.block_data_end],
                 &mut self.prev_key,
             );
@@ -1682,7 +1682,7 @@ mod tests {
         }
     }
 
-    // ===== Timestamp & TTL (v2 format) =====
+    // ===== Timestamp & TTL =====
 
     #[test]
     fn point_lookup_returns_timestamp_and_ttl() {
@@ -1939,7 +1939,7 @@ mod tests {
         assert!(entries.is_empty());
     }
 
-    // ===== Restart point binary search tests (v3 format) =====
+    // ===== Restart point binary search tests =====
 
     #[test]
     fn binary_search_first_interval() {
@@ -2144,7 +2144,7 @@ mod tests {
     #[test]
     fn compaction_output_has_restart_points() {
         // Segments produced by compaction (via SplittingSegmentBuilder → SegmentBuilder)
-        // should be v3 with restart trailers.
+        // should have restart trailers.
         use crate::segment_builder::SplittingSegmentBuilder;
 
         let dir = tempfile::tempdir().unwrap();
@@ -2183,7 +2183,7 @@ mod tests {
             .build_split(iter, |idx| out_dir.join(format!("{:06}.sst", idx)))
             .unwrap();
 
-        // Verify output is v4 and readable
+        // Verify output is v7 and readable
         for (p, meta) in &results {
             let out_seg = KVSegment::open(p).unwrap();
             assert_eq!(out_seg.header.format_version, 7);
@@ -2191,7 +2191,7 @@ mod tests {
         }
     }
 
-    // ===== v4 prefix compression integration tests =====
+    // ===== Prefix compression integration tests =====
 
     #[test]
     fn v4_binary_search_works() {

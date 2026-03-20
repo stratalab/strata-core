@@ -204,7 +204,7 @@ impl SegmentBuilder {
         let mut block_entry_count: usize = 0;
         let mut restart_offsets: Vec<u32> = vec![0]; // entry 0 always at offset 0
 
-        // v4 prefix compression state
+        // Prefix compression state
         let mut prev_key: Vec<u8> = Vec::new();
 
         // Hash index: (xxh3_hash, restart_interval) per unique typed_key in block
@@ -245,9 +245,9 @@ impl SegmentBuilder {
                 restart_offsets.push(block_buf.len() as u32);
             }
 
-            // Encode entry into block buffer (v4 prefix compression)
+            // Encode entry into block buffer (prefix compression)
             let is_restart = block_entry_count == 0 || block_entry_count % RESTART_INTERVAL == 0;
-            encode_entry_v4(&prev_key, &ik, &entry, &mut block_buf, is_restart);
+            encode_entry(&prev_key, &ik, &entry, &mut block_buf, is_restart);
             prev_key.clear();
             prev_key.extend_from_slice(ik.as_bytes());
 
@@ -533,8 +533,6 @@ pub(crate) fn parse_filter_index(data: &[u8]) -> Option<Vec<FilterIndexEntry>> {
 // Entry encoding (within data blocks)
 // ---------------------------------------------------------------------------
 
-/// Encode a single entry into a data block buffer (v2/v3 format, no prefix compression).
-///
 /// Append restart point trailer to a data block buffer.
 ///
 /// Format: `[restart_0: u32 LE] ... [restart_K: u32 LE] [num_restarts: u32 LE]`
@@ -615,7 +613,7 @@ pub(crate) fn decode_entry_value(data: &[u8], header: &EntryHeader) -> Option<Va
 }
 
 // ---------------------------------------------------------------------------
-// Varint utilities (v4 prefix compression)
+// Varint utilities (prefix compression)
 // ---------------------------------------------------------------------------
 
 fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
@@ -740,15 +738,15 @@ fn decode_varint32_slow(data: &[u8]) -> Option<(u32, usize)> {
 }
 
 // ---------------------------------------------------------------------------
-// v4 entry encoding (prefix-compressed keys)
+// Entry encoding (prefix-compressed keys)
 // ---------------------------------------------------------------------------
 
 /// Encode a single entry with prefix compression into a data block buffer.
 ///
-/// v4 format: `| shared: varint32 | non_shared: varint32 | key_delta[non_shared] | value_kind: u8 | timestamp: u64 LE | ttl_ms: u64 LE | value_len: u32 LE | value_bytes |`
+/// Format: `| shared: varint32 | non_shared: varint32 | key_delta[non_shared] | value_kind: u8 | timestamp: u64 LE | ttl_ms: u64 LE | value_len: u32 LE | value_bytes |`
 ///
 /// At restart points, `shared` is forced to 0 so the key is self-contained.
-fn encode_entry_v4(
+fn encode_entry(
     prev_key: &[u8],
     ik: &InternalKey,
     entry: &MemtableEntry,
@@ -784,11 +782,11 @@ fn encode_entry_v4(
     }
 }
 
-/// Decoded v4 entry header — metadata without key allocation or value deserialization.
+/// Decoded entry header — metadata without key allocation or value deserialization.
 ///
 /// The caller passes a `prev_key: &mut Vec<u8>` which is updated in-place to hold
 /// the reconstructed full key after decoding.
-pub(crate) struct EntryHeaderV4 {
+pub(crate) struct ScanEntryHeader {
     pub is_tombstone: bool,
     pub timestamp: u64,
     pub ttl_ms: u64,
@@ -797,8 +795,8 @@ pub(crate) struct EntryHeaderV4 {
     pub total_len: usize,
 }
 
-/// Decode v4 entry, reconstructing the full key into `prev_key` (in/out).
-pub(crate) fn decode_entry_header_v4(data: &[u8], prev_key: &mut Vec<u8>) -> Option<EntryHeaderV4> {
+/// Decode entry header, reconstructing the full key into `prev_key` (in/out).
+pub(crate) fn decode_scan_entry_header(data: &[u8], prev_key: &mut Vec<u8>) -> Option<ScanEntryHeader> {
     let (shared, n1) = decode_varint32(data)?;
     let (non_shared, n2) = decode_varint32(&data[n1..])?;
     let shared = shared as usize;
@@ -853,7 +851,7 @@ pub(crate) fn decode_entry_header_v4(data: &[u8], prev_key: &mut Vec<u8>) -> Opt
         pos += value_len;
     }
 
-    Some(EntryHeaderV4 {
+    Some(ScanEntryHeader {
         is_tombstone,
         timestamp,
         ttl_ms,
@@ -863,14 +861,14 @@ pub(crate) fn decode_entry_header_v4(data: &[u8], prev_key: &mut Vec<u8>) -> Opt
     })
 }
 
-/// Decode a v4 entry fully, reconstructing key into `prev_key` (in/out).
+/// Decode an entry fully, reconstructing key into `prev_key` (in/out).
 ///
 /// Returns `(internal_key, is_tombstone, value, timestamp_micros, ttl_ms, bytes_consumed)`.
-pub(crate) fn decode_entry_v4(
+pub(crate) fn decode_entry(
     data: &[u8],
     prev_key: &mut Vec<u8>,
 ) -> Option<(InternalKey, bool, Value, u64, u64, usize)> {
-    let hdr = decode_entry_header_v4(data, prev_key)?;
+    let hdr = decode_scan_entry_header(data, prev_key)?;
     let ik = InternalKey::try_from_bytes(prev_key.clone())?;
     let value = if hdr.is_tombstone {
         Value::Null
@@ -891,12 +889,12 @@ pub(crate) fn decode_entry_v4(
     ))
 }
 
-/// Zero-copy decode of a v4 restart entry key (where shared=0).
+/// Zero-copy decode of a restart entry key (where shared=0).
 ///
 /// Returns `EntryHeaderRef` borrowing key bytes directly from the block data.
 /// Only valid at restart points where shared=0, so the key is self-contained.
 /// Used by `binary_search_restarts` for key comparison without allocation.
-pub(crate) fn decode_entry_header_ref_v4(data: &[u8]) -> Option<EntryHeaderRef<'_>> {
+pub(crate) fn decode_entry_header_ref(data: &[u8]) -> Option<EntryHeaderRef<'_>> {
     let (shared, n1) = decode_varint32(data)?;
     if shared != 0 {
         return None; // Not a restart point
@@ -1169,7 +1167,7 @@ pub(crate) fn parse_header(data: &[u8; KV_HEADER_SIZE]) -> Option<KVHeader> {
         return None;
     }
     let format_version = u16::from_le_bytes(data[8..10].try_into().ok()?);
-    if !(2..=FORMAT_VERSION).contains(&format_version) {
+    if format_version != FORMAT_VERSION {
         return None;
     }
     let commit_min = u64::from_le_bytes(data[16..24].try_into().ok()?);
@@ -1187,7 +1185,7 @@ pub(crate) fn parse_header(data: &[u8; KV_HEADER_SIZE]) -> Option<KVHeader> {
 
 /// Parsed KV file header.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // fields read by future format versioning/compaction
+#[allow(dead_code)] // fields read by compaction
 pub(crate) struct KVHeader {
     pub format_version: u16,
     pub commit_min: u64,
@@ -1314,6 +1312,31 @@ mod tests {
 
         assert_eq!(meta.entry_count, 0);
         assert!(path.exists());
+    }
+
+    #[test]
+    fn parse_header_rejects_old_format_versions() {
+        // Build a valid v7 header, then patch format_version to older values.
+        let header = encode_header(10, 1, 10, 4096);
+        // v7 should succeed
+        assert!(parse_header(&header).is_some());
+        assert_eq!(parse_header(&header).unwrap().format_version, 7);
+
+        // Versions 2-6 must be rejected (v7-only consolidation)
+        for v in 0u16..=6 {
+            let mut patched = header;
+            patched[8..10].copy_from_slice(&v.to_le_bytes());
+            assert!(
+                parse_header(&patched).is_none(),
+                "format version {} should be rejected",
+                v,
+            );
+        }
+
+        // Version 8 (future) must also be rejected
+        let mut patched = header;
+        patched[8..10].copy_from_slice(&8u16.to_le_bytes());
+        assert!(parse_header(&patched).is_none(), "format version 8 should be rejected");
     }
 
     #[test]
@@ -1658,7 +1681,7 @@ mod tests {
                 ttl_ms: 0,
             };
             let is_restart_point = entry_count == 0 || is_restart;
-            encode_entry_v4(&prev_key, &ik, &entry, &mut buf, is_restart_point);
+            encode_entry(&prev_key, &ik, &entry, &mut buf, is_restart_point);
             prev_key = ik.as_bytes().to_vec();
             entry_count += 1;
         }
@@ -1698,7 +1721,7 @@ mod tests {
                     ttl_ms: 0,
                 };
                 let is_restart_point = count == 0 || is_restart;
-                encode_entry_v4(&prev_key, &ik, &entry, &mut buf, is_restart_point);
+                encode_entry(&prev_key, &ik, &entry, &mut buf, is_restart_point);
                 prev_key = ik.as_bytes().to_vec();
                 count += 1;
             }
@@ -1721,7 +1744,7 @@ mod tests {
         assert_eq!(build_and_count_restarts(48), 3);
     }
 
-    // ===== v4 prefix compression tests =====
+    // ===== Prefix compression tests =====
 
     #[test]
     fn varint32_roundtrip() {
@@ -1775,11 +1798,11 @@ mod tests {
         };
 
         let mut buf = Vec::new();
-        encode_entry_v4(&[], &ik, &entry, &mut buf, true);
+        encode_entry(&[], &ik, &entry, &mut buf, true);
 
         let mut prev_key = Vec::new();
         let (decoded_ik, is_tomb, decoded_val, ts, ttl, consumed) =
-            decode_entry_v4(&buf, &mut prev_key).unwrap();
+            decode_entry(&buf, &mut prev_key).unwrap();
         assert_eq!(decoded_ik, ik);
         assert!(!is_tomb);
         assert_eq!(decoded_val, Value::String("world".into()));
@@ -1799,11 +1822,11 @@ mod tests {
         };
 
         let mut buf = Vec::new();
-        encode_entry_v4(&[], &ik, &entry, &mut buf, true);
+        encode_entry(&[], &ik, &entry, &mut buf, true);
 
         let mut prev_key = Vec::new();
         let (decoded_ik, is_tomb, _, ts, ttl, consumed) =
-            decode_entry_v4(&buf, &mut prev_key).unwrap();
+            decode_entry(&buf, &mut prev_key).unwrap();
         assert_eq!(decoded_ik, ik);
         assert!(is_tomb);
         assert_eq!(ts, entry.timestamp.as_micros());
@@ -1827,19 +1850,19 @@ mod tests {
 
         let mut buf = Vec::new();
         // First entry: restart, shared=0
-        encode_entry_v4(&[], &ik1, &entry, &mut buf, true);
+        encode_entry(&[], &ik1, &entry, &mut buf, true);
         let first_len = buf.len();
 
         // Second entry: non-restart, should share prefix
-        encode_entry_v4(ik1.as_bytes(), &ik2, &entry, &mut buf, false);
+        encode_entry(ik1.as_bytes(), &ik2, &entry, &mut buf, false);
 
         // Decode first entry
         let mut prev_key = Vec::new();
-        let (dec_ik1, ..) = decode_entry_v4(&buf[..first_len], &mut prev_key).unwrap();
+        let (dec_ik1, ..) = decode_entry(&buf[..first_len], &mut prev_key).unwrap();
         assert_eq!(dec_ik1, ik1);
 
         // Decode second entry (prev_key is now ik1)
-        let (dec_ik2, ..) = decode_entry_v4(&buf[first_len..], &mut prev_key).unwrap();
+        let (dec_ik2, ..) = decode_entry(&buf[first_len..], &mut prev_key).unwrap();
         assert_eq!(dec_ik2, ik2);
 
         // Verify sharing actually happened: second entry should be smaller
@@ -1868,7 +1891,7 @@ mod tests {
                 ttl_ms: 0,
             };
             let is_restart = i == 0 || i % RESTART_INTERVAL as u32 == 0;
-            encode_entry_v4(&prev_key, &ik, &entry, &mut buf, is_restart);
+            encode_entry(&prev_key, &ik, &entry, &mut buf, is_restart);
             prev_key = ik.as_bytes().to_vec();
         }
 
@@ -1888,7 +1911,7 @@ mod tests {
                 assert!(shared > 0, "entry {} should share prefix", entry_idx);
             }
             // Advance to next entry
-            let hdr = decode_entry_header_v4(&buf[pos..], &mut pk).unwrap();
+            let hdr = decode_scan_entry_header(&buf[pos..], &mut pk).unwrap();
             pos += hdr.total_len;
             entry_idx += 1;
         }
