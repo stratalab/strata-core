@@ -21,11 +21,10 @@ use crate::block_cache::{self, Priority};
 use crate::bloom::BloomFilter;
 use crate::key_encoding::{encode_typed_key, encode_typed_key_prefix, InternalKey};
 use crate::segment_builder::{
-    decode_entry, decode_entry_header_ref, decode_entry_header_ref_v4, decode_entry_header_v4,
-    decode_entry_v4, decode_entry_value, parse_filter_index, parse_footer, parse_framed_block,
-    parse_header, parse_index_block, parse_properties_block, EntryHeader, FilterIndexEntry, Footer,
-    IndexEntry, KVHeader, PropertiesBlock, FOOTER_SZ, FRAME_OVERHEAD, HEADER_SIZE,
-    IDX_TYPE_PARTITIONED,
+    decode_entry_header_ref_v4, decode_entry_header_v4, decode_entry_v4, decode_entry_value,
+    parse_filter_index, parse_footer, parse_framed_block, parse_header, parse_index_block,
+    parse_properties_block, EntryHeader, FilterIndexEntry, Footer, IndexEntry, KVHeader,
+    PropertiesBlock, FOOTER_SZ, FRAME_OVERHEAD, HEADER_SIZE, IDX_TYPE_PARTITIONED,
 };
 use strata_core::types::Key;
 use strata_core::value::Value;
@@ -616,89 +615,34 @@ impl KVSegment {
     ) -> Option<SegmentEntry> {
         let block_data = self.read_data_block(ie)?;
         let data = &**block_data;
-        let fv = self.header.format_version;
 
         // Strip hash index if present (v6+)
-        let (block, hash_index) = strip_hash_index(data, fv);
+        let (block, hash_index) = strip_hash_index(data);
 
-        // Determine scan bounds based on format version
-        let (scan_start, data_end) = if fv >= 3 {
-            if let Some((de, num_restarts)) = parse_restart_trailer(block) {
-                let start = if let Some(ref hi) = hash_index {
-                    // O(1) hash lookup for the restart interval
-                    let h = xxhash_rust::xxh3::xxh3_64(typed_key) as usize;
-                    let bucket = h % hi.num_buckets;
-                    let interval = hi.buckets[bucket];
-                    if interval != 0xFF && (interval as usize) < num_restarts {
-                        restart_offset_at(block, de, interval as usize) as usize
-                    } else {
-                        // Empty bucket or out of range: fall back to binary search
-                        binary_search_restarts(block, de, num_restarts, typed_key, fv)
-                    }
+        // Determine scan bounds via restart trailer
+        let (scan_start, data_end) = if let Some((de, num_restarts)) = parse_restart_trailer(block)
+        {
+            let start = if let Some(ref hi) = hash_index {
+                // O(1) hash lookup for the restart interval
+                let h = xxhash_rust::xxh3::xxh3_64(typed_key) as usize;
+                let bucket = h % hi.num_buckets;
+                let interval = hi.buckets[bucket];
+                if interval != 0xFF && (interval as usize) < num_restarts {
+                    restart_offset_at(block, de, interval as usize) as usize
                 } else {
-                    binary_search_restarts(block, de, num_restarts, typed_key, fv)
-                };
-                (start.min(de), de)
+                    // Empty bucket or out of range: fall back to binary search
+                    binary_search_restarts(block, de, num_restarts, typed_key)
+                }
             } else {
-                // Malformed trailer — fall back to full linear scan
-                (0, block.len())
-            }
+                binary_search_restarts(block, de, num_restarts, typed_key)
+            };
+            (start.min(de), de)
         } else {
+            // Malformed trailer — fall back to full linear scan
             (0, block.len())
         };
 
-        if fv >= 4 {
-            self.linear_scan_block_v4(data, scan_start, data_end, typed_key, snapshot_commit)
-        } else {
-            self.linear_scan_block(data, scan_start, data_end, typed_key, snapshot_commit)
-        }
-    }
-
-    /// Linear scan entries in `data[start..end]` for `typed_key` at or below `snapshot_commit`.
-    fn linear_scan_block(
-        &self,
-        data: &[u8],
-        start: usize,
-        end: usize,
-        typed_key: &[u8],
-        snapshot_commit: u64,
-    ) -> Option<SegmentEntry> {
-        let mut pos = start;
-        while pos < end {
-            let ref_header = decode_entry_header_ref(&data[pos..end])?;
-            let entry_data_start = pos;
-            pos += ref_header.total_len;
-
-            if ref_header.typed_key_prefix() != typed_key {
-                if ref_header.typed_key_prefix() > typed_key {
-                    break;
-                }
-                continue;
-            }
-
-            let commit_id = ref_header.commit_id();
-            if commit_id <= snapshot_commit {
-                let header = EntryHeader {
-                    ik: InternalKey::try_from_bytes(ref_header.ik_bytes.to_vec())?,
-                    is_tombstone: ref_header.is_tombstone,
-                    timestamp: ref_header.timestamp,
-                    ttl_ms: ref_header.ttl_ms,
-                    value_start: ref_header.value_start,
-                    value_len: ref_header.value_len,
-                    total_len: ref_header.total_len,
-                };
-                let value = decode_entry_value(&data[entry_data_start..end], &header)?;
-                return Some(SegmentEntry {
-                    value,
-                    is_tombstone: header.is_tombstone,
-                    commit_id,
-                    timestamp: header.timestamp,
-                    ttl_ms: header.ttl_ms,
-                });
-            }
-        }
-
-        None
+        self.linear_scan_block_v4(data, scan_start, data_end, typed_key, snapshot_commit)
     }
 
     /// Linear scan entries in `data[start..end]` for `typed_key` at or below `snapshot_commit`.
@@ -735,15 +679,12 @@ impl KVSegment {
             let len = prev_key.len();
             let commit_id = !u64::from_be_bytes(prev_key[len - 8..].try_into().ok()?);
             if commit_id <= snapshot_commit {
-                let ik = InternalKey::try_from_bytes(prev_key.clone())?;
                 let header = EntryHeader {
-                    ik,
                     is_tombstone: hdr.is_tombstone,
                     timestamp: hdr.timestamp,
                     ttl_ms: hdr.ttl_ms,
                     value_start: hdr.value_start,
                     value_len: hdr.value_len,
-                    total_len: hdr.total_len,
                 };
                 let value = decode_entry_value(&data[entry_start..end], &header)?;
                 return Some(SegmentEntry {
@@ -817,7 +758,11 @@ pub(crate) fn parse_restart_trailer(data: &[u8]) -> Option<(usize, usize)> {
 #[inline]
 fn restart_offset_at(data: &[u8], data_end: usize, index: usize) -> u32 {
     let off = data_end + index * 4;
-    u32::from_le_bytes(data[off..off + 4].try_into().unwrap())
+    u32::from_le_bytes(
+        data[off..off + 4]
+            .try_into()
+            .expect("restart offset within bounds"),
+    )
 }
 
 /// Binary search restart points to find the interval containing `typed_key`.
@@ -830,7 +775,6 @@ fn binary_search_restarts(
     data_end: usize,
     num_restarts: usize,
     typed_key: &[u8],
-    format_version: u16,
 ) -> usize {
     let mut left = 0usize;
     let mut right = num_restarts - 1;
@@ -840,14 +784,8 @@ fn binary_search_restarts(
         let offset = restart_offset_at(data, data_end, mid) as usize;
         if offset < data_end {
             // At restart points, shared=0 always, so key is self-contained.
-            // Dispatch to v3 or v4 decoder for zero-copy key access.
-            let cmp = if format_version >= 4 {
-                decode_entry_header_ref_v4(&data[offset..data_end])
-                    .map(|hdr| hdr.typed_key_prefix() < typed_key)
-            } else {
-                decode_entry_header_ref(&data[offset..data_end])
-                    .map(|hdr| hdr.typed_key_prefix() < typed_key)
-            };
+            let cmp = decode_entry_header_ref_v4(&data[offset..data_end])
+                .map(|hdr| hdr.typed_key_prefix() < typed_key);
             match cmp {
                 Some(true) => left = mid,
                 Some(false) => right = mid - 1,
@@ -874,10 +812,10 @@ struct HashIndex<'a> {
 ///
 /// Returns the data without hash index and the hash index (if any).
 /// The hash index sentinel is `0x01` as the last byte of the decompressed block.
-fn strip_hash_index(data: &[u8], format_version: u16) -> (&[u8], Option<HashIndex<'_>>) {
-    // Hash index only in v6+, minimum size: 1 bucket + 2 (num_buckets) + 1 (sentinel) = 4
+fn strip_hash_index(data: &[u8]) -> (&[u8], Option<HashIndex<'_>>) {
+    // Minimum size: 1 bucket + 2 (num_buckets) + 1 (sentinel) = 4
     // Plus at least 4 bytes for the restart trailer before it.
-    if format_version < 6 || data.len() < 8 || data[data.len() - 1] != 0x01 {
+    if data.len() < 8 || data[data.len() - 1] != 0x01 {
         return (data, None);
     }
     let num_buckets =
@@ -898,14 +836,11 @@ fn strip_hash_index(data: &[u8], format_version: u16) -> (&[u8], Option<HashInde
     (&data[..hash_start], Some(hi))
 }
 
-/// Compute `data_end` for a block, handling both v2 (no trailer) and v3+ (with trailer).
-/// For v6+, also strips the hash index before parsing the restart trailer.
-fn block_data_end(data: &[u8], format_version: u16) -> usize {
-    if format_version >= 3 {
-        let (block, _) = strip_hash_index(data, format_version);
-        if let Some((de, _)) = parse_restart_trailer(block) {
-            return de;
-        }
+/// Compute `data_end` for a block — strips the hash index and restart trailer.
+fn block_data_end(data: &[u8]) -> usize {
+    let (block, _) = strip_hash_index(data);
+    if let Some((de, _)) = parse_restart_trailer(block) {
+        return de;
     }
     data.len()
 }
@@ -973,7 +908,7 @@ impl<'a> Iterator for SegmentIter<'a> {
                 let ie = &self.current_sub_index[self.block_within_partition];
                 match self.segment.read_data_block(ie) {
                     Some(data) => {
-                        let de = block_data_end(&data, self.segment.header.format_version);
+                        let de = block_data_end(&data);
                         self.block_data_end = de;
                         self.block_data = Some(data);
                         self.block_offset = 0;
@@ -995,15 +930,10 @@ impl<'a> Iterator for SegmentIter<'a> {
                 continue;
             }
 
-            let fv = self.segment.header.format_version;
-            let result = if fv >= 4 {
-                decode_entry_v4(
-                    &data[self.block_offset..self.block_data_end],
-                    &mut self.prev_key,
-                )
-            } else {
-                decode_entry(&data[self.block_offset..self.block_data_end])
-            };
+            let result = decode_entry_v4(
+                &data[self.block_offset..self.block_data_end],
+                &mut self.prev_key,
+            );
 
             match result {
                 Some((ik, is_tomb, value, timestamp, ttl_ms, consumed)) => {
@@ -1124,13 +1054,6 @@ impl OwnedSegmentIter {
     }
 }
 
-impl OwnedSegmentIter {
-    /// Return the current data block index (used by `ThrottledSegmentIter`).
-    pub(crate) fn current_block_idx(&self) -> usize {
-        self.block_idx
-    }
-}
-
 impl Iterator for OwnedSegmentIter {
     type Item = (InternalKey, SegmentEntry);
 
@@ -1150,7 +1073,7 @@ impl Iterator for OwnedSegmentIter {
                 let ie = &self.current_sub_index[self.block_within_partition];
                 match self.segment.read_data_block(ie) {
                     Some(data) => {
-                        let de = block_data_end(&data, self.segment.header.format_version);
+                        let de = block_data_end(&data);
                         self.block_data_end = de;
                         self.block_data = Some(data);
                         self.block_offset = 0;
@@ -1172,15 +1095,10 @@ impl Iterator for OwnedSegmentIter {
                 continue;
             }
 
-            let fv = self.segment.header.format_version;
-            let result = if fv >= 4 {
-                decode_entry_v4(
-                    &data[self.block_offset..self.block_data_end],
-                    &mut self.prev_key,
-                )
-            } else {
-                decode_entry(&data[self.block_offset..self.block_data_end])
-            };
+            let result = decode_entry_v4(
+                &data[self.block_offset..self.block_data_end],
+                &mut self.prev_key,
+            );
 
             match result {
                 Some((ik, is_tomb, value, timestamp, ttl_ms, consumed)) => {
@@ -2161,7 +2079,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_iter_respects_data_end() {
+    fn iter_respects_data_end() {
         // Verify that iterators stop at data_end and don't parse restart trailer as entries
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("restart_iter.sst");
@@ -2189,7 +2107,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_multi_block_binary_search() {
+    fn multi_block_binary_search() {
         // Binary search works correctly across multiple blocks
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("restart_multi.sst");
@@ -2221,54 +2139,6 @@ mod tests {
         // Verify iteration yields all entries
         let all: Vec<_> = seg.iter_seek_all().collect();
         assert_eq!(all.len(), 500);
-    }
-
-    #[test]
-    fn v2_fallback_linear_scan() {
-        // Build a v3-format segment, then patch the header to v2 to simulate a legacy file.
-        // The reader must fall back to linear scan and still return correct results.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("v2_compat.sst");
-
-        let mt = Memtable::new(0);
-        for i in 0..48u32 {
-            mt.put(
-                &kv_key(&format!("k_{:04}", i)),
-                i as u64 + 1,
-                Value::Int(i as i64),
-                false,
-            );
-        }
-        mt.freeze();
-        // Use v3 builder so block data uses the old uncompressed-key format
-        let builder = SegmentBuilder::default();
-        builder.build_from_iter_v3(mt.iter_all(), &path).unwrap();
-
-        // Patch format_version in the header from 3 to 2 (bytes 8..10 LE)
-        let mut raw = std::fs::read(&path).unwrap();
-        raw[8] = 2;
-        raw[9] = 0;
-        let v2_path = dir.path().join("v2_patched.sst");
-        std::fs::write(&v2_path, &raw).unwrap();
-
-        let seg = KVSegment::open(&v2_path).unwrap();
-        assert_eq!(seg.header.format_version, 2);
-
-        // Point lookups still work (linear scan ignores restart trailer)
-        let e = seg.point_lookup(&kv_key("k_0005"), u64::MAX).unwrap();
-        assert_eq!(e.value, Value::Int(5));
-
-        let e = seg.point_lookup(&kv_key("k_0045"), u64::MAX).unwrap();
-        assert_eq!(e.value, Value::Int(45));
-
-        assert!(seg.point_lookup(&kv_key("zzz"), u64::MAX).is_none());
-
-        // Iteration still works — but will include restart trailer bytes as
-        // "entries" and fail to parse them, stopping iteration early. For a
-        // genuine v2 file (no trailer), iteration would yield all entries.
-        // With a patched v2 header over v3 data, the iterator hits the trailer
-        // and stops. This is expected and safe — it returns a truncated but
-        // correct prefix of entries.
     }
 
     #[test]
@@ -2400,96 +2270,6 @@ mod tests {
 
         for i in 1..all.len() {
             assert!(all[i - 1].0 < all[i].0, "entries must be in order");
-        }
-    }
-
-    #[test]
-    fn v4_compaction_mixed_versions() {
-        // Read a v3 segment via OwnedSegmentIter, write v4 via build_from_iter
-        use crate::segment_builder::SegmentBuilder;
-
-        let dir = tempfile::tempdir().unwrap();
-        let v3_path = dir.path().join("v3_input.sst");
-
-        let mt = Memtable::new(0);
-        for i in 0..50u32 {
-            mt.put(
-                &kv_key(&format!("k_{:04}", i)),
-                i as u64 + 1,
-                Value::Int(i as i64),
-                false,
-            );
-        }
-        mt.freeze();
-        let builder = SegmentBuilder::default();
-        builder.build_from_iter_v3(mt.iter_all(), &v3_path).unwrap();
-
-        let v3_seg = Arc::new(KVSegment::open(&v3_path).unwrap());
-        assert_eq!(v3_seg.header.format_version, 3);
-
-        // Collect entries via OwnedSegmentIter (v3 read path)
-        let entries: Vec<_> = OwnedSegmentIter::new(v3_seg).collect();
-        assert_eq!(entries.len(), 50);
-
-        // Write as v4
-        let v4_path = dir.path().join("v4_output.sst");
-        let iter = entries.iter().map(|(ik, se)| {
-            let me = crate::memtable::MemtableEntry {
-                value: se.value.clone(),
-                is_tombstone: se.is_tombstone,
-                timestamp: strata_core::Timestamp::from_micros(se.timestamp),
-                ttl_ms: se.ttl_ms,
-            };
-            (ik.clone(), me)
-        });
-        let builder = SegmentBuilder::default();
-        builder.build_from_iter(iter, &v4_path).unwrap();
-
-        let v4_seg = KVSegment::open(&v4_path).unwrap();
-        assert_eq!(v4_seg.header.format_version, 7);
-
-        // Verify all entries readable
-        for i in 0..50u32 {
-            let k = kv_key(&format!("k_{:04}", i));
-            let e = v4_seg.point_lookup(&k, u64::MAX).unwrap();
-            assert_eq!(e.value, Value::Int(i as i64));
-        }
-    }
-
-    #[test]
-    fn v3_backward_compat() {
-        // Build a v3-format segment and verify it reads correctly with new code
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("v3_compat.sst");
-
-        let mt = Memtable::new(0);
-        for i in 0..50u32 {
-            mt.put(
-                &kv_key(&format!("k_{:04}", i)),
-                i as u64 + 1,
-                Value::Int(i as i64),
-                false,
-            );
-        }
-        mt.freeze();
-        let builder = SegmentBuilder::default();
-        builder.build_from_iter_v3(mt.iter_all(), &path).unwrap();
-
-        let seg = KVSegment::open(&path).unwrap();
-        assert_eq!(seg.header.format_version, 3);
-
-        // Point lookups
-        for i in 0..50u32 {
-            let k = kv_key(&format!("k_{:04}", i));
-            let e = seg.point_lookup(&k, u64::MAX).unwrap();
-            assert_eq!(e.value, Value::Int(i as i64));
-        }
-
-        // Iteration
-        let all: Vec<_> = seg.iter_seek_all().collect();
-        assert_eq!(all.len(), 50);
-        for i in 1..all.len() {
-            assert!(all[i - 1].0 < all[i].0);
         }
     }
 
@@ -2723,38 +2503,6 @@ mod tests {
     }
 
     #[test]
-    fn hash_index_space_overhead() {
-        // Verify hash index adds roughly 4-6% overhead per block.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("hash_size.sst");
-
-        let mt = Memtable::new(0);
-        for i in 0..200u32 {
-            let k = kv_key(&format!("sz_{:06}", i));
-            mt.put(&k, 1, Value::Int(i as i64), false);
-        }
-        mt.freeze();
-
-        // Build v6 (with hash index)
-        let builder = SegmentBuilder::default();
-        let v6_meta = builder.build_from_iter(mt.iter_all(), &path).unwrap();
-
-        // Build v3 (without hash index) for comparison
-        let v3_path = dir.path().join("v3_size.sst");
-        let v3_meta = builder.build_from_iter_v3(mt.iter_all(), &v3_path).unwrap();
-
-        // Hash index overhead should be under 10%
-        let overhead = v6_meta.file_size as f64 / v3_meta.file_size as f64;
-        assert!(
-            overhead < 1.10,
-            "hash index overhead too large: v6={}, v3={}, ratio={:.3}",
-            v6_meta.file_size,
-            v3_meta.file_size,
-            overhead,
-        );
-    }
-
-    #[test]
     fn hash_index_mvcc_versions() {
         // Many versions of the same key spanning multiple restart intervals.
         // All versions map to the same hash bucket, so the hash index must
@@ -2892,39 +2640,6 @@ mod tests {
         // "revived" at snapshot 2 → see tombstone
         let e = seg.point_lookup(&kv_key("revived"), 2).unwrap();
         assert!(e.is_tombstone);
-    }
-
-    #[test]
-    fn hash_index_v3_backward_compat() {
-        // A v3 segment (no hash index) must still be readable by the v6 reader.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("v3_compat.sst");
-
-        let mt = Memtable::new(0);
-        for i in 0..50u32 {
-            let k = kv_key(&format!("bc_{:04}", i));
-            mt.put(&k, 1, Value::Int(i as i64), false);
-        }
-        mt.freeze();
-
-        let builder = SegmentBuilder::default();
-        builder.build_from_iter_v3(mt.iter_all(), &path).unwrap();
-
-        let seg = KVSegment::open(&path).unwrap();
-        assert_eq!(seg.header.format_version, 3);
-
-        // Point lookups must work (binary search path, no hash index)
-        for i in 0..50u32 {
-            let k = kv_key(&format!("bc_{:04}", i));
-            let e = seg
-                .point_lookup(&k, u64::MAX)
-                .unwrap_or_else(|| panic!("v3 key bc_{:04} not found", i));
-            assert_eq!(e.value, Value::Int(i as i64));
-        }
-
-        // Iterator must work
-        let all: Vec<_> = seg.iter_seek_all().collect();
-        assert_eq!(all.len(), 50);
     }
 
     #[test]
@@ -3434,41 +3149,195 @@ mod tests {
         }
     }
 
+    // ===== Additional coverage tests =====
+
     #[test]
-    fn partitioned_index_v3_compat_stays_monolithic() {
-        // v3 segments (created by build_from_iter_v3) should always open as
-        // monolithic since v3 builder always writes INDEX_TYPE_MONOLITHIC.
+    fn multi_partition_bloom_rejects_absent_keys() {
+        // Build a segment with many small blocks to force multiple bloom partitions,
+        // then verify the bloom filter correctly rejects absent keys with low FPR.
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("v3_compat.sst");
+        let path = dir.path().join("bloom_reject.sst");
 
         let mt = Memtable::new(0);
-        for i in 0..50u32 {
-            let k = kv_key(&format!("v3c_{:04}", i));
+        for i in 0..2000u32 {
+            mt.put(
+                &kv_key(&format!("present_{:06}", i)),
+                1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+        build_segment_small_blocks(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+        assert!(
+            seg.bloom.index.len() > 1,
+            "expected multiple bloom partitions, got {}",
+            seg.bloom.index.len()
+        );
+
+        // All present keys must pass bloom check (no false negatives)
+        for i in 0..2000u32 {
+            assert!(
+                seg.bloom_maybe_contains(&kv_key(&format!("present_{:06}", i))),
+                "false negative for present_{:06}",
+                i
+            );
+        }
+
+        // Absent keys: measure false positive rate across partitions
+        let mut false_positives = 0u32;
+        let probe_count = 10_000u32;
+        for i in 0..probe_count {
+            if seg.bloom_maybe_contains(&kv_key(&format!("absent_{:06}", i))) {
+                false_positives += 1;
+            }
+        }
+        let fpr = false_positives as f64 / probe_count as f64;
+        assert!(
+            fpr < 0.05,
+            "bloom FPR across partitions too high: {:.4} ({} / {})",
+            fpr,
+            false_positives,
+            probe_count,
+        );
+    }
+
+    #[test]
+    fn hash_index_collision_fallback_to_binary_search() {
+        // Insert keys that are likely to share hash buckets (similar prefixes).
+        // Verify all keys are still findable — the hash index must fall back to
+        // binary search on collision and still locate the correct restart interval.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hash_collision.sst");
+
+        let mt = Memtable::new(0);
+        // Use keys with identical long prefix differing only in the last few bytes.
+        // These will have similar xxh3 hashes and tend to collide in the hash index.
+        for i in 0..500u32 {
+            let k = kv_key(&format!("shared_prefix_collision_test_key_{:06}", i));
             mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
         }
         mt.freeze();
-
-        let builder = SegmentBuilder {
-            data_block_size: 128,
-            bloom_bits_per_key: 10,
-            compression: crate::segment_builder::CompressionCodec::None,
-            rate_limiter: None,
-        };
-        builder.build_from_iter_v3(mt.iter_all(), &path).unwrap();
+        build_segment_small_blocks(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
-        assert_eq!(seg.header.format_version, 3);
-        assert!(matches!(&seg.index, SegmentIndex::Monolithic(_)));
+        assert_eq!(seg.header.format_version, 7);
 
-        // Point lookups work on v3 segment
-        for i in 0..50u32 {
-            let k = kv_key(&format!("v3c_{:04}", i));
-            let e = seg.point_lookup(&k, u64::MAX).unwrap();
+        // Every key must be findable despite hash collisions
+        for i in 0..500u32 {
+            let k = kv_key(&format!("shared_prefix_collision_test_key_{:06}", i));
+            let e = seg.point_lookup(&k, u64::MAX).unwrap_or_else(|| {
+                panic!("key shared_prefix_collision_test_key_{:06} not found", i)
+            });
             assert_eq!(e.value, Value::Int(i as i64));
+            assert_eq!(e.commit_id, i as u64 + 1);
         }
 
-        // Iteration works on v3 segment
-        let all: Vec<_> = seg.iter_seek_all().collect();
-        assert_eq!(all.len(), 50);
+        // Non-existent keys with similar prefix must not be found
+        for i in 500..550u32 {
+            let k = kv_key(&format!("shared_prefix_collision_test_key_{:06}", i));
+            assert!(seg.point_lookup(&k, u64::MAX).is_none());
+        }
+    }
+
+    #[test]
+    fn index_shortening_long_shared_prefix_lookup() {
+        // Keys that share a long common prefix and differ only in the last
+        // few bytes or in commit_id. Index key shortening must preserve enough
+        // bytes for binary search to route to the correct block.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short_prefix.sst");
+
+        let mt = Memtable::new(0);
+        // Long shared prefix, tiny suffix difference
+        for i in 0..300u32 {
+            let k = kv_key(&format!(
+                "very_long_shared_prefix_that_exercises_shortening_{:04}",
+                i
+            ));
+            mt.put(&k, 1, Value::Int(i as i64), false);
+        }
+        // Same key, multiple commit versions (differ only in commit_id)
+        let multi_ver_key = kv_key("very_long_shared_prefix_that_exercises_shortening_0150");
+        for commit in 2..=10u64 {
+            mt.put(
+                &multi_ver_key,
+                commit,
+                Value::Int(commit as i64 * 100),
+                false,
+            );
+        }
+        mt.freeze();
+        build_segment_small_blocks(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+
+        // All keys must be retrievable
+        for i in 0..300u32 {
+            let k = kv_key(&format!(
+                "very_long_shared_prefix_that_exercises_shortening_{:04}",
+                i
+            ));
+            let e = seg
+                .point_lookup(&k, u64::MAX)
+                .unwrap_or_else(|| panic!("key ..._shortening_{:04} not found", i));
+            // Key 150 was overwritten; others have their original value
+            if i == 150 {
+                assert_eq!(e.value, Value::Int(1000)); // commit 10 * 100
+            } else {
+                assert_eq!(e.value, Value::Int(i as i64));
+            }
+        }
+
+        // MVCC: snapshot at commit 5 for the multi-version key
+        let e = seg.point_lookup(&multi_ver_key, 5).unwrap();
+        assert_eq!(e.value, Value::Int(500)); // commit 5 * 100
+
+        // MVCC: snapshot at commit 1 gets the original value
+        let e = seg.point_lookup(&multi_ver_key, 1).unwrap();
+        assert_eq!(e.value, Value::Int(150)); // original from loop
+    }
+
+    #[test]
+    fn cache_local_bloom_fpr_measurement() {
+        // End-to-end FPR measurement through the full segment bloom path
+        // (build segment → open → bloom_maybe_contains).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fpr_measure.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..5000u32 {
+            mt.put(
+                &kv_key(&format!("fpr_{:06}", i)),
+                1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        let seg = KVSegment::open(&path).unwrap();
+
+        // Measure FPR with keys guaranteed absent
+        let mut fps = 0u32;
+        let probes = 50_000u32;
+        for i in 0..probes {
+            if seg.bloom_maybe_contains(&kv_key(&format!("miss_{:06}", i))) {
+                fps += 1;
+            }
+        }
+        let fpr = fps as f64 / probes as f64;
+        // At 10 bits/key, theoretical FPR ≈ 1%. Cache-local blocked bloom
+        // may be slightly higher. Allow up to 2%.
+        assert!(
+            fpr < 0.02,
+            "end-to-end bloom FPR too high: {:.4} ({} / {})",
+            fpr,
+            fps,
+            probes,
+        );
     }
 }
