@@ -147,7 +147,9 @@ impl TransactionCoordinator {
         // Register in active_count BEFORE creating the snapshot so that a
         // concurrent drain (active_count → 0) cannot set gc_safe_version
         // past our about-to-be-created snapshot version.
-        self.active_count.fetch_add(1, Ordering::Relaxed);
+        // Uses Release so the decrement's Acquire load observes this increment
+        // on weakly-ordered architectures (ARM/Apple Silicon).
+        self.active_count.fetch_add(1, Ordering::Release);
         self.total_started.fetch_add(1, Ordering::Relaxed);
 
         debug!(target: "strata::txn", branch_id = %branch_id, "Transaction started");
@@ -234,7 +236,7 @@ impl TransactionCoordinator {
     /// * `_txn_id` - Unique transaction ID (unused, kept for API compat)
     /// * `_start_version` - Snapshot version at transaction start (unused)
     pub fn record_start(&self, _txn_id: u64, _start_version: u64) {
-        self.active_count.fetch_add(1, Ordering::Relaxed);
+        self.active_count.fetch_add(1, Ordering::Release);
         self.total_started.fetch_add(1, Ordering::Relaxed);
     }
 
