@@ -82,6 +82,10 @@ pub struct TransactionManager {
     /// Using per-branch locks allows parallel commits for different branches while
     /// still preventing TOCTOU within each branch.
     commit_locks: DashMap<BranchId, Mutex<()>>,
+    /// Count of versions allocated but never committed (e.g., WAL write failure
+    /// after `allocate_version()`). Useful for disk-pressure alerts.
+    /// Uses Relaxed ordering — purely observational metric.
+    leaked_versions: AtomicU64,
 }
 
 impl TransactionManager {
@@ -107,7 +111,13 @@ impl TransactionManager {
             // Start next_txn_id at max_txn_id + 1 to avoid conflicts
             next_txn_id: AtomicU64::new(max_txn_id + 1),
             commit_locks: DashMap::new(),
+            leaked_versions: AtomicU64::new(0),
         }
+    }
+
+    /// Number of versions allocated but never committed.
+    pub fn leaked_versions(&self) -> u64 {
+        self.leaked_versions.load(Ordering::Relaxed)
     }
 
     /// Get current global version
@@ -282,6 +292,7 @@ impl TransactionManager {
                     txn.status = TransactionStatus::Aborted {
                         reason: format!("WAL write failed: {}", e),
                     };
+                    self.leaked_versions.fetch_add(1, Ordering::Relaxed);
                     return Err(CommitError::WALError(e.to_string()));
                 }
 
@@ -309,6 +320,7 @@ impl TransactionManager {
                 txn.status = TransactionStatus::Aborted {
                     reason: format!("Storage application failed: {}", e),
                 };
+                self.leaked_versions.fetch_add(1, Ordering::Relaxed);
                 return Err(CommitError::WALError(format!(
                     "Storage application failed (no WAL): {}",
                     e
@@ -394,6 +406,7 @@ impl TransactionManager {
                             txn.status = TransactionStatus::Aborted {
                                 reason: format!("WAL write failed: {}", e),
                             };
+                            self.leaked_versions.fetch_add(1, Ordering::Relaxed);
                             return Err(CommitError::WALError(e.to_string()));
                         }
                     }
@@ -414,6 +427,7 @@ impl TransactionManager {
                     txn.status = TransactionStatus::Aborted {
                         reason: format!("Storage application failed: {}", e),
                     };
+                    self.leaked_versions.fetch_add(1, Ordering::Relaxed);
                     return Err(CommitError::WALError(format!(
                         "Storage application failed (no WAL): {}",
                         e
@@ -464,6 +478,7 @@ impl TransactionManager {
                         txn.status = TransactionStatus::Aborted {
                             reason: format!("WAL write failed: {}", e),
                         };
+                        self.leaked_versions.fetch_add(1, Ordering::Relaxed);
                         return Err(CommitError::WALError(e.to_string()));
                     }
                 }
@@ -484,6 +499,7 @@ impl TransactionManager {
                 txn.status = TransactionStatus::Aborted {
                     reason: format!("Storage application failed: {}", e),
                 };
+                self.leaked_versions.fetch_add(1, Ordering::Relaxed);
                 return Err(CommitError::WALError(format!(
                     "Storage application failed (no WAL): {}",
                     e

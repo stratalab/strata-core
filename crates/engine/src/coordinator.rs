@@ -374,6 +374,7 @@ impl TransactionCoordinator {
             total_started: started,
             total_committed: committed,
             total_aborted: self.total_aborted.load(Ordering::Relaxed),
+            leaked_versions: self.manager.leaked_versions(),
             commit_rate: if started > 0 {
                 committed as f64 / started as f64
             } else {
@@ -442,6 +443,9 @@ pub struct TransactionMetrics {
     pub total_committed: u64,
     /// Total number of transactions aborted
     pub total_aborted: u64,
+    /// Versions allocated but never committed (e.g., WAL write failure after
+    /// version allocation). Non-zero values may indicate disk pressure.
+    pub leaked_versions: u64,
     /// Commit success rate (committed / started)
     pub commit_rate: f64,
 }
