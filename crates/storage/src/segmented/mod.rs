@@ -687,6 +687,73 @@ impl SegmentedStore {
         0
     }
 
+    /// Apply a put during WAL recovery, preserving the original commit timestamp (#1619).
+    ///
+    /// Normal writes use `Timestamp::now()`, but recovery must use the timestamp
+    /// from the WAL record to maintain correct temporal ordering. Without this,
+    /// time-travel queries return wrong results after crash recovery.
+    pub fn put_recovery_entry(
+        &self,
+        key: Key,
+        value: Value,
+        version: u64,
+        timestamp_micros: u64,
+    ) -> StrataResult<()> {
+        let branch_id = key.namespace.branch_id;
+
+        let mut branch = self
+            .branches
+            .entry(branch_id)
+            .or_insert_with(BranchState::new);
+
+        let entry = MemtableEntry {
+            value,
+            is_tombstone: false,
+            timestamp: Timestamp::from_micros(timestamp_micros),
+            ttl_ms: 0,
+        };
+        let ts = entry.timestamp.as_micros();
+        branch.active.put_entry(&key, version, entry);
+        branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
+        branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
+
+        self.maybe_rotate_branch(branch_id, &mut branch);
+        self.version.fetch_max(version, Ordering::AcqRel);
+
+        Ok(())
+    }
+
+    /// Apply a delete during WAL recovery, preserving the original commit timestamp (#1619).
+    pub fn delete_recovery_entry(
+        &self,
+        key: &Key,
+        version: u64,
+        timestamp_micros: u64,
+    ) -> StrataResult<()> {
+        let branch_id = key.namespace.branch_id;
+
+        let mut branch = self
+            .branches
+            .entry(branch_id)
+            .or_insert_with(BranchState::new);
+
+        let entry = MemtableEntry {
+            value: Value::Null,
+            is_tombstone: true,
+            timestamp: Timestamp::from_micros(timestamp_micros),
+            ttl_ms: 0,
+        };
+        let ts = entry.timestamp.as_micros();
+        branch.active.put_entry(key, version, entry);
+        branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
+        branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
+
+        self.maybe_rotate_branch(branch_id, &mut branch);
+        self.version.fetch_max(version, Ordering::AcqRel);
+
+        Ok(())
+    }
+
     /// Get `(entry_count, total_version_count, btree_built)` for a branch.
     ///
     /// SegmentedStore does not use BTreeSet indexes, so `btree_built` is always false.

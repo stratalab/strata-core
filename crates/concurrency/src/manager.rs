@@ -497,33 +497,13 @@ impl TransactionManager {
     /// defeating the TOCTOU protection the lock provides. The stale entry
     /// will be cleaned up on the next branch delete attempt or lazily collected.
     pub fn remove_branch_lock(&self, branch_id: &BranchId) -> bool {
-        let can_remove = match self.commit_locks.get(branch_id) {
-            Some(entry) => {
-                // Try to acquire the lock to verify no commit is in-flight
-                let held = entry.value().try_lock().is_some();
-                // Drop entry ref (and any guard) before we attempt removal
-                drop(entry);
-                held
-            }
-            None => {
-                // No lock entry exists — nothing to remove
-                return true;
-            }
-        };
-
-        if can_remove {
-            // Lock was not held — safe to remove
-            self.commit_locks.remove(branch_id);
-            true
-        } else {
-            // Lock is held — concurrent commit in-flight, skip removal
-            tracing::warn!(
-                target: "strata::txn",
-                branch = %branch_id,
-                "Skipping branch lock removal: concurrent commit in-flight"
-            );
-            false
-        }
+        // DashMap::remove() atomically acquires the shard write lock and
+        // removes the entry.  If a concurrent commit holds the shard lock
+        // (via `entry()`), this blocks until the commit finishes — then
+        // removes the now-unlocked entry.  The next commit will recreate
+        // the entry via `entry().or_insert_with()`.  (#1621)
+        self.commit_locks.remove(branch_id);
+        true
     }
 
     /// Advance the version counter to at least `v`.
@@ -1615,43 +1595,6 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_branch_lock_skips_when_held() {
-        let manager = Arc::new(TransactionManager::new(0));
-        let branch_id = BranchId::new();
-
-        // Insert a lock entry
-        manager
-            .commit_locks
-            .entry(branch_id)
-            .or_insert_with(|| Mutex::new(()));
-
-        // Hold the lock on a background thread
-        let manager2 = Arc::clone(&manager);
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-
-        let handle = std::thread::spawn(move || {
-            let entry = manager2.commit_locks.get(&branch_id).unwrap();
-            let _guard = entry.value().lock();
-            // Signal that lock is held
-            tx.send(()).unwrap();
-            // Wait for main thread to finish its check
-            done_rx.recv().unwrap();
-        });
-
-        // Wait for background thread to hold the lock
-        rx.recv().unwrap();
-
-        // Removal should fail since the lock is held
-        assert!(!manager.remove_branch_lock(&branch_id));
-        assert!(manager.commit_locks.contains_key(&branch_id));
-
-        // Release the background thread
-        done_tx.send(()).unwrap();
-        handle.join().unwrap();
-    }
-
-    #[test]
     fn test_remove_branch_lock_nonexistent_succeeds() {
         let manager = TransactionManager::new(0);
         let branch_id = BranchId::new();
@@ -1661,54 +1604,34 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_branch_lock_still_functional_after_failed_removal() {
-        // After remove_branch_lock returns false (skipped because lock was
-        // held), verify the lock is still present and functional — a
-        // subsequent commit can still acquire and use it.
+    fn test_remove_branch_lock_serializes_with_commit() {
+        // Verify that remove_branch_lock removes the entry and that the
+        // next commit recreates it via entry().or_insert_with().
         let manager = Arc::new(TransactionManager::new(0));
         let branch_id = BranchId::new();
 
-        // Insert a lock entry
-        manager
-            .commit_locks
-            .entry(branch_id)
-            .or_insert_with(|| Mutex::new(()));
-
-        // Hold the lock on a background thread
-        let manager2 = Arc::clone(&manager);
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-
-        let handle = std::thread::spawn(move || {
-            let entry = manager2.commit_locks.get(&branch_id).unwrap();
-            let _guard = entry.value().lock();
-            tx.send(()).unwrap();
-            done_rx.recv().unwrap();
-        });
-
-        rx.recv().unwrap();
-
-        // Removal should fail
-        assert!(!manager.remove_branch_lock(&branch_id));
-
-        // Release background thread's lock
-        done_tx.send(()).unwrap();
-        handle.join().unwrap();
-
-        // Lock should still exist and be acquirable
+        // Insert a lock entry via the same path as commit()
+        {
+            let _entry = manager
+                .commit_locks
+                .entry(branch_id)
+                .or_insert_with(|| Mutex::new(()));
+            // entry guard dropped here, releasing shard lock
+        }
         assert!(manager.commit_locks.contains_key(&branch_id));
-        let entry = manager.commit_locks.get(&branch_id).unwrap();
-        let guard = entry.value().try_lock();
-        assert!(
-            guard.is_some(),
-            "Lock should be acquirable after failed removal and holder release"
-        );
-        drop(guard);
-        drop(entry);
 
-        // Now removal should succeed since no one holds it
+        // Removal should succeed since no commit is in-flight
         assert!(manager.remove_branch_lock(&branch_id));
         assert!(!manager.commit_locks.contains_key(&branch_id));
+
+        // Next commit should recreate the entry via or_insert_with
+        {
+            let _entry = manager
+                .commit_locks
+                .entry(branch_id)
+                .or_insert_with(|| Mutex::new(()));
+        }
+        assert!(manager.commit_locks.contains_key(&branch_id));
     }
 
     // ========================================================================

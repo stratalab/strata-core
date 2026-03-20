@@ -196,10 +196,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                     );
                     // If mmap loaded, the backend has embeddings but no timestamps;
                     // proceed anyway so rebuild_index() at least builds the graph.
-                    state
-                        .backends
-                        .write()
-                        .insert(collection_id.clone(), backend);
+                    state.backends.insert(collection_id.clone(), backend);
                     stats.collections_created += 1;
                     continue;
                 }
@@ -275,10 +272,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                 );
             }
 
-            state
-                .backends
-                .write()
-                .insert(collection_id.clone(), backend);
+            state.backends.insert(collection_id.clone(), backend);
             stats.collections_created += 1;
         }
     }
@@ -287,28 +281,27 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
     // Rebuild HNSW graphs (or load from mmap cache)
     // -----------------------------------------------------------
     {
-        let mut backends = state.backends.write();
-        for (cid, backend) in backends.iter_mut() {
+        for mut entry in state.backends.iter_mut() {
             let mut loaded = false;
             if use_mmap {
-                let gdir = super::graph_dir(data_dir, cid.branch_id, &cid.name);
-                if let Ok(true) = backend.load_graphs_from_disk(&gdir) {
+                let gdir = super::graph_dir(data_dir, entry.key().branch_id, &entry.key().name);
+                if let Ok(true) = entry.value_mut().load_graphs_from_disk(&gdir) {
                     loaded = true;
                 }
             }
             if !loaded {
-                backend.rebuild_index();
+                entry.value_mut().rebuild_index();
             }
 
             // Seal any remaining active buffer entries into HNSW segments.
             // After graph loading, partial chunks may remain in the active
             // buffer for O(n) brute-force search. Sealing them into HNSW
             // segments ensures all vectors benefit from O(log n) search.
-            backend.seal_remaining_active();
+            entry.value_mut().seal_remaining_active();
 
             if can_write_disk {
-                let gdir = super::graph_dir(data_dir, cid.branch_id, &cid.name);
-                let _ = backend.freeze_graphs_to_disk(&gdir);
+                let gdir = super::graph_dir(data_dir, entry.key().branch_id, &entry.key().name);
+                let _ = entry.value_mut().freeze_graphs_to_disk(&gdir);
             }
         }
     }
@@ -317,14 +310,14 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
     // Freeze heaps to mmap cache & configure flush paths
     // -----------------------------------------------------------
     if can_write_disk {
-        let mut backends = state.backends.write();
-        for (cid, backend) in backends.iter_mut() {
-            let vec_path = mmap_path(data_dir, cid.branch_id, &cid.name);
-            if !backend.is_heap_mmap() {
-                if let Err(e) = backend.freeze_heap_to_disk(&vec_path) {
+        for mut entry in state.backends.iter_mut() {
+            let vec_path = mmap_path(data_dir, entry.key().branch_id, &entry.key().name);
+            if !entry.value().is_heap_mmap() {
+                let name = entry.key().name.clone();
+                if let Err(e) = entry.value_mut().freeze_heap_to_disk(&vec_path) {
                     tracing::warn!(
                         target: "strata::vector",
-                        collection = %cid.name,
+                        collection = %name,
                         error = %e,
                         "Failed to freeze heap to mmap cache"
                     );
@@ -332,7 +325,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
             }
             // Configure periodic flush path so the backend can flush
             // its overlay during long-running indexing operations.
-            let _ = backend.flush_heap_to_disk_if_needed(&vec_path);
+            let _ = entry.value_mut().flush_heap_to_disk_if_needed(&vec_path);
         }
     }
 

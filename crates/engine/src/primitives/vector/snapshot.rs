@@ -94,22 +94,30 @@ impl VectorStore {
             .map_err(|e| VectorError::Io(e.to_string()))?;
 
         let state = self.backends()?;
-        let backends = state.backends.read();
-        let collection_count = backends.len() as u32;
+        let collection_count = state.backends.len() as u32;
         writer
             .write_u32::<LittleEndian>(collection_count)
             .map_err(|e| VectorError::Io(e.to_string()))?;
 
-        // Sort collections for deterministic output
-        let mut collections: Vec<_> = backends.iter().collect();
-        collections.sort_by(|a, b| {
-            a.0.branch_id
+        // Collect and sort collections for deterministic output
+        let mut collection_ids: Vec<_> = state
+            .backends
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        collection_ids.sort_by(|a, b| {
+            a.branch_id
                 .as_bytes()
-                .cmp(b.0.branch_id.as_bytes())
-                .then(a.0.name.cmp(&b.0.name))
+                .cmp(b.branch_id.as_bytes())
+                .then(a.name.cmp(&b.name))
         });
 
-        for (collection_id, backend) in collections {
+        for collection_id in &collection_ids {
+            let backend = state.backends.get(collection_id).ok_or_else(|| {
+                VectorError::CollectionNotFound {
+                    name: collection_id.name.clone(),
+                }
+            })?;
             // Get config from the collection info (which gets it from KV)
             // Use "default" space for snapshot serialization (backwards compat)
             let config = self
@@ -390,10 +398,7 @@ impl VectorStore {
             backend.restore_snapshot_state(header.next_id, header.free_slots);
 
             // Add backend to store
-            self.backends()?
-                .backends
-                .write()
-                .insert(collection_id, backend);
+            self.backends()?.backends.insert(collection_id, backend);
         }
 
         Ok(())

@@ -131,7 +131,7 @@ impl Memtable {
     /// Panics if the memtable is frozen.
     pub fn put_entry(&self, key: &Key, commit_id: u64, entry: MemtableEntry) {
         assert!(
-            !self.frozen.load(Ordering::Relaxed),
+            !self.frozen.load(Ordering::Acquire),
             "cannot write to frozen memtable"
         );
 
