@@ -270,6 +270,9 @@ pub struct InvertedIndex {
     active_doc_count: AtomicUsize,
     /// Guard to prevent concurrent auto-seals
     sealing: AtomicBool,
+    /// Protects against concurrent index_document during seal_active.
+    /// index_document takes a read lock; seal_active takes a write lock.
+    seal_lock: RwLock<()>,
     /// Set of branch IDs seen across all indexed documents.
     /// When only one branch exists, score_top_k can skip per-doc branch checks.
     branch_ids: RwLock<HashSet<BranchId>>,
@@ -300,6 +303,7 @@ impl InvertedIndex {
             data_dir: RwLock::new(None),
             active_doc_count: AtomicUsize::new(0),
             sealing: AtomicBool::new(false),
+            seal_lock: RwLock::new(()),
             branch_ids: RwLock::new(HashSet::new()),
         }
     }
@@ -686,6 +690,11 @@ impl InvertedIndex {
         // Collect term names for the forward index before consuming tf_map
         let term_names: Vec<String> = tf_map.keys().cloned().collect();
 
+        // Hold seal_lock as reader so seal_active cannot drain postings
+        // while we are inserting. Multiple index_document calls can proceed
+        // concurrently (shared read lock).
+        let _seal_guard = self.seal_lock.read().unwrap();
+
         // Update posting lists
         for (term, tf) in tf_map {
             let entry = PostingEntry::new(doc_id, tf, doc_len);
@@ -847,6 +856,10 @@ impl InvertedIndex {
         if active_count == 0 {
             return;
         }
+
+        // Exclusive lock: block concurrent index_document calls during drain
+        // so no postings are inserted between iter() and remove().
+        let _seal_guard = self.seal_lock.write().unwrap();
 
         // Drain active segment into sorted term map
         let mut term_postings: BTreeMap<String, Vec<PostingEntry>> = BTreeMap::new();
