@@ -671,7 +671,9 @@ impl JsonPath {
                         .chars()
                         .any(|c| !(c.is_alphanumeric() || c == '_' || c == '-'));
                     if needs_quoting {
-                        result.push_str(&format!("[\"{}\"]", k));
+                        // Escape embedded double-quotes so roundtrip is safe.
+                        let escaped = k.replace('\\', "\\\\").replace('"', "\\\"");
+                        result.push_str(&format!("[\"{}\"]", escaped));
                     } else {
                         if !result.is_empty() {
                             result.push('.');
@@ -733,14 +735,26 @@ impl FromStr for JsonPath {
                 if i < chars.len() && chars[i] == '"' {
                     // Bracket-quote key segment: ["key with.dots"]
                     i += 1; // skip opening quote
+                    let mut key = String::new();
                     let key_start = i;
                     while i < chars.len() && chars[i] != '"' {
+                        if chars[i] == '\\' && i + 1 < chars.len() {
+                            // Escaped character: \" or \\
+                            match chars[i + 1] {
+                                '"' | '\\' => {
+                                    key.push(chars[i + 1]);
+                                    i += 2;
+                                    continue;
+                                }
+                                _ => {} // not a recognized escape, treat backslash as literal
+                            }
+                        }
+                        key.push(chars[i]);
                         i += 1;
                     }
                     if i >= chars.len() {
                         return Err(PathParseError::UnclosedBracket(start));
                     }
-                    let key: String = chars[key_start..i].iter().collect();
                     if key.is_empty() {
                         return Err(PathParseError::EmptyKey(key_start));
                     }
@@ -1955,6 +1969,72 @@ mod tests {
             PathSegment::Key("has space".to_string()),
         ]);
         assert_eq!(path.to_path_string(), r#"normal["has.dot"]["has space"]"#);
+    }
+
+    #[test]
+    fn test_path_parse_consecutive_bracket_quotes() {
+        let path: JsonPath = r#"["a.b"]["c.d"]"#.parse().unwrap();
+        assert_eq!(path.len(), 2);
+        assert_eq!(
+            path.segments(),
+            &[
+                PathSegment::Key("a.b".to_string()),
+                PathSegment::Key("c.d".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_path_parse_bracket_quote_key_with_bracket() {
+        // Key contains ']' character — parser scans for '"' not ']'
+        let path: JsonPath = r#"["a]b"]"#.parse().unwrap();
+        assert_eq!(path.segments(), &[PathSegment::Key("a]b".to_string())]);
+    }
+
+    #[test]
+    fn test_path_parse_dot_before_bracket_quote() {
+        let path: JsonPath = r#"root.["a.b"]"#.parse().unwrap();
+        assert_eq!(path.len(), 2);
+        assert_eq!(
+            path.segments(),
+            &[
+                PathSegment::Key("root".to_string()),
+                PathSegment::Key("a.b".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_path_bracket_quote_with_embedded_quotes() {
+        // Key containing double-quote, escaped as \"
+        let path: JsonPath = r#"["a\"b"]"#.parse().unwrap();
+        assert_eq!(path.segments(), &[PathSegment::Key("a\"b".to_string())]);
+    }
+
+    #[test]
+    fn test_path_bracket_quote_with_backslash() {
+        // Key containing literal backslash, escaped as \\
+        let path: JsonPath = r#"["a\\b"]"#.parse().unwrap();
+        assert_eq!(path.segments(), &[PathSegment::Key("a\\b".to_string())]);
+    }
+
+    #[test]
+    fn test_path_bracket_quote_embedded_quote_roundtrip() {
+        // Build key with embedded quote programmatically, verify roundtrip
+        let path = JsonPath::from_segments(vec![PathSegment::Key("a\"b".to_string())]);
+        let s = path.to_path_string();
+        assert_eq!(s, r#"["a\"b"]"#);
+        let reparsed: JsonPath = s.parse().unwrap();
+        assert_eq!(path, reparsed);
+    }
+
+    #[test]
+    fn test_path_bracket_quote_embedded_backslash_roundtrip() {
+        let path = JsonPath::from_segments(vec![PathSegment::Key("a\\b".to_string())]);
+        let s = path.to_path_string();
+        assert_eq!(s, r#"["a\\b"]"#);
+        let reparsed: JsonPath = s.parse().unwrap();
+        assert_eq!(path, reparsed);
     }
 
     #[test]

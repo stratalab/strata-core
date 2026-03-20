@@ -1879,6 +1879,9 @@ mod tests {
             .batch_set_or_create(&branch_id, "default", entries)
             .unwrap();
         assert_eq!(results.len(), 2);
+        // Both are new documents, so version should be 1
+        assert_eq!(results[0], Version::counter(1));
+        assert_eq!(results[1], Version::counter(1));
 
         // Verify persistence
         let v1 = store
@@ -1935,6 +1938,102 @@ mod tests {
             v.and_then(|v| v.as_str().map(String::from)),
             Some("new".to_string())
         );
+    }
+
+    // ========== Post-mutation validation tests (#1613) ==========
+
+    #[test]
+    fn test_set_rejects_document_exceeding_depth_limit() {
+        // Build a path with 101 key segments.  Each intermediate creates a
+        // nested object, producing depth > MAX_NESTING_DEPTH (100).
+        let db = Database::cache().unwrap();
+        let store = JsonStore::new(db);
+        let branch_id = BranchId::new();
+
+        // Create a document with a simple object
+        store
+            .create(&branch_id, "default", "deep", JsonValue::object())
+            .unwrap();
+
+        // Build a path of depth 101 (exceeds MAX_NESTING_DEPTH=100)
+        let mut path = JsonPath::root();
+        for i in 0..101 {
+            path = path.key(&format!("k{}", i));
+        }
+
+        let result = store.set_or_create(
+            &branch_id,
+            "default",
+            "deep",
+            &path,
+            JsonValue::from(1i64),
+        );
+        assert!(result.is_err(), "Should reject document exceeding depth limit");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("nesting") || err_msg.contains("depth"),
+            "Error should mention nesting/depth, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_incremental_sets_enforce_size_limit() {
+        // Each individual value is small, but accumulated document exceeds limits.
+        // Post-mutation validation must catch this.
+        use strata_core::primitives::json::MAX_DOCUMENT_SIZE;
+
+        let db = Database::cache().unwrap();
+        let store = JsonStore::new(db);
+        let branch_id = BranchId::new();
+
+        // Start with an empty object
+        store
+            .create(&branch_id, "default", "big", JsonValue::object())
+            .unwrap();
+
+        // Write chunks that individually pass validation but accumulate.
+        // Use 1MB chunks — after 17 writes, doc > 16MB.
+        let chunk = JsonValue::from("x".repeat(1_000_000));
+        let mut last_err = None;
+        for i in 0..20 {
+            let path = JsonPath::root().key(&format!("field_{}", i));
+            match store.set(&branch_id, "default", "big", &path, chunk.clone()) {
+                Ok(_) => {}
+                Err(e) => {
+                    last_err = Some(e);
+                    break;
+                }
+            }
+        }
+        assert!(
+            last_err.is_some(),
+            "Should have rejected document exceeding {} bytes",
+            MAX_DOCUMENT_SIZE
+        );
+    }
+
+    #[test]
+    fn test_create_if_missing_validates_result() {
+        // set_or_create on a new document with a deep path should validate
+        // the resulting document, not just the input value.
+        let db = Database::cache().unwrap();
+        let store = JsonStore::new(db);
+        let branch_id = BranchId::new();
+
+        let mut path = JsonPath::root();
+        for i in 0..101 {
+            path = path.key(&format!("k{}", i));
+        }
+
+        let result = store.set_or_create(
+            &branch_id,
+            "default",
+            "newdoc",
+            &path,
+            JsonValue::from(1i64),
+        );
+        assert!(result.is_err(), "Should reject new doc exceeding depth limit");
     }
 
     // ========== Time-Travel Boundary Tests ==========
