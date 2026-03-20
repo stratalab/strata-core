@@ -29,16 +29,19 @@ use tracing::{debug, info, warn};
 ///
 /// # Memory Ordering
 ///
-/// The metric counters (active_count, total_started, total_committed, total_aborted)
+/// `active_count` uses Release on increment and AcqRel on decrement because
+/// it synchronizes `gc_safe_version` updates: when active_count drains to 0,
+/// gc_safe_version advances to allow GC of old versions.
+///
+/// The remaining metric counters (total_started, total_committed, total_aborted)
 /// use Relaxed ordering intentionally because:
 /// 1. They are purely observational metrics for monitoring/debugging
 /// 2. They do not synchronize any other memory operations
 /// 3. Approximate counts are acceptable for metrics purposes
-/// 4. The atomic operations (fetch_add/fetch_sub) guarantee no torn reads/writes
 pub struct TransactionCoordinator {
     /// Transaction manager for ID/version allocation
     manager: TransactionManager,
-    /// Active transaction count (for metrics) - uses Relaxed ordering
+    /// Active transaction count — uses Release/AcqRel for gc_safe_version sync
     active_count: AtomicU64,
     /// Total transactions started - uses Relaxed ordering
     total_started: AtomicU64,
@@ -147,7 +150,9 @@ impl TransactionCoordinator {
         // Register in active_count BEFORE creating the snapshot so that a
         // concurrent drain (active_count → 0) cannot set gc_safe_version
         // past our about-to-be-created snapshot version.
-        self.active_count.fetch_add(1, Ordering::Relaxed);
+        // Uses Release so the decrement's Acquire load observes this increment
+        // on weakly-ordered architectures (ARM/Apple Silicon).
+        self.active_count.fetch_add(1, Ordering::Release);
         self.total_started.fetch_add(1, Ordering::Relaxed);
 
         debug!(target: "strata::txn", branch_id = %branch_id, "Transaction started");
@@ -234,7 +239,7 @@ impl TransactionCoordinator {
     /// * `_txn_id` - Unique transaction ID (unused, kept for API compat)
     /// * `_start_version` - Snapshot version at transaction start (unused)
     pub fn record_start(&self, _txn_id: u64, _start_version: u64) {
-        self.active_count.fetch_add(1, Ordering::Relaxed);
+        self.active_count.fetch_add(1, Ordering::Release);
         self.total_started.fetch_add(1, Ordering::Relaxed);
     }
 

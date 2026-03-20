@@ -424,9 +424,17 @@ impl TransactionManager {
             return Ok(commit_version);
         }
 
-        // Blind write fast path: no per-branch lock needed.
-        // No reads → no TOCTOU risk. Blind writes are commutative — concurrent
-        // writers to the same key create distinct versions; highest version wins.
+        // Blind write path: still acquire per-branch lock to prevent racing
+        // with a concurrent read-write transaction's validation-to-apply window.
+        // OCC validation is skipped (no reads), but the lock is needed so that
+        // a blind write cannot mutate storage between another txn's validate
+        // and apply phases on the same branch.
+        let branch_lock = self
+            .commit_locks
+            .entry(txn.branch_id)
+            .or_insert_with(|| Mutex::new(()));
+        let _commit_guard = branch_lock.lock();
+
         if !txn.is_active() {
             return Err(CommitError::InvalidState(format!(
                 "Cannot commit transaction {} from {:?} state - must be Active",

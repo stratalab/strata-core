@@ -1337,6 +1337,77 @@ impl SegmentedStore {
             );
         }
     }
+
+    // ========================================================================
+    // Recovery helpers
+    // ========================================================================
+
+    /// Put a value during WAL recovery with the original commit timestamp.
+    ///
+    /// Normal writes use `Timestamp::now()`, but during recovery we must
+    /// preserve the original commit-time timestamp so that time-travel queries
+    /// and `time_range()` return correct results after a crash/restart.
+    pub fn put_recovery_entry(
+        &self,
+        key: Key,
+        value: Value,
+        version: u64,
+        timestamp_micros: u64,
+    ) -> StrataResult<()> {
+        let branch_id = key.namespace.branch_id;
+
+        let mut branch = self
+            .branches
+            .entry(branch_id)
+            .or_insert_with(BranchState::new);
+
+        let entry = MemtableEntry {
+            value,
+            is_tombstone: false,
+            timestamp: Timestamp::from_micros(timestamp_micros),
+            ttl_ms: 0,
+        };
+        let ts = entry.timestamp.as_micros();
+        branch.active.put_entry(&key, version, entry);
+        branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
+        branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
+
+        self.maybe_rotate_branch(branch_id, &mut branch);
+        self.version.fetch_max(version, Ordering::AcqRel);
+
+        Ok(())
+    }
+
+    /// Delete a key during WAL recovery with the original commit timestamp.
+    pub fn delete_recovery_entry(
+        &self,
+        key: &Key,
+        version: u64,
+        timestamp_micros: u64,
+    ) -> StrataResult<()> {
+        let branch_id = key.namespace.branch_id;
+
+        let mut branch = self
+            .branches
+            .entry(branch_id)
+            .or_insert_with(BranchState::new);
+
+        let entry = MemtableEntry {
+            value: Value::Null,
+            is_tombstone: true,
+            timestamp: Timestamp::from_micros(timestamp_micros),
+            ttl_ms: 0,
+        };
+        let ts = entry.timestamp.as_micros();
+        branch.active.put_entry(key, version, entry);
+        branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
+        branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
+
+        self.maybe_rotate_branch(branch_id, &mut branch);
+        self.version.fetch_max(version, Ordering::AcqRel);
+
+        Ok(())
+    }
 }
 
 /// Statistics returned by [`SegmentedStore::recover_segments`].
