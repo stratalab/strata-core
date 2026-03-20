@@ -17,7 +17,6 @@
 use crate::payload::TransactionPayload;
 use crate::TransactionManager;
 use std::path::PathBuf;
-use strata_core::traits::{Storage, WriteMode};
 use strata_core::StrataResult;
 use strata_durability::wal::WalReader;
 use strata_storage::SegmentedStore;
@@ -130,21 +129,21 @@ impl RecoveryCoordinator {
 
             max_version = max_version.max(payload.version);
 
-            // Apply puts
+            // Apply puts — use recovery-specific method to preserve original
+            // commit timestamp instead of generating a new Timestamp::now() (#1619).
             for (key, value) in &payload.puts {
-                storage.put_with_version_mode(
+                storage.put_recovery_entry(
                     key.clone(),
                     value.clone(),
                     payload.version,
-                    None,
-                    WriteMode::Append,
+                    record.timestamp,
                 )?;
                 stats.writes_applied += 1;
             }
 
-            // Apply deletes — use trait method explicitly so Storage::version is updated
+            // Apply deletes with original timestamp (#1619)
             for key in &payload.deletes {
-                Storage::delete_with_version(&storage, key, payload.version)?;
+                storage.delete_recovery_entry(key, payload.version, record.timestamp)?;
                 stats.deletes_applied += 1;
             }
 
@@ -259,6 +258,7 @@ mod tests {
     use super::*;
     use crate::payload::TransactionPayload;
     use std::sync::Arc;
+    use strata_core::traits::Storage;
     use strata_core::types::{BranchId, Key, Namespace};
     use strata_core::value::Value;
     use strata_durability::codec::IdentityCodec;

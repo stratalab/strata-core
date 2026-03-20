@@ -170,7 +170,7 @@ impl SegmentedStore {
         };
 
         // Snapshot current segments under a read guard.
-        let (old_segments, total_input_entries) = {
+        let (old_segments, total_input_entries, is_bottommost) = {
             let branch = match self.branches.get(branch_id) {
                 Some(b) => b,
                 None => return Ok(None),
@@ -181,7 +181,9 @@ impl SegmentedStore {
             }
             let segs: Vec<Arc<KVSegment>> = ver.l0_segments().to_vec();
             let total: u64 = segs.iter().map(|s| s.entry_count()).sum();
-            (segs, total)
+            // Output stays in L0; bottommost if L1–L6 are all empty.
+            let bottom = (1..ver.levels.len()).all(|l| ver.levels[l].is_empty());
+            (segs, total, bottom)
             // DashMap guard drops here
         };
 
@@ -200,8 +202,9 @@ impl SegmentedStore {
 
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
-        let compaction_iter =
-            CompactionIterator::new(merge, prune_floor).with_max_versions(max_versions);
+        let compaction_iter = CompactionIterator::new(merge, prune_floor)
+            .with_max_versions(max_versions)
+            .with_drop_expired(is_bottommost);
 
         let mut builder = SegmentBuilder::default()
             .with_compression(crate::segment_builder::CompressionCodec::None);
@@ -303,7 +306,7 @@ impl SegmentedStore {
         };
 
         // Snapshot selected segments under a read guard.
-        let (selected_segments, total_input_entries) = {
+        let (selected_segments, total_input_entries, is_bottommost) = {
             let branch = match self.branches.get(branch_id) {
                 Some(b) => b,
                 None => return Ok(None),
@@ -319,7 +322,9 @@ impl SegmentedStore {
                 return Ok(None);
             }
             let total: u64 = segs.iter().map(|s| s.entry_count()).sum();
-            (segs, total)
+            // Output stays in L0; bottommost if L1–L6 are all empty.
+            let bottom = (1..ver.levels.len()).all(|l| ver.levels[l].is_empty());
+            (segs, total, bottom)
             // DashMap guard drops here
         };
 
@@ -337,8 +342,9 @@ impl SegmentedStore {
 
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
-        let compaction_iter =
-            CompactionIterator::new(merge, prune_floor).with_max_versions(max_versions);
+        let compaction_iter = CompactionIterator::new(merge, prune_floor)
+            .with_max_versions(max_versions)
+            .with_drop_expired(is_bottommost);
 
         let mut builder = SegmentBuilder::default()
             .with_compression(crate::segment_builder::CompressionCodec::None);
@@ -413,7 +419,7 @@ impl SegmentedStore {
         };
 
         // Snapshot current version.
-        let (l0_segs, l1_segs) = {
+        let (l0_segs, l1_segs, is_bottommost) = {
             let branch = match self.branches.get(branch_id) {
                 Some(b) => b,
                 None => return Ok(None),
@@ -424,7 +430,9 @@ impl SegmentedStore {
             }
             let l0: Vec<Arc<KVSegment>> = ver.l0_segments().to_vec();
             let l1: Vec<Arc<KVSegment>> = ver.l1_segments().to_vec();
-            (l0, l1)
+            // Output goes to L1; bottommost if L2–L6 are all empty.
+            let bottom = (2..ver.levels.len()).all(|l| ver.levels[l].is_empty());
+            (l0, l1, bottom)
         };
 
         // Compute overall L0 key range.
@@ -506,8 +514,9 @@ impl SegmentedStore {
         let sources = streaming_sources(&all_inputs, &limiter);
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
-        let compaction_iter =
-            CompactionIterator::new(merge, prune_floor).with_max_versions(max_versions);
+        let compaction_iter = CompactionIterator::new(merge, prune_floor)
+            .with_max_versions(max_versions)
+            .with_drop_expired(is_bottommost);
 
         // Build output segments, splitting at target file size
         let branch_hex = hex_encode_branch(branch_id);
@@ -620,7 +629,7 @@ impl SegmentedStore {
         };
 
         // ── 1. Snapshot current version and pick input file(s) ──────────
-        let (input_segs, overlap_segs, grandparent_segs, _non_overlap_next) = {
+        let (input_segs, overlap_segs, grandparent_segs, _non_overlap_next, is_bottommost) = {
             let branch = match self.branches.get(branch_id) {
                 Some(b) => b,
                 None => return Ok(None),
@@ -678,7 +687,9 @@ impl SegmentedStore {
                 Vec::new()
             };
 
-            (inputs, overlap, grandparents, non_overlap)
+            // Output goes to level+1; bottommost if no segments exist below it.
+            let bottom = (level + 2..ver.levels.len()).all(|l| ver.levels[l].is_empty());
+            (inputs, overlap, grandparents, non_overlap, bottom)
         };
 
         // ── 2. Check for trivial move ───────────────────────────────────
@@ -738,8 +749,9 @@ impl SegmentedStore {
         let sources = streaming_sources(&all_inputs, &limiter);
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
-        let compaction_iter =
-            CompactionIterator::new(merge, prune_floor).with_max_versions(max_versions);
+        let compaction_iter = CompactionIterator::new(merge, prune_floor)
+            .with_max_versions(max_versions)
+            .with_drop_expired(is_bottommost);
 
         let branch_hex = hex_encode_branch(branch_id);
         let branch_dir = segments_dir.join(&branch_hex);

@@ -31,6 +31,12 @@ pub struct CompactionIterator<I: Iterator<Item = (InternalKey, MemtableEntry)>> 
     max_versions: usize,
     /// Number of versions emitted for the current logical key.
     versions_emitted: usize,
+    /// Whether to drop expired TTL entries (#1622).
+    ///
+    /// Should only be true for bottommost-level compactions, since
+    /// non-bottommost compactions must preserve expired entries that
+    /// shadow older versions in lower levels.
+    drop_expired: bool,
 }
 
 impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> CompactionIterator<I> {
@@ -46,6 +52,7 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> CompactionIterator<I> {
             emitted_floor_entry: false,
             max_versions: 0,
             versions_emitted: 0,
+            drop_expired: false,
         }
     }
 
@@ -56,6 +63,16 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> CompactionIterator<I> {
     /// version limiting is disabled and only `prune_floor` governs pruning.
     pub fn with_max_versions(mut self, max: usize) -> Self {
         self.max_versions = max;
+        self
+    }
+
+    /// Enable dropping of expired TTL entries (#1622).
+    ///
+    /// When enabled, entries whose TTL has elapsed are silently dropped
+    /// during compaction instead of being copied to the output segment.
+    /// This should only be used for bottommost-level compactions.
+    pub fn with_drop_expired(mut self, drop: bool) -> Self {
+        self.drop_expired = drop;
         self
     }
 }
@@ -73,6 +90,13 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for CompactionIt
                 self.current_prefix = Some(prefix);
                 self.emitted_floor_entry = false;
                 self.versions_emitted = 0;
+            }
+
+            // Drop expired TTL entries in bottommost compactions (#1622).
+            // Non-bottommost compactions must keep them because they may
+            // shadow older versions in lower levels.
+            if self.drop_expired && entry.is_expired() {
+                continue;
             }
 
             let commit_id = ik.commit_id();

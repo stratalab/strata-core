@@ -1339,8 +1339,7 @@ impl Database {
                     let cid = CollectionId::new(branch_id, collection);
                     let vid = VectorId::new(record.vector_id);
 
-                    let mut backends = vs.backends.write();
-                    if let Some(backend) = backends.get_mut(&cid) {
+                    if let Some(mut backend) = vs.backends.get_mut(&cid) {
                         let _ = backend.insert_with_timestamp(
                             vid,
                             &record.embedding,
@@ -1376,8 +1375,7 @@ impl Database {
                     let cid = CollectionId::new(branch_id, collection);
                     let vid = VectorId::new(record.vector_id);
 
-                    let mut backends = vs.backends.write();
-                    if let Some(backend) = backends.get_mut(&cid) {
+                    if let Some(mut backend) = vs.backends.get_mut(&cid) {
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_micros() as u64)
@@ -2145,8 +2143,8 @@ impl Database {
             Err(_) => return Ok(()), // No vector state registered
         };
 
-        let backends = state.backends.read();
-        for (cid, backend) in backends.iter() {
+        for entry in state.backends.iter() {
+            let (cid, backend) = (entry.key(), entry.value());
             let branch_hex = format!("{:032x}", u128::from_be_bytes(*cid.branch_id.as_bytes()));
             let vec_path = data_dir
                 .join("vectors")

@@ -32,7 +32,7 @@ use crate::primitives::vector::{
     VectorConfig, VectorEntry, VectorError, VectorId, VectorIndexBackend, VectorMatch,
     VectorMatchWithSource, VectorRecord, VectorResult,
 };
-use parking_lot::RwLock;
+use dashmap::DashMap;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -68,18 +68,20 @@ pub struct RecoveryStats {
 ///
 /// # Thread Safety
 ///
-/// Protected by RwLock for concurrent read access and exclusive write access.
-/// Uses BTreeMap for deterministic iteration order (Invariant R3).
+/// Uses `DashMap` for per-collection (per-shard) concurrency (#1624).
+/// Writes to collection A no longer block reads from collection B.
 pub struct VectorBackendState {
-    /// In-memory index backends per collection
-    /// CRITICAL: BTreeMap for deterministic iteration (Invariant R3)
-    pub backends: RwLock<BTreeMap<CollectionId, Box<dyn VectorIndexBackend>>>,
+    /// In-memory index backends per collection.
+    ///
+    /// `DashMap` provides per-shard locking so that operations on different
+    /// collections proceed concurrently without a global write lock.
+    pub backends: DashMap<CollectionId, Box<dyn VectorIndexBackend>>,
 }
 
 impl Default for VectorBackendState {
     fn default() -> Self {
         Self {
-            backends: RwLock::new(BTreeMap::new()),
+            backends: DashMap::new(),
         }
     }
 }
@@ -282,7 +284,7 @@ impl VectorStore {
         // Remove in-memory backend
         {
             let state = self.state()?;
-            state.backends.write().remove(&collection_id);
+            state.backends.remove(&collection_id);
         }
 
         info!(target: "strata::vector", collection = name, branch_id = %branch_id, "Collection deleted");
@@ -488,14 +490,14 @@ impl VectorStore {
 
         let kv_key = Key::new_vector(self.namespace_for(branch_id, space), collection, key);
 
-        // Hold write lock for the entire check-then-insert sequence to prevent
-        // TOCTOU race (fixes #936). Also commit KV before updating backend so
-        // a KV commit failure doesn't leave the backend in an inconsistent
-        // state (fixes #937).
+        // Hold per-collection lock for the entire check-then-insert sequence to
+        // prevent TOCTOU race (fixes #936). Also commit KV before updating
+        // backend so a KV commit failure doesn't leave the backend in an
+        // inconsistent state (fixes #937).
         let state = self.state()?;
-        let mut backends = state.backends.write();
-        let backend =
-            backends
+        let mut backend =
+            state
+                .backends
                 .get_mut(&collection_id)
                 .ok_or_else(|| VectorError::CollectionNotFound {
                     name: collection.to_string(),
@@ -548,7 +550,7 @@ impl VectorStore {
             },
         );
 
-        drop(backends);
+        drop(backend);
 
         debug!(target: "strata::vector", collection, branch_id = %branch_id, "Vector upserted");
 
@@ -598,9 +600,9 @@ impl VectorStore {
 
         // Get embedding from backend
         let state = self.state()?;
-        let backends = state.backends.read();
         let backend =
-            backends
+            state
+                .backends
                 .get(&collection_id)
                 .ok_or_else(|| VectorError::CollectionNotFound {
                     name: collection.to_string(),
@@ -669,9 +671,9 @@ impl VectorStore {
             let collection_id = CollectionId::new(branch_id, collection);
             let vector_id = VectorId(record.vector_id);
             let state = self.state()?;
-            let backends = state.backends.read();
             let backend =
-                backends
+                state
+                    .backends
                     .get(&collection_id)
                     .ok_or_else(|| VectorError::CollectionNotFound {
                         name: collection.to_string(),
@@ -710,9 +712,8 @@ impl VectorStore {
         let collection_id = CollectionId::new(branch_id, collection);
         let kv_key = Key::new_vector(self.namespace_for(branch_id, space), collection, key);
 
-        // Hold write lock for entire check-then-delete (mirrors insert_inner fix #936)
+        // Hold per-collection lock for entire check-then-delete (mirrors insert_inner fix #936)
         let state = self.state()?;
-        let mut backends = state.backends.write();
 
         let Some(record) = self.get_vector_record_by_key(&kv_key)? else {
             return Ok(false);
@@ -726,12 +727,11 @@ impl VectorStore {
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
         // Backend after KV succeeds
-        if let Some(backend) = backends.get_mut(&collection_id) {
+        if let Some(mut backend) = state.backends.get_mut(&collection_id) {
             use super::types::now_micros;
             backend.delete_with_timestamp(vector_id, now_micros())?;
             backend.remove_inline_meta(vector_id);
         }
-        drop(backends);
 
         Ok(true)
     }
@@ -781,11 +781,11 @@ impl VectorStore {
         self.ensure_collection_loaded(branch_id, space, collection)?;
         let collection_id = CollectionId::new(branch_id, collection);
 
-        // Acquire write lock once for the entire batch
+        // Acquire per-collection lock once for the entire batch
         let state = self.state()?;
-        let mut backends = state.backends.write();
-        let backend =
-            backends
+        let mut backend =
+            state
+                .backends
                 .get_mut(&collection_id)
                 .ok_or_else(|| VectorError::CollectionNotFound {
                     name: collection.to_string(),
@@ -844,7 +844,7 @@ impl VectorStore {
             );
         }
 
-        drop(backends);
+        drop(backend);
 
         debug!(target: "strata::vector", collection, count = batch_count, branch_id = %branch_id, "Batch upsert completed");
 
@@ -907,9 +907,9 @@ impl VectorStore {
         if filter.is_none() {
             // No filter - simple case, fetch exactly k with O(1) inline meta lookup
             let state = self.state()?;
-            let backends = state.backends.read();
             let backend =
-                backends
+                state
+                    .backends
                     .get(&collection_id)
                     .ok_or_else(|| VectorError::CollectionNotFound {
                         name: collection.to_string(),
@@ -934,14 +934,14 @@ impl VectorStore {
                     });
                 }
             }
-            drop(backends);
+            drop(backend);
         } else {
             // Filter active - use adaptive over-fetch with O(1) key lookup + point-get for metadata
             let multipliers = [3, 6, 12];
             let state = self.state()?;
-            let backends = state.backends.read();
             let backend =
-                backends
+                state
+                    .backends
                     .get(&collection_id)
                     .ok_or_else(|| VectorError::CollectionNotFound {
                         name: collection.to_string(),
@@ -992,7 +992,7 @@ impl VectorStore {
                     break;
                 }
             }
-            drop(backends);
+            drop(backend);
         }
 
         // Apply facade-level tie-breaking (score desc, key asc)
@@ -1056,15 +1056,15 @@ impl VectorStore {
         if filter.is_none() {
             // No filter — fetch exactly k
             let state = self.state()?;
-            let backends = state.backends.read();
             let backend =
-                backends
+                state
+                    .backends
                     .get(&collection_id)
                     .ok_or_else(|| VectorError::CollectionNotFound {
                         name: collection.to_string(),
                     })?;
             let candidates = backend.search_at(query, k, as_of_ts);
-            drop(backends);
+            drop(backend);
 
             for (vector_id, score) in candidates {
                 if let Some((key, metadata)) = self.find_vector_key_metadata_at(
@@ -1081,9 +1081,9 @@ impl VectorStore {
             // Filter active — adaptive over-fetch [3, 6, 12]
             let multipliers = [3, 6, 12];
             let state = self.state()?;
-            let backends = state.backends.read();
             let backend =
-                backends
+                state
+                    .backends
                     .get(&collection_id)
                     .ok_or_else(|| VectorError::CollectionNotFound {
                         name: collection.to_string(),
@@ -1124,7 +1124,7 @@ impl VectorStore {
                     break;
                 }
             }
-            drop(backends);
+            drop(backend);
         }
 
         // Apply facade-level tie-breaking (score desc, key asc)
@@ -1225,7 +1225,7 @@ impl VectorStore {
     fn init_backend(&self, id: &CollectionId, config: &VectorConfig) -> Result<(), VectorError> {
         let backend = self.create_backend(id, config)?;
         let state = self.state()?;
-        state.backends.write().insert(id.clone(), backend);
+        state.backends.insert(id.clone(), backend);
         Ok(())
     }
 
@@ -1429,11 +1429,9 @@ impl VectorStore {
     ) -> VectorResult<usize> {
         // Check in-memory backend first
         let state = self.state()?;
-        let backends = state.backends.read();
-        if let Some(backend) = backends.get(id) {
+        if let Some(backend) = state.backends.get(id) {
             return Ok(backend.len());
         }
-        drop(backends);
 
         // Backend not loaded - count from KV
         use strata_core::traits::Storage;
@@ -1535,8 +1533,8 @@ impl VectorStore {
         let collection_id = CollectionId::new(branch_id, name);
         let state = self.state()?;
 
-        // Fast path: read lock check
-        if state.backends.read().contains_key(&collection_id) {
+        // Fast path: check without entry overhead
+        if state.backends.contains_key(&collection_id) {
             return Ok(());
         }
 
@@ -1548,12 +1546,14 @@ impl VectorStore {
             })?;
         let backend = self.create_backend(&collection_id, &config)?;
 
-        // Double-check under write lock: another thread may have loaded it
-        let mut backends = state.backends.write();
-        if backends.contains_key(&collection_id) {
-            return Ok(());
+        // Double-check via entry API: another thread may have loaded it
+        use dashmap::mapref::entry::Entry;
+        match state.backends.entry(collection_id) {
+            Entry::Occupied(_) => {}
+            Entry::Vacant(e) => {
+                e.insert(backend);
+            }
         }
-        backends.insert(collection_id, backend);
         Ok(())
     }
 
@@ -1581,47 +1581,43 @@ impl VectorStore {
         let collection_id = CollectionId::new(branch_id, name);
 
         // Check if collection already exists in backend
-        {
-            let state = self.state()?;
-            let backends = state.backends.read();
-            if let Some(existing_backend) = backends.get(&collection_id) {
-                // Validate config matches (Issue #452)
-                let existing_config = existing_backend.config();
-                if existing_config.dimension != config.dimension {
-                    tracing::warn!(
-                        target: "strata::vector",
-                        collection = name,
-                        existing_dim = existing_config.dimension,
-                        wal_dim = config.dimension,
-                        "Config mismatch during WAL replay: dimension differs"
-                    );
-                    return Err(VectorError::DimensionMismatch {
-                        expected: existing_config.dimension,
-                        got: config.dimension,
-                    });
-                }
-                if existing_config.metric != config.metric {
-                    tracing::warn!(
-                        target: "strata::vector",
-                        collection = name,
-                        existing_metric = ?existing_config.metric,
-                        wal_metric = ?config.metric,
-                        "Config mismatch during WAL replay: metric differs"
-                    );
-                    return Err(VectorError::ConfigMismatch {
-                        collection: name.to_string(),
-                        field: "metric".to_string(),
-                    });
-                }
-                // Collection already exists with matching config - idempotent replay
-                return Ok(());
+        let state = self.state()?;
+        if let Some(existing_backend) = state.backends.get(&collection_id) {
+            // Validate config matches (Issue #452)
+            let existing_config = existing_backend.config();
+            if existing_config.dimension != config.dimension {
+                tracing::warn!(
+                    target: "strata::vector",
+                    collection = name,
+                    existing_dim = existing_config.dimension,
+                    wal_dim = config.dimension,
+                    "Config mismatch during WAL replay: dimension differs"
+                );
+                return Err(VectorError::DimensionMismatch {
+                    expected: existing_config.dimension,
+                    got: config.dimension,
+                });
             }
+            if existing_config.metric != config.metric {
+                tracing::warn!(
+                    target: "strata::vector",
+                    collection = name,
+                    existing_metric = ?existing_config.metric,
+                    wal_metric = ?config.metric,
+                    "Config mismatch during WAL replay: metric differs"
+                );
+                return Err(VectorError::ConfigMismatch {
+                    collection: name.to_string(),
+                    field: "metric".to_string(),
+                });
+            }
+            // Collection already exists with matching config - idempotent replay
+            return Ok(());
         }
 
         // Initialize backend (no KV write - KV is replayed separately)
         let backend = self.backend_factory().create(&config);
-        let state = self.state()?;
-        state.backends.write().insert(collection_id, backend);
+        state.backends.insert(collection_id, backend);
 
         Ok(())
     }
@@ -1635,7 +1631,7 @@ impl VectorStore {
 
         // Remove in-memory backend
         let state = self.state()?;
-        state.backends.write().remove(&collection_id);
+        state.backends.remove(&collection_id);
 
         Ok(())
     }
@@ -1666,9 +1662,9 @@ impl VectorStore {
         let collection_id = CollectionId::new(branch_id, collection);
 
         let state = self.state()?;
-        let mut backends = state.backends.write();
-        let backend =
-            backends
+        let mut backend =
+            state
+                .backends
                 .get_mut(&collection_id)
                 .ok_or_else(|| VectorError::CollectionNotFound {
                     name: collection.to_string(),
@@ -1699,8 +1695,7 @@ impl VectorStore {
         let collection_id = CollectionId::new(branch_id, collection);
 
         let state = self.state()?;
-        let mut backends = state.backends.write();
-        if let Some(backend) = backends.get_mut(&collection_id) {
+        if let Some(mut backend) = state.backends.get_mut(&collection_id) {
             backend.delete_with_timestamp(vector_id, deleted_at)?;
         }
         // Note: If collection doesn't exist, that's OK - it may have been deleted
@@ -1816,8 +1811,7 @@ impl VectorStore {
     ) -> VectorResult<usize> {
         let cid = CollectionId::new(branch_id, collection);
         let state = self.state()?;
-        let backends = state.backends.read();
-        Ok(backends.get(&cid).map(|b| b.len()).unwrap_or(0))
+        Ok(state.backends.get(&cid).map(|b| b.len()).unwrap_or(0))
     }
 
     /// Search a system collection (internal use only)
@@ -1883,11 +1877,11 @@ impl VectorStore {
             });
         }
 
-        // Search backend + resolve inline metadata under a single lock
+        // Search backend + resolve inline metadata under a single guard
         let state = self.state()?;
-        let backends = state.backends.read();
         let backend =
-            backends
+            state
+                .backends
                 .get(&collection_id)
                 .ok_or_else(|| VectorError::CollectionNotFound {
                     name: collection.to_string(),
@@ -1912,7 +1906,7 @@ impl VectorStore {
             }
         }
 
-        drop(backends);
+        drop(backend);
 
         // Resolve any candidates missing inline meta via KV fallback
         for (vid, score) in fallback_candidates {
@@ -1991,11 +1985,11 @@ impl VectorStore {
             });
         }
 
-        // Search backend + resolve inline metadata under a single lock
+        // Search backend + resolve inline metadata under a single guard
         let state = self.state()?;
-        let backends = state.backends.read();
         let backend =
-            backends
+            state
+                .backends
                 .get(&collection_id)
                 .ok_or_else(|| VectorError::CollectionNotFound {
                     name: collection.to_string(),
@@ -2020,7 +2014,7 @@ impl VectorStore {
             }
         }
 
-        drop(backends);
+        drop(backend);
 
         // Resolve any candidates missing inline meta via KV fallback
         for (vid, score) in fallback_candidates {
@@ -2065,8 +2059,8 @@ impl VectorStore {
     ) -> Option<(&'static str, usize)> {
         let collection_id = CollectionId::new(branch_id, name);
         let state = self.state().ok()?;
-        let backends = state.backends.read();
-        backends
+        state
+            .backends
             .get(&collection_id)
             .map(|b| (b.index_type_name(), b.memory_usage()))
     }
@@ -2206,7 +2200,7 @@ impl VectorStore {
 
                 // Grab the old backend (if any) so we can read embeddings
                 // from it for lite records that don't store them in KV.
-                let old_backend = state.backends.write().remove(&collection_id);
+                let old_backend = state.backends.remove(&collection_id).map(|(_, v)| v);
 
                 // If we have a source branch, build a map from user_key → VectorId
                 // for the source collection. This lets us determine which backend
@@ -2293,9 +2287,9 @@ impl VectorStore {
                         if is_from_source {
                             if let Some(src_bid) = source_branch_id {
                                 let src_cid = CollectionId::new(src_bid, &collection_name);
-                                let backends = state.backends.read();
-                                match backends.get(&src_cid).and_then(|b| b.get(old_vid)) {
-                                    Some(emb) => emb.to_vec(),
+                                let src_emb = state.backends.get(&src_cid).and_then(|b| b.get(old_vid).map(|e| e.to_vec()));
+                                match src_emb {
+                                    Some(emb) => emb,
                                     None => match old_backend.as_ref().and_then(|b| b.get(old_vid))
                                     {
                                         Some(emb) => emb.to_vec(),
@@ -2329,9 +2323,9 @@ impl VectorStore {
                                 None => {
                                     if let Some(src_bid) = source_branch_id {
                                         let src_cid = CollectionId::new(src_bid, &collection_name);
-                                        let backends = state.backends.read();
-                                        match backends.get(&src_cid).and_then(|b| b.get(old_vid)) {
-                                            Some(emb) => emb.to_vec(),
+                                        let src_emb = state.backends.get(&src_cid).and_then(|b| b.get(old_vid).map(|e| e.to_vec()));
+                                        match src_emb {
+                                            Some(emb) => emb,
                                             None => {
                                                 tracing::warn!(
                                                     target: "strata::vector",
@@ -2416,7 +2410,7 @@ impl VectorStore {
                 backend.rebuild_index();
 
                 // Replace existing backend atomically
-                state.backends.write().insert(collection_id, backend);
+                state.backends.insert(collection_id, backend);
 
                 total_collections += 1;
                 total_vectors += collection_vector_count;
@@ -3285,7 +3279,6 @@ mod tests {
             .backends()
             .unwrap()
             .backends
-            .read()
             .contains_key(&collection_id));
     }
 
@@ -3304,7 +3297,6 @@ mod tests {
             .backends()
             .unwrap()
             .backends
-            .read()
             .contains_key(&collection_id));
 
         // Replay deletion
@@ -3314,7 +3306,6 @@ mod tests {
             .backends()
             .unwrap()
             .backends
-            .read()
             .contains_key(&collection_id));
     }
 
@@ -3346,8 +3337,7 @@ mod tests {
         // Verify vector exists in backend
         let collection_id = CollectionId::new(branch_id, "test");
         let state = store.backends().unwrap();
-        let backends = state.backends.read();
-        let backend = backends.get(&collection_id).unwrap();
+        let backend = state.backends.get(&collection_id).unwrap();
         assert!(backend.contains(vector_id));
         assert_eq!(backend.len(), 1);
     }
@@ -3380,8 +3370,7 @@ mod tests {
         // Verify the vector exists
         let collection_id = CollectionId::new(branch_id, "test");
         let state = store.backends().unwrap();
-        let backends = state.backends.read();
-        let backend = backends.get(&collection_id).unwrap();
+        let backend = state.backends.get(&collection_id).unwrap();
         assert!(backend.contains(high_id));
     }
 
@@ -3413,8 +3402,7 @@ mod tests {
         let collection_id = CollectionId::new(branch_id, "test");
         {
             let state = store.backends().unwrap();
-            let backends = state.backends.read();
-            assert!(backends.get(&collection_id).unwrap().contains(vector_id));
+            assert!(state.backends.get(&collection_id).unwrap().contains(vector_id));
         }
 
         // Replay deletion
@@ -3424,8 +3412,7 @@ mod tests {
 
         {
             let state = store.backends().unwrap();
-            let backends = state.backends.read();
-            assert!(!backends.get(&collection_id).unwrap().contains(vector_id));
+            assert!(!state.backends.get(&collection_id).unwrap().contains(vector_id));
         }
     }
 
@@ -3484,8 +3471,7 @@ mod tests {
         // Verify final state
         let collection_id = CollectionId::new(branch_id, "col1");
         let state = store.backends().unwrap();
-        let backends = state.backends.read();
-        let backend = backends.get(&collection_id).unwrap();
+        let backend = state.backends.get(&collection_id).unwrap();
 
         assert!(!backend.contains(VectorId::new(1)));
         assert!(backend.contains(VectorId::new(2)));
@@ -3504,8 +3490,7 @@ mod tests {
 
         // Use backends accessor
         let state = store.backends().unwrap();
-        let guard = state.backends.read();
-        assert_eq!(guard.len(), 1);
+        assert_eq!(state.backends.len(), 1);
     }
 
     // ========================================
@@ -3542,8 +3527,7 @@ mod tests {
         // Verify backends are restored
         {
             let state = store.state().unwrap();
-            let backends = state.backends.read();
-            let backend = backends.get(&collection_id).unwrap();
+            let backend = state.backends.get(&collection_id).unwrap();
             assert_eq!(backend.len(), 3, "Should have 3 vectors after reload");
         }
 
@@ -3587,8 +3571,7 @@ mod tests {
         let collection_id = CollectionId::new(branch_id, "test");
         {
             let state = store.state().unwrap();
-            let backends = state.backends.read();
-            assert_eq!(backends.get(&collection_id).unwrap().len(), 2);
+            assert_eq!(state.backends.get(&collection_id).unwrap().len(), 2);
         }
 
         // Delete one vector (this updates both KV and backend)
@@ -3600,9 +3583,8 @@ mod tests {
         // Backend should reflect KV state: only "b"
         {
             let state = store.state().unwrap();
-            let backends = state.backends.read();
             assert_eq!(
-                backends.get(&collection_id).unwrap().len(),
+                state.backends.get(&collection_id).unwrap().len(),
                 1,
                 "Should have 1 vector after reload (deleted vector not in KV)"
             );
@@ -4065,7 +4047,7 @@ mod tests {
         {
             let state = store.state().unwrap();
             let collection_id = CollectionId::new(branch_id, "concurrent_test");
-            state.backends.write().remove(&collection_id);
+            state.backends.remove(&collection_id);
         }
 
         // Spawn multiple threads calling ensure_collection_loaded simultaneously
@@ -4092,7 +4074,7 @@ mod tests {
         // Verify exactly one backend exists
         let state = store.state().unwrap();
         let collection_id = CollectionId::new(branch_id, "concurrent_test");
-        assert!(state.backends.read().contains_key(&collection_id));
+        assert!(state.backends.contains_key(&collection_id));
     }
 
     // ========================================
