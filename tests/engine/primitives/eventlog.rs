@@ -217,21 +217,102 @@ fn read_range_empty_when_start_equals_end() {
 // ============================================================================
 
 #[test]
-#[ignore = "requires: EventLog::verify_chain"]
 fn verify_chain_valid_for_empty_log() {
     let test_db = TestDb::new();
-    let _event = test_db.event();
-    // Chain integrity verification is an architectural principle
-    // but verify_chain() is not yet in the MVP API
+    let event = test_db.event();
+
+    let result = event.verify_chain(&test_db.branch_id, "default").unwrap();
+    assert!(result.is_valid);
+    assert_eq!(result.length, 0);
+    assert!(result.first_invalid.is_none());
+    assert!(result.error.is_none());
 }
 
 #[test]
-#[ignore = "requires: EventLog::verify_chain"]
 fn verify_chain_valid_after_appends() {
     let test_db = TestDb::new();
-    let _event = test_db.event();
-    // Chain integrity verification is an architectural principle
-    // but verify_chain() is not yet in the MVP API
+    let event = test_db.event();
+
+    for i in 0..10 {
+        event
+            .append(&test_db.branch_id, "default", "type", payload_int(i))
+            .unwrap();
+    }
+
+    let result = event.verify_chain(&test_db.branch_id, "default").unwrap();
+    assert!(result.is_valid);
+    assert_eq!(result.length, 10);
+    assert!(result.first_invalid.is_none());
+    assert!(result.error.is_none());
+}
+
+#[test]
+fn verify_chain_valid_with_multi_key_objects() {
+    // Regression test for #1612: HashMap key ordering non-determinism.
+    // Objects with multiple keys must produce the same hash after
+    // deserialization roundtrip (canonical JSON sorts keys).
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    // Build payload with many keys to increase probability of iteration
+    // order differing between runs / after deserialization.
+    let payload = Value::object(HashMap::from([
+        ("zebra".to_string(), Value::Int(1)),
+        ("alpha".to_string(), Value::Int(2)),
+        ("mango".to_string(), Value::String("fruit".to_string())),
+        ("beta".to_string(), Value::Bool(true)),
+        ("omega".to_string(), Value::Float(3.14)),
+    ]));
+
+    event
+        .append(&test_db.branch_id, "default", "multi_key", payload)
+        .unwrap();
+
+    let result = event.verify_chain(&test_db.branch_id, "default").unwrap();
+    assert!(result.is_valid, "Chain with multi-key object must verify: {:?}", result.error);
+}
+
+#[test]
+fn verify_chain_valid_with_nested_objects() {
+    // Nested objects must also sort keys at every level for deterministic hashing.
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    let inner = Value::object(HashMap::from([
+        ("z_inner".to_string(), Value::Int(99)),
+        ("a_inner".to_string(), Value::String("nested".to_string())),
+    ]));
+    let payload = Value::object(HashMap::from([
+        ("z_outer".to_string(), inner),
+        ("a_outer".to_string(), Value::Int(1)),
+    ]));
+
+    event
+        .append(&test_db.branch_id, "default", "nested", payload)
+        .unwrap();
+
+    let result = event.verify_chain(&test_db.branch_id, "default").unwrap();
+    assert!(result.is_valid, "Chain with nested objects must verify: {:?}", result.error);
+}
+
+#[test]
+fn verify_chain_valid_with_mixed_event_types() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    event
+        .append(&test_db.branch_id, "default", "type_a", payload_int(1))
+        .unwrap();
+    event
+        .append(&test_db.branch_id, "default", "type_b", payload_str("hello"))
+        .unwrap();
+    event
+        .append(&test_db.branch_id, "default", "type_a", payload_int(3))
+        .unwrap();
+
+    let result = event.verify_chain(&test_db.branch_id, "default").unwrap();
+    assert!(result.is_valid);
+    assert_eq!(result.length, 3);
 }
 
 #[test]
