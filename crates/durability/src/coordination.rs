@@ -8,7 +8,7 @@
 //!   `{wal_dir}/counters` for globally-unique version and txn_id allocation.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Exclusive file lock on `{wal_dir}/.wal-lock`.
@@ -169,31 +169,43 @@ impl CounterFile {
         Ok((max_version, max_txn_id))
     }
 
-    /// Read the counters, returning `(0, 0)` if the file does not exist.
+    /// Read the counters, returning `(0, 0)` if the file is missing or corrupted.
+    ///
+    /// Handles truncated/corrupted counter files gracefully (e.g., from a crash
+    /// during an older non-atomic write). The caller should scan the WAL to
+    /// reconstruct the true maximums when `(0, 0)` is returned for an existing
+    /// database.
     pub fn read_or_default(&self) -> io::Result<(u64, u64)> {
         match self.read() {
             Ok(v) => Ok(v),
             Err(ref e) if e.kind() == io::ErrorKind::NotFound => Ok((0, 0)),
+            Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                tracing::warn!(
+                    target: "strata::wal",
+                    path = %self.path.display(),
+                    "Counter file truncated (crash during write?) — defaulting to (0, 0)"
+                );
+                Ok((0, 0))
+            }
             Err(e) => Err(e),
         }
     }
 
-    /// Write `(max_version, max_txn_id)` atomically.
+    /// Write `(max_version, max_txn_id)` atomically via write-fsync-rename.
     ///
-    /// Writes to the file and fsyncs to ensure durability.
+    /// Uses a temporary file to ensure crash-safety: if a crash occurs
+    /// mid-write, the original file is either fully intact or replaced
+    /// atomically by the rename.
     pub fn write(&self, max_version: u64, max_txn_id: u64) -> io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .read(true)
-            .open(&self.path)?;
+        let tmp = self.path.with_extension("tmp");
+        let mut file = File::create(&tmp)?;
         let mut buf = [0u8; COUNTER_FILE_SIZE];
         buf[0..8].copy_from_slice(&max_version.to_le_bytes());
         buf[8..16].copy_from_slice(&max_txn_id.to_le_bytes());
-        file.seek(SeekFrom::Start(0))?;
         file.write_all(&buf)?;
         file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, &self.path)?;
         Ok(())
     }
 }
@@ -465,38 +477,43 @@ mod tests {
     }
 
     #[test]
-    fn test_counter_file_truncated_returns_error() {
+    fn test_counter_file_truncated_returns_default() {
         let dir = tempdir().unwrap();
         let cf = CounterFile::new(dir.path());
 
-        // Write only 4 bytes (need 16) — simulates crash during write
+        // Write only 4 bytes (need 16) — simulates crash during old non-atomic write
         std::fs::write(dir.path().join("counters"), &[0xAA; 4]).unwrap();
 
-        // read_or_default should return Err because read_exact fails
-        // (file exists so NotFound branch is not taken, but UnexpectedEof occurs)
-        let result = cf.read_or_default();
-        assert!(
-            result.is_err(),
-            "Truncated counter file should return error, got {:?}",
-            result
-        );
+        // read_or_default now handles UnexpectedEof gracefully
+        let (v, t) = cf.read_or_default().unwrap();
+        assert_eq!((v, t), (0, 0), "Truncated counter file should default to (0, 0)");
     }
 
     #[test]
-    fn test_counter_file_empty_returns_error() {
+    fn test_counter_file_empty_returns_default() {
         let dir = tempdir().unwrap();
         let cf = CounterFile::new(dir.path());
 
         // Write empty file — simulates crash right after file creation
         std::fs::write(dir.path().join("counters"), &[]).unwrap();
 
-        // read_or_default should return Err (file exists but empty)
-        let result = cf.read_or_default();
-        assert!(
-            result.is_err(),
-            "Empty counter file should return error, got {:?}",
-            result
-        );
+        // read_or_default now handles UnexpectedEof gracefully
+        let (v, t) = cf.read_or_default().unwrap();
+        assert_eq!((v, t), (0, 0), "Empty counter file should default to (0, 0)");
+    }
+
+    #[test]
+    fn test_counter_file_atomic_write_uses_rename() {
+        let dir = tempdir().unwrap();
+        let cf = CounterFile::new(dir.path());
+
+        cf.write(42, 100).unwrap();
+
+        // Temp file should not remain after successful write
+        assert!(!dir.path().join("counters.tmp").exists());
+        // Counter file should contain the written values
+        let (v, t) = cf.read().unwrap();
+        assert_eq!((v, t), (42, 100));
     }
 
     #[cfg(unix)]
