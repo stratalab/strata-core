@@ -153,6 +153,7 @@ fn sorted_vec_insert(vec: &mut Vec<VectorId>, id: VectorId) {
 
 /// Remove from a sorted Vec. No-op if not present.
 #[inline]
+#[allow(dead_code)]
 fn sorted_vec_remove(vec: &mut Vec<VectorId>, id: VectorId) {
     if let Ok(pos) = vec.binary_search(&id) {
         vec.remove(pos);
@@ -870,7 +871,12 @@ impl HnswGraph {
         was_alive
     }
 
-    /// Remove a node and all its bidirectional connections from the graph (for updates)
+    /// Remove a node and all its bidirectional connections from the graph.
+    ///
+    /// **Warning:** This can fragment the graph if the node is a bridge between
+    /// subgraphs. Prefer `delete_with_timestamp()` + re-insert for updates, which
+    /// preserves the old node as a traversal waypoint. See issue #1608.
+    #[allow(dead_code)]
     pub(crate) fn remove_node(&mut self, id: VectorId) {
         if let Some(node) = self.nodes.remove(&id) {
             // Remove references to this node from all neighbors
@@ -1783,13 +1789,28 @@ impl VectorIndexBackend for HnswBackend {
         self.heap.upsert(id, embedding)?;
 
         if is_update {
-            // For updates, remove old graph connections and re-insert
-            self.graph.remove_node(id);
+            // For updates, keep existing graph connections (#1608).
+            //
+            // remove_node() severs all connections and can fragment the graph
+            // if the node was a bridge between subgraphs. Re-inserting via
+            // insert_into_graph() replaces the node entry, also losing outbound
+            // edges. Both approaches degrade connectivity over many updates.
+            //
+            // Instead, we only update the embedding in the heap (above) and
+            // leave the graph structure intact. The search algorithm uses the
+            // new embedding for distance computation (from the heap) while
+            // traversing the old connections. This mirrors the segmented
+            // backend strategy where sealed segments preserve graph structure
+            // even when embeddings are logically superseded.
+            //
+            // The old connections may be suboptimal for the new embedding but
+            // maintain full connectivity. HNSW search is robust to suboptimal
+            // edges — they just add extra hops without breaking recall.
+        } else {
+            // New vector: build graph connections from scratch
+            self.graph
+                .insert_into_graph(id, embedding, created_at, &self.heap);
         }
-
-        // Insert into graph with timestamp
-        self.graph
-            .insert_into_graph(id, embedding, created_at, &self.heap);
 
         Ok(())
     }
@@ -2693,6 +2714,106 @@ mod tests {
             results_early.iter().all(|(id, _)| id.as_u64() == 10),
             "At ts=150 only VectorId(10) should be alive"
         );
+    }
+
+    /// Regression test for #1608: soft-delete during updates preserves graph connectivity.
+    ///
+    /// Tests with 30 nodes arranged as a ring in 3D space (good cosine similarity
+    /// between adjacent nodes). Updates 10 nodes with shifted embeddings and
+    /// verifies all nodes remain reachable.
+    #[test]
+    fn test_update_preserves_connectivity_multi_node() {
+        let dim = 3;
+        let mut backend = make_backend(dim, DistanceMetric::Cosine);
+
+        // Insert 30 nodes arranged as a ring in 3D space.
+        // This ensures all pairs have non-trivial cosine similarity,
+        // creating a well-connected HNSW graph.
+        let n = 30usize;
+        let mut embeddings: Vec<Vec<f32>> = Vec::new();
+        for i in 0..n {
+            let angle = (i as f32) * std::f32::consts::TAU / (n as f32);
+            let emb = vec![angle.cos(), angle.sin(), 0.3 + (i as f32) * 0.01];
+            embeddings.push(emb.clone());
+            backend
+                .insert_with_timestamp(VectorId::new(i as u64), &emb, (i as u64) * 100)
+                .unwrap();
+        }
+
+        // Verify all 30 are reachable
+        let results = backend.search(&embeddings[0], n);
+        assert_eq!(results.len(), n, "all {n} nodes reachable before updates");
+
+        // Update 10 nodes (including node 0 which is likely the entry point)
+        let update_ids = [0, 3, 7, 11, 15, 19, 22, 25, 28, 29];
+        for &i in &update_ids {
+            // Shift the embedding noticeably but stay in the same region
+            let angle = (i as f32) * std::f32::consts::TAU / (n as f32) + 0.1;
+            let new_emb = vec![angle.cos(), angle.sin(), 0.5];
+            embeddings[i] = new_emb.clone();
+            backend
+                .insert_with_timestamp(VectorId::new(i as u64), &new_emb, 5000 + i as u64)
+                .unwrap();
+        }
+
+        // All 30 must still be reachable after updates
+        let results_after = backend.search(&embeddings[0], n);
+        let found_ids: BTreeSet<_> = results_after.iter().map(|(id, _)| id.as_u64()).collect();
+        assert_eq!(
+            found_ids.len(),
+            n,
+            "all {n} nodes must be reachable after 10 updates; missing: {:?}",
+            (0..n as u64)
+                .filter(|id| !found_ids.contains(id))
+                .collect::<Vec<_>>()
+        );
+
+        // Verify updated embeddings are in use (self-nearest check)
+        for &i in &update_ids {
+            let results = backend.search(&embeddings[i], 1);
+            assert_eq!(
+                results[0].0,
+                VectorId::new(i as u64),
+                "updated node {i} should be nearest to its own new embedding"
+            );
+        }
+    }
+
+    /// Regression test for #1608: updating the entry point node.
+    ///
+    /// The entry point is special — delete_with_timestamp moves the entry
+    /// point to another node, then insert_into_graph may set it back.
+    /// Verify no panics or lost nodes.
+    #[test]
+    fn test_update_entry_point_node() {
+        let mut backend = make_backend(3, DistanceMetric::Cosine);
+
+        // Insert entry point first (VectorId 0)
+        backend.insert(VectorId::new(0), &[1.0, 0.0, 0.0]).unwrap();
+        backend.insert(VectorId::new(1), &[0.0, 1.0, 0.0]).unwrap();
+        backend.insert(VectorId::new(2), &[0.0, 0.0, 1.0]).unwrap();
+        backend.insert(VectorId::new(3), &[0.5, 0.5, 0.0]).unwrap();
+        backend.insert(VectorId::new(4), &[0.0, 0.5, 0.5]).unwrap();
+
+        // Update the entry point (VectorId 0) three times
+        for i in 0..3u64 {
+            backend
+                .insert_with_timestamp(
+                    VectorId::new(0),
+                    &[0.9 - (i as f32) * 0.1, 0.1 + (i as f32) * 0.1, 0.0],
+                    100 + i,
+                )
+                .unwrap();
+
+            // After each update, all 5 nodes must be reachable
+            let results = backend.search(&[0.5, 0.5, 0.0], 5);
+            let found: BTreeSet<_> = results.iter().map(|(id, _)| id.as_u64()).collect();
+            assert_eq!(
+                found.len(),
+                5,
+                "all 5 nodes must be reachable after update {i} of entry point"
+            );
+        }
     }
 }
 

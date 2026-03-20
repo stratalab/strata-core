@@ -939,18 +939,16 @@ impl InvertedIndex {
         if let Some((segment_id, search_dir, bytes)) = flush_info {
             let path = search_dir.join(format!("seg_{}.sidx", segment_id));
             let dir = path.parent().unwrap_or(std::path::Path::new("."));
-            if let Err(e) = std::fs::create_dir_all(dir)
-                .and_then(|_| {
-                    let tmp_path = path.with_extension("sidx.tmp");
-                    std::fs::write(&tmp_path, &bytes)
-                        .and_then(|_| {
-                            let f = std::fs::File::open(&tmp_path)?;
-                            f.sync_all()?;
-                            Ok(())
-                        })
-                        .and_then(|_| std::fs::rename(path.with_extension("sidx.tmp"), &path))
-                })
-            {
+            if let Err(e) = std::fs::create_dir_all(dir).and_then(|_| {
+                let tmp_path = path.with_extension("sidx.tmp");
+                std::fs::write(&tmp_path, &bytes)
+                    .and_then(|_| {
+                        let f = std::fs::File::open(&tmp_path)?;
+                        f.sync_all()?;
+                        Ok(())
+                    })
+                    .and_then(|_| std::fs::rename(path.with_extension("sidx.tmp"), &path))
+            }) {
                 tracing::warn!(
                     target: "strata::search",
                     segment_id = segment_id,

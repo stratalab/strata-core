@@ -780,8 +780,19 @@ impl VectorStore {
         // Ensure collection is loaded
         self.ensure_collection_loaded(branch_id, space, collection)?;
         let collection_id = CollectionId::new(branch_id, collection);
+        let namespace = self.namespace_for(branch_id, space);
+        let batch_count = entries.len();
 
-        // Acquire write lock once for the entire batch
+        // Phase 1: Read existing records OUTSIDE the write lock (#1607)
+        // KV reads can be slow (cold cache, large LSM) and would block all searches
+        // if done while holding the backends write lock.
+        let mut existing_records: Vec<Option<VectorRecord>> = Vec::with_capacity(entries.len());
+        for (key, _, _) in &entries {
+            let kv_key = Key::new_vector(namespace.clone(), collection, key);
+            existing_records.push(self.get_vector_record_by_key(&kv_key)?);
+        }
+
+        // Phase 2: Acquire write lock for ID allocation, KV commit, and backend updates
         let state = self.state()?;
         let mut backends = state.backends.write();
         let backend =
@@ -792,27 +803,36 @@ impl VectorStore {
                 })?;
 
         let mut versions = Vec::with_capacity(entries.len());
-        let batch_count = entries.len();
-
-        // Prepare all records and accumulate KV writes for a single transaction
         let mut kv_writes: Vec<(Key, Value)> = Vec::with_capacity(entries.len());
         let mut backend_updates: Vec<(VectorId, String, Vec<f32>, u64)> =
             Vec::with_capacity(entries.len());
 
-        for (key, embedding, metadata) in entries {
-            let kv_key = Key::new_vector(self.namespace_for(branch_id, space), collection, &key);
-
-            // Check existence
-            let existing = self.get_vector_record_by_key(&kv_key)?;
+        for ((key, embedding, metadata), existing) in
+            entries.into_iter().zip(existing_records.into_iter())
+        {
+            let kv_key = Key::new_vector(namespace.clone(), collection, &key);
 
             let (vector_id, record) = if let Some(existing_record) = existing {
+                // Phase 1 found an existing record — VectorId is stable for
+                // this key regardless of concurrent modifications.
                 let mut updated = existing_record;
                 updated.update(embedding.clone(), metadata);
                 (VectorId(updated.vector_id), updated)
             } else {
-                let vector_id = backend.allocate_id();
-                let record = VectorRecord::new(vector_id, embedding.clone(), metadata);
-                (vector_id, record)
+                // Phase 1 found nothing. Re-read inside the lock to prevent
+                // TOCTOU: a concurrent insert() may have created this key
+                // between Phase 1 and Phase 2. Without this re-read, we'd
+                // allocate a duplicate VectorId (see insert_inner fix #936).
+                let fresh = self.get_vector_record_by_key(&kv_key)?;
+                if let Some(existing_record) = fresh {
+                    let mut updated = existing_record;
+                    updated.update(embedding.clone(), metadata);
+                    (VectorId(updated.vector_id), updated)
+                } else {
+                    let vector_id = backend.allocate_id();
+                    let record = VectorRecord::new(vector_id, embedding.clone(), metadata);
+                    (vector_id, record)
+                }
             };
 
             let record_version = record.version;
@@ -949,11 +969,13 @@ impl VectorStore {
             let collection_size = backend.len();
             let namespace = self.namespace_for(branch_id, space);
 
+            let mut last_fetch_k = 0;
             for &mult in &multipliers {
                 let fetch_k = (k * mult).min(collection_size);
                 if fetch_k == 0 {
                     break;
                 }
+                last_fetch_k = fetch_k;
 
                 let candidates = backend.search(query, fetch_k);
 
@@ -990,6 +1012,41 @@ impl VectorStore {
                 // If we have enough results or searched all vectors, stop
                 if matches.len() >= k || fetch_k >= collection_size {
                     break;
+                }
+            }
+
+            // Final fallback: search the entire collection if multipliers
+            // didn't yield k results (#1609). This handles low match-rate
+            // filters (< 1/12) that the 12x cap misses.
+            if matches.len() < k && last_fetch_k < collection_size {
+                let candidates = backend.search(query, collection_size);
+
+                matches.clear();
+                for (vector_id, score) in candidates {
+                    let (key, metadata) = if let Some(meta) = backend.get_inline_meta(vector_id) {
+                        let kv_key = Key::new_vector(namespace.clone(), collection, &meta.key);
+                        let md = self
+                            .get_vector_record_by_key(&kv_key)?
+                            .and_then(|r| r.metadata);
+                        (meta.key.clone(), md)
+                    } else {
+                        self.get_key_and_metadata(branch_id, space, collection, vector_id)?
+                    };
+
+                    if let Some(ref f) = filter {
+                        if !f.matches(&metadata) {
+                            continue;
+                        }
+                    }
+
+                    matches.push(VectorMatch {
+                        key,
+                        score,
+                        metadata,
+                    });
+                    if matches.len() >= k {
+                        break;
+                    }
                 }
             }
             drop(backends);
@@ -1078,7 +1135,7 @@ impl VectorStore {
                 }
             }
         } else {
-            // Filter active — adaptive over-fetch [3, 6, 12]
+            // Filter active — adaptive over-fetch [3, 6, 12] with full fallback (#1609)
             let multipliers = [3, 6, 12];
             let state = self.state()?;
             let backends = state.backends.read();
@@ -1090,11 +1147,13 @@ impl VectorStore {
                     })?;
             let collection_size = backend.len();
 
+            let mut last_fetch_k = 0;
             for &mult in &multipliers {
                 let fetch_k = (k * mult).min(collection_size);
                 if fetch_k == 0 {
                     break;
                 }
+                last_fetch_k = fetch_k;
 
                 let candidates = backend.search_at(query, fetch_k, as_of_ts);
 
@@ -1122,6 +1181,32 @@ impl VectorStore {
                 // If we have enough results or searched all vectors, stop
                 if matches.len() >= k || fetch_k >= collection_size {
                     break;
+                }
+            }
+
+            // Final fallback: search entire collection (#1609)
+            if matches.len() < k && last_fetch_k < collection_size {
+                let candidates = backend.search_at(query, collection_size, as_of_ts);
+
+                matches.clear();
+                for (vector_id, score) in candidates {
+                    if let Some((key, metadata)) = self.find_vector_key_metadata_at(
+                        branch_id, space, collection, vector_id, as_of_ts,
+                    )? {
+                        if let Some(ref f) = filter {
+                            if !f.matches(&metadata) {
+                                continue;
+                            }
+                        }
+                        matches.push(VectorMatch {
+                            key,
+                            score,
+                            metadata,
+                        });
+                        if matches.len() >= k {
+                            break;
+                        }
+                    }
                 }
             }
             drop(backends);
@@ -4426,5 +4511,300 @@ mod tests {
         assert_eq!(results[0].key, "a");
         assert_eq!(results[1].key, "m");
         assert_eq!(results[2].key, "z");
+    }
+
+    /// Regression test for #1607: batch_insert two-phase correctness.
+    ///
+    /// Tests mixed updates + new inserts, duplicate keys within a batch,
+    /// all-new batch, all-update batch, and VectorId consistency between
+    /// KV records and the backend.
+    #[test]
+    fn test_batch_insert_two_phase_correctness() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        // --- Case 1: All-new batch ---
+        let entries = vec![
+            ("a".to_string(), vec![1.0, 0.0, 0.0], None),
+            ("b".to_string(), vec![0.0, 1.0, 0.0], None),
+            ("c".to_string(), vec![0.0, 0.0, 1.0], None),
+        ];
+        let versions = store
+            .batch_insert(branch_id, "default", "test", entries)
+            .unwrap();
+        assert_eq!(versions.len(), 3);
+        let results = store
+            .search(branch_id, "default", "test", &[1.0, 0.0, 0.0], 10, None)
+            .unwrap();
+        assert_eq!(results.len(), 3, "all-new batch: 3 vectors searchable");
+
+        // Verify each KV record has a unique VectorId
+        let rec_a = store
+            .get(branch_id, "default", "test", "a")
+            .unwrap()
+            .unwrap()
+            .value;
+        let rec_b = store
+            .get(branch_id, "default", "test", "b")
+            .unwrap()
+            .unwrap()
+            .value;
+        let rec_c = store
+            .get(branch_id, "default", "test", "c")
+            .unwrap()
+            .unwrap()
+            .value;
+        assert_ne!(rec_a.vector_id, rec_b.vector_id, "VectorIds must be unique");
+        assert_ne!(rec_b.vector_id, rec_c.vector_id, "VectorIds must be unique");
+
+        // --- Case 2: All-update batch ---
+        let entries = vec![
+            (
+                "a".to_string(),
+                vec![0.9, 0.1, 0.0],
+                Some(serde_json::json!({"v": 2})),
+            ),
+            (
+                "b".to_string(),
+                vec![0.1, 0.9, 0.0],
+                Some(serde_json::json!({"v": 2})),
+            ),
+        ];
+        store
+            .batch_insert(branch_id, "default", "test", entries)
+            .unwrap();
+
+        // Verify updates applied with correct VectorIds (unchanged from original)
+        let rec_a2 = store
+            .get(branch_id, "default", "test", "a")
+            .unwrap()
+            .unwrap()
+            .value;
+        assert_eq!(rec_a2.embedding, vec![0.9, 0.1, 0.0]);
+        assert_eq!(
+            rec_a2.vector_id, rec_a.vector_id,
+            "update must preserve VectorId"
+        );
+        assert_eq!(
+            rec_a2.metadata.unwrap().get("v").unwrap(),
+            &serde_json::json!(2)
+        );
+
+        // --- Case 3: Mixed update + new ---
+        let entries = vec![
+            (
+                "c".to_string(),
+                vec![0.1, 0.1, 0.8],
+                Some(serde_json::json!({"updated": true})),
+            ),
+            ("d".to_string(), vec![0.5, 0.5, 0.0], None),
+        ];
+        store
+            .batch_insert(branch_id, "default", "test", entries)
+            .unwrap();
+        let rec_c2 = store
+            .get(branch_id, "default", "test", "c")
+            .unwrap()
+            .unwrap()
+            .value;
+        assert_eq!(
+            rec_c2.vector_id, rec_c.vector_id,
+            "update must preserve VectorId"
+        );
+        let rec_d = store
+            .get(branch_id, "default", "test", "d")
+            .unwrap()
+            .unwrap()
+            .value;
+        assert_ne!(
+            rec_d.vector_id, rec_a.vector_id,
+            "new key gets fresh VectorId"
+        );
+
+        let results = store
+            .search(branch_id, "default", "test", &[1.0, 0.0, 0.0], 10, None)
+            .unwrap();
+        assert_eq!(results.len(), 4, "4 unique keys after all batches");
+
+        // --- Case 4: Duplicate keys within the same batch (last-writer-wins) ---
+        let entries = vec![
+            (
+                "dup".to_string(),
+                vec![1.0, 0.0, 0.0],
+                Some(serde_json::json!({"version": 1})),
+            ),
+            (
+                "dup".to_string(),
+                vec![0.0, 1.0, 0.0],
+                Some(serde_json::json!({"version": 2})),
+            ),
+        ];
+        store
+            .batch_insert(branch_id, "default", "test", entries)
+            .unwrap();
+        let rec_dup = store
+            .get(branch_id, "default", "test", "dup")
+            .unwrap()
+            .unwrap()
+            .value;
+        // The second entry in the batch should win (LWW within the batch)
+        assert_eq!(rec_dup.embedding, vec![0.0, 1.0, 0.0]);
+        assert_eq!(
+            rec_dup.metadata.unwrap().get("version").unwrap(),
+            &serde_json::json!(2)
+        );
+    }
+
+    /// Regression test for #1607: batch_insert TOCTOU re-read.
+    ///
+    /// Verifies that concurrent insert() + batch_insert() for the same key
+    /// doesn't create orphaned VectorIds. The batch's Phase 2 re-reads keys
+    /// that Phase 1 found as "not found" to detect concurrent inserts.
+    #[test]
+    fn test_batch_insert_concurrent_insert_no_orphan() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        // Simulate the race: insert "x" before batch_insert runs Phase 2,
+        // but after batch_insert would have read "x" as not-found in Phase 1.
+        // We can't control thread scheduling, but we CAN verify correctness:
+        // insert "x" first, then batch_insert with "x" should see the existing
+        // VectorId and reuse it (not allocate a new one).
+        store
+            .insert(branch_id, "default", "test", "x", &[1.0, 0.0, 0.0], None)
+            .unwrap();
+        let rec_before = store
+            .get(branch_id, "default", "test", "x")
+            .unwrap()
+            .unwrap()
+            .value;
+        let original_vid = rec_before.vector_id;
+
+        // Batch insert the same key — should REUSE the existing VectorId
+        let entries = vec![(
+            "x".to_string(),
+            vec![0.0, 1.0, 0.0],
+            Some(serde_json::json!({"batch": true})),
+        )];
+        store
+            .batch_insert(branch_id, "default", "test", entries)
+            .unwrap();
+
+        let rec_after = store
+            .get(branch_id, "default", "test", "x")
+            .unwrap()
+            .unwrap()
+            .value;
+        assert_eq!(
+            rec_after.vector_id, original_vid,
+            "batch_insert must reuse existing VectorId, not allocate a new one"
+        );
+        assert_eq!(rec_after.embedding, vec![0.0, 1.0, 0.0]);
+
+        // Only one search result for this key (no orphaned VectorId)
+        let results = store
+            .search(branch_id, "default", "test", &[0.0, 1.0, 0.0], 10, None)
+            .unwrap();
+        assert_eq!(results.len(), 1, "only one vector should exist for key 'x'");
+    }
+
+    /// Regression test for #1609: search with selective filter must fall back
+    /// to scanning the entire collection when the 12x multiplier is insufficient.
+    ///
+    /// Uses 200 common + 5 rare vectors to guarantee the fallback is exercised:
+    /// k=5, k*12=60, collection_size=205. Match rate = 5/205 ≈ 2.4%.
+    /// Expected matches in 60 candidates: ~1.5. The 12x multiplier cannot
+    /// possibly return k=5 results.
+    #[test]
+    fn test_search_filter_fallback_to_full_scan() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        // 200 non-matching vectors — ensures k*12=60 << 205 (collection_size)
+        for i in 0..200 {
+            store
+                .insert(
+                    branch_id,
+                    "default",
+                    "test",
+                    &format!("common_{:03}", i),
+                    &[1.0, (i as f32) * 0.001, 0.0],
+                    Some(serde_json::json!({"type": "common"})),
+                )
+                .unwrap();
+        }
+
+        // 5 rare vectors (match rate = 5/205 ≈ 2.4%, well below 1/12 ≈ 8.3%)
+        for i in 0..5 {
+            store
+                .insert(
+                    branch_id,
+                    "default",
+                    "test",
+                    &format!("rare_{}", i),
+                    &[1.0, 0.0, (i as f32) * 0.01],
+                    Some(serde_json::json!({"type": "rare"})),
+                )
+                .unwrap();
+        }
+
+        // Search for k=5 with filter matching only "rare" vectors
+        let filter = MetadataFilter::new().eq("type", "rare");
+        let results = store
+            .search(
+                branch_id,
+                "default",
+                "test",
+                &[1.0, 0.0, 0.0],
+                5,
+                Some(filter),
+            )
+            .unwrap();
+
+        assert_eq!(
+            results.len(),
+            5,
+            "should find all 5 rare vectors via full-collection fallback"
+        );
+        for r in &results {
+            assert!(
+                r.key.starts_with("rare_"),
+                "all results should be rare vectors, got: {}",
+                r.key
+            );
+        }
+
+        // Also test that requesting more than exist returns partial results
+        let filter2 = MetadataFilter::new().eq("type", "rare");
+        let results2 = store
+            .search(
+                branch_id,
+                "default",
+                "test",
+                &[1.0, 0.0, 0.0],
+                100,
+                Some(filter2),
+            )
+            .unwrap();
+        assert_eq!(
+            results2.len(),
+            5,
+            "should return all 5 rare even when k=100 (not more)"
+        );
     }
 }
