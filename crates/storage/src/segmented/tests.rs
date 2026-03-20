@@ -3531,6 +3531,42 @@ fn compact_level_prunes_old_versions() {
 }
 
 #[test]
+fn compact_level_non_bottommost_preserves_tombstones() {
+    // Regression test for zombie key bug (#1600):
+    // When a tombstone exists in L1 and an older value exists in L3,
+    // compacting L0→L1 with prune_floor must NOT drop the tombstone
+    // (since L3 holds data the tombstone covers).
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let b = branch();
+
+    // Step 1: Write value@1, flush, compact to L3 (deep level)
+    seed(&store, kv_key("k"), Value::Int(1), 1);
+    store.rotate_memtable(&b);
+    store.flush_oldest_frozen(&b).unwrap();
+    store.compact_level(&b, 0, 0).unwrap(); // L0 → L1
+    store.compact_level(&b, 1, 0).unwrap(); // L1 → L2
+    store.compact_level(&b, 2, 0).unwrap(); // L2 → L3
+
+    // Step 2: Write tombstone@3, flush to L0
+    seed(&store, kv_key("k"), Value::Null, 3);
+    store.rotate_memtable(&b);
+    store.flush_oldest_frozen(&b).unwrap();
+
+    // Step 3: Compact L0→L1 with prune_floor=5 (tombstone@3 is below floor).
+    // This is NOT bottommost (L3 has data), so tombstone MUST be preserved.
+    store.compact_level(&b, 0, 5).unwrap();
+
+    // The key should still be deleted (tombstone covers value@1 in L3)
+    let result = store.get_versioned(&kv_key("k"), u64::MAX).unwrap();
+    assert!(
+        result.is_none() || result.as_ref().map_or(false, |v| v.value == Value::Null),
+        "Key should be deleted, but got {:?} — zombie key bug!",
+        result,
+    );
+}
+
+#[test]
 fn compact_level_ephemeral_returns_none() {
     // Ephemeral store (no segments_dir) — compact_level should return None
     let store = SegmentedStore::new();
