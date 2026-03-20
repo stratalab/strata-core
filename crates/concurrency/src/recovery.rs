@@ -321,12 +321,7 @@ mod tests {
             puts,
             deletes,
         };
-        let record = WalRecord::new(
-            txn_id,
-            *branch_id.as_bytes(),
-            timestamp,
-            payload.to_bytes(),
-        );
+        let record = WalRecord::new(txn_id, *branch_id.as_bytes(), timestamp, payload.to_bytes());
         wal.append(&record).unwrap();
         wal.flush().unwrap();
     }

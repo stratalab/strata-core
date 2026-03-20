@@ -309,20 +309,39 @@ impl WalWriter {
                 }
                 self.reset_sync_counters();
             }
-            DurabilityMode::Standard { interval_ms, .. } => {
+            DurabilityMode::Standard {
+                interval_ms,
+                batch_size,
+            } => {
                 // Standard mode: fsync is deferred to the background flush thread (#969).
                 // Data is already written to the BufWriter by append().
                 // The background thread periodically calls sync_if_overdue().
                 //
-                // Safety net: if background thread is stalled (3× interval without sync),
-                // perform inline sync to maintain durability guarantee.
-                let deadline_ms = interval_ms.saturating_mul(3);
-                let elapsed_ms = self.last_sync_time.elapsed().as_millis() as u64;
-                if self.has_unsynced_data && elapsed_ms >= deadline_ms {
-                    warn!(target: "strata::wal",
-                        elapsed_ms,
-                        deadline_ms,
-                        "Background flush thread appears stalled — inline sync fallback");
+                // Two inline sync triggers:
+                // 1. Batch-size threshold: sync after N unsynced writes.
+                // 2. Time-based safety net: if background thread is stalled
+                //    (3× interval without sync), perform inline sync.
+                let needs_sync = if self.has_unsynced_data && self.writes_since_sync >= batch_size {
+                    debug!(target: "strata::wal",
+                        writes_since_sync = self.writes_since_sync,
+                        batch_size,
+                        "Batch-size threshold reached — inline sync");
+                    true
+                } else {
+                    let deadline_ms = interval_ms.saturating_mul(3);
+                    let elapsed_ms = self.last_sync_time.elapsed().as_millis() as u64;
+                    if self.has_unsynced_data && elapsed_ms >= deadline_ms {
+                        warn!(target: "strata::wal",
+                            elapsed_ms,
+                            deadline_ms,
+                            "Background flush thread appears stalled — inline sync fallback");
+                        true
+                    } else {
+                        false
+                    }
+                };
+
+                if needs_sync {
                     if let Some(ref mut segment) = self.segment {
                         let start = Instant::now();
                         segment.sync()?;
@@ -1517,5 +1536,58 @@ mod tests {
         let usage = writer.wal_disk_usage();
         // Only the .seg file should be counted
         assert_eq!(usage.segment_count, 1);
+    }
+
+    #[test]
+    fn test_standard_mode_batch_size_triggers_sync() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        // batch_size=3, very long interval so time-based sync won't trigger
+        let mode = DurabilityMode::Standard {
+            interval_ms: 999_999,
+            batch_size: 3,
+        };
+        let mut writer = make_writer(&wal_dir, mode);
+
+        // Writes 1 and 2: no sync yet
+        writer.append(&make_record(1)).unwrap();
+        writer.append(&make_record(2)).unwrap();
+        assert_eq!(writer.counters().sync_calls, 0);
+
+        // Write 3: hits batch_size threshold → sync
+        writer.append(&make_record(3)).unwrap();
+        assert_eq!(writer.counters().sync_calls, 1);
+
+        // Writes 4 and 5: no sync yet (counter reset after sync)
+        writer.append(&make_record(4)).unwrap();
+        writer.append(&make_record(5)).unwrap();
+        assert_eq!(writer.counters().sync_calls, 1);
+
+        // Write 6: hits threshold again → second sync
+        writer.append(&make_record(6)).unwrap();
+        assert_eq!(writer.counters().sync_calls, 2);
+    }
+
+    #[test]
+    fn test_standard_mode_batch_size_one_syncs_every_write() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let mode = DurabilityMode::Standard {
+            interval_ms: 999_999,
+            batch_size: 1,
+        };
+        let mut writer = make_writer(&wal_dir, mode);
+
+        // Every write should trigger a sync
+        for i in 1..=5 {
+            writer.append(&make_record(i)).unwrap();
+            assert_eq!(
+                writer.counters().sync_calls,
+                i,
+                "batch_size=1 should sync on every write"
+            );
+        }
     }
 }

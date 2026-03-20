@@ -170,7 +170,7 @@ impl SegmentedStore {
         };
 
         // Snapshot current segments under a read guard.
-        let (old_segments, total_input_entries) = {
+        let (old_segments, total_input_entries, is_bottommost) = {
             let branch = match self.branches.get(branch_id) {
                 Some(b) => b,
                 None => return Ok(None),
@@ -181,7 +181,9 @@ impl SegmentedStore {
             }
             let segs: Vec<Arc<KVSegment>> = ver.l0_segments().to_vec();
             let total: u64 = segs.iter().map(|s| s.entry_count()).sum();
-            (segs, total)
+            // L0→L0 compaction: bottommost only if L1+ are all empty
+            let bottommost = (1..ver.levels.len()).all(|l| ver.levels[l].is_empty());
+            (segs, total, bottommost)
             // DashMap guard drops here
         };
 
@@ -194,6 +196,9 @@ impl SegmentedStore {
         std::fs::create_dir_all(&branch_dir)?;
         let seg_path = branch_dir.join(format!("{}.sst", seg_id));
 
+        // Force prune_floor=0 for non-bottommost compactions to prevent zombie keys.
+        let effective_prune_floor = if is_bottommost { prune_floor } else { 0 };
+
         // Build streaming source iterators from each segment.
         let limiter = self.compaction_rate_limiter.load_full();
         let sources = streaming_sources(&old_segments, &limiter);
@@ -201,7 +206,7 @@ impl SegmentedStore {
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
         let compaction_iter =
-            CompactionIterator::new(merge, prune_floor).with_max_versions(max_versions);
+            CompactionIterator::new(merge, effective_prune_floor).with_max_versions(max_versions);
 
         let mut builder = SegmentBuilder::default()
             .with_compression(crate::segment_builder::CompressionCodec::None);
@@ -303,7 +308,7 @@ impl SegmentedStore {
         };
 
         // Snapshot selected segments under a read guard.
-        let (selected_segments, total_input_entries) = {
+        let (selected_segments, total_input_entries, is_bottommost) = {
             let branch = match self.branches.get(branch_id) {
                 Some(b) => b,
                 None => return Ok(None),
@@ -319,7 +324,9 @@ impl SegmentedStore {
                 return Ok(None);
             }
             let total: u64 = segs.iter().map(|s| s.entry_count()).sum();
-            (segs, total)
+            // L0→L0 tier compaction: bottommost only if L1+ are all empty
+            let bottommost = (1..ver.levels.len()).all(|l| ver.levels[l].is_empty());
+            (segs, total, bottommost)
             // DashMap guard drops here
         };
 
@@ -332,13 +339,16 @@ impl SegmentedStore {
         std::fs::create_dir_all(&branch_dir)?;
         let seg_path = branch_dir.join(format!("{}.sst", seg_id));
 
+        // Force prune_floor=0 for non-bottommost compactions to prevent zombie keys.
+        let effective_prune_floor = if is_bottommost { prune_floor } else { 0 };
+
         let limiter = self.compaction_rate_limiter.load_full();
         let sources = streaming_sources(&selected_segments, &limiter);
 
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
         let compaction_iter =
-            CompactionIterator::new(merge, prune_floor).with_max_versions(max_versions);
+            CompactionIterator::new(merge, effective_prune_floor).with_max_versions(max_versions);
 
         let mut builder = SegmentBuilder::default()
             .with_compression(crate::segment_builder::CompressionCodec::None);
@@ -413,7 +423,7 @@ impl SegmentedStore {
         };
 
         // Snapshot current version.
-        let (l0_segs, l1_segs) = {
+        let (l0_segs, l1_segs, is_bottommost) = {
             let branch = match self.branches.get(branch_id) {
                 Some(b) => b,
                 None => return Ok(None),
@@ -424,7 +434,9 @@ impl SegmentedStore {
             }
             let l0: Vec<Arc<KVSegment>> = ver.l0_segments().to_vec();
             let l1: Vec<Arc<KVSegment>> = ver.l1_segments().to_vec();
-            (l0, l1)
+            // Output goes to L1; bottommost if L2+ are all empty
+            let bottommost = (2..ver.levels.len()).all(|l| ver.levels[l].is_empty());
+            (l0, l1, bottommost)
         };
 
         // Compute overall L0 key range.
@@ -502,12 +514,15 @@ impl SegmentedStore {
         all_inputs.extend(l0_segs.iter().cloned());
         all_inputs.extend(overlapping_l1.iter().cloned());
 
+        // Force prune_floor=0 for non-bottommost compactions to prevent zombie keys.
+        let effective_prune_floor = if is_bottommost { prune_floor } else { 0 };
+
         let limiter = self.compaction_rate_limiter.load_full();
         let sources = streaming_sources(&all_inputs, &limiter);
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
         let compaction_iter =
-            CompactionIterator::new(merge, prune_floor).with_max_versions(max_versions);
+            CompactionIterator::new(merge, effective_prune_floor).with_max_versions(max_versions);
 
         // Build output segments, splitting at target file size
         let branch_hex = hex_encode_branch(branch_id);
@@ -620,7 +635,7 @@ impl SegmentedStore {
         };
 
         // ── 1. Snapshot current version and pick input file(s) ──────────
-        let (input_segs, overlap_segs, grandparent_segs, _non_overlap_next) = {
+        let (input_segs, overlap_segs, grandparent_segs, _non_overlap_next, is_bottommost) = {
             let branch = match self.branches.get(branch_id) {
                 Some(b) => b,
                 None => return Ok(None),
@@ -678,7 +693,13 @@ impl SegmentedStore {
                 Vec::new()
             };
 
-            (inputs, overlap, grandparents, non_overlap)
+            // A compaction is "bottommost" when no deeper level holds data.
+            // Only bottommost compactions may safely drop tombstones, since
+            // non-bottommost drops could resurrect values in deeper levels.
+            let output_level = level + 1;
+            let bottommost = (output_level + 1..ver.levels.len()).all(|l| ver.levels[l].is_empty());
+
+            (inputs, overlap, grandparents, non_overlap, bottommost)
         };
 
         // ── 2. Check for trivial move ───────────────────────────────────
@@ -734,12 +755,17 @@ impl SegmentedStore {
         all_inputs.extend(input_segs.iter().cloned());
         all_inputs.extend(overlap_segs.iter().cloned());
 
+        // Force prune_floor=0 for non-bottommost compactions to prevent zombie
+        // keys: dropping a tombstone when deeper levels hold an older value would
+        // resurrect the deleted key.
+        let effective_prune_floor = if is_bottommost { prune_floor } else { 0 };
+
         let limiter = self.compaction_rate_limiter.load_full();
         let sources = streaming_sources(&all_inputs, &limiter);
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
         let compaction_iter =
-            CompactionIterator::new(merge, prune_floor).with_max_versions(max_versions);
+            CompactionIterator::new(merge, effective_prune_floor).with_max_versions(max_versions);
 
         let branch_hex = hex_encode_branch(branch_id);
         let branch_dir = segments_dir.join(&branch_hex);

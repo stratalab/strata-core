@@ -21,7 +21,7 @@ use crate::block_cache::{self, Priority};
 use crate::bloom::BloomFilter;
 use crate::key_encoding::{encode_typed_key, encode_typed_key_prefix, InternalKey};
 use crate::segment_builder::{
-    decode_entry_header_ref, decode_scan_entry_header, decode_entry, decode_entry_value,
+    decode_entry, decode_entry_header_ref, decode_entry_value, decode_scan_entry_header,
     parse_filter_index, parse_footer, parse_framed_block, parse_header, parse_index_block,
     parse_properties_block, EntryHeader, FilterIndexEntry, Footer, IndexEntry, KVHeader,
     PropertiesBlock, FOOTER_SZ, FRAME_OVERHEAD, HEADER_SIZE, IDX_TYPE_PARTITIONED,

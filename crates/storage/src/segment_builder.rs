@@ -796,7 +796,10 @@ pub(crate) struct ScanEntryHeader {
 }
 
 /// Decode entry header, reconstructing the full key into `prev_key` (in/out).
-pub(crate) fn decode_scan_entry_header(data: &[u8], prev_key: &mut Vec<u8>) -> Option<ScanEntryHeader> {
+pub(crate) fn decode_scan_entry_header(
+    data: &[u8],
+    prev_key: &mut Vec<u8>,
+) -> Option<ScanEntryHeader> {
     let (shared, n1) = decode_varint32(data)?;
     let (non_shared, n2) = decode_varint32(&data[n1..])?;
     let shared = shared as usize;
@@ -1336,7 +1339,10 @@ mod tests {
         // Version 8 (future) must also be rejected
         let mut patched = header;
         patched[8..10].copy_from_slice(&8u16.to_le_bytes());
-        assert!(parse_header(&patched).is_none(), "format version 8 should be rejected");
+        assert!(
+            parse_header(&patched).is_none(),
+            "format version 8 should be rejected"
+        );
     }
 
     #[test]
