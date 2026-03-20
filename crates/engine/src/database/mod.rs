@@ -209,7 +209,10 @@ pub struct Database {
     flush_handle: ParkingMutex<Option<std::thread::JoinHandle<()>>>,
 
     /// Background task scheduler for deferred work (embedding, GC, etc.)
-    scheduler: BackgroundScheduler,
+    scheduler: Arc<BackgroundScheduler>,
+
+    /// Per-branch flag preventing duplicate compaction task submissions.
+    compaction_pending: DashMap<BranchId, Arc<AtomicBool>>,
 
     /// Exclusive lock file preventing concurrent process access to the same database.
     ///
@@ -492,7 +495,8 @@ impl Database {
             config: parking_lot::RwLock::new(cfg),
             flush_shutdown: Arc::new(AtomicBool::new(false)),
             flush_handle: ParkingMutex::new(None), // No flush thread
-            scheduler: BackgroundScheduler::new(2, 4096),
+            scheduler: Arc::new(BackgroundScheduler::new(4, 4096)),
+            compaction_pending: DashMap::new(),
             _lock_file: None, // No lock acquired
             wal_dir,
             wal_watermark,
@@ -665,7 +669,8 @@ impl Database {
             config: parking_lot::RwLock::new(cfg),
             flush_shutdown,
             flush_handle: ParkingMutex::new(flush_handle),
-            scheduler: BackgroundScheduler::new(2, 4096),
+            scheduler: Arc::new(BackgroundScheduler::new(4, 4096)),
+            compaction_pending: DashMap::new(),
             _lock_file: lock_file,
             wal_dir,
             wal_watermark,
@@ -742,7 +747,8 @@ impl Database {
             config: parking_lot::RwLock::new(StrataConfig::default()),
             flush_shutdown: Arc::new(AtomicBool::new(false)),
             flush_handle: ParkingMutex::new(None),
-            scheduler: BackgroundScheduler::new(2, 4096),
+            scheduler: Arc::new(BackgroundScheduler::new(4, 4096)),
+            compaction_pending: DashMap::new(),
             _lock_file: None, // No lock for ephemeral databases
             wal_dir: PathBuf::new(),
             wal_watermark: AtomicU64::new(0),
@@ -1724,6 +1730,10 @@ impl Database {
 
     /// Schedule background flush tasks for branches with frozen memtables.
     /// Best-effort: errors are logged, never propagated to the commit caller.
+    ///
+    /// Flush and compaction are separate tasks so that compaction never blocks
+    /// flush from running.  A per-branch `compaction_pending` flag prevents
+    /// duplicate compaction submissions.
     fn schedule_flush_if_needed(&self) {
         // Fast path: ephemeral databases never flush (no segments_dir)
         if self.storage.segments_dir().is_none() {
@@ -1739,61 +1749,89 @@ impl Database {
             let storage = Arc::clone(&self.storage);
             let data_dir = self.data_dir.clone();
             let wal_dir = self.wal_dir.clone();
+            let compaction_flag = self
+                .compaction_pending
+                .entry(branch_id)
+                .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+                .clone();
+            let scheduler_ref = Arc::clone(&self.scheduler);
+
+            // Flush task (High priority): drain ALL frozen memtables for this
+            // branch, then submit a separate compaction task at Normal priority.
             let submit_result =
                 self.scheduler
                     .submit(crate::background::TaskPriority::High, move || {
-                        match storage.flush_oldest_frozen(&branch_id) {
-                            Ok(true) => {
-                                tracing::debug!(
-                                    target: "strata::flush",
-                                    ?branch_id,
-                                    "Flushed frozen memtable to segment"
-                                );
+                        let mut flushed_any = false;
+                        loop {
+                            match storage.flush_oldest_frozen(&branch_id) {
+                                Ok(true) => {
+                                    tracing::debug!(
+                                        target: "strata::flush",
+                                        ?branch_id,
+                                        "Flushed frozen memtable to segment"
+                                    );
+                                    Self::update_flush_watermark(&storage, &data_dir, &wal_dir);
+                                    flushed_any = true;
+                                }
+                                Ok(false) => break,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "strata::flush",
+                                        ?branch_id,
+                                        error = %e,
+                                        "Background flush failed"
+                                    );
+                                    break;
+                                }
+                            }
+                        }
 
-                                // Update flush watermark and truncate WAL
-                                Self::update_flush_watermark(&storage, &data_dir, &wal_dir);
-
-                                // Post-flush: run adaptive compaction until no level
-                                // is over target (dynamic level sizing).
-                                let mut compactions = 0;
-                                loop {
-                                    match storage.pick_and_compact(&branch_id, 0) {
-                                        Ok(Some(result)) => {
-                                            tracing::debug!(
-                                                target: "strata::compact",
-                                                ?branch_id,
-                                                level = result.level,
-                                                segments_merged = result.compaction.segments_merged,
-                                                entries_pruned = result.compaction.entries_pruned,
-                                                "compaction complete"
-                                            );
-                                            compactions += 1;
-                                            if compactions >= 16 {
+                        // Submit a compaction task if we flushed anything and
+                        // no compaction is already pending for this branch.
+                        if flushed_any
+                            && !compaction_flag.swap(true, Ordering::AcqRel)
+                        {
+                            let compact_storage = Arc::clone(&storage);
+                            let compact_flag = Arc::clone(&compaction_flag);
+                            let _ = scheduler_ref.submit(
+                                crate::background::TaskPriority::Normal,
+                                move || {
+                                    let mut compactions = 0;
+                                    loop {
+                                        match compact_storage
+                                            .pick_and_compact(&branch_id, 0)
+                                        {
+                                            Ok(Some(result)) => {
+                                                tracing::debug!(
+                                                    target: "strata::compact",
+                                                    ?branch_id,
+                                                    level = result.level,
+                                                    segments_merged =
+                                                        result.compaction.segments_merged,
+                                                    entries_pruned =
+                                                        result.compaction.entries_pruned,
+                                                    "compaction complete"
+                                                );
+                                                compactions += 1;
+                                                if compactions >= 16 {
+                                                    break;
+                                                }
+                                            }
+                                            Ok(None) => break,
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    target: "strata::compact",
+                                                    ?branch_id,
+                                                    error = %e,
+                                                    "compaction failed"
+                                                );
                                                 break;
                                             }
                                         }
-                                        Ok(None) => break,
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                target: "strata::compact",
-                                                ?branch_id,
-                                                error = %e,
-                                                "compaction failed"
-                                            );
-                                            break;
-                                        }
                                     }
-                                }
-                            }
-                            Ok(false) => {}
-                            Err(e) => {
-                                tracing::warn!(
-                                    target: "strata::flush",
-                                    ?branch_id,
-                                    error = %e,
-                                    "Background flush failed"
-                                );
-                            }
+                                    compact_flag.store(false, Ordering::Release);
+                                },
+                            );
                         }
                     });
             if let Err(e) = submit_result {
@@ -1804,6 +1842,33 @@ impl Database {
                 );
                 break;
             }
+        }
+    }
+
+    /// Apply write backpressure when memtable memory exceeds safe limits.
+    ///
+    /// Called after every write commit, outside any storage guards.  If the
+    /// total memtable footprint exceeds `write_buffer_size * (max_frozen + 2)`
+    /// we yield briefly (1 ms) to let background flushes drain.  This caps
+    /// the active memtable growth that would otherwise cause OOM.
+    #[inline]
+    fn maybe_apply_write_backpressure(&self) {
+        let cfg = self.config.read();
+        let wbs = cfg.storage.write_buffer_size as u64;
+        let max_frozen = cfg.storage.max_immutable_memtables as u64;
+        if wbs == 0 {
+            return;
+        }
+        let threshold = wbs * (max_frozen + 2);
+        let current = self.storage.total_memtable_bytes();
+        if current > threshold {
+            tracing::debug!(
+                target: "strata::backpressure",
+                current_mb = current / (1024 * 1024),
+                threshold_mb = threshold / (1024 * 1024),
+                "write backpressure: memtable exceeds threshold, yielding"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
 
@@ -1909,6 +1974,7 @@ impl Database {
                 // Schedule flush only for write transactions (reads skip entirely)
                 if had_writes {
                     self.schedule_flush_if_needed();
+                    self.maybe_apply_write_backpressure();
                 }
                 Ok((value, commit_version))
             }
@@ -2081,6 +2147,7 @@ impl Database {
         let version = self.commit_internal(txn, self.durability_mode)?;
         if had_writes {
             self.schedule_flush_if_needed();
+            self.maybe_apply_write_backpressure();
         }
         Ok(version)
     }
