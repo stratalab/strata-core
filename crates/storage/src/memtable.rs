@@ -182,10 +182,21 @@ impl Memtable {
     ) -> Option<(u64, MemtableEntry)> {
         let seek_key = InternalKey::encode(key, u64::MAX);
         let typed_prefix = encode_typed_key(key);
+        self.get_versioned_preencoded(&typed_prefix, seek_key.as_bytes(), snapshot_commit)
+    }
 
+    /// Point lookup using pre-encoded key bytes. Avoids redundant encoding
+    /// when the caller already has the typed key and seek bytes.
+    pub fn get_versioned_preencoded(
+        &self,
+        typed_key: &[u8],
+        seek_bytes: &[u8],
+        snapshot_commit: u64,
+    ) -> Option<(u64, MemtableEntry)> {
+        let seek_key = InternalKey::from_bytes(seek_bytes.to_vec());
         for entry in self.map.range(seek_key..) {
             let ik = entry.key();
-            if ik.typed_key_prefix() != typed_prefix.as_slice() {
+            if ik.typed_key_prefix() != typed_key {
                 break;
             }
             if ik.commit_id() <= snapshot_commit {

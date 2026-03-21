@@ -117,6 +117,43 @@ impl BloomFilter {
     ///
     /// Only accepts the `0xFB` cache-local blocked format.
     /// Returns `None` if the data is malformed.
+    /// Check if a key might be present, operating directly on serialized bytes.
+    ///
+    /// Zero-copy: borrows the byte slice without allocating. Use this on the
+    /// read hot path instead of `from_bytes` + `maybe_contains`.
+    pub fn maybe_contains_raw(data: &[u8], key: &[u8]) -> Option<bool> {
+        if data.len() < 5 || data[0] != MAGIC {
+            return None;
+        }
+        let num_probes = u32::from_le_bytes(data[1..5].try_into().ok()?);
+        if num_probes == 0 || num_probes > 30 {
+            return None;
+        }
+        let bits = &data[5..];
+        if bits.is_empty() {
+            return Some(false);
+        }
+        if bits.len() % BLOCK_BYTES != 0 {
+            return None;
+        }
+
+        let num_blocks = bits.len() / BLOCK_BYTES;
+        let h = xxhash_rust::xxh3::xxh3_64(key);
+        let block_idx = ((h >> 32) as usize) % num_blocks;
+        let block_start = block_idx * BLOCK_BYTES;
+
+        let mut h2 = h as u32;
+        for _ in 0..num_probes {
+            h2 = h2.wrapping_mul(0x9e3779b9).wrapping_add(1);
+            let bit = (h2 >> PROBE_SHIFT) as usize;
+            if bits[block_start + bit / 8] & (1 << (bit % 8)) == 0 {
+                return Some(false);
+            }
+        }
+        Some(true)
+    }
+
+    /// Deserialize a bloom filter from raw bytes (allocating copy).
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < 5 {
             return None;

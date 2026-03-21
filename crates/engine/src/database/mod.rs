@@ -211,9 +211,6 @@ pub struct Database {
     /// Background task scheduler for deferred work (embedding, GC, etc.)
     scheduler: Arc<BackgroundScheduler>,
 
-    /// Per-branch flag preventing duplicate compaction task submissions.
-    compaction_pending: DashMap<BranchId, Arc<AtomicBool>>,
-
     /// Condition variable signalled by compaction when L0 count drops.
     /// Writers wait on this when L0 exceeds `l0_stop_writes_trigger`.
     write_stall_cv: Arc<parking_lot::Condvar>,
@@ -502,7 +499,6 @@ impl Database {
             flush_shutdown: Arc::new(AtomicBool::new(false)),
             flush_handle: ParkingMutex::new(None), // No flush thread
             scheduler: Arc::new(BackgroundScheduler::new(4, 4096)),
-            compaction_pending: DashMap::new(),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
             _lock_file: None, // No lock acquired
@@ -678,7 +674,6 @@ impl Database {
             flush_shutdown,
             flush_handle: ParkingMutex::new(flush_handle),
             scheduler: Arc::new(BackgroundScheduler::new(4, 4096)),
-            compaction_pending: DashMap::new(),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
             _lock_file: lock_file,
@@ -758,7 +753,6 @@ impl Database {
             flush_shutdown: Arc::new(AtomicBool::new(false)),
             flush_handle: ParkingMutex::new(None),
             scheduler: Arc::new(BackgroundScheduler::new(4, 4096)),
-            compaction_pending: DashMap::new(),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
             _lock_file: None, // No lock for ephemeral databases
@@ -1740,14 +1734,11 @@ impl Database {
         Ok(())
     }
 
-    /// Schedule background flush tasks for branches with frozen memtables.
-    /// Best-effort: errors are logged, never propagated to the commit caller.
+    /// Flush frozen memtables and compact synchronously on the writer's thread.
     ///
-    /// Flush and compaction are separate tasks so that compaction never blocks
-    /// flush from running.  A per-branch `compaction_pending` flag prevents
-    /// duplicate compaction submissions.
+    /// Writes pay the cost so reads never hit a deep L0. This keeps L0 at ≤4
+    /// segments at all times.
     fn schedule_flush_if_needed(&self) {
-        // Fast path: ephemeral databases never flush (no segments_dir)
         if self.storage.segments_dir().is_none() {
             return;
         }
@@ -1758,68 +1749,42 @@ impl Database {
         }
 
         for branch_id in branches {
-            let storage = Arc::clone(&self.storage);
-            let data_dir = self.data_dir.clone();
-            let wal_dir = self.wal_dir.clone();
-            let compaction_flag = self
-                .compaction_pending
-                .entry(branch_id)
-                .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-                .clone();
-            let stall_cv = Arc::clone(&self.write_stall_cv);
-            let scheduler_ref = Arc::clone(&self.scheduler);
+            // Flush all frozen memtables
+            loop {
+                match self.storage.flush_oldest_frozen(&branch_id) {
+                    Ok(true) => {
+                        Self::update_flush_watermark(&self.storage, &self.data_dir, &self.wal_dir);
+                    }
+                    Ok(false) => break,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "strata::flush",
+                            ?branch_id,
+                            error = %e,
+                            "flush failed"
+                        );
+                        break;
+                    }
+                }
+            }
 
-            // Flush task (High priority): drain ALL frozen memtables for this
-            // branch, then submit a separate compaction task at Normal priority.
-            let submit_result =
-                self.scheduler
-                    .submit(crate::background::TaskPriority::High, move || {
-                        let mut flushed_any = false;
-                        loop {
-                            match storage.flush_oldest_frozen(&branch_id) {
-                                Ok(true) => {
-                                    tracing::debug!(
-                                        target: "strata::flush",
-                                        ?branch_id,
-                                        "Flushed frozen memtable to segment"
-                                    );
-                                    Self::update_flush_watermark(&storage, &data_dir, &wal_dir);
-                                    flushed_any = true;
-                                }
-                                Ok(false) => break,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        target: "strata::flush",
-                                        ?branch_id,
-                                        error = %e,
-                                        "Background flush failed"
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-
-                        // Submit a compaction task if we flushed anything and
-                        // no compaction is already pending for this branch.
-                        if flushed_any
-                            && !compaction_flag.swap(true, Ordering::AcqRel)
-                        {
-                            Self::submit_compaction_task(
-                                &scheduler_ref,
-                                Arc::clone(&storage),
-                                branch_id,
-                                Arc::clone(&compaction_flag),
-                                Arc::clone(&stall_cv),
-                            );
-                        }
-                    });
-            if let Err(e) = submit_result {
-                tracing::debug!(
-                    target: "strata::flush",
-                    error = %e,
-                    "Flush task rejected (queue full)"
-                );
-                break;
+            // Compact until all levels are below target
+            loop {
+                match self.storage.pick_and_compact(&branch_id, 0) {
+                    Ok(Some(_)) => {
+                        self.write_stall_cv.notify_all();
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "strata::compact",
+                            ?branch_id,
+                            error = %e,
+                            "compaction failed"
+                        );
+                        break;
+                    }
+                }
             }
         }
     }
@@ -1852,7 +1817,8 @@ impl Database {
             let mut guard = self.write_stall_mu.lock();
             // Re-check after acquiring lock (compaction may have finished)
             while self.storage.max_l0_segment_count() >= l0_stop {
-                self.write_stall_cv.wait_for(&mut guard, std::time::Duration::from_millis(10));
+                self.write_stall_cv
+                    .wait_for(&mut guard, std::time::Duration::from_millis(10));
             }
             return;
         }
@@ -1874,72 +1840,6 @@ impl Database {
         if current > threshold {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-    }
-
-    /// Submit a compaction task that runs until all levels are below target,
-    /// then re-schedules itself if compaction produced work (to handle L0
-    /// segments added by concurrent flushes during the compaction).
-    ///
-    /// Signals `stall_cv` after each compaction round so that stalled writers
-    /// can re-check the L0 count and resume.
-    fn submit_compaction_task(
-        scheduler: &Arc<BackgroundScheduler>,
-        storage: Arc<SegmentedStore>,
-        branch_id: BranchId,
-        flag: Arc<AtomicBool>,
-        stall_cv: Arc<parking_lot::Condvar>,
-    ) {
-        let sched = Arc::clone(scheduler);
-        let cv = Arc::clone(&stall_cv);
-        let _ = scheduler.submit(
-            crate::background::TaskPriority::Normal,
-            move || {
-                let mut total_compactions = 0;
-                loop {
-                    match storage.pick_and_compact(&branch_id, 0) {
-                        Ok(Some(result)) => {
-                            tracing::debug!(
-                                target: "strata::compact",
-                                ?branch_id,
-                                level = result.level,
-                                segments_merged = result.compaction.segments_merged,
-                                entries_pruned = result.compaction.entries_pruned,
-                                "compaction complete"
-                            );
-                            // Wake stalled writers after each compaction round.
-                            cv.notify_all();
-                            total_compactions += 1;
-                            if total_compactions >= 32 {
-                                break;
-                            }
-                        }
-                        Ok(None) => break,
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "strata::compact",
-                                ?branch_id,
-                                error = %e,
-                                "compaction failed"
-                            );
-                            break;
-                        }
-                    }
-                }
-
-                // If we hit the iteration cap, re-schedule to keep draining.
-                if total_compactions >= 32 {
-                    Self::submit_compaction_task(
-                        &sched,
-                        Arc::clone(&storage),
-                        branch_id,
-                        Arc::clone(&flag),
-                        cv,
-                    );
-                } else {
-                    flag.store(false, Ordering::Release);
-                }
-            },
-        );
     }
 
     /// Update the MANIFEST flush watermark and truncate WAL segments below it.

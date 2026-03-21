@@ -57,22 +57,30 @@ pub struct SegmentEntry {
 // KVSegment
 // ---------------------------------------------------------------------------
 
-/// Partitioned bloom filter — loaded on demand through the block cache.
+/// Partitioned bloom filter with partition data pinned in memory.
 ///
-/// Only the filter index (small) is kept in memory. Individual ~4KB bloom
-/// partitions are loaded from disk via pread + block cache on each lookup.
+/// The filter index maps key ranges to partitions. Each partition's raw
+/// bytes are loaded into memory at segment open time — no block cache
+/// lookup or pread on the read hot path.
 struct PartitionedBloom {
     /// Top-level index mapping key ranges → partition offsets.
     index: Vec<FilterIndexEntry>,
+    /// Raw bytes of each bloom partition, parallel to `index`.
+    /// Used directly by `maybe_contains_raw` (zero-copy).
+    partitions: Vec<Arc<Vec<u8>>>,
 }
 
 /// Two-level or monolithic index for a segment.
 enum SegmentIndex {
     /// All index entries loaded in memory (small segments or legacy format).
     Monolithic(Vec<IndexEntry>),
-    /// Two-level partitioned index: only the top-level is memory-resident.
-    /// Sub-index partitions are loaded on-demand through the block cache.
-    Partitioned { top_level: Vec<IndexEntry> },
+    /// Two-level partitioned index with all sub-indexes pinned in memory.
+    /// No block cache lookup or pread on the read hot path.
+    Partitioned {
+        top_level: Vec<IndexEntry>,
+        /// Pre-parsed sub-index entries, parallel to `top_level`.
+        sub_indexes: Vec<Vec<IndexEntry>>,
+    },
 }
 
 /// An immutable KV segment file backed by pread + block cache.
@@ -173,8 +181,24 @@ impl KVSegment {
         let index_entries = parse_index_block(idx_data)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed index block"))?;
         let index = if footer.index_type == IDX_TYPE_PARTITIONED {
+            // Eagerly load all sub-index partitions into memory.
+            let mut sub_indexes = Vec::with_capacity(index_entries.len());
+            for entry in &index_entries {
+                let raw = pread_exact(&file, entry.block_offset, entry.block_data_len as usize)?;
+                let (_, data) = parse_framed_block(&raw).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "sub-index partition CRC mismatch",
+                    )
+                })?;
+                let sub = parse_index_block(data).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "malformed sub-index partition")
+                })?;
+                sub_indexes.push(sub);
+            }
             SegmentIndex::Partitioned {
                 top_level: index_entries,
+                sub_indexes,
             }
         } else {
             SegmentIndex::Monolithic(index_entries)
@@ -195,8 +219,19 @@ impl KVSegment {
         })?;
         let filter_index = parse_filter_index(fi_data)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed filter index"))?;
+
+        // Eagerly load all bloom partition data into memory.
+        let mut bloom_partitions = Vec::with_capacity(filter_index.len());
+        for entry in &filter_index {
+            let raw = pread_exact(&file, entry.block_offset, entry.block_data_len as usize)?;
+            let (_, data) = parse_framed_block(&raw).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "bloom partition CRC mismatch")
+            })?;
+            bloom_partitions.push(Arc::new(data.to_vec()));
+        }
         let bloom = PartitionedBloom {
             index: filter_index,
+            partitions: bloom_partitions,
         };
 
         // Parse properties block via pread
@@ -242,21 +277,32 @@ impl KVSegment {
     /// - Bloom filter says key is absent
     /// - No matching entry exists at or below the snapshot
     pub fn point_lookup(&self, key: &Key, snapshot_commit: u64) -> Option<SegmentEntry> {
+        let typed_key = encode_typed_key(key);
+        let seek_ik = InternalKey::encode(key, u64::MAX);
+        self.point_lookup_preencoded(&typed_key, seek_ik.as_bytes(), snapshot_commit)
+    }
+
+    /// Point lookup using pre-encoded key bytes. Avoids redundant key encoding
+    /// when the caller already has the typed key and seek bytes.
+    pub fn point_lookup_preencoded(
+        &self,
+        typed_key: &[u8],
+        seek_bytes: &[u8],
+        snapshot_commit: u64,
+    ) -> Option<SegmentEntry> {
         // 1. Bloom check
-        if !self.bloom_maybe_contains(key) {
+        if !self.partitioned_bloom_check(typed_key) {
             return None;
         }
 
-        let typed_key = encode_typed_key(key);
-        let seek_ik = InternalKey::encode(key, u64::MAX);
-        let seek_bytes = seek_ik.as_bytes();
-
         match &self.index {
             SegmentIndex::Monolithic(entries) => {
-                self.point_lookup_with_index(entries, &typed_key, seek_bytes, snapshot_commit)
+                self.point_lookup_with_index(entries, typed_key, seek_bytes, snapshot_commit)
             }
-            SegmentIndex::Partitioned { top_level } => {
-                // Binary search top-level to find which sub-index partition
+            SegmentIndex::Partitioned {
+                top_level,
+                sub_indexes,
+            } => {
                 let part_idx =
                     match top_level.binary_search_by(|e| e.key.as_slice().cmp(seek_bytes)) {
                         Ok(i) => i,
@@ -264,28 +310,26 @@ impl KVSegment {
                         Err(i) => i - 1,
                     };
 
-                // Check this partition and possibly the next (boundary spanning)
                 for pi in part_idx..top_level.len() {
                     if pi > part_idx {
                         let prev_key = &top_level[pi - 1].key;
                         if prev_key.len() >= 8 {
                             let prefix = &prev_key[..prev_key.len() - 8];
-                            if prefix > typed_key.as_slice() {
+                            if prefix > typed_key {
                                 break;
                             }
                         } else {
                             break;
                         }
                     }
-                    if let Some(sub_entries) = self.load_sub_index(&top_level[pi]) {
-                        if let Some(entry) = self.point_lookup_with_index(
-                            &sub_entries,
-                            &typed_key,
-                            seek_bytes,
-                            snapshot_commit,
-                        ) {
-                            return Some(entry);
-                        }
+                    // Sub-index is pinned in memory — no cache lookup, no pread.
+                    if let Some(entry) = self.point_lookup_with_index(
+                        &sub_indexes[pi],
+                        typed_key,
+                        seek_bytes,
+                        snapshot_commit,
+                    ) {
+                        return Some(entry);
                     }
                 }
                 None
@@ -353,7 +397,10 @@ impl KVSegment {
                     (0, start, entries.clone(), false)
                 }
             }
-            SegmentIndex::Partitioned { top_level } => {
+            SegmentIndex::Partitioned {
+                top_level,
+                sub_indexes,
+            } => {
                 if top_level.is_empty() {
                     (0, 0, Vec::new(), true)
                 } else {
@@ -364,18 +411,15 @@ impl KVSegment {
                         Err(0) => 0,
                         Err(i) => i - 1,
                     };
-                    if let Some(sub) = self.load_sub_index(&top_level[part]) {
-                        let block_in = match sub
-                            .binary_search_by(|e| e.key.as_slice().cmp(seek_bytes.as_slice()))
-                        {
-                            Ok(i) => i,
-                            Err(0) => 0,
-                            Err(i) => i - 1,
-                        };
-                        (part, block_in, sub, false)
-                    } else {
-                        (0, 0, Vec::new(), true)
-                    }
+                    let sub = &sub_indexes[part];
+                    let block_in = match sub
+                        .binary_search_by(|e| e.key.as_slice().cmp(seek_bytes.as_slice()))
+                    {
+                        Ok(i) => i,
+                        Err(0) => 0,
+                        Err(i) => i - 1,
+                    };
+                    (part, block_in, sub.clone(), false)
                 }
             }
         };
@@ -438,40 +482,14 @@ impl KVSegment {
     fn index_entry_count(&self) -> usize {
         match &self.index {
             SegmentIndex::Monolithic(entries) => entries.len(),
-            SegmentIndex::Partitioned { top_level } => top_level.len(),
+            SegmentIndex::Partitioned { top_level, .. } => top_level.len(),
         }
     }
 
-    /// Pin all bloom partitions in the block cache with Pinned priority.
+    /// No-op: bloom partitions are now loaded into memory at open time.
     ///
-    /// Called for L0 segments so their bloom partitions are never evicted.
-    pub fn pin_bloom_partitions(&self) {
-        let cache = block_cache::global_cache();
-        for entry in &self.bloom.index {
-            if cache.get(self.file_id, entry.block_offset).is_none() {
-                // Load partition from disk and insert as Pinned
-                if let Ok(raw) = pread_exact(
-                    &self.file,
-                    entry.block_offset,
-                    entry.block_data_len as usize,
-                ) {
-                    if let Some((_, data)) = parse_framed_block(&raw) {
-                        cache.insert_with_priority(
-                            self.file_id,
-                            entry.block_offset,
-                            data.to_vec(),
-                            Priority::Pinned,
-                        );
-                    }
-                }
-            }
-            // Unconditionally promote: handles both the case where the entry
-            // was already cached (at High from a prior lookup) and the TOCTOU
-            // race where a concurrent bloom check inserted at High between
-            // our get() and insert_with_priority() above.
-            cache.promote_to_pinned(self.file_id, entry.block_offset);
-        }
-    }
+    /// Retained for API compatibility with callers that pin L0 blooms.
+    pub fn pin_bloom_partitions(&self) {}
 
     // -----------------------------------------------------------------------
     // Internal helpers
@@ -481,6 +499,7 @@ impl KVSegment {
     ///
     /// Follows the same pattern as `partitioned_bloom_check`: check cache
     /// first, pread on miss, insert at High priority.
+    #[allow(dead_code)]
     fn load_sub_index(&self, entry: &IndexEntry) -> Option<Vec<IndexEntry>> {
         let cache = block_cache::global_cache();
         let data = if let Some(cached) = cache.get(self.file_id, entry.block_offset) {
@@ -523,38 +542,10 @@ impl KVSegment {
         if idx >= self.bloom.index.len() {
             return false; // key is beyond all partitions
         }
-        let entry = &self.bloom.index[idx];
 
-        // Load partition from block cache (cache miss → pread)
-        let cache = block_cache::global_cache();
-        let data = if let Some(cached) = cache.get(self.file_id, entry.block_offset) {
-            cached
-        } else {
-            // Cache miss: pread from file
-            let raw = match pread_exact(
-                &self.file,
-                entry.block_offset,
-                entry.block_data_len as usize,
-            ) {
-                Ok(buf) => buf,
-                Err(_) => return true, // I/O error → assume might exist
-            };
-            let (_, data) = match parse_framed_block(&raw) {
-                Some(parsed) => parsed,
-                None => return true, // corrupt → assume might exist
-            };
-            cache.insert_with_priority(
-                self.file_id,
-                entry.block_offset,
-                data.to_vec(),
-                Priority::High,
-            )
-        };
-
-        match BloomFilter::from_bytes(&data) {
-            Some(bloom) => bloom.maybe_contains(typed_key),
-            None => true, // malformed bloom → assume might exist
-        }
+        // Bloom data is pinned in memory — no cache lookup, no pread.
+        let data = &self.bloom.partitions[idx];
+        BloomFilter::maybe_contains_raw(data, typed_key).unwrap_or(true)
     }
 
     /// Read and verify a data block, checking the global block cache first.
@@ -706,13 +697,11 @@ impl KVSegment {
     pub fn iter_seek_all(&self) -> SegmentIter<'_> {
         let (current_sub_index, done) = match &self.index {
             SegmentIndex::Monolithic(entries) => (entries.clone(), entries.is_empty()),
-            SegmentIndex::Partitioned { top_level } => {
-                if top_level.is_empty() {
+            SegmentIndex::Partitioned { sub_indexes, .. } => {
+                if sub_indexes.is_empty() {
                     (Vec::new(), true)
-                } else if let Some(sub) = self.load_sub_index(&top_level[0]) {
-                    (sub, false)
                 } else {
-                    (Vec::new(), true)
+                    (sub_indexes[0].clone(), false)
                 }
             }
         };
@@ -870,18 +859,14 @@ impl<'a> SegmentIter<'a> {
     fn advance_partition(&mut self) -> bool {
         match &self.segment.index {
             SegmentIndex::Monolithic(_) => false, // single partition, already exhausted
-            SegmentIndex::Partitioned { top_level } => {
+            SegmentIndex::Partitioned { sub_indexes, .. } => {
                 self.partition_idx += 1;
-                if self.partition_idx >= top_level.len() {
+                if self.partition_idx >= sub_indexes.len() {
                     return false;
                 }
-                if let Some(sub) = self.segment.load_sub_index(&top_level[self.partition_idx]) {
-                    self.current_sub_index = sub;
-                    self.block_within_partition = 0;
-                    true
-                } else {
-                    false
-                }
+                self.current_sub_index = sub_indexes[self.partition_idx].clone();
+                self.block_within_partition = 0;
+                true
             }
         }
     }
@@ -1002,13 +987,11 @@ impl OwnedSegmentIter {
     pub fn new(segment: Arc<KVSegment>) -> Self {
         let (current_sub_index, done) = match &segment.index {
             SegmentIndex::Monolithic(entries) => (entries.clone(), entries.is_empty()),
-            SegmentIndex::Partitioned { top_level } => {
-                if top_level.is_empty() {
+            SegmentIndex::Partitioned { sub_indexes, .. } => {
+                if sub_indexes.is_empty() {
                     (Vec::new(), true)
-                } else if let Some(sub) = segment.load_sub_index(&top_level[0]) {
-                    (sub, false)
                 } else {
-                    (Vec::new(), true)
+                    (sub_indexes[0].clone(), false)
                 }
             }
         };
@@ -1030,18 +1013,14 @@ impl OwnedSegmentIter {
     fn advance_partition(&mut self) -> bool {
         match &self.segment.index {
             SegmentIndex::Monolithic(_) => false,
-            SegmentIndex::Partitioned { top_level } => {
+            SegmentIndex::Partitioned { sub_indexes, .. } => {
                 self.partition_idx += 1;
-                if self.partition_idx >= top_level.len() {
+                if self.partition_idx >= sub_indexes.len() {
                     return false;
                 }
-                if let Some(sub) = self.segment.load_sub_index(&top_level[self.partition_idx]) {
-                    self.current_sub_index = sub;
-                    self.block_within_partition = 0;
-                    true
-                } else {
-                    false
-                }
+                self.current_sub_index = sub_indexes[self.partition_idx].clone();
+                self.block_within_partition = 0;
+                true
             }
         }
     }
@@ -3040,7 +3019,7 @@ mod tests {
 
         // Verify the top-level has multiple partitions
         let num_partitions = match &seg.index {
-            SegmentIndex::Partitioned { top_level } => top_level.len(),
+            SegmentIndex::Partitioned { top_level, .. } => top_level.len(),
             _ => panic!("expected partitioned"),
         };
         assert!(
@@ -3128,7 +3107,7 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
         // With 200 entries at 64B block size, we should definitely exceed 128 blocks
         assert!(
-            matches!(&seg.index, SegmentIndex::Partitioned { top_level } if top_level.len() >= 2),
+            matches!(&seg.index, SegmentIndex::Partitioned { top_level, .. } if top_level.len() >= 2),
             "expected partitioned index with >=2 partitions"
         );
 
