@@ -25,7 +25,7 @@
 //! break lexicographic byte ordering.
 
 use std::sync::Arc;
-use strata_core::types::{Key, Namespace, TypeTag};
+use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 
 // ---------------------------------------------------------------------------
 // Byte-stuffed encoding (order-preserving for arbitrary binary data)
@@ -231,6 +231,35 @@ impl InternalKey {
         let key = Key::new(namespace, type_tag, user_key);
         Some((key, commit_id))
     }
+
+    /// Create a new InternalKey with the branch_id (first 16 bytes) replaced.
+    ///
+    /// Used by COW branching to rewrite keys from a source branch's namespace
+    /// into the child branch's namespace, so that `MvccIterator` can group
+    /// own + inherited entries by the same `typed_key_prefix`.
+    pub fn with_rewritten_branch_id(&self, new_branch_id: &BranchId) -> Self {
+        let mut bytes = self.0.clone();
+        bytes[..16].copy_from_slice(new_branch_id.as_bytes());
+        InternalKey(bytes)
+    }
+}
+
+/// Rewrite the branch_id (first 16 bytes) of an encoded typed key.
+///
+/// Used by COW branching point lookups to rewrite a child's `typed_key`
+/// into the source branch's namespace for bloom probes and index searches.
+///
+/// # Panics
+/// Panics if `encoded` is shorter than 16 bytes.
+pub fn rewrite_branch_id_bytes(encoded: &[u8], new_branch_id: &BranchId) -> Vec<u8> {
+    debug_assert!(
+        encoded.len() >= 16,
+        "rewrite_branch_id_bytes: encoded key too short ({} bytes, need ≥16)",
+        encoded.len()
+    );
+    let mut rewritten = encoded.to_vec();
+    rewritten[..16].copy_from_slice(new_branch_id.as_bytes());
+    rewritten
 }
 
 impl Ord for InternalKey {

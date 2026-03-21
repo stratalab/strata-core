@@ -4210,3 +4210,629 @@ fn compaction_preserves_when_referenced() {
         "expected 1 compacted output + 1 preserved referenced segment"
     );
 }
+
+// =========================================================================
+// COW Branching — inherited layer read-path tests
+// =========================================================================
+
+/// Helper: snapshot the parent's segments and attach as an inherited layer
+/// on the child branch. Creates the child branch if needed.
+fn attach_inherited_layer(
+    store: &SegmentedStore,
+    source_branch_id: BranchId,
+    child_branch_id: BranchId,
+    fork_version: u64,
+) {
+    let source = store.branches.get(&source_branch_id).unwrap();
+    let snapshot = source.version.load_full();
+    drop(source);
+    store
+        .branches
+        .entry(child_branch_id)
+        .or_insert_with(BranchState::new);
+    let mut child = store.branches.get_mut(&child_branch_id).unwrap();
+    child.inherited_layers.push(InheritedLayer {
+        source_branch_id,
+        fork_version,
+        segments: snapshot,
+        status: LayerStatus::Active,
+    });
+}
+
+fn parent_branch() -> BranchId {
+    BranchId::from_bytes([10; 16])
+}
+
+fn child_branch() -> BranchId {
+    BranchId::from_bytes([20; 16])
+}
+
+fn parent_ns() -> Arc<Namespace> {
+    Arc::new(Namespace::new(parent_branch(), "default".to_string()))
+}
+
+fn child_ns() -> Arc<Namespace> {
+    Arc::new(Namespace::new(child_branch(), "default".to_string()))
+}
+
+fn parent_kv(name: &str) -> Key {
+    Key::new(parent_ns(), TypeTag::KV, name.as_bytes().to_vec())
+}
+
+fn child_kv(name: &str) -> Key {
+    Key::new(child_ns(), TypeTag::KV, name.as_bytes().to_vec())
+}
+
+/// Set up a store where parent has flushed segments with given key-value pairs.
+fn setup_parent_with_segments(entries: &[(&str, i64, u64)]) -> (tempfile::TempDir, SegmentedStore) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    for &(key, val, ver) in entries {
+        store
+            .put_with_version_mode(
+                parent_kv(key),
+                Value::Int(val),
+                ver,
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
+    }
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+    (dir, store)
+}
+
+#[test]
+fn inherited_layer_point_lookup() {
+    let (_dir, store) = setup_parent_with_segments(&[("a", 1, 1), ("b", 2, 2), ("c", 3, 3)]);
+    attach_inherited_layer(&store, parent_branch(), child_branch(), 10);
+
+    // Child should see parent's data
+    let result = store
+        .get_versioned(&child_kv("a"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.value, Value::Int(1));
+
+    let result = store
+        .get_versioned(&child_kv("c"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.value, Value::Int(3));
+
+    // Non-existent key still returns None
+    assert!(store
+        .get_versioned(&child_kv("z"), u64::MAX)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn inherited_layer_version_filter() {
+    // Parent has entries at versions 1, 5, 10.
+    // Fork at version 5 → child should only see versions 1 and 5.
+    let (_dir, store) = setup_parent_with_segments(&[("k", 10, 1), ("k", 50, 5), ("k", 100, 10)]);
+    attach_inherited_layer(&store, parent_branch(), child_branch(), 5);
+
+    let result = store
+        .get_versioned(&child_kv("k"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.value,
+        Value::Int(50),
+        "should see version 5, not version 10"
+    );
+}
+
+#[test]
+fn inherited_layer_write_shadows() {
+    let (_dir, store) = setup_parent_with_segments(&[("k", 100, 1)]);
+    attach_inherited_layer(&store, parent_branch(), child_branch(), 10);
+
+    // Write to child — this should shadow the inherited value
+    store
+        .put_with_version_mode(child_kv("k"), Value::Int(999), 11, None, WriteMode::Append)
+        .unwrap();
+
+    let result = store
+        .get_versioned(&child_kv("k"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.value, Value::Int(999));
+
+    // But at snapshot before the child write, we see the inherited value
+    let result = store.get_versioned(&child_kv("k"), 10).unwrap().unwrap();
+    assert_eq!(result.value, Value::Int(100));
+}
+
+#[test]
+fn inherited_layer_delete_shadows() {
+    let (_dir, store) = setup_parent_with_segments(&[("k", 42, 1)]);
+    attach_inherited_layer(&store, parent_branch(), child_branch(), 10);
+
+    // Delete on child hides inherited entry
+    store.delete_with_version(&child_kv("k"), 11).unwrap();
+
+    assert!(store
+        .get_versioned(&child_kv("k"), u64::MAX)
+        .unwrap()
+        .is_none());
+
+    // Snapshot before the delete still sees inherited data
+    let result = store.get_versioned(&child_kv("k"), 10).unwrap().unwrap();
+    assert_eq!(result.value, Value::Int(42));
+}
+
+#[test]
+fn inherited_layer_range_scan() {
+    let (_dir, store) = setup_parent_with_segments(&[
+        ("user:alice", 1, 1),
+        ("user:bob", 2, 2),
+        ("user:carol", 3, 3),
+        ("order:1", 10, 4),
+    ]);
+    attach_inherited_layer(&store, parent_branch(), child_branch(), 10);
+
+    // Child writes a new user and overwrites bob
+    store
+        .put_with_version_mode(
+            child_kv("user:bob"),
+            Value::Int(200),
+            11,
+            None,
+            WriteMode::Append,
+        )
+        .unwrap();
+    store
+        .put_with_version_mode(
+            child_kv("user:dave"),
+            Value::Int(4),
+            12,
+            None,
+            WriteMode::Append,
+        )
+        .unwrap();
+
+    let results = store.scan_prefix(&child_kv("user:"), u64::MAX).unwrap();
+    assert_eq!(results.len(), 4); // alice, bob(200), carol, dave
+
+    let values: Vec<i64> = results
+        .iter()
+        .map(|(_, vv)| match &vv.value {
+            Value::Int(i) => *i,
+            _ => panic!("expected Int"),
+        })
+        .collect();
+    assert_eq!(values, vec![1, 200, 3, 4]); // alice=1, bob=200, carol=3, dave=4
+}
+
+#[test]
+fn inherited_layer_list_branch() {
+    let (_dir, store) = setup_parent_with_segments(&[("a", 1, 1), ("b", 2, 2)]);
+    attach_inherited_layer(&store, parent_branch(), child_branch(), 10);
+
+    // Write one more on child
+    store
+        .put_with_version_mode(child_kv("c"), Value::Int(3), 11, None, WriteMode::Append)
+        .unwrap();
+
+    let entries = store.list_branch(&child_branch());
+    assert_eq!(entries.len(), 3);
+
+    let keys: Vec<String> = entries
+        .iter()
+        .map(|(k, _)| String::from_utf8(k.user_key.to_vec()).unwrap())
+        .collect();
+    assert_eq!(keys, vec!["a", "b", "c"]);
+}
+
+#[test]
+fn inherited_layer_bloom_correct() {
+    // Point lookup should succeed through inherited layer even with bloom
+    // filters — we rewrite the typed_key to use the source branch_id for probes.
+    let (_dir, store) = setup_parent_with_segments(&[("bloom_key", 42, 1)]);
+    attach_inherited_layer(&store, parent_branch(), child_branch(), 10);
+
+    let result = store
+        .get_versioned(&child_kv("bloom_key"), u64::MAX)
+        .unwrap();
+    assert!(
+        result.is_some(),
+        "bloom filter should not reject rewritten key"
+    );
+    assert_eq!(result.unwrap().value, Value::Int(42));
+}
+
+#[test]
+fn inherited_layer_two_levels() {
+    // A ← B ← C: C reads through B's own segments and A's segments.
+    // C has two inherited layers: [parent_segments, grandparent_segments]
+    // (nearest ancestor first).
+    let grandparent = BranchId::from_bytes([30; 16]);
+    let parent = BranchId::from_bytes([31; 16]);
+    let child = BranchId::from_bytes([32; 16]);
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    let gp_ns = Arc::new(Namespace::new(grandparent, "default".to_string()));
+    let p_ns = Arc::new(Namespace::new(parent, "default".to_string()));
+    let c_ns = Arc::new(Namespace::new(child, "default".to_string()));
+
+    // Write to grandparent and flush
+    store
+        .put_with_version_mode(
+            Key::new(gp_ns.clone(), TypeTag::KV, b"from_gp".to_vec()),
+            Value::Int(1),
+            1,
+            None,
+            WriteMode::Append,
+        )
+        .unwrap();
+    store
+        .put_with_version_mode(
+            Key::new(gp_ns.clone(), TypeTag::KV, b"shared".to_vec()),
+            Value::Int(10),
+            2,
+            None,
+            WriteMode::Append,
+        )
+        .unwrap();
+    store.rotate_memtable(&grandparent);
+    store.flush_oldest_frozen(&grandparent).unwrap();
+
+    // Parent writes own data and flushes
+    store
+        .put_with_version_mode(
+            Key::new(p_ns.clone(), TypeTag::KV, b"from_parent".to_vec()),
+            Value::Int(2),
+            3,
+            None,
+            WriteMode::Append,
+        )
+        .unwrap();
+    store
+        .put_with_version_mode(
+            Key::new(p_ns.clone(), TypeTag::KV, b"shared".to_vec()),
+            Value::Int(20),
+            4,
+            None,
+            WriteMode::Append,
+        )
+        .unwrap();
+    store.rotate_memtable(&parent);
+    store.flush_oldest_frozen(&parent).unwrap();
+
+    // Child inherits from parent (nearest ancestor) then grandparent
+    attach_inherited_layer(&store, parent, child, 10);
+    // Also attach grandparent's segments (ordered: nearest ancestor first)
+    {
+        let gp = store.branches.get(&grandparent).unwrap();
+        let gp_snapshot = gp.version.load_full();
+        drop(gp);
+        let mut child_state = store.branches.get_mut(&child).unwrap();
+        child_state.inherited_layers.push(InheritedLayer {
+            source_branch_id: grandparent,
+            fork_version: 10,
+            segments: gp_snapshot,
+            status: LayerStatus::Active,
+        });
+    }
+
+    // Child sees parent's own data
+    let r = store
+        .get_versioned(
+            &Key::new(c_ns.clone(), TypeTag::KV, b"from_parent".to_vec()),
+            u64::MAX,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.value, Value::Int(2));
+
+    // Child sees parent's version of "shared" (parent shadows grandparent)
+    let r = store
+        .get_versioned(
+            &Key::new(c_ns.clone(), TypeTag::KV, b"shared".to_vec()),
+            u64::MAX,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.value, Value::Int(20));
+
+    // Child sees grandparent's exclusive data
+    let r = store
+        .get_versioned(
+            &Key::new(c_ns.clone(), TypeTag::KV, b"from_gp".to_vec()),
+            u64::MAX,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.value, Value::Int(1));
+}
+
+#[test]
+fn inherited_layer_version_clamping() {
+    // Time-travel: get_versioned(key, 3) with fork_version=10
+    // should respect the user's snapshot version, not fork_version.
+    let (_dir, store) = setup_parent_with_segments(&[("k", 10, 1), ("k", 50, 5), ("k", 100, 9)]);
+    attach_inherited_layer(&store, parent_branch(), child_branch(), 10);
+
+    // Snapshot at version 3: should see version 1
+    let result = store.get_versioned(&child_kv("k"), 3).unwrap().unwrap();
+    assert_eq!(result.value, Value::Int(10));
+
+    // Snapshot at version 7: should see version 5
+    let result = store.get_versioned(&child_kv("k"), 7).unwrap().unwrap();
+    assert_eq!(result.value, Value::Int(50));
+}
+
+#[test]
+fn inherited_layer_get_at_timestamp() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // Write entries with specific timestamps via recovery API
+    store
+        .put_recovery_entry(parent_kv("k"), Value::Int(100), 1, 1000)
+        .unwrap();
+    store
+        .put_recovery_entry(parent_kv("k"), Value::Int(200), 2, 2000)
+        .unwrap();
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    attach_inherited_layer(&store, parent_branch(), child_branch(), 10);
+
+    // get_at_timestamp with max_ts=1500 should see the first version (ts=1000)
+    let result = store
+        .get_at_timestamp(&child_kv("k"), 1500)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.value, Value::Int(100));
+
+    // get_at_timestamp with max_ts=2500 should see the second version (ts=2000)
+    let result = store
+        .get_at_timestamp(&child_kv("k"), 2500)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.value, Value::Int(200));
+}
+
+#[test]
+fn inherited_layer_get_history() {
+    let (_dir, store) = setup_parent_with_segments(&[("k", 10, 1), ("k", 20, 2), ("k", 30, 3)]);
+    attach_inherited_layer(&store, parent_branch(), child_branch(), 10);
+
+    let history = store.get_history(&child_kv("k"), None, None).unwrap();
+    assert_eq!(history.len(), 3);
+    // Newest first
+    assert_eq!(history[0].value, Value::Int(30));
+    assert_eq!(history[1].value, Value::Int(20));
+    assert_eq!(history[2].value, Value::Int(10));
+}
+
+#[test]
+fn inherited_layer_scan_prefix_at_timestamp() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    store
+        .put_recovery_entry(parent_kv("user:a"), Value::Int(1), 1, 1000)
+        .unwrap();
+    store
+        .put_recovery_entry(parent_kv("user:b"), Value::Int(2), 2, 2000)
+        .unwrap();
+    store
+        .put_recovery_entry(parent_kv("user:c"), Value::Int(3), 3, 3000)
+        .unwrap();
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    attach_inherited_layer(&store, parent_branch(), child_branch(), 10);
+
+    // Scan at timestamp 2500 — should see a and b but not c
+    let results = store
+        .scan_prefix_at_timestamp(&child_kv("user:"), 2500)
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    let keys: Vec<String> = results
+        .iter()
+        .map(|(k, _)| String::from_utf8(k.user_key.to_vec()).unwrap())
+        .collect();
+    assert_eq!(keys, vec!["user:a", "user:b"]);
+}
+
+#[test]
+fn inherited_layer_materialized_skipped() {
+    let (_dir, store) = setup_parent_with_segments(&[("k", 42, 1)]);
+
+    // Manually attach a Materialized layer — should be skipped
+    let source = store.branches.get(&parent_branch()).unwrap();
+    let snapshot = source.version.load_full();
+    drop(source);
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    let mut child = store.branches.get_mut(&child_branch()).unwrap();
+    child.inherited_layers.push(InheritedLayer {
+        source_branch_id: parent_branch(),
+        fork_version: 10,
+        segments: snapshot,
+        status: LayerStatus::Materialized,
+    });
+    drop(child);
+
+    // Point lookup should return None — materialized layer is skipped
+    assert!(store
+        .get_versioned(&child_kv("k"), u64::MAX)
+        .unwrap()
+        .is_none());
+
+    // List should be empty
+    assert!(store.list_branch(&child_branch()).is_empty());
+
+    // Scan should be empty
+    assert!(store
+        .scan_prefix(&child_kv(""), u64::MAX)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn inherited_layer_empty_parent() {
+    // Parent branch exists but has no data (no segments).
+    // Inherited layer should gracefully return nothing.
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // Create parent branch with empty state (no writes, no flush)
+    store
+        .branches
+        .entry(parent_branch())
+        .or_insert_with(BranchState::new);
+    attach_inherited_layer(&store, parent_branch(), child_branch(), 10);
+
+    assert!(store
+        .get_versioned(&child_kv("k"), u64::MAX)
+        .unwrap()
+        .is_none());
+    assert!(store.list_branch(&child_branch()).is_empty());
+    assert!(store
+        .scan_prefix(&child_kv(""), u64::MAX)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .get_history(&child_kv("k"), None, None)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn inherited_layer_fork_version_zero() {
+    // fork_version=0 means no parent data is visible (all entries have commit_id >= 1).
+    let (_dir, store) = setup_parent_with_segments(&[("a", 1, 1), ("b", 2, 2)]);
+    attach_inherited_layer(&store, parent_branch(), child_branch(), 0);
+
+    // Point lookup: nothing visible
+    assert!(store
+        .get_versioned(&child_kv("a"), u64::MAX)
+        .unwrap()
+        .is_none());
+
+    // List: empty
+    assert!(store.list_branch(&child_branch()).is_empty());
+
+    // Scan: empty
+    assert!(store
+        .scan_prefix(&child_kv(""), u64::MAX)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn inherited_layer_custom_space() {
+    // Verify that non-default space names survive the branch_id rewrite.
+    let space = "custom_space";
+    let parent = parent_branch();
+    let child = child_branch();
+    let p_ns = Arc::new(Namespace::new(parent, space.to_string()));
+    let c_ns = Arc::new(Namespace::new(child, space.to_string()));
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    store
+        .put_with_version_mode(
+            Key::new(p_ns.clone(), TypeTag::KV, b"key1".to_vec()),
+            Value::Int(42),
+            1,
+            None,
+            WriteMode::Append,
+        )
+        .unwrap();
+    store.rotate_memtable(&parent);
+    store.flush_oldest_frozen(&parent).unwrap();
+
+    attach_inherited_layer(&store, parent, child, 10);
+
+    // Query with child's namespace in the custom space
+    let result = store
+        .get_versioned(
+            &Key::new(c_ns.clone(), TypeTag::KV, b"key1".to_vec()),
+            u64::MAX,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.value, Value::Int(42));
+
+    // Query with child's namespace in the DEFAULT space should NOT find it
+    assert!(store
+        .get_versioned(&child_kv("key1"), u64::MAX)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn inherited_layer_non_kv_type_tags() {
+    // Verify inherited layers work for State and Event type tags, not just KV.
+    let parent = parent_branch();
+    let child = child_branch();
+    let p_ns = Arc::new(Namespace::new(parent, "default".to_string()));
+    let c_ns = Arc::new(Namespace::new(child, "default".to_string()));
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // Write a State entry and an Event entry to parent
+    store
+        .put_with_version_mode(
+            Key::new(p_ns.clone(), TypeTag::State, b"cell1".to_vec()),
+            Value::Int(100),
+            1,
+            None,
+            WriteMode::Append,
+        )
+        .unwrap();
+    store
+        .put_with_version_mode(
+            Key::new(p_ns.clone(), TypeTag::Event, 42u64.to_be_bytes().to_vec()),
+            Value::Int(200),
+            2,
+            None,
+            WriteMode::Append,
+        )
+        .unwrap();
+    store.rotate_memtable(&parent);
+    store.flush_oldest_frozen(&parent).unwrap();
+
+    attach_inherited_layer(&store, parent, child, 10);
+
+    // Child sees the State entry
+    let result = store
+        .get_versioned(
+            &Key::new(c_ns.clone(), TypeTag::State, b"cell1".to_vec()),
+            u64::MAX,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.value, Value::Int(100));
+
+    // Child sees the Event entry
+    let result = store
+        .get_versioned(
+            &Key::new(c_ns.clone(), TypeTag::Event, 42u64.to_be_bytes().to_vec()),
+            u64::MAX,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.value, Value::Int(200));
+
+    // KV lookup should NOT find State/Event entries
+    assert!(store
+        .get_versioned(&child_kv("cell1"), u64::MAX)
+        .unwrap()
+        .is_none());
+}

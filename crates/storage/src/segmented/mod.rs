@@ -9,10 +9,12 @@
 //! The first match for a key at commit_id ≤ snapshot wins.
 
 use crate::compaction::CompactionIterator;
-use crate::key_encoding::{encode_typed_key, encode_typed_key_prefix, InternalKey};
+use crate::key_encoding::{
+    encode_typed_key, encode_typed_key_prefix, rewrite_branch_id_bytes, InternalKey,
+};
 use crate::memory_stats::{BranchMemoryStats, StorageMemoryStats};
 use crate::memtable::{Memtable, MemtableEntry};
-use crate::merge_iter::{MergeIterator, MvccIterator};
+use crate::merge_iter::{MergeIterator, MvccIterator, RewritingIterator};
 use crate::pressure::{MemoryPressure, PressureLevel};
 use crate::segment::{KVSegment, SegmentEntry};
 use crate::segment_builder::SegmentBuilder;
@@ -179,11 +181,11 @@ impl SegmentVersion {
 
 /// Status of an inherited layer during materialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Used in Epic C (COW fork)
 enum LayerStatus {
     /// Layer is active — reads fall through to parent segments.
     Active,
     /// Materialization in progress (reset to Active on crash recovery).
+    #[allow(dead_code)] // Constructed in Epic C (COW materialization)
     Materializing,
     /// Layer has been fully materialized into own segments.
     Materialized,
@@ -421,7 +423,7 @@ impl SegmentedStore {
             None => return 0,
         };
         // Collect all entries via MVCC dedup at u64::MAX
-        self.list_branch_inner(&branch).len()
+        self.list_branch_inner(&branch, *branch_id).len()
     }
 
     /// List all live entries for a branch (MVCC dedup at latest version).
@@ -430,11 +432,15 @@ impl SegmentedStore {
             Some(b) => b,
             None => return Vec::new(),
         };
-        self.list_branch_inner(&branch)
+        self.list_branch_inner(&branch, *branch_id)
     }
 
     /// Internal: list all live entries for a branch reference.
-    fn list_branch_inner(&self, branch: &BranchState) -> Vec<(Key, VersionedValue)> {
+    fn list_branch_inner(
+        &self,
+        branch: &BranchState,
+        branch_id: BranchId,
+    ) -> Vec<(Key, VersionedValue)> {
         // Build an empty-prefix key to scan all entries.
         // We iterate all entries from all sources, MVCC dedup, filter tombstones/expired.
         let mut sources: Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> = Vec::new();
@@ -458,6 +464,26 @@ impl SegmentedStore {
                     .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
                     .collect();
                 sources.push(Box::new(entries.into_iter()));
+            }
+        }
+
+        // Inherited layers (COW branching)
+        for layer in &branch.inherited_layers {
+            if layer.status == LayerStatus::Materialized {
+                continue;
+            }
+            for level in &layer.segments.levels {
+                for seg in level {
+                    let entries: Vec<_> = seg
+                        .iter_seek_all()
+                        .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
+                        .collect();
+                    sources.push(Box::new(RewritingIterator::new(
+                        entries.into_iter(),
+                        branch_id,
+                        layer.fork_version,
+                    )));
+                }
             }
         }
 
@@ -553,6 +579,26 @@ impl SegmentedStore {
                     .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
                     .collect();
                 sources.push(Box::new(entries.into_iter()));
+            }
+        }
+
+        // Inherited layers (COW branching)
+        for layer in &branch.inherited_layers {
+            if layer.status == LayerStatus::Materialized {
+                continue;
+            }
+            for level in &layer.segments.levels {
+                for seg in level {
+                    let entries: Vec<_> = seg
+                        .iter_seek_all()
+                        .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
+                        .collect();
+                    sources.push(Box::new(RewritingIterator::new(
+                        entries.into_iter(),
+                        *branch_id,
+                        layer.fork_version,
+                    )));
+                }
             }
         }
 
@@ -661,6 +707,41 @@ impl SegmentedStore {
             }
         }
 
+        // Inherited layers (COW branching)
+        for layer in &branch.inherited_layers {
+            if layer.status == LayerStatus::Materialized {
+                continue;
+            }
+            let src_prefix = prefix.with_branch_id(layer.source_branch_id);
+            let src_prefix_bytes = encode_typed_key_prefix(&src_prefix);
+            for level in &layer.segments.levels {
+                for seg in level {
+                    let (seg_min, seg_max) = seg.key_range();
+                    if seg_max.len() >= 8 && seg_min.len() >= 8 {
+                        let max_typed = &seg_max[..seg_max.len() - 8];
+                        let min_typed = &seg_min[..seg_min.len() - 8];
+                        if max_typed < src_prefix_bytes.as_slice() {
+                            continue;
+                        }
+                        if !min_typed.starts_with(&src_prefix_bytes)
+                            && min_typed > src_prefix_bytes.as_slice()
+                        {
+                            continue;
+                        }
+                    }
+                    let entries: Vec<_> = seg
+                        .iter_seek(&src_prefix)
+                        .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
+                        .collect();
+                    sources.push(Box::new(RewritingIterator::new(
+                        entries.into_iter(),
+                        prefix.namespace.branch_id,
+                        layer.fork_version,
+                    )));
+                }
+            }
+        }
+
         let merge = MergeIterator::new(sources);
         let mut results: Vec<(Key, VersionedValue)> = Vec::new();
         let mut last_typed_key: Option<Vec<u8>> = None;
@@ -713,7 +794,7 @@ impl SegmentedStore {
 
         // Fallback: atomics not populated (e.g. after recovery from segments
         // where WAL was truncated). Scan entries to find actual range.
-        let entries = self.list_branch_inner(&branch);
+        let entries = self.list_branch_inner(&branch, branch_id);
         if entries.is_empty() {
             return Ok(None);
         }
@@ -814,7 +895,7 @@ impl SegmentedStore {
     /// SegmentedStore does not use BTreeSet indexes, so `btree_built` is always false.
     pub fn shard_stats_detailed(&self, branch_id: &BranchId) -> Option<(usize, usize, bool)> {
         let branch = self.branches.get(branch_id)?;
-        let entry_count = self.list_branch_inner(&branch).len();
+        let entry_count = self.list_branch_inner(&branch, *branch_id).len();
         let mut total_versions = branch.active.len();
         for frozen in &branch.frozen {
             total_versions += frozen.len();
@@ -844,7 +925,7 @@ impl SegmentedStore {
                 .map(|f| f.approx_bytes() as usize)
                 .sum();
             let branch_bytes = active_bytes + frozen_bytes;
-            let count = self.list_branch_inner(branch).len();
+            let count = self.list_branch_inner(branch, branch_id).len();
             total_entries += count;
             estimated_bytes += branch_bytes;
             per_branch.push(BranchMemoryStats {
@@ -1480,6 +1561,41 @@ impl SegmentedStore {
             }
         }
 
+        // 5. Inherited layers (COW branching — nearest ancestor first)
+        for layer in &branch.inherited_layers {
+            if layer.status == LayerStatus::Materialized {
+                continue;
+            }
+            let effective_version = max_version.min(layer.fork_version);
+            // Rewrite typed_key: child branch_id → source branch_id
+            let src_typed_key = rewrite_branch_id_bytes(&typed_key, &layer.source_branch_id);
+            let src_seek_ik = InternalKey::from_typed_key_bytes(&src_typed_key, u64::MAX);
+            let src_seek_bytes = src_seek_ik.as_bytes();
+
+            // L0 segments (linear scan)
+            for seg in layer.segments.l0_segments() {
+                if let Some(se) =
+                    seg.point_lookup_preencoded(&src_typed_key, src_seek_bytes, effective_version)
+                {
+                    let commit_id = se.commit_id;
+                    return Some((commit_id, segment_entry_to_memtable_entry(se)));
+                }
+            }
+
+            // L1+ segments (binary search per level)
+            for level_idx in 1..layer.segments.levels.len() {
+                if let Some(se) = point_lookup_level_preencoded(
+                    &layer.segments.levels[level_idx],
+                    &src_typed_key,
+                    src_seek_bytes,
+                    effective_version,
+                ) {
+                    let commit_id = se.commit_id;
+                    return Some((commit_id, segment_entry_to_memtable_entry(se)));
+                }
+            }
+        }
+
         None
     }
 
@@ -1505,6 +1621,27 @@ impl SegmentedStore {
                         break;
                     }
                     all_versions.push((se.commit_id, segment_entry_to_memtable_entry(se)));
+                }
+            }
+        }
+
+        // Inherited layers (COW branching)
+        for layer in &branch.inherited_layers {
+            if layer.status == LayerStatus::Materialized {
+                continue;
+            }
+            let src_key = key.with_branch_id(layer.source_branch_id);
+            let src_typed_key = encode_typed_key(&src_key);
+            for level in &layer.segments.levels {
+                for seg in level {
+                    for (ik, se) in seg.iter_seek(&src_key) {
+                        if ik.typed_key_prefix() != src_typed_key.as_slice() {
+                            break;
+                        }
+                        if se.commit_id <= layer.fork_version {
+                            all_versions.push((se.commit_id, segment_entry_to_memtable_entry(se)));
+                        }
+                    }
                 }
             }
         }
@@ -1563,6 +1700,41 @@ impl SegmentedStore {
                     .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
                     .collect();
                 sources.push(Box::new(entries.into_iter()));
+            }
+        }
+
+        // Inherited layers (COW branching)
+        for layer in &branch.inherited_layers {
+            if layer.status == LayerStatus::Materialized {
+                continue;
+            }
+            let src_prefix = prefix.with_branch_id(layer.source_branch_id);
+            let src_prefix_bytes = encode_typed_key_prefix(&src_prefix);
+            for level in &layer.segments.levels {
+                for seg in level {
+                    let (seg_min, seg_max) = seg.key_range();
+                    if seg_max.len() >= 8 && seg_min.len() >= 8 {
+                        let max_typed = &seg_max[..seg_max.len() - 8];
+                        let min_typed = &seg_min[..seg_min.len() - 8];
+                        if max_typed < src_prefix_bytes.as_slice() {
+                            continue;
+                        }
+                        if !min_typed.starts_with(&src_prefix_bytes)
+                            && min_typed > src_prefix_bytes.as_slice()
+                        {
+                            continue;
+                        }
+                    }
+                    let entries: Vec<_> = seg
+                        .iter_seek(&src_prefix)
+                        .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
+                        .collect();
+                    sources.push(Box::new(RewritingIterator::new(
+                        entries.into_iter(),
+                        prefix.namespace.branch_id,
+                        layer.fork_version,
+                    )));
+                }
             }
         }
 
