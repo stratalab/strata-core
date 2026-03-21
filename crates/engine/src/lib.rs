@@ -55,6 +55,9 @@ pub mod search;
 // Re-export search types at crate root for convenience
 pub use search::{SearchBudget, SearchHit, SearchMode, SearchRequest, SearchResponse, SearchStats};
 
+// Re-export branch ops types at crate root for convenience
+pub use branch_ops::MaterializeInfo;
+
 // Re-export search recovery registration
 pub use search::register_search_recovery;
 

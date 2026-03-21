@@ -692,6 +692,86 @@ pub fn merge_branches(
 }
 
 // =============================================================================
+// Materialize
+// =============================================================================
+
+/// Information returned after materializing inherited layers.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MaterializeInfo {
+    /// Branch name
+    pub branch: String,
+    /// Total entries materialized across all layers
+    pub entries_materialized: u64,
+    /// Total new segments created
+    pub segments_created: usize,
+    /// Number of inherited layers collapsed
+    pub layers_collapsed: usize,
+}
+
+/// Materialize all inherited layers of a branch.
+///
+/// Collapses inherited layers deepest-first so that each layer's data
+/// becomes "own" data before shallower layers are processed (enabling
+/// shadow detection for subsequent layers).
+///
+/// # Errors
+///
+/// - Branch does not exist
+/// - Database is ephemeral
+pub fn materialize_branch(db: &Arc<Database>, branch_name: &str) -> StrataResult<MaterializeInfo> {
+    let branch_id = resolve_and_verify(db, branch_name)?;
+    let storage = db.storage();
+
+    if !storage.has_segments_dir() {
+        return Err(StrataError::invalid_input(
+            "materialize_branch requires a disk-backed database",
+        ));
+    }
+
+    let mut total_entries = 0u64;
+    let mut total_segments = 0usize;
+    let mut layers_collapsed = 0usize;
+
+    // Loop: materialize deepest layer first
+    loop {
+        let layer_count = storage.inherited_layer_count(&branch_id);
+        if layer_count == 0 {
+            break;
+        }
+        let deepest = layer_count - 1;
+        match storage.materialize_layer(&branch_id, deepest) {
+            Ok(result) => {
+                total_entries += result.entries_materialized;
+                total_segments += result.segments_created;
+                layers_collapsed += 1;
+            }
+            Err(e) => {
+                return Err(StrataError::storage(format!(
+                    "materialize_layer failed: {}",
+                    e
+                )));
+            }
+        }
+    }
+
+    info!(
+        target: "strata::branch_ops",
+        branch = branch_name,
+        entries_materialized = total_entries,
+        segments_created = total_segments,
+        layers_collapsed,
+        "Branch materialized"
+    );
+
+    Ok(MaterializeInfo {
+        branch: branch_name.to_string(),
+        entries_materialized: total_entries,
+        segments_created: total_segments,
+        layers_collapsed,
+    })
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -1969,5 +2049,73 @@ mod tests {
             !vec_entries.is_empty(),
             "VectorConfig should be visible through inherited layers"
         );
+    }
+
+    #[test]
+    fn test_force_materialize_all_layers() {
+        let (_temp, db) = setup_with_branch("source");
+
+        // Write data to source
+        write_kv(&db, "source", "default", "k1", Value::Int(1));
+        write_kv(&db, "source", "default", "k2", Value::Int(2));
+
+        // Fork source → dest
+        let fork_info = fork_branch(&db, "source", "dest").unwrap();
+        assert!(fork_info.fork_version.is_some());
+
+        // Verify inherited layers exist
+        let dest_id = resolve_branch_name("dest");
+        let storage = db.storage();
+        assert!(
+            storage.inherited_layer_count(&dest_id) > 0,
+            "dest should have inherited layers"
+        );
+
+        // Materialize all layers
+        let mat_info = materialize_branch(&db, "dest").unwrap();
+        assert!(mat_info.layers_collapsed > 0);
+
+        // No inherited layers remain
+        assert_eq!(storage.inherited_layer_count(&dest_id), 0);
+
+        // Data still accessible
+        let val = read_kv(&db, "dest", "default", "k1");
+        assert_eq!(val, Some(Value::Int(1)));
+        let val = read_kv(&db, "dest", "default", "k2");
+        assert_eq!(val, Some(Value::Int(2)));
+    }
+
+    #[test]
+    fn test_materialize_then_diff_merge() {
+        let (_temp, db) = setup_with_branch("source");
+
+        // Write to source
+        write_kv(&db, "source", "default", "shared", Value::Int(1));
+
+        // Fork
+        fork_branch(&db, "source", "dest").unwrap();
+
+        // Write different data to dest
+        write_kv(&db, "dest", "default", "dest_only", Value::Int(42));
+
+        // Materialize dest
+        let mat_info = materialize_branch(&db, "dest").unwrap();
+        assert!(mat_info.layers_collapsed > 0);
+
+        // Diff should still work
+        let diff = diff_branches(&db, "source", "dest").unwrap();
+        assert_eq!(
+            diff.summary.total_added, 1,
+            "dest_only should show as added in dest"
+        );
+
+        // Merge dest → source should work
+        let merge_info =
+            merge_branches(&db, "dest", "source", MergeStrategy::LastWriterWins).unwrap();
+        assert!(merge_info.keys_applied > 0);
+
+        // Source should now have dest_only
+        let val = read_kv(&db, "source", "default", "dest_only");
+        assert_eq!(val, Some(Value::Int(42)));
     }
 }
