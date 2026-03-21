@@ -174,6 +174,39 @@ impl SegmentVersion {
 }
 
 // ---------------------------------------------------------------------------
+// COW Branching — inherited layer types
+// ---------------------------------------------------------------------------
+
+/// Status of an inherited layer during materialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Used in Epic C (COW fork)
+enum LayerStatus {
+    /// Layer is active — reads fall through to parent segments.
+    Active,
+    /// Materialization in progress (reset to Active on crash recovery).
+    Materializing,
+    /// Layer has been fully materialized into own segments.
+    Materialized,
+}
+
+/// An inherited layer from a parent branch (COW fork).
+///
+/// When a branch is forked, instead of deep-copying every key-value pair,
+/// the child holds an `Arc<SegmentVersion>` pointing at the parent's
+/// segments at fork time. Reads fall through to these inherited segments
+/// until materialization copies them into the child's own segments.
+struct InheritedLayer {
+    /// Branch ID of the source (parent) branch.
+    source_branch_id: BranchId,
+    /// Version counter of the source branch at fork time.
+    fork_version: u64,
+    /// Snapshot of the parent's segments at fork time.
+    segments: Arc<SegmentVersion>,
+    /// Current materialization status.
+    status: LayerStatus,
+}
+
+// ---------------------------------------------------------------------------
 // BranchState
 // ---------------------------------------------------------------------------
 
@@ -194,6 +227,9 @@ struct BranchState {
     compact_pointers: Vec<Option<Vec<u8>>>,
     /// Cached per-level byte targets, recomputed after compaction/flush.
     level_targets: compaction::LevelTargets,
+    /// Inherited layers from parent branches (COW fork).
+    /// Empty until Epic C enables fork_branch.
+    inherited_layers: Vec<InheritedLayer>,
 }
 
 impl BranchState {
@@ -206,6 +242,7 @@ impl BranchState {
             max_timestamp: AtomicU64::new(0),
             compact_pointers: vec![None; NUM_LEVELS],
             level_targets: compaction::recalculate_level_targets(&[0u64; NUM_LEVELS]),
+            inherited_layers: Vec::new(),
         }
     }
 }
@@ -253,6 +290,8 @@ pub struct SegmentedStore {
     max_immutable_memtables: AtomicUsize,
     /// Optional rate limiter for compaction I/O (read + write).
     compaction_rate_limiter: arc_swap::ArcSwapOption<crate::rate_limiter::RateLimiter>,
+    /// Reference count registry for shared segments (COW branching).
+    ref_registry: ref_registry::SegmentRefRegistry,
 }
 
 impl SegmentedStore {
@@ -274,6 +313,7 @@ impl SegmentedStore {
             total_frozen_count: AtomicUsize::new(0),
             max_immutable_memtables: AtomicUsize::new(0),
             compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
+            ref_registry: ref_registry::SegmentRefRegistry::new(),
         }
     }
 
@@ -296,6 +336,7 @@ impl SegmentedStore {
             total_frozen_count: AtomicUsize::new(0),
             max_immutable_memtables: AtomicUsize::new(0),
             compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
+            ref_registry: ref_registry::SegmentRefRegistry::new(),
         }
     }
 
@@ -318,6 +359,7 @@ impl SegmentedStore {
             total_frozen_count: AtomicUsize::new(0),
             max_immutable_memtables: AtomicUsize::new(0),
             compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
+            ref_registry: ref_registry::SegmentRefRegistry::new(),
         }
     }
 
@@ -1066,6 +1108,10 @@ impl SegmentedStore {
             errors_skipped: 0,
         };
 
+        // Collect inherited layer info for deferred resolution (second pass).
+        let mut deferred_inherited: Vec<(BranchId, Vec<crate::manifest::ManifestInheritedLayer>)> =
+            Vec::new();
+
         for entry in std::fs::read_dir(segments_dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -1128,7 +1174,7 @@ impl SegmentedStore {
 
             // Partition segments into levels based on manifest
             let mut level_segs: Vec<Vec<Arc<KVSegment>>> = vec![Vec::new(); NUM_LEVELS];
-            if let Some(manifest) = manifest {
+            if let Some(ref manifest) = manifest {
                 for seg in branch_segments.iter() {
                     let filename = seg
                         .file_path()
@@ -1187,7 +1233,109 @@ impl SegmentedStore {
                 .store(Arc::new(SegmentVersion { levels: new_levels }));
             refresh_level_targets(&mut branch);
 
+            // Collect inherited layer info for second pass (deferred resolution).
+            if let Some(manifest) = manifest {
+                if !manifest.inherited_layers.is_empty() {
+                    deferred_inherited.push((branch_id, manifest.inherited_layers));
+                }
+            }
+
             info.branches_recovered += 1;
+        }
+
+        // ── Second pass: resolve inherited layers and rebuild refcounts ──
+        //
+        // After all branches have been loaded with their own segments, we can
+        // resolve inherited layer references to source branch segments.
+        for (child_id, manifest_layers) in deferred_inherited {
+            let mut inherited_layers = Vec::new();
+
+            for ml in &manifest_layers {
+                let source_branch = match self.branches.get(&ml.source_branch_id) {
+                    Some(b) => b,
+                    None => {
+                        tracing::warn!(
+                            child = %hex_encode_branch(&child_id),
+                            source = %hex_encode_branch(&ml.source_branch_id),
+                            "inherited layer references missing source branch, skipping"
+                        );
+                        continue;
+                    }
+                };
+
+                // Build SegmentVersion from manifest entries using source branch's
+                // segments (they are already opened and Arc'd).
+                let source_ver = source_branch.version.load();
+                let mut layer_levels: Vec<Vec<Arc<KVSegment>>> = vec![Vec::new(); NUM_LEVELS];
+
+                for entry in &ml.entries {
+                    let level = (entry.level as usize).min(NUM_LEVELS - 1);
+                    // Find the matching segment in the source branch's version
+                    let mut found = false;
+                    for source_level in &source_ver.levels {
+                        for seg in source_level {
+                            let seg_name = seg
+                                .file_path()
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("");
+                            if seg_name == entry.filename {
+                                layer_levels[level].push(Arc::clone(seg));
+                                found = true;
+                            }
+                        }
+                    }
+                    if !found {
+                        tracing::warn!(
+                            child = %hex_encode_branch(&child_id),
+                            source = %hex_encode_branch(&ml.source_branch_id),
+                            segment = %entry.filename,
+                            "inherited layer segment not found in source branch"
+                        );
+                    }
+                }
+
+                // Sort levels consistently
+                layer_levels[0].sort_by(|a, b| b.commit_range().1.cmp(&a.commit_range().1));
+                for level in layer_levels.iter_mut().skip(1) {
+                    level.sort_by(|a, b| a.key_range().0.cmp(b.key_range().0));
+                }
+
+                let seg_version = Arc::new(SegmentVersion {
+                    levels: layer_levels,
+                });
+
+                // Reset Materializing → Active on crash recovery
+                let status = if ml.status == 1 {
+                    LayerStatus::Active
+                } else if ml.status == 2 {
+                    LayerStatus::Materialized
+                } else {
+                    LayerStatus::Active
+                };
+
+                inherited_layers.push(InheritedLayer {
+                    source_branch_id: ml.source_branch_id,
+                    fork_version: ml.fork_version,
+                    segments: seg_version,
+                    status,
+                });
+            }
+
+            if !inherited_layers.is_empty() {
+                if let Some(mut branch) = self.branches.get_mut(&child_id) {
+                    branch.inherited_layers = inherited_layers;
+                }
+            }
+        }
+
+        // Rebuild refcounts from inherited layers
+        for branch in self.branches.iter() {
+            for layer in &branch.inherited_layers {
+                for seg in layer.segments.all_segments() {
+                    self.ref_registry.increment(seg.file_id());
+                }
+            }
         }
 
         Ok(info)
@@ -1431,7 +1579,8 @@ impl SegmentedStore {
         .collect()
     }
 
-    /// Write the manifest file for a branch, reflecting current level assignments.
+    /// Write the manifest file for a branch, reflecting current level assignments
+    /// and inherited layers.
     fn write_branch_manifest(&self, branch_id: &BranchId) {
         let segments_dir = match &self.segments_dir {
             Some(d) => d,
@@ -1457,7 +1606,45 @@ impl SegmentedStore {
             }
         }
 
-        if let Err(e) = crate::manifest::write_manifest(&branch_dir, &entries) {
+        // Serialize inherited layers
+        let inherited: Vec<crate::manifest::ManifestInheritedLayer> = branch
+            .inherited_layers
+            .iter()
+            .map(|layer| {
+                let layer_entries: Vec<crate::manifest::ManifestEntry> = layer
+                    .segments
+                    .levels
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(level_idx, level)| {
+                        level.iter().filter_map(move |seg| {
+                            seg.file_path()
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|name| crate::manifest::ManifestEntry {
+                                    filename: name.to_string(),
+                                    level: level_idx as u8,
+                                })
+                        })
+                    })
+                    .collect();
+
+                let status = match layer.status {
+                    LayerStatus::Active => 0,
+                    LayerStatus::Materializing => 1,
+                    LayerStatus::Materialized => 2,
+                };
+
+                crate::manifest::ManifestInheritedLayer {
+                    source_branch_id: layer.source_branch_id,
+                    fork_version: layer.fork_version,
+                    status,
+                    entries: layer_entries,
+                }
+            })
+            .collect();
+
+        if let Err(e) = crate::manifest::write_manifest(&branch_dir, &entries, &inherited) {
             tracing::warn!(
                 branch = %branch_hex,
                 error = %e,
@@ -1832,6 +2019,7 @@ fn segment_entry_to_memtable_entry(se: SegmentEntry) -> MemtableEntry {
 }
 
 mod compaction;
+mod ref_registry;
 
 #[cfg(test)]
 mod tests;

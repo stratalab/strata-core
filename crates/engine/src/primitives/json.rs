@@ -1961,14 +1961,12 @@ mod tests {
             path = path.key(&format!("k{}", i));
         }
 
-        let result = store.set_or_create(
-            &branch_id,
-            "default",
-            "deep",
-            &path,
-            JsonValue::from(1i64),
+        let result =
+            store.set_or_create(&branch_id, "default", "deep", &path, JsonValue::from(1i64));
+        assert!(
+            result.is_err(),
+            "Should reject document exceeding depth limit"
         );
-        assert!(result.is_err(), "Should reject document exceeding depth limit");
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("nesting") || err_msg.contains("depth"),
@@ -2033,7 +2031,10 @@ mod tests {
             &path,
             JsonValue::from(1i64),
         );
-        assert!(result.is_err(), "Should reject new doc exceeding depth limit");
+        assert!(
+            result.is_err(),
+            "Should reject new doc exceeding depth limit"
+        );
     }
 
     // ========== Time-Travel Boundary Tests ==========

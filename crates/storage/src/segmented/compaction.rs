@@ -60,6 +60,17 @@ pub(super) fn recalculate_level_targets(level_bytes: &[u64; NUM_LEVELS]) -> Leve
 }
 
 impl SegmentedStore {
+    /// Delete a segment file if it is not referenced by any inherited layer.
+    ///
+    /// Decrements the segment's refcount and deletes the file only when the
+    /// count reaches zero (or was never tracked — i.e., not shared via COW).
+    fn delete_segment_if_unreferenced(&self, seg: &KVSegment) {
+        if self.ref_registry.decrement(seg.file_id()) {
+            crate::block_cache::global_cache().invalidate_file(seg.file_id());
+            let _ = std::fs::remove_file(seg.file_path());
+        }
+    }
+
     /// Compute compaction scores for all levels of a branch.
     ///
     /// - L0: `score = file_count / L0_COMPACTION_TRIGGER`
@@ -248,11 +259,9 @@ impl SegmentedStore {
         // find the new compacted segment.
         self.write_branch_manifest(branch_id);
 
-        // Now safe to delete old segment files and invalidate cached blocks.
-        let cache = crate::block_cache::global_cache();
+        // Now safe to delete old segment files (refcount-guarded).
         for seg in &old_segments {
-            cache.invalidate_file(seg.file_id());
-            let _ = std::fs::remove_file(seg.file_path());
+            self.delete_segment_if_unreferenced(seg);
         }
 
         let entries_pruned = total_input_entries.saturating_sub(meta.entry_count);
@@ -384,10 +393,9 @@ impl SegmentedStore {
         // Persist manifest BEFORE deleting old files (crash safety).
         self.write_branch_manifest(branch_id);
 
-        let cache = crate::block_cache::global_cache();
+        // Delete old segment files (refcount-guarded).
         for seg in &selected_segments {
-            cache.invalidate_file(seg.file_id());
-            let _ = std::fs::remove_file(seg.file_path());
+            self.delete_segment_if_unreferenced(seg);
         }
 
         let entries_pruned = total_input_entries.saturating_sub(meta.entry_count);
@@ -580,15 +588,12 @@ impl SegmentedStore {
         // Persist manifest BEFORE deleting old files (crash safety).
         self.write_branch_manifest(branch_id);
 
-        // Now safe to delete old files and invalidate cache.
-        let cache = crate::block_cache::global_cache();
+        // Now safe to delete old files (refcount-guarded).
         for seg in &l0_segs {
-            cache.invalidate_file(seg.file_id());
-            let _ = std::fs::remove_file(seg.file_path());
+            self.delete_segment_if_unreferenced(seg);
         }
         for seg in &overlapping_l1 {
-            cache.invalidate_file(seg.file_id());
-            let _ = std::fs::remove_file(seg.file_path());
+            self.delete_segment_if_unreferenced(seg);
         }
 
         let entries_pruned = total_input_entries.saturating_sub(output_entries);
@@ -850,14 +855,12 @@ impl SegmentedStore {
         // Persist manifest BEFORE deleting old files (crash safety).
         self.write_branch_manifest(branch_id);
 
-        let cache = crate::block_cache::global_cache();
+        // Delete old segment files (refcount-guarded).
         for seg in &input_segs {
-            cache.invalidate_file(seg.file_id());
-            let _ = std::fs::remove_file(seg.file_path());
+            self.delete_segment_if_unreferenced(seg);
         }
         for seg in &overlap_segs {
-            cache.invalidate_file(seg.file_id());
-            let _ = std::fs::remove_file(seg.file_path());
+            self.delete_segment_if_unreferenced(seg);
         }
 
         let entries_pruned = total_input_entries.saturating_sub(output_entries);
