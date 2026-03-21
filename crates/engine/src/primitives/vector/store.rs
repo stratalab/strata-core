@@ -495,13 +495,11 @@ impl VectorStore {
         // backend so a KV commit failure doesn't leave the backend in an
         // inconsistent state (fixes #937).
         let state = self.state()?;
-        let mut backend =
-            state
-                .backends
-                .get_mut(&collection_id)
-                .ok_or_else(|| VectorError::CollectionNotFound {
-                    name: collection.to_string(),
-                })?;
+        let mut backend = state.backends.get_mut(&collection_id).ok_or_else(|| {
+            VectorError::CollectionNotFound {
+                name: collection.to_string(),
+            }
+        })?;
 
         // Check existence under write lock
         let existing = self.get_vector_record_by_key(&kv_key)?;
@@ -671,13 +669,11 @@ impl VectorStore {
             let collection_id = CollectionId::new(branch_id, collection);
             let vector_id = VectorId(record.vector_id);
             let state = self.state()?;
-            let backend =
-                state
-                    .backends
-                    .get(&collection_id)
-                    .ok_or_else(|| VectorError::CollectionNotFound {
-                        name: collection.to_string(),
-                    })?;
+            let backend = state.backends.get(&collection_id).ok_or_else(|| {
+                VectorError::CollectionNotFound {
+                    name: collection.to_string(),
+                }
+            })?;
             backend
                 .get(vector_id)
                 .ok_or_else(|| VectorError::Internal("Embedding missing from backend".to_string()))?
@@ -783,13 +779,11 @@ impl VectorStore {
 
         // Acquire per-collection lock once for the entire batch
         let state = self.state()?;
-        let mut backend =
-            state
-                .backends
-                .get_mut(&collection_id)
-                .ok_or_else(|| VectorError::CollectionNotFound {
-                    name: collection.to_string(),
-                })?;
+        let mut backend = state.backends.get_mut(&collection_id).ok_or_else(|| {
+            VectorError::CollectionNotFound {
+                name: collection.to_string(),
+            }
+        })?;
 
         let mut versions = Vec::with_capacity(entries.len());
         let batch_count = entries.len();
@@ -907,13 +901,11 @@ impl VectorStore {
         if filter.is_none() {
             // No filter - simple case, fetch exactly k with O(1) inline meta lookup
             let state = self.state()?;
-            let backend =
-                state
-                    .backends
-                    .get(&collection_id)
-                    .ok_or_else(|| VectorError::CollectionNotFound {
-                        name: collection.to_string(),
-                    })?;
+            let backend = state.backends.get(&collection_id).ok_or_else(|| {
+                VectorError::CollectionNotFound {
+                    name: collection.to_string(),
+                }
+            })?;
             let candidates = backend.search(query, k);
 
             for (vector_id, score) in candidates {
@@ -939,13 +931,11 @@ impl VectorStore {
             // Filter active - use adaptive over-fetch with O(1) key lookup + point-get for metadata
             let multipliers = [3, 6, 12];
             let state = self.state()?;
-            let backend =
-                state
-                    .backends
-                    .get(&collection_id)
-                    .ok_or_else(|| VectorError::CollectionNotFound {
-                        name: collection.to_string(),
-                    })?;
+            let backend = state.backends.get(&collection_id).ok_or_else(|| {
+                VectorError::CollectionNotFound {
+                    name: collection.to_string(),
+                }
+            })?;
             let collection_size = backend.len();
             let namespace = self.namespace_for(branch_id, space);
 
@@ -1056,13 +1046,11 @@ impl VectorStore {
         if filter.is_none() {
             // No filter — fetch exactly k
             let state = self.state()?;
-            let backend =
-                state
-                    .backends
-                    .get(&collection_id)
-                    .ok_or_else(|| VectorError::CollectionNotFound {
-                        name: collection.to_string(),
-                    })?;
+            let backend = state.backends.get(&collection_id).ok_or_else(|| {
+                VectorError::CollectionNotFound {
+                    name: collection.to_string(),
+                }
+            })?;
             let candidates = backend.search_at(query, k, as_of_ts);
             drop(backend);
 
@@ -1081,13 +1069,11 @@ impl VectorStore {
             // Filter active — adaptive over-fetch [3, 6, 12]
             let multipliers = [3, 6, 12];
             let state = self.state()?;
-            let backend =
-                state
-                    .backends
-                    .get(&collection_id)
-                    .ok_or_else(|| VectorError::CollectionNotFound {
-                        name: collection.to_string(),
-                    })?;
+            let backend = state.backends.get(&collection_id).ok_or_else(|| {
+                VectorError::CollectionNotFound {
+                    name: collection.to_string(),
+                }
+            })?;
             let collection_size = backend.len();
 
             for &mult in &multipliers {
@@ -1662,13 +1648,11 @@ impl VectorStore {
         let collection_id = CollectionId::new(branch_id, collection);
 
         let state = self.state()?;
-        let mut backend =
-            state
-                .backends
-                .get_mut(&collection_id)
-                .ok_or_else(|| VectorError::CollectionNotFound {
-                    name: collection.to_string(),
-                })?;
+        let mut backend = state.backends.get_mut(&collection_id).ok_or_else(|| {
+            VectorError::CollectionNotFound {
+                name: collection.to_string(),
+            }
+        })?;
 
         // Use insert_with_id_and_timestamp to maintain VectorId monotonicity
         // and preserve temporal data for time-travel queries after recovery.
@@ -2287,7 +2271,10 @@ impl VectorStore {
                         if is_from_source {
                             if let Some(src_bid) = source_branch_id {
                                 let src_cid = CollectionId::new(src_bid, &collection_name);
-                                let src_emb = state.backends.get(&src_cid).and_then(|b| b.get(old_vid).map(|e| e.to_vec()));
+                                let src_emb = state
+                                    .backends
+                                    .get(&src_cid)
+                                    .and_then(|b| b.get(old_vid).map(|e| e.to_vec()));
                                 match src_emb {
                                     Some(emb) => emb,
                                     None => match old_backend.as_ref().and_then(|b| b.get(old_vid))
@@ -2323,7 +2310,10 @@ impl VectorStore {
                                 None => {
                                     if let Some(src_bid) = source_branch_id {
                                         let src_cid = CollectionId::new(src_bid, &collection_name);
-                                        let src_emb = state.backends.get(&src_cid).and_then(|b| b.get(old_vid).map(|e| e.to_vec()));
+                                        let src_emb = state
+                                            .backends
+                                            .get(&src_cid)
+                                            .and_then(|b| b.get(old_vid).map(|e| e.to_vec()));
                                         match src_emb {
                                             Some(emb) => emb,
                                             None => {
@@ -3402,7 +3392,11 @@ mod tests {
         let collection_id = CollectionId::new(branch_id, "test");
         {
             let state = store.backends().unwrap();
-            assert!(state.backends.get(&collection_id).unwrap().contains(vector_id));
+            assert!(state
+                .backends
+                .get(&collection_id)
+                .unwrap()
+                .contains(vector_id));
         }
 
         // Replay deletion
@@ -3412,7 +3406,11 @@ mod tests {
 
         {
             let state = store.backends().unwrap();
-            assert!(!state.backends.get(&collection_id).unwrap().contains(vector_id));
+            assert!(!state
+                .backends
+                .get(&collection_id)
+                .unwrap()
+                .contains(vector_id));
         }
     }
 
