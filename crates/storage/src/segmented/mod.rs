@@ -431,21 +431,46 @@ impl SegmentedStore {
         self.segments_dir.is_some()
     }
 
-    /// Remove all data for a branch, decrementing refcounts for inherited segments.
-    /// Deletes segment files when the last reference is released.
+    /// Remove all data for a branch, cleaning up own segments and inherited refcounts.
+    /// Own segment files and the branch manifest are deleted immediately.
+    /// Inherited segment files are NOT deleted — their refcounts are decremented
+    /// and lazy cleanup happens during parent compaction.
     /// Returns true if the branch existed.
     pub fn clear_branch(&self, branch_id: &BranchId) -> bool {
         if let Some((_, branch)) = self.branches.remove(branch_id) {
+            // 1. Clean up the branch's own segments (not refcounted — always delete).
+            let ver = branch.version.load();
+            for level in &ver.levels {
+                for seg in level {
+                    crate::block_cache::global_cache().invalidate_file(seg.file_id());
+                    let _ = std::fs::remove_file(seg.file_path());
+                }
+            }
+
+            // 2. Decrement refcounts for inherited (shared) segments.
+            // Do NOT delete files here — the parent branch may still own
+            // the segment in its version.levels. Files are cleaned up
+            // lazily when parent compaction calls delete_segment_if_unreferenced
+            // (which checks is_referenced after the segment leaves the
+            // parent's version).
             for layer in &branch.inherited_layers {
                 for level in &layer.segments.levels {
                     for seg in level {
-                        if self.ref_registry.decrement(seg.file_id()) {
-                            crate::block_cache::global_cache().invalidate_file(seg.file_id());
-                            let _ = std::fs::remove_file(seg.file_path());
-                        }
+                        self.ref_registry.decrement(seg.file_id());
                     }
                 }
             }
+
+            // 3. Remove manifest file and branch directory from disk.
+            if let Some(segments_dir) = &self.segments_dir {
+                let branch_hex = hex_encode_branch(branch_id);
+                let branch_dir = segments_dir.join(&branch_hex);
+                let _ = std::fs::remove_file(branch_dir.join("segments.manifest"));
+                // remove_dir only succeeds if empty (safe — won't delete
+                // files we missed).
+                let _ = std::fs::remove_dir(&branch_dir);
+            }
+
             true
         } else {
             false
@@ -661,13 +686,13 @@ impl SegmentedStore {
         // 2f. Cleanup
         self.write_branch_manifest(child_branch_id);
 
-        // Decrement refcounts for each segment in the removed layer
+        // Decrement refcounts for each segment in the removed layer.
+        // Do NOT delete files here — the parent may still own the segment.
+        // Lazy cleanup happens via delete_segment_if_unreferenced during
+        // parent compaction.
         for level in &layer_segments.levels {
             for seg in level {
-                if self.ref_registry.decrement(seg.file_id()) {
-                    crate::block_cache::global_cache().invalidate_file(seg.file_id());
-                    let _ = std::fs::remove_file(seg.file_path());
-                }
+                self.ref_registry.decrement(seg.file_id());
             }
         }
 
@@ -771,44 +796,59 @@ impl SegmentedStore {
         // 2. Capture fork_version
         let fork_version = self.version.load(Ordering::Acquire);
 
-        // 3. Snapshot source segments + clone inherited layers
-        let source = self
-            .branches
-            .get(source_id)
-            .expect("fork_branch: source branch must exist");
-        let source_segments = source.version.load_full();
-        let source_inherited: Vec<InheritedLayer> = source
-            .inherited_layers
-            .iter()
-            .map(|l| InheritedLayer {
-                source_branch_id: l.source_branch_id,
-                fork_version: l.fork_version,
-                segments: Arc::clone(&l.segments),
-                status: l.status,
-            })
-            .collect();
-        drop(source);
+        // 3. Snapshot source segments + clone inherited layers.
+        //
+        // CRITICAL: Increment refcounts BEFORE dropping the source guard.
+        // Without this, concurrent parent compaction can delete segments
+        // between the snapshot and the refcount increment (see #1662).
+        let (dest_layers, segments_shared) = {
+            let source = match self.branches.get(source_id) {
+                Some(b) => b,
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "fork_branch: source branch no longer exists",
+                    ))
+                }
+            };
+            let source_segments = source.version.load_full();
+            let source_inherited: Vec<InheritedLayer> = source
+                .inherited_layers
+                .iter()
+                .map(|l| InheritedLayer {
+                    source_branch_id: l.source_branch_id,
+                    fork_version: l.fork_version,
+                    segments: Arc::clone(&l.segments),
+                    status: l.status,
+                })
+                .collect();
 
-        // 4. Build dest layers: [source_own, ...source_inherited]
-        let mut dest_layers = Vec::with_capacity(1 + source_inherited.len());
-        dest_layers.push(InheritedLayer {
-            source_branch_id: *source_id,
-            fork_version,
-            segments: source_segments,
-            status: LayerStatus::Active,
-        });
-        dest_layers.extend(source_inherited);
+            // 4. Build dest layers: [source_own, ...source_inherited]
+            let mut layers = Vec::with_capacity(1 + source_inherited.len());
+            layers.push(InheritedLayer {
+                source_branch_id: *source_id,
+                fork_version,
+                segments: source_segments,
+                status: LayerStatus::Active,
+            });
+            layers.extend(source_inherited);
 
-        // 5. Increment refcounts for all shared segments
-        let mut segments_shared = 0usize;
-        for layer in &dest_layers {
-            for level in &layer.segments.levels {
-                for seg in level {
-                    self.ref_registry.increment(seg.file_id());
-                    segments_shared += 1;
+            // 5. Increment refcounts while source guard is still held.
+            // The DashMap (branches) and ref_registry are independent
+            // DashMaps, so no deadlock risk.
+            let mut shared = 0usize;
+            for layer in &layers {
+                for level in &layer.segments.levels {
+                    for seg in level {
+                        self.ref_registry.increment(seg.file_id());
+                        shared += 1;
+                    }
                 }
             }
-        }
+
+            (layers, shared)
+            // source DashMap guard drops here — segments are now protected
+        };
 
         // 6. Attach to dest branch, decrementing refcounts for any prior layers
         let mut dest = self

@@ -6109,3 +6109,304 @@ fn materialize_multi_level_inherited_layer() {
         .unwrap();
     assert_eq!(c.value, Value::Int(3));
 }
+
+// =====================================================================
+// Bug-fix regression tests (#1662, #1663, #1664)
+// =====================================================================
+
+/// #1663: clear_branch() must delete own segment files, manifest, and branch dir.
+#[test]
+fn clear_branch_deletes_own_segments_and_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // Write data to child and flush to produce own segments
+    seed(&store, child_kv("x"), Value::Int(10), 1);
+    store.rotate_memtable(&child_branch());
+    store.flush_oldest_frozen(&child_branch()).unwrap();
+
+    seed(&store, child_kv("y"), Value::Int(20), 2);
+    store.rotate_memtable(&child_branch());
+    store.flush_oldest_frozen(&child_branch()).unwrap();
+
+    // Collect own segment file paths
+    let child_state = store.branches.get(&child_branch()).unwrap();
+    let own_paths: Vec<std::path::PathBuf> = child_state
+        .version
+        .load()
+        .levels
+        .iter()
+        .flat_map(|level| level.iter().map(|s| s.file_path().to_path_buf()))
+        .collect();
+    drop(child_state);
+    assert!(!own_paths.is_empty(), "should have own segment files");
+
+    // Verify manifest exists
+    let branch_hex = hex_encode_branch(&child_branch());
+    let branch_dir = dir.path().join(&branch_hex);
+    let manifest_path = branch_dir.join("segments.manifest");
+    assert!(manifest_path.exists(), "manifest should exist before clear");
+
+    // Clear the branch
+    assert!(store.clear_branch(&child_branch()));
+
+    // Own segment files must be deleted
+    for path in &own_paths {
+        assert!(
+            !path.exists(),
+            "Own segment {:?} should be deleted by clear_branch",
+            path
+        );
+    }
+
+    // Manifest must be deleted
+    assert!(
+        !manifest_path.exists(),
+        "manifest should be deleted by clear_branch"
+    );
+
+    // Branch directory should be removed (was empty after file cleanup)
+    assert!(
+        !branch_dir.exists(),
+        "branch directory should be removed by clear_branch"
+    );
+}
+
+/// #1663: clear_branch() must clean up inherited segment refcounts AND own segments.
+/// Inherited segment files must NOT be deleted when the parent still owns them.
+#[test]
+fn clear_branch_cleans_up_inherited_and_own_segments() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // Set up parent with a segment
+    seed(&store, parent_kv("a"), Value::Int(1), 1);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // Fork parent → child (increments refcounts on parent segments)
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    // Write own data to child and flush
+    seed(&store, child_kv("b"), Value::Int(2), 2);
+    store.rotate_memtable(&child_branch());
+    store.flush_oldest_frozen(&child_branch()).unwrap();
+
+    // Collect paths
+    let child_state = store.branches.get(&child_branch()).unwrap();
+    let own_paths: Vec<std::path::PathBuf> = child_state
+        .version
+        .load()
+        .levels
+        .iter()
+        .flat_map(|level| level.iter().map(|s| s.file_path().to_path_buf()))
+        .collect();
+    let inherited_paths: Vec<std::path::PathBuf> = child_state
+        .inherited_layers
+        .iter()
+        .flat_map(|l| l.segments.levels.iter())
+        .flat_map(|level| level.iter().map(|s| s.file_path().to_path_buf()))
+        .collect();
+    let inherited_ids: Vec<u64> = child_state
+        .inherited_layers
+        .iter()
+        .flat_map(|l| l.segments.levels.iter())
+        .flat_map(|level| level.iter().map(|s| s.file_id()))
+        .collect();
+    drop(child_state);
+
+    assert!(!own_paths.is_empty());
+    assert!(!inherited_paths.is_empty());
+
+    // Clear child — parent has NOT compacted, so inherited segment files
+    // must survive (parent still owns them in its version.levels).
+    assert!(store.clear_branch(&child_branch()));
+
+    // Own segments must be gone
+    for path in &own_paths {
+        assert!(!path.exists(), "Own segment {:?} should be deleted", path);
+    }
+
+    // Inherited segment files must still exist (parent owns them)
+    for path in &inherited_paths {
+        assert!(
+            path.exists(),
+            "Inherited segment {:?} should still exist (parent owns it)",
+            path
+        );
+    }
+
+    // Refcounts should be released
+    for id in &inherited_ids {
+        assert!(
+            !store.ref_registry.is_referenced(*id),
+            "Inherited segment {} should have refcount=0 after clear",
+            id
+        );
+    }
+
+    // Parent can still read its data
+    let result = store
+        .get_versioned(&parent_kv("a"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.value, Value::Int(1));
+}
+
+/// #1664: Concurrent fork + compaction must not lose segments.
+///
+/// Validates the #1662 fix: refcount increments happen before the DashMap
+/// source guard is dropped, so concurrent parent compaction cannot delete
+/// segments that the fork just snapshotted.
+#[test]
+fn concurrent_fork_and_compaction_no_data_loss() {
+    use std::sync::{Arc, Barrier};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(SegmentedStore::with_dir(dir.path().to_path_buf(), 0));
+
+    // Write enough parent data to trigger compaction (need ≥2 L0 segments)
+    for i in 0..50 {
+        seed(
+            &store,
+            parent_kv(&format!("key{:04}", i)),
+            Value::Int(i as i64),
+            1,
+        );
+    }
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    for i in 50..100 {
+        seed(
+            &store,
+            parent_kv(&format!("key{:04}", i)),
+            Value::Int(i as i64),
+            2,
+        );
+    }
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // Ensure child branch exists
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+
+    // Run fork and compaction concurrently
+    let barrier = Arc::new(Barrier::new(2));
+
+    let store_fork = Arc::clone(&store);
+    let barrier_fork = Arc::clone(&barrier);
+    let fork_handle = std::thread::spawn(move || {
+        barrier_fork.wait();
+        store_fork
+            .fork_branch(&parent_branch(), &child_branch())
+            .unwrap()
+    });
+
+    let store_compact = Arc::clone(&store);
+    let barrier_compact = Arc::clone(&barrier);
+    let compact_handle = std::thread::spawn(move || {
+        barrier_compact.wait();
+        store_compact.compact_branch(&parent_branch(), 0)
+    });
+
+    let (_fork_ver, segments_shared) = fork_handle.join().unwrap();
+    let _compact_result = compact_handle.join().unwrap();
+
+    assert!(segments_shared > 0, "fork should share segments");
+
+    // The critical check: child must be able to read ALL inherited data
+    // without ENOENT errors on deleted segment files.
+    for i in 0..100 {
+        let key = child_kv(&format!("key{:04}", i));
+        let result = store.get_versioned(&key, u64::MAX).unwrap();
+        assert!(
+            result.is_some(),
+            "child should see inherited key {:04} — segment file must not be deleted",
+            i
+        );
+        assert_eq!(result.unwrap().value, Value::Int(i as i64));
+    }
+}
+
+/// #1664: Run multiple rounds of concurrent fork + compaction to increase
+/// the chance of hitting the race window.
+#[test]
+fn concurrent_fork_and_compaction_stress() {
+    use std::sync::{Arc, Barrier};
+
+    for round in 0..10 {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SegmentedStore::with_dir(dir.path().to_path_buf(), 0));
+
+        // Two L0 segments on parent
+        for i in 0..20 {
+            seed(
+                &store,
+                parent_kv(&format!("r{}k{:04}", round, i)),
+                Value::Int(i as i64),
+                1,
+            );
+        }
+        store.rotate_memtable(&parent_branch());
+        store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+        for i in 20..40 {
+            seed(
+                &store,
+                parent_kv(&format!("r{}k{:04}", round, i)),
+                Value::Int(i as i64),
+                2,
+            );
+        }
+        store.rotate_memtable(&parent_branch());
+        store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+        store
+            .branches
+            .entry(child_branch())
+            .or_insert_with(BranchState::new);
+
+        let barrier = Arc::new(Barrier::new(2));
+
+        let s1 = Arc::clone(&store);
+        let b1 = Arc::clone(&barrier);
+        let t1 = std::thread::spawn(move || {
+            b1.wait();
+            s1.fork_branch(&parent_branch(), &child_branch())
+        });
+
+        let s2 = Arc::clone(&store);
+        let b2 = Arc::clone(&barrier);
+        let t2 = std::thread::spawn(move || {
+            b2.wait();
+            s2.compact_branch(&parent_branch(), 0)
+        });
+
+        let fork_result = t1.join().unwrap().unwrap();
+        let _compact_result = t2.join().unwrap();
+
+        assert!(fork_result.1 > 0);
+
+        // Verify all data readable from child
+        for i in 0..40 {
+            let key = child_kv(&format!("r{}k{:04}", round, i));
+            let result = store.get_versioned(&key, u64::MAX).unwrap();
+            assert!(
+                result.is_some(),
+                "round {}: child missing key {:04}",
+                round,
+                i
+            );
+        }
+    }
+}
