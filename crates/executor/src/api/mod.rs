@@ -1081,17 +1081,19 @@ mod tests {
 
     #[test]
     fn test_branches_fork() {
-        let db = create_strata();
+        let dir = tempfile::tempdir().unwrap();
+        let db = Strata::open(dir.path()).unwrap();
 
         // Write some data to default branch
         db.kv_put("key1", "value1").unwrap();
         db.kv_put("key2", 42i64).unwrap();
 
-        // Fork default branch to "forked"
+        // Fork default branch to "forked" (no data copy)
         let info = db.fork_branch("forked").unwrap();
         assert_eq!(info.source, "default");
         assert_eq!(info.destination, "forked");
-        assert!(info.keys_copied >= 2);
+        assert_eq!(info.keys_copied, 0, "fork copies zero keys");
+        assert!(info.fork_version.is_some(), "fork returns fork_version");
     }
 
     #[test]

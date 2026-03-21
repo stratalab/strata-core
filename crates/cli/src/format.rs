@@ -102,13 +102,23 @@ pub fn format_fork_info(info: &ForkInfo, mode: OutputMode) -> String {
             "destination": info.destination,
             "keys_copied": info.keys_copied,
             "spaces_copied": info.spaces_copied,
+            "fork_version": info.fork_version,
         }))
         .unwrap(),
         OutputMode::Raw => format!("{}", info.keys_copied),
-        OutputMode::Human => format!(
-            "Forked \"{}\" -> \"{}\" ({} keys, {} spaces)",
-            info.source, info.destination, info.keys_copied, info.spaces_copied
-        ),
+        OutputMode::Human => {
+            if let Some(fv) = info.fork_version {
+                format!(
+                    "Forked \"{}\" -> \"{}\" (version {}, {} spaces)",
+                    info.source, info.destination, fv, info.spaces_copied
+                )
+            } else {
+                format!(
+                    "Forked \"{}\" -> \"{}\" ({} keys, {} spaces)",
+                    info.source, info.destination, info.keys_copied, info.spaces_copied
+                )
+            }
+        }
     }
 }
 

@@ -4836,3 +4836,568 @@ fn inherited_layer_non_kv_type_tags() {
         .unwrap()
         .is_none());
 }
+
+// =========================================================================
+// COW Fork — SegmentedStore::fork_branch() tests
+// =========================================================================
+
+fn grandchild_branch() -> BranchId {
+    BranchId::from_bytes([30; 16])
+}
+
+fn grandchild_ns() -> Arc<Namespace> {
+    Arc::new(Namespace::new(grandchild_branch(), "default".to_string()))
+}
+
+fn grandchild_kv(name: &str) -> Key {
+    Key::new(grandchild_ns(), TypeTag::KV, name.as_bytes().to_vec())
+}
+
+#[test]
+fn fork_creates_inherited_layer() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // Write data to parent and flush to segments
+    seed(&store, parent_kv("a"), Value::Int(1), 1);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // Create child branch
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+
+    // Fork
+    let (fork_version, segments_shared) = store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    // Verify inherited layer
+    let child = store.branches.get(&child_branch()).unwrap();
+    assert_eq!(child.inherited_layers.len(), 1);
+    assert_eq!(child.inherited_layers[0].source_branch_id, parent_branch());
+    assert_eq!(child.inherited_layers[0].fork_version, fork_version);
+    assert_eq!(child.inherited_layers[0].status, LayerStatus::Active);
+    assert!(segments_shared > 0);
+}
+
+#[test]
+fn fork_no_data_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // Write data to parent and flush
+    seed(&store, parent_kv("a"), Value::Int(1), 1);
+    seed(&store, parent_kv("b"), Value::Int(2), 2);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // Create child branch
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+
+    // Fork
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    // Child's own segments should be empty
+    let child = store.branches.get(&child_branch()).unwrap();
+    assert_eq!(child.version.load().total_segment_count(), 0);
+    assert!(child.active.is_empty());
+    assert!(child.frozen.is_empty());
+}
+
+#[test]
+fn fork_read_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    seed(&store, parent_kv("x"), Value::Int(42), 1);
+    seed(&store, parent_kv("y"), Value::String("hello".into()), 2);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    // Point lookups on child return parent's data
+    let r = store
+        .get_versioned(&child_kv("x"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.value, Value::Int(42));
+
+    let r = store
+        .get_versioned(&child_kv("y"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.value, Value::String("hello".into()));
+
+    // Non-existent key
+    assert!(store
+        .get_versioned(&child_kv("z"), u64::MAX)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn fork_write_shadows() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    seed(&store, parent_kv("k"), Value::Int(1), 1);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    // Write to child shadows inherited data
+    let child_version = store.next_version();
+    store
+        .put_with_version_mode(
+            child_kv("k"),
+            Value::Int(99),
+            child_version,
+            None,
+            WriteMode::Append,
+        )
+        .unwrap();
+
+    let r = store
+        .get_versioned(&child_kv("k"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.value, Value::Int(99));
+
+    // Parent is unchanged
+    let r = store
+        .get_versioned(&parent_kv("k"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.value, Value::Int(1));
+}
+
+#[test]
+fn fork_parent_write_invisible() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    seed(&store, parent_kv("k"), Value::Int(1), 1);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    // Write new data to parent after fork — flush to new segment
+    let v = store.next_version();
+    store
+        .put_with_version_mode(
+            parent_kv("new_key"),
+            Value::Int(999),
+            v,
+            None,
+            WriteMode::Append,
+        )
+        .unwrap();
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // Child should NOT see the new parent key
+    assert!(store
+        .get_versioned(&child_kv("new_key"), u64::MAX)
+        .unwrap()
+        .is_none());
+
+    // But parent sees it
+    assert_eq!(
+        store
+            .get_versioned(&parent_kv("new_key"), u64::MAX)
+            .unwrap()
+            .unwrap()
+            .value,
+        Value::Int(999)
+    );
+}
+
+#[test]
+fn fork_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    seed(&store, parent_kv("user/alice"), Value::Int(1), 1);
+    seed(&store, parent_kv("user/bob"), Value::Int(2), 2);
+    seed(&store, parent_kv("config/x"), Value::Int(3), 3);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    // Prefix scan on child finds inherited data
+    let prefix = Key::new(child_ns(), TypeTag::KV, "user/".as_bytes().to_vec());
+    let results = store.scan_prefix(&prefix, u64::MAX).unwrap();
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn fork_chain_3_levels() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // Grandparent → parent → child
+    seed(&store, parent_kv("gp_key"), Value::Int(100), 1);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // Fork parent → child
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    // Write something to child, flush
+    let v = store.next_version();
+    store
+        .put_with_version_mode(
+            child_kv("child_key"),
+            Value::Int(200),
+            v,
+            None,
+            WriteMode::Append,
+        )
+        .unwrap();
+    store.rotate_memtable(&child_branch());
+    store.flush_oldest_frozen(&child_branch()).unwrap();
+
+    // Fork child → grandchild
+    store
+        .branches
+        .entry(grandchild_branch())
+        .or_insert_with(BranchState::new);
+    store
+        .fork_branch(&child_branch(), &grandchild_branch())
+        .unwrap();
+
+    // Grandchild should see parent's data via flattened layers
+    let gc = store.branches.get(&grandchild_branch()).unwrap();
+    assert_eq!(
+        gc.inherited_layers.len(),
+        2,
+        "grandchild has 2 inherited layers"
+    );
+
+    // Grandchild sees child's own data
+    let r = store
+        .get_versioned(&grandchild_kv("child_key"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.value, Value::Int(200));
+
+    // Grandchild sees grandparent's data (through child's inherited layer)
+    let r = store
+        .get_versioned(&grandchild_kv("gp_key"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.value, Value::Int(100));
+}
+
+#[test]
+fn fork_refcounts_incremented() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    seed(&store, parent_kv("a"), Value::Int(1), 1);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // Get segment file_id before fork
+    let parent_state = store.branches.get(&parent_branch()).unwrap();
+    let seg_ids: Vec<u64> = parent_state
+        .version
+        .load()
+        .levels
+        .iter()
+        .flat_map(|l| l.iter().map(|s| s.file_id()))
+        .collect();
+    drop(parent_state);
+    assert!(!seg_ids.is_empty());
+
+    // Before fork: segments are untracked
+    for &id in &seg_ids {
+        assert!(!store.ref_registry.is_referenced(id));
+    }
+
+    // Fork
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    // After fork: refcounts are incremented
+    for &id in &seg_ids {
+        assert!(
+            store.ref_registry.is_referenced(id),
+            "Segment {} should be referenced after fork",
+            id
+        );
+    }
+}
+
+#[test]
+fn fork_refcounts_on_clear() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    seed(&store, parent_kv("a"), Value::Int(1), 1);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    let parent_state = store.branches.get(&parent_branch()).unwrap();
+    let seg_ids: Vec<u64> = parent_state
+        .version
+        .load()
+        .levels
+        .iter()
+        .flat_map(|l| l.iter().map(|s| s.file_id()))
+        .collect();
+    drop(parent_state);
+
+    // Fork
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    // Verify referenced
+    for &id in &seg_ids {
+        assert!(store.ref_registry.is_referenced(id));
+    }
+
+    // Clear child — refcounts should be decremented
+    store.clear_branch(&child_branch());
+
+    for &id in &seg_ids {
+        assert!(
+            !store.ref_registry.is_referenced(id),
+            "Segment {} should not be referenced after clear",
+            id
+        );
+    }
+}
+
+#[test]
+fn fork_manifest_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    seed(&store, parent_kv("a"), Value::Int(1), 1);
+    seed(&store, parent_kv("b"), Value::Int(2), 2);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    let (fork_version, _) = store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    // Verify inherited layers are present before recovery
+    {
+        let child = store.branches.get(&child_branch()).unwrap();
+        assert_eq!(child.inherited_layers.len(), 1);
+        assert_eq!(child.inherited_layers[0].fork_version, fork_version);
+    }
+
+    // Create a new store and recover from the same directory
+    let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    store2.recover_segments().unwrap();
+
+    // Verify child branch recovered with inherited layers
+    let child2 = store2.branches.get(&child_branch());
+    assert!(
+        child2.is_some(),
+        "Child branch should survive manifest recovery"
+    );
+    let child2 = child2.unwrap();
+    assert_eq!(
+        child2.inherited_layers.len(),
+        1,
+        "Inherited layers should survive recovery"
+    );
+    assert_eq!(child2.inherited_layers[0].fork_version, fork_version);
+
+    // Verify data is readable through inherited layers after recovery
+    let r = store2
+        .get_versioned(&child_kv("a"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.value, Value::Int(1));
+}
+
+#[test]
+fn fork_self_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    seed(&store, parent_kv("a"), Value::Int(1), 1);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    let result = store.fork_branch(&parent_branch(), &parent_branch());
+    assert!(result.is_err(), "Self-fork must be rejected");
+    let err = result.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn fork_ephemeral_succeeds_at_storage_level() {
+    // The storage layer allows fork on ephemeral stores (data stays in memtables).
+    // The engine layer guards against this with has_segments_dir().
+    let store = SegmentedStore::new();
+    assert!(!store.has_segments_dir());
+
+    seed(&store, parent_kv("a"), Value::Int(1), 1);
+
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+
+    // Fork succeeds — flush is a no-op, snapshot captures empty SegmentVersion
+    let (fork_version, segments_shared) = store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+    let _ = fork_version;
+    assert_eq!(segments_shared, 0, "No segments on ephemeral store");
+
+    // Data written to parent's memtable is NOT visible to child via inherited
+    // layers (memtable data is not captured in the segment snapshot).
+    // The engine layer prevents this by checking has_segments_dir() first.
+    assert!(store
+        .get_versioned(&child_kv("a"), u64::MAX)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn fork_empty_source_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // Create parent branch with no data (no segments)
+    store
+        .branches
+        .entry(parent_branch())
+        .or_insert_with(BranchState::new);
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+
+    let (fork_version, _segments_shared) = store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    // fork_version is still valid (captures current version counter)
+    let _ = fork_version;
+
+    // Child has one inherited layer, reads return nothing
+    let child = store.branches.get(&child_branch()).unwrap();
+    assert_eq!(child.inherited_layers.len(), 1);
+    assert!(store
+        .get_versioned(&child_kv("anything"), u64::MAX)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn fork_double_fork_same_dest_overwrites_layers() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    seed(&store, parent_kv("a"), Value::Int(1), 1);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+
+    // Fork once
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    // Collect segment IDs after first fork for refcount verification
+    let child_state = store.branches.get(&child_branch()).unwrap();
+    let first_fork_seg_ids: Vec<u64> = child_state
+        .inherited_layers
+        .iter()
+        .flat_map(|l| l.segments.levels.iter())
+        .flat_map(|level| level.iter().map(|s| s.file_id()))
+        .collect();
+    drop(child_state);
+
+    // After first fork, each inherited segment has refcount 1
+    for &id in &first_fork_seg_ids {
+        assert_eq!(store.ref_registry.ref_count(id), 1);
+    }
+
+    // Fork again — old layers decremented, new layers incremented
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    let child = store.branches.get(&child_branch()).unwrap();
+    // Should still have exactly 1 inherited layer (not 2)
+    assert_eq!(child.inherited_layers.len(), 1);
+
+    // Original segments should still have refcount 1 (old layers decremented,
+    // new layers include the same segments and re-incremented them).
+    for &id in &first_fork_seg_ids {
+        assert!(
+            store.ref_registry.ref_count(id) >= 1,
+            "Segment {} should still be referenced after re-fork",
+            id
+        );
+    }
+}

@@ -411,9 +411,109 @@ impl SegmentedStore {
         self.branches.iter().map(|entry| *entry.key()).collect()
     }
 
-    /// Remove all data for a branch.  Returns true if the branch existed.
+    /// Returns `true` if this store is backed by a segments directory (disk-backed).
+    pub fn has_segments_dir(&self) -> bool {
+        self.segments_dir.is_some()
+    }
+
+    /// Remove all data for a branch, decrementing refcounts for inherited segments.
+    /// Returns true if the branch existed.
     pub fn clear_branch(&self, branch_id: &BranchId) -> bool {
-        self.branches.remove(branch_id).is_some()
+        if let Some((_, branch)) = self.branches.remove(branch_id) {
+            for layer in &branch.inherited_layers {
+                for level in &layer.segments.levels {
+                    for seg in level {
+                        self.ref_registry.decrement(seg.file_id());
+                    }
+                }
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Fork source branch onto destination via COW inherited layers.
+    ///
+    /// Flushes source memtables, snapshots segments, attaches as inherited
+    /// layer on dest, increments refcounts. Returns `(fork_version, segments_shared)`.
+    pub fn fork_branch(
+        &self,
+        source_id: &BranchId,
+        dest_id: &BranchId,
+    ) -> io::Result<(u64, usize)> {
+        if source_id == dest_id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "fork_branch: source and destination must be different branches",
+            ));
+        }
+
+        // 1. Flush source memtables to segments
+        self.rotate_memtable(source_id);
+        while self.flush_oldest_frozen(source_id)? {}
+
+        // 2. Capture fork_version
+        let fork_version = self.version.load(Ordering::Acquire);
+
+        // 3. Snapshot source segments + clone inherited layers
+        let source = self
+            .branches
+            .get(source_id)
+            .expect("fork_branch: source branch must exist");
+        let source_segments = source.version.load_full();
+        let source_inherited: Vec<InheritedLayer> = source
+            .inherited_layers
+            .iter()
+            .map(|l| InheritedLayer {
+                source_branch_id: l.source_branch_id,
+                fork_version: l.fork_version,
+                segments: Arc::clone(&l.segments),
+                status: l.status,
+            })
+            .collect();
+        drop(source);
+
+        // 4. Build dest layers: [source_own, ...source_inherited]
+        let mut dest_layers = Vec::with_capacity(1 + source_inherited.len());
+        dest_layers.push(InheritedLayer {
+            source_branch_id: *source_id,
+            fork_version,
+            segments: source_segments,
+            status: LayerStatus::Active,
+        });
+        dest_layers.extend(source_inherited);
+
+        // 5. Increment refcounts for all shared segments
+        let mut segments_shared = 0usize;
+        for layer in &dest_layers {
+            for level in &layer.segments.levels {
+                for seg in level {
+                    self.ref_registry.increment(seg.file_id());
+                    segments_shared += 1;
+                }
+            }
+        }
+
+        // 6. Attach to dest branch, decrementing refcounts for any prior layers
+        let mut dest = self
+            .branches
+            .entry(*dest_id)
+            .or_insert_with(BranchState::new);
+        for old_layer in &dest.inherited_layers {
+            for level in &old_layer.segments.levels {
+                for seg in level {
+                    self.ref_registry.decrement(seg.file_id());
+                }
+            }
+        }
+        dest.inherited_layers = dest_layers;
+        drop(dest);
+
+        // 7. Write manifest
+        self.write_branch_manifest(dest_id);
+
+        Ok((fork_version, segments_shared))
     }
 
     /// Count distinct live (non-tombstone, non-expired) logical keys in a branch.
@@ -1236,10 +1336,6 @@ impl SegmentedStore {
                 }
             }
 
-            if branch_segments.is_empty() {
-                continue;
-            }
-
             // Try to read manifest for level assignments
             let manifest = match crate::manifest::read_manifest(&path) {
                 Ok(m) => m,
@@ -1252,6 +1348,14 @@ impl SegmentedStore {
                     None
                 }
             };
+
+            // Skip branches with no segments and no inherited layers
+            let has_inherited = manifest
+                .as_ref()
+                .is_some_and(|m| !m.inherited_layers.is_empty());
+            if branch_segments.is_empty() && !has_inherited {
+                continue;
+            }
 
             // Partition segments into levels based on manifest
             let mut level_segs: Vec<Vec<Arc<KVSegment>>> = vec![Vec::new(); NUM_LEVELS];
@@ -1765,6 +1869,17 @@ impl SegmentedStore {
         let ver = branch.version.load();
         let branch_hex = hex_encode_branch(branch_id);
         let branch_dir = segments_dir.join(&branch_hex);
+
+        // Ensure the branch directory exists (needed for COW forks with
+        // no own segments but inherited layers that need a manifest).
+        if let Err(e) = std::fs::create_dir_all(&branch_dir) {
+            tracing::warn!(
+                branch = %branch_hex,
+                error = %e,
+                "failed to create branch directory for manifest"
+            );
+            return;
+        }
 
         let mut entries = Vec::new();
         for (level_idx, level) in ver.levels.iter().enumerate() {
