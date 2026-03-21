@@ -55,6 +55,9 @@ const LEVEL_MULTIPLIER: u64 = 10;
 /// output split.  Set to 10 × TARGET_FILE_SIZE (640MB).
 const MAX_GRANDPARENT_OVERLAP: u64 = 10 * TARGET_FILE_SIZE;
 
+/// Maximum inherited layer depth before background materialization is triggered.
+const MAX_INHERITED_LAYERS: usize = 4;
+
 /// Minimum L1 target size for dynamic level sizing (1MB).
 /// Prevents degenerate zero-size targets on tiny embedded datasets.
 const MIN_BASE_BYTES: u64 = 1 << 20;
@@ -132,6 +135,19 @@ pub struct CompactionResult {
 }
 
 // ---------------------------------------------------------------------------
+// MaterializeResult
+// ---------------------------------------------------------------------------
+
+/// Statistics returned by [`SegmentedStore::materialize_layer`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializeResult {
+    /// Number of entries copied from the inherited layer into own segments.
+    pub entries_materialized: u64,
+    /// Number of new segment files created (0 or 1).
+    pub segments_created: usize,
+}
+
+// ---------------------------------------------------------------------------
 // SegmentVersion
 // ---------------------------------------------------------------------------
 
@@ -185,7 +201,6 @@ enum LayerStatus {
     /// Layer is active — reads fall through to parent segments.
     Active,
     /// Materialization in progress (reset to Active on crash recovery).
-    #[allow(dead_code)] // Constructed in Epic C (COW materialization)
     Materializing,
     /// Layer has been fully materialized into own segments.
     Materialized,
@@ -417,13 +432,17 @@ impl SegmentedStore {
     }
 
     /// Remove all data for a branch, decrementing refcounts for inherited segments.
+    /// Deletes segment files when the last reference is released.
     /// Returns true if the branch existed.
     pub fn clear_branch(&self, branch_id: &BranchId) -> bool {
         if let Some((_, branch)) = self.branches.remove(branch_id) {
             for layer in &branch.inherited_layers {
                 for level in &layer.segments.levels {
                     for seg in level {
-                        self.ref_registry.decrement(seg.file_id());
+                        if self.ref_registry.decrement(seg.file_id()) {
+                            crate::block_cache::global_cache().invalidate_file(seg.file_id());
+                            let _ = std::fs::remove_file(seg.file_path());
+                        }
                     }
                 }
             }
@@ -431,6 +450,302 @@ impl SegmentedStore {
         } else {
             false
         }
+    }
+
+    /// Number of inherited layers for a branch.
+    pub fn inherited_layer_count(&self, branch_id: &BranchId) -> usize {
+        self.branches
+            .get(branch_id)
+            .map_or(0, |b| b.inherited_layers.len())
+    }
+
+    /// Return branch IDs where inherited layer depth exceeds `MAX_INHERITED_LAYERS`.
+    pub fn branches_needing_materialization(&self) -> Vec<BranchId> {
+        self.branches
+            .iter()
+            .filter_map(|entry| {
+                if entry.value().inherited_layers.len() > MAX_INHERITED_LAYERS {
+                    Some(*entry.key())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Materialize a single inherited layer into the child's own segments.
+    ///
+    /// Copies entries from `inherited_layers[layer_index]` that are not
+    /// shadowed by the child's own data or closer layers. Follows the same
+    /// snapshot → release → I/O → re-acquire pattern as `flush_oldest_frozen`.
+    ///
+    /// Returns `Err` on I/O failure, `Ok(result)` on success.
+    pub fn materialize_layer(
+        &self,
+        child_branch_id: &BranchId,
+        layer_index: usize,
+    ) -> io::Result<MaterializeResult> {
+        let segments_dir = match &self.segments_dir {
+            Some(d) => d,
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "materialize_layer requires a disk-backed store",
+                ))
+            }
+        };
+
+        // 2a. Snapshot under read guard
+        let (layer_segments, _source_branch_id, fork_version, own_version, closer_layers) = {
+            let branch = match self.branches.get(child_branch_id) {
+                Some(b) => b,
+                None => return Err(io::Error::new(io::ErrorKind::NotFound, "branch not found")),
+            };
+            if layer_index >= branch.inherited_layers.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "layer_index {} out of bounds (have {})",
+                        layer_index,
+                        branch.inherited_layers.len()
+                    ),
+                ));
+            }
+            let layer = &branch.inherited_layers[layer_index];
+            let layer_segments = Arc::clone(&layer.segments);
+            let source_branch_id = layer.source_branch_id;
+            let fork_version = layer.fork_version;
+            let own_version = branch.version.load_full();
+
+            // Snapshot closer inherited layers (indices 0..layer_index)
+            let closer_layers: Vec<(Arc<SegmentVersion>, BranchId, u64)> = branch.inherited_layers
+                [..layer_index]
+                .iter()
+                .map(|l| (Arc::clone(&l.segments), l.source_branch_id, l.fork_version))
+                .collect();
+
+            (
+                layer_segments,
+                source_branch_id,
+                fork_version,
+                own_version,
+                closer_layers,
+            )
+            // DashMap guard drops here
+        };
+
+        // 2b. Set status to Materializing
+        {
+            let mut branch = match self.branches.get_mut(child_branch_id) {
+                Some(b) => b,
+                None => return Err(io::Error::new(io::ErrorKind::NotFound, "branch not found")),
+            };
+            if layer_index < branch.inherited_layers.len() {
+                branch.inherited_layers[layer_index].status = LayerStatus::Materializing;
+            }
+        }
+        self.write_branch_manifest(child_branch_id);
+
+        // 2c. Build materialized entries (no locks held — I/O heavy)
+        let mut entries: Vec<(InternalKey, MemtableEntry)> = Vec::new();
+
+        // Cache shadow detection result per logical key (same typed_key_prefix).
+        // `iter_seek_all` yields entries sorted by key, so all versions of the
+        // same key are consecutive — one lookup per unique key suffices.
+        let mut last_shadow_key: Option<Vec<u8>> = None;
+        let mut last_shadow_result: bool = false; // true = shadowed (skip)
+
+        for level in &layer_segments.levels {
+            for seg in level {
+                for (ik, se) in seg.iter_seek_all() {
+                    // Filter: skip entries with commit_id > fork_version
+                    if se.commit_id > fork_version {
+                        continue;
+                    }
+
+                    let typed_key = ik.typed_key_prefix();
+
+                    // Rewrite branch_id: source → child
+                    let child_typed_key = rewrite_branch_id_bytes(typed_key, child_branch_id);
+
+                    // Shadow detection (cached per logical key)
+                    let is_shadowed = if last_shadow_key.as_deref() == Some(&child_typed_key) {
+                        last_shadow_result
+                    } else {
+                        let shadowed =
+                            Self::key_exists_in_own_segments(&own_version, &child_typed_key)
+                                || closer_layers.iter().any(
+                                    |(closer_segs, closer_source, closer_fork)| {
+                                        Self::key_exists_in_layer(
+                                            closer_segs,
+                                            *closer_source,
+                                            &child_typed_key,
+                                            *closer_fork,
+                                        )
+                                    },
+                                );
+                        last_shadow_key = Some(child_typed_key.clone());
+                        last_shadow_result = shadowed;
+                        shadowed
+                    };
+
+                    if is_shadowed {
+                        continue;
+                    }
+
+                    // Rewrite full internal key: source → child
+                    let child_ik_bytes = rewrite_branch_id_bytes(ik.as_bytes(), child_branch_id);
+                    let child_ik = InternalKey::from_bytes(child_ik_bytes);
+
+                    entries.push((child_ik, segment_entry_to_memtable_entry(se)));
+                }
+            }
+        }
+
+        let entries_materialized = entries.len() as u64;
+
+        // Sort entries by InternalKey — required because entries from multiple
+        // segments/levels are not globally sorted (L0 segments overlap, and
+        // entries span L0 through L6). SegmentBuilder expects sorted input.
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // 2d. Build segment file (no locks held)
+        let mut segments_created = 0usize;
+        let new_segment = if !entries.is_empty() {
+            let seg_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
+            let branch_hex = hex_encode_branch(child_branch_id);
+            let branch_dir = segments_dir.join(&branch_hex);
+            std::fs::create_dir_all(&branch_dir)?;
+            let seg_path = branch_dir.join(format!("{}.sst", seg_id));
+
+            let builder = SegmentBuilder::default()
+                .with_compression(crate::segment_builder::CompressionCodec::None);
+            builder.build_from_iter(entries.into_iter(), &seg_path)?;
+
+            let segment = KVSegment::open(&seg_path)?;
+            segment.pin_bloom_partitions();
+            segments_created = 1;
+            Some(segment)
+        } else {
+            None
+        };
+
+        // 2e. Atomic install (under DashMap write guard)
+        {
+            let mut branch = self
+                .branches
+                .entry(*child_branch_id)
+                .or_insert_with(BranchState::new);
+
+            // Prepend new segment to L0 (if we built one)
+            if let Some(seg) = new_segment {
+                let old_ver = branch.version.load();
+                let mut new_l0 = Vec::with_capacity(old_ver.l0_segments().len() + 1);
+                new_l0.push(Arc::new(seg));
+                new_l0.extend(old_ver.l0_segments().iter().cloned());
+                let mut new_levels = old_ver.levels.clone();
+                new_levels[0] = new_l0;
+                branch
+                    .version
+                    .store(Arc::new(SegmentVersion { levels: new_levels }));
+            }
+
+            // Remove the inherited layer
+            if layer_index < branch.inherited_layers.len() {
+                branch.inherited_layers.remove(layer_index);
+            }
+
+            refresh_level_targets(&mut branch);
+        }
+
+        // 2f. Cleanup
+        self.write_branch_manifest(child_branch_id);
+
+        // Decrement refcounts for each segment in the removed layer
+        for level in &layer_segments.levels {
+            for seg in level {
+                if self.ref_registry.decrement(seg.file_id()) {
+                    crate::block_cache::global_cache().invalidate_file(seg.file_id());
+                    let _ = std::fs::remove_file(seg.file_path());
+                }
+            }
+        }
+
+        Ok(MaterializeResult {
+            entries_materialized,
+            segments_created,
+        })
+    }
+
+    /// Check if a key exists in the child's own segments.
+    fn key_exists_in_own_segments(own_version: &SegmentVersion, typed_key: &[u8]) -> bool {
+        let seek_ik = InternalKey::from_typed_key_bytes(typed_key, u64::MAX);
+        let seek_bytes = seek_ik.as_bytes();
+
+        // L0 segments (linear scan)
+        for seg in own_version.l0_segments() {
+            if seg
+                .point_lookup_preencoded(typed_key, seek_bytes, u64::MAX)
+                .is_some()
+            {
+                return true;
+            }
+        }
+
+        // L1+ segments (binary search per level)
+        for level_idx in 1..own_version.levels.len() {
+            if point_lookup_level_preencoded(
+                &own_version.levels[level_idx],
+                typed_key,
+                seek_bytes,
+                u64::MAX,
+            )
+            .is_some()
+            {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Check if a key exists in a closer inherited layer's segments.
+    fn key_exists_in_layer(
+        layer_segments: &SegmentVersion,
+        source_branch_id: BranchId,
+        child_typed_key: &[u8], // in child namespace
+        fork_version: u64,
+    ) -> bool {
+        // Rewrite typed_key from child → source namespace
+        let src_typed_key = rewrite_branch_id_bytes(child_typed_key, &source_branch_id);
+        let src_seek_ik = InternalKey::from_typed_key_bytes(&src_typed_key, u64::MAX);
+        let src_seek_bytes = src_seek_ik.as_bytes();
+
+        // L0 segments
+        for seg in layer_segments.l0_segments() {
+            if seg
+                .point_lookup_preencoded(&src_typed_key, src_seek_bytes, fork_version)
+                .is_some()
+            {
+                return true;
+            }
+        }
+
+        // L1+ segments
+        for level_idx in 1..layer_segments.levels.len() {
+            if point_lookup_level_preencoded(
+                &layer_segments.levels[level_idx],
+                &src_typed_key,
+                src_seek_bytes,
+                fork_version,
+            )
+            .is_some()
+            {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Fork source branch onto destination via COW inherited layers.

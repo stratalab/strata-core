@@ -30,7 +30,6 @@ impl SegmentRefRegistry {
     /// Increment the reference count for `id`.
     ///
     /// Creates the entry with count 1 if it does not exist, otherwise adds 1.
-    #[allow(dead_code)] // Used in Epic C (COW fork recovery)
     pub(crate) fn increment(&self, id: SegmentId) {
         self.refs
             .entry(id)
@@ -83,7 +82,6 @@ impl SegmentRefRegistry {
     }
 
     /// Check if a segment is currently referenced (count > 0).
-    #[allow(dead_code)] // Used in Epic C (COW fork)
     pub(crate) fn is_referenced(&self, id: SegmentId) -> bool {
         self.refs
             .get(&id)

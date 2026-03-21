@@ -1787,6 +1787,33 @@ impl Database {
                 }
             }
         }
+
+        // Materialize inherited layers that exceed depth limit
+        for branch_id in self.storage.branches_needing_materialization() {
+            let layer_count = self.storage.inherited_layer_count(&branch_id);
+            if layer_count > 0 {
+                let deepest = layer_count - 1;
+                match self.storage.materialize_layer(&branch_id, deepest) {
+                    Ok(result) => {
+                        tracing::info!(
+                            target: "strata::materialize",
+                            ?branch_id,
+                            entries = result.entries_materialized,
+                            segments = result.segments_created,
+                            "materialized inherited layer"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "strata::materialize",
+                            ?branch_id,
+                            error = %e,
+                            "materialization failed"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Apply write backpressure when memtable memory exceeds safe limits.

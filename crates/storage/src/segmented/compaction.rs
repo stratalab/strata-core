@@ -62,10 +62,13 @@ pub(super) fn recalculate_level_targets(level_bytes: &[u64; NUM_LEVELS]) -> Leve
 impl SegmentedStore {
     /// Delete a segment file if it is not referenced by any inherited layer.
     ///
-    /// Decrements the segment's refcount and deletes the file only when the
-    /// count reaches zero (or was never tracked — i.e., not shared via COW).
+    /// Checks if the segment is shared (referenced by child branches via COW
+    /// inherited layers). Shared segments are skipped — their files are only
+    /// deleted when the last child releases via `decrement` (in `clear_branch`
+    /// or `materialize_layer`). Untracked segments (not shared) are deleted
+    /// immediately.
     fn delete_segment_if_unreferenced(&self, seg: &KVSegment) {
-        if self.ref_registry.decrement(seg.file_id()) {
+        if !self.ref_registry.is_referenced(seg.file_id()) {
             crate::block_cache::global_cache().invalidate_file(seg.file_id());
             let _ = std::fs::remove_file(seg.file_path());
         }
