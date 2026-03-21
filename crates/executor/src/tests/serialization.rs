@@ -925,8 +925,9 @@ fn test_output_branch_forked() {
     test_output_round_trip(Output::BranchForked(strata_engine::branch_ops::ForkInfo {
         source: "main".to_string(),
         destination: "experiment".to_string(),
-        keys_copied: 42,
+        keys_copied: 0,
         spaces_copied: 2,
+        fork_version: Some(42),
     }));
 }
 

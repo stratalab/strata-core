@@ -419,11 +419,12 @@ fn test_fork_branch() {
         .unwrap();
     kv.put(&source_id, "default", "k2", Value::Int(42)).unwrap();
 
-    // Fork it
+    // Fork it (no data copy)
     let info = branch_ops::fork_branch(&test_db.db, "source", "forked").unwrap();
     assert_eq!(info.source, "source");
     assert_eq!(info.destination, "forked");
-    assert!(info.keys_copied >= 2);
+    assert_eq!(info.keys_copied, 0, "fork copies zero keys");
+    assert!(info.fork_version.is_some(), "fork returns fork_version");
 
     // Verify forked branch has the data
     let dest_id = strata_engine::primitives::branch::resolve_branch_name("forked");
