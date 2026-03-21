@@ -4074,3 +4074,139 @@ fn rate_limited_compaction_preserves_prune_semantics() {
         .unwrap()
         .is_none());
 }
+
+// ===== COW Branching Foundation Tests (Epic A) =====
+
+#[test]
+fn branch_state_default_no_inherited_layers() {
+    let state = BranchState::new();
+    assert!(state.inherited_layers.is_empty());
+}
+
+#[test]
+fn compaction_deletes_when_unreferenced() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 1024);
+    let bid = branch();
+
+    // Write enough data to create 2+ segments via flush
+    for i in 0..100 {
+        seed(
+            &store,
+            kv_key(&format!("key_{:04}", i)),
+            Value::Int(i as i64),
+            1,
+        );
+    }
+    store.rotate_memtable(&bid);
+    store.flush_oldest_frozen(&bid).unwrap();
+
+    for i in 100..200 {
+        seed(
+            &store,
+            kv_key(&format!("key_{:04}", i)),
+            Value::Int(i as i64),
+            2,
+        );
+    }
+    store.rotate_memtable(&bid);
+    store.flush_oldest_frozen(&bid).unwrap();
+
+    // Count .sst files before compaction
+    let branch_hex = super::hex_encode_branch(&bid);
+    let branch_dir = dir.path().join(&branch_hex);
+    let sst_before: Vec<_> = std::fs::read_dir(&branch_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("sst"))
+        .collect();
+    assert!(sst_before.len() >= 2);
+
+    // Compact — segments are unreferenced, so they should be deleted
+    store.compact_branch(&bid, 0).unwrap();
+
+    // Old .sst files should be gone, only the compacted output remains
+    let sst_after: Vec<_> = std::fs::read_dir(&branch_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("sst"))
+        .collect();
+    // Should have exactly 1 compacted output segment
+    assert_eq!(sst_after.len(), 1);
+}
+
+#[test]
+fn compaction_preserves_when_referenced() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 1024);
+    let bid = branch();
+
+    // Write enough data to create 2+ segments via flush
+    for i in 0..100 {
+        seed(
+            &store,
+            kv_key(&format!("key_{:04}", i)),
+            Value::Int(i as i64),
+            1,
+        );
+    }
+    store.rotate_memtable(&bid);
+    store.flush_oldest_frozen(&bid).unwrap();
+
+    for i in 100..200 {
+        seed(
+            &store,
+            kv_key(&format!("key_{:04}", i)),
+            Value::Int(i as i64),
+            2,
+        );
+    }
+    store.rotate_memtable(&bid);
+    store.flush_oldest_frozen(&bid).unwrap();
+
+    // Increment refcount on the first segment twice (simulating 2 COW children)
+    let branch_ref = store.branches.get(&bid).unwrap();
+    let ver = branch_ref.version.load();
+    let referenced_seg = &ver.l0_segments()[0];
+    let referenced_file_id = referenced_seg.file_id();
+    let referenced_path = referenced_seg.file_path().to_path_buf();
+    store.ref_registry.increment(referenced_file_id);
+    store.ref_registry.increment(referenced_file_id);
+    drop(ver);
+    drop(branch_ref);
+
+    // Count .sst files before compaction (should be 2 input segments)
+    let branch_hex = super::hex_encode_branch(&bid);
+    let branch_dir = dir.path().join(&branch_hex);
+    let sst_before: Vec<_> = std::fs::read_dir(&branch_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("sst"))
+        .collect();
+    assert!(sst_before.len() >= 2);
+
+    // Compact — this will call decrement, but refcount goes 2→1 (still referenced)
+    store.compact_branch(&bid, 0).unwrap();
+
+    // The referenced segment file should still exist on disk
+    assert!(
+        referenced_path.exists(),
+        "multiply-referenced segment should not be deleted during compaction"
+    );
+
+    // Refcount should be 1 (was 2, compaction decremented once)
+    assert_eq!(store.ref_registry.ref_count(referenced_file_id), 1);
+
+    // Verify non-referenced segments were deleted: should have the 1 new compacted
+    // output + 1 surviving referenced segment = 2 total
+    let sst_after: Vec<_> = std::fs::read_dir(&branch_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("sst"))
+        .collect();
+    assert_eq!(
+        sst_after.len(),
+        2,
+        "expected 1 compacted output + 1 preserved referenced segment"
+    );
+}
