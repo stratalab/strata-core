@@ -606,8 +606,7 @@ impl SegmentedStore {
                     if max_typed < prefix_bytes.as_slice() {
                         continue;
                     }
-                    if !min_typed.starts_with(&prefix_bytes)
-                        && min_typed > prefix_bytes.as_slice()
+                    if !min_typed.starts_with(&prefix_bytes) && min_typed > prefix_bytes.as_slice()
                     {
                         continue;
                     }
@@ -1288,14 +1287,25 @@ impl SegmentedStore {
         key: &Key,
         max_version: u64,
     ) -> Option<(u64, MemtableEntry)> {
+        // Encode once, reuse everywhere.
+        let typed_key = encode_typed_key(key);
+        let seek_ik = InternalKey::from_typed_key_bytes(&typed_key, u64::MAX);
+        let seek_bytes = seek_ik.as_bytes();
+
         // 1. Active memtable
-        if let Some(result) = branch.active.get_versioned_with_commit(key, max_version) {
+        if let Some(result) =
+            branch
+                .active
+                .get_versioned_preencoded(&typed_key, seek_bytes, max_version)
+        {
             return Some(result);
         }
 
         // 2. Frozen memtables (newest first)
         for frozen in &branch.frozen {
-            if let Some(result) = frozen.get_versioned_with_commit(key, max_version) {
+            if let Some(result) =
+                frozen.get_versioned_preencoded(&typed_key, seek_bytes, max_version)
+            {
                 return Some(result);
             }
         }
@@ -1303,7 +1313,7 @@ impl SegmentedStore {
         // 3. L0 segments (newest first, overlapping — linear scan)
         let ver = branch.version.load();
         for seg in ver.l0_segments() {
-            if let Some(se) = seg.point_lookup(key, max_version) {
+            if let Some(se) = seg.point_lookup_preencoded(&typed_key, seek_bytes, max_version) {
                 let commit_id = se.commit_id;
                 return Some((commit_id, segment_entry_to_memtable_entry(se)));
             }
@@ -1311,7 +1321,12 @@ impl SegmentedStore {
 
         // 4. L1+ segments (non-overlapping, sorted by key range — binary search per level)
         for level_idx in 1..ver.levels.len() {
-            if let Some(se) = point_lookup_level(&ver.levels[level_idx], key, max_version) {
+            if let Some(se) = point_lookup_level_preencoded(
+                &ver.levels[level_idx],
+                &typed_key,
+                seek_bytes,
+                max_version,
+            ) {
                 let commit_id = se.commit_id;
                 return Some((commit_id, segment_entry_to_memtable_entry(se)));
             }
@@ -1389,8 +1404,7 @@ impl SegmentedStore {
                     // Segment is entirely after the prefix range: its min key
                     // doesn't start with the prefix AND is lexicographically
                     // greater than the prefix.
-                    if !min_typed.starts_with(&prefix_bytes)
-                        && min_typed > prefix_bytes.as_slice()
+                    if !min_typed.starts_with(&prefix_bytes) && min_typed > prefix_bytes.as_slice()
                     {
                         continue;
                     }
@@ -1761,44 +1775,50 @@ fn hex_decode_branch(hex: &str) -> Option<BranchId> {
 /// at most one segment can contain it. We binary search on the
 /// `typed_key_prefix` portion of the key range bounds (stripping the trailing
 /// 8-byte commit_id).
+#[allow(dead_code)]
 fn point_lookup_level(
     l1_segments: &[Arc<KVSegment>],
     key: &Key,
+    max_version: u64,
+) -> Option<SegmentEntry> {
+    let typed_key = encode_typed_key(key);
+    let seek_ik = InternalKey::from_typed_key_bytes(&typed_key, u64::MAX);
+    point_lookup_level_preencoded(l1_segments, &typed_key, seek_ik.as_bytes(), max_version)
+}
+
+fn point_lookup_level_preencoded(
+    l1_segments: &[Arc<KVSegment>],
+    typed_key: &[u8],
+    seek_bytes: &[u8],
     max_version: u64,
 ) -> Option<SegmentEntry> {
     if l1_segments.is_empty() {
         return None;
     }
 
-    let typed_key = encode_typed_key(key);
-
-    // Binary search: find the segment whose key range could contain `key`.
-    // Each segment's key_range() returns full InternalKey bytes; we compare
-    // only the typed_key_prefix portion (everything except trailing 8 bytes).
     let idx = l1_segments.partition_point(|seg| {
         let (_, max_ik) = seg.key_range();
         if max_ik.len() < 8 {
-            return true; // empty/invalid segment sorts before everything
+            return true;
         }
         let max_prefix = &max_ik[..max_ik.len() - 8];
-        max_prefix < typed_key.as_slice()
+        max_prefix < typed_key
     });
 
     if idx >= l1_segments.len() {
         return None;
     }
 
-    // Verify the candidate segment's min key is ≤ our key
     let seg = &l1_segments[idx];
     let (min_ik, _) = seg.key_range();
     if min_ik.len() >= 8 {
         let min_prefix = &min_ik[..min_ik.len() - 8];
-        if min_prefix > typed_key.as_slice() {
-            return None; // key is before this segment's range
+        if min_prefix > typed_key {
+            return None;
         }
     }
 
-    seg.point_lookup(key, max_version)
+    seg.point_lookup_preencoded(typed_key, seek_bytes, max_version)
 }
 
 /// Convert a `SegmentEntry` into a `MemtableEntry` for the merge path.

@@ -129,7 +129,7 @@ pub struct SegmentBuilder {
 impl Default for SegmentBuilder {
     fn default() -> Self {
         Self {
-            data_block_size: 64 * 1024, // 64 KiB
+            data_block_size: 4 * 1024, // 4 KiB (matches RocksDB default)
             bloom_bits_per_key: 10,
             compression: CompressionCodec::default(),
             rate_limiter: None,

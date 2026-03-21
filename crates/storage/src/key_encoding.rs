@@ -138,6 +138,16 @@ impl InternalKey {
         InternalKey(buf)
     }
 
+    /// Build an `InternalKey` from pre-encoded typed key bytes and a commit_id.
+    ///
+    /// Avoids re-encoding the key when the typed key bytes are already available.
+    pub fn from_typed_key_bytes(typed_key: &[u8], commit_id: u64) -> Self {
+        let mut buf = Vec::with_capacity(typed_key.len() + 8);
+        buf.extend_from_slice(typed_key);
+        buf.extend_from_slice(&(!commit_id).to_be_bytes());
+        InternalKey(buf)
+    }
+
     /// Create an InternalKey from raw bytes (e.g., read from a segment file).
     ///
     /// # Panics
