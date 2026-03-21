@@ -14,6 +14,7 @@ use crate::key_encoding::InternalKey;
 use crate::memtable::MemtableEntry;
 
 use std::iter::Peekable;
+use strata_core::types::BranchId;
 
 // ---------------------------------------------------------------------------
 // MergeIterator
@@ -120,6 +121,53 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for MvccIterator
             }
             // commit_id > max_version: skip this version, try the next
             // (which may be an older version of the same key)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RewritingIterator (COW branching)
+// ---------------------------------------------------------------------------
+
+/// Iterator adapter that rewrites keys from a source branch's namespace into
+/// the child branch's namespace, filtering out entries written after fork.
+///
+/// Two responsibilities:
+/// 1. **Version gate:** skip entries with `commit_id > fork_version`
+/// 2. **Branch_id rewrite:** source → child, so `MvccIterator` groups
+///    own + inherited entries by the same `typed_key_prefix`
+pub struct RewritingIterator<I> {
+    inner: I,
+    target_branch_id: BranchId,
+    fork_version: u64,
+}
+
+impl<I> RewritingIterator<I> {
+    /// Create a new rewriting iterator.
+    ///
+    /// - `inner`: iterator over source branch entries
+    /// - `target_branch_id`: child branch's ID (rewrite TO)
+    /// - `fork_version`: maximum visible commit_id from source
+    pub fn new(inner: I, target_branch_id: BranchId, fork_version: u64) -> Self {
+        Self {
+            inner,
+            target_branch_id,
+            fork_version,
+        }
+    }
+}
+
+impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for RewritingIterator<I> {
+    type Item = (InternalKey, MemtableEntry);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let (ik, entry) = self.inner.next()?;
+            if ik.commit_id() > self.fork_version {
+                continue;
+            }
+            let rewritten = ik.with_rewritten_branch_id(&self.target_branch_id);
+            return Some((rewritten, entry));
         }
     }
 }

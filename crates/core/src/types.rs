@@ -460,6 +460,18 @@ impl Key {
             && self.type_tag == prefix.type_tag
             && self.user_key.starts_with(&prefix.user_key)
     }
+
+    /// Create a copy of this key with a different branch_id.
+    ///
+    /// Used by COW branching to construct seek keys in the source branch's
+    /// namespace when reading through inherited layers.
+    pub fn with_branch_id(&self, branch_id: BranchId) -> Self {
+        Key::new(
+            Arc::new(Namespace::new(branch_id, self.namespace.space.clone())),
+            self.type_tag,
+            self.user_key.to_vec(),
+        )
+    }
 }
 
 /// Ordering implementation for BTreeMap
