@@ -100,11 +100,25 @@ pub fn write_manifest(
     let crc = crc32fast::hash(&buf);
     buf.extend_from_slice(&crc.to_le_bytes());
 
-    // Atomic write: temp file + rename
+    // Atomic write: temp file + fsync + rename + dir fsync
     let final_path = dir.join(MANIFEST_FILENAME);
     let tmp_path = dir.join(format!("{}.tmp", MANIFEST_FILENAME));
-    std::fs::write(&tmp_path, &buf)?;
+
+    // Write and fsync the temp file before rename — ensures data is
+    // durable on disk, not just in the page cache.
+    {
+        let mut file = std::fs::File::create(&tmp_path)?;
+        std::io::Write::write_all(&mut file, &buf)?;
+        file.sync_all()?;
+    }
+
     std::fs::rename(&tmp_path, &final_path)?;
+
+    // Fsync the parent directory to make the rename durable.
+    // Failure here is non-fatal (rename already succeeded).
+    if let Ok(dir_fd) = std::fs::File::open(dir) {
+        let _ = dir_fd.sync_all();
+    }
 
     Ok(())
 }

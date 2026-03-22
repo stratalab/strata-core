@@ -17,7 +17,7 @@ use crate::memtable::{Memtable, MemtableEntry};
 use crate::merge_iter::{MergeIterator, MvccIterator, RewritingIterator};
 use crate::pressure::{MemoryPressure, PressureLevel};
 use crate::segment::{KVSegment, SegmentEntry};
-use crate::segment_builder::SegmentBuilder;
+use crate::segment_builder::{SegmentBuilder, SplittingSegmentBuilder};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -634,26 +634,33 @@ impl SegmentedStore {
         // entries span L0 through L6). SegmentBuilder expects sorted input.
         entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-        // 2d. Build segment file (no locks held)
-        let mut segments_created = 0usize;
-        let new_segment = if !entries.is_empty() {
-            let seg_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
+        // 2d. Build segment file(s) (no locks held).
+        // Use SplittingSegmentBuilder to avoid creating oversized L0 segments
+        // from large inherited layers (#1671).
+        let new_segments: Vec<KVSegment> = if !entries.is_empty() {
             let branch_hex = hex_encode_branch(child_branch_id);
             let branch_dir = segments_dir.join(&branch_hex);
             std::fs::create_dir_all(&branch_dir)?;
-            let seg_path = branch_dir.join(format!("{}.sst", seg_id));
 
-            let builder = SegmentBuilder::default()
+            let next_id = &self.next_segment_id;
+            let builder = SplittingSegmentBuilder::new(TARGET_FILE_SIZE)
                 .with_compression(crate::segment_builder::CompressionCodec::None);
-            builder.build_from_iter(entries.into_iter(), &seg_path)?;
+            let built = builder.build_split(entries.into_iter(), |_split_idx| {
+                let seg_id = next_id.fetch_add(1, Ordering::Relaxed);
+                branch_dir.join(format!("{}.sst", seg_id))
+            })?;
 
-            let segment = KVSegment::open(&seg_path)?;
-            segment.pin_bloom_partitions();
-            segments_created = 1;
-            Some(segment)
+            let mut segments = Vec::with_capacity(built.len());
+            for (path, _meta) in built {
+                let seg = KVSegment::open(&path)?;
+                seg.pin_bloom_partitions();
+                segments.push(seg);
+            }
+            segments
         } else {
-            None
+            Vec::new()
         };
+        let segments_created = new_segments.len();
 
         // 2e. Atomic install (under DashMap write guard)
         {
@@ -662,11 +669,14 @@ impl SegmentedStore {
                 .entry(*child_branch_id)
                 .or_insert_with(BranchState::new);
 
-            // Prepend new segment to L0 (if we built one)
-            if let Some(seg) = new_segment {
+            // Prepend new segments to L0
+            if !new_segments.is_empty() {
                 let old_ver = branch.version.load();
-                let mut new_l0 = Vec::with_capacity(old_ver.l0_segments().len() + 1);
-                new_l0.push(Arc::new(seg));
+                let mut new_l0 =
+                    Vec::with_capacity(old_ver.l0_segments().len() + new_segments.len());
+                for seg in new_segments {
+                    new_l0.push(Arc::new(seg));
+                }
                 new_l0.extend(old_ver.l0_segments().iter().cloned());
                 let mut new_levels = old_ver.levels.clone();
                 new_levels[0] = new_l0;
@@ -1621,28 +1631,14 @@ impl SegmentedStore {
     pub fn recover_segments(&self) -> io::Result<RecoverSegmentsInfo> {
         let segments_dir = match &self.segments_dir {
             Some(d) => d,
-            None => {
-                return Ok(RecoverSegmentsInfo {
-                    branches_recovered: 0,
-                    segments_loaded: 0,
-                    errors_skipped: 0,
-                })
-            }
+            None => return Ok(RecoverSegmentsInfo::default()),
         };
 
         if !segments_dir.exists() {
-            return Ok(RecoverSegmentsInfo {
-                branches_recovered: 0,
-                segments_loaded: 0,
-                errors_skipped: 0,
-            });
+            return Ok(RecoverSegmentsInfo::default());
         }
 
-        let mut info = RecoverSegmentsInfo {
-            branches_recovered: 0,
-            segments_loaded: 0,
-            errors_skipped: 0,
-        };
+        let mut info = RecoverSegmentsInfo::default();
 
         // Collect inherited layer info for deferred resolution (second pass).
         let mut deferred_inherited: Vec<(BranchId, Vec<crate::manifest::ManifestInheritedLayer>)> =
@@ -1799,6 +1795,7 @@ impl SegmentedStore {
                             source = %hex_encode_branch(&ml.source_branch_id),
                             "inherited layer references missing source branch, skipping"
                         );
+                        info.layers_dropped.push((child_id, ml.source_branch_id));
                         continue;
                     }
                 };
@@ -2297,7 +2294,7 @@ impl SegmentedStore {
 }
 
 /// Statistics returned by [`SegmentedStore::recover_segments`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecoverSegmentsInfo {
     /// Number of branch subdirectories successfully loaded.
     pub branches_recovered: usize,
@@ -2305,6 +2302,11 @@ pub struct RecoverSegmentsInfo {
     pub segments_loaded: usize,
     /// Number of `.sst` files that failed to open (corrupt/invalid).
     pub errors_skipped: usize,
+    /// Inherited layers that were dropped because their source branch
+    /// was missing. Each entry is `(child_branch_id, source_branch_id)`.
+    /// Non-empty means the child branch may be missing data that was
+    /// visible before the crash.
+    pub layers_dropped: Vec<(BranchId, BranchId)>,
 }
 
 impl Default for SegmentedStore {
