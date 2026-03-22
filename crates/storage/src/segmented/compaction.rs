@@ -218,7 +218,8 @@ impl SegmentedStore {
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
         let compaction_iter = CompactionIterator::new(merge, prune_floor)
             .with_max_versions(max_versions)
-            .with_drop_expired(is_bottommost);
+            .with_drop_expired(is_bottommost)
+            .with_is_bottommost(is_bottommost);
 
         let mut builder = SegmentBuilder::default()
             .with_compression(crate::segment_builder::CompressionCodec::None);
@@ -356,7 +357,8 @@ impl SegmentedStore {
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
         let compaction_iter = CompactionIterator::new(merge, prune_floor)
             .with_max_versions(max_versions)
-            .with_drop_expired(is_bottommost);
+            .with_drop_expired(is_bottommost)
+            .with_is_bottommost(is_bottommost);
 
         let mut builder = SegmentBuilder::default()
             .with_compression(crate::segment_builder::CompressionCodec::None);
@@ -527,7 +529,8 @@ impl SegmentedStore {
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
         let compaction_iter = CompactionIterator::new(merge, prune_floor)
             .with_max_versions(max_versions)
-            .with_drop_expired(is_bottommost);
+            .with_drop_expired(is_bottommost)
+            .with_is_bottommost(is_bottommost);
 
         // Build output segments, splitting at target file size
         let branch_hex = hex_encode_branch(branch_id);
@@ -759,7 +762,8 @@ impl SegmentedStore {
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
         let compaction_iter = CompactionIterator::new(merge, prune_floor)
             .with_max_versions(max_versions)
-            .with_drop_expired(is_bottommost);
+            .with_drop_expired(is_bottommost)
+            .with_is_bottommost(is_bottommost);
 
         let branch_hex = hex_encode_branch(branch_id);
         let branch_dir = segments_dir.join(&branch_hex);
