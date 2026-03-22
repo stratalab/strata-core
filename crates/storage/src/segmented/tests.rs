@@ -6835,3 +6835,288 @@ fn bench_fork_chain_depth() {
     let last = store.branches.get(&branches[4]).unwrap();
     assert_eq!(last.inherited_layers.len(), 3);
 }
+
+// =============================================================================
+// #1701: Recovery skips orphan SSTs not in manifest
+// =============================================================================
+
+/// Recovery with a manifest must only load segments listed in the manifest.
+/// Files on disk but not in the manifest are orphans and must be skipped.
+#[test]
+fn recovery_skips_orphan_sst_not_in_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // Write and flush parent data → creates segment + manifest
+    seed(&store, parent_kv("a"), Value::Int(1), 1);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // Verify 1 segment exists
+    let parent_state = store.branches.get(&parent_branch()).unwrap();
+    assert_eq!(parent_state.version.load().total_segment_count(), 1);
+    drop(parent_state);
+
+    // Create an orphan .sst in the parent directory (simulates a shared
+    // segment kept for a child that has since been deleted)
+    let branch_hex = hex_encode_branch(&parent_branch());
+    let branch_dir = dir.path().join(&branch_hex);
+    let orphan_path = branch_dir.join("999999.sst");
+    // Write a valid segment file using the correct builder API
+    let typed_key = crate::key_encoding::encode_typed_key(&parent_kv("orphan"));
+    let ik = crate::key_encoding::InternalKey::from_typed_key_bytes(&typed_key, 1);
+    let me = crate::memtable::MemtableEntry {
+        value: Value::Int(999),
+        is_tombstone: false,
+        timestamp: strata_core::Timestamp::from(0u64),
+        ttl_ms: 0,
+    };
+    let builder = crate::segment_builder::SegmentBuilder::default();
+    builder
+        .build_from_iter(std::iter::once((ik, me)), &orphan_path)
+        .unwrap();
+    assert!(orphan_path.exists());
+
+    // Drop store and recover
+    drop(store);
+    let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let info = store2.recover_segments().unwrap();
+
+    // The orphan should be skipped (not loaded as L0)
+    assert!(info.orphans_skipped >= 1, "expected orphan to be counted");
+    let parent_state = store2.branches.get(&parent_branch()).unwrap();
+    // Should have exactly 1 segment (the real one), not 2
+    assert_eq!(
+        parent_state.version.load().total_segment_count(),
+        1,
+        "orphan SST should not be loaded"
+    );
+
+    // Data from the real segment should be readable
+    drop(parent_state);
+    let result = store2
+        .get_versioned(&parent_kv("a"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.value, Value::Int(1));
+}
+
+// =============================================================================
+// #1703: Concurrent materialize_layer is serialized
+// =============================================================================
+
+/// Two concurrent calls to materialize_layer on the same branch should
+/// not both proceed — one should return early with 0 entries.
+#[test]
+fn concurrent_materialize_serialized() {
+    use std::sync::{Arc, Barrier};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(SegmentedStore::with_dir(dir.path().to_path_buf(), 0));
+
+    // Write parent data and flush
+    for i in 0..100 {
+        seed(
+            &store,
+            parent_kv(&format!("k{:04}", i)),
+            Value::Int(i as i64),
+            1,
+        );
+    }
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // Fork → child gets inherited layer
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    assert_eq!(store.inherited_layer_count(&child_branch()), 1);
+
+    // Race two materializations
+    let barrier = Arc::new(Barrier::new(2));
+    let results: Vec<_> = (0..2)
+        .map(|_| {
+            let s = Arc::clone(&store);
+            let b = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                b.wait();
+                s.materialize_layer(&child_branch(), 0)
+            })
+        })
+        .collect();
+
+    let mut materialized_count = 0;
+    let mut skipped_count = 0;
+    for handle in results {
+        let result = handle.join().unwrap().unwrap();
+        if result.entries_materialized > 0 {
+            materialized_count += 1;
+        } else {
+            skipped_count += 1;
+        }
+    }
+
+    // Exactly one should have materialized, the other should have been skipped
+    assert_eq!(
+        materialized_count, 1,
+        "exactly one materialization should proceed"
+    );
+    assert_eq!(skipped_count, 1, "the other should be skipped");
+
+    // Layer should be removed
+    assert_eq!(store.inherited_layer_count(&child_branch()), 0);
+
+    // Data should be accessible
+    let result = store
+        .get_versioned(&child_kv("k0050"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.value, Value::Int(50));
+}
+
+// =============================================================================
+// #1702: clear_branch checks refcount before deleting own segments
+// =============================================================================
+
+/// When a parent's own segments are referenced by a child, deleting the parent
+/// must not remove those segment files.
+#[test]
+fn clear_branch_preserves_referenced_own_segments() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // Write and flush parent data
+    seed(&store, parent_kv("a"), Value::Int(1), 1);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // Fork → child inherits parent's segments
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    // Collect parent's own segment paths
+    let parent_state = store.branches.get(&parent_branch()).unwrap();
+    let own_paths: Vec<std::path::PathBuf> = parent_state
+        .version
+        .load()
+        .levels
+        .iter()
+        .flat_map(|level| level.iter().map(|s| s.file_path().to_path_buf()))
+        .collect();
+    drop(parent_state);
+    assert!(!own_paths.is_empty());
+
+    // Clear (delete) parent — child still references parent's segments
+    assert!(store.clear_branch(&parent_branch()));
+
+    // Parent's own segment files should still exist (child references them)
+    for path in &own_paths {
+        assert!(
+            path.exists(),
+            "Parent segment {:?} should survive (child references it)",
+            path
+        );
+    }
+
+    // Child should still be able to read inherited data
+    let result = store
+        .get_versioned(&child_kv("a"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.value, Value::Int(1));
+}
+
+// =============================================================================
+// #1705: gc_orphan_segments cleans up leaked files
+// =============================================================================
+
+/// After parent compaction removes segment S and child releases its reference,
+/// gc_orphan_segments should delete the orphaned S.
+#[test]
+fn gc_orphan_segments_cleans_leaked_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // Write TWO batches to parent so compaction can merge them
+    for i in 0..50 {
+        seed(
+            &store,
+            parent_kv(&format!("k{:04}", i)),
+            Value::Int(i as i64),
+            1,
+        );
+    }
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    for i in 50..100 {
+        seed(
+            &store,
+            parent_kv(&format!("k{:04}", i)),
+            Value::Int(i as i64),
+            2,
+        );
+    }
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // Fork → child inherits 2 segments, refcount=1 each
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    // Collect the inherited segment paths
+    let child_state = store.branches.get(&child_branch()).unwrap();
+    let inherited_paths: Vec<std::path::PathBuf> = child_state
+        .inherited_layers
+        .iter()
+        .flat_map(|l| l.segments.levels.iter())
+        .flat_map(|level| level.iter().map(|s| s.file_path().to_path_buf()))
+        .collect();
+    drop(child_state);
+    assert!(
+        inherited_paths.len() >= 2,
+        "expected at least 2 inherited segments"
+    );
+
+    // Parent compacts: S1 + S2 → S3. Old segments kept (refcount > 0).
+    store.compact_branch(&parent_branch(), 0).unwrap();
+    for path in &inherited_paths {
+        assert!(
+            path.exists(),
+            "segment should survive compaction (refcount > 0)"
+        );
+    }
+
+    // Child releases (clear_branch). refcount → 0.
+    // clear_branch runs gc_orphan_segments internally, which should clean up
+    // the orphaned files (parent already compacted them away, no references remain).
+    store.clear_branch(&child_branch());
+
+    // Orphaned segments should be deleted (GC ran as part of clear_branch).
+    for path in &inherited_paths {
+        assert!(
+            !path.exists(),
+            "orphaned segment {:?} should be deleted by GC after clear_branch",
+            path
+        );
+    }
+
+    // Calling GC again should find nothing to delete.
+    let deleted = store.gc_orphan_segments();
+    assert_eq!(deleted, 0, "no orphans should remain after clear_branch GC");
+}
