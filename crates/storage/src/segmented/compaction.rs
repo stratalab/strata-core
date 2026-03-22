@@ -8,6 +8,7 @@
 //! - Multi-level compaction helpers
 
 use super::*;
+use std::sync::atomic::AtomicBool;
 
 /// Per-level byte targets, computed dynamically from actual data sizes.
 #[derive(Debug, Clone)]
@@ -212,7 +213,7 @@ impl SegmentedStore {
 
         // Build streaming source iterators from each segment.
         let limiter = self.compaction_rate_limiter.load_full();
-        let sources = streaming_sources(&old_segments, &limiter);
+        let (sources, corruption_flags) = streaming_sources(&old_segments, &limiter);
 
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
@@ -227,6 +228,7 @@ impl SegmentedStore {
             builder = builder.with_rate_limiter(Arc::clone(l));
         }
         let meta = builder.build_from_iter(compaction_iter, &seg_path)?;
+        check_corruption_flags(&corruption_flags)?;
 
         // Open the newly written segment.
         let new_segment = KVSegment::open(&seg_path)?;
@@ -351,7 +353,7 @@ impl SegmentedStore {
         let seg_path = branch_dir.join(format!("{}.sst", seg_id));
 
         let limiter = self.compaction_rate_limiter.load_full();
-        let sources = streaming_sources(&selected_segments, &limiter);
+        let (sources, corruption_flags) = streaming_sources(&selected_segments, &limiter);
 
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
@@ -366,6 +368,7 @@ impl SegmentedStore {
             builder = builder.with_rate_limiter(Arc::clone(l));
         }
         let meta = builder.build_from_iter(compaction_iter, &seg_path)?;
+        check_corruption_flags(&corruption_flags)?;
 
         let new_segment = KVSegment::open(&seg_path)?;
 
@@ -524,7 +527,7 @@ impl SegmentedStore {
         all_inputs.extend(overlapping_l1.iter().cloned());
 
         let limiter = self.compaction_rate_limiter.load_full();
-        let sources = streaming_sources(&all_inputs, &limiter);
+        let (sources, corruption_flags) = streaming_sources(&all_inputs, &limiter);
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
         let compaction_iter = CompactionIterator::new(merge, prune_floor)
@@ -550,6 +553,7 @@ impl SegmentedStore {
             let id = next_id.fetch_add(1, Ordering::Relaxed);
             branch_dir.join(format!("{}.sst", id))
         })?;
+        check_corruption_flags(&corruption_flags)?;
 
         let output_entries: u64 = outputs.iter().map(|(_, m)| m.entry_count).sum();
         let output_file_size: u64 = outputs.iter().map(|(_, m)| m.file_size).sum();
@@ -757,7 +761,7 @@ impl SegmentedStore {
         all_inputs.extend(overlap_segs.iter().cloned());
 
         let limiter = self.compaction_rate_limiter.load_full();
-        let sources = streaming_sources(&all_inputs, &limiter);
+        let (sources, corruption_flags) = streaming_sources(&all_inputs, &limiter);
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
         let compaction_iter = CompactionIterator::new(merge, prune_floor)
@@ -819,6 +823,7 @@ impl SegmentedStore {
             },
             should_split,
         )?;
+        check_corruption_flags(&corruption_flags)?;
 
         let output_entries: u64 = outputs.iter().map(|(_, m)| m.entry_count).sum();
         let output_file_size: u64 = outputs.iter().map(|(_, m)| m.file_size).sum();
@@ -881,14 +886,23 @@ impl SegmentedStore {
     }
 }
 
+type StreamingSources = (
+    Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>>,
+    Vec<Arc<AtomicBool>>,
+);
+
 fn streaming_sources(
     segments: &[Arc<KVSegment>],
     rate_limiter: &Option<Arc<crate::rate_limiter::RateLimiter>>,
-) -> Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> {
-    segments
+) -> StreamingSources {
+    let mut corruption_flags = Vec::with_capacity(segments.len());
+    let sources = segments
         .iter()
         .map(|seg| {
-            let owned = crate::segment::OwnedSegmentIter::new(Arc::clone(seg));
+            let flag = Arc::new(AtomicBool::new(false));
+            corruption_flags.push(Arc::clone(&flag));
+            let owned =
+                crate::segment::OwnedSegmentIter::new(Arc::clone(seg)).with_corruption_flag(flag);
             if let Some(ref limiter) = rate_limiter {
                 let throttled =
                     crate::segment::ThrottledSegmentIter::new(owned, Arc::clone(limiter));
@@ -899,7 +913,20 @@ fn streaming_sources(
                     as Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>
             }
         })
-        .collect()
+        .collect();
+    (sources, corruption_flags)
+}
+
+/// Check if any corruption flag was set during iteration.
+/// If so, return an error to abort the compaction (#1677).
+fn check_corruption_flags(flags: &[Arc<AtomicBool>]) -> io::Result<()> {
+    if flags.iter().any(|f| f.load(Ordering::Relaxed)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "compaction aborted: source segment has corrupt data block (#1677)",
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
