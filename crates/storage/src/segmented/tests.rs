@@ -7199,3 +7199,105 @@ fn test_issue_1677_corruption_does_not_resurrect_stale_data() {
         }
     }
 }
+
+/// Regression test: compaction must abort when a source segment is corrupt.
+///
+/// Before this fix, `OwnedSegmentIter` silently returned `None` on corruption,
+/// causing the compacted output to permanently lose all entries after the
+/// corrupt data block.
+#[test]
+fn test_issue_1677_compaction_aborts_on_corrupt_segment() {
+    use crate::segment_builder::HEADER_SIZE;
+
+    let dir = tempfile::tempdir().unwrap();
+    let seg_dir = dir.path().join("segments");
+    let store = SegmentedStore::with_dir(seg_dir.clone(), 1024);
+    let bid = branch();
+
+    // Flush two L0 segments (compact_branch requires >= 2)
+    seed(&store, kv_key("a"), Value::Int(1), 1);
+    store.rotate_memtable(&bid);
+    store.flush_oldest_frozen(&bid).unwrap();
+
+    seed(&store, kv_key("b"), Value::Int(2), 2);
+    store.rotate_memtable(&bid);
+    store.flush_oldest_frozen(&bid).unwrap();
+
+    // Corrupt the first segment's data-block CRC
+    let branch_hex = hex_encode_branch(&bid);
+    let branch_dir = seg_dir.join(&branch_hex);
+    let mut sst_files: Vec<std::path::PathBuf> = std::fs::read_dir(&branch_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "sst"))
+        .collect();
+    sst_files.sort();
+    let target = &sst_files[0];
+
+    let data = std::fs::read(target).unwrap();
+    let data_len =
+        u32::from_le_bytes(data[HEADER_SIZE + 4..HEADER_SIZE + 8].try_into().unwrap()) as usize;
+    let crc_offset = HEADER_SIZE + 8 + data_len;
+    let mut corrupt = data.clone();
+    corrupt[crc_offset] ^= 0xFF;
+    std::fs::write(target, &corrupt).unwrap();
+
+    // Compaction must return an error, not silently drop entries
+    let result = store.compact_branch(&bid, 0);
+    assert!(
+        result.is_err(),
+        "compaction must abort on corrupt segment, not silently drop entries"
+    );
+}
+
+/// Regression test: materialization shadow check must return true (shadowed)
+/// on corruption, not false (unshadowed).
+///
+/// Returning false when corruption prevents reading a child segment would cause
+/// the materializer to copy stale parent entries into the child — data resurrection.
+#[test]
+fn test_issue_1677_shadow_check_returns_true_on_corruption() {
+    use crate::segment_builder::HEADER_SIZE;
+
+    let dir = tempfile::tempdir().unwrap();
+    let seg_dir = dir.path().join("segments");
+    let store = SegmentedStore::with_dir(seg_dir.clone(), 1024);
+    let bid = branch();
+
+    // Write a key and flush to a segment
+    seed(&store, kv_key("k"), Value::Int(42), 1);
+    store.rotate_memtable(&bid);
+    store.flush_oldest_frozen(&bid).unwrap();
+
+    // Corrupt the segment
+    let branch_hex = hex_encode_branch(&bid);
+    let branch_dir = seg_dir.join(&branch_hex);
+    let sst_files: Vec<std::path::PathBuf> = std::fs::read_dir(&branch_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "sst"))
+        .collect();
+    let target = &sst_files[0];
+
+    let data = std::fs::read(target).unwrap();
+    let data_len =
+        u32::from_le_bytes(data[HEADER_SIZE + 4..HEADER_SIZE + 8].try_into().unwrap()) as usize;
+    let crc_offset = HEADER_SIZE + 8 + data_len;
+    let mut corrupt = data.clone();
+    corrupt[crc_offset] ^= 0xFF;
+    std::fs::write(target, &corrupt).unwrap();
+
+    // key_exists_in_own_segments must return true (conservatively shadowed)
+    // when corruption prevents reading. Returning false would cause
+    // materialization to copy stale parent data.
+    let branch_state = store.branches.get(&bid).unwrap();
+    let ver = branch_state.version.load_full();
+    let typed_key = crate::key_encoding::encode_typed_key(&kv_key("k"));
+    let result = SegmentedStore::key_exists_in_own_segments(&ver, &typed_key);
+    assert!(
+        result,
+        "shadow check must return true on corruption to prevent stale data resurrection"
+    );
+}

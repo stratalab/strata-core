@@ -850,7 +850,7 @@ impl SegmentedStore {
                 Ok(None) => {}
                 Err(e) => {
                     tracing::error!(error = %e, "corruption during materialization shadow check");
-                    return false;
+                    return true; // Conservative: assume shadowed to prevent stale data resurrection
                 }
             }
         }
@@ -867,7 +867,7 @@ impl SegmentedStore {
                 Ok(None) => {}
                 Err(e) => {
                     tracing::error!(error = %e, "corruption during materialization shadow check");
-                    return false;
+                    return true; // Conservative: assume shadowed to prevent stale data resurrection
                 }
             }
         }
@@ -894,7 +894,7 @@ impl SegmentedStore {
                 Ok(None) => {}
                 Err(e) => {
                     tracing::error!(error = %e, "corruption during materialization shadow check");
-                    return false;
+                    return true; // Conservative: assume shadowed to prevent stale data resurrection
                 }
             }
         }
@@ -911,7 +911,7 @@ impl SegmentedStore {
                 Ok(None) => {}
                 Err(e) => {
                     tracing::error!(error = %e, "corruption during materialization shadow check");
-                    return false;
+                    return true; // Conservative: assume shadowed to prevent stale data resurrection
                 }
             }
         }

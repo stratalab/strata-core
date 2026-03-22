@@ -994,6 +994,8 @@ pub struct OwnedSegmentIter {
     prev_key: Vec<u8>,
     /// Monotonically increasing global block counter (for ThrottledSegmentIter).
     global_block_idx: usize,
+    /// Set to true if iteration was stopped by a corruption error (#1677).
+    corruption_detected: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl OwnedSegmentIter {
@@ -1020,7 +1022,19 @@ impl OwnedSegmentIter {
             done,
             prev_key: Vec::new(),
             global_block_idx: 0,
+            corruption_detected: None,
         }
+    }
+
+    /// Attach a shared corruption flag that will be set if a data block
+    /// cannot be read due to corruption (#1677). Callers (e.g., compaction)
+    /// check this flag after consuming the iterator.
+    pub fn with_corruption_flag(
+        mut self,
+        flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.corruption_detected = Some(flag);
+        self
     }
 
     /// Advance to the next partition. Returns `false` if no more partitions.
@@ -1074,6 +1088,9 @@ impl Iterator for OwnedSegmentIter {
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "segment iterator stopping due to corruption");
+                        if let Some(ref flag) = self.corruption_detected {
+                            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
                         self.done = true;
                         return None;
                     }
