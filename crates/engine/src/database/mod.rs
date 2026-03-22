@@ -801,7 +801,10 @@ impl Database {
     ///
     /// Skips Version enum and VersionedValue construction. Used by the
     /// KVStore::get() hot path where version metadata is not needed.
-    pub(crate) fn get_value_direct(&self, key: &Key) -> Option<strata_core::value::Value> {
+    pub(crate) fn get_value_direct(
+        &self,
+        key: &Key,
+    ) -> strata_core::StrataResult<Option<strata_core::value::Value>> {
         self.storage.get_value_direct(key)
     }
 

@@ -1852,7 +1852,10 @@ fn get_value_direct_returns_latest() {
     let store = SegmentedStore::new();
     seed(&store, kv_key("k"), Value::Int(10), 1);
     seed(&store, kv_key("k"), Value::Int(20), 2);
-    assert_eq!(store.get_value_direct(&kv_key("k")), Some(Value::Int(20)));
+    assert_eq!(
+        store.get_value_direct(&kv_key("k")).unwrap(),
+        Some(Value::Int(20))
+    );
 }
 
 #[test]
@@ -1860,13 +1863,13 @@ fn get_value_direct_skips_tombstone() {
     let store = SegmentedStore::new();
     seed(&store, kv_key("k"), Value::Int(10), 1);
     store.delete_with_version(&kv_key("k"), 2).unwrap();
-    assert_eq!(store.get_value_direct(&kv_key("k")), None);
+    assert_eq!(store.get_value_direct(&kv_key("k")).unwrap(), None);
 }
 
 #[test]
 fn get_value_direct_nonexistent() {
     let store = SegmentedStore::new();
-    assert_eq!(store.get_value_direct(&kv_key("k")), None);
+    assert_eq!(store.get_value_direct(&kv_key("k")).unwrap(), None);
 }
 
 #[test]
@@ -7119,4 +7122,80 @@ fn gc_orphan_segments_cleans_leaked_files() {
     // Calling GC again should find nothing to delete.
     let deleted = store.gc_orphan_segments();
     assert_eq!(deleted, 0, "no orphans should remain after clear_branch GC");
+}
+
+// ===== Issue #1677: Corruption must not resurrect stale data =====
+
+/// Regression test for issue #1677.
+///
+/// When a newer L0 segment's data block is corrupt, `read_data_block()` must
+/// return an error — NOT `None`. Returning `None` causes the read path to
+/// silently fall through to an older segment, resurrecting stale data.
+#[test]
+fn test_issue_1677_corruption_does_not_resurrect_stale_data() {
+    use crate::segment_builder::HEADER_SIZE;
+
+    let dir = tempfile::tempdir().unwrap();
+    let seg_dir = dir.path().join("segments");
+    let store = SegmentedStore::with_dir(seg_dir.clone(), 1024);
+    let bid = branch();
+
+    // 1. Write old value and flush to L0 segment
+    seed(&store, kv_key("k"), Value::Int(100), 1);
+    store.rotate_memtable(&bid);
+    store.flush_oldest_frozen(&bid).unwrap();
+
+    // 2. Write newer value and flush to another L0 segment (prepended, i.e. newest-first)
+    seed(&store, kv_key("k"), Value::Int(200), 2);
+    store.rotate_memtable(&bid);
+    store.flush_oldest_frozen(&bid).unwrap();
+
+    // 3. Find the segment files. The newer segment has a higher numeric ID.
+    let branch_hex = hex_encode_branch(&bid);
+    let branch_dir = seg_dir.join(&branch_hex);
+    let mut sst_files: Vec<std::path::PathBuf> = std::fs::read_dir(&branch_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "sst"))
+        .collect();
+    sst_files.sort();
+    assert!(sst_files.len() >= 2, "expected at least 2 segment files");
+    let newer_path = sst_files.last().unwrap();
+
+    // 4. Corrupt the newer segment's data-block CRC.
+    //    Data block starts at HEADER_SIZE. Frame: type(1) + codec(1) + reserved(2) + data_len(4) + data(N) + crc(4).
+    let data = std::fs::read(newer_path).unwrap();
+    let data_len =
+        u32::from_le_bytes(data[HEADER_SIZE + 4..HEADER_SIZE + 8].try_into().unwrap()) as usize;
+    let crc_offset = HEADER_SIZE + 8 + data_len;
+    let mut corrupt = data.clone();
+    corrupt[crc_offset] ^= 0xFF;
+    std::fs::write(newer_path, &corrupt).unwrap();
+
+    // 5. Read must return a corruption error, NEVER the stale value (100).
+    //    Before this fix, corruption returned None which fell through to the
+    //    older segment and returned Value::Int(100) — a data-correctness violation.
+    let result = store.get_versioned(&kv_key("k"), u64::MAX);
+    match result {
+        Err(e) => {
+            assert!(
+                e.is_storage_error(),
+                "expected a storage/corruption error, got: {e}"
+            );
+        }
+        Ok(Some(v)) => {
+            panic!(
+                "corruption must not silently return data (got {:?}); \
+                 stale value resurrection detected",
+                v.value
+            );
+        }
+        Ok(None) => {
+            panic!(
+                "corruption must not be treated as 'key absent'; \
+                 this would cause stale data resurrection in multi-level reads"
+            );
+        }
+    }
 }

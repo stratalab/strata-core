@@ -85,7 +85,7 @@ impl KVStore {
     pub fn get(&self, branch_id: &BranchId, space: &str, key: &str) -> StrataResult<Option<Value>> {
         let storage_key = self.key_for(branch_id, space, key);
         // Direct value-only read — skips VersionedValue construction entirely
-        Ok(self.db.get_value_direct(&storage_key))
+        self.db.get_value_direct(&storage_key)
     }
 
     /// Get a value with its version metadata.

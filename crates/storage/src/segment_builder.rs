@@ -1437,12 +1437,12 @@ mod tests {
 
         let seg = KVSegment::open(&path).unwrap();
 
-        let e = seg.point_lookup(&key("a"), u64::MAX).unwrap();
+        let e = seg.point_lookup(&key("a"), u64::MAX).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(10));
         assert_eq!(e.timestamp, 1_600_000_000_000_000);
         assert_eq!(e.ttl_ms, 60_000);
 
-        let e = seg.point_lookup(&key("b"), u64::MAX).unwrap();
+        let e = seg.point_lookup(&key("b"), u64::MAX).unwrap().unwrap();
         assert!(e.is_tombstone);
         assert_eq!(e.timestamp, 999);
         assert_eq!(e.ttl_ms, 0);
@@ -1472,7 +1472,7 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
         for i in 0..100u32 {
             let k = key(&format!("key_{:06}", i));
-            let e = seg.point_lookup(&k, u64::MAX).unwrap();
+            let e = seg.point_lookup(&k, u64::MAX).unwrap().unwrap();
             assert_eq!(
                 e.value,
                 Value::String(format!("value_{}", "abcdefgh".repeat(20)))
@@ -1512,6 +1512,7 @@ mod tests {
             let k = key(&format!("key_{:06}", i));
             let e = seg
                 .point_lookup(&k, u64::MAX)
+                .unwrap()
                 .unwrap_or_else(|| panic!("missing key_{:06}", i));
             assert_eq!(
                 e.value,
@@ -1920,6 +1921,7 @@ mod tests {
             let k = key(&format!("key_{:06}", i));
             let e = seg
                 .point_lookup(&k, u64::MAX)
+                .unwrap()
                 .unwrap_or_else(|| panic!("missing key_{:06}", i));
             assert_eq!(e.value, Value::Int(i as i64));
             assert_eq!(e.commit_id, i as u64 + 1);
@@ -1945,19 +1947,19 @@ mod tests {
 
         let seg = KVSegment::open(&path).unwrap();
 
-        let e = seg.point_lookup(&k, 10).unwrap();
+        let e = seg.point_lookup(&k, 10).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(100));
         assert_eq!(e.commit_id, 10);
 
-        let e = seg.point_lookup(&k, 7).unwrap();
+        let e = seg.point_lookup(&k, 7).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(50));
         assert_eq!(e.commit_id, 5);
 
-        let e = seg.point_lookup(&k, 1).unwrap();
+        let e = seg.point_lookup(&k, 1).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(10));
         assert_eq!(e.commit_id, 1);
 
-        assert!(seg.point_lookup(&k, 0).is_none());
+        assert!(seg.point_lookup(&k, 0).unwrap().is_none());
     }
 
     // -----------------------------------------------------------------------
@@ -2139,7 +2141,7 @@ mod tests {
 
         for i in 0..200 {
             let k = key(&format!("key_{:04}", i));
-            let e = seg.point_lookup(&k, i as u64 + 1);
+            let e = seg.point_lookup(&k, i as u64 + 1).unwrap();
             assert!(e.is_some(), "key_{:04} not found", i);
             assert_eq!(e.unwrap().value, Value::Int(i as i64));
         }
@@ -2173,7 +2175,7 @@ mod tests {
 
         // Verify every version is accessible at its own snapshot
         for commit in 1..=200_u64 {
-            let e = seg.point_lookup(&k, commit);
+            let e = seg.point_lookup(&k, commit).unwrap();
             assert!(e.is_some(), "commit {} not found", commit);
             let entry = e.unwrap();
             assert_eq!(entry.value, Value::Int(commit as i64));
@@ -2181,7 +2183,7 @@ mod tests {
         }
 
         // Also verify the latest snapshot returns the newest version
-        let e = seg.point_lookup(&k, 200).unwrap();
+        let e = seg.point_lookup(&k, 200).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(200));
     }
 
@@ -2231,19 +2233,19 @@ mod tests {
         // Check unique alpha keys
         for i in 0..50 {
             let k = key(&format!("alpha_{:04}", i));
-            let e = seg.point_lookup(&k, 1);
+            let e = seg.point_lookup(&k, 1).unwrap();
             assert!(e.is_some(), "alpha_{:04} not found", i);
         }
         // Check hot key versions
         for c in 1..=100_u64 {
-            let e = seg.point_lookup(&hot, c);
+            let e = seg.point_lookup(&hot, c).unwrap();
             assert!(e.is_some(), "beta_hot commit {} not found", c);
             assert_eq!(e.unwrap().commit_id, c);
         }
         // Check unique gamma keys
         for i in 0..50 {
             let k = key(&format!("gamma_{:04}", i));
-            let e = seg.point_lookup(&k, 1);
+            let e = seg.point_lookup(&k, 1).unwrap();
             assert!(e.is_some(), "gamma_{:04} not found", i);
         }
     }
@@ -2297,7 +2299,9 @@ mod tests {
         // Verify point lookups on the uncompressed segment
         let seg = KVSegment::open(&path_none).unwrap();
         for i in 0..200u64 {
-            let e = seg.point_lookup(&key(&format!("k_{:04}", i)), i + 1);
+            let e = seg
+                .point_lookup(&key(&format!("k_{:04}", i)), i + 1)
+                .unwrap();
             assert!(e.is_some(), "key k_{:04} not found with None codec", i);
             let expected = Value::String(format!("value_{:06}_padding_to_inflate_size", i));
             assert_eq!(e.unwrap().value, expected);
@@ -2311,7 +2315,7 @@ mod tests {
         // Verify MVCC snapshot isolation: looking up a key at an older snapshot
         // should not see newer versions
         let seg = KVSegment::open(&path_none).unwrap();
-        let e = seg.point_lookup(&key("k_0100"), 50);
+        let e = seg.point_lookup(&key("k_0100"), 50).unwrap();
         assert!(
             e.is_none(),
             "key k_0100 at commit 50 should not be visible (written at 101)"
@@ -2345,7 +2349,9 @@ mod tests {
 
             // Point lookups: first, last, and middle keys
             for &i in &[0u64, 99, 199] {
-                let e = seg.point_lookup(&key(&format!("k_{:04}", i)), i + 1);
+                let e = seg
+                    .point_lookup(&key(&format!("k_{:04}", i)), i + 1)
+                    .unwrap();
                 assert!(
                     e.is_some(),
                     "key k_{:04} not found with Zstd({})",
@@ -2423,13 +2429,13 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
         // Even keys should have tombstone at commit 100+i
         for i in (0..20u64).step_by(2) {
-            let e = seg.point_lookup(&key(&format!("k_{:04}", i)), 200);
+            let e = seg.point_lookup(&key(&format!("k_{:04}", i)), 200).unwrap();
             assert!(e.is_some(), "tombstone k_{:04} should be visible", i);
             assert!(e.unwrap().is_tombstone, "k_{:04} should be a tombstone", i);
         }
         // Odd keys should still have their values
         for i in (1..20u64).step_by(2) {
-            let e = seg.point_lookup(&key(&format!("k_{:04}", i)), 200);
+            let e = seg.point_lookup(&key(&format!("k_{:04}", i)), 200).unwrap();
             assert!(e.is_some());
             assert_eq!(e.unwrap().value, Value::Int(i as i64));
         }
