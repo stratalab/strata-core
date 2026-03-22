@@ -2410,8 +2410,9 @@ mod tests {
             puts,
             deletes,
         };
+        // Use version (commit_version) as WAL record ordering key (#1696)
         let record = WalRecord::new(
-            txn_id,
+            version,
             *branch_id.as_bytes(),
             now_micros(),
             payload.to_bytes(),
