@@ -193,6 +193,25 @@ pub trait Storage: Send + Sync {
         Ok(())
     }
 
+    /// Apply puts and deletes atomically: all entries are installed before
+    /// the global version is advanced.
+    ///
+    /// Default implementation delegates to `apply_batch` then `delete_batch`.
+    /// `SegmentedStore` overrides this to defer the version bump until all
+    /// entries are in the memtable, preventing partial-state visibility (#1706).
+    fn apply_writes_atomic(
+        &self,
+        writes: Vec<(Key, Value, WriteMode)>,
+        deletes: Vec<Key>,
+        version: u64,
+    ) -> StrataResult<()> {
+        self.apply_batch(writes, version)?;
+        if !deletes.is_empty() {
+            self.delete_batch(deletes, version)?;
+        }
+        Ok(())
+    }
+
     /// Get only the version number for a key (no Value clone)
     ///
     /// Returns the raw version as `u64` without constructing a `VersionedValue`.

@@ -1439,12 +1439,9 @@ impl TransactionContext {
         // Collect deletes into batch
         let deletes: Vec<Key> = self.delete_set.drain().collect();
 
-        // Apply via batch methods — implementations can optimize (e.g., acquire
-        // branch guards once per branch instead of per entry).
-        store.apply_batch(writes, commit_version)?;
-        if !deletes.is_empty() {
-            store.delete_batch(deletes, commit_version)?;
-        }
+        // Apply all puts and deletes atomically — the global version is advanced
+        // only after every entry is installed, preventing partial-state visibility (#1706).
+        store.apply_writes_atomic(writes, deletes, commit_version)?;
 
         Ok(ApplyResult {
             commit_version,
