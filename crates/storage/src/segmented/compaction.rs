@@ -217,8 +217,10 @@ impl SegmentedStore {
 
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
+        let snap_floor = self.snapshot_floor.load(Ordering::Relaxed);
         let compaction_iter = CompactionIterator::new(merge, prune_floor)
             .with_max_versions(max_versions)
+            .with_snapshot_floor(snap_floor)
             .with_drop_expired(is_bottommost)
             .with_is_bottommost(is_bottommost);
 
@@ -357,8 +359,10 @@ impl SegmentedStore {
 
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
+        let snap_floor = self.snapshot_floor.load(Ordering::Relaxed);
         let compaction_iter = CompactionIterator::new(merge, prune_floor)
             .with_max_versions(max_versions)
+            .with_snapshot_floor(snap_floor)
             .with_drop_expired(is_bottommost)
             .with_is_bottommost(is_bottommost);
 
@@ -530,8 +534,10 @@ impl SegmentedStore {
         let (sources, corruption_flags) = streaming_sources(&all_inputs, &limiter);
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
+        let snap_floor = self.snapshot_floor.load(Ordering::Relaxed);
         let compaction_iter = CompactionIterator::new(merge, prune_floor)
             .with_max_versions(max_versions)
+            .with_snapshot_floor(snap_floor)
             .with_drop_expired(is_bottommost)
             .with_is_bottommost(is_bottommost);
 
@@ -764,8 +770,10 @@ impl SegmentedStore {
         let (sources, corruption_flags) = streaming_sources(&all_inputs, &limiter);
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
+        let snap_floor = self.snapshot_floor.load(Ordering::Relaxed);
         let compaction_iter = CompactionIterator::new(merge, prune_floor)
             .with_max_versions(max_versions)
+            .with_snapshot_floor(snap_floor)
             .with_drop_expired(is_bottommost)
             .with_is_bottommost(is_bottommost);
 
