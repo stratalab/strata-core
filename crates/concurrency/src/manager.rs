@@ -271,8 +271,11 @@ impl TransactionManager {
         if has_mutations {
             if let Some(wal) = wal.as_mut() {
                 let payload = TransactionPayload::from_transaction(txn, commit_version);
+                // Use commit_version as the WAL record ordering key (#1696).
+                // Watermarks are set from the commit_version space, so the WAL
+                // record must carry commit_version for correct replay filtering.
                 let record = WalRecord::new(
-                    txn.txn_id,
+                    commit_version,
                     *txn.branch_id.as_bytes(),
                     now_micros(),
                     payload.to_bytes(),
@@ -379,8 +382,9 @@ impl TransactionManager {
                 if let Some(wal_arc) = wal_arc {
                     let payload = TransactionPayload::from_transaction(txn, commit_version);
                     let timestamp = now_micros();
+                    // Use commit_version as WAL record ordering key (#1696)
                     let record = WalRecord::new(
-                        txn.txn_id,
+                        commit_version,
                         *txn.branch_id.as_bytes(),
                         timestamp,
                         payload.to_bytes(),
@@ -389,7 +393,7 @@ impl TransactionManager {
                     {
                         let mut wal = wal_arc.lock();
                         if let Err(e) =
-                            wal.append_pre_serialized(&record_bytes, txn.txn_id, timestamp)
+                            wal.append_pre_serialized(&record_bytes, commit_version, timestamp)
                         {
                             txn.status = TransactionStatus::Aborted {
                                 reason: format!("WAL write failed: {}", e),
@@ -442,8 +446,9 @@ impl TransactionManager {
             if let Some(wal_arc) = wal_arc {
                 let payload = TransactionPayload::from_transaction(txn, commit_version);
                 let timestamp = now_micros();
+                // Use commit_version as WAL record ordering key (#1696)
                 let record = WalRecord::new(
-                    txn.txn_id,
+                    commit_version,
                     *txn.branch_id.as_bytes(),
                     timestamp,
                     payload.to_bytes(),
@@ -451,7 +456,8 @@ impl TransactionManager {
                 let record_bytes = record.to_bytes();
                 {
                     let mut wal = wal_arc.lock();
-                    if let Err(e) = wal.append_pre_serialized(&record_bytes, txn.txn_id, timestamp)
+                    if let Err(e) =
+                        wal.append_pre_serialized(&record_bytes, commit_version, timestamp)
                     {
                         txn.status = TransactionStatus::Aborted {
                             reason: format!("WAL write failed: {}", e),
@@ -586,8 +592,9 @@ impl TransactionManager {
         if has_mutations {
             if let Some(wal) = wal.as_mut() {
                 let payload = TransactionPayload::from_transaction(txn, commit_version);
+                // Use commit_version as WAL record ordering key (#1696)
                 let record = WalRecord::new(
-                    txn.txn_id,
+                    commit_version,
                     *txn.branch_id.as_bytes(),
                     now_micros(),
                     payload.to_bytes(),
@@ -655,7 +662,7 @@ mod tests {
     use strata_core::types::{Key, Namespace};
     use strata_core::value::Value;
     use strata_durability::codec::IdentityCodec;
-    use strata_durability::wal::{DurabilityMode, WalConfig};
+    use strata_durability::wal::{DurabilityMode, WalConfig, WalReader};
     use strata_storage::SegmentedStore;
     use tempfile::TempDir;
 
@@ -1726,6 +1733,74 @@ mod tests {
         assert_eq!(
             store.get_versioned(&key2, u64::MAX).unwrap().unwrap().value,
             Value::Int(2)
+        );
+    }
+
+    /// Issue #1696: WAL records must carry commit_version (not start-time txn_id)
+    /// as their ordering key. Without this, a long-running transaction whose
+    /// txn_id < checkpoint watermark would be skipped during WAL replay,
+    /// silently losing committed data.
+    ///
+    /// This test verifies that WalRecord.txn_id carries the commit_version:
+    /// T1 starts (txn_id=1), T2 starts and commits (advancing version),
+    /// then T1 commits. T1's WAL record must carry its commit_version (2),
+    /// not its start-time txn_id (1).
+    #[test]
+    fn test_issue_1696_wal_record_carries_commit_version() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let mut wal = create_test_wal(&wal_dir);
+        let store = Arc::new(SegmentedStore::new());
+        let manager = TransactionManager::new(0);
+
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        // T1 starts first → gets txn_id=1
+        let mut txn1 = TransactionContext::with_store(
+            manager.next_txn_id().unwrap(),
+            branch_id,
+            Arc::clone(&store),
+        );
+        txn1.put(create_test_key(&ns, "k1"), Value::Int(1)).unwrap();
+        assert_eq!(txn1.txn_id, 1, "T1 should get txn_id=1");
+
+        // T2 starts → gets txn_id=2, and commits first → gets commit_version=1
+        let mut txn2 = TransactionContext::with_store(
+            manager.next_txn_id().unwrap(),
+            branch_id,
+            Arc::clone(&store),
+        );
+        txn2.put(create_test_key(&ns, "k2"), Value::Int(2)).unwrap();
+        let v2 = manager
+            .commit(&mut txn2, store.as_ref(), Some(&mut wal))
+            .unwrap();
+        assert_eq!(v2, 1, "T2 should get commit_version=1");
+
+        // T1 commits second → gets commit_version=2
+        let v1 = manager
+            .commit(&mut txn1, store.as_ref(), Some(&mut wal))
+            .unwrap();
+        assert_eq!(v1, 2, "T1 should get commit_version=2");
+
+        // Read WAL records back and verify ordering keys
+        wal.flush().unwrap();
+        let reader = WalReader::new();
+        let records = reader.read_all_after_watermark(&wal_dir, 0).unwrap();
+        assert_eq!(records.len(), 2, "Should have 2 WAL records");
+
+        // T2's record (written first): txn_id should be commit_version=1
+        assert_eq!(
+            records[0].txn_id, 1,
+            "T2's WAL record should carry commit_version=1 (not txn_id=2)"
+        );
+
+        // T1's record (written second): txn_id should be commit_version=2
+        // BUG (pre-fix): would carry txn_id=1 (start-time ID)
+        // This would be skipped by any watermark >= 1, losing T1's data
+        assert_eq!(
+            records[1].txn_id, 2,
+            "T1's WAL record must carry commit_version=2 (not start-time txn_id=1)"
         );
     }
 }

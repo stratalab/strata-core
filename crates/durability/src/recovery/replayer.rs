@@ -510,4 +510,55 @@ mod tests {
         assert_eq!(stats.records_applied, 3);
         assert_eq!(applied, vec![1, 2, 3]);
     }
+
+    /// Issue #1696: WAL replay uses txn_id for watermark comparison, but
+    /// watermarks are set from the commit_version space. A long-running
+    /// transaction gets a low txn_id at start but a high commit_version
+    /// at commit. If watermark is between them, the record is incorrectly
+    /// skipped, losing committed data.
+    ///
+    /// The fix writes commit_version into WalRecord.txn_id, so the WAL
+    /// ordering key matches the watermark domain. This test verifies that
+    /// records with txn_id (now commit_version) above the watermark are
+    /// correctly replayed, and records at or below are skipped.
+    #[test]
+    fn test_issue_1696_long_running_txn_not_skipped_by_watermark() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        // After fix (#1696): WalRecord.txn_id carries commit_version.
+        // Fast txns T2..T50 committed with versions 1..50 (already in checkpoint).
+        // T1 started early but committed late with commit_version=100.
+        // Its WAL record now carries txn_id=100 (the commit_version).
+        let records = vec![
+            // Already-checkpointed record (commit_version=30, at or below watermark)
+            WalRecord::new(30, [1u8; 16], 30_000, vec![30]),
+            // Long-running txn committed after checkpoint (commit_version=100)
+            WalRecord::new(100, [1u8; 16], 100_000, vec![42]),
+        ];
+
+        write_records(&wal_dir, &records);
+
+        let replayer = WalReplayer::new(wal_dir);
+        let mut applied = Vec::new();
+
+        // Watermark=50 from checkpoint. Records with commit_version <= 50
+        // should be skipped. Records with commit_version > 50 must be replayed.
+        let stats = replayer
+            .replay_after(Some(50), |record| {
+                applied.push(record.txn_id);
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            stats.records_applied, 1,
+            "Record with commit_version=100 must NOT be skipped by watermark=50"
+        );
+        assert_eq!(
+            stats.records_skipped, 1,
+            "Record with commit_version=30 should be skipped"
+        );
+        assert_eq!(applied, vec![100]);
+    }
 }
