@@ -1095,7 +1095,7 @@ impl GraphStore {
             for (node_id, new_edges) in chunk {
                 let uk = keys::forward_adj_key(graph, node_id);
                 let sk = Key::new_kv(ns.clone(), &uk);
-                let mut buf = match self.db.get_value_direct(&sk) {
+                let mut buf = match self.db.get_value_direct(&sk)? {
                     Some(Value::Bytes(existing)) => existing,
                     _ => packed::empty(),
                 };
@@ -1120,7 +1120,7 @@ impl GraphStore {
             for (node_id, new_edges) in chunk {
                 let uk = keys::reverse_adj_key(graph, node_id);
                 let sk = Key::new_kv(ns.clone(), &uk);
-                let mut buf = match self.db.get_value_direct(&sk) {
+                let mut buf = match self.db.get_value_direct(&sk)? {
                     Some(Value::Bytes(existing)) => existing,
                     _ => packed::empty(),
                 };

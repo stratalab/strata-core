@@ -26,6 +26,7 @@ use crate::segment_builder::{
     parse_properties_block, EntryHeader, FilterIndexEntry, Footer, IndexEntry, KVHeader,
     PropertiesBlock, FOOTER_SZ, FRAME_OVERHEAD, HEADER_SIZE, IDX_TYPE_PARTITIONED,
 };
+use strata_core::error::StrataError;
 use strata_core::types::Key;
 use strata_core::value::Value;
 
@@ -276,7 +277,11 @@ impl KVSegment {
     /// Returns `None` if:
     /// - Bloom filter says key is absent
     /// - No matching entry exists at or below the snapshot
-    pub fn point_lookup(&self, key: &Key, snapshot_commit: u64) -> Option<SegmentEntry> {
+    pub fn point_lookup(
+        &self,
+        key: &Key,
+        snapshot_commit: u64,
+    ) -> Result<Option<SegmentEntry>, StrataError> {
         let typed_key = encode_typed_key(key);
         let seek_ik = InternalKey::encode(key, u64::MAX);
         self.point_lookup_preencoded(&typed_key, seek_ik.as_bytes(), snapshot_commit)
@@ -289,10 +294,10 @@ impl KVSegment {
         typed_key: &[u8],
         seek_bytes: &[u8],
         snapshot_commit: u64,
-    ) -> Option<SegmentEntry> {
+    ) -> Result<Option<SegmentEntry>, StrataError> {
         // 1. Bloom check
         if !self.partitioned_bloom_check(typed_key) {
-            return None;
+            return Ok(None);
         }
 
         match &self.index {
@@ -328,11 +333,11 @@ impl KVSegment {
                         typed_key,
                         seek_bytes,
                         snapshot_commit,
-                    ) {
-                        return Some(entry);
+                    )? {
+                        return Ok(Some(entry));
                     }
                 }
-                None
+                Ok(None)
             }
         }
     }
@@ -344,7 +349,7 @@ impl KVSegment {
         typed_key: &[u8],
         seek_bytes: &[u8],
         snapshot_commit: u64,
-    ) -> Option<SegmentEntry> {
+    ) -> Result<Option<SegmentEntry>, StrataError> {
         let block_idx = match index.binary_search_by(|e| e.key.as_slice().cmp(seek_bytes)) {
             Ok(i) => i,
             Err(0) => 0,
@@ -366,11 +371,11 @@ impl KVSegment {
                 }
             }
 
-            if let Some(entry) = self.scan_block_for_key(ie, typed_key, snapshot_commit) {
-                return Some(entry);
+            if let Some(entry) = self.scan_block_for_key(ie, typed_key, snapshot_commit)? {
+                return Ok(Some(entry));
             }
         }
-        None
+        Ok(None)
     }
 
     /// Iterate entries starting from `prefix`, yielding `(InternalKey, SegmentEntry)` pairs.
@@ -552,42 +557,50 @@ impl KVSegment {
     ///
     /// On cache hit, returns the cached decompressed block (zero decompression cost).
     /// On cache miss, reads from file via pread, decompresses if needed, caches, and returns.
-    fn read_data_block(&self, ie: &IndexEntry) -> Option<Arc<Vec<u8>>> {
+    fn read_data_block(&self, ie: &IndexEntry) -> Result<Arc<Vec<u8>>, StrataError> {
         let cache = crate::block_cache::global_cache();
         let block_offset = ie.block_offset;
 
         // Check cache first
         if let Some(cached) = cache.get(self.file_id, block_offset) {
-            return Some(cached);
+            return Ok(cached);
         }
 
         // Cache miss: pread from file and decompress
         let framed_len = FRAME_OVERHEAD + ie.block_data_len as usize;
-        let raw = match pread_exact(&self.file, block_offset, framed_len) {
-            Ok(buf) => buf,
-            Err(e) => {
-                tracing::warn!(
-                    path = %self.file_path.display(),
-                    offset = block_offset,
-                    len = framed_len,
-                    error = %e,
-                    "pread failed reading data block"
-                );
-                return None;
+        let raw = pread_exact(&self.file, block_offset, framed_len).map_err(|e| {
+            StrataError::corruption(format!(
+                "pread failed reading data block at offset {} in {:?}: {}",
+                block_offset, self.file_path, e
+            ))
+        })?;
+
+        let codec_byte = raw[1];
+        let (_, data) = parse_framed_block(&raw).ok_or_else(|| {
+            StrataError::corruption(format!(
+                "data block CRC mismatch or truncation at offset {} in {:?}",
+                block_offset, self.file_path
+            ))
+        })?;
+
+        let decompressed = match codec_byte {
+            0 => data.to_vec(), // Uncompressed
+            1 => zstd::decode_all(data).map_err(|e| {
+                StrataError::corruption(format!(
+                    "zstd decompression failed at offset {} in {:?}: {}",
+                    block_offset, self.file_path, e
+                ))
+            })?,
+            other => {
+                return Err(StrataError::corruption(format!(
+                    "unknown compression codec {} at offset {} in {:?}",
+                    other, block_offset, self.file_path
+                )));
             }
         };
 
-        let codec_byte = raw[1];
-        let (_, data) = parse_framed_block(&raw)?;
-
-        let decompressed = match codec_byte {
-            0 => data.to_vec(),                // Uncompressed
-            1 => zstd::decode_all(data).ok()?, // Zstd
-            _ => return None,                  // Unknown codec
-        };
-
         // Cache the decompressed block
-        Some(cache.insert(self.file_id, block_offset, decompressed))
+        Ok(cache.insert(self.file_id, block_offset, decompressed))
     }
 
     /// Scan a single data block for the newest version of a typed key at or below snapshot.
@@ -603,7 +616,7 @@ impl KVSegment {
         ie: &IndexEntry,
         typed_key: &[u8],
         snapshot_commit: u64,
-    ) -> Option<SegmentEntry> {
+    ) -> Result<Option<SegmentEntry>, StrataError> {
         let block_data = self.read_data_block(ie)?;
         let data = &**block_data;
 
@@ -633,7 +646,7 @@ impl KVSegment {
             (0, block.len())
         };
 
-        self.linear_scan_block_v4(data, scan_start, data_end, typed_key, snapshot_commit)
+        Ok(self.linear_scan_block_v4(data, scan_start, data_end, typed_key, snapshot_commit))
     }
 
     /// Linear scan entries in `data[start..end]` for `typed_key` at or below `snapshot_commit`.
@@ -892,14 +905,15 @@ impl<'a> Iterator for SegmentIter<'a> {
                 }
                 let ie = &self.current_sub_index[self.block_within_partition];
                 match self.segment.read_data_block(ie) {
-                    Some(data) => {
+                    Ok(data) => {
                         let de = block_data_end(&data);
                         self.block_data_end = de;
                         self.block_data = Some(data);
                         self.block_offset = 0;
                         self.prev_key.clear();
                     }
-                    None => {
+                    Err(e) => {
+                        tracing::error!(error = %e, "segment iterator stopping due to corruption");
                         self.done = true;
                         return None;
                     }
@@ -1051,14 +1065,15 @@ impl Iterator for OwnedSegmentIter {
                 }
                 let ie = &self.current_sub_index[self.block_within_partition];
                 match self.segment.read_data_block(ie) {
-                    Some(data) => {
+                    Ok(data) => {
                         let de = block_data_end(&data);
                         self.block_data_end = de;
                         self.block_data = Some(data);
                         self.block_offset = 0;
                         self.prev_key.clear();
                     }
-                    None => {
+                    Err(e) => {
+                        tracing::error!(error = %e, "segment iterator stopping due to corruption");
                         self.done = true;
                         return None;
                     }
@@ -1240,14 +1255,14 @@ mod tests {
 
         let seg = KVSegment::open(&path).unwrap();
 
-        let e = seg.point_lookup(&kv_key("a"), u64::MAX).unwrap();
+        let e = seg.point_lookup(&kv_key("a"), u64::MAX).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(10));
         assert!(!e.is_tombstone);
 
-        let e = seg.point_lookup(&kv_key("b"), u64::MAX).unwrap();
+        let e = seg.point_lookup(&kv_key("b"), u64::MAX).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(20));
 
-        let e = seg.point_lookup(&kv_key("c"), u64::MAX).unwrap();
+        let e = seg.point_lookup(&kv_key("c"), u64::MAX).unwrap().unwrap();
         assert_eq!(e.value, Value::String("hello".into()));
     }
 
@@ -1262,7 +1277,7 @@ mod tests {
         build_segment(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
-        assert!(seg.point_lookup(&kv_key("z"), u64::MAX).is_none());
+        assert!(seg.point_lookup(&kv_key("z"), u64::MAX).unwrap().is_none());
     }
 
     #[test]
@@ -1280,22 +1295,22 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
 
         // Snapshot at 10: see version 10
-        let e = seg.point_lookup(&kv_key("k"), 10).unwrap();
+        let e = seg.point_lookup(&kv_key("k"), 10).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(100));
         assert_eq!(e.commit_id, 10);
 
         // Snapshot at 7: see version 5
-        let e = seg.point_lookup(&kv_key("k"), 7).unwrap();
+        let e = seg.point_lookup(&kv_key("k"), 7).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(50));
         assert_eq!(e.commit_id, 5);
 
         // Snapshot at 1: see version 1
-        let e = seg.point_lookup(&kv_key("k"), 1).unwrap();
+        let e = seg.point_lookup(&kv_key("k"), 1).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(10));
         assert_eq!(e.commit_id, 1);
 
         // Snapshot at 0: nothing visible
-        assert!(seg.point_lookup(&kv_key("k"), 0).is_none());
+        assert!(seg.point_lookup(&kv_key("k"), 0).unwrap().is_none());
     }
 
     #[test]
@@ -1312,12 +1327,12 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
 
         // Snapshot at 2: see tombstone
-        let e = seg.point_lookup(&kv_key("k"), 2).unwrap();
+        let e = seg.point_lookup(&kv_key("k"), 2).unwrap().unwrap();
         assert!(e.is_tombstone);
         assert_eq!(e.commit_id, 2);
 
         // Snapshot at 1: see the value
-        let e = seg.point_lookup(&kv_key("k"), 1).unwrap();
+        let e = seg.point_lookup(&kv_key("k"), 1).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(10));
     }
 
@@ -1436,27 +1451,45 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
 
         assert_eq!(
-            seg.point_lookup(&kv_key("null"), u64::MAX).unwrap().value,
+            seg.point_lookup(&kv_key("null"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             Value::Null,
         );
         assert_eq!(
-            seg.point_lookup(&kv_key("bool"), u64::MAX).unwrap().value,
+            seg.point_lookup(&kv_key("bool"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             Value::Bool(true),
         );
         assert_eq!(
-            seg.point_lookup(&kv_key("int"), u64::MAX).unwrap().value,
+            seg.point_lookup(&kv_key("int"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             Value::Int(42),
         );
         assert_eq!(
-            seg.point_lookup(&kv_key("float"), u64::MAX).unwrap().value,
+            seg.point_lookup(&kv_key("float"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             Value::Float(3.14),
         );
         assert_eq!(
-            seg.point_lookup(&kv_key("string"), u64::MAX).unwrap().value,
+            seg.point_lookup(&kv_key("string"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             Value::String("hello".into()),
         );
         assert_eq!(
-            seg.point_lookup(&kv_key("bytes"), u64::MAX).unwrap().value,
+            seg.point_lookup(&kv_key("bytes"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
         );
     }
@@ -1481,17 +1514,29 @@ mod tests {
         assert_eq!(seg.entry_count(), 500);
 
         // Look up specific keys
-        let e = seg.point_lookup(&kv_key("key_000000"), u64::MAX).unwrap();
+        let e = seg
+            .point_lookup(&kv_key("key_000000"), u64::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.commit_id, 1);
 
-        let e = seg.point_lookup(&kv_key("key_000250"), u64::MAX).unwrap();
+        let e = seg
+            .point_lookup(&kv_key("key_000250"), u64::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.commit_id, 251);
 
-        let e = seg.point_lookup(&kv_key("key_000499"), u64::MAX).unwrap();
+        let e = seg
+            .point_lookup(&kv_key("key_000499"), u64::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.commit_id, 500);
 
         // Non-existent key
-        assert!(seg.point_lookup(&kv_key("key_999999"), u64::MAX).is_none());
+        assert!(seg
+            .point_lookup(&kv_key("key_999999"), u64::MAX)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1549,10 +1594,12 @@ mod tests {
 
         // Open should succeed (data blocks are lazily verified)
         let seg = KVSegment::open(&corrupt_path).unwrap();
-        // But point_lookup must fail because read_data_block checks CRC
+        // point_lookup must return an error because read_data_block checks CRC
+        let result = seg.point_lookup(&kv_key("k"), u64::MAX);
         assert!(
-            seg.point_lookup(&kv_key("k"), u64::MAX).is_none(),
-            "corrupt data block CRC should cause lookup to return None",
+            result.is_err(),
+            "corrupt data block CRC should cause lookup to return Err, got {:?}",
+            result,
         );
     }
 
@@ -1588,7 +1635,10 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
         assert_eq!(seg.entry_count(), 0);
         assert_eq!(seg.commit_range(), (0, 0));
-        assert!(seg.point_lookup(&kv_key("anything"), u64::MAX).is_none());
+        assert!(seg
+            .point_lookup(&kv_key("anything"), u64::MAX)
+            .unwrap()
+            .is_none());
         assert_eq!(seg.iter_seek(&kv_key("")).collect::<Vec<_>>().len(), 0);
     }
 
@@ -1615,11 +1665,17 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
 
         assert_eq!(
-            seg.point_lookup(&kv_key("arr"), u64::MAX).unwrap().value,
+            seg.point_lookup(&kv_key("arr"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             array_val,
         );
         assert_eq!(
-            seg.point_lookup(&kv_key("obj"), u64::MAX).unwrap().value,
+            seg.point_lookup(&kv_key("obj"), u64::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             object_val,
         );
     }
@@ -1655,7 +1711,8 @@ mod tests {
             let k = kv_key(&format!("k_{:08}", i));
             let e = seg
                 .point_lookup(&k, u64::MAX)
-                .expect(&format!("point lookup failed for k_{:08}", i));
+                .expect(&format!("point lookup failed for k_{:08}", i))
+                .unwrap();
             assert_eq!(e.value, Value::Int(i as i64));
             assert_eq!(e.commit_id, i as u64 + 1);
         }
@@ -1697,12 +1754,12 @@ mod tests {
 
         let seg = KVSegment::open(&path).unwrap();
 
-        let e = seg.point_lookup(&kv_key("k1"), u64::MAX).unwrap();
+        let e = seg.point_lookup(&kv_key("k1"), u64::MAX).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(42));
         assert_eq!(e.timestamp, 1_700_000_000_000_000);
         assert_eq!(e.ttl_ms, 30_000);
 
-        let e = seg.point_lookup(&kv_key("k2"), u64::MAX).unwrap();
+        let e = seg.point_lookup(&kv_key("k2"), u64::MAX).unwrap().unwrap();
         assert!(e.is_tombstone);
         assert_eq!(e.timestamp, 555);
         assert_eq!(e.ttl_ms, 10_000);
@@ -1768,9 +1825,15 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
         assert_eq!(seg.entry_count(), 500);
         // Spot check a few entries
-        let e = seg.point_lookup(&kv_key("k_000000"), u64::MAX).unwrap();
+        let e = seg
+            .point_lookup(&kv_key("k_000000"), u64::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.commit_id, 1);
-        let e = seg.point_lookup(&kv_key("k_000499"), u64::MAX).unwrap();
+        let e = seg
+            .point_lookup(&kv_key("k_000499"), u64::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.commit_id, 500);
     }
 
@@ -1803,7 +1866,7 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
         for i in 0..200u32 {
             let k = kv_key(&format!("key_{:06}", i));
-            let e = seg.point_lookup(&k, u64::MAX).unwrap();
+            let e = seg.point_lookup(&k, u64::MAX).unwrap().unwrap();
             assert_eq!(e.value, Value::String("A".repeat(500)));
         }
 
@@ -1941,7 +2004,10 @@ mod tests {
 
         let seg = KVSegment::open(&path).unwrap();
         // Look up a key in the first interval (entries 0-15)
-        let e = seg.point_lookup(&kv_key("k_0005"), u64::MAX).unwrap();
+        let e = seg
+            .point_lookup(&kv_key("k_0005"), u64::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(5));
         assert_eq!(e.commit_id, 6);
     }
@@ -1966,7 +2032,10 @@ mod tests {
 
         let seg = KVSegment::open(&path).unwrap();
         // Key in last interval (entries 32-47)
-        let e = seg.point_lookup(&kv_key("k_0045"), u64::MAX).unwrap();
+        let e = seg
+            .point_lookup(&kv_key("k_0045"), u64::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(45));
     }
 
@@ -1990,7 +2059,10 @@ mod tests {
 
         let seg = KVSegment::open(&path).unwrap();
         // Entry 16 is exactly at a restart point
-        let e = seg.point_lookup(&kv_key("k_0016"), u64::MAX).unwrap();
+        let e = seg
+            .point_lookup(&kv_key("k_0016"), u64::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(16));
         assert_eq!(e.commit_id, 17);
     }
@@ -2021,17 +2093,17 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
 
         // Snapshot at 5: see version 5
-        let e = seg.point_lookup(&kv_key("b_0000"), 5).unwrap();
+        let e = seg.point_lookup(&kv_key("b_0000"), 5).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(50));
         assert_eq!(e.commit_id, 5);
 
         // Snapshot at 3: see version 3
-        let e = seg.point_lookup(&kv_key("b_0000"), 3).unwrap();
+        let e = seg.point_lookup(&kv_key("b_0000"), 3).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(30));
         assert_eq!(e.commit_id, 3);
 
         // Snapshot at 1: see version 1
-        let e = seg.point_lookup(&kv_key("b_0000"), 1).unwrap();
+        let e = seg.point_lookup(&kv_key("b_0000"), 1).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(10));
     }
 
@@ -2053,8 +2125,14 @@ mod tests {
         build_segment(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
-        assert!(seg.point_lookup(&kv_key("zzz_missing"), u64::MAX).is_none());
-        assert!(seg.point_lookup(&kv_key("aaa_missing"), u64::MAX).is_none());
+        assert!(seg
+            .point_lookup(&kv_key("zzz_missing"), u64::MAX)
+            .unwrap()
+            .is_none());
+        assert!(seg
+            .point_lookup(&kv_key("aaa_missing"), u64::MAX)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -2104,16 +2182,28 @@ mod tests {
         assert_eq!(seg.entry_count(), 500);
 
         // Verify lookups across different blocks
-        let e = seg.point_lookup(&kv_key("key_000000"), u64::MAX).unwrap();
+        let e = seg
+            .point_lookup(&kv_key("key_000000"), u64::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.commit_id, 1);
 
-        let e = seg.point_lookup(&kv_key("key_000250"), u64::MAX).unwrap();
+        let e = seg
+            .point_lookup(&kv_key("key_000250"), u64::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.commit_id, 251);
 
-        let e = seg.point_lookup(&kv_key("key_000499"), u64::MAX).unwrap();
+        let e = seg
+            .point_lookup(&kv_key("key_000499"), u64::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.commit_id, 500);
 
-        assert!(seg.point_lookup(&kv_key("key_999999"), u64::MAX).is_none());
+        assert!(seg
+            .point_lookup(&kv_key("key_999999"), u64::MAX)
+            .unwrap()
+            .is_none());
 
         // Verify iteration yields all entries
         let all: Vec<_> = seg.iter_seek_all().collect();
@@ -2196,13 +2286,17 @@ mod tests {
             let k = kv_key(&format!("key_{:06}", i));
             let e = seg
                 .point_lookup(&k, u64::MAX)
+                .unwrap()
                 .unwrap_or_else(|| panic!("missing key_{:06}", i));
             assert_eq!(e.value, Value::String(format!("val_{}", "x".repeat(50))));
             assert_eq!(e.commit_id, i as u64 + 1);
         }
 
         // Non-existent key
-        assert!(seg.point_lookup(&kv_key("key_999999"), u64::MAX).is_none());
+        assert!(seg
+            .point_lookup(&kv_key("key_999999"), u64::MAX)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -2322,7 +2416,7 @@ mod tests {
         // Point lookups should all succeed
         for i in 0..2000u32 {
             let k = kv_key(&format!("item_{:06}", i));
-            let e = seg.point_lookup(&k, u64::MAX);
+            let e = seg.point_lookup(&k, u64::MAX).unwrap();
             assert!(e.is_some(), "point lookup failed for item_{:06}", i);
             assert_eq!(e.unwrap().value, Value::Int(i as i64));
         }
@@ -2406,6 +2500,7 @@ mod tests {
             let k = kv_key(&format!("hk_{:06}", i));
             let e = seg
                 .point_lookup(&k, u64::MAX)
+                .unwrap()
                 .unwrap_or_else(|| panic!("key hk_{:06} not found", i));
             assert_eq!(e.value, Value::Int(i as i64));
             assert_eq!(e.commit_id, i as u64 + 1);
@@ -2430,14 +2525,23 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
 
         // Keys that don't exist — various positions relative to existing keys
-        assert!(seg.point_lookup(&kv_key("aaa"), u64::MAX).is_none()); // before all
-        assert!(seg.point_lookup(&kv_key("exist_0050x"), u64::MAX).is_none()); // between
-        assert!(seg.point_lookup(&kv_key("zzz"), u64::MAX).is_none()); // after all
-                                                                       // Keys with similar prefixes to stress hash collisions
+        assert!(seg
+            .point_lookup(&kv_key("aaa"), u64::MAX)
+            .unwrap()
+            .is_none()); // before all
+        assert!(seg
+            .point_lookup(&kv_key("exist_0050x"), u64::MAX)
+            .unwrap()
+            .is_none()); // between
+        assert!(seg
+            .point_lookup(&kv_key("zzz"), u64::MAX)
+            .unwrap()
+            .is_none()); // after all
+                         // Keys with similar prefixes to stress hash collisions
         for i in 0..50u32 {
             let k = kv_key(&format!("exist_{:04}_GHOST", i));
             assert!(
-                seg.point_lookup(&k, u64::MAX).is_none(),
+                seg.point_lookup(&k, u64::MAX).unwrap().is_none(),
                 "ghost key exist_{:04}_GHOST should not exist",
                 i
             );
@@ -2466,6 +2570,7 @@ mod tests {
             let k = kv_key(&format!("col_{:06}", i));
             let e = seg
                 .point_lookup(&k, u64::MAX)
+                .unwrap()
                 .unwrap_or_else(|| panic!("key col_{:06} not found", i));
             assert_eq!(e.value, Value::Int(i as i64));
         }
@@ -2474,7 +2579,7 @@ mod tests {
         for i in 500..600u32 {
             let k = kv_key(&format!("col_{:06}", i));
             assert!(
-                seg.point_lookup(&k, u64::MAX).is_none(),
+                seg.point_lookup(&k, u64::MAX).unwrap().is_none(),
                 "absent key col_{:06} should not be found",
                 i
             );
@@ -2501,20 +2606,20 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
 
         // Verify specific snapshot points
-        let e = seg.point_lookup(&k, 1).unwrap();
+        let e = seg.point_lookup(&k, 1).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(10));
         assert_eq!(e.commit_id, 1);
 
-        let e = seg.point_lookup(&k, 25).unwrap();
+        let e = seg.point_lookup(&k, 25).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(250));
         assert_eq!(e.commit_id, 25);
 
-        let e = seg.point_lookup(&k, u64::MAX).unwrap();
+        let e = seg.point_lookup(&k, u64::MAX).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(500));
         assert_eq!(e.commit_id, 50);
 
         // snapshot_commit=0 → no version visible
-        assert!(seg.point_lookup(&k, 0).is_none());
+        assert!(seg.point_lookup(&k, 0).unwrap().is_none());
     }
 
     #[test]
@@ -2528,10 +2633,16 @@ mod tests {
         build_segment(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
-        let e = seg.point_lookup(&kv_key("only"), u64::MAX).unwrap();
+        let e = seg
+            .point_lookup(&kv_key("only"), u64::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(42));
         // Absent key in single-entry segment
-        assert!(seg.point_lookup(&kv_key("nope"), u64::MAX).is_none());
+        assert!(seg
+            .point_lookup(&kv_key("nope"), u64::MAX)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -2598,26 +2709,35 @@ mod tests {
 
         let seg = KVSegment::open(&path).unwrap();
 
-        let e = seg.point_lookup(&kv_key("alive"), u64::MAX).unwrap();
+        let e = seg
+            .point_lookup(&kv_key("alive"), u64::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(1));
         assert!(!e.is_tombstone);
 
-        let e = seg.point_lookup(&kv_key("dead"), u64::MAX).unwrap();
+        let e = seg
+            .point_lookup(&kv_key("dead"), u64::MAX)
+            .unwrap()
+            .unwrap();
         assert!(e.is_tombstone);
         assert_eq!(e.commit_id, 2);
 
         // "dead" at snapshot 1 → see the value
-        let e = seg.point_lookup(&kv_key("dead"), 1).unwrap();
+        let e = seg.point_lookup(&kv_key("dead"), 1).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(10));
         assert!(!e.is_tombstone);
 
         // "revived" at latest → see the re-put
-        let e = seg.point_lookup(&kv_key("revived"), u64::MAX).unwrap();
+        let e = seg
+            .point_lookup(&kv_key("revived"), u64::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(30));
         assert!(!e.is_tombstone);
 
         // "revived" at snapshot 2 → see tombstone
-        let e = seg.point_lookup(&kv_key("revived"), 2).unwrap();
+        let e = seg.point_lookup(&kv_key("revived"), 2).unwrap().unwrap();
         assert!(e.is_tombstone);
     }
 
@@ -2708,14 +2828,21 @@ mod tests {
             let k = kv_key(&format!("pk_{:06}", i));
             let e = seg
                 .point_lookup(&k, u64::MAX)
+                .unwrap()
                 .unwrap_or_else(|| panic!("key pk_{:06} not found", i));
             assert_eq!(e.value, Value::Int(i as i64));
             assert_eq!(e.commit_id, i as u64 + 1);
         }
 
         // Missing keys return None
-        assert!(seg.point_lookup(&kv_key("pk_999999"), u64::MAX).is_none());
-        assert!(seg.point_lookup(&kv_key("zz_missing"), u64::MAX).is_none());
+        assert!(seg
+            .point_lookup(&kv_key("pk_999999"), u64::MAX)
+            .unwrap()
+            .is_none());
+        assert!(seg
+            .point_lookup(&kv_key("zz_missing"), u64::MAX)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -2838,7 +2965,7 @@ mod tests {
         // Point lookups still work
         for i in 0..10u32 {
             let k = kv_key(&format!("sm_{:04}", i));
-            let e = seg.point_lookup(&k, u64::MAX).unwrap();
+            let e = seg.point_lookup(&k, u64::MAX).unwrap().unwrap();
             assert_eq!(e.value, Value::Int(i as i64));
         }
 
@@ -2921,6 +3048,7 @@ mod tests {
             let k = kv_key(&format!("mv_{:06}", i));
             let e = seg
                 .point_lookup(&k, 1)
+                .unwrap()
                 .unwrap_or_else(|| panic!("key mv_{:06} not found at snapshot 1", i));
             assert_eq!(
                 e.value,
@@ -2936,6 +3064,7 @@ mod tests {
             let k = kv_key(&format!("mv_{:06}", i));
             let e = seg
                 .point_lookup(&k, 5)
+                .unwrap()
                 .unwrap_or_else(|| panic!("key mv_{:06} not found at snapshot 5", i));
             assert_eq!(
                 e.value,
@@ -2948,7 +3077,7 @@ mod tests {
 
         // Snapshot at commit 0 should find nothing
         let k = kv_key("mv_000000");
-        assert!(seg.point_lookup(&k, 0).is_none());
+        assert!(seg.point_lookup(&k, 0).unwrap().is_none());
     }
 
     #[test]
@@ -2977,6 +3106,7 @@ mod tests {
             let k = kv_key(&format!("tb_{:06}", i));
             let e = seg
                 .point_lookup(&k, u64::MAX)
+                .unwrap()
                 .unwrap_or_else(|| panic!("key tb_{:06} not found", i));
             if i % 2 == 0 {
                 assert!(e.is_tombstone, "key {} should be tombstone", i);
@@ -2991,7 +3121,7 @@ mod tests {
         // At snapshot 1: all keys should be non-tombstone values
         for i in (0..500u32).step_by(50) {
             let k = kv_key(&format!("tb_{:06}", i));
-            let e = seg.point_lookup(&k, 1).unwrap();
+            let e = seg.point_lookup(&k, 1).unwrap().unwrap();
             assert!(!e.is_tombstone);
             assert_eq!(e.value, Value::Int(i as i64));
         }
@@ -3116,6 +3246,7 @@ mod tests {
             let k = kv_key(&format!("b129_{:06}", i));
             let e = seg
                 .point_lookup(&k, u64::MAX)
+                .unwrap()
                 .unwrap_or_else(|| panic!("key b129_{:06} not found", i));
             assert_eq!(e.value, Value::Int(i as i64));
         }
@@ -3207,7 +3338,7 @@ mod tests {
         // Every key must be findable despite hash collisions
         for i in 0..500u32 {
             let k = kv_key(&format!("shared_prefix_collision_test_key_{:06}", i));
-            let e = seg.point_lookup(&k, u64::MAX).unwrap_or_else(|| {
+            let e = seg.point_lookup(&k, u64::MAX).unwrap().unwrap_or_else(|| {
                 panic!("key shared_prefix_collision_test_key_{:06} not found", i)
             });
             assert_eq!(e.value, Value::Int(i as i64));
@@ -3217,7 +3348,7 @@ mod tests {
         // Non-existent keys with similar prefix must not be found
         for i in 500..550u32 {
             let k = kv_key(&format!("shared_prefix_collision_test_key_{:06}", i));
-            assert!(seg.point_lookup(&k, u64::MAX).is_none());
+            assert!(seg.point_lookup(&k, u64::MAX).unwrap().is_none());
         }
     }
 
@@ -3261,6 +3392,7 @@ mod tests {
             ));
             let e = seg
                 .point_lookup(&k, u64::MAX)
+                .unwrap()
                 .unwrap_or_else(|| panic!("key ..._shortening_{:04} not found", i));
             // Key 150 was overwritten; others have their original value
             if i == 150 {
@@ -3271,11 +3403,11 @@ mod tests {
         }
 
         // MVCC: snapshot at commit 5 for the multi-version key
-        let e = seg.point_lookup(&multi_ver_key, 5).unwrap();
+        let e = seg.point_lookup(&multi_ver_key, 5).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(500)); // commit 5 * 100
 
         // MVCC: snapshot at commit 1 gets the original value
-        let e = seg.point_lookup(&multi_ver_key, 1).unwrap();
+        let e = seg.point_lookup(&multi_ver_key, 1).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(150)); // original from loop
     }
 

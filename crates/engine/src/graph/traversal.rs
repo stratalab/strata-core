@@ -76,7 +76,7 @@ impl GraphStore {
             super::keys::reverse_adj_key(graph, node_id)
         };
         let storage_key = super::keys::storage_key(branch_id, &user_key);
-        match self.db.get_value_direct(&storage_key) {
+        match self.db.get_value_direct(&storage_key)? {
             Some(strata_core::Value::Bytes(bytes)) => {
                 Ok(super::packed::edge_count(&bytes) as usize)
             }

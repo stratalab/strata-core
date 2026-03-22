@@ -845,25 +845,30 @@ impl SegmentedStore {
 
         // L0 segments (linear scan)
         for seg in own_version.l0_segments() {
-            if seg
-                .point_lookup_preencoded(typed_key, seek_bytes, u64::MAX)
-                .is_some()
-            {
-                return true;
+            match seg.point_lookup_preencoded(typed_key, seek_bytes, u64::MAX) {
+                Ok(Some(_)) => return true,
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "corruption during materialization shadow check");
+                    return false;
+                }
             }
         }
 
         // L1+ segments (binary search per level)
         for level_idx in 1..own_version.levels.len() {
-            if point_lookup_level_preencoded(
+            match point_lookup_level_preencoded(
                 &own_version.levels[level_idx],
                 typed_key,
                 seek_bytes,
                 u64::MAX,
-            )
-            .is_some()
-            {
-                return true;
+            ) {
+                Ok(Some(_)) => return true,
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "corruption during materialization shadow check");
+                    return false;
+                }
             }
         }
 
@@ -884,25 +889,30 @@ impl SegmentedStore {
 
         // L0 segments
         for seg in layer_segments.l0_segments() {
-            if seg
-                .point_lookup_preencoded(&src_typed_key, src_seek_bytes, fork_version)
-                .is_some()
-            {
-                return true;
+            match seg.point_lookup_preencoded(&src_typed_key, src_seek_bytes, fork_version) {
+                Ok(Some(_)) => return true,
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "corruption during materialization shadow check");
+                    return false;
+                }
             }
         }
 
         // L1+ segments
         for level_idx in 1..layer_segments.levels.len() {
-            if point_lookup_level_preencoded(
+            match point_lookup_level_preencoded(
                 &layer_segments.levels[level_idx],
                 &src_typed_key,
                 src_seek_bytes,
                 fork_version,
-            )
-            .is_some()
-            {
-                return true;
+            ) {
+                Ok(Some(_)) => return true,
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "corruption during materialization shadow check");
+                    return false;
+                }
             }
         }
 
@@ -1116,14 +1126,22 @@ impl SegmentedStore {
     }
 
     /// Direct single-key read returning only the Value (no VersionedValue).
-    pub fn get_value_direct(&self, key: &Key) -> Option<Value> {
+    pub fn get_value_direct(&self, key: &Key) -> StrataResult<Option<Value>> {
         let branch_id = key.namespace.branch_id;
-        let branch = self.branches.get(&branch_id)?;
-        let (_commit_id, entry) = Self::get_versioned_from_branch(&branch, key, u64::MAX)?;
-        if entry.is_tombstone || entry.is_expired() {
-            return None;
+        let branch = match self.branches.get(&branch_id) {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        match Self::get_versioned_from_branch(&branch, key, u64::MAX)? {
+            Some((_commit_id, entry)) => {
+                if entry.is_tombstone || entry.is_expired() {
+                    Ok(None)
+                } else {
+                    Ok(Some(entry.value))
+                }
+            }
+            None => Ok(None),
         }
-        Some(entry.value)
     }
 
     /// List all live entries for a branch filtered by type tag.
@@ -2132,7 +2150,7 @@ impl SegmentedStore {
         branch: &BranchState,
         key: &Key,
         max_version: u64,
-    ) -> Option<(u64, MemtableEntry)> {
+    ) -> StrataResult<Option<(u64, MemtableEntry)>> {
         // Encode once, reuse everywhere.
         let typed_key = encode_typed_key(key);
         let seek_ik = InternalKey::from_typed_key_bytes(&typed_key, u64::MAX);
@@ -2144,7 +2162,7 @@ impl SegmentedStore {
                 .active
                 .get_versioned_preencoded(&typed_key, seek_bytes, max_version)
         {
-            return Some(result);
+            return Ok(Some(result));
         }
 
         // 2. Frozen memtables (newest first)
@@ -2152,16 +2170,16 @@ impl SegmentedStore {
             if let Some(result) =
                 frozen.get_versioned_preencoded(&typed_key, seek_bytes, max_version)
             {
-                return Some(result);
+                return Ok(Some(result));
             }
         }
 
         // 3. L0 segments (newest first, overlapping — linear scan)
         let ver = branch.version.load();
         for seg in ver.l0_segments() {
-            if let Some(se) = seg.point_lookup_preencoded(&typed_key, seek_bytes, max_version) {
+            if let Some(se) = seg.point_lookup_preencoded(&typed_key, seek_bytes, max_version)? {
                 let commit_id = se.commit_id;
-                return Some((commit_id, segment_entry_to_memtable_entry(se)));
+                return Ok(Some((commit_id, segment_entry_to_memtable_entry(se))));
             }
         }
 
@@ -2172,9 +2190,9 @@ impl SegmentedStore {
                 &typed_key,
                 seek_bytes,
                 max_version,
-            ) {
+            )? {
                 let commit_id = se.commit_id;
-                return Some((commit_id, segment_entry_to_memtable_entry(se)));
+                return Ok(Some((commit_id, segment_entry_to_memtable_entry(se))));
             }
         }
 
@@ -2192,10 +2210,10 @@ impl SegmentedStore {
             // L0 segments (linear scan)
             for seg in layer.segments.l0_segments() {
                 if let Some(se) =
-                    seg.point_lookup_preencoded(&src_typed_key, src_seek_bytes, effective_version)
+                    seg.point_lookup_preencoded(&src_typed_key, src_seek_bytes, effective_version)?
                 {
                     let commit_id = se.commit_id;
-                    return Some((commit_id, segment_entry_to_memtable_entry(se)));
+                    return Ok(Some((commit_id, segment_entry_to_memtable_entry(se))));
                 }
             }
 
@@ -2206,14 +2224,14 @@ impl SegmentedStore {
                     &src_typed_key,
                     src_seek_bytes,
                     effective_version,
-                ) {
+                )? {
                     let commit_id = se.commit_id;
-                    return Some((commit_id, segment_entry_to_memtable_entry(se)));
+                    return Ok(Some((commit_id, segment_entry_to_memtable_entry(se))));
                 }
             }
         }
 
-        None
+        Ok(None)
     }
 
     /// Collect all versions of a key across all sources in a branch.
@@ -2501,7 +2519,7 @@ impl Storage for SegmentedStore {
             None => return Ok(None),
         };
 
-        match Self::get_versioned_from_branch(&branch, key, max_version) {
+        match Self::get_versioned_from_branch(&branch, key, max_version)? {
             Some((commit_id, entry)) => {
                 if entry.is_tombstone || entry.is_expired() {
                     Ok(None)
@@ -2724,7 +2742,7 @@ impl Storage for SegmentedStore {
             None => return Ok(None),
         };
 
-        match Self::get_versioned_from_branch(&branch, key, u64::MAX) {
+        match Self::get_versioned_from_branch(&branch, key, u64::MAX)? {
             Some((commit_id, entry)) => {
                 if entry.is_tombstone || entry.is_expired() {
                     Ok(None)
@@ -2776,7 +2794,7 @@ fn point_lookup_level(
     l1_segments: &[Arc<KVSegment>],
     key: &Key,
     max_version: u64,
-) -> Option<SegmentEntry> {
+) -> StrataResult<Option<SegmentEntry>> {
     let typed_key = encode_typed_key(key);
     let seek_ik = InternalKey::from_typed_key_bytes(&typed_key, u64::MAX);
     point_lookup_level_preencoded(l1_segments, &typed_key, seek_ik.as_bytes(), max_version)
@@ -2787,9 +2805,9 @@ fn point_lookup_level_preencoded(
     typed_key: &[u8],
     seek_bytes: &[u8],
     max_version: u64,
-) -> Option<SegmentEntry> {
+) -> StrataResult<Option<SegmentEntry>> {
     if l1_segments.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let idx = l1_segments.partition_point(|seg| {
@@ -2802,7 +2820,7 @@ fn point_lookup_level_preencoded(
     });
 
     if idx >= l1_segments.len() {
-        return None;
+        return Ok(None);
     }
 
     let seg = &l1_segments[idx];
@@ -2810,7 +2828,7 @@ fn point_lookup_level_preencoded(
     if min_ik.len() >= 8 {
         let min_prefix = &min_ik[..min_ik.len() - 8];
         if min_prefix > typed_key {
-            return None;
+            return Ok(None);
         }
     }
 
