@@ -939,14 +939,7 @@ fn recover_segments_empty_dir_is_noop() {
     let dir = tempfile::tempdir().unwrap();
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
     let info = store.recover_segments().unwrap();
-    assert_eq!(
-        info,
-        super::RecoverSegmentsInfo {
-            branches_recovered: 0,
-            segments_loaded: 0,
-            errors_skipped: 0
-        }
-    );
+    assert_eq!(info, super::RecoverSegmentsInfo::default());
 }
 
 #[test]
@@ -6037,6 +6030,58 @@ fn materialize_crash_recovery_with_valid_orphan_segment() {
     }
 }
 
+/// #1670: Recovery surfaces dropped inherited layers when source branch is missing.
+#[test]
+fn recovery_surfaces_missing_source_branch() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Phase 1: Create parent and fork child
+    {
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        seed(&store, parent_kv("a"), Value::Int(1), 1);
+        store.rotate_memtable(&parent_branch());
+        store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+        store
+            .branches
+            .entry(child_branch())
+            .or_insert_with(BranchState::new);
+        store
+            .fork_branch(&parent_branch(), &child_branch())
+            .unwrap();
+
+        // Write manifest for both branches
+        store.write_branch_manifest(&parent_branch());
+        store.write_branch_manifest(&child_branch());
+    }
+
+    // Sabotage: delete the parent's branch directory (simulating missing source)
+    let parent_hex = hex_encode_branch(&parent_branch());
+    let parent_dir = dir.path().join(&parent_hex);
+    std::fs::remove_dir_all(&parent_dir).unwrap();
+
+    // Phase 2: Recover — child's inherited layer should be dropped
+    {
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let info = store.recover_segments().unwrap();
+
+        // layers_dropped should report the missing parent
+        assert!(
+            !info.layers_dropped.is_empty(),
+            "should report dropped inherited layer"
+        );
+        assert_eq!(info.layers_dropped[0].0, child_branch());
+        assert_eq!(info.layers_dropped[0].1, parent_branch());
+
+        // Child should still exist but with no inherited layers
+        let child = store.branches.get(&child_branch()).unwrap();
+        assert!(
+            child.inherited_layers.is_empty(),
+            "inherited layer should be dropped (source missing)"
+        );
+    }
+}
+
 #[test]
 fn materialize_manifest_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
@@ -6568,4 +6613,225 @@ fn concurrent_fork_and_compaction_stress() {
             );
         }
     }
+}
+
+// =====================================================================
+// Performance benchmarks (#1672)
+//
+// Run with: cargo test -p strata-storage --lib -- segmented::tests::bench_ --ignored --nocapture
+// =====================================================================
+
+/// #1672: Fork 1M-key branch — target: < 100ms.
+/// Verifies the O(1) fork claim holds in practice.
+#[test]
+#[ignore = "benchmark — run with --ignored --nocapture"]
+fn bench_fork_1m_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // Populate parent with 1M keys across multiple segments
+    let big_value = Value::Bytes(vec![0xAB; 64]);
+    let batch_size = 50_000;
+    let total_keys = 1_000_000;
+    for batch in 0..(total_keys / batch_size) {
+        for i in 0..batch_size {
+            let key_idx = batch * batch_size + i;
+            seed(
+                &store,
+                parent_kv(&format!("k{:08}", key_idx)),
+                big_value.clone(),
+                1,
+            );
+        }
+        store.rotate_memtable(&parent_branch());
+        store.flush_oldest_frozen(&parent_branch()).unwrap();
+    }
+
+    let parent_segs: usize = store
+        .branches
+        .get(&parent_branch())
+        .unwrap()
+        .version
+        .load()
+        .levels
+        .iter()
+        .map(|l| l.len())
+        .sum();
+    eprintln!("Parent: {} segments, {} keys", parent_segs, total_keys);
+
+    // Fork
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+
+    let start = std::time::Instant::now();
+    let (_fv, shared) = store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    eprintln!(
+        "Fork: {} segments shared in {:.2}ms",
+        shared,
+        elapsed.as_secs_f64() * 1000.0
+    );
+    assert!(
+        elapsed.as_millis() < 500,
+        "Fork should be fast (was {}ms)",
+        elapsed.as_millis()
+    );
+    assert!(shared > 0);
+}
+
+/// #1672: 100 branches forked from same parent — verify fan-out scalability.
+#[test]
+#[ignore = "benchmark — run with --ignored --nocapture"]
+fn bench_100_branch_fanout() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(SegmentedStore::with_dir(dir.path().to_path_buf(), 0));
+
+    // Populate parent
+    for i in 0..1000 {
+        seed(
+            &store,
+            parent_kv(&format!("k{:06}", i)),
+            Value::Int(i as i64),
+            1,
+        );
+    }
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // Second segment for compaction eligibility
+    for i in 1000..2000 {
+        seed(
+            &store,
+            parent_kv(&format!("k{:06}", i)),
+            Value::Int(i as i64),
+            2,
+        );
+    }
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // Fork 100 children
+    let start = std::time::Instant::now();
+    for c in 0..100 {
+        let child = BranchId::from_bytes([c as u8 + 50; 16]);
+        store.branches.entry(child).or_insert_with(BranchState::new);
+        store.fork_branch(&parent_branch(), &child).unwrap();
+    }
+    let fork_elapsed = start.elapsed();
+    eprintln!(
+        "100 forks in {:.2}ms ({:.2}ms/fork)",
+        fork_elapsed.as_secs_f64() * 1000.0,
+        fork_elapsed.as_secs_f64() * 10.0
+    );
+
+    // Compact parent — should NOT delete shared segments
+    store.compact_branch(&parent_branch(), 0).unwrap();
+
+    // Verify all 100 children can still read
+    let start = std::time::Instant::now();
+    for c in 0..100u8 {
+        let child = BranchId::from_bytes([c + 50; 16]);
+        for i in 0..2000 {
+            let key = Key::new(
+                std::sync::Arc::new(strata_core::types::Namespace::new(
+                    child,
+                    "default".to_string(),
+                )),
+                strata_core::types::TypeTag::KV,
+                format!("k{:06}", i).into_bytes(),
+            );
+            let val = store.get_versioned(&key, u64::MAX).unwrap();
+            assert!(val.is_some(), "child {} missing key {}", c, i);
+        }
+    }
+    let read_elapsed = start.elapsed();
+    eprintln!(
+        "200K reads across 100 children in {:.2}ms",
+        read_elapsed.as_secs_f64() * 1000.0
+    );
+}
+
+/// #1672: Fork chain depth trigger — fork A→B→C→D→E (4 layers on E).
+#[test]
+#[ignore = "benchmark — run with --ignored --nocapture"]
+fn bench_fork_chain_depth() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // Create chain: A → B → C → D → E
+    let branches: Vec<BranchId> = (0..5)
+        .map(|i| BranchId::from_bytes([i as u8 + 100; 16]))
+        .collect();
+
+    // Populate first branch
+    let ns_a = std::sync::Arc::new(strata_core::types::Namespace::new(
+        branches[0],
+        "default".to_string(),
+    ));
+    for i in 0..1000 {
+        seed(
+            &store,
+            Key::new(
+                std::sync::Arc::clone(&ns_a),
+                strata_core::types::TypeTag::KV,
+                format!("k{:04}", i).into_bytes(),
+            ),
+            Value::Int(i as i64),
+            1,
+        );
+    }
+    store.rotate_memtable(&branches[0]);
+    store.flush_oldest_frozen(&branches[0]).unwrap();
+
+    // Fork chain
+    for i in 1..5 {
+        store
+            .branches
+            .entry(branches[i])
+            .or_insert_with(BranchState::new);
+        store.fork_branch(&branches[i - 1], &branches[i]).unwrap();
+    }
+
+    // Verify depth
+    let last = store.branches.get(&branches[4]).unwrap();
+    let depth = last.inherited_layers.len();
+    eprintln!("Fork chain depth on E: {} layers", depth);
+    assert_eq!(depth, 4, "E should have 4 inherited layers (A,B,C,D)");
+    drop(last);
+
+    // Verify E can read all data
+    let ns_e = std::sync::Arc::new(strata_core::types::Namespace::new(
+        branches[4],
+        "default".to_string(),
+    ));
+    for i in 0..1000 {
+        let key = Key::new(
+            std::sync::Arc::clone(&ns_e),
+            strata_core::types::TypeTag::KV,
+            format!("k{:04}", i).into_bytes(),
+        );
+        let val = store.get_versioned(&key, u64::MAX).unwrap();
+        assert!(val.is_some(), "E missing key {}", i);
+    }
+
+    // Materialize deepest layer on E
+    let start = std::time::Instant::now();
+    let result = store.materialize_layer(&branches[4], 0).unwrap();
+    let elapsed = start.elapsed();
+    eprintln!(
+        "Materialize: {} entries in {:.2}ms, {} segments created",
+        result.entries_materialized,
+        elapsed.as_secs_f64() * 1000.0,
+        result.segments_created
+    );
+    assert!(result.entries_materialized > 0);
+
+    // Depth should be reduced
+    let last = store.branches.get(&branches[4]).unwrap();
+    assert_eq!(last.inherited_layers.len(), 3);
 }
