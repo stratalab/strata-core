@@ -332,7 +332,14 @@ impl BranchIndex {
 
             info!(target: "strata::branch", %branch_id, "Branch deleted");
             Ok(())
-        })
+        })?;
+
+        // Clean up storage-layer segments, manifest, and refcounts (#1702).
+        // Must happen after logical deletion so in-progress reads see the
+        // deletion before files disappear.
+        self.db.clear_branch_storage(&executor_branch_id);
+
+        Ok(())
     }
 
     /// Delete all branch-scoped data within an existing transaction context.

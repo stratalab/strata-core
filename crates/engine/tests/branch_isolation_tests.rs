@@ -8,7 +8,9 @@ use std::sync::Arc;
 use strata_core::contract::Version;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
+use strata_engine::database::config::StorageConfig;
 use strata_engine::Database;
+use strata_engine::StrataConfig;
 use strata_engine::{BranchIndex, EventLog, KVStore, StateCell};
 use tempfile::TempDir;
 
@@ -436,4 +438,93 @@ fn test_event_log_chain_isolation() {
     // Verify chain lengths independently
     assert_eq!(event_log.len(&branch1, "default").unwrap(), 3);
     assert_eq!(event_log.len(&branch2, "default").unwrap(), 2);
+}
+
+/// #1702: BranchIndex::delete_branch() must clean up storage-layer segment files.
+///
+/// When a branch has been flushed to disk (producing .sst files), deleting the
+/// branch via the engine-level API must remove those files. Without the fix,
+/// only logical KV entries are removed — .sst files, manifests, and the branch
+/// directory leak on disk forever.
+#[test]
+fn test_issue_1702_delete_branch_cleans_up_segment_files() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // Use a tiny write_buffer_size to force memtable rotation (and thus segment
+    // creation) on every write transaction commit.
+    let cfg = StrataConfig {
+        storage: StorageConfig {
+            write_buffer_size: 1, // 1 byte → rotates immediately
+            ..StorageConfig::default()
+        },
+        ..StrataConfig::default()
+    };
+    let db = Database::open_with_config(temp_dir.path(), cfg).unwrap();
+
+    let branch_index = BranchIndex::new(db.clone());
+    let kv = KVStore::new(db.clone());
+
+    // Create a branch and write data.
+    branch_index.create_branch("doomed").unwrap();
+    let branch_id = strata_engine::primitives::branch::resolve_branch_name("doomed");
+
+    // Each write triggers rotation → flush → .sst file on disk.
+    for i in 0..5 {
+        kv.put(&branch_id, "default", &format!("key{i}"), Value::Int(i))
+            .unwrap();
+    }
+
+    // Compute the branch's on-disk directory.
+    let segments_dir = temp_dir.path().join("segments");
+    let branch_hex = {
+        let bytes = branch_id.as_bytes();
+        let mut s = String::with_capacity(32);
+        for &b in bytes.iter() {
+            use std::fmt::Write;
+            let _ = write!(s, "{:02x}", b);
+        }
+        s
+    };
+    let branch_dir = segments_dir.join(&branch_hex);
+
+    // Collect .sst files for this branch before deletion.
+    let sst_count_before = std::fs::read_dir(&branch_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
+        .count();
+    assert!(
+        sst_count_before > 0,
+        "Expected .sst files in {:?} before delete, found none",
+        branch_dir,
+    );
+
+    // Delete the branch through the engine-level API.
+    branch_index.delete_branch("doomed").unwrap();
+
+    // Logical data should be gone.
+    assert!(kv.get(&branch_id, "default", "key0").unwrap().is_none());
+
+    // Storage-layer files should ALSO be gone.
+    let sst_after: Vec<_> = std::fs::read_dir(&branch_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
+        .collect();
+    assert!(
+        sst_after.is_empty(),
+        "Expected all .sst files to be cleaned up after delete_branch(), \
+         but found {} files: {:?}",
+        sst_after.len(),
+        sst_after.iter().map(|e| e.path()).collect::<Vec<_>>(),
+    );
+
+    // Branch directory should also be removed.
+    assert!(
+        !branch_dir.exists(),
+        "Branch directory {:?} should be removed after delete_branch()",
+        branch_dir,
+    );
 }
