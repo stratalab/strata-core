@@ -37,6 +37,12 @@ pub struct CompactionIterator<I: Iterator<Item = (InternalKey, MemtableEntry)>> 
     /// non-bottommost compactions must preserve expired entries that
     /// shadow older versions in lower levels.
     drop_expired: bool,
+    /// Whether this compaction is bottommost (no lower levels exist).
+    ///
+    /// When true, below-floor tombstones can be safely elided since
+    /// there are no lower levels with older puts to shadow.
+    /// When false, below-floor tombstones must be preserved (#1678).
+    is_bottommost: bool,
 }
 
 impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> CompactionIterator<I> {
@@ -53,6 +59,7 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> CompactionIterator<I> {
             max_versions: 0,
             versions_emitted: 0,
             drop_expired: false,
+            is_bottommost: true,
         }
     }
 
@@ -73,6 +80,16 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> CompactionIterator<I> {
     /// This should only be used for bottommost-level compactions.
     pub fn with_drop_expired(mut self, drop: bool) -> Self {
         self.drop_expired = drop;
+        self
+    }
+
+    /// Set whether this is a bottommost-level compaction (#1678).
+    ///
+    /// When false, below-floor tombstones are preserved to shadow
+    /// older puts in lower levels. Defaults to true (safe for callers
+    /// that previously relied on unconditional tombstone elision).
+    pub fn with_is_bottommost(mut self, is_bottommost: bool) -> Self {
+        self.is_bottommost = is_bottommost;
         self
     }
 }
@@ -114,8 +131,13 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for CompactionIt
             if !self.emitted_floor_entry {
                 self.emitted_floor_entry = true;
                 if entry.is_tombstone {
-                    // Dead key cleanup: skip floor tombstone
-                    continue;
+                    if self.is_bottommost {
+                        // Bottommost: safe to elide — no lower levels to shadow
+                        continue;
+                    }
+                    // Non-bottommost: keep tombstone to shadow lower-level puts (#1678)
+                    self.versions_emitted += 1;
+                    return Some((ik, entry));
                 }
                 // Keep one floor entry, but respect max_versions
                 if self.max_versions > 0 && self.versions_emitted >= self.max_versions {
@@ -497,6 +519,100 @@ mod tests {
             .with_max_versions(10)
             .collect();
         assert!(result.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #1678: Non-bottommost compaction must preserve below-floor tombstones
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_issue_1678_non_bottommost_preserves_below_floor_tombstone() {
+        // Scenario from the issue:
+        // - k=v1 exists in a lower level (L2) at commit_id=1
+        // - k=tombstone in L1 at commit_id=3, with prune_floor=5
+        //   (so the tombstone is below floor)
+        // - Compact L1 (non-bottommost: lower levels exist)
+        //
+        // Bug: CompactionIterator unconditionally drops below-floor tombstones,
+        //      removing the shadow that hides v1 in L2 → data resurrection.
+        //
+        // The tombstone MUST be preserved when is_bottommost=false.
+        let items = vec![(InternalKey::encode(&key("k"), 3), tombstone())];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 5)
+            .with_is_bottommost(false)
+            .collect();
+        // Non-bottommost: tombstone must survive to shadow lower-level puts
+        assert_eq!(
+            result.len(),
+            1,
+            "below-floor tombstone must be kept in non-bottommost compaction"
+        );
+        assert!(result[0].1.is_tombstone);
+        assert_eq!(result[0].0.commit_id(), 3);
+    }
+
+    #[test]
+    fn test_issue_1678_bottommost_drops_below_floor_tombstone() {
+        // Same scenario but bottommost — safe to drop the tombstone since
+        // no lower levels exist.
+        let items = vec![(InternalKey::encode(&key("k"), 3), tombstone())];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 5)
+            .with_is_bottommost(true)
+            .collect();
+        // Bottommost: tombstone can be safely elided
+        assert!(
+            result.is_empty(),
+            "below-floor tombstone should be dropped in bottommost compaction"
+        );
+    }
+
+    #[test]
+    fn test_issue_1678_non_bottommost_tombstone_with_older_versions() {
+        // tombstone at 3, value at 1, floor=5, non-bottommost
+        // Both below floor: tombstone is floor entry but must be kept.
+        // The value at 1 should be pruned (tombstone is the floor entry).
+        let items = vec![
+            (InternalKey::encode(&key("k"), 3), tombstone()),
+            (InternalKey::encode(&key("k"), 1), entry(10)),
+        ];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 5)
+            .with_is_bottommost(false)
+            .collect();
+        // Tombstone kept as floor entry, older value pruned
+        assert_eq!(result.len(), 1);
+        assert!(result[0].1.is_tombstone);
+        assert_eq!(result[0].0.commit_id(), 3);
+    }
+
+    #[test]
+    fn test_issue_1678_non_bottommost_tombstone_preserved_despite_max_versions() {
+        // Non-bottommost below-floor tombstone MUST be kept even when
+        // max_versions is already exhausted — dropping it resurrects data.
+        // versions: value@10, value@8 (above floor), tombstone@2 (below floor)
+        // floor=5, max_versions=2, non-bottommost
+        let items = vec![
+            (InternalKey::encode(&key("k"), 10), entry(100)),
+            (InternalKey::encode(&key("k"), 8), entry(80)),
+            (InternalKey::encode(&key("k"), 2), tombstone()),
+        ];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 5)
+            .with_max_versions(2)
+            .with_is_bottommost(false)
+            .collect();
+        // Must keep all 3: two above-floor values + the tombstone that shadows lower levels
+        assert_eq!(
+            result.len(),
+            3,
+            "tombstone must survive even when max_versions exhausted"
+        );
+        assert_eq!(result[0].0.commit_id(), 10);
+        assert_eq!(result[1].0.commit_id(), 8);
+        assert!(result[2].1.is_tombstone);
+        assert_eq!(result[2].0.commit_id(), 2);
     }
 
     // -----------------------------------------------------------------------
