@@ -316,7 +316,10 @@ impl BranchIndex {
 
         // Single atomic transaction for all delete operations (#974).
         // Deletes branch data from all namespaces + metadata entry.
+        // Cross-branch access is safe here: the branch is being deleted,
+        // so no concurrent user transactions should target it (#1709).
         self.db.transaction(global_branch_id(), |txn| {
+            txn.set_allow_cross_branch(true);
             // Delete data from the executor's namespace
             Self::delete_namespace_data(txn, executor_branch_id)?;
 
