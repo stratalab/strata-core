@@ -309,6 +309,8 @@ pub struct SegmentedStore {
     compaction_rate_limiter: arc_swap::ArcSwapOption<crate::rate_limiter::RateLimiter>,
     /// Reference count registry for shared segments (COW branching).
     ref_registry: ref_registry::SegmentRefRegistry,
+    /// Branches currently being materialized (prevents concurrent materialization #1703).
+    materializing_branches: DashMap<BranchId, ()>,
 }
 
 impl SegmentedStore {
@@ -331,6 +333,7 @@ impl SegmentedStore {
             max_immutable_memtables: AtomicUsize::new(0),
             compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
             ref_registry: ref_registry::SegmentRefRegistry::new(),
+            materializing_branches: DashMap::new(),
         }
     }
 
@@ -354,6 +357,7 @@ impl SegmentedStore {
             max_immutable_memtables: AtomicUsize::new(0),
             compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
             ref_registry: ref_registry::SegmentRefRegistry::new(),
+            materializing_branches: DashMap::new(),
         }
     }
 
@@ -377,6 +381,7 @@ impl SegmentedStore {
             max_immutable_memtables: AtomicUsize::new(0),
             compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
             ref_registry: ref_registry::SegmentRefRegistry::new(),
+            materializing_branches: DashMap::new(),
         }
     }
 
@@ -438,21 +443,23 @@ impl SegmentedStore {
     /// Returns true if the branch existed.
     pub fn clear_branch(&self, branch_id: &BranchId) -> bool {
         if let Some((_, branch)) = self.branches.remove(branch_id) {
-            // 1. Clean up the branch's own segments (not refcounted — always delete).
+            // 1. Clean up the branch's own segments.
+            // Check refcount before deleting — a child branch may still
+            // reference these segments through inherited layers (#1702).
             let ver = branch.version.load();
             for level in &ver.levels {
                 for seg in level {
                     crate::block_cache::global_cache().invalidate_file(seg.file_id());
-                    let _ = std::fs::remove_file(seg.file_path());
+                    if !self.ref_registry.is_referenced(seg.file_id()) {
+                        let _ = std::fs::remove_file(seg.file_path());
+                    }
                 }
             }
 
             // 2. Decrement refcounts for inherited (shared) segments.
-            // Do NOT delete files here — the parent branch may still own
-            // the segment in its version.levels. Files are cleaned up
-            // lazily when parent compaction calls delete_segment_if_unreferenced
-            // (which checks is_referenced after the segment leaves the
-            // parent's version).
+            // Do NOT delete files here — the parent may still own the segment
+            // in its version.levels. Orphaned files (parent compacted away the
+            // segment before this decrement) are cleaned up by gc_orphan_segments.
             for layer in &branch.inherited_layers {
                 for level in &layer.segments.levels {
                     for seg in level {
@@ -471,10 +478,86 @@ impl SegmentedStore {
                 let _ = std::fs::remove_dir(&branch_dir);
             }
 
+            // 4. Garbage-collect orphan segment files (#1705).
+            // Refcount decrements above may have released the last reference to
+            // segments whose parent already compacted them away. GC deletes
+            // any .sst on disk not referenced by a live branch or the refcount
+            // registry.
+            self.gc_orphan_segments();
+
             true
         } else {
             false
         }
+    }
+
+    /// Garbage-collect orphaned segment files (#1705).
+    ///
+    /// Scans all branch directories for `.sst` files that are not referenced
+    /// by any branch's current `version.levels` or inherited layers. Such
+    /// files arise when a parent compacts away a segment while a child still
+    /// references it, and the child later releases its reference (decrement
+    /// to 0) without being able to delete the file (the parent might still
+    /// own it at that time).
+    ///
+    /// Returns the number of files deleted.
+    pub fn gc_orphan_segments(&self) -> usize {
+        let segments_dir = match &self.segments_dir {
+            Some(d) => d,
+            None => return 0,
+        };
+
+        // Build the set of all segment file_id values currently live in any
+        // branch. file_id is a hash of the file path (see block_cache::file_path_hash).
+        let mut live_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for branch in self.branches.iter() {
+            let ver = branch.version.load();
+            for level in &ver.levels {
+                for seg in level {
+                    live_ids.insert(seg.file_id());
+                }
+            }
+            for layer in &branch.inherited_layers {
+                for level in &layer.segments.levels {
+                    for seg in level {
+                        live_ids.insert(seg.file_id());
+                    }
+                }
+            }
+        }
+
+        let mut deleted = 0usize;
+
+        // Scan all branch directories.
+        let entries = match std::fs::read_dir(segments_dir) {
+            Ok(e) => e,
+            Err(_) => return 0,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let sst_entries = match std::fs::read_dir(&path) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for sst_entry in sst_entries.flatten() {
+                let sst_path = sst_entry.path();
+                if sst_path.extension().and_then(|e| e.to_str()) != Some("sst") {
+                    continue;
+                }
+                // file_id is a hash of the full path, matching KVSegment::file_id().
+                let file_id = crate::block_cache::file_path_hash(&sst_path);
+                if !live_ids.contains(&file_id) && !self.ref_registry.is_referenced(file_id) {
+                    crate::block_cache::global_cache().invalidate_file(file_id);
+                    let _ = std::fs::remove_file(&sst_path);
+                    deleted += 1;
+                }
+            }
+        }
+
+        deleted
     }
 
     /// Number of inherited layers for a branch.
@@ -520,23 +603,62 @@ impl SegmentedStore {
             }
         };
 
+        // Serialize materialization per branch (#1703).
+        // Use atomic entry() API to prevent TOCTOU between check and insert.
+        {
+            use dashmap::mapref::entry::Entry;
+            match self.materializing_branches.entry(*child_branch_id) {
+                Entry::Occupied(_) => {
+                    return Ok(MaterializeResult {
+                        entries_materialized: 0,
+                        segments_created: 0,
+                    });
+                }
+                Entry::Vacant(e) => {
+                    e.insert(());
+                }
+            }
+        }
+
+        // RAII guard to remove entry on all exit paths.
+        struct MaterializeGuard<'a> {
+            store: &'a SegmentedStore,
+            branch_id: BranchId,
+        }
+        impl Drop for MaterializeGuard<'_> {
+            fn drop(&mut self) {
+                self.store.materializing_branches.remove(&self.branch_id);
+            }
+        }
+        let _guard = MaterializeGuard {
+            store: self,
+            branch_id: *child_branch_id,
+        };
+
         // 2a. Snapshot under read guard
-        let (layer_segments, _source_branch_id, fork_version, own_version, closer_layers) = {
+        let (layer_segments, source_branch_id, fork_version, own_version, closer_layers) = {
             let branch = match self.branches.get(child_branch_id) {
                 Some(b) => b,
                 None => return Err(io::Error::new(io::ErrorKind::NotFound, "branch not found")),
             };
             if layer_index >= branch.inherited_layers.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "layer_index {} out of bounds (have {})",
-                        layer_index,
-                        branch.inherited_layers.len()
-                    ),
-                ));
+                // Layer was already removed by a concurrent materialization that
+                // completed before we acquired the DashMap guard. Not an error.
+                return Ok(MaterializeResult {
+                    entries_materialized: 0,
+                    segments_created: 0,
+                });
             }
             let layer = &branch.inherited_layers[layer_index];
+
+            // Reject if already being materialized (#1703)
+            if layer.status == LayerStatus::Materializing {
+                return Ok(MaterializeResult {
+                    entries_materialized: 0,
+                    segments_created: 0,
+                });
+            }
+
             let layer_segments = Arc::clone(&layer.segments);
             let source_branch_id = layer.source_branch_id;
             let fork_version = layer.fork_version;
@@ -685,9 +807,13 @@ impl SegmentedStore {
                     .store(Arc::new(SegmentVersion { levels: new_levels }));
             }
 
-            // Remove the inherited layer
-            if layer_index < branch.inherited_layers.len() {
-                branch.inherited_layers.remove(layer_index);
+            // Remove the inherited layer by identity (source_branch_id + fork_version)
+            // instead of by index, since the index may have shifted if another
+            // layer was removed between snapshot and install (#1703).
+            if let Some(idx) = branch.inherited_layers.iter().position(|l| {
+                l.source_branch_id == source_branch_id && l.fork_version == fork_version
+            }) {
+                branch.inherited_layers.remove(idx);
             }
 
             refresh_level_targets(&mut branch);
@@ -697,9 +823,9 @@ impl SegmentedStore {
         self.write_branch_manifest(child_branch_id);
 
         // Decrement refcounts for each segment in the removed layer.
-        // Do NOT delete files here — the parent may still own the segment.
-        // Lazy cleanup happens via delete_segment_if_unreferenced during
-        // parent compaction.
+        // Do NOT delete files here — the parent may still own the segment
+        // in its version.levels. Orphaned files (parent compacted away the
+        // segment before this decrement) are cleaned up by gc_orphan_segments.
         for level in &layer_segments.levels {
             for seg in level {
                 self.ref_registry.decrement(seg.file_id());
@@ -1708,22 +1834,57 @@ impl SegmentedStore {
                 continue;
             }
 
-            // Partition segments into levels based on manifest
+            // Partition segments into levels based on manifest.
+            //
+            // IMPORTANT (#1701): When a manifest exists, ONLY load segments
+            // listed in the manifest. Files on disk but not in the manifest
+            // are orphans (e.g. shared segments kept for COW children) and
+            // must NOT be promoted to L0, as they could shadow compacted data.
             let mut level_segs: Vec<Vec<Arc<KVSegment>>> = vec![Vec::new(); NUM_LEVELS];
             if let Some(ref manifest) = manifest {
+                // Build a map of opened segments by filename for O(1) lookup.
+                let seg_by_name: std::collections::HashMap<String, Arc<KVSegment>> =
+                    branch_segments
+                        .iter()
+                        .filter_map(|seg| {
+                            seg.file_path()
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|name| (name.to_string(), Arc::clone(seg)))
+                        })
+                        .collect();
+
+                let mut manifest_filenames: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                for entry in &manifest.entries {
+                    manifest_filenames.insert(entry.filename.clone());
+                    let level = (entry.level as usize).min(NUM_LEVELS - 1);
+                    if let Some(seg) = seg_by_name.get(&entry.filename) {
+                        level_segs[level].push(Arc::clone(seg));
+                    } else {
+                        tracing::warn!(
+                            branch = %dir_name,
+                            segment = %entry.filename,
+                            "manifest references segment not found on disk"
+                        );
+                    }
+                }
+
+                // Log orphan files (on disk but not in manifest — not loaded).
                 for seg in branch_segments.iter() {
                     let filename = seg
                         .file_path()
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("");
-                    let level = manifest
-                        .entries
-                        .iter()
-                        .find(|e| e.filename == filename)
-                        .map(|e| (e.level as usize).min(NUM_LEVELS - 1))
-                        .unwrap_or(0); // unknown → L0
-                    level_segs[level].push(Arc::clone(seg));
+                    if !manifest_filenames.contains(filename) {
+                        tracing::warn!(
+                            branch = %dir_name,
+                            segment = %filename,
+                            "orphan segment on disk (not in manifest), skipping"
+                        );
+                        info.orphans_skipped += 1;
+                    }
                 }
             } else {
                 // No manifest → all segments go to L0 (backward compat)
@@ -1746,7 +1907,7 @@ impl SegmentedStore {
                 .entry(branch_id)
                 .or_insert_with(BranchState::new);
 
-            info.segments_loaded += branch_segments.len();
+            info.segments_loaded += level_segs.iter().map(|l| l.len()).sum::<usize>();
 
             // Build new version: merge existing segments with recovered ones
             let old_ver = branch.version.load();
@@ -2307,6 +2468,10 @@ pub struct RecoverSegmentsInfo {
     /// Non-empty means the child branch may be missing data that was
     /// visible before the crash.
     pub layers_dropped: Vec<(BranchId, BranchId)>,
+    /// Number of orphan `.sst` files on disk that were not in the manifest.
+    /// These are skipped during recovery to prevent stale data from shadowing
+    /// compacted data (#1701).
+    pub orphans_skipped: usize,
 }
 
 impl Default for SegmentedStore {

@@ -788,6 +788,15 @@ impl Database {
         &self.storage
     }
 
+    /// Clean up storage-layer segments for a deleted branch (#1702).
+    ///
+    /// Removes the branch's memtables, segment files, and decrements
+    /// inherited layer refcounts. Should be called after logical
+    /// deletion succeeds.
+    pub fn clear_branch_storage(&self, branch_id: &BranchId) {
+        self.storage.clear_branch(branch_id);
+    }
+
     /// Direct single-key read returning only the Value (no VersionedValue).
     ///
     /// Skips Version enum and VersionedValue construction. Used by the
@@ -1743,11 +1752,8 @@ impl Database {
             return;
         }
 
+        // 1. Flush and compact branches that need it.
         let branches = self.storage.branches_needing_flush();
-        if branches.is_empty() {
-            return;
-        }
-
         for branch_id in branches {
             // Flush all frozen memtables
             loop {
@@ -1788,7 +1794,8 @@ impl Database {
             }
         }
 
-        // Materialize inherited layers that exceed depth limit
+        // 2. Materialize inherited layers that exceed depth limit.
+        //    Decoupled from flush — runs even when no branches need flushing (#1704).
         for branch_id in self.storage.branches_needing_materialization() {
             let layer_count = self.storage.inherited_layer_count(&branch_id);
             if layer_count > 0 {
