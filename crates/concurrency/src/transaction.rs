@@ -464,6 +464,17 @@ pub struct TransactionContext {
     /// instead of the default Append. Used for internal data like graph
     /// adjacency lists where version history wastes memory.
     key_write_modes: HashMap<Key, WriteMode>,
+
+    /// Allow operations on keys from branches other than `self.branch_id`.
+    ///
+    /// Default `false` — all keys must match the transaction's branch.
+    /// Internal admin operations (branch deletion) set this to `true`
+    /// because they intentionally reach into other branches' namespaces.
+    ///
+    /// **WARNING**: Cross-branch reads are NOT protected by the per-branch
+    /// commit lock, so TOCTOU is possible. Only enable for operations where
+    /// concurrent access to the target branch is ruled out by design.
+    allow_cross_branch: bool,
 }
 
 impl TransactionContext {
@@ -509,6 +520,7 @@ impl TransactionContext {
             max_write_entries: 0,
             read_only: false,
             key_write_modes: HashMap::new(),
+            allow_cross_branch: false,
         }
     }
 
@@ -556,6 +568,7 @@ impl TransactionContext {
             max_write_entries: 0,
             read_only: false,
             key_write_modes: HashMap::new(),
+            allow_cross_branch: false,
         }
     }
 
@@ -594,6 +607,7 @@ impl TransactionContext {
     /// ```
     pub fn get(&mut self, key: &Key) -> StrataResult<Option<Value>> {
         self.ensure_active()?;
+        self.enforce_branch_scope(key)?;
 
         // 1. Check write_set first (read-your-writes)
         // No read_set entry - we're reading our own uncommitted write
@@ -652,6 +666,7 @@ impl TransactionContext {
     /// Returns `StrataError::invalid_input` if transaction is not active.
     pub fn get_versioned(&mut self, key: &Key) -> StrataResult<Option<VersionedValue>> {
         self.ensure_active()?;
+        self.enforce_branch_scope(key)?;
 
         // 1. Check write_set first (read-your-writes)
         if let Some(value) = self.write_set.get(key) {
@@ -732,6 +747,7 @@ impl TransactionContext {
     /// ```
     pub fn scan_prefix(&mut self, prefix: &Key) -> StrataResult<Vec<(Key, Value)>> {
         self.ensure_active()?;
+        self.enforce_branch_scope(prefix)?;
 
         let store = self.store.as_ref().ok_or_else(|| {
             StrataError::invalid_input("Transaction has no store for reads".to_string())
@@ -792,6 +808,16 @@ impl TransactionContext {
     /// and read-set tracking is skipped, saving memory on large scans.
     pub fn set_read_only(&mut self, read_only: bool) {
         self.read_only = read_only;
+    }
+
+    /// Allow operations on keys whose branch_id differs from this transaction's.
+    ///
+    /// **Internal only.** Normal user transactions must NOT enable this.
+    /// Cross-branch reads bypass the per-branch commit lock, so TOCTOU
+    /// protection is lost (see #1709). Only safe when the caller guarantees
+    /// no concurrent mutation of the target branch (e.g., branch deletion).
+    pub fn set_allow_cross_branch(&mut self, allow: bool) {
+        self.allow_cross_branch = allow;
     }
 
     /// Check if this transaction was explicitly set to read-only mode.
@@ -864,6 +890,7 @@ impl TransactionContext {
     /// ```
     pub fn put(&mut self, key: Key, value: Value) -> StrataResult<()> {
         self.ensure_active()?;
+        self.enforce_branch_scope(&key)?;
         if self.read_only {
             return Err(StrataError::invalid_input(
                 "Cannot write in a read-only transaction",
@@ -921,6 +948,7 @@ impl TransactionContext {
     /// ```
     pub fn delete(&mut self, key: Key) -> StrataResult<()> {
         self.ensure_active()?;
+        self.enforce_branch_scope(&key)?;
         if self.read_only {
             return Err(StrataError::invalid_input(
                 "Cannot write in a read-only transaction",
@@ -974,6 +1002,7 @@ impl TransactionContext {
     /// ```
     pub fn cas(&mut self, key: Key, expected_version: u64, new_value: Value) -> StrataResult<()> {
         self.ensure_active()?;
+        self.enforce_branch_scope(&key)?;
         if self.read_only {
             return Err(StrataError::invalid_input(
                 "Cannot write in a read-only transaction",
@@ -1001,6 +1030,7 @@ impl TransactionContext {
         new_value: Value,
     ) -> StrataResult<()> {
         self.ensure_active()?;
+        self.enforce_branch_scope(&key)?;
         if self.read_only {
             return Err(StrataError::invalid_input(
                 "Cannot write in a read-only transaction",
@@ -1228,6 +1258,22 @@ impl TransactionContext {
                 self.txn_id, self.status
             )))
         }
+    }
+
+    /// Verify a key belongs to this transaction's branch.
+    ///
+    /// Commit serialization locks only `self.branch_id`. Allowing keys from
+    /// other branches would let cross-branch reads bypass that lock, creating
+    /// a TOCTOU vulnerability (#1709).
+    fn enforce_branch_scope(&self, key: &Key) -> StrataResult<()> {
+        if !self.allow_cross_branch && key.namespace.branch_id != self.branch_id {
+            return Err(StrataError::invalid_input(format!(
+                "Key branch {} does not match transaction branch {} — \
+                 cross-branch operations are not supported in a single transaction",
+                key.namespace.branch_id, self.branch_id
+            )));
+        }
+        Ok(())
     }
 
     /// Transition to Validating state
@@ -1588,6 +1634,7 @@ impl TransactionContext {
         self.status = TransactionStatus::Active;
         self.start_time = Instant::now();
         self.read_only = false;
+        self.allow_cross_branch = false;
     }
 
     /// Get current capacity of internal collections (for debugging/testing)
@@ -1621,6 +1668,7 @@ impl TransactionContext {
 impl JsonStoreExt for TransactionContext {
     fn json_get(&mut self, key: &Key, path: &JsonPath) -> StrataResult<Option<JsonValue>> {
         self.ensure_active()?;
+        self.enforce_branch_scope(key)?;
 
         // Check write set first (read-your-writes)
         // Look for the most recent write that affects this path
@@ -1695,6 +1743,7 @@ impl JsonStoreExt for TransactionContext {
 
     fn json_set(&mut self, key: &Key, path: &JsonPath, value: JsonValue) -> StrataResult<()> {
         self.ensure_active()?;
+        self.enforce_branch_scope(key)?;
 
         // Ensure we have tracked the snapshot version for this document
         // (for conflict detection at commit time)
@@ -1720,6 +1769,7 @@ impl JsonStoreExt for TransactionContext {
 
     fn json_delete(&mut self, key: &Key, path: &JsonPath) -> StrataResult<()> {
         self.ensure_active()?;
+        self.enforce_branch_scope(key)?;
 
         // Ensure we have tracked the snapshot version for this document
         if self
@@ -1748,6 +1798,7 @@ impl JsonStoreExt for TransactionContext {
 
     fn json_exists(&mut self, key: &Key) -> StrataResult<bool> {
         self.ensure_active()?;
+        self.enforce_branch_scope(key)?;
 
         // Check write buffer first (read-your-writes)
         // Look for root-level Set or Delete operations on this key
@@ -1786,8 +1837,8 @@ mod tests {
     use strata_core::types::{BranchId, Namespace, TypeTag};
     use strata_core::value::Value;
 
-    fn test_namespace() -> Arc<Namespace> {
-        Arc::new(Namespace::new(BranchId::new(), "default".to_string()))
+    fn test_namespace_for(branch_id: BranchId) -> Arc<Namespace> {
+        Arc::new(Namespace::new(branch_id, "default".to_string()))
     }
 
     fn test_key(ns: &Arc<Namespace>, name: &str) -> Key {
@@ -1810,9 +1861,9 @@ mod tests {
 
     #[test]
     fn test_get_versioned_from_snapshot() {
-        let ns = test_namespace();
-        let key = test_key(&ns, "k1");
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
+        let key = test_key(&ns, "k1");
         let store = store_with_key(&key, Value::Int(42), 5);
         let mut txn = TransactionContext::with_store(1, branch_id, store);
 
@@ -1824,9 +1875,9 @@ mod tests {
 
     #[test]
     fn test_get_versioned_from_write_set() {
-        let ns = test_namespace();
-        let key = test_key(&ns, "k1");
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
+        let key = test_key(&ns, "k1");
         let store = empty_store();
         let mut txn = TransactionContext::with_store(1, branch_id, store);
 
@@ -1841,9 +1892,9 @@ mod tests {
 
     #[test]
     fn test_get_versioned_from_delete_set() {
-        let ns = test_namespace();
-        let key = test_key(&ns, "k1");
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
+        let key = test_key(&ns, "k1");
         let store = store_with_key(&key, Value::Int(42), 5);
         let mut txn = TransactionContext::with_store(1, branch_id, store);
 
@@ -1855,9 +1906,9 @@ mod tests {
 
     #[test]
     fn test_get_versioned_nonexistent() {
-        let ns = test_namespace();
-        let key = test_key(&ns, "missing");
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
+        let key = test_key(&ns, "missing");
         let store = empty_store();
         let mut txn = TransactionContext::with_store(1, branch_id, store);
 
@@ -1869,9 +1920,9 @@ mod tests {
 
     #[test]
     fn test_get_versioned_tracks_read_set() {
-        let ns = test_namespace();
-        let key = test_key(&ns, "k1");
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
+        let key = test_key(&ns, "k1");
         let store = store_with_key(&key, Value::Int(7), 15);
         let mut txn = TransactionContext::with_store(1, branch_id, store);
 
@@ -1886,8 +1937,8 @@ mod tests {
 
     #[test]
     fn test_write_buffer_limit_rejects_at_max() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let mut txn = TransactionContext::new(1, branch_id, 100);
         txn.set_max_write_entries(3);
 
@@ -1909,8 +1960,8 @@ mod tests {
 
     #[test]
     fn test_write_buffer_limit_counts_deletes() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let mut txn = TransactionContext::new(1, branch_id, 100);
         txn.set_max_write_entries(2);
 
@@ -1923,8 +1974,8 @@ mod tests {
 
     #[test]
     fn test_write_buffer_limit_zero_unlimited() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let mut txn = TransactionContext::new(1, branch_id, 100);
         // max_write_entries = 0 (default, unlimited)
 
@@ -1941,8 +1992,8 @@ mod tests {
 
     #[test]
     fn test_reset_shrinks_large_capacity() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let mut txn = TransactionContext::new(1, branch_id, 100);
 
         // Inflate capacity well beyond the 4096 threshold
@@ -1964,8 +2015,8 @@ mod tests {
 
     #[test]
     fn test_write_buffer_limit_counts_cas() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let mut txn = TransactionContext::new(1, branch_id, 100);
         txn.set_max_write_entries(2);
 
@@ -1980,8 +2031,8 @@ mod tests {
 
     #[test]
     fn test_write_buffer_overwrite_at_limit() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let mut txn = TransactionContext::new(1, branch_id, 100);
         txn.set_max_write_entries(2);
 
@@ -2000,8 +2051,8 @@ mod tests {
 
     #[test]
     fn test_write_buffer_delete_existing_at_limit() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let mut txn = TransactionContext::new(1, branch_id, 100);
         txn.set_max_write_entries(2);
 
@@ -2021,8 +2072,8 @@ mod tests {
 
     #[test]
     fn test_reset_preserves_normal_capacity() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let mut txn = TransactionContext::new(1, branch_id, 100);
 
         // Insert a modest number of entries (below threshold)
@@ -2044,8 +2095,8 @@ mod tests {
 
     #[test]
     fn test_reset_clears_key_write_modes() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let store = empty_store();
         let mut txn = TransactionContext::new(1, branch_id, 100);
 
@@ -2071,8 +2122,8 @@ mod tests {
 
     #[test]
     fn test_put_replace_uses_keep_last() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let mut txn = TransactionContext::new(1, branch_id, 100);
 
         let key = test_key(&ns, "graph_adj");
@@ -2085,8 +2136,8 @@ mod tests {
 
     #[test]
     fn test_delete_cleans_up_key_write_modes() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let mut txn = TransactionContext::new(1, branch_id, 100);
 
         let key = test_key(&ns, "adj_to_delete");
@@ -2107,8 +2158,8 @@ mod tests {
     fn test_apply_writes_with_keep_last_mode() {
         use strata_core::traits::Storage;
 
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let store = empty_store();
 
         // First: write 3 versions of a key to storage (simulating prior commits)
@@ -2166,8 +2217,8 @@ mod tests {
 
     #[test]
     fn test_read_only_skips_read_set() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let key = test_key(&ns, "k1");
         let store = store_with_key(&key, Value::Int(42), 1);
         let mut txn = TransactionContext::with_store(1, branch_id, store);
@@ -2186,8 +2237,8 @@ mod tests {
 
     #[test]
     fn test_read_only_rejects_put() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let mut txn = TransactionContext::new(1, branch_id, 0);
         txn.set_read_only(true);
 
@@ -2198,8 +2249,8 @@ mod tests {
 
     #[test]
     fn test_read_only_rejects_delete() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let mut txn = TransactionContext::new(1, branch_id, 0);
         txn.set_read_only(true);
 
@@ -2210,8 +2261,8 @@ mod tests {
 
     #[test]
     fn test_read_only_rejects_cas() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let mut txn = TransactionContext::new(1, branch_id, 0);
         txn.set_read_only(true);
 
@@ -2240,8 +2291,8 @@ mod tests {
 
     #[test]
     fn test_cas_with_read_populates_read_set() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let key = test_key(&ns, "k1");
         let store = store_with_key(&key, Value::Int(10), 5);
         let mut txn = TransactionContext::with_store(1, branch_id, store);
@@ -2257,8 +2308,8 @@ mod tests {
 
     #[test]
     fn test_cas_with_read_nonexistent_key_tracks_version_zero() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let key = test_key(&ns, "missing");
         let store = empty_store();
         let mut txn = TransactionContext::with_store(1, branch_id, store);
@@ -2272,8 +2323,8 @@ mod tests {
 
     #[test]
     fn test_cas_with_read_rejects_read_only() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let store = empty_store();
         let mut txn = TransactionContext::with_store(1, branch_id, store);
         txn.set_read_only(true);
@@ -2289,8 +2340,8 @@ mod tests {
 
     #[test]
     fn test_read_only_get_versioned_skips_read_set() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let key = test_key(&ns, "k1");
         let store = store_with_key(&key, Value::Int(42), 7);
         let mut txn = TransactionContext::with_store(1, branch_id, store);
@@ -2310,8 +2361,8 @@ mod tests {
 
     #[test]
     fn test_read_only_get_versioned_nonexistent_skips_read_set() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let store = empty_store();
         let mut txn = TransactionContext::with_store(1, branch_id, store);
         txn.set_read_only(true);
@@ -2329,8 +2380,8 @@ mod tests {
 
     #[test]
     fn test_read_only_scan_prefix_skips_read_set() {
-        let ns = test_namespace();
         let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
         let store = Arc::new(SegmentedStore::new());
         for i in 0..3 {
             let key = test_key(&ns, &format!("pfx:{}", i));
@@ -2350,5 +2401,134 @@ mod tests {
             txn.read_set.is_empty(),
             "read_set should be empty after scan_prefix in read-only mode"
         );
+    }
+
+    // ========================================================================
+    // Cross-Branch Key Rejection Tests (#1709)
+    // ========================================================================
+
+    #[test]
+    fn test_issue_1709_get_rejects_cross_branch_key() {
+        let branch_a = BranchId::new();
+        let branch_b = BranchId::new();
+        let ns_b = Arc::new(Namespace::new(branch_b, "default".to_string()));
+        let cross_key = Key::new(ns_b, TypeTag::KV, b"flag".to_vec());
+
+        let store = Arc::new(SegmentedStore::new());
+        let mut txn = TransactionContext::with_store(1, branch_a, store);
+
+        // Reading a key from branch B inside a branch A transaction must fail
+        let err = txn.get(&cross_key).unwrap_err();
+        assert!(
+            format!("{}", err).contains("branch"),
+            "Error should mention branch mismatch: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_issue_1709_put_rejects_cross_branch_key() {
+        let branch_a = BranchId::new();
+        let branch_b = BranchId::new();
+        let ns_b = Arc::new(Namespace::new(branch_b, "default".to_string()));
+        let cross_key = Key::new(ns_b, TypeTag::KV, b"flag".to_vec());
+
+        let mut txn = TransactionContext::new(1, branch_a, 100);
+
+        // Writing a key from branch B inside a branch A transaction must fail
+        let err = txn.put(cross_key, Value::Int(1)).unwrap_err();
+        assert!(
+            format!("{}", err).contains("branch"),
+            "Error should mention branch mismatch: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_issue_1709_delete_rejects_cross_branch_key() {
+        let branch_a = BranchId::new();
+        let branch_b = BranchId::new();
+        let ns_b = Arc::new(Namespace::new(branch_b, "default".to_string()));
+        let cross_key = Key::new(ns_b, TypeTag::KV, b"flag".to_vec());
+
+        let mut txn = TransactionContext::new(1, branch_a, 100);
+
+        // Deleting a key from branch B inside a branch A transaction must fail
+        let err = txn.delete(cross_key).unwrap_err();
+        assert!(
+            format!("{}", err).contains("branch"),
+            "Error should mention branch mismatch: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_issue_1709_cas_rejects_cross_branch_key() {
+        let branch_a = BranchId::new();
+        let branch_b = BranchId::new();
+        let ns_b = Arc::new(Namespace::new(branch_b, "default".to_string()));
+        let cross_key = Key::new(ns_b, TypeTag::KV, b"flag".to_vec());
+
+        let mut txn = TransactionContext::new(1, branch_a, 100);
+
+        // CAS on a key from branch B inside a branch A transaction must fail
+        let err = txn.cas(cross_key, 1, Value::Int(2)).unwrap_err();
+        assert!(
+            format!("{}", err).contains("branch"),
+            "Error should mention branch mismatch: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_issue_1709_cas_with_read_rejects_cross_branch_key() {
+        let branch_a = BranchId::new();
+        let branch_b = BranchId::new();
+        let ns_b = Arc::new(Namespace::new(branch_b, "default".to_string()));
+        let cross_key = Key::new(ns_b, TypeTag::KV, b"flag".to_vec());
+
+        let store = Arc::new(SegmentedStore::new());
+        let mut txn = TransactionContext::with_store(1, branch_a, store);
+
+        // cas_with_read on a key from branch B must fail
+        let err = txn.cas_with_read(cross_key, 0, Value::Int(2)).unwrap_err();
+        assert!(
+            format!("{}", err).contains("branch"),
+            "Error should mention branch mismatch: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_issue_1709_scan_prefix_rejects_cross_branch_key() {
+        let branch_a = BranchId::new();
+        let branch_b = BranchId::new();
+        let ns_b = Arc::new(Namespace::new(branch_b, "default".to_string()));
+        let cross_prefix = Key::new(ns_b, TypeTag::KV, b"pfx:".to_vec());
+
+        let store = Arc::new(SegmentedStore::new());
+        let mut txn = TransactionContext::with_store(1, branch_a, store);
+
+        let err = txn.scan_prefix(&cross_prefix).unwrap_err();
+        assert!(
+            format!("{}", err).contains("branch"),
+            "Error should mention branch mismatch: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_issue_1709_allow_cross_branch_bypasses_check() {
+        let branch_a = BranchId::new();
+        let branch_b = BranchId::new();
+        let ns_b = Arc::new(Namespace::new(branch_b, "default".to_string()));
+        let cross_key = Key::new(ns_b, TypeTag::KV, b"flag".to_vec());
+
+        let store = Arc::new(SegmentedStore::new());
+        let mut txn = TransactionContext::with_store(1, branch_a, store);
+        txn.set_allow_cross_branch(true);
+
+        // With allow_cross_branch, cross-branch get should succeed (returns None, no data)
+        assert!(txn.get(&cross_key).unwrap().is_none());
     }
 }
