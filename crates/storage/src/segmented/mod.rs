@@ -301,6 +301,10 @@ pub struct SegmentedStore {
     max_branches: AtomicUsize,
     /// Maximum versions to keep per key (0 = unlimited, pruned at compaction).
     max_versions_per_key: AtomicUsize,
+    /// Snapshot-safe floor (#1697): versions at or above this commit_id are
+    /// protected from `max_versions_per_key` pruning during compaction.
+    /// Updated by the engine before compaction to reflect `gc_safe_point()`.
+    snapshot_floor: AtomicU64,
     /// Total frozen memtable count across all branches (for O(1) "any frozen?" check).
     total_frozen_count: AtomicUsize,
     /// Maximum frozen memtables per branch before rotation is skipped (0 = unlimited).
@@ -329,6 +333,7 @@ impl SegmentedStore {
             bulk_load_branches: DashMap::new(),
             max_branches: AtomicUsize::new(0),
             max_versions_per_key: AtomicUsize::new(0),
+            snapshot_floor: AtomicU64::new(0),
             total_frozen_count: AtomicUsize::new(0),
             max_immutable_memtables: AtomicUsize::new(0),
             compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
@@ -353,6 +358,7 @@ impl SegmentedStore {
             bulk_load_branches: DashMap::new(),
             max_branches: AtomicUsize::new(0),
             max_versions_per_key: AtomicUsize::new(0),
+            snapshot_floor: AtomicU64::new(0),
             total_frozen_count: AtomicUsize::new(0),
             max_immutable_memtables: AtomicUsize::new(0),
             compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
@@ -377,6 +383,7 @@ impl SegmentedStore {
             bulk_load_branches: DashMap::new(),
             max_branches: AtomicUsize::new(0),
             max_versions_per_key: AtomicUsize::new(0),
+            snapshot_floor: AtomicU64::new(0),
             total_frozen_count: AtomicUsize::new(0),
             max_immutable_memtables: AtomicUsize::new(0),
             compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
@@ -1114,6 +1121,15 @@ impl SegmentedStore {
     /// Pruning happens at compaction time, not at write time.
     pub fn set_max_versions_per_key(&self, max: usize) {
         self.max_versions_per_key.store(max, Ordering::Relaxed);
+    }
+
+    /// Set the snapshot-safe floor for compaction (#1697).
+    ///
+    /// Versions with `commit_id >= floor` are protected from `max_versions_per_key`
+    /// pruning during compaction. The engine should call this with `gc_safe_point()`
+    /// before triggering compaction so that active snapshots are not violated.
+    pub fn set_snapshot_floor(&self, floor: u64) {
+        self.snapshot_floor.store(floor, Ordering::Relaxed);
     }
 
     /// Set maximum frozen memtables per branch before write stalling (0 = unlimited).

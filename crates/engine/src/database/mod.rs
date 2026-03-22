@@ -1755,6 +1755,9 @@ impl Database {
             return;
         }
 
+        // Update snapshot floor so compaction respects active snapshots (#1697).
+        self.storage.set_snapshot_floor(self.gc_safe_point());
+
         // 1. Flush and compact branches that need it.
         let branches = self.storage.branches_needing_flush();
         for branch_id in branches {
@@ -3776,5 +3779,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Issue #1697: background compaction with max_versions_per_key must not
+    /// prune versions that active snapshots need.
+    #[test]
+    fn test_issue_1697_compaction_preserves_snapshot_versions() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut cfg = StrataConfig::default();
+        cfg.storage.max_versions_per_key = 1;
+        let db = Database::open_with_config(temp_dir.path().join("db"), cfg).unwrap();
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = Key::new_kv(ns.clone(), "snap_key");
+
+        // Write version 1
+        blind_write(&db, key.clone(), Value::Int(1));
+
+        // Start a reader that pins the current snapshot
+        let reader = db.begin_read_only_transaction(branch_id).unwrap();
+        let pinned_version = reader.start_version;
+
+        // Write version 2 — now key has 2 versions, max_versions_per_key=1
+        blind_write(&db, key.clone(), Value::Int(2));
+
+        // Force data from memtable → segments so compaction can process it.
+        // Rotate twice to create 2 frozen memtables → flush both → compact.
+        db.storage().rotate_memtable(&branch_id);
+        db.storage().flush_oldest_frozen(&branch_id).unwrap();
+        // Need a second segment to trigger compaction (min 2 segments).
+        // Write a dummy key so the second memtable isn't empty.
+        blind_write(&db, Key::new_kv(ns.clone(), "dummy"), Value::Int(999));
+        db.storage().rotate_memtable(&branch_id);
+        db.storage().flush_oldest_frozen(&branch_id).unwrap();
+
+        // Now compact — this is where max_versions would drop the old version.
+        let compacted = db.storage().compact_branch(&branch_id, 0).unwrap();
+        assert!(compacted.is_some(), "compaction should have run");
+
+        // The reader's snapshot must still be able to find version 1
+        // via the storage layer at the pinned version.
+        let result = db.storage().get_versioned(&key, pinned_version).unwrap();
+        assert!(
+            result.is_some(),
+            "version at snapshot {} was pruned by compaction despite active reader",
+            pinned_version
+        );
+        assert_eq!(
+            result.unwrap().value,
+            Value::Int(1),
+            "snapshot read returned wrong value after compaction"
+        );
+
+        // Latest version must also be intact
+        let latest = db.storage().get_versioned(&key, u64::MAX).unwrap();
+        assert!(latest.is_some(), "latest version missing after compaction");
+        assert_eq!(latest.unwrap().value, Value::Int(2));
+
+        // Clean up reader
+        db.coordinator.record_abort(reader.txn_id);
     }
 }
