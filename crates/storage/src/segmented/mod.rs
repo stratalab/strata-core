@@ -1804,6 +1804,14 @@ impl SegmentedStore {
         let mut deferred_inherited: Vec<(BranchId, Vec<crate::manifest::ManifestInheritedLayer>)> =
             Vec::new();
 
+        // All opened segments per branch, including orphans not in the manifest.
+        // Needed so the second pass (inherited layer resolution) can find segments
+        // that are orphans in the parent's active version but still needed by children.
+        let mut all_opened: std::collections::HashMap<
+            BranchId,
+            std::collections::HashMap<String, Arc<KVSegment>>,
+        > = std::collections::HashMap::new();
+
         for entry in std::fs::read_dir(segments_dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -1867,6 +1875,19 @@ impl SegmentedStore {
             if branch_segments.is_empty() && !has_inherited {
                 continue;
             }
+
+            // Record all opened segments for this branch (including orphans)
+            // so inherited layer resolution can find them in the second pass.
+            let branch_seg_map: std::collections::HashMap<String, Arc<KVSegment>> = branch_segments
+                .iter()
+                .filter_map(|seg| {
+                    seg.file_path()
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|name| (name.to_string(), Arc::clone(seg)))
+                })
+                .collect();
+            all_opened.insert(branch_id, branch_seg_map);
 
             // Partition segments into levels based on manifest.
             //
@@ -1982,8 +2003,13 @@ impl SegmentedStore {
             let mut inherited_layers = Vec::new();
 
             for ml in &manifest_layers {
-                let source_branch = match self.branches.get(&ml.source_branch_id) {
-                    Some(b) => b,
+                // Look up ALL opened segments for the source branch, including
+                // orphans not loaded into its active version. This is critical
+                // for #1701: after parent compaction, the pre-compaction segments
+                // are orphans in the parent's manifest but still needed by
+                // children's inherited layers.
+                let source_segs = match all_opened.get(&ml.source_branch_id) {
+                    Some(segs) => segs,
                     None => {
                         tracing::warn!(
                             child = %hex_encode_branch(&child_id),
@@ -1995,29 +2021,15 @@ impl SegmentedStore {
                     }
                 };
 
-                // Build SegmentVersion from manifest entries using source branch's
-                // segments (they are already opened and Arc'd).
-                let source_ver = source_branch.version.load();
+                // Build SegmentVersion from manifest entries using all opened
+                // segments (including orphans not in the source branch's active version).
                 let mut layer_levels: Vec<Vec<Arc<KVSegment>>> = vec![Vec::new(); NUM_LEVELS];
 
                 for entry in &ml.entries {
                     let level = (entry.level as usize).min(NUM_LEVELS - 1);
-                    // Find the matching segment in the source branch's version
-                    let mut found = false;
-                    for source_level in &source_ver.levels {
-                        for seg in source_level {
-                            let seg_name = seg
-                                .file_path()
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("");
-                            if seg_name == entry.filename {
-                                layer_levels[level].push(Arc::clone(seg));
-                                found = true;
-                            }
-                        }
-                    }
-                    if !found {
+                    if let Some(seg) = source_segs.get(&entry.filename) {
+                        layer_levels[level].push(Arc::clone(seg));
+                    } else {
                         tracing::warn!(
                             child = %hex_encode_branch(&child_id),
                             source = %hex_encode_branch(&ml.source_branch_id),

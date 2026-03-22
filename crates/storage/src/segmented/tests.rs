@@ -6904,6 +6904,94 @@ fn recovery_skips_orphan_sst_not_in_manifest() {
     assert_eq!(result.value, Value::Int(1));
 }
 
+/// #1701: After fork → parent compaction → crash → recovery, the child's
+/// inherited layer must still find the orphaned (pre-compaction) segments.
+/// Without the fix, inherited layer resolution looks only at the parent's
+/// active version (which skips orphans), so the child loses its data.
+#[test]
+fn test_issue_1701_recovery_inherited_layer_finds_orphan_segments() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // 1. Write parent data in two flushes → 2 L0 segments
+    seed(&store, parent_kv("a"), Value::Int(1), 1);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    seed(&store, parent_kv("b"), Value::Int(2), 2);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // 2. Fork parent → child (child inherits both segments)
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    let (_fork_ver, shared) = store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+    assert!(shared >= 2, "child should share at least 2 segments");
+
+    // Verify child can read inherited data before compaction
+    let val_a = store
+        .get_versioned(&child_kv("a"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(val_a.value, Value::Int(1));
+
+    // 3. Compact parent L0 → L1. Old segments kept on disk (refcount > 0).
+    store
+        .compact_l0_to_l1(&parent_branch(), 0)
+        .unwrap()
+        .expect("compaction should produce output");
+
+    // Parent's L0 should be empty, data now in L1
+    let parent_state = store.branches.get(&parent_branch()).unwrap();
+    assert_eq!(
+        parent_state.version.load().l0_segments().len(),
+        0,
+        "parent L0 should be empty after compaction"
+    );
+    drop(parent_state);
+
+    // Verify child still reads correctly (in-memory Arcs are alive)
+    let val_b = store
+        .get_versioned(&child_kv("b"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(val_b.value, Value::Int(2));
+
+    // 4. Drop store (simulate crash) and recover
+    drop(store);
+    let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let info = store2.recover_segments().unwrap();
+    assert!(info.branches_recovered >= 2, "both branches should recover");
+
+    // 5. Child must still see inherited data after recovery
+    //    This is the bug: without the fix, inherited layer resolution can't
+    //    find the orphan segments because they're not in the parent's version.
+    let val_a_recovered = store2.get_versioned(&child_kv("a"), u64::MAX).unwrap();
+    assert!(
+        val_a_recovered.is_some(),
+        "child should see inherited key 'a' after recovery (orphan segment)"
+    );
+    assert_eq!(val_a_recovered.unwrap().value, Value::Int(1));
+
+    let val_b_recovered = store2.get_versioned(&child_kv("b"), u64::MAX).unwrap();
+    assert!(
+        val_b_recovered.is_some(),
+        "child should see inherited key 'b' after recovery (orphan segment)"
+    );
+    assert_eq!(val_b_recovered.unwrap().value, Value::Int(2));
+
+    // Parent should still read the compacted data
+    let parent_a = store2
+        .get_versioned(&parent_kv("a"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(parent_a.value, Value::Int(1));
+}
+
 // =============================================================================
 // #1703: Concurrent materialize_layer is serialized
 // =============================================================================
