@@ -120,6 +120,8 @@ pub struct ForkRecord {
     pub child: String,
     /// Timestamp in microseconds.
     pub timestamp: u64,
+    /// MVCC snapshot version at the time of fork.
+    pub fork_version: Option<u64>,
     /// Optional descriptive message.
     pub message: Option<String>,
     /// Optional creator identifier.
@@ -336,6 +338,7 @@ pub fn dag_record_fork(
     db: &Arc<Database>,
     parent: &str,
     child: &str,
+    fork_version: Option<u64>,
     message: Option<&str>,
     creator: Option<&str>,
 ) -> StrataResult<DagEventId> {
@@ -350,6 +353,9 @@ pub fn dag_record_fork(
     let mut props = serde_json::json!({
         "timestamp": now,
     });
+    if let Some(fv) = fork_version {
+        props["fork_version"] = serde_json::json!(fv);
+    }
     if let Some(msg) = message {
         props["message"] = serde_json::json!(msg);
     }
@@ -629,6 +635,9 @@ fn find_fork_origin(db: &Arc<Database>, name: &str) -> StrataResult<Option<ForkR
                         .and_then(|p| p.get("timestamp"))
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0),
+                    fork_version: props
+                        .and_then(|p| p.get("fork_version"))
+                        .and_then(|v| v.as_u64()),
                     message: props
                         .and_then(|p| p.get("message"))
                         .and_then(|v| v.as_str())
@@ -930,8 +939,15 @@ mod tests {
         dag_add_branch(&db, "parent-branch", None, None).unwrap();
         dag_add_branch(&db, "child-branch", None, None).unwrap();
 
-        let event_id =
-            dag_record_fork(&db, "parent-branch", "child-branch", Some("fork msg"), None).unwrap();
+        let event_id = dag_record_fork(
+            &db,
+            "parent-branch",
+            "child-branch",
+            Some(42),
+            Some("fork msg"),
+            None,
+        )
+        .unwrap();
         assert!(event_id.is_fork());
         assert!(!event_id.is_merge());
 
@@ -953,6 +969,11 @@ mod tests {
             .get("timestamp")
             .and_then(|v| v.as_u64())
             .is_some());
+        assert_eq!(
+            event_props.get("fork_version").and_then(|v| v.as_u64()),
+            Some(42),
+            "fork_version should be persisted in DAG node properties"
+        );
 
         // Verify edges: parent --[parent]--> fork_event
         let parent_neighbors = graph_store
@@ -1097,7 +1118,15 @@ mod tests {
         let db = Database::cache().unwrap();
         dag_add_branch(&db, "info-parent", Some("parent branch"), Some("admin")).unwrap();
         dag_add_branch(&db, "info-child", None, None).unwrap();
-        dag_record_fork(&db, "info-parent", "info-child", Some("forked!"), None).unwrap();
+        dag_record_fork(
+            &db,
+            "info-parent",
+            "info-child",
+            Some(100),
+            Some("forked!"),
+            None,
+        )
+        .unwrap();
 
         let merge_info = crate::branch_ops::MergeInfo {
             source: "info-child".to_string(),
@@ -1132,6 +1161,7 @@ mod tests {
         let fork = child_info.forked_from.unwrap();
         assert_eq!(fork.parent, "info-parent");
         assert_eq!(fork.child, "info-child");
+        assert_eq!(fork.fork_version, Some(100));
         assert!(!child_info.merges.is_empty());
         assert_eq!(child_info.merges[0].target, "info-parent");
     }
@@ -1142,8 +1172,8 @@ mod tests {
         dag_add_branch(&db, "fc-parent", None, None).unwrap();
         dag_add_branch(&db, "fc-child1", None, None).unwrap();
         dag_add_branch(&db, "fc-child2", None, None).unwrap();
-        dag_record_fork(&db, "fc-parent", "fc-child1", None, None).unwrap();
-        dag_record_fork(&db, "fc-parent", "fc-child2", None, None).unwrap();
+        dag_record_fork(&db, "fc-parent", "fc-child1", None, None, None).unwrap();
+        dag_record_fork(&db, "fc-parent", "fc-child2", None, None, None).unwrap();
 
         let children = find_children(&db, "fc-parent").unwrap();
         assert!(children.contains(&"fc-child1".to_string()));

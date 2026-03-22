@@ -726,6 +726,241 @@ fn test_fork_diff_merge_roundtrip() {
 // Branch Isolation Stress Test
 // ============================================================================
 
+// ============================================================================
+// COW Inherited Layer Integration Tests (#1666, #1667)
+// ============================================================================
+
+/// #1667: Diff across inherited layers after COW fork.
+///
+/// After forking, the child inherits parent data through COW layers.
+/// Modifications and deletions on the child should appear correctly in diff.
+#[test]
+fn cow_diff_across_inherited_layers() {
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+
+    // 1. Create parent with keys {a: 1, b: 2, c: 3}
+    branch_index.create_branch("parent").unwrap();
+    let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
+    kv.put(&parent_id, "default", "a", Value::Int(1)).unwrap();
+    kv.put(&parent_id, "default", "b", Value::Int(2)).unwrap();
+    kv.put(&parent_id, "default", "c", Value::Int(3)).unwrap();
+
+    // 2. COW fork parent → child
+    branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+    let child_id = strata_engine::primitives::branch::resolve_branch_name("child");
+
+    // 3. Child modifies b and deletes c
+    kv.put(&child_id, "default", "b", Value::Int(20)).unwrap();
+    kv.delete(&child_id, "default", "c").unwrap();
+
+    // 4. diff_branches(parent, child): b modified, c removed
+    let diff = branch_ops::diff_branches(&test_db.db, "parent", "child").unwrap();
+    assert_eq!(
+        diff.summary.total_modified, 1,
+        "b should be modified (2 → 20)"
+    );
+    assert_eq!(
+        diff.summary.total_removed, 1,
+        "c should be removed (in parent, deleted in child)"
+    );
+    assert_eq!(diff.summary.total_added, 0, "no new keys added in child");
+
+    // 5. Inverse diff: diff_branches(child, parent)
+    let inv = branch_ops::diff_branches(&test_db.db, "child", "parent").unwrap();
+    assert_eq!(inv.summary.total_modified, 1, "b modified in inverse");
+    assert_eq!(
+        inv.summary.total_added, 1,
+        "c appears as added (in parent, not in child)"
+    );
+    assert_eq!(
+        inv.summary.total_removed, 0,
+        "nothing removed from child→parent perspective"
+    );
+}
+
+/// #1667: Diff after COW fork with no changes should show empty diff.
+#[test]
+fn cow_diff_no_changes_is_empty() {
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+
+    branch_index.create_branch("parent").unwrap();
+    let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
+    kv.put(&parent_id, "default", "x", Value::Int(1)).unwrap();
+    kv.put(&parent_id, "default", "y", Value::Int(2)).unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+
+    // No modifications — diff should be empty
+    let diff = branch_ops::diff_branches(&test_db.db, "parent", "child").unwrap();
+    assert_eq!(diff.summary.total_added, 0);
+    assert_eq!(diff.summary.total_removed, 0);
+    assert_eq!(diff.summary.total_modified, 0);
+}
+
+/// #1666: Two-way LWW merge after COW fork.
+///
+/// Current merge is two-way (no ancestor awareness). LWW applies ALL
+/// source (child) entries that differ from target (parent), including
+/// inherited values the child didn't actually modify.
+#[test]
+fn cow_merge_lww_with_inherited_layers() {
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+
+    // 1. Create parent with keys {a: 1, b: 2, c: 3}
+    branch_index.create_branch("parent").unwrap();
+    let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
+    kv.put(&parent_id, "default", "a", Value::Int(1)).unwrap();
+    kv.put(&parent_id, "default", "b", Value::Int(2)).unwrap();
+    kv.put(&parent_id, "default", "c", Value::Int(3)).unwrap();
+
+    // 2. COW fork parent → child
+    branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+    let child_id = strata_engine::primitives::branch::resolve_branch_name("child");
+
+    // 3. Diverge: parent writes a: 10, child writes b: 20
+    kv.put(&parent_id, "default", "a", Value::Int(10)).unwrap();
+    kv.put(&child_id, "default", "b", Value::Int(20)).unwrap();
+
+    // 4. Merge child → parent (LWW)
+    let info = branch_ops::merge_branches(
+        &test_db.db,
+        "child",
+        "parent",
+        MergeStrategy::LastWriterWins,
+    )
+    .unwrap();
+    assert!(info.keys_applied >= 1, "at least b should be applied");
+
+    // 5. Verify: b gets child's value, c unchanged.
+    //    Two-way LWW sees child's inherited a:1 vs parent's a:10 as
+    //    "modified" and overwrites with child's value. A true three-way
+    //    merge would preserve parent's a:10 (see cow_three_way_merge test).
+    assert_eq!(
+        kv.get(&parent_id, "default", "a").unwrap(),
+        Some(Value::Int(1)),
+        "a: two-way LWW overwrites parent's 10 with child's inherited 1"
+    );
+    assert_eq!(
+        kv.get(&parent_id, "default", "b").unwrap(),
+        Some(Value::Int(20)),
+        "b should have child's merged value (20)"
+    );
+    assert_eq!(
+        kv.get(&parent_id, "default", "c").unwrap(),
+        Some(Value::Int(3)),
+        "c should be unchanged"
+    );
+}
+
+/// #1666: Three-way merge with ancestor state from inherited layers.
+///
+/// NOT YET IMPLEMENTED — three-way merge requires ancestor awareness
+/// (reading the fork point to determine which side actually changed a key).
+/// This test documents the desired behavior.
+#[test]
+#[ignore = "three-way merge not yet implemented"]
+fn cow_three_way_merge_with_inherited_layers() {
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+
+    // 1. Create parent with keys {a: 1, b: 2, c: 3}
+    branch_index.create_branch("parent").unwrap();
+    let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
+    kv.put(&parent_id, "default", "a", Value::Int(1)).unwrap();
+    kv.put(&parent_id, "default", "b", Value::Int(2)).unwrap();
+    kv.put(&parent_id, "default", "c", Value::Int(3)).unwrap();
+
+    // 2. COW fork parent → child
+    branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+    let child_id = strata_engine::primitives::branch::resolve_branch_name("child");
+
+    // 3. Diverge: parent writes a: 10, child writes b: 20
+    kv.put(&parent_id, "default", "a", Value::Int(10)).unwrap();
+    kv.put(&child_id, "default", "b", Value::Int(20)).unwrap();
+
+    // 4. Three-way merge: ancestor is {a: 1, b: 2, c: 3}
+    //    Parent changed a (1→10), child changed b (2→20), neither changed c.
+    //    Expected result: {a: 10, b: 20, c: 3}
+    let _info = branch_ops::merge_branches(
+        &test_db.db,
+        "child",
+        "parent",
+        MergeStrategy::LastWriterWins, // TODO: ThreeWay strategy
+    )
+    .unwrap();
+
+    assert_eq!(
+        kv.get(&parent_id, "default", "a").unwrap(),
+        Some(Value::Int(10)),
+        "a should keep parent's change (ancestor was 1, parent changed to 10)"
+    );
+    assert_eq!(
+        kv.get(&parent_id, "default", "b").unwrap(),
+        Some(Value::Int(20)),
+        "b should get child's change (ancestor was 2, child changed to 20)"
+    );
+    assert_eq!(
+        kv.get(&parent_id, "default", "c").unwrap(),
+        Some(Value::Int(3)),
+        "c should be unchanged (neither side modified it)"
+    );
+}
+
+/// #1666: Repeated merge after COW fork (fork → merge → modify → merge again).
+#[test]
+fn cow_repeated_merge_after_fork() {
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+
+    branch_index.create_branch("parent").unwrap();
+    let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
+    kv.put(&parent_id, "default", "k", Value::Int(1)).unwrap();
+
+    // Fork
+    branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+    let child_id = strata_engine::primitives::branch::resolve_branch_name("child");
+
+    // First round: child modifies, merge into parent
+    kv.put(&child_id, "default", "k", Value::Int(10)).unwrap();
+    branch_ops::merge_branches(
+        &test_db.db,
+        "child",
+        "parent",
+        MergeStrategy::LastWriterWins,
+    )
+    .unwrap();
+    assert_eq!(
+        kv.get(&parent_id, "default", "k").unwrap(),
+        Some(Value::Int(10))
+    );
+
+    // Second round: child modifies again, merge into parent again
+    kv.put(&child_id, "default", "k", Value::Int(100)).unwrap();
+    branch_ops::merge_branches(
+        &test_db.db,
+        "child",
+        "parent",
+        MergeStrategy::LastWriterWins,
+    )
+    .unwrap();
+    assert_eq!(
+        kv.get(&parent_id, "default", "k").unwrap(),
+        Some(Value::Int(100))
+    );
+}
+
+// ============================================================================
+// Branch Isolation Stress Test
+// ============================================================================
+
 #[test]
 fn concurrent_operations_across_branches() {
     use std::sync::{Arc, Barrier};

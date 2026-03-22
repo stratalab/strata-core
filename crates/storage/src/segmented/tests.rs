@@ -5878,6 +5878,165 @@ fn materialize_crash_recovery_resets_status() {
     }
 }
 
+/// #1668: Recovery after crash during materialization I/O.
+///
+/// Simulates a crash after the new `.sst` segment has been partially
+/// written but before the inherited layer was removed from BranchState.
+/// On recovery: Materializing status resets to Active, reads return
+/// correct data (dedup handles the duplicate entries).
+#[test]
+fn materialize_crash_recovery_with_partial_segment() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Phase 1: Set up fork, begin materialization (simulate crash mid-I/O)
+    {
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+        // Parent with data
+        seed(&store, parent_kv("a"), Value::Int(1), 1);
+        seed(&store, parent_kv("b"), Value::Int(2), 2);
+        store.rotate_memtable(&parent_branch());
+        store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+        // Fork parent → child
+        store
+            .branches
+            .entry(child_branch())
+            .or_insert_with(BranchState::new);
+        store
+            .fork_branch(&parent_branch(), &child_branch())
+            .unwrap();
+
+        // Simulate partial materialization:
+        // 1. Write an orphan .sst file in the child's branch dir
+        //    (as if the segment was written but install step never ran)
+        let child_hex = hex_encode_branch(&child_branch());
+        let child_dir = dir.path().join(&child_hex);
+        let orphan_path = child_dir.join("999999.sst");
+        // Write a small dummy file (not a valid segment — recovery should
+        // skip invalid files gracefully)
+        std::fs::write(&orphan_path, b"partial garbage").unwrap();
+
+        // 2. Mark the layer as Materializing in the manifest
+        {
+            let mut child = store.branches.get_mut(&child_branch()).unwrap();
+            child.inherited_layers[0].status = LayerStatus::Materializing;
+        }
+        store.write_branch_manifest(&child_branch());
+
+        // "crash" — store drops
+    }
+
+    // Phase 2: Recover and verify
+    {
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let info = store.recover_segments().unwrap();
+        assert!(info.branches_recovered >= 2, "both branches should recover");
+        assert!(
+            info.errors_skipped >= 1,
+            "corrupt orphan .sst should be skipped"
+        );
+
+        // Materializing status should be reset to Active
+        let child = store.branches.get(&child_branch()).unwrap();
+        assert_eq!(
+            child.inherited_layers.len(),
+            1,
+            "inherited layer should still exist"
+        );
+        assert_eq!(
+            child.inherited_layers[0].status,
+            LayerStatus::Active,
+            "Materializing should reset to Active on recovery"
+        );
+        drop(child);
+
+        // Data should be readable through inherited layers
+        let a = store
+            .get_versioned(&child_kv("a"), u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.value, Value::Int(1));
+
+        let b = store
+            .get_versioned(&child_kv("b"), u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(b.value, Value::Int(2));
+
+        // Parent data should also be intact
+        let pa = store
+            .get_versioned(&parent_kv("a"), u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pa.value, Value::Int(1));
+    }
+}
+
+/// #1668: Recovery with a valid orphan segment (crash after segment write,
+/// before layer removal). The orphan segment gets loaded into the child's
+/// own version during recovery, and reads still succeed via MVCC dedup.
+#[test]
+fn materialize_crash_recovery_with_valid_orphan_segment() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Phase 1: Create a real scenario where a valid segment exists
+    // alongside inherited layers
+    {
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+        // Parent with data
+        seed(&store, parent_kv("x"), Value::Int(10), 1);
+        store.rotate_memtable(&parent_branch());
+        store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+        // Fork parent → child
+        store
+            .branches
+            .entry(child_branch())
+            .or_insert_with(BranchState::new);
+        store
+            .fork_branch(&parent_branch(), &child_branch())
+            .unwrap();
+
+        // Child writes own data and flushes (creates a real .sst in child dir)
+        seed(&store, child_kv("y"), Value::Int(20), 2);
+        store.rotate_memtable(&child_branch());
+        store.flush_oldest_frozen(&child_branch()).unwrap();
+
+        // Mark Materializing (simulating mid-materialization crash)
+        {
+            let mut child = store.branches.get_mut(&child_branch()).unwrap();
+            child.inherited_layers[0].status = LayerStatus::Materializing;
+        }
+        store.write_branch_manifest(&child_branch());
+    }
+
+    // Phase 2: Recover
+    {
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        store.recover_segments().unwrap();
+
+        let child = store.branches.get(&child_branch()).unwrap();
+        assert_eq!(child.inherited_layers[0].status, LayerStatus::Active);
+        drop(child);
+
+        // Child's own data (from the valid segment) should be readable
+        let y = store
+            .get_versioned(&child_kv("y"), u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(y.value, Value::Int(20));
+
+        // Inherited data from parent should also be readable
+        let x = store
+            .get_versioned(&child_kv("x"), u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(x.value, Value::Int(10));
+    }
+}
+
 #[test]
 fn materialize_manifest_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
