@@ -1746,6 +1746,89 @@ fn apply_batch_empty() {
 }
 
 // ========================================================================
+// Issue #1706: apply_writes_atomic does not advance version until all
+// puts AND deletes are installed.
+// ========================================================================
+
+#[test]
+fn test_issue_1706_apply_writes_atomic_no_partial_visibility() {
+    // Setup: K1 and K2 exist at version 1.
+    let store = SegmentedStore::new();
+    seed(&store, kv_key("K1"), Value::Int(1), 1);
+    seed(&store, kv_key("K2"), Value::Int(2), 1);
+    assert_eq!(store.version(), 1);
+
+    // Transaction at version 10: put K1="new", delete K2.
+    let writes = vec![(kv_key("K1"), Value::from("new"), WriteMode::Append)];
+    let deletes = vec![kv_key("K2")];
+
+    // apply_writes_atomic should install everything BEFORE advancing version.
+    store.apply_writes_atomic(writes, deletes, 10).unwrap();
+
+    // After the atomic call, version should be 10.
+    assert_eq!(store.version(), 10);
+
+    // A reader at version 10 must see BOTH the put AND the delete.
+    // K1 should be "new" at version 10.
+    let k1 = store.get_versioned(&kv_key("K1"), 10).unwrap().unwrap();
+    assert_eq!(k1.value, Value::from("new"));
+
+    // K2 should be deleted (tombstone) at version 10 — returns None.
+    let k2 = store.get_versioned(&kv_key("K2"), 10).unwrap();
+    assert!(k2.is_none(), "K2 should be deleted at version 10");
+
+    // A reader at version 9 (before the commit) must see old state.
+    let k1_old = store.get_versioned(&kv_key("K1"), 9).unwrap().unwrap();
+    assert_eq!(k1_old.value, Value::Int(1));
+    let k2_old = store.get_versioned(&kv_key("K2"), 9).unwrap().unwrap();
+    assert_eq!(k2_old.value, Value::Int(2));
+}
+
+#[test]
+fn test_issue_1706_version_not_advanced_before_deletes_installed() {
+    // This test verifies the core invariant: version must not be visible
+    // while deletes are still pending.
+    //
+    // With the OLD split apply_batch/delete_batch, apply_batch alone
+    // advances the version. With the fix, only apply_writes_atomic
+    // advances it after ALL entries are installed.
+    let store = SegmentedStore::new();
+    seed(&store, kv_key("A"), Value::Int(100), 1);
+
+    // Simulate a transaction that both puts and deletes.
+    let writes = vec![(kv_key("B"), Value::Int(200), WriteMode::Append)];
+    let deletes = vec![kv_key("A")];
+
+    store.apply_writes_atomic(writes, deletes, 5).unwrap();
+
+    // Version advanced to 5 only after both writes and deletes are in.
+    assert_eq!(store.version(), 5);
+
+    // Reader at version 5: B exists, A is deleted.
+    assert!(store.get_versioned(&kv_key("B"), 5).unwrap().is_some());
+    assert!(store.get_versioned(&kv_key("A"), 5).unwrap().is_none());
+}
+
+#[test]
+fn test_issue_1706_apply_writes_atomic_empty() {
+    let store = SegmentedStore::new();
+    // Both empty — should not advance version.
+    store.apply_writes_atomic(vec![], vec![], 5).unwrap();
+    assert_eq!(store.version(), 0);
+
+    // Only writes, no deletes.
+    let writes = vec![(kv_key("X"), Value::Int(1), WriteMode::Append)];
+    store.apply_writes_atomic(writes, vec![], 3).unwrap();
+    assert_eq!(store.version(), 3);
+
+    // Only deletes, no writes.
+    let deletes = vec![kv_key("X")];
+    store.apply_writes_atomic(vec![], deletes, 7).unwrap();
+    assert_eq!(store.version(), 7);
+    assert!(store.get_versioned(&kv_key("X"), 7).unwrap().is_none());
+}
+
+// ========================================================================
 // Bulk load mode tests (Epic 8d)
 // ========================================================================
 
