@@ -246,6 +246,7 @@ pub fn branch_fork(
         &p.db,
         &source,
         &destination,
+        info.fork_version,
         message.as_deref(),
         creator.as_deref(),
     ) {
