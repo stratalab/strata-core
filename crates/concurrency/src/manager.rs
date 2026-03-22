@@ -357,87 +357,34 @@ impl TransactionManager {
             return Ok(self.version.load(Ordering::Acquire));
         }
 
-        // Step 1: Check if this is a blind write (no reads, no CAS, no JSON snapshots)
+        // Step 1: Acquire per-branch commit lock. Must be held from validation
+        // through version allocation and apply_writes for ALL writers (including
+        // blind writes) to prevent a concurrent writer from advancing the store
+        // version while another transaction is mid-apply (#1708).
+        let branch_lock = self
+            .commit_locks
+            .entry(txn.branch_id)
+            .or_insert_with(|| Mutex::new(()));
+        let _commit_guard = branch_lock.lock();
+
+        // Skip OCC validation for blind writes (no reads, no CAS, no JSON snapshots)
         let can_skip_validation = txn.read_set.is_empty()
             && txn.cas_set.is_empty()
             && txn.json_snapshot_versions().map_or(true, |v| v.is_empty())
             && txn.json_writes().is_empty();
 
-        // Read-write transactions: acquire per-branch lock and hold it through
-        // validation + version alloc + WAL + apply (prevents TOCTOU).
-        if !can_skip_validation {
-            let branch_lock = self
-                .commit_locks
-                .entry(txn.branch_id)
-                .or_insert_with(|| Mutex::new(()));
-            let _commit_guard = branch_lock.lock();
+        if can_skip_validation {
+            if !txn.is_active() {
+                return Err(CommitError::InvalidState(format!(
+                    "Cannot commit transaction {} from {:?} state - must be Active",
+                    txn.txn_id, txn.status
+                )));
+            }
+            txn.status = TransactionStatus::Committed;
+        } else {
             txn.commit(store)?;
             tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, "Validation passed");
-
-            // Version alloc + WAL + apply all under the per-branch lock
-            let commit_version = self.allocate_version()?;
-
-            let has_mutations = !txn.is_read_only() || !txn.json_writes().is_empty();
-            if has_mutations {
-                if let Some(wal_arc) = wal_arc {
-                    let payload = TransactionPayload::from_transaction(txn, commit_version);
-                    let timestamp = now_micros();
-                    // Use commit_version as WAL record ordering key (#1696)
-                    let record = WalRecord::new(
-                        commit_version,
-                        *txn.branch_id.as_bytes(),
-                        timestamp,
-                        payload.to_bytes(),
-                    );
-                    let record_bytes = record.to_bytes();
-                    {
-                        let mut wal = wal_arc.lock();
-                        if let Err(e) =
-                            wal.append_pre_serialized(&record_bytes, commit_version, timestamp)
-                        {
-                            txn.status = TransactionStatus::Aborted {
-                                reason: format!("WAL write failed: {}", e),
-                            };
-                            return Err(CommitError::WALError(e.to_string()));
-                        }
-                    }
-                    tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, commit_version, "WAL durable");
-                }
-            }
-
-            if let Err(e) = txn.apply_writes(store, commit_version) {
-                if wal_arc.is_some() {
-                    tracing::error!(
-                        target: "strata::txn",
-                        txn_id = txn.txn_id,
-                        commit_version = commit_version,
-                        error = %e,
-                        "Storage application failed after WAL commit - will be recovered on restart"
-                    );
-                } else {
-                    txn.status = TransactionStatus::Aborted {
-                        reason: format!("Storage application failed: {}", e),
-                    };
-                    return Err(CommitError::WALError(format!(
-                        "Storage application failed (no WAL): {}",
-                        e
-                    )));
-                }
-            }
-
-            return Ok(commit_version);
         }
-
-        // Blind write fast path: no per-branch lock needed.
-        // No reads → no TOCTOU risk. Blind writes are commutative — concurrent
-        // writers to the same key create distinct versions; highest version wins.
-        if !txn.is_active() {
-            return Err(CommitError::InvalidState(format!(
-                "Cannot commit transaction {} from {:?} state - must be Active",
-                txn.txn_id, txn.status
-            )));
-        }
-        txn.status = TransactionStatus::Committed;
 
         let commit_version = self.allocate_version()?;
 
@@ -1801,6 +1748,76 @@ mod tests {
         assert_eq!(
             records[1].txn_id, 2,
             "T1's WAL record must carry commit_version=2 (not start-time txn_id=1)"
+        );
+    }
+
+    // ========================================================================
+    // Issue #1708: Blind-write fast path in commit_with_wal_arc must acquire
+    // the per-branch lock to prevent interleaving with concurrent writers.
+    // ========================================================================
+
+    #[test]
+    fn test_issue_1708_blind_write_acquires_branch_lock() {
+        // commit() and commit_with_version() correctly acquire the per-branch
+        // lock for all transactions (including blind writes), then skip only
+        // validation. commit_with_wal_arc() must do the same.
+        //
+        // This test verifies that commit_with_wal_arc() creates the commit_locks
+        // entry for blind writes — proving the lock path is taken.
+        let store = Arc::new(SegmentedStore::new());
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = create_test_key(&ns, "blind_key");
+
+        // No lock entry should exist initially
+        assert!(!manager.commit_locks.contains_key(&branch_id));
+
+        // Commit a blind write via commit_with_wal_arc
+        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        txn.put(key, Value::Int(42)).unwrap();
+        assert!(txn.read_set.is_empty(), "Must be a blind write");
+
+        manager
+            .commit_with_wal_arc(&mut txn, store.as_ref(), None)
+            .unwrap();
+
+        // After the commit, the branch lock entry must exist — proving the
+        // blind-write path acquired the per-branch lock.
+        assert!(
+            manager.commit_locks.contains_key(&branch_id),
+            "commit_with_wal_arc blind-write path must acquire the per-branch lock"
+        );
+    }
+
+    #[test]
+    fn test_issue_1708_commit_already_acquires_lock_for_blind_writes() {
+        // Verify that commit() (the non-arc variant) already acquires the
+        // per-branch lock for blind writes. This establishes the expected
+        // behavior that commit_with_wal_arc must also follow.
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let mut wal = create_test_wal(&wal_dir);
+        let store = Arc::new(SegmentedStore::new());
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = create_test_key(&ns, "blind_key");
+
+        assert!(!manager.commit_locks.contains_key(&branch_id));
+
+        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        txn.put(key, Value::Int(42)).unwrap();
+        assert!(txn.read_set.is_empty(), "Must be a blind write");
+
+        manager
+            .commit(&mut txn, store.as_ref(), Some(&mut wal))
+            .unwrap();
+
+        // commit() correctly acquires the lock for blind writes
+        assert!(
+            manager.commit_locks.contains_key(&branch_id),
+            "commit() acquires per-branch lock even for blind writes"
         );
     }
 }
