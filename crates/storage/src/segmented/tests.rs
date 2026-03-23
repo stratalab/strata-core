@@ -8376,3 +8376,98 @@ fn test_issue_1716_compact_l0_to_l1_cleans_up_on_failure() {
          (before={files_before}, after={files_after})"
     );
 }
+
+// ===== Issue #1722: TTL-expired entries don't shadow older versions in timestamp queries =====
+
+/// When the newest version of a key is TTL-expired at the query timestamp,
+/// older non-expired versions must NOT bleed through (ghost resurrection).
+#[test]
+fn test_issue_1722_get_at_timestamp_expired_shadows_older() {
+    let store = SegmentedStore::new();
+    let key = kv_key("k");
+
+    // v1: written at t=100s, no TTL
+    let ts_v1 = Timestamp::from_micros(100_000_000);
+    seed_with_timestamp_and_ttl(&store, key.clone(), Value::Int(1), 5, ts_v1, 0);
+
+    // v2: written at t=200s, TTL=60s (expires at t=260s)
+    let ts_v2 = Timestamp::from_micros(200_000_000);
+    seed_with_timestamp_and_ttl(&store, key.clone(), Value::Int(2), 10, ts_v2, 60_000);
+
+    // Query at t=230s — v2 still alive, should return v2
+    let pre_expiry = 230_000_000u64;
+    let alive = store.get_at_timestamp(&key, pre_expiry).unwrap();
+    assert_eq!(
+        alive.as_ref().map(|v| &v.value),
+        Some(&Value::Int(2)),
+        "Before expiry, v2 should be returned",
+    );
+
+    // Query at t=300s — v2 is expired. Must NOT fall through to v1.
+    let query_ts = 300_000_000u64;
+    let result = store.get_at_timestamp(&key, query_ts).unwrap();
+    assert!(
+        result.is_none(),
+        "Expired v2 must shadow v1 — got {:?} (ghost resurrection)",
+        result,
+    );
+}
+
+#[test]
+fn test_issue_1722_list_by_type_at_timestamp_expired_shadows_older() {
+    let store = SegmentedStore::new();
+    let key = kv_key("k");
+
+    // v1: written at t=100s, no TTL
+    let ts_v1 = Timestamp::from_micros(100_000_000);
+    seed_with_timestamp_and_ttl(&store, key.clone(), Value::Int(1), 5, ts_v1, 0);
+
+    // v2: written at t=200s, TTL=60s (expires at t=260s)
+    let ts_v2 = Timestamp::from_micros(200_000_000);
+    seed_with_timestamp_and_ttl(&store, key.clone(), Value::Int(2), 10, ts_v2, 60_000);
+
+    // Query at t=230s — v2 still alive, should appear
+    let pre_expiry = 230_000_000u64;
+    let alive = store.list_by_type_at_timestamp(&branch(), TypeTag::KV, pre_expiry);
+    assert_eq!(alive.len(), 1, "Before expiry, v2 should appear in list");
+    assert_eq!(alive[0].1.value, Value::Int(2));
+
+    // Query at t=300s — v2 is expired. Key must not appear at all.
+    let query_ts = 300_000_000u64;
+    let results = store.list_by_type_at_timestamp(&branch(), TypeTag::KV, query_ts);
+    assert!(
+        results.is_empty(),
+        "Expired v2 must shadow v1 in list — got {} result(s) (ghost resurrection)",
+        results.len(),
+    );
+}
+
+#[test]
+fn test_issue_1722_scan_prefix_at_timestamp_expired_shadows_older() {
+    let store = SegmentedStore::new();
+    let key = kv_key("k");
+
+    // v1: written at t=100s, no TTL
+    let ts_v1 = Timestamp::from_micros(100_000_000);
+    seed_with_timestamp_and_ttl(&store, key.clone(), Value::Int(1), 5, ts_v1, 0);
+
+    // v2: written at t=200s, TTL=60s (expires at t=260s)
+    let ts_v2 = Timestamp::from_micros(200_000_000);
+    seed_with_timestamp_and_ttl(&store, key.clone(), Value::Int(2), 10, ts_v2, 60_000);
+
+    // Query at t=230s — v2 still alive, should appear
+    let pre_expiry = 230_000_000u64;
+    let prefix = kv_key("k");
+    let alive = store.scan_prefix_at_timestamp(&prefix, pre_expiry).unwrap();
+    assert_eq!(alive.len(), 1, "Before expiry, v2 should appear in scan");
+    assert_eq!(alive[0].1.value, Value::Int(2));
+
+    // Query at t=300s — v2 is expired. Key must not appear at all.
+    let query_ts = 300_000_000u64;
+    let results = store.scan_prefix_at_timestamp(&prefix, query_ts).unwrap();
+    assert!(
+        results.is_empty(),
+        "Expired v2 must shadow v1 in scan — got {} result(s) (ghost resurrection)",
+        results.len(),
+    );
+}

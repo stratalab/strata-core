@@ -1323,7 +1323,11 @@ impl SegmentedStore {
             if found_for_current {
                 continue;
             }
-            if entry.is_expired_at(max_ts) || entry.timestamp.as_micros() > max_ts {
+            if entry.is_expired_at(max_ts) {
+                found_for_current = true;
+                continue;
+            }
+            if entry.timestamp.as_micros() > max_ts {
                 continue;
             }
             found_for_current = true;
@@ -1354,8 +1358,11 @@ impl SegmentedStore {
         };
         let all_versions = Self::get_all_versions_from_branch(&branch, key);
         for (commit_id, entry) in all_versions {
-            if entry.is_expired_at(max_timestamp) {
+            if entry.timestamp.as_micros() > max_timestamp {
                 continue;
+            }
+            if entry.is_expired_at(max_timestamp) {
+                return Ok(None);
             }
             if entry.timestamp.as_micros() <= max_timestamp {
                 if entry.is_tombstone {
@@ -1463,7 +1470,11 @@ impl SegmentedStore {
             if found_for_current {
                 continue;
             }
-            if entry.is_expired_at(max_timestamp) || entry.timestamp.as_micros() > max_timestamp {
+            if entry.is_expired_at(max_timestamp) {
+                found_for_current = true;
+                continue;
+            }
+            if entry.timestamp.as_micros() > max_timestamp {
                 continue;
             }
             found_for_current = true;
