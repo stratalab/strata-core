@@ -1234,7 +1234,7 @@ impl Database {
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
-                let deletes: Vec<_> = payload.deletes.iter().cloned().collect();
+                let deletes: Vec<_> = payload.deletes.to_vec();
                 self.storage.apply_recovery_atomic(
                     writes,
                     deletes,
