@@ -1248,6 +1248,129 @@ impl VectorStore {
         Ok(backend)
     }
 
+    /// Load a backend from KV, populating it with existing vectors.
+    ///
+    /// Used by `ensure_collection_loaded` when a collection exists in KV but
+    /// its backend was evicted from memory. This mirrors the per-collection
+    /// recovery logic in `recovery::recover_from_db` to satisfy ARCH-003:
+    /// losing a secondary index must not lose data.
+    fn load_backend_from_kv(
+        &self,
+        id: &CollectionId,
+        config: &VectorConfig,
+        space: &str,
+    ) -> Result<Box<dyn VectorIndexBackend>, VectorError> {
+        use strata_core::traits::Storage;
+
+        let mut backend = self.create_backend(id, config)?;
+
+        let data_dir = self.db.data_dir();
+        let use_mmap = !data_dir.as_os_str().is_empty();
+
+        // Try mmap-accelerated reload (same logic as recover_from_db)
+        let mut loaded_from_mmap = false;
+        if use_mmap {
+            let vec_path = super::recovery::mmap_path(data_dir, id.branch_id, &id.name);
+            if vec_path.exists() {
+                match super::heap::VectorHeap::from_mmap(&vec_path, config.clone()) {
+                    Ok(heap) if !heap.is_empty() => {
+                        backend.replace_heap(heap);
+                        loaded_from_mmap = true;
+                    }
+                    Ok(_) => {} // empty mmap, fall through to KV
+                    Err(e) => {
+                        warn!(
+                            target: "strata::vector",
+                            collection = %id.name,
+                            error = %e,
+                            "Failed to load mmap cache during reload, falling back to KV"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Scan KV for vector entries
+        let ns = self.namespace_for(id.branch_id, space);
+        let version = self.db.storage().version();
+        let vector_prefix = Key::new_vector(ns, &id.name, "");
+        let vector_entries = self
+            .db
+            .storage()
+            .scan_prefix(&vector_prefix, version)
+            .map_err(|e| VectorError::Storage(e.to_string()))?;
+
+        let collection_prefix = format!("{}/", id.name);
+        for (vec_key, vec_versioned) in &vector_entries {
+            let vec_bytes = match &vec_versioned.value {
+                Value::Bytes(b) => b,
+                _ => continue,
+            };
+
+            let vec_record = match VectorRecord::from_bytes(vec_bytes) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(
+                        target: "strata::vector",
+                        error = %e,
+                        "Failed to decode vector record during reload, skipping"
+                    );
+                    continue;
+                }
+            };
+
+            let vid = VectorId::new(vec_record.vector_id);
+
+            if loaded_from_mmap && backend.get(vid).is_some() {
+                backend.register_mmap_vector(vid, vec_record.created_at);
+            } else if vec_record.embedding.is_empty() {
+                continue; // lite record — only available via mmap
+            } else {
+                let _ = backend.insert_with_id_and_timestamp(
+                    vid,
+                    &vec_record.embedding,
+                    vec_record.created_at,
+                );
+            }
+
+            // Populate inline metadata for O(1) search resolution
+            let vector_key = String::from_utf8(vec_key.user_key.to_vec())
+                .ok()
+                .and_then(|uk| uk.strip_prefix(&collection_prefix).map(|s| s.to_string()))
+                .unwrap_or_default();
+            backend.set_inline_meta(
+                vid,
+                super::types::InlineMeta {
+                    key: vector_key,
+                    source_ref: vec_record.source_ref.clone(),
+                },
+            );
+        }
+
+        // Rebuild HNSW graphs (or load from mmap cache)
+        let mut graphs_loaded = false;
+        if use_mmap {
+            let gdir = super::graph_dir(data_dir, id.branch_id, &id.name);
+            if let Ok(true) = backend.load_graphs_from_disk(&gdir) {
+                graphs_loaded = true;
+            }
+        }
+        if !graphs_loaded {
+            backend.rebuild_index();
+        }
+        backend.seal_remaining_active();
+
+        info!(
+            target: "strata::vector",
+            collection = %id.name,
+            vectors = backend.len(),
+            mmap = loaded_from_mmap,
+            "Reloaded collection backend from KV"
+        );
+
+        Ok(backend)
+    }
+
     /// Get collection config (required version that errors if not found)
     fn get_collection_config_required(
         &self,
@@ -1524,13 +1647,13 @@ impl VectorStore {
             return Ok(());
         }
 
-        // Slow path: load config and create backend outside lock
+        // Slow path: load config and rebuild backend from KV (ARCH-003)
         let config = self
             .load_collection_config(branch_id, space, name)?
             .ok_or_else(|| VectorError::CollectionNotFound {
                 name: name.to_string(),
             })?;
-        let backend = self.create_backend(&collection_id, &config)?;
+        let backend = self.load_backend_from_kv(&collection_id, &config, space)?;
 
         // Double-check via entry API: another thread may have loaded it
         use dashmap::mapref::entry::Entry;
@@ -4406,5 +4529,92 @@ mod tests {
         assert_eq!(results[0].key, "a");
         assert_eq!(results[1].key, "m");
         assert_eq!(results[2].key, "z");
+    }
+
+    // ========================================
+    // Issue #1772: ensure_collection_loaded must reload vectors from KV
+    // ========================================
+
+    #[test]
+    fn test_issue_1772_ensure_loaded_restores_vectors() {
+        // Reproduce: create collection, insert vectors, evict backend from
+        // memory, then search. Before the fix, ensure_collection_loaded
+        // creates an empty backend and search returns zero results.
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::for_minilm();
+        store
+            .create_collection(branch_id, "default", "reload_test", config)
+            .unwrap();
+
+        // Insert 5 vectors with distinct embeddings
+        let embeddings: Vec<Vec<f32>> = (0..5)
+            .map(|i| {
+                let mut emb = vec![0.0; 384];
+                emb[i] = 1.0; // unit vectors along different axes
+                emb
+            })
+            .collect();
+
+        for (i, emb) in embeddings.iter().enumerate() {
+            store
+                .insert(
+                    branch_id,
+                    "default",
+                    "reload_test",
+                    &format!("vec_{i}"),
+                    emb,
+                    None,
+                )
+                .unwrap();
+        }
+
+        // Verify search works before eviction
+        let query = &embeddings[0];
+        let results = store
+            .search(branch_id, "default", "reload_test", query, 5, None)
+            .unwrap();
+        assert_eq!(results.len(), 5, "pre-eviction search should find all 5");
+        assert_eq!(results[0].key, "vec_0", "best match should be vec_0");
+
+        // Evict the backend from memory (simulates the cold-start scenario)
+        {
+            let state = store.state().unwrap();
+            let collection_id = CollectionId::new(branch_id, "reload_test");
+            state.backends.remove(&collection_id);
+        }
+
+        // Search after eviction: ensure_collection_loaded must reload vectors
+        let results = store
+            .search(branch_id, "default", "reload_test", query, 5, None)
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            5,
+            "post-eviction search should still find all 5 vectors"
+        );
+        assert_eq!(
+            results[0].key, "vec_0",
+            "best match should still be vec_0 after reload"
+        );
+
+        // Insert a new vector after reload — verifies the backend's internal
+        // ID counter was restored correctly by insert_with_id_and_timestamp.
+        let mut new_emb = vec![0.0; 384];
+        new_emb[0] = 0.99;
+        new_emb[1] = 0.01;
+        store
+            .insert(branch_id, "default", "reload_test", "vec_5", &new_emb, None)
+            .unwrap();
+
+        let results = store
+            .search(branch_id, "default", "reload_test", query, 6, None)
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            6,
+            "search after insert-on-reloaded-backend should find all 6"
+        );
     }
 }
