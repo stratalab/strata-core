@@ -1401,8 +1401,12 @@ impl VectorIndexBackend for SegmentedHnswBackend {
         // Staleness check: if the heap vector count changed since the graphs
         // were frozen (e.g. vectors deleted via WAL replay), the graphs are
         // stale and must be rebuilt.
-        let frozen_heap_count =
-            u64::from_le_bytes(manifest_data[0..8].try_into().unwrap()) as usize;
+        let frozen_heap_count_u64 = u64::from_le_bytes(manifest_data[0..8].try_into().unwrap());
+        let frozen_heap_count = usize::try_from(frozen_heap_count_u64).map_err(|_| {
+            VectorError::Serialization(format!(
+                "frozen_heap_count {frozen_heap_count_u64} exceeds platform pointer size"
+            ))
+        })?;
         if frozen_heap_count != self.heap.len() {
             tracing::info!(
                 target: "strata::vector",
@@ -1421,9 +1425,13 @@ impl VectorIndexBackend for SegmentedHnswBackend {
             let offset = 8 + i * 24;
             let segment_id =
                 u64::from_le_bytes(manifest_data[offset..offset + 8].try_into().unwrap());
-            let live_count =
-                u64::from_le_bytes(manifest_data[offset + 8..offset + 16].try_into().unwrap())
-                    as usize;
+            let live_count_u64 =
+                u64::from_le_bytes(manifest_data[offset + 8..offset + 16].try_into().unwrap());
+            let live_count = usize::try_from(live_count_u64).map_err(|_| {
+                VectorError::Serialization(format!(
+                    "segment live_count {live_count_u64} exceeds platform pointer size"
+                ))
+            })?;
             // offset+16..offset+24 reserved
 
             let graph_path = dir.join(format!("seg_{}.hgr", segment_id));

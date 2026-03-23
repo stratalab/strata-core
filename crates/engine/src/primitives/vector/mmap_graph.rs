@@ -223,8 +223,18 @@ pub(crate) fn open_graph_file(
     let node_count = u32::from_le_bytes(data[20..24].try_into().unwrap()) as usize;
 
     // neighbor_data_len, node_section_size
-    let neighbor_data_len = u64::from_le_bytes(data[24..32].try_into().unwrap()) as usize;
-    let node_section_size = u64::from_le_bytes(data[32..40].try_into().unwrap()) as usize;
+    let neighbor_data_len_u64 = u64::from_le_bytes(data[24..32].try_into().unwrap());
+    let neighbor_data_len = usize::try_from(neighbor_data_len_u64).map_err(|_| {
+        VectorError::Serialization(format!(
+            "neighbor_data_len {neighbor_data_len_u64} exceeds platform pointer size"
+        ))
+    })?;
+    let node_section_size_u64 = u64::from_le_bytes(data[32..40].try_into().unwrap());
+    let node_section_size = usize::try_from(node_section_size_u64).map_err(|_| {
+        VectorError::Serialization(format!(
+            "node_section_size {node_section_size_u64} exceeds platform pointer size"
+        ))
+    })?;
     // reserved at 40..48 (ignored)
 
     // Validate file size (with overflow protection for untrusted file values)
@@ -505,6 +515,33 @@ mod tests {
         let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
         let result = open_graph_file(&path, HnswConfig::default(), config);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_issue_1735_graph_mmap_rejects_oversized_fields() {
+        // Craft a graph file with neighbor_data_len > u32::MAX.
+        // On 32-bit, try_from must reject. On 64-bit, size validation catches it.
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("big_neighbor.hgr");
+
+        let big_len: u64 = (u32::MAX as u64) + 1;
+        let mut data = vec![0u8; HEADER_SIZE + 64];
+        data[0..4].copy_from_slice(MAGIC);
+        data[4..8].copy_from_slice(&1u32.to_le_bytes()); // version
+        data[8..16].copy_from_slice(&NONE_SENTINEL.to_le_bytes()); // entry_point = None
+        data[16..20].copy_from_slice(&0u32.to_le_bytes()); // max_level
+        data[20..24].copy_from_slice(&0u32.to_le_bytes()); // node_count
+        data[24..32].copy_from_slice(&big_len.to_le_bytes()); // neighbor_data_len > u32::MAX
+        data[32..40].copy_from_slice(&0u64.to_le_bytes()); // node_section_size
+        data[40..48].copy_from_slice(&0u64.to_le_bytes()); // reserved
+
+        std::fs::write(&path, &data).unwrap();
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        let result = open_graph_file(&path, HnswConfig::default(), config);
+        assert!(
+            result.is_err(),
+            "should reject file with oversized neighbor_data_len"
+        );
     }
 
     #[test]
