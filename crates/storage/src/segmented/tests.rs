@@ -8712,3 +8712,87 @@ fn test_issue_1740_apply_recovery_atomic_preserves_ttl() {
         entry.ttl_ms
     );
 }
+
+// ===== Issue #1721: fork_branch must not copy Materializing status =====
+
+/// Regression test for issue #1721 (COW-M6).
+///
+/// When a source branch has an inherited layer with `Materializing` status,
+/// `fork_branch` must set the child's copy to `Active`. Otherwise the child
+/// can never materialize that layer (the `Materializing` check returns early).
+#[test]
+fn test_issue_1721_fork_resets_materializing_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    let grandparent = BranchId::from_bytes([10; 16]);
+    let gp_ns = Arc::new(Namespace::new(grandparent, "default".to_string()));
+
+    // 1. Seed grandparent with data and flush to segments.
+    for i in 0..10 {
+        let key = Key::new(
+            Arc::clone(&gp_ns),
+            TypeTag::KV,
+            format!("k{}", i).into_bytes(),
+        );
+        seed(&store, key, Value::Int(i as i64), 1);
+    }
+    store.rotate_memtable(&grandparent);
+    store.flush_oldest_frozen(&grandparent).unwrap();
+
+    // 2. Fork grandparent → parent.  Parent inherits grandparent's segments.
+    let parent = BranchId::from_bytes([20; 16]);
+    store
+        .branches
+        .entry(parent)
+        .or_insert_with(BranchState::new);
+    store.fork_branch(&grandparent, &parent).unwrap();
+
+    // 3. Simulate in-progress materialization on the parent's inherited layer.
+    {
+        let mut branch = store.branches.get_mut(&parent).unwrap();
+        assert!(
+            !branch.inherited_layers.is_empty(),
+            "parent should have inherited layers"
+        );
+        branch.inherited_layers[0].status = LayerStatus::Materializing;
+    }
+
+    // 4. Fork parent → child (grandchild).
+    let child = BranchId::from_bytes([30; 16]);
+    store.branches.entry(child).or_insert_with(BranchState::new);
+    store.fork_branch(&parent, &child).unwrap();
+
+    // 5. Verify ALL of child's inherited layers are Active.
+    {
+        let branch = store.branches.get(&child).unwrap();
+        assert!(
+            branch.inherited_layers.len() >= 2,
+            "child should have at least 2 inherited layers"
+        );
+        for (i, layer) in branch.inherited_layers.iter().enumerate() {
+            assert_eq!(
+                layer.status,
+                LayerStatus::Active,
+                "child inherited layer {} should be Active, got {:?}",
+                i,
+                layer.status
+            );
+        }
+    }
+
+    // 6. Verify child can materialize layer[1] (the one that was Materializing in parent).
+    //    Before the fix, materialize_layer returns early with 0 entries because
+    //    it sees Materializing status and assumes materialization is already running.
+    let result = store.materialize_layer(&child, 1).unwrap();
+    assert!(
+        result.entries_materialized > 0,
+        "child must be able to materialize layer that was Materializing in parent"
+    );
+
+    // 7. Verify data is still readable through the child.
+    let child_ns = Arc::new(Namespace::new(child, "default".to_string()));
+    let child_key = Key::new(Arc::clone(&child_ns), TypeTag::KV, b"k0".to_vec());
+    let val = store.get_versioned(&child_key, u64::MAX).unwrap().unwrap();
+    assert_eq!(val.value, Value::Int(0));
+}
