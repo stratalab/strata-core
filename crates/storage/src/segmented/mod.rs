@@ -453,12 +453,16 @@ impl SegmentedStore {
             // 1. Clean up the branch's own segments.
             // Check refcount before deleting — a child branch may still
             // reference these segments through inherited layers (#1702).
+            // Hold deletion write guard to prevent TOCTOU with fork (#1682).
             let ver = branch.version.load();
-            for level in &ver.levels {
-                for seg in level {
-                    crate::block_cache::global_cache().invalidate_file(seg.file_id());
-                    if !self.ref_registry.is_referenced(seg.file_id()) {
-                        let _ = std::fs::remove_file(seg.file_path());
+            {
+                let _deletion_guard = self.ref_registry.deletion_write_guard();
+                for level in &ver.levels {
+                    for seg in level {
+                        crate::block_cache::global_cache().invalidate_file(seg.file_id());
+                        if !self.ref_registry.is_referenced(seg.file_id()) {
+                            let _ = std::fs::remove_file(seg.file_path());
+                        }
                     }
                 }
             }
@@ -556,10 +560,14 @@ impl SegmentedStore {
                 }
                 // file_id is a hash of the full path, matching KVSegment::file_id().
                 let file_id = crate::block_cache::file_path_hash(&sst_path);
-                if !live_ids.contains(&file_id) && !self.ref_registry.is_referenced(file_id) {
-                    crate::block_cache::global_cache().invalidate_file(file_id);
-                    let _ = std::fs::remove_file(&sst_path);
-                    deleted += 1;
+                if !live_ids.contains(&file_id) {
+                    // Hold deletion write guard to prevent TOCTOU with fork (#1682).
+                    let _deletion_guard = self.ref_registry.deletion_write_guard();
+                    if !self.ref_registry.is_referenced(file_id) {
+                        crate::block_cache::global_cache().invalidate_file(file_id);
+                        let _ = std::fs::remove_file(&sst_path);
+                        deleted += 1;
+                    }
                 }
             }
         }
@@ -987,14 +995,18 @@ impl SegmentedStore {
             layers.extend(source_inherited);
 
             // 5. Increment refcounts while source guard is still held.
-            // The DashMap (branches) and ref_registry are independent
-            // DashMaps, so no deadlock risk.
+            // Hold the deletion barrier read guard to prevent concurrent
+            // delete_segment_if_unreferenced from observing a transient
+            // zero refcount mid-batch (#1682).
             let mut shared = 0usize;
-            for layer in &layers {
-                for level in &layer.segments.levels {
-                    for seg in level {
-                        self.ref_registry.increment(seg.file_id());
-                        shared += 1;
+            {
+                let _deletion_guard = self.ref_registry.deletion_read_guard();
+                for layer in &layers {
+                    for level in &layer.segments.levels {
+                        for seg in level {
+                            self.ref_registry.increment(seg.file_id());
+                            shared += 1;
+                        }
                     }
                 }
             }

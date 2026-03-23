@@ -4,6 +4,7 @@
 //! refcount drops to zero (or was never tracked), it is safe to delete.
 
 use dashmap::DashMap;
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Segment identity — matches `KVSegment::file_id()`.
@@ -15,8 +16,15 @@ pub(crate) type SegmentId = u64;
 /// `decrement` returns `true`, so existing non-COW compaction deletes files
 /// normally. In Epic C, shared segments will be `increment`ed; only then
 /// does the guard become load-bearing.
+///
+/// The `deletion_barrier` RwLock prevents a TOCTOU race between
+/// `is_referenced()` + file deletion (compaction) and `increment()`
+/// (fork_branch). See issue #1682.
 pub(crate) struct SegmentRefRegistry {
     refs: DashMap<SegmentId, AtomicUsize>,
+    /// Fork increments hold a **read** guard (concurrent forks OK).
+    /// Segment deletion holds a **write** guard (exclusive with forks).
+    deletion_barrier: RwLock<()>,
 }
 
 impl SegmentRefRegistry {
@@ -24,7 +32,27 @@ impl SegmentRefRegistry {
     pub(crate) fn new() -> Self {
         Self {
             refs: DashMap::new(),
+            deletion_barrier: RwLock::new(()),
         }
+    }
+
+    /// Acquire a read guard on the deletion barrier.
+    ///
+    /// Hold this while incrementing refcounts for a batch of segments
+    /// (e.g., during `fork_branch`). Prevents concurrent segment file
+    /// deletion from observing a transient zero refcount mid-batch.
+    pub(crate) fn deletion_read_guard(&self) -> parking_lot::RwLockReadGuard<'_, ()> {
+        self.deletion_barrier.read()
+    }
+
+    /// Acquire a write guard on the deletion barrier.
+    ///
+    /// Hold this during the check-and-delete sequence in
+    /// `delete_segment_if_unreferenced`. Ensures no concurrent fork
+    /// can increment a refcount between the `is_referenced()` check
+    /// and the `remove_file()` call.
+    pub(crate) fn deletion_write_guard(&self) -> parking_lot::RwLockWriteGuard<'_, ()> {
+        self.deletion_barrier.write()
     }
 
     /// Increment the reference count for `id`.

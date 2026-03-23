@@ -69,6 +69,7 @@ impl SegmentedStore {
     /// or `materialize_layer`). Untracked segments (not shared) are deleted
     /// immediately.
     fn delete_segment_if_unreferenced(&self, seg: &KVSegment) {
+        let _guard = self.ref_registry.deletion_write_guard();
         if !self.ref_registry.is_referenced(seg.file_id()) {
             crate::block_cache::global_cache().invalidate_file(seg.file_id());
             let _ = std::fs::remove_file(seg.file_path());
