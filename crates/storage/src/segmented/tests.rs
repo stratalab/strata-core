@@ -1763,7 +1763,7 @@ fn test_issue_1706_apply_writes_atomic_no_partial_visibility() {
     let deletes = vec![kv_key("K2")];
 
     // apply_writes_atomic should install everything BEFORE advancing version.
-    store.apply_writes_atomic(writes, deletes, 10).unwrap();
+    store.apply_writes_atomic(writes, deletes, 10, &[]).unwrap();
 
     // After the atomic call, version should be 10.
     assert_eq!(store.version(), 10);
@@ -1799,7 +1799,7 @@ fn test_issue_1706_version_not_advanced_before_deletes_installed() {
     let writes = vec![(kv_key("B"), Value::Int(200), WriteMode::Append)];
     let deletes = vec![kv_key("A")];
 
-    store.apply_writes_atomic(writes, deletes, 5).unwrap();
+    store.apply_writes_atomic(writes, deletes, 5, &[]).unwrap();
 
     // Version advanced to 5 only after both writes and deletes are in.
     assert_eq!(store.version(), 5);
@@ -1813,17 +1813,17 @@ fn test_issue_1706_version_not_advanced_before_deletes_installed() {
 fn test_issue_1706_apply_writes_atomic_empty() {
     let store = SegmentedStore::new();
     // Both empty — should not advance version.
-    store.apply_writes_atomic(vec![], vec![], 5).unwrap();
+    store.apply_writes_atomic(vec![], vec![], 5, &[]).unwrap();
     assert_eq!(store.version(), 0);
 
     // Only writes, no deletes.
     let writes = vec![(kv_key("X"), Value::Int(1), WriteMode::Append)];
-    store.apply_writes_atomic(writes, vec![], 3).unwrap();
+    store.apply_writes_atomic(writes, vec![], 3, &[]).unwrap();
     assert_eq!(store.version(), 3);
 
     // Only deletes, no writes.
     let deletes = vec![kv_key("X")];
-    store.apply_writes_atomic(vec![], deletes, 7).unwrap();
+    store.apply_writes_atomic(vec![], deletes, 7, &[]).unwrap();
     assert_eq!(store.version(), 7);
     assert!(store.get_versioned(&kv_key("X"), 7).unwrap().is_none());
 }
@@ -4659,10 +4659,10 @@ fn inherited_layer_get_at_timestamp() {
 
     // Write entries with specific timestamps via recovery API
     store
-        .put_recovery_entry(parent_kv("k"), Value::Int(100), 1, 1000)
+        .put_recovery_entry(parent_kv("k"), Value::Int(100), 1, 1000, 0)
         .unwrap();
     store
-        .put_recovery_entry(parent_kv("k"), Value::Int(200), 2, 2000)
+        .put_recovery_entry(parent_kv("k"), Value::Int(200), 2, 2000, 0)
         .unwrap();
     store.rotate_memtable(&parent_branch());
     store.flush_oldest_frozen(&parent_branch()).unwrap();
@@ -4703,13 +4703,13 @@ fn inherited_layer_scan_prefix_at_timestamp() {
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
 
     store
-        .put_recovery_entry(parent_kv("user:a"), Value::Int(1), 1, 1000)
+        .put_recovery_entry(parent_kv("user:a"), Value::Int(1), 1, 1000, 0)
         .unwrap();
     store
-        .put_recovery_entry(parent_kv("user:b"), Value::Int(2), 2, 2000)
+        .put_recovery_entry(parent_kv("user:b"), Value::Int(2), 2, 2000, 0)
         .unwrap();
     store
-        .put_recovery_entry(parent_kv("user:c"), Value::Int(3), 3, 3000)
+        .put_recovery_entry(parent_kv("user:c"), Value::Int(3), 3, 3000, 0)
         .unwrap();
     store.rotate_memtable(&parent_branch());
     store.flush_oldest_frozen(&parent_branch()).unwrap();
@@ -8653,4 +8653,62 @@ fn test_issue_1720_concurrent_fork_same_dest_concurrent() {
             }
         }
     }
+}
+
+// ===== Issue #1740: TTL not preserved through recovery =====
+
+#[test]
+fn test_issue_1740_put_recovery_entry_preserves_ttl() {
+    // Write via put_recovery_entry (simulating WAL replay) with a TTL.
+    // The entry should retain its TTL after recovery, not become permanent.
+    let store = SegmentedStore::new();
+    let key = kv_key("ttl_recovery");
+    let ttl_ms = 3_600_000u64; // 1 hour — won't expire during test
+
+    // Use current wall-clock time so the entry is not expired
+    let now_us = Timestamp::now().as_micros();
+
+    store
+        .put_recovery_entry(key.clone(), Value::Int(42), 1, now_us, ttl_ms)
+        .unwrap();
+
+    // Read the entry via store (filters expired) — should still be alive
+    let result = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
+    assert_eq!(result.value, Value::Int(42));
+
+    // Verify TTL was preserved by checking via the memtable directly
+    let branch = store.branches.get(&branch()).unwrap();
+    let entry = branch.active.get_versioned(&key, u64::MAX).unwrap();
+    assert_eq!(
+        entry.ttl_ms, ttl_ms,
+        "put_recovery_entry must preserve TTL, got ttl_ms={}",
+        entry.ttl_ms
+    );
+}
+
+#[test]
+fn test_issue_1740_apply_recovery_atomic_preserves_ttl() {
+    // apply_recovery_atomic is used by follower refresh and should preserve TTL.
+    let store = SegmentedStore::new();
+    let key = kv_key("ttl_atomic");
+    let ttl_ms = 3_600_000u64; // 1 hour — won't expire during test
+
+    let now_us = Timestamp::now().as_micros();
+
+    let writes = vec![(key.clone(), Value::Int(99))];
+    let put_ttls = vec![ttl_ms];
+    let deletes = vec![];
+
+    store
+        .apply_recovery_atomic(writes, deletes, 1, now_us, &put_ttls)
+        .unwrap();
+
+    // Verify TTL was preserved
+    let branch = store.branches.get(&branch()).unwrap();
+    let entry = branch.active.get_versioned(&key, u64::MAX).unwrap();
+    assert_eq!(
+        entry.ttl_ms, ttl_ms,
+        "apply_recovery_atomic must preserve TTL, got ttl_ms={}",
+        entry.ttl_ms
+    );
 }
