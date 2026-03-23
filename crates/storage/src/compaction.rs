@@ -124,14 +124,16 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for CompactionIt
                 self.versions_emitted = 0;
             }
 
+            let commit_id = ik.commit_id();
+
             // Drop expired TTL entries in bottommost compactions (#1622).
             // Non-bottommost compactions must keep them because they may
             // shadow older versions in lower levels.
-            if self.drop_expired && entry.is_expired() {
+            // #1727: Only drop if below prune_floor — entries above the floor
+            // may be visible to active snapshots and must not be removed.
+            if self.drop_expired && entry.is_expired() && commit_id < self.prune_floor {
                 continue;
             }
-
-            let commit_id = ik.commit_id();
 
             if commit_id >= self.prune_floor {
                 // Above floor: check max_versions limit.
@@ -765,6 +767,113 @@ mod tests {
         assert_eq!(result[0].0.commit_id(), 8);
         assert!(result[1].1.is_tombstone);
         assert_eq!(result[1].0.commit_id(), 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #1727: TTL expiration must respect prune_floor (snapshot safety)
+    // -----------------------------------------------------------------------
+
+    /// Create an entry that is already expired (far-past timestamp + short TTL).
+    fn expired_entry(value: i64) -> MemtableEntry {
+        MemtableEntry {
+            value: Value::Int(value),
+            is_tombstone: false,
+            // 1 second after epoch with 1ms TTL → always expired
+            timestamp: Timestamp::from_micros(1_000_000),
+            ttl_ms: 1,
+        }
+    }
+
+    #[test]
+    fn test_issue_1727_drop_expired_respects_prune_floor() {
+        // Scenario from the issue:
+        // - Entry K@v50 has expired TTL, but commit_id 50 >= prune_floor 10
+        // - An active transaction at snapshot version 50 should still see it
+        // - Compaction with drop_expired must NOT drop it
+        let items = vec![(InternalKey::encode(&key("k"), 50), expired_entry(500))];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 10)
+            .with_drop_expired(true)
+            .collect();
+        // Entry is above prune_floor — must survive even though expired
+        assert_eq!(
+            result.len(),
+            1,
+            "expired entry above prune_floor must NOT be dropped (snapshot may need it)"
+        );
+        assert_eq!(result[0].0.commit_id(), 50);
+    }
+
+    #[test]
+    fn test_issue_1727_drop_expired_below_prune_floor() {
+        // Entry K@v5 is expired AND below prune_floor 10 → safe to drop
+        let items = vec![(InternalKey::encode(&key("k"), 5), expired_entry(50))];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 10)
+            .with_drop_expired(true)
+            .collect();
+        // Entry is below prune_floor and expired — should be dropped
+        assert!(
+            result.is_empty(),
+            "expired entry below prune_floor should be dropped"
+        );
+    }
+
+    #[test]
+    fn test_issue_1727_mixed_expired_and_live_versions() {
+        // Key "k" has versions: 50 (expired, above floor), 8 (expired, below floor), 3 (live, below floor)
+        // prune_floor=10
+        // Expected: keep v50 (above floor, even though expired),
+        //           drop v8 (expired + below floor),
+        //           v3 would be floor entry but v8 was the first below-floor seen
+        //           (v8 is dropped by expired, so v3 becomes floor entry → kept)
+        let items = vec![
+            (InternalKey::encode(&key("k"), 50), expired_entry(500)),
+            (InternalKey::encode(&key("k"), 8), expired_entry(80)),
+            (InternalKey::encode(&key("k"), 3), entry(30)),
+        ];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 10)
+            .with_drop_expired(true)
+            .collect();
+        // v50 kept (above floor), v8 dropped (expired below floor), v3 kept (floor entry)
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0.commit_id(), 50);
+        assert_eq!(result[1].0.commit_id(), 3);
+    }
+
+    #[test]
+    fn test_issue_1727_prune_floor_zero_preserves_expired() {
+        // prune_floor=0 means "don't prune". Even with drop_expired=true,
+        // no entry should be dropped because commit_id < 0 is always false for u64.
+        let items = vec![(InternalKey::encode(&key("k"), 5), expired_entry(50))];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 0)
+            .with_drop_expired(true)
+            .collect();
+        assert_eq!(
+            result.len(),
+            1,
+            "prune_floor=0 disables all pruning, including TTL expiration"
+        );
+    }
+
+    #[test]
+    fn test_issue_1727_all_below_floor_expired_drops_all() {
+        // Above-floor entry + multiple expired below-floor entries.
+        // All below-floor entries are expired → no floor entry survives.
+        let items = vec![
+            (InternalKey::encode(&key("k"), 50), entry(500)),
+            (InternalKey::encode(&key("k"), 8), expired_entry(80)),
+            (InternalKey::encode(&key("k"), 3), expired_entry(30)),
+        ];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 10)
+            .with_drop_expired(true)
+            .collect();
+        // Only v50 survives; both below-floor expired entries are dropped
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0.commit_id(), 50);
     }
 
     // -----------------------------------------------------------------------
