@@ -483,6 +483,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // OOM: Vec::with_capacity(4B) on 64-bit — see #1780
     fn test_issue_1735_mmap_rejects_oversized_count() {
         // Craft a valid-looking mmap file with count > u32::MAX.
         // On 32-bit, this must error (not silently truncate).

@@ -294,7 +294,12 @@ impl HybridSearch {
             }
         }
 
-        // 5. Combine results: keyword mode merges by raw score,
+        // 5. Propagate index_used from any primitive result (#1770)
+        let any_index_used = primitive_results
+            .iter()
+            .any(|(_, resp)| resp.stats.index_used);
+
+        // 6. Combine results: keyword mode merges by raw score,
         //    hybrid mode fuses with RRF across BM25 + vector lists.
         let fused = if req.mode == SearchMode::Keyword {
             crate::fuser::merge_by_score(primitive_results, req.k)
@@ -302,8 +307,9 @@ impl HybridSearch {
             self.fuser.fuse(primitive_results, req.k)
         };
 
-        // 6. Build stats
-        let stats = SearchStats::new(start.elapsed().as_micros() as u64, total_candidates);
+        // 7. Build stats
+        let stats = SearchStats::new(start.elapsed().as_micros() as u64, total_candidates)
+            .with_index_used(any_index_used);
 
         Ok(SearchResponse {
             hits: fused.hits,
@@ -821,5 +827,54 @@ mod tests {
         let hybrid = HybridSearch::with_embedder(db, embedder);
         let cloned = hybrid.clone();
         assert!(cloned.embedder.is_some());
+    }
+
+    /// Regression test for #1770: HybridSearch.search() drops index_used flag
+    ///
+    /// When a primitive (e.g. KV) returns `index_used: true` in its SearchStats,
+    /// the fused HybridSearch response must propagate that flag. Previously,
+    /// HybridSearch::search() created a fresh SearchStats (defaulting index_used
+    /// to false), silently discarding the flag from primitive results.
+    #[test]
+    fn test_issue_1770_hybrid_search_propagates_index_used() {
+        let db = test_db();
+        let kv = KVStore::new(db.clone());
+        let branch_id = BranchId::new();
+
+        // Insert text data so the inverted index is populated
+        kv.put(
+            &branch_id,
+            "default",
+            "doc1",
+            Value::String("the quick brown fox jumps over the lazy dog".into()),
+        )
+        .unwrap();
+        kv.put(
+            &branch_id,
+            "default",
+            "doc2",
+            Value::String("a lazy cat sleeps on the mat".into()),
+        )
+        .unwrap();
+
+        let hybrid = HybridSearch::new(db);
+
+        // Keyword mode: only BM25, no vector search needed
+        let req = SearchRequest::new(branch_id, "lazy")
+            .with_mode(SearchMode::Keyword)
+            .with_primitive_filter(vec![PrimitiveType::Kv]);
+
+        let response = hybrid.search(&req).unwrap();
+
+        // The KV primitive search uses the inverted index and sets index_used: true.
+        // The fused response MUST propagate this flag.
+        assert!(
+            !response.hits.is_empty(),
+            "Should find documents containing 'lazy'"
+        );
+        assert!(
+            response.stats.index_used,
+            "BUG #1770: index_used flag lost during hybrid search fusion"
+        );
     }
 }
