@@ -2557,8 +2557,11 @@ impl SegmentedStore {
             }
         }
 
-        // Sort descending by commit_id (newest first)
+        // Sort descending by commit_id (newest first) and deduplicate.
+        // After recovery, the same (key, commit_id) may exist in both memtable
+        // (from WAL replay) and segments (from disk), producing duplicates (#1733).
         all_versions.sort_by(|a, b| b.0.cmp(&a.0));
+        all_versions.dedup_by_key(|entry| entry.0);
         all_versions
     }
 
