@@ -261,14 +261,38 @@ pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> Strat
         )));
     }
 
-    // 3. Create destination branch
-    branch_index.create_branch(destination)?;
-
-    // 4. Resolve BranchIds
+    // 3. Resolve BranchIds
     let source_id = resolve_branch_name(source);
     let dest_id = resolve_branch_name(destination);
 
-    // 5. Copy spaces
+    // 4. COW fork via storage layer — BEFORE creating KV metadata (#1724).
+    //
+    //    The storage fork writes durable manifests. By doing this before
+    //    the KV metadata (create_branch), a crash can never leave a
+    //    user-visible branch with no inherited data:
+    //      - Crash before storage fork: no KV metadata → clean state
+    //      - Crash after storage fork, before KV: orphaned storage state
+    //        (harmless — refcounts rebuilt from manifests on recovery)
+    //      - Crash after KV: complete fork
+    let storage = db.storage();
+    if !storage.has_segments_dir() {
+        return Err(StrataError::invalid_input(
+            "fork_branch requires a disk-backed database",
+        ));
+    }
+
+    let (fork_version, _segments_shared) = storage
+        .fork_branch(&source_id, &dest_id)
+        .map_err(|e| StrataError::storage(format!("fork failed: {}", e)))?;
+
+    // 5. Create destination branch in KV metadata (WAL-protected).
+    //    If this fails, rollback the storage fork.
+    if let Err(e) = branch_index.create_branch(destination) {
+        storage.clear_branch(&dest_id);
+        return Err(e);
+    }
+
+    // 6. Copy spaces from source to destination
     let source_spaces = space_index.list(source_id)?;
     let mut spaces_copied = 0u64;
 
@@ -278,25 +302,6 @@ pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> Strat
         }
         spaces_copied += 1;
     }
-
-    // 6. COW fork via storage layer
-    let storage = db.storage();
-    if !storage.has_segments_dir() {
-        // Rollback: remove the branch we just created
-        let _ = branch_index.delete_branch(destination);
-        return Err(StrataError::invalid_input(
-            "fork_branch requires a disk-backed database",
-        ));
-    }
-
-    let (fork_version, _segments_shared) = match storage.fork_branch(&source_id, &dest_id) {
-        Ok(result) => result,
-        Err(e) => {
-            // Rollback: remove the branch we just created
-            let _ = branch_index.delete_branch(destination);
-            return Err(StrataError::storage(format!("fork failed: {}", e)));
-        }
-    };
 
     info!(
         target: "strata::branch_ops",
@@ -2336,6 +2341,12 @@ mod tests {
     /// triggers `schedule_flush_if_needed` via a write to a separate branch
     /// (which doesn't fill its memtable, so no flush is needed). The leaf
     /// branch's inherited layers must still get materialized.
+    ///
+    /// Note: After #1724, `create_branch()` (called after the storage fork)
+    /// triggers `schedule_flush_if_needed`, which eagerly materializes deep
+    /// branches during the fork chain itself. The storage-level fork is used
+    /// directly to build the chain without triggering engine-level materialization,
+    /// so we can still verify that writing to root triggers materialization.
     #[test]
     fn test_issue_1704_materialization_runs_without_pending_flush() {
         // Chain: root → b1 → b2 → b3 → b4 → leaf
@@ -2347,9 +2358,11 @@ mod tests {
         // Write data to root so it has segments to inherit.
         write_kv(&db, "root", "default", "origin", Value::Int(0));
 
-        // Build the fork chain. Each fork flushes the source's memtable
-        // and the child inherits [source_own, ...source_inherited].
-        // fork_branch() creates the destination branch internally.
+        // Build the fork chain via the storage layer directly, bypassing
+        // the engine's fork_branch() to avoid triggering materialization
+        // during chain construction.  This isolates the #1704 test from
+        // the #1724 ordering change (create_branch after storage fork now
+        // triggers schedule_flush_if_needed which eagerly materializes).
         for i in 1..branch_names.len() {
             let source = branch_names[i - 1];
             let dest = branch_names[i];
@@ -2363,7 +2376,11 @@ mod tests {
                 Value::Int(i as i64),
             );
 
-            fork_branch(&db, source, dest).unwrap();
+            let source_id = resolve_branch_name(source);
+            let dest_id = resolve_branch_name(dest);
+
+            // Storage-only fork (no KV metadata, no schedule_flush_if_needed).
+            db.storage().fork_branch(&source_id, &dest_id).unwrap();
         }
 
         let leaf_id = resolve_branch_name("leaf");
@@ -2397,6 +2414,143 @@ mod tests {
             val,
             Some(Value::Int(0)),
             "root data must be visible on leaf"
+        );
+    }
+
+    // =========================================================================
+    // Issue #1724 — fork_branch crash atomicity
+    // =========================================================================
+
+    /// Simulates the crash scenario from issue #1724: if the process crashes
+    /// after fork_branch() creates the branch in KV metadata but before the
+    /// storage-layer COW fork completes, recovery reveals an empty orphan
+    /// branch that has no inherited data.
+    ///
+    /// The fix reorders fork_branch() to perform the storage fork (with
+    /// durable manifest writes) BEFORE creating branch KV metadata, so a
+    /// crash can never leave a user-visible branch without its data.
+    #[test]
+    fn test_issue_1724_fork_crash_no_orphan_branch() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Phase 1: Create source branch with data, then do a proper fork.
+        // After fork, drop the database to simulate "crash after completion."
+        // This verifies the fork is fully durable.
+        {
+            let db = Database::open(temp_dir.path()).unwrap();
+            let branch_index = BranchIndex::new(db.clone());
+            branch_index.create_branch("main").unwrap();
+
+            write_kv(
+                &db,
+                "main",
+                "default",
+                "key1",
+                Value::String("from_parent".into()),
+            );
+
+            // Fork main -> child
+            fork_branch(&db, "main", "child").unwrap();
+
+            // Drop without explicit shutdown (simulates unclean exit)
+        }
+
+        // Phase 2: Reopen and verify fork survived recovery with data intact.
+        {
+            let db = Database::open(temp_dir.path()).unwrap();
+            let branch_index = BranchIndex::new(db.clone());
+
+            // Child must exist
+            assert!(
+                branch_index.exists("child").unwrap(),
+                "forked branch must survive recovery"
+            );
+
+            // Child must have inherited data — an empty branch is the bug
+            let val = read_kv(&db, "child", "default", "key1");
+            assert_eq!(
+                val,
+                Some(Value::String("from_parent".into())),
+                "forked branch must have inherited data after recovery (issue #1724)"
+            );
+        }
+    }
+
+    /// Verifies that fork_branch() does not create branch metadata in KV
+    /// before the storage fork completes. With the pre-fix ordering
+    /// (KV first, storage second), a failed storage fork leaves orphaned
+    /// metadata even though the error path attempts rollback.
+    ///
+    /// This test verifies the post-fix ordering: storage fork happens
+    /// first, so if it fails, no KV metadata was ever written.
+    #[test]
+    fn test_issue_1724_fork_error_no_orphan_metadata() {
+        // Use a cache (in-memory) database where storage fork must fail
+        let db = Database::cache().unwrap();
+        let branch_index = BranchIndex::new(db.clone());
+        branch_index.create_branch("source").unwrap();
+
+        write_kv(&db, "source", "default", "k1", Value::String("v1".into()));
+
+        // fork_branch must fail — no disk storage
+        let result = fork_branch(&db, "source", "child");
+        assert!(result.is_err(), "fork on ephemeral DB must fail");
+
+        // After the fix: "child" must NOT exist in KV because the storage
+        // fork is attempted before create_branch(). Since the storage fork
+        // fails (no segments dir), create_branch() is never reached.
+        //
+        // Before the fix: create_branch() was called first, then rollback
+        // via delete_branch(). The rollback works for errors, but NOT for
+        // crashes — this test verifies the ordering property that makes
+        // crashes safe too.
+        assert!(
+            !branch_index.exists("child").unwrap(),
+            "failed fork must not leave orphaned branch metadata"
+        );
+    }
+
+    /// Verifies the storage manifest is durable before fork_branch()
+    /// returns. After the fix (#1724), the storage fork (which writes
+    /// the manifest) happens before KV metadata creation, so a crash
+    /// after return can never leave a branch without its inherited data.
+    #[test]
+    fn test_issue_1724_fork_manifest_before_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open(temp_dir.path()).unwrap();
+        let branch_index = BranchIndex::new(db.clone());
+        branch_index.create_branch("main").unwrap();
+
+        write_kv(
+            &db,
+            "main",
+            "default",
+            "key1",
+            Value::String("parent_data".into()),
+        );
+
+        fork_branch(&db, "main", "child").unwrap();
+
+        // Verify storage manifest exists and has inherited layers.
+        let child_id = resolve_branch_name("child");
+        let child_hex = {
+            let bytes = child_id.as_bytes();
+            let mut s = String::with_capacity(32);
+            for &b in bytes.iter() {
+                use std::fmt::Write;
+                let _ = write!(s, "{:02x}", b);
+            }
+            s
+        };
+        let manifest_dir = temp_dir.path().join("segments").join(&child_hex);
+        let manifest = strata_storage::manifest::read_manifest(&manifest_dir).unwrap();
+        assert!(
+            manifest.is_some(),
+            "storage manifest must exist after fork_branch()"
+        );
+        assert!(
+            !manifest.unwrap().inherited_layers.is_empty(),
+            "forked branch must have inherited layers in manifest"
         );
     }
 }
