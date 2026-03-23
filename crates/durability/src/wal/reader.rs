@@ -15,13 +15,32 @@ const MAX_RECOVERY_SCAN_WINDOW: usize = 8 * 1_024 * 1_024; // 8 MB
 /// WAL reader for iterating over records in segments.
 ///
 /// The reader can read individual segments or scan all segments in order.
+///
+/// By default, mid-segment corruption (checksum mismatch with valid records
+/// after the corrupted region) is fatal — `read_segment` returns an error.
+/// Use [`with_lossy_recovery`](WalReader::with_lossy_recovery) to opt in to
+/// the scan-ahead behavior that skips corrupted regions.
 #[derive(Default)]
-pub struct WalReader;
+pub struct WalReader {
+    allow_lossy_recovery: bool,
+}
 
 impl WalReader {
-    /// Create a new WAL reader.
+    /// Create a new WAL reader with strict (default) corruption handling.
     pub fn new() -> Self {
-        WalReader
+        WalReader {
+            allow_lossy_recovery: false,
+        }
+    }
+
+    /// Enable lossy recovery mode.
+    ///
+    /// When enabled, the reader scans forward past corrupted regions to find
+    /// the next valid record instead of returning an error. This may silently
+    /// lose committed records in the corrupted region.
+    pub fn with_lossy_recovery(mut self) -> Self {
+        self.allow_lossy_recovery = true;
+        self
     }
 
     /// Read all records from a single segment.
@@ -82,7 +101,15 @@ impl WalReader {
                     break;
                 }
                 Err(WalRecordError::ChecksumMismatch { .. }) => {
-                    // Corrupted record detected. Scan forward byte-by-byte to find
+                    if !self.allow_lossy_recovery {
+                        // Strict mode (default): mid-segment corruption is fatal.
+                        return Err(WalReaderError::CorruptedSegment {
+                            offset,
+                            records_before: records.len(),
+                        });
+                    }
+
+                    // Lossy recovery: scan forward byte-by-byte to find
                     // the next valid record instead of trusting the corrupted length
                     // field (which is itself part of the corrupted data).
                     let scan_start = offset + 1;
@@ -430,6 +457,7 @@ impl WalReader {
             current_segment_idx: 0,
             current_records: Vec::new(),
             current_record_idx: 0,
+            allow_lossy_recovery: self.allow_lossy_recovery,
         })
     }
 }
@@ -445,6 +473,7 @@ pub struct WalRecordIterator {
     current_segment_idx: usize,
     current_records: Vec<WalRecord>,
     current_record_idx: usize,
+    allow_lossy_recovery: bool,
 }
 
 impl Iterator for WalRecordIterator {
@@ -472,7 +501,8 @@ impl Iterator for WalRecordIterator {
             let seg_num = self.segments[self.current_segment_idx];
             self.current_segment_idx += 1;
 
-            let reader = WalReader::new();
+            let mut reader = WalReader::new();
+            reader.allow_lossy_recovery = self.allow_lossy_recovery;
             match reader.read_segment(&self.wal_dir, seg_num) {
                 Ok((records, _, _, _)) => {
                     self.current_records = records;
@@ -559,6 +589,18 @@ pub enum WalReaderError {
     /// Record parsing error
     #[error("Record parsing error: {0}")]
     ParseError(String),
+
+    /// Mid-segment corruption detected (checksum mismatch).
+    ///
+    /// Returned in strict mode (default) when a corrupted record is found.
+    /// Use `WalReader::with_lossy_recovery()` to skip past corruption instead.
+    #[error("Corrupted WAL segment at byte offset {offset} ({records_before} valid records before corruption)")]
+    CorruptedSegment {
+        /// Byte offset within the record data where corruption was detected
+        offset: usize,
+        /// Number of valid records read before the corruption
+        records_before: usize,
+    },
 }
 
 #[cfg(test)]
@@ -1466,5 +1508,64 @@ mod tests {
         for (i, record) in iter_records.iter().enumerate() {
             assert_eq!(record.txn_id, (i + 1) as u64);
         }
+    }
+
+    /// Issue #1712: Mid-segment corruption should be fatal by default.
+    ///
+    /// Write 6 records, corrupt the bytes of record 3 (mid-segment), verify
+    /// that the default (strict) reader returns an error instead of silently
+    /// skipping the corrupted region and returning records 4-6.
+    #[test]
+    fn test_issue_1712_mid_segment_corruption_fatal_by_default() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        // Write 6 valid records
+        let records: Vec<_> = (1..=6)
+            .map(|i| WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8; 20]))
+            .collect();
+        write_records(&wal_dir, &records);
+
+        // Serialize records to find byte offsets for corruption
+        let record_bytes: Vec<Vec<u8>> = records.iter().map(|r| r.to_bytes()).collect();
+        let offset_of_record_3: usize = record_bytes[0].len() + record_bytes[1].len();
+
+        // Read the segment file, corrupt record 3's payload (not the length
+        // header) so that the length field is still valid but CRC fails.
+        let segment_path = WalSegment::segment_path(&wal_dir, 1);
+        let mut seg_data = std::fs::read(&segment_path).unwrap();
+        let hdr_size = 36; // v2 segment header
+        let corrupt_start = hdr_size + offset_of_record_3;
+        // Corrupt payload bytes (skip 4-byte length prefix, flip payload bytes)
+        let payload_start = corrupt_start + 4;
+        let payload_end = corrupt_start + record_bytes[2].len() - 4; // before CRC
+        for byte in seg_data[payload_start..payload_end].iter_mut() {
+            *byte ^= 0xFF;
+        }
+        std::fs::write(&segment_path, &seg_data).unwrap();
+
+        // Default (strict) reader should return an error on mid-segment corruption
+        let reader = WalReader::new();
+        let result = reader.read_segment(&wal_dir, 1);
+        assert!(
+            result.is_err(),
+            "Default reader should error on mid-segment corruption, got: {:?}",
+            result.unwrap(),
+        );
+        match result.unwrap_err() {
+            WalReaderError::CorruptedSegment { offset, .. } => {
+                // Corruption detected at the right place
+                assert_eq!(offset, offset_of_record_3);
+            }
+            other => panic!("Expected CorruptedSegment error, got: {:?}", other),
+        }
+
+        // Lossy reader should skip the corrupted region and return records on both sides
+        let lossy_reader = WalReader::new().with_lossy_recovery();
+        let (lossy_records, _, _, skipped) = lossy_reader.read_segment(&wal_dir, 1).unwrap();
+        assert!(skipped > 0, "Lossy reader should report skipped corruption");
+        // Records 1-2 before corruption and 4-6 after should be present
+        let txn_ids: Vec<u64> = lossy_records.iter().map(|r| r.txn_id).collect();
+        assert_eq!(txn_ids, vec![1, 2, 4, 5, 6]);
     }
 }

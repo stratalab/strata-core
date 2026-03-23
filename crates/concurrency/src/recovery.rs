@@ -39,6 +39,8 @@ pub struct RecoveryCoordinator {
     segments_dir: Option<PathBuf>,
     /// Write buffer size in bytes for SegmentedStore (used when segments_dir is set)
     write_buffer_size: usize,
+    /// When true, WAL reader scans past corrupted regions instead of erroring.
+    allow_lossy_recovery: bool,
 }
 
 impl RecoveryCoordinator {
@@ -52,7 +54,14 @@ impl RecoveryCoordinator {
             snapshot_path: None,
             segments_dir: None,
             write_buffer_size: 0,
+            allow_lossy_recovery: false,
         }
+    }
+
+    /// Enable lossy WAL recovery (scan past corrupted regions).
+    pub fn with_lossy_recovery(mut self, allow: bool) -> Self {
+        self.allow_lossy_recovery = allow;
+        self
     }
 
     /// Set snapshot path for checkpoint-based recovery (M3+ feature)
@@ -109,7 +118,10 @@ impl RecoveryCoordinator {
         // Stream records from segmented WAL one segment at a time.
         // This bounds memory to O(largest_segment) instead of O(total_wal_size),
         // preventing OOM on large databases.
-        let reader = WalReader::new();
+        let mut reader = WalReader::new();
+        if self.allow_lossy_recovery {
+            reader = reader.with_lossy_recovery();
+        }
         let records_iter = reader
             .iter_all(&self.wal_dir)
             .map_err(|e| strata_core::StrataError::storage(format!("WAL read failed: {}", e)))?;
