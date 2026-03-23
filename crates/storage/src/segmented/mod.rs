@@ -1597,6 +1597,88 @@ impl SegmentedStore {
         Ok(())
     }
 
+    /// Apply puts and deletes atomically during WAL recovery/refresh,
+    /// preserving the original commit timestamp (#1699) and deferring the
+    /// global version bump until all entries are installed (#1707).
+    pub fn apply_recovery_atomic(
+        &self,
+        writes: Vec<(Key, Value)>,
+        deletes: Vec<Key>,
+        version: u64,
+        timestamp_micros: u64,
+    ) -> StrataResult<()> {
+        if writes.is_empty() && deletes.is_empty() {
+            return Ok(());
+        }
+
+        let timestamp = Timestamp::from_micros(timestamp_micros);
+        let ts = timestamp.as_micros();
+
+        // Group puts by branch.
+        let mut puts_by_branch: std::collections::HashMap<BranchId, Vec<(Key, Value)>> =
+            std::collections::HashMap::new();
+        for (key, value) in writes {
+            puts_by_branch
+                .entry(key.namespace.branch_id)
+                .or_default()
+                .push((key, value));
+        }
+
+        // Group deletes by branch.
+        let mut deletes_by_branch: std::collections::HashMap<BranchId, Vec<Key>> =
+            std::collections::HashMap::new();
+        for key in deletes {
+            deletes_by_branch
+                .entry(key.namespace.branch_id)
+                .or_default()
+                .push(key);
+        }
+
+        // Install puts.
+        for (branch_id, entries) in puts_by_branch {
+            let mut branch = self
+                .branches
+                .entry(branch_id)
+                .or_insert_with(BranchState::new);
+            for (key, value) in entries {
+                let entry = MemtableEntry {
+                    value,
+                    is_tombstone: false,
+                    timestamp,
+                    ttl_ms: 0,
+                };
+                branch.active.put_entry(&key, version, entry);
+            }
+            branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
+            branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
+            self.maybe_rotate_branch(branch_id, &mut branch);
+        }
+
+        // Install tombstones.
+        for (branch_id, keys) in deletes_by_branch {
+            let mut branch = self
+                .branches
+                .entry(branch_id)
+                .or_insert_with(BranchState::new);
+            for key in keys {
+                let entry = MemtableEntry {
+                    value: Value::Null,
+                    is_tombstone: true,
+                    timestamp,
+                    ttl_ms: 0,
+                };
+                branch.active.put_entry(&key, version, entry);
+            }
+            branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
+            branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
+            self.maybe_rotate_branch(branch_id, &mut branch);
+        }
+
+        // Advance version only after ALL entries are installed.
+        self.version.fetch_max(version, Ordering::AcqRel);
+        Ok(())
+    }
+
     /// Get `(entry_count, total_version_count, btree_built)` for a branch.
     ///
     /// SegmentedStore does not use BTreeSet indexes, so `btree_built` is always false.

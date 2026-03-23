@@ -4,6 +4,7 @@
 //! a primary, replay the WAL, read data, refresh to see new data, and that
 //! writes are rejected.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
@@ -395,4 +396,256 @@ fn test_refresh_on_non_follower_returns_zero() {
     let cache = Database::cache().unwrap();
     let result = cache.refresh().unwrap();
     assert_eq!(result, 0, "refresh on cache should be a no-op");
+}
+
+// ============================================================================
+// Atomicity tests (Issue #1707)
+// ============================================================================
+
+/// Verify that refresh() applies each WAL transaction atomically.
+///
+/// A concurrent reader during refresh must never observe partial transaction
+/// state: if it sees ANY write from a committed transaction, it must see ALL
+/// writes from that transaction.
+///
+/// The bug: refresh() applied puts one-by-one via put_with_version_mode(),
+/// each of which advances the global storage version independently. Between
+/// the first put and the last delete, a concurrent reader could snapshot at
+/// the transaction's version and observe partial state.
+#[test]
+fn test_issue_1707_refresh_atomic_visibility() {
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+
+    let primary = Database::open(dir.path()).unwrap();
+
+    // Set up: commit many keys that will be deleted in the multi-key transaction.
+    // Use a large number of keys to widen the race window.
+    let n = ns(branch);
+    for i in 0..50 {
+        let k = Key::new_kv(n.clone(), &format!("old_{}", i));
+        primary
+            .transaction(branch, |txn| {
+                txn.put(k.clone(), Value::String(format!("old_val_{}", i)))?;
+                Ok(())
+            })
+            .unwrap();
+    }
+    primary.flush().unwrap();
+
+    // Open follower BEFORE the multi-key transaction — it sees only old keys.
+    let follower = Arc::new(Database::open_follower(dir.path()).unwrap());
+
+    // Now commit ONE transaction that puts 50 new keys AND deletes 50 old keys.
+    // All 100 mutations must become visible atomically during follower refresh.
+    primary
+        .transaction(branch, |txn| {
+            for i in 0..50 {
+                txn.put(
+                    Key::new_kv(n.clone(), &format!("new_{}", i)),
+                    Value::String(format!("new_val_{}", i)),
+                )?;
+                txn.delete(Key::new_kv(n.clone(), &format!("old_{}", i)))?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    primary.flush().unwrap();
+
+    // Verify pre-condition: old keys visible, new keys not
+    assert!(read_kv(&follower, branch, "old_0").is_some());
+    assert!(read_kv(&follower, branch, "new_0").is_none());
+
+    // Spawn reader threads that continuously check for partial state
+    let found_partial = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let f = follower.clone();
+            let found = found_partial.clone();
+            let stop_flag = stop.clone();
+            std::thread::spawn(move || {
+                let n = ns(branch);
+                while !stop_flag.load(Ordering::Relaxed) {
+                    // Take a snapshot read
+                    let mut txn = match f.begin_read_only_transaction(branch) {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+
+                    // Count how many "new_" keys are visible
+                    let mut new_visible = 0u32;
+                    let mut old_visible = 0u32;
+                    for i in 0..50 {
+                        let nk = Key::new_kv(n.clone(), &format!("new_{}", i));
+                        if let Ok(Some(_)) = txn.get(&nk) {
+                            new_visible += 1;
+                        }
+                        let ok = Key::new_kv(n.clone(), &format!("old_{}", i));
+                        if let Ok(Some(_)) = txn.get(&ok) {
+                            old_visible += 1;
+                        }
+                    }
+
+                    // Atomicity invariant: either we see the pre-transaction state
+                    // (new_visible == 0 && old_visible == 50) or the post-transaction
+                    // state (new_visible == 50 && old_visible == 0). Anything else
+                    // means partial visibility.
+                    if new_visible > 0 && new_visible < 50 {
+                        found.store(true, Ordering::Relaxed);
+                    }
+                    if new_visible > 0 && old_visible > 0 {
+                        found.store(true, Ordering::Relaxed);
+                    }
+                }
+            })
+        })
+        .collect();
+
+    // Give readers a moment to start, then refresh
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    follower.refresh().unwrap();
+
+    // Let readers run a bit after refresh to capture any lagging partial state
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    stop.store(true, Ordering::Relaxed);
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // After refresh, verify final state is correct
+    for i in 0..50 {
+        assert_eq!(
+            read_kv(&follower, branch, &format!("new_{}", i)).as_deref(),
+            Some(format!("new_val_{}", i).as_str()),
+            "new_{} should be visible after refresh",
+            i
+        );
+        assert_eq!(
+            read_kv(&follower, branch, &format!("old_{}", i)),
+            None,
+            "old_{} should be deleted after refresh",
+            i
+        );
+    }
+
+    assert!(
+        !found_partial.load(Ordering::Relaxed),
+        "Concurrent reader observed partial transaction state during refresh — \
+         atomicity violation (ARCH-002)"
+    );
+}
+
+/// Stress test variant: multiple large transactions replayed concurrently with readers.
+#[test]
+fn test_issue_1707_refresh_atomic_concurrent() {
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+
+    let primary = Database::open(dir.path()).unwrap();
+    primary.flush().unwrap();
+
+    // Open follower BEFORE the batch transactions.
+    let follower = Arc::new(Database::open_follower(dir.path()).unwrap());
+
+    // Commit 10 transactions, each writing 20 keys with the same value tag.
+    // Within each txn, all keys get value "txn_T" where T is the txn index.
+    let n = ns(branch);
+    for t in 0..10u32 {
+        primary
+            .transaction(branch, |txn| {
+                for k in 0..20u32 {
+                    txn.put(
+                        Key::new_kv(n.clone(), &format!("batch_{}", k)),
+                        Value::String(format!("txn_{}", t)),
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+    primary.flush().unwrap();
+
+    let found_partial = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let f = follower.clone();
+            let found = found_partial.clone();
+            let stop_flag = stop.clone();
+            std::thread::spawn(move || {
+                let n = ns(branch);
+                while !stop_flag.load(Ordering::Relaxed) {
+                    let mut txn = match f.begin_read_only_transaction(branch) {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+
+                    // All 20 keys must have the SAME value (from the same txn).
+                    // If any key has a different value, we saw a mix of two transactions.
+                    let mut first_val: Option<String> = None;
+                    let mut all_none = true;
+                    let mut mismatch = false;
+
+                    for k in 0..20u32 {
+                        let key = Key::new_kv(n.clone(), &format!("batch_{}", k));
+                        match txn.get(&key) {
+                            Ok(Some(Value::String(s))) => {
+                                all_none = false;
+                                if let Some(ref expected) = first_val {
+                                    if *expected != s {
+                                        mismatch = true;
+                                        break;
+                                    }
+                                } else {
+                                    first_val = Some(s);
+                                }
+                            }
+                            Ok(None) => {
+                                // Key not yet visible — fine if ALL are none
+                                if first_val.is_some() {
+                                    mismatch = true;
+                                    break;
+                                }
+                            }
+                            _ => continue,
+                        }
+                    }
+
+                    if mismatch && !all_none {
+                        found.store(true, Ordering::Relaxed);
+                    }
+                }
+            })
+        })
+        .collect();
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    follower.refresh().unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    stop.store(true, Ordering::Relaxed);
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // All keys should have the final transaction's value
+    for k in 0..20u32 {
+        assert_eq!(
+            read_kv(&follower, branch, &format!("batch_{}", k)).as_deref(),
+            Some("txn_9"),
+            "batch_{} should have final txn value",
+            k
+        );
+    }
+
+    assert!(
+        !found_partial.load(Ordering::Relaxed),
+        "Concurrent reader observed mixed transaction state during refresh — \
+         atomicity violation (ARCH-002)"
+    );
 }

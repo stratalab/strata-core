@@ -1224,23 +1224,23 @@ impl Database {
                 }
             }
 
-            // Apply puts with original WAL timestamp (#1699).
-            // Using put_recovery_entry ensures all entries from the same
-            // transaction share the WAL record's commit timestamp, so
-            // time-travel queries see atomic transactions, not partial state.
-            for (key, value) in &payload.puts {
-                self.storage.put_recovery_entry(
-                    key.clone(),
-                    value.clone(),
+            // Apply puts and deletes atomically with original WAL timestamp.
+            // Combines #1699 (preserve commit timestamp for time-travel) and
+            // #1707 (defer version bump until all entries installed, preventing
+            // partial-state visibility for concurrent follower readers).
+            {
+                let writes: Vec<_> = payload
+                    .puts
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let deletes: Vec<_> = payload.deletes.iter().cloned().collect();
+                self.storage.apply_recovery_atomic(
+                    writes,
+                    deletes,
                     payload.version,
                     record.timestamp,
                 )?;
-            }
-
-            // Apply deletes with original WAL timestamp (#1699)
-            for key in &payload.deletes {
-                self.storage
-                    .delete_recovery_entry(key, payload.version, record.timestamp)?;
             }
 
             // --- Update BM25 search index ---
