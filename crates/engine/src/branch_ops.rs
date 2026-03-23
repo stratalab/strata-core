@@ -743,7 +743,17 @@ pub fn materialize_branch(db: &Arc<Database>, branch_name: &str) -> StrataResult
             Ok(result) => {
                 total_entries += result.entries_materialized;
                 total_segments += result.segments_created;
-                layers_collapsed += 1;
+                // Only count as collapsed if the layer was actually removed.
+                // When another thread is materializing this branch, the call
+                // returns Ok(0, 0) without removing the layer (#1693).
+                let new_count = storage.inherited_layer_count(&branch_id);
+                if new_count < layer_count {
+                    layers_collapsed += 1;
+                } else if result.entries_materialized == 0 && result.segments_created == 0 {
+                    // No work done and layer not removed — concurrent
+                    // materialization in progress. Break instead of spinning.
+                    break;
+                }
             }
             Err(e) => {
                 return Err(StrataError::storage(format!(
@@ -2117,5 +2127,200 @@ mod tests {
         // Source should now have dest_only
         let val = read_kv(&db, "source", "default", "dest_only");
         assert_eq!(val, Some(Value::Int(42)));
+    }
+
+    /// Regression test for #1693: concurrent materialize_layer() calls on the
+    /// same branch must not duplicate L0 segments or corrupt refcounts.
+    ///
+    /// Races N threads calling materialize_branch() simultaneously. The
+    /// materializing_branches guard (#1703) ensures only one proceeds; the
+    /// rest return early. After all threads complete we verify:
+    ///   - exactly one set of materialized segments (no duplication)
+    ///   - inherited layers fully collapsed
+    ///   - data remains correct
+    #[test]
+    fn test_issue_1693_concurrent_materialize_no_duplication() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        let (_temp, db) = setup_with_branch("source");
+
+        // Write enough keys to produce meaningful segments
+        for i in 0..50 {
+            write_kv(
+                &db,
+                "source",
+                "default",
+                &format!("key_{:04}", i),
+                Value::Int(i),
+            );
+        }
+
+        // Fork source → child
+        fork_branch(&db, "source", "child").unwrap();
+
+        let child_id = resolve_branch_name("child");
+        let storage = db.storage();
+        let layer_count_before = storage.inherited_layer_count(&child_id);
+        assert!(
+            layer_count_before > 0,
+            "child must have inherited layers before materialization"
+        );
+
+        // Record L0 segment count before materialization
+        let l0_before = storage.l0_segment_count(&child_id);
+
+        // Race 8 threads all calling materialize_branch on the same child
+        let num_threads = 8;
+        let barrier = Arc::new(Barrier::new(num_threads));
+        let handles: Vec<_> = (0..num_threads)
+            .map(|_| {
+                let db = db.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    materialize_branch(&db, "child")
+                })
+            })
+            .collect();
+
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        // All calls must succeed
+        for (i, r) in results.iter().enumerate() {
+            assert!(r.is_ok(), "thread {} failed: {:?}", i, r);
+        }
+
+        // Exactly one thread should have materialized entries (entries > 0);
+        // the rest were serialized out by the materializing_branches guard
+        // and returned 0 entries.
+        let workers: Vec<_> = results
+            .iter()
+            .filter(|r| r.as_ref().unwrap().entries_materialized > 0)
+            .collect();
+        assert_eq!(
+            workers.len(),
+            1,
+            "expected exactly 1 thread to materialize entries, got {}",
+            workers.len()
+        );
+
+        // Non-winning threads must report layers_collapsed == 0 (#1693 fix).
+        let idle_count = results
+            .iter()
+            .filter(|r| r.as_ref().unwrap().layers_collapsed == 0)
+            .count();
+        assert!(
+            idle_count >= (num_threads - 1),
+            "at most 1 thread should report layers_collapsed > 0"
+        );
+
+        // Inherited layers must be fully collapsed
+        assert_eq!(
+            storage.inherited_layer_count(&child_id),
+            0,
+            "all inherited layers should be removed after materialization"
+        );
+
+        // L0 segments should have increased by a bounded amount (no duplication).
+        // The winner materializes the layer into new L0 segments; the losers add
+        // nothing. So the increase equals the winner's segments_created.
+        let l0_after = storage.l0_segment_count(&child_id);
+        let winner = workers[0].as_ref().unwrap();
+        assert_eq!(
+            l0_after - l0_before,
+            winner.segments_created,
+            "L0 segment increase must match the single winner's output"
+        );
+
+        // Data must still be correct
+        for i in 0..50 {
+            let val = read_kv(&db, "child", "default", &format!("key_{:04}", i));
+            assert_eq!(
+                val,
+                Some(Value::Int(i)),
+                "key_{:04} should be readable after materialization",
+                i
+            );
+        }
+    }
+
+    /// Stress variant of #1693: race background-style (single deepest layer)
+    /// and explicit-style (full materialize_branch) concurrently.
+    #[test]
+    fn test_issue_1693_concurrent_materialize_bg_vs_explicit() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        let (_temp, db) = setup_with_branch("parent");
+
+        for i in 0..20 {
+            write_kv(
+                &db,
+                "parent",
+                "default",
+                &format!("pk_{:03}", i),
+                Value::Int(i),
+            );
+        }
+
+        fork_branch(&db, "parent", "racing").unwrap();
+
+        let racing_id = resolve_branch_name("racing");
+        let storage = db.storage();
+        assert!(storage.inherited_layer_count(&racing_id) > 0);
+
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Thread 1: simulate background scheduler — materialize deepest layer
+        let db1 = db.clone();
+        let barrier1 = barrier.clone();
+        let bg_handle = thread::spawn(move || {
+            barrier1.wait();
+            let storage = db1.storage();
+            let racing_id = resolve_branch_name("racing");
+            let layer_count = storage.inherited_layer_count(&racing_id);
+            if layer_count > 0 {
+                let deepest = layer_count - 1;
+                storage.materialize_layer(&racing_id, deepest)
+            } else {
+                Ok(strata_storage::MaterializeResult {
+                    entries_materialized: 0,
+                    segments_created: 0,
+                })
+            }
+        });
+
+        // Thread 2: explicit API call
+        let db2 = db.clone();
+        let barrier2 = barrier.clone();
+        let api_handle = thread::spawn(move || {
+            barrier2.wait();
+            materialize_branch(&db2, "racing")
+        });
+
+        let bg_result = bg_handle.join().unwrap();
+        let api_result = api_handle.join().unwrap();
+
+        // Both must succeed (no panics, no corruption)
+        assert!(
+            bg_result.is_ok(),
+            "background materialize failed: {:?}",
+            bg_result
+        );
+        assert!(
+            api_result.is_ok(),
+            "API materialize failed: {:?}",
+            api_result
+        );
+
+        // All layers collapsed
+        assert_eq!(storage.inherited_layer_count(&racing_id), 0);
+
+        // Data correct
+        for i in 0..20 {
+            let val = read_kv(&db, "racing", "default", &format!("pk_{:03}", i));
+            assert_eq!(val, Some(Value::Int(i)));
+        }
     }
 }
