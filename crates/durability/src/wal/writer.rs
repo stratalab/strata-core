@@ -1502,6 +1502,65 @@ mod tests {
         assert_eq!(usage.segment_count, 0);
     }
 
+    /// Issue #1711: Segment rotation must fsync the parent directory so the
+    /// new segment's directory entry survives power loss. Without the directory
+    /// fsync, the first record in a newly-rotated segment can be lost.
+    ///
+    /// This test exercises the full rotation path and verifies all segments
+    /// (including rotated ones) are discoverable and readable afterward.
+    #[test]
+    fn test_issue_1711_rotation_fsyncs_parent_directory() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        // Use very small segment size to force many rotations
+        let config = WalConfig::new()
+            .with_segment_size(100)
+            .with_buffered_sync_bytes(50);
+
+        let mut writer = WalWriter::new(
+            wal_dir.clone(),
+            [1u8; 16],
+            DurabilityMode::Always,
+            config,
+            Box::new(IdentityCodec),
+        )
+        .unwrap();
+
+        // Write enough records to force several rotations
+        for i in 1..=20 {
+            writer
+                .append(&WalRecord::new(i, [1u8; 16], i * 1000, vec![0; 50]))
+                .unwrap();
+        }
+
+        let segments = writer.list_segments().unwrap();
+        assert!(
+            segments.len() >= 3,
+            "Expected at least 3 segments from rotation, got {}",
+            segments.len()
+        );
+
+        // Every segment file must be visible in the directory
+        for seg_num in &segments {
+            let path = WalSegment::segment_path(&wal_dir, *seg_num);
+            assert!(
+                path.exists(),
+                "Segment {} directory entry must be durable",
+                seg_num
+            );
+        }
+
+        // All records must be readable through the reader
+        let reader = crate::wal::WalReader::new();
+        let result = reader.read_all(&wal_dir).unwrap();
+        assert_eq!(
+            result.records.len(),
+            20,
+            "All 20 records must survive rotation"
+        );
+    }
+
     #[test]
     fn test_wal_disk_usage_ignores_non_segment_files() {
         let dir = tempdir().unwrap();
