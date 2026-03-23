@@ -125,6 +125,16 @@ impl TransactionManager {
         self.version.load(Ordering::Acquire)
     }
 
+    /// Ensure the version counter is at least `floor` (#1726).
+    ///
+    /// Used after segment recovery to prevent version collisions when the WAL
+    /// has been fully compacted and contains no records.  Segments may hold
+    /// data at versions higher than what the WAL reports; this method bumps
+    /// the counter so that new transactions start above all existing data.
+    pub fn bump_version_floor(&self, floor: u64) {
+        self.version.fetch_max(floor, Ordering::AcqRel);
+    }
+
     /// Get the current version after draining all in-flight commits (#1710).
     ///
     /// Acquires the exclusive (write) side of `commit_quiesce`, which blocks
