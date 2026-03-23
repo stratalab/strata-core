@@ -942,6 +942,14 @@ impl TransactionContext {
         }
         self.check_write_limit(Some(&key))?;
 
+        // Reject if the same key already has a CAS operation (#1739 OCC-M1)
+        if self.cas_set.iter().any(|op| op.key == key) {
+            return Err(StrataError::invalid_input(
+                "Key already has a CAS operation in this transaction; \
+                 mixing put/delete and CAS on the same key is ambiguous",
+            ));
+        }
+
         // Remove from delete_set if previously deleted in this txn
         self.delete_set.remove(&key);
 
@@ -1000,6 +1008,14 @@ impl TransactionContext {
         }
         self.check_write_limit(Some(&key))?;
 
+        // Reject if the same key already has a CAS operation (#1739 OCC-M1)
+        if self.cas_set.iter().any(|op| op.key == key) {
+            return Err(StrataError::invalid_input(
+                "Key already has a CAS operation in this transaction; \
+                 mixing put/delete and CAS on the same key is ambiguous",
+            ));
+        }
+
         // Remove from write_set if previously written in this txn
         self.write_set.remove(&key);
         // Clean up any write mode override for this key
@@ -1054,6 +1070,14 @@ impl TransactionContext {
         }
         self.check_write_limit(None)?;
 
+        // Reject if the same key already has a put or delete (#1739 OCC-M1)
+        if self.write_set.contains_key(&key) || self.delete_set.contains(&key) {
+            return Err(StrataError::invalid_input(
+                "Key already has a put/delete in this transaction; \
+                 mixing put/delete and CAS on the same key is ambiguous",
+            ));
+        }
+
         self.cas_set.push(CASOperation {
             key,
             expected_version,
@@ -1081,6 +1105,15 @@ impl TransactionContext {
             ));
         }
         self.check_write_limit(None)?;
+
+        // Reject if the same key already has a put or delete (#1739 OCC-M1)
+        if self.write_set.contains_key(&key) || self.delete_set.contains(&key) {
+            return Err(StrataError::invalid_input(
+                "Key already has a put/delete in this transaction; \
+                 mixing put/delete and CAS on the same key is ambiguous",
+            ));
+        }
+
         self.read_from_snapshot(&key)?;
         self.cas_set.push(CASOperation {
             key,
@@ -1539,6 +1572,71 @@ impl TransactionContext {
             deletes_applied: deletes_count,
             cas_applied: cas_count,
         })
+    }
+
+    /// Materialize JSON patches into the write_set as full-document puts.
+    ///
+    /// For each key in `json_writes`, reads the base document from the snapshot
+    /// store, applies all patches in order, serializes the result to msgpack bytes,
+    /// and inserts into `write_set`. After this call, `json_writes` is cleared and
+    /// the existing `TransactionPayload` / `apply_writes` path handles persistence.
+    ///
+    /// Must be called after validation but before building `TransactionPayload`.
+    pub fn materialize_json_writes(&mut self) -> StrataResult<()> {
+        use strata_core::primitives::json::{apply_patches, JsonValue};
+
+        let json_writes = match self.json_writes.take() {
+            Some(w) if !w.is_empty() => w,
+            _ => return Ok(()),
+        };
+
+        // Group patches by key, preserving insertion order.
+        let mut patches_by_key: Vec<(Key, Vec<strata_core::primitives::json::JsonPatch>)> =
+            Vec::new();
+        for entry in json_writes {
+            if let Some((_k, patches)) = patches_by_key.iter_mut().find(|(k, _)| *k == entry.key) {
+                patches.push(entry.patch);
+            } else {
+                patches_by_key.push((entry.key, vec![entry.patch]));
+            }
+        }
+
+        let store = self.store.as_ref().ok_or_else(|| {
+            StrataError::internal("Cannot materialize JSON writes: no snapshot store")
+        })?;
+
+        for (key, patches) in patches_by_key {
+            // Read the base document from the snapshot.
+            let mut doc: JsonValue =
+                if let Some(vv) = store.get_versioned(&key, self.start_version)? {
+                    match &vv.value {
+                        Value::Bytes(b) => rmp_serde::from_slice(b).map_err(|e| {
+                            StrataError::internal(format!(
+                                "Failed to deserialize JSON document for materialization: {}",
+                                e
+                            ))
+                        })?,
+                        _ => JsonValue::object(),
+                    }
+                } else {
+                    JsonValue::object()
+                };
+
+            apply_patches(&mut doc, &patches).map_err(|e| {
+                StrataError::internal(format!("Failed to apply JSON patches: {}", e))
+            })?;
+
+            let doc_bytes = rmp_serde::to_vec(&doc).map_err(|e| {
+                StrataError::internal(format!(
+                    "Failed to serialize materialized JSON document: {}",
+                    e
+                ))
+            })?;
+
+            self.write_set.insert(key, Value::Bytes(doc_bytes));
+        }
+
+        Ok(())
     }
 
     // === Introspection ===
