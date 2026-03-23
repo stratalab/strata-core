@@ -282,7 +282,7 @@ mod tests {
         // Verify num_probes is correctly encoded
         let encoded_probes = u32::from_le_bytes(bytes[1..5].try_into().unwrap());
         assert_eq!(encoded_probes, filter.num_probes);
-        assert!(encoded_probes >= 1 && encoded_probes <= 30);
+        assert!((1..=30).contains(&encoded_probes));
         // bits portion must be 64-byte aligned
         assert_eq!((bytes.len() - 5) % BLOCK_BYTES, 0);
     }

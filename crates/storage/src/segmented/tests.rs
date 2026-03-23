@@ -558,7 +558,7 @@ fn flush_produces_valid_segment_file() {
     let sst_files: Vec<_> = std::fs::read_dir(&branch_dir)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "sst"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
         .collect();
     assert!(!sst_files.is_empty());
 
@@ -1660,7 +1660,7 @@ fn compact_concurrent_flush_preserves_new_segment() {
 #[test]
 fn apply_batch_equivalent_to_individual() {
     let store = SegmentedStore::new();
-    let b = branch();
+    let _b = branch();
 
     // Write some keys individually
     seed(&store, kv_key("a"), Value::Int(1), 1);
@@ -1713,7 +1713,7 @@ fn apply_batch_cross_branch() {
 #[test]
 fn apply_batch_with_deletes() {
     let store = SegmentedStore::new();
-    let b = branch();
+    let _b = branch();
 
     // Write first
     seed(&store, kv_key("a"), Value::Int(1), 1);

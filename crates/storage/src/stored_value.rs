@@ -315,7 +315,7 @@ mod tests {
     fn test_stored_value_with_timestamp() {
         let ts = Timestamp::from_micros(5_000_000);
         let sv = StoredValue::with_timestamp(
-            Value::Float(3.14),
+            Value::Float(2.78),
             Version::txn(10),
             ts,
             Some(Duration::from_secs(30)),

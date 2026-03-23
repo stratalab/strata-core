@@ -769,8 +769,8 @@ mod tests {
         let v2 = handle2.join().unwrap().unwrap();
 
         // Both commits should succeed with unique versions
-        assert!(v1 >= 1 && v1 <= 2);
-        assert!(v2 >= 1 && v2 <= 2);
+        assert!((1..=2).contains(&v1));
+        assert!((1..=2).contains(&v2));
         assert_ne!(v1, v2); // Versions must be unique
 
         // Both keys should be in storage

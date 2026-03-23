@@ -470,7 +470,7 @@ mod tests {
         let cf = CounterFile::new(dir.path());
 
         // Write only 4 bytes (need 16) — simulates crash during write
-        std::fs::write(dir.path().join("counters"), &[0xAA; 4]).unwrap();
+        std::fs::write(dir.path().join("counters"), [0xAA; 4]).unwrap();
 
         // read_or_default should return Err because read_exact fails
         // (file exists so NotFound branch is not taken, but UnexpectedEof occurs)
@@ -488,7 +488,7 @@ mod tests {
         let cf = CounterFile::new(dir.path());
 
         // Write empty file — simulates crash right after file creation
-        std::fs::write(dir.path().join("counters"), &[]).unwrap();
+        std::fs::write(dir.path().join("counters"), []).unwrap();
 
         // read_or_default should return Err (file exists but empty)
         let result = cf.read_or_default();

@@ -428,7 +428,7 @@ mod tests {
         id_to_offset.insert(VectorId::new(1), 0usize);
         id_to_offset.insert(VectorId::new(3), 3usize);
 
-        let raw_data: Vec<f32> = vec![
+        let _raw_data: Vec<f32> = vec![
             1.0, 0.0, 0.0, // id=1 at offset 0
             0.0, 0.0, 0.0, // deleted slot (offset 3 would be id=2 but it's free)
             0.0, 1.0, 0.0, // id=3 at offset 3... wait, offset 3 maps to floats 3,4,5

@@ -612,7 +612,7 @@ mod tests {
         let wal_dir = dir.path().join("wal");
 
         let record = WalRecord::new(1, [1u8; 16], 12345, vec![1, 2, 3]);
-        write_records(&wal_dir, &[record.clone()]);
+        write_records(&wal_dir, std::slice::from_ref(&record));
 
         let reader = WalReader::new();
         let (records, _, _, _) = reader.read_segment(&wal_dir, 1).unwrap();

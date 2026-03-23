@@ -242,7 +242,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("tiny.manifest");
 
-        std::fs::write(&path, &[0u8; 4]).unwrap();
+        std::fs::write(&path, [0u8; 4]).unwrap();
         assert!(load_manifest(&path).is_err());
     }
 }

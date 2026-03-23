@@ -1245,8 +1245,8 @@ mod tests {
 
         // Check that the data at that offset is zeroed
         let data = heap.raw_data();
-        for i in offset..offset + 384 {
-            assert_eq!(data[i], 0.0, "Data should be zeroed after deletion");
+        for item in &data[offset..offset + 384] {
+            assert_eq!(*item, 0.0, "Data should be zeroed after deletion");
         }
     }
 
@@ -1307,8 +1307,8 @@ mod tests {
 
         let e1 = vec![1.0_f32; 384];
         let e2 = vec![2.0_f32; 384];
-        let id1 = heap.insert(&e1).unwrap();
-        let id2 = heap.insert(&e2).unwrap();
+        let _id1 = heap.insert(&e1).unwrap();
+        let _id2 = heap.insert(&e2).unwrap();
 
         // Collect in-memory iteration results
         let mem_entries: Vec<_> = heap.iter().collect();

@@ -1454,7 +1454,7 @@ mod tests {
         mt.put(&kv_key("null"), 1, Value::Null, false);
         mt.put(&kv_key("bool"), 1, Value::Bool(true), false);
         mt.put(&kv_key("int"), 1, Value::Int(42), false);
-        mt.put(&kv_key("float"), 1, Value::Float(3.14), false);
+        mt.put(&kv_key("float"), 1, Value::Float(2.78), false);
         mt.put(&kv_key("string"), 1, Value::String("hello".into()), false);
         mt.put(
             &kv_key("bytes"),
@@ -1493,7 +1493,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .value,
-            Value::Float(3.14),
+            Value::Float(2.78),
         );
         assert_eq!(
             seg.point_lookup(&kv_key("string"), u64::MAX)
@@ -1728,7 +1728,7 @@ mod tests {
             let k = kv_key(&format!("k_{:08}", i));
             let e = seg
                 .point_lookup(&k, u64::MAX)
-                .expect(&format!("point lookup failed for k_{:08}", i))
+                .unwrap_or_else(|_| panic!("point lookup failed for k_{:08}", i))
                 .unwrap();
             assert_eq!(e.value, Value::Int(i as i64));
             assert_eq!(e.commit_id, i as u64 + 1);

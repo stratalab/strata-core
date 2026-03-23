@@ -2398,7 +2398,7 @@ mod tests {
     /// Helper: write a committed transaction to the segmented WAL
     fn write_wal_txn(
         wal_dir: &std::path::Path,
-        txn_id: u64,
+        _txn_id: u64,
         branch_id: BranchId,
         puts: Vec<(Key, Value)>,
         deletes: Vec<Key>,
@@ -3050,7 +3050,7 @@ mod tests {
 
         // Commit a few transactions to advance version well past 1
         for i in 0..5 {
-            let key = Key::new_kv(ns.clone(), &format!("key_{}", i));
+            let key = Key::new_kv(ns.clone(), format!("key_{}", i));
             db.transaction(branch_id, |txn| {
                 txn.put(key.clone(), Value::Int(i))?;
                 Ok(())
@@ -3064,7 +3064,7 @@ mod tests {
 
         // Commit two more transactions to advance version further
         for i in 5..7 {
-            let key = Key::new_kv(ns.clone(), &format!("key_{}", i));
+            let key = Key::new_kv(ns.clone(), format!("key_{}", i));
             db.transaction(branch_id, |t| {
                 t.put(key.clone(), Value::Int(i))?;
                 Ok(())
@@ -3615,7 +3615,7 @@ mod tests {
             let start = std::time::Instant::now();
 
             std::thread::scope(|s| {
-                for t in 0..num_threads {
+                for _t in 0..num_threads {
                     let db = &db;
                     let barrier = barrier.clone();
                     s.spawn(move || {

@@ -2012,7 +2012,7 @@ mod tests {
         for i in 0..3 {
             db.event_append(
                 "paged",
-                Value::object([(format!("i"), Value::Int(i))].into_iter().collect()),
+                Value::object([("i".to_string(), Value::Int(i))].into_iter().collect()),
             )
             .unwrap();
         }

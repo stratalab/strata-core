@@ -462,9 +462,9 @@ mod tests {
         assert!(v_int.is_int());
         assert_eq!(v_int.as_int(), Some(42));
 
-        let v_float = Versioned::new(Value::Float(3.14), Version::txn(1));
+        let v_float = Versioned::new(Value::Float(2.78), Version::txn(1));
         assert!(v_float.is_float());
-        assert!((v_float.as_float().unwrap() - 3.14).abs() < f64::EPSILON);
+        assert!((v_float.as_float().unwrap() - 2.78).abs() < f64::EPSILON);
 
         let v_str = Versioned::new(Value::String("hello".into()), Version::txn(1));
         assert!(v_str.is_string());

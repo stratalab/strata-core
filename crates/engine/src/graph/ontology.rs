@@ -2158,7 +2158,7 @@ mod tests {
         // float is not integer
         let bad = NodeData {
             object_type: Some("Counter".to_string()),
-            properties: Some(serde_json::json!({"count": 3.14})),
+            properties: Some(serde_json::json!({"count": 2.78})),
             ..Default::default()
         };
         let err = gs.add_node(b, "g", "c2", bad).unwrap_err();
@@ -2250,7 +2250,7 @@ mod tests {
         // float counts as number
         let float_data = NodeData {
             object_type: Some("Score".to_string()),
-            properties: Some(serde_json::json!({"score": 3.14})),
+            properties: Some(serde_json::json!({"score": 2.78})),
             ..Default::default()
         };
         assert!(gs.add_node(b, "g", "s2", float_data).is_ok());

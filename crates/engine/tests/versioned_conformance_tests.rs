@@ -127,7 +127,7 @@ mod invariant_1_addressable {
         json.create(
             &branch_id,
             "default",
-            &doc_id,
+            doc_id,
             serde_json::json!({"data": 1}).into(),
         )
         .unwrap();
@@ -308,11 +308,11 @@ mod invariant_2_versioned {
         let json = JsonStore::new(db);
         let doc_id = "test-doc";
 
-        json.create(&branch_id, "default", &doc_id, serde_json::json!(42).into())
+        json.create(&branch_id, "default", doc_id, serde_json::json!(42).into())
             .unwrap();
 
         let value = json
-            .get(&branch_id, "default", &doc_id, &JsonPath::root())
+            .get(&branch_id, "default", doc_id, &JsonPath::root())
             .unwrap()
             .unwrap();
         assert_eq!(value.as_i64(), Some(42));
@@ -325,7 +325,7 @@ mod invariant_2_versioned {
         let doc_id = "test-doc";
 
         let version = json
-            .create(&branch_id, "default", &doc_id, serde_json::json!({}).into())
+            .create(&branch_id, "default", doc_id, serde_json::json!({}).into())
             .unwrap();
 
         assert!(matches!(version, Version::Counter(1)));
@@ -337,14 +337,14 @@ mod invariant_2_versioned {
         let json = JsonStore::new(db);
         let doc_id = "test-doc";
 
-        json.create(&branch_id, "default", &doc_id, serde_json::json!({}).into())
+        json.create(&branch_id, "default", doc_id, serde_json::json!({}).into())
             .unwrap();
 
         let version = json
             .set(
                 &branch_id,
                 "default",
-                &doc_id,
+                doc_id,
                 &JsonPath::root(),
                 serde_json::json!(100).into(),
             )
@@ -488,7 +488,7 @@ mod invariant_3_transactional {
         .unwrap();
 
         let json = JsonStore::new(db);
-        assert!(json.exists(&branch_id, "default", &doc_id).unwrap());
+        assert!(json.exists(&branch_id, "default", doc_id).unwrap());
     }
 
     #[test]
@@ -630,25 +630,25 @@ mod invariant_4_lifecycle {
         json.create(
             &branch_id,
             "default",
-            &doc_id,
+            doc_id,
             serde_json::json!({"v": 1}).into(),
         )
         .unwrap();
 
         // Exist
-        assert!(json.exists(&branch_id, "default", &doc_id).unwrap());
+        assert!(json.exists(&branch_id, "default", doc_id).unwrap());
 
         // Evolve (set)
         json.set(
             &branch_id,
             "default",
-            &doc_id,
+            doc_id,
             &JsonPath::root(),
             serde_json::json!({"v": 2}).into(),
         )
         .unwrap();
         let v = json
-            .get(&branch_id, "default", &doc_id, &JsonPath::root())
+            .get(&branch_id, "default", doc_id, &JsonPath::root())
             .unwrap()
             .unwrap();
         assert_eq!(v.get("v").and_then(|v| v.as_i64()), Some(2));
@@ -797,24 +797,24 @@ mod invariant_5_branch_scoped {
         json.create(
             &branch1,
             "default",
-            &doc_id,
+            doc_id,
             serde_json::json!({"branch": 1}).into(),
         )
         .unwrap();
         json.create(
             &branch2,
             "default",
-            &doc_id,
+            doc_id,
             serde_json::json!({"branch": 2}).into(),
         )
         .unwrap();
 
         let j1 = json
-            .get(&branch1, "default", &doc_id, &JsonPath::root())
+            .get(&branch1, "default", doc_id, &JsonPath::root())
             .unwrap()
             .unwrap();
         let j2 = json
-            .get(&branch2, "default", &doc_id, &JsonPath::root())
+            .get(&branch2, "default", doc_id, &JsonPath::root())
             .unwrap()
             .unwrap();
 
@@ -932,12 +932,12 @@ mod invariant_6_introspectable {
         let json = JsonStore::new(db);
         let doc_id = "test-doc";
 
-        assert!(!json.exists(&branch_id, "default", &doc_id).unwrap());
+        assert!(!json.exists(&branch_id, "default", doc_id).unwrap());
 
-        json.create(&branch_id, "default", &doc_id, serde_json::json!({}).into())
+        json.create(&branch_id, "default", doc_id, serde_json::json!({}).into())
             .unwrap();
 
-        assert!(json.exists(&branch_id, "default", &doc_id).unwrap());
+        assert!(json.exists(&branch_id, "default", doc_id).unwrap());
     }
 
     #[test]
@@ -1115,10 +1115,10 @@ mod invariant_7_read_write {
         let json = JsonStore::new(db.clone());
         let doc_id = "test-doc";
         let _ = json
-            .create(&branch_id, "default", &doc_id, serde_json::json!({}).into())
+            .create(&branch_id, "default", doc_id, serde_json::json!({}).into())
             .unwrap(); // write
         let _ = json
-            .get(&branch_id, "default", &doc_id, &JsonPath::root())
+            .get(&branch_id, "default", doc_id, &JsonPath::root())
             .unwrap(); // read
 
         // Vector
@@ -1200,7 +1200,7 @@ mod version_monotonicity {
         let json = JsonStore::new(db);
         let doc_id = "test-doc";
 
-        json.create(&branch_id, "default", &doc_id, serde_json::json!(0).into())
+        json.create(&branch_id, "default", doc_id, serde_json::json!(0).into())
             .unwrap();
 
         let mut last_version = 1u64;
@@ -1209,7 +1209,7 @@ mod version_monotonicity {
                 .set(
                     &branch_id,
                     "default",
-                    &doc_id,
+                    doc_id,
                     &JsonPath::root(),
                     serde_json::json!(i).into(),
                 )
