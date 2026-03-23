@@ -134,4 +134,34 @@ mod tests {
         let result = TransactionPayload::from_bytes(&[0xFF, 0x00, 0x01]);
         assert!(result.is_err());
     }
+
+    /// Issue #1754: Value::Bytes must use msgpack bin encoding, not array-of-u8.
+    ///
+    /// Without `serde_bytes`, rmp-serde encodes `Vec<u8>` as a msgpack array where
+    /// each byte > 127 becomes 2 bytes (type tag + value), and deserialization
+    /// calls `deserialize_u8` per byte — 32-36% of read latency at 1KB values.
+    ///
+    /// With `serde_bytes`, encoding uses msgpack bin (header + raw bulk copy) and
+    /// deserialization is a single `visit_bytes` + memcpy.
+    #[test]
+    fn test_issue_1754_value_bytes_uses_efficient_msgpack_encoding() {
+        // 256 bytes all > 127: without serde_bytes, each byte encodes as 2 bytes
+        // (0xcc prefix + value), roughly doubling the payload size.
+        let data = vec![0xFFu8; 256];
+        let value = Value::Bytes(data.clone());
+        let encoded = rmp_serde::to_vec(&value).unwrap();
+
+        // With serde_bytes (bin encoding): ~260 bytes (enum overhead + bin16 header + 256 raw)
+        // Without serde_bytes (array encoding): ~515 bytes (enum overhead + array16 header + 256×2)
+        assert!(
+            encoded.len() < 300,
+            "Value::Bytes encoded size {} indicates array-of-u8 encoding \
+             (expected bin encoding < 300 bytes for 256 high bytes)",
+            encoded.len()
+        );
+
+        // Verify round-trip correctness
+        let decoded: Value = rmp_serde::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, Value::Bytes(vec![0xFFu8; 256]));
+    }
 }

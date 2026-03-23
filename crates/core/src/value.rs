@@ -60,6 +60,7 @@ pub enum Value {
     /// `Value::Bytes`. This means `Bytes` values do not survive a JSON roundtrip
     /// with their original type intact. Use binary serialization (e.g., bincode,
     /// MessagePack) for lossless `Bytes` roundtrips.
+    #[serde(with = "serde_bytes")]
     Bytes(Vec<u8>),
     /// Array of values
     ///
