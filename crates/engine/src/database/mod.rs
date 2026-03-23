@@ -45,7 +45,8 @@ use strata_core::{StrataResult, VersionedValue};
 use strata_durability::codec::IdentityCodec;
 use strata_durability::wal::{DurabilityMode, WalConfig, WalWriter};
 use strata_durability::{
-    BranchSnapshotEntry, EventSnapshotEntry, JsonSnapshotEntry, KvSnapshotEntry, StateSnapshotEntry,
+    BranchSnapshotEntry, EventSnapshotEntry, JsonSnapshotEntry, KvSnapshotEntry,
+    StateSnapshotEntry, VectorCollectionSnapshotEntry, VectorSnapshotEntry,
 };
 use strata_durability::{
     CheckpointCoordinator, CheckpointData, CheckpointError, CompactionError, ManifestError,
@@ -1606,13 +1607,16 @@ impl Database {
 
     /// Collect all primitive data from storage for checkpointing.
     fn collect_checkpoint_data(&self) -> CheckpointData {
+        use crate::primitives::branch::BranchMetadata;
+        use crate::primitives::vector::types::VectorRecord;
+        use strata_core::primitives::State;
+
         let mut kv_entries = Vec::new();
         let mut event_entries = Vec::new();
         let mut state_entries = Vec::new();
         let mut branch_entries = Vec::new();
         let mut json_entries = Vec::new();
-
-        let now = strata_durability::now_micros();
+        let mut vector_collections = Vec::new();
 
         for branch_id in self.storage.branch_ids() {
             // KV entries
@@ -1622,13 +1626,13 @@ impl Database {
                     key: key.user_key_string().unwrap_or_default(),
                     value: value_bytes,
                     version: vv.version.as_u64(),
-                    timestamp: now,
+                    timestamp: vv.timestamp.as_micros(),
                 });
             }
 
             // Event entries
             for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::Event) {
-                // Skip metadata keys
+                // Skip metadata keys (internal implementation details, reconstructed on restore)
                 if *key.user_key == *b"__meta__" || key.user_key.starts_with(b"__tidx__") {
                     continue;
                 }
@@ -1641,18 +1645,26 @@ impl Database {
                 event_entries.push(EventSnapshotEntry {
                     sequence,
                     payload,
-                    timestamp: now,
+                    timestamp: vv.timestamp.as_micros(),
                 });
             }
 
             // State entries
             for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::State) {
                 let value_bytes = serde_json::to_vec(&vv.value).unwrap_or_default();
+                // Extract the embedded Counter version from the State struct,
+                // not the Txn version from storage.
+                let counter = match &vv.value {
+                    strata_core::value::Value::String(s) => serde_json::from_str::<State>(s)
+                        .map(|state| state.version.as_u64())
+                        .unwrap_or(vv.version.as_u64()),
+                    _ => vv.version.as_u64(),
+                };
                 state_entries.push(StateSnapshotEntry {
                     name: key.user_key_string().unwrap_or_default(),
                     value: value_bytes,
-                    counter: vv.version.as_u64(),
-                    timestamp: now,
+                    counter,
+                    timestamp: vv.timestamp.as_micros(),
                 });
             }
 
@@ -1667,11 +1679,20 @@ impl Database {
                 } else {
                     [0; 16]
                 };
+                // Extract name and created_at from the serialized BranchMetadata
+                let (name, created_at) = match &vv.value {
+                    strata_core::value::Value::String(s) => {
+                        serde_json::from_str::<BranchMetadata>(s)
+                            .map(|meta| (meta.name, meta.created_at.as_micros()))
+                            .unwrap_or_else(|_| (String::new(), vv.timestamp.as_micros()))
+                    }
+                    _ => (String::new(), vv.timestamp.as_micros()),
+                };
                 let metadata = serde_json::to_vec(&vv.value).unwrap_or_default();
                 branch_entries.push(BranchSnapshotEntry {
                     branch_id: branch_id_bytes,
-                    name: String::new(),
-                    created_at: now,
+                    name,
+                    created_at,
                     metadata,
                 });
             }
@@ -1683,7 +1704,55 @@ impl Database {
                     doc_id: key.user_key_string().unwrap_or_default(),
                     content,
                     version: vv.version.as_u64(),
-                    timestamp: now,
+                    timestamp: vv.timestamp.as_micros(),
+                });
+            }
+
+            // Vector collection configs
+            for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::VectorConfig) {
+                let collection_name = key.user_key_string().unwrap_or_default();
+                let config_bytes = match &vv.value {
+                    strata_core::value::Value::Bytes(b) => b.clone(),
+                    _ => serde_json::to_vec(&vv.value).unwrap_or_default(),
+                };
+
+                // Collect vectors belonging to this collection
+                let ns = key.namespace.clone();
+                let prefix = Key::vector_collection_prefix(ns, &collection_name);
+                let mut snapshot_vectors = Vec::new();
+                for (vec_key, vec_vv) in self.storage.list_by_type(&branch_id, TypeTag::Vector) {
+                    if !vec_key.starts_with(&prefix) {
+                        continue;
+                    }
+                    // Extract vector key: user_key = "collection/vector_key"
+                    let vec_key_str = vec_key.user_key_string().unwrap_or_default();
+                    let vector_key = vec_key_str
+                        .strip_prefix(&format!("{}/", collection_name))
+                        .unwrap_or(&vec_key_str)
+                        .to_string();
+
+                    // Deserialize VectorRecord from bytes
+                    if let strata_core::value::Value::Bytes(bytes) = &vec_vv.value {
+                        if let Ok(record) = VectorRecord::from_bytes(bytes) {
+                            let metadata_bytes = record
+                                .metadata
+                                .as_ref()
+                                .and_then(|m| serde_json::to_vec(m).ok())
+                                .unwrap_or_default();
+                            snapshot_vectors.push(VectorSnapshotEntry {
+                                key: vector_key,
+                                vector_id: record.vector_id,
+                                embedding: record.embedding,
+                                metadata: metadata_bytes,
+                            });
+                        }
+                    }
+                }
+
+                vector_collections.push(VectorCollectionSnapshotEntry {
+                    name: collection_name,
+                    config: config_bytes,
+                    vectors: snapshot_vectors,
                 });
             }
         }
@@ -1703,6 +1772,9 @@ impl Database {
         }
         if !json_entries.is_empty() {
             data = data.with_json(json_entries);
+        }
+        if !vector_collections.is_empty() {
+            data = data.with_vectors(vector_collections);
         }
         data
     }
@@ -2368,6 +2440,7 @@ impl Drop for Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::primitives::extensions::StateCellExt;
     use std::sync::Arc;
     use std::time::Duration;
     use strata_concurrency::TransactionPayload;
@@ -4043,6 +4116,172 @@ mod tests {
             "Key B should be deleted at A's timestamp (same transaction). \
              Got {:?}, indicating split timestamps between put and delete.",
             b_at_a_ts.map(|v| v.value),
+        );
+    }
+
+    #[test]
+    fn test_issue_1732_checkpoint_data_preserves_timestamps() {
+        // Issue #1732: collect_checkpoint_data() rewrites all timestamps to `now`,
+        // losing the original commit timestamps.
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open(temp_dir.path().join("db")).unwrap();
+
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = Key::new_kv(ns, "ts_test");
+
+        // Write data
+        db.transaction(branch_id, |txn| {
+            txn.put(key.clone(), Value::String("hello".to_string()))?;
+            Ok(())
+        })
+        .unwrap();
+
+        // Get the timestamp from list_by_type (same source as collect_checkpoint_data)
+        let listed = db.storage().list_by_type(&branch_id, TypeTag::KV);
+        let entry_for_key = listed
+            .iter()
+            .find(|(k, _)| k.user_key_string().unwrap_or_default() == "ts_test")
+            .expect("should find ts_test entry");
+        let storage_ts = entry_for_key.1.timestamp.as_micros();
+        assert!(storage_ts > 0, "Storage timestamp should be non-zero");
+
+        // Sleep so `now` would differ from the storage timestamp
+        std::thread::sleep(Duration::from_millis(50));
+        let now_after_sleep = strata_durability::now_micros();
+
+        let data = db.collect_checkpoint_data();
+        let kv_entries = data.kv.expect("should have KV entries");
+
+        let entry = kv_entries
+            .iter()
+            .find(|e| e.key == "ts_test")
+            .expect("should find ts_test in checkpoint");
+
+        // The checkpoint timestamp must match the storage timestamp, not `now`
+        assert_eq!(
+            entry.timestamp, storage_ts,
+            "Checkpoint timestamp should match storage timestamp, not now",
+        );
+        // Sanity: now is significantly later than storage_ts
+        assert!(
+            now_after_sleep > storage_ts + 40_000,
+            "now ({}) should be at least 40ms after storage_ts ({})",
+            now_after_sleep,
+            storage_ts,
+        );
+    }
+
+    #[test]
+    fn test_issue_1732_checkpoint_data_preserves_branch_names() {
+        // Issue #1732: collect_checkpoint_data() sets branch name to String::new()
+        // instead of extracting it from the serialized BranchMetadata.
+        use crate::primitives::branch::BranchIndex;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open(temp_dir.path().join("db")).unwrap();
+
+        let branch_index = BranchIndex::new(db.clone());
+        branch_index.create_branch("my-test-branch").unwrap();
+
+        let data = db.collect_checkpoint_data();
+        let branch_entries = data.branches.expect("should have branch entries");
+
+        let found = branch_entries.iter().find(|b| b.name == "my-test-branch");
+        assert!(
+            found.is_some(),
+            "Branch name 'my-test-branch' should be preserved in checkpoint. \
+             Got names: {:?}",
+            branch_entries.iter().map(|b| &b.name).collect::<Vec<_>>(),
+        );
+        // Also verify created_at is a real timestamp, not rewritten to `now`
+        let branch_entry = found.unwrap();
+        assert!(
+            branch_entry.created_at > 0,
+            "Branch created_at should be non-zero",
+        );
+    }
+
+    #[test]
+    fn test_issue_1732_checkpoint_data_state_counter() {
+        // Issue #1732: collect_checkpoint_data() records the Txn storage version
+        // for state entries instead of the embedded State Counter version.
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open(temp_dir.path().join("db")).unwrap();
+
+        let branch_id = BranchId::new();
+
+        // Set a state value 3 times to get counter = 3
+        for _ in 0..3 {
+            db.transaction(branch_id, |txn| {
+                txn.state_set("my_counter", Value::Int(42))?;
+                Ok(())
+            })
+            .unwrap();
+        }
+
+        let data = db.collect_checkpoint_data();
+        let state_entries = data.states.expect("should have state entries");
+        assert!(!state_entries.is_empty());
+
+        let entry = state_entries
+            .iter()
+            .find(|s| s.name == "my_counter")
+            .expect("should find my_counter");
+        // The counter should be 3 (the embedded State Counter), not the Txn version
+        assert_eq!(
+            entry.counter, 3,
+            "State counter should be 3 (Counter domain), got {} (likely Txn version)",
+            entry.counter,
+        );
+    }
+
+    #[test]
+    fn test_issue_1732_checkpoint_data_includes_vectors() {
+        // Issue #1732: collect_checkpoint_data() never collects vector data.
+        use crate::primitives::vector::store::VectorStore;
+        use strata_core::primitives::vector::VectorConfig;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open(temp_dir.path().join("db")).unwrap();
+
+        let branch_id = BranchId::new();
+        let store = VectorStore::new(db.clone());
+
+        let config = VectorConfig {
+            dimension: 3,
+            metric: strata_core::primitives::vector::DistanceMetric::Cosine,
+            storage_dtype: strata_core::primitives::vector::StorageDtype::F32,
+        };
+        store
+            .create_collection(branch_id, "default", "my_vectors", config)
+            .unwrap();
+        store
+            .insert(
+                branch_id,
+                "default",
+                "my_vectors",
+                "vec1",
+                &[1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+
+        let data = db.collect_checkpoint_data();
+        let vectors = data
+            .vectors
+            .expect("Checkpoint should include vector data, but vectors field is None");
+        assert!(
+            !vectors.is_empty(),
+            "Should have at least one vector collection"
+        );
+        assert_eq!(vectors[0].name, "my_vectors");
+        assert_eq!(vectors[0].vectors.len(), 1);
+        assert_eq!(vectors[0].vectors[0].key, "vec1");
+        assert_eq!(
+            vectors[0].vectors[0].embedding,
+            vec![1.0, 0.0, 0.0],
+            "Embedding values should be preserved in checkpoint",
         );
     }
 }
