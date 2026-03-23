@@ -1939,6 +1939,7 @@ mod profiling_tests {
     /// Benchmarks the O(1) dense-offset path (get) against the
     /// BTreeMap-only path (get_btree) to quantify the acceleration ratio.
     #[test]
+    #[ignore] // profiling test — run explicitly with `cargo test -- --ignored`
     fn profile_heap_get_vs_get_btree() {
         let dim = 128;
         let n = 100_000;

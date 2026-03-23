@@ -984,6 +984,7 @@ mod profiling_tests {
     /// Times 100K distance computations via scalar vs SIMD-dispatched paths
     /// to confirm SIMD is actually activating and providing speedup.
     #[test]
+    #[ignore] // profiling test — run explicitly with `cargo test -- --ignored`
     fn profile_simd_vs_scalar() {
         let dim = 128;
         let num_pairs = 100_000;

@@ -3088,6 +3088,7 @@ mod profiling_tests {
     /// Times 100 queries. Then compact() into 1 segment, times same queries.
     /// Reports QPS and recall@10 for both configurations.
     #[test]
+    #[ignore] // profiling test — run explicitly with `cargo test -- --ignored`
     fn profile_segment_fanout_vs_compact() {
         use crate::primitives::vector::brute_force::BruteForceBackend;
 
