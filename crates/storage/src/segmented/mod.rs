@@ -1085,17 +1085,25 @@ impl SegmentedStore {
             self.write_branch_manifest(source_id);
         }
 
-        // 6. Attach to dest branch, decrementing refcounts for any prior layers
+        // 6. Attach to dest branch, rejecting if a concurrent fork already installed layers.
         let mut dest = self
             .branches
             .entry(*dest_id)
             .or_insert_with(BranchState::new);
-        for old_layer in &dest.inherited_layers {
-            for level in &old_layer.segments.levels {
-                for seg in level {
-                    self.ref_registry.decrement(seg.file_id());
+        if !dest.inherited_layers.is_empty() {
+            drop(dest);
+            // Undo refcount increments from step 2.
+            for layer in &dest_layers {
+                for level in &layer.segments.levels {
+                    for seg in level {
+                        self.ref_registry.decrement(seg.file_id());
+                    }
                 }
             }
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "fork_branch: destination already has inherited layers (concurrent fork race)",
+            ));
         }
         dest.inherited_layers = dest_layers;
         drop(dest);
