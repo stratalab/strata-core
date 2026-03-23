@@ -1466,7 +1466,12 @@ impl Database {
         // Flush WAL first to ensure all buffered writes are on disk
         self.flush()?;
 
-        let watermark_txn = self.coordinator.current_version();
+        // Drain all in-flight commits so the watermark reflects only fully-
+        // applied versions. Using current_version() here is unsafe because
+        // allocate_version() bumps the counter before apply_writes() completes,
+        // so a concurrent commit's version could be included in the watermark
+        // while its storage writes are still in progress (#1710).
+        let watermark_txn = self.coordinator.quiesced_version();
 
         // Collect data from storage
         let data = self.collect_checkpoint_data();

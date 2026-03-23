@@ -30,7 +30,7 @@
 use crate::payload::TransactionPayload;
 use crate::{CommitError, TransactionContext, TransactionStatus};
 use dashmap::DashMap;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use strata_core::traits::Storage;
@@ -82,6 +82,15 @@ pub struct TransactionManager {
     /// Using per-branch locks allows parallel commits for different branches while
     /// still preventing TOCTOU within each branch.
     commit_locks: DashMap<BranchId, Mutex<()>>,
+
+    /// Quiesce lock for checkpoint safety (#1710).
+    ///
+    /// Commit paths acquire a **shared** (read) lock, allowing concurrent commits.
+    /// `quiesced_version()` acquires an **exclusive** (write) lock, which blocks
+    /// until every in-flight commit's `apply_writes` has completed. The returned
+    /// version is then safe to use as a checkpoint watermark — no version ≤ that
+    /// value has storage application still in progress.
+    commit_quiesce: RwLock<()>,
 }
 
 impl TransactionManager {
@@ -107,11 +116,23 @@ impl TransactionManager {
             // Start next_txn_id at max_txn_id + 1 to avoid conflicts
             next_txn_id: AtomicU64::new(max_txn_id + 1),
             commit_locks: DashMap::new(),
+            commit_quiesce: RwLock::new(()),
         }
     }
 
     /// Get current global version
     pub fn current_version(&self) -> u64 {
+        self.version.load(Ordering::Acquire)
+    }
+
+    /// Get the current version after draining all in-flight commits (#1710).
+    ///
+    /// Acquires the exclusive (write) side of `commit_quiesce`, which blocks
+    /// until every concurrent commit has finished its `apply_writes`. The
+    /// returned version is safe to use as a checkpoint watermark because no
+    /// version ≤ this value has storage application still in progress.
+    pub fn quiesced_version(&self) -> u64 {
+        let _guard = self.commit_quiesce.write();
         self.version.load(Ordering::Acquire)
     }
 
@@ -193,12 +214,13 @@ impl TransactionManager {
     ///
     /// # Commit Sequence
     ///
+    /// 0. Acquire quiesce read lock (checkpoint drains via write lock, #1710)
     /// 1. Acquire per-branch commit lock (prevents TOCTOU race within same branch)
     /// 2. Validate and mark committed (in-memory state transition)
     /// 3. Allocate commit version
     /// 4. Write to WAL if provided (BeginTxn, operations, CommitTxn)
     /// 5. Apply writes to storage
-    /// 6. Release commit lock
+    /// 6. Release commit lock and quiesce lock
     /// 7. Return commit version
     ///
     /// When `wal` is `None`, steps 4 is skipped entirely. The transaction is
@@ -228,6 +250,10 @@ impl TransactionManager {
             txn.status = TransactionStatus::Committed;
             return Ok(self.version.load(Ordering::Acquire));
         }
+
+        // Acquire quiesce read lock so checkpoint's quiesced_version() can
+        // drain all in-flight commits before reading the version counter (#1710).
+        let _quiesce_guard = self.commit_quiesce.read();
 
         // Step 1: Acquire per-branch commit lock and validate.
         //
@@ -332,7 +358,7 @@ impl TransactionManager {
     ///
     /// # Lock ordering
     ///
-    /// branch lock → WAL lock (acquired inside, released before storage apply).
+    /// quiesce read lock → branch lock → WAL lock (acquired inside, released before storage apply).
     ///
     /// # Arguments
     /// * `txn` - Transaction to commit (must be in Active state)
@@ -356,6 +382,10 @@ impl TransactionManager {
             txn.status = TransactionStatus::Committed;
             return Ok(self.version.load(Ordering::Acquire));
         }
+
+        // Acquire quiesce read lock so checkpoint's quiesced_version() can
+        // drain all in-flight commits before reading the version counter (#1710).
+        let _quiesce_guard = self.commit_quiesce.read();
 
         // Step 1: Acquire per-branch commit lock. Must be held from validation
         // through version allocation and apply_writes for ALL writers (including
@@ -502,6 +532,10 @@ impl TransactionManager {
             txn.status = TransactionStatus::Committed;
             return Ok(version);
         }
+
+        // Acquire quiesce read lock so checkpoint's quiesced_version() can
+        // drain all in-flight commits before reading the version counter (#1710).
+        let _quiesce_guard = self.commit_quiesce.read();
 
         // Acquire per-branch lock — must be held through validation + apply.
         let branch_lock = self
@@ -1819,5 +1853,197 @@ mod tests {
             manager.commit_locks.contains_key(&branch_id),
             "commit() acquires per-branch lock even for blind writes"
         );
+    }
+
+    /// Storage wrapper that delays apply_writes_atomic and signals when it starts.
+    /// Used to create a deterministic window where a commit is in-flight.
+    struct DelayedStorage {
+        inner: SegmentedStore,
+        /// Signaled when apply_writes_atomic starts (version already allocated).
+        apply_started: Arc<std::sync::Barrier>,
+        /// How long to delay apply_writes_atomic.
+        delay: std::time::Duration,
+    }
+
+    impl Storage for DelayedStorage {
+        fn get_versioned(
+            &self,
+            key: &Key,
+            max_version: u64,
+        ) -> strata_core::error::StrataResult<Option<strata_core::contract::VersionedValue>>
+        {
+            self.inner.get_versioned(key, max_version)
+        }
+
+        fn get_history(
+            &self,
+            key: &Key,
+            limit: Option<usize>,
+            before_version: Option<u64>,
+        ) -> strata_core::error::StrataResult<Vec<strata_core::contract::VersionedValue>> {
+            self.inner.get_history(key, limit, before_version)
+        }
+
+        fn scan_prefix(
+            &self,
+            prefix: &Key,
+            max_version: u64,
+        ) -> strata_core::error::StrataResult<Vec<(Key, strata_core::contract::VersionedValue)>>
+        {
+            self.inner.scan_prefix(prefix, max_version)
+        }
+
+        fn current_version(&self) -> u64 {
+            self.inner.current_version()
+        }
+
+        fn put_with_version_mode(
+            &self,
+            key: Key,
+            value: Value,
+            version: u64,
+            ttl: Option<std::time::Duration>,
+            mode: strata_core::traits::WriteMode,
+        ) -> strata_core::error::StrataResult<()> {
+            self.inner
+                .put_with_version_mode(key, value, version, ttl, mode)
+        }
+
+        fn delete_with_version(
+            &self,
+            key: &Key,
+            version: u64,
+        ) -> strata_core::error::StrataResult<()> {
+            self.inner.delete_with_version(key, version)
+        }
+
+        fn apply_writes_atomic(
+            &self,
+            writes: Vec<(Key, Value, strata_core::traits::WriteMode)>,
+            deletes: Vec<Key>,
+            version: u64,
+        ) -> strata_core::error::StrataResult<()> {
+            // Signal that apply has started (version already allocated)
+            self.apply_started.wait();
+            // Delay to widen the in-flight window
+            std::thread::sleep(self.delay);
+            self.inner.apply_writes_atomic(writes, deletes, version)
+        }
+    }
+
+    /// Issue #1710: quiesced_version() must drain in-flight commits before
+    /// returning the version, ensuring the returned value is safe for use
+    /// as a checkpoint watermark.
+    ///
+    /// This test creates a commit with a delayed storage backend. While the
+    /// commit is in-flight (version allocated but apply_writes not complete):
+    /// - current_version() returns the in-flight version (unsafe for watermark)
+    /// - quiesced_version() blocks until the commit finishes, then returns the
+    ///   version (safe for watermark)
+    #[test]
+    fn test_issue_1710_quiesced_version_drains_inflight_commits() {
+        let apply_started = Arc::new(std::sync::Barrier::new(2));
+        let store = Arc::new(DelayedStorage {
+            inner: SegmentedStore::new(),
+            apply_started: Arc::clone(&apply_started),
+            delay: std::time::Duration::from_millis(200),
+        });
+        let manager = Arc::new(TransactionManager::new(0));
+
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = create_test_key(&ns, "test_key");
+
+        // Prepare a blind-write transaction (skips validation, no store reads)
+        let mut txn = TransactionContext::new(1, branch_id, 0);
+        txn.put(key, Value::Int(42)).unwrap();
+
+        let manager_clone = Arc::clone(&manager);
+        let store_clone = Arc::clone(&store);
+
+        // Spawn commit thread — will block in apply_writes_atomic
+        let commit_handle = std::thread::spawn(move || {
+            manager_clone
+                .commit(&mut txn, store_clone.as_ref(), None)
+                .unwrap()
+        });
+
+        // Wait until apply_writes_atomic has started (version is allocated)
+        apply_started.wait();
+
+        // current_version() returns the in-flight version — unsafe for watermark
+        let current = manager.current_version();
+        assert_eq!(
+            current, 1,
+            "current_version() reflects allocated-but-unapplied version"
+        );
+
+        // quiesced_version() must block until the commit finishes
+        let start = std::time::Instant::now();
+        let quiesced = manager.quiesced_version();
+        let elapsed = start.elapsed();
+
+        // The commit should have completed (200ms delay)
+        assert_eq!(
+            quiesced, 1,
+            "quiesced_version returns version after commit completes"
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_millis(50),
+            "quiesced_version() must have blocked waiting for in-flight commit \
+             (elapsed: {:?}, expected >= 50ms)",
+            elapsed
+        );
+
+        let committed_version = commit_handle.join().unwrap();
+        assert_eq!(committed_version, 1);
+    }
+
+    /// Issue #1710 stress variant: concurrent commits on multiple branches
+    /// with interleaved quiesced_version() calls.
+    #[test]
+    fn test_issue_1710_quiesced_version_concurrent_multi_branch() {
+        let apply_started = Arc::new(std::sync::Barrier::new(5)); // 4 writers + 1 reader
+        let store = Arc::new(DelayedStorage {
+            inner: SegmentedStore::new(),
+            apply_started: Arc::clone(&apply_started),
+            delay: std::time::Duration::from_millis(100),
+        });
+        let manager = Arc::new(TransactionManager::new(0));
+
+        let num_writers = 4;
+        let mut handles = Vec::new();
+
+        for i in 0..num_writers {
+            let manager_clone = Arc::clone(&manager);
+            let store_clone = Arc::clone(&store);
+            let branch_id = BranchId::new();
+            let ns = create_test_namespace(branch_id);
+            let key = create_test_key(&ns, &format!("key_{}", i));
+
+            handles.push(std::thread::spawn(move || {
+                let mut txn = TransactionContext::new(i as u64 + 1, branch_id, 0);
+                txn.put(key, Value::Int(i as i64)).unwrap();
+                manager_clone
+                    .commit(&mut txn, store_clone.as_ref(), None)
+                    .unwrap()
+            }));
+        }
+
+        // Wait until all commits have entered apply_writes_atomic
+        apply_started.wait();
+
+        // quiesced_version() must wait for all 4 commits to finish
+        let quiesced = manager.quiesced_version();
+
+        // All 4 versions should be allocated and applied
+        assert_eq!(
+            quiesced, 4,
+            "quiesced_version must reflect all completed commits"
+        );
+
+        for h in handles {
+            h.join().unwrap();
+        }
     }
 }

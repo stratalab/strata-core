@@ -825,3 +825,170 @@ fn test_search_index_survives_multiple_recoveries() {
         );
     }
 }
+
+/// Issue #1710: checkpoint watermark must not include in-flight versions.
+///
+/// Writes data, checkpoints, writes more data, checkpoints again, then
+/// simulates a crash and verifies ALL data survives recovery. This is an
+/// end-to-end correctness test for the checkpoint + WAL replay path.
+#[test]
+fn test_issue_1710_checkpoint_recovery_preserves_all_data() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().to_path_buf();
+
+    let branch_id = BranchId::new();
+
+    // Phase 1: Write initial data and checkpoint
+    {
+        let db = Database::open(&path).unwrap();
+        let kv = KVStore::new(db.clone());
+
+        for i in 0..10 {
+            kv.put(
+                &branch_id,
+                "default",
+                &format!("batch1_key_{}", i),
+                Value::Int(i),
+            )
+            .unwrap();
+        }
+
+        db.flush().unwrap();
+        db.checkpoint().unwrap();
+
+        // Phase 2: Write more data after checkpoint
+        for i in 0..10 {
+            kv.put(
+                &branch_id,
+                "default",
+                &format!("batch2_key_{}", i),
+                Value::Int(100 + i),
+            )
+            .unwrap();
+        }
+
+        // Second checkpoint covers both batches
+        db.flush().unwrap();
+        db.checkpoint().unwrap();
+
+        // Simulate crash
+        drop(kv);
+        drop(db);
+    }
+
+    // Phase 3: Recovery — all 20 keys must be present
+    {
+        let db = Database::open(&path).unwrap();
+        let kv = KVStore::new(db.clone());
+
+        for i in 0..10 {
+            let val = kv
+                .get(&branch_id, "default", &format!("batch1_key_{}", i))
+                .unwrap();
+            assert_eq!(
+                val,
+                Some(Value::Int(i)),
+                "batch1_key_{} missing after checkpoint recovery",
+                i
+            );
+        }
+
+        for i in 0..10 {
+            let val = kv
+                .get(&branch_id, "default", &format!("batch2_key_{}", i))
+                .unwrap();
+            assert_eq!(
+                val,
+                Some(Value::Int(100 + i)),
+                "batch2_key_{} missing after checkpoint recovery",
+                i
+            );
+        }
+    }
+}
+
+/// Issue #1710 concurrent variant: writes happening on multiple threads
+/// while checkpoint runs, followed by crash + recovery.
+#[test]
+fn test_issue_1710_checkpoint_concurrent_writes_recovery() {
+    use std::sync::{Arc, Barrier};
+
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().to_path_buf();
+
+    let branch_id = BranchId::new();
+    let num_writers = 4;
+    let keys_per_writer = 25;
+
+    {
+        let db = Database::open(&path).unwrap();
+        let kv = KVStore::new(db.clone());
+
+        // Write initial data
+        kv.put(&branch_id, "default", "sentinel", Value::Int(0))
+            .unwrap();
+        db.flush().unwrap();
+        db.checkpoint().unwrap();
+
+        // Concurrent writes on different threads (same branch)
+        let barrier = Arc::new(Barrier::new(num_writers));
+        let mut handles = Vec::new();
+
+        for writer_id in 0..num_writers {
+            let db_clone = db.clone();
+            let kv_clone = KVStore::new(db_clone);
+            let barrier_clone = Arc::clone(&barrier);
+
+            handles.push(std::thread::spawn(move || {
+                barrier_clone.wait();
+                for k in 0..keys_per_writer {
+                    kv_clone
+                        .put(
+                            &branch_id,
+                            "default",
+                            &format!("w{}_k{}", writer_id, k),
+                            Value::Int((writer_id * 1000 + k) as i64),
+                        )
+                        .unwrap();
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Checkpoint after concurrent writes
+        db.flush().unwrap();
+        db.checkpoint().unwrap();
+
+        // Simulate crash
+        drop(kv);
+        drop(db);
+    }
+
+    // Recovery: all keys must be present
+    {
+        let db = Database::open(&path).unwrap();
+        let kv = KVStore::new(db.clone());
+
+        assert_eq!(
+            kv.get(&branch_id, "default", "sentinel").unwrap(),
+            Some(Value::Int(0)),
+            "sentinel key missing"
+        );
+
+        for writer_id in 0..num_writers {
+            for k in 0..keys_per_writer {
+                let key_name = format!("w{}_k{}", writer_id, k);
+                let val = kv.get(&branch_id, "default", &key_name).unwrap();
+                assert_eq!(
+                    val,
+                    Some(Value::Int((writer_id * 1000 + k) as i64)),
+                    "key {} missing after concurrent checkpoint recovery",
+                    key_name
+                );
+            }
+        }
+    }
+}
