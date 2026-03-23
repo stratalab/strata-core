@@ -474,6 +474,10 @@ impl Database {
                         errors_skipped = seg_info.errors_skipped,
                         "Recovered segments from disk");
                 }
+                // Bump version counter from segment data (#1726)
+                if seg_info.max_commit_id > 0 {
+                    coordinator.bump_version_floor(seg_info.max_commit_id);
+                }
             }
             Err(e) => {
                 warn!(target: "strata::db", error = %e, "Segment recovery failed");
@@ -648,6 +652,12 @@ impl Database {
                         segments = seg_info.segments_loaded,
                         errors_skipped = seg_info.errors_skipped,
                         "Recovered segments from disk");
+                }
+                // Bump version counter to at least the max commit_id in
+                // recovered segments, preventing version collisions when
+                // WAL has been fully compacted (#1726).
+                if seg_info.max_commit_id > 0 {
+                    coordinator.bump_version_floor(seg_info.max_commit_id);
                 }
             }
             Err(e) => {

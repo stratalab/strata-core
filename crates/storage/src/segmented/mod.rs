@@ -2022,6 +2022,8 @@ impl SegmentedStore {
                                     .fetch_max(file_seg_id + 1, Ordering::Relaxed);
                             }
                         }
+                        // Track max commit_id for version counter restoration (#1726)
+                        info.max_commit_id = info.max_commit_id.max(seg.commit_range().1);
                         branch_segments.push(Arc::new(seg));
                     }
                     Err(_) => {
@@ -2192,6 +2194,8 @@ impl SegmentedStore {
                                         .fetch_max(file_seg_id + 1, Ordering::Relaxed);
                                 }
                             }
+                            // Track max commit_id for version counter (#1726)
+                            info.max_commit_id = info.max_commit_id.max(seg.commit_range().1);
                             layer_levels[level].push(Arc::new(seg));
                             any_found = true;
                         }
@@ -2695,6 +2699,10 @@ pub struct RecoverSegmentsInfo {
     /// Own segments for these branches are not loaded, but their segment
     /// files remain on disk for children to open directly.
     pub corrupt_manifest_branches: usize,
+    /// Maximum commit_id seen across all loaded segments (#1726).
+    /// Used to bump the version counter so new transactions don't collide
+    /// with data already persisted in segments.
+    pub max_commit_id: u64,
 }
 
 impl Default for SegmentedStore {
