@@ -5433,7 +5433,7 @@ fn fork_empty_source_succeeds() {
 }
 
 #[test]
-fn fork_double_fork_same_dest_overwrites_layers() {
+fn fork_double_fork_same_dest_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
 
@@ -5466,21 +5466,24 @@ fn fork_double_fork_same_dest_overwrites_layers() {
         assert_eq!(store.ref_registry.ref_count(id), 1);
     }
 
-    // Fork again — old layers decremented, new layers incremented
-    store
-        .fork_branch(&parent_branch(), &child_branch())
-        .unwrap();
+    // Second fork to same dest must be rejected (issue #1720)
+    let result = store.fork_branch(&parent_branch(), &child_branch());
+    assert!(result.is_err(), "Double fork must be rejected");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
 
+    // Original inherited layers must be preserved unchanged.
     let child = store.branches.get(&child_branch()).unwrap();
-    // Should still have exactly 1 inherited layer (not 2)
     assert_eq!(child.inherited_layers.len(), 1);
 
-    // Original segments should still have refcount 1 (old layers decremented,
-    // new layers include the same segments and re-incremented them).
+    // Refcounts must remain at 1 (no leak, no underflow).
     for &id in &first_fork_seg_ids {
-        assert!(
-            store.ref_registry.ref_count(id) >= 1,
-            "Segment {} should still be referenced after re-fork",
+        assert_eq!(
+            store.ref_registry.ref_count(id),
+            1,
+            "Segment {} refcount must remain 1 after rejected fork",
             id
         );
     }
@@ -8470,4 +8473,184 @@ fn test_issue_1722_scan_prefix_at_timestamp_expired_shadows_older() {
         "Expired v2 must shadow v1 in scan — got {} result(s) (ghost resurrection)",
         results.len(),
     );
+}
+
+#[test]
+fn test_issue_1720_concurrent_fork_same_dest_rejected() {
+    // Issue #1720: Two forks to the same destination must not both succeed.
+    // The second fork should fail because the destination already has inherited layers.
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(SegmentedStore::with_dir(dir.path().to_path_buf(), 0));
+
+    // Set up two source branches with different data.
+    let source_a = BranchId::from_bytes([10; 16]);
+    let source_b = BranchId::from_bytes([20; 16]);
+    let dest = BranchId::from_bytes([30; 16]);
+
+    let ns_a = Arc::new(Namespace::new(source_a, "default".to_string()));
+    let ns_b = Arc::new(Namespace::new(source_b, "default".to_string()));
+
+    // Write data to source_a and flush to segments.
+    let key_a = Key::new(ns_a, TypeTag::KV, b"key_a".to_vec());
+    seed(&store, key_a, Value::Int(1), 1);
+    store.rotate_memtable(&source_a);
+    store.flush_oldest_frozen(&source_a).unwrap();
+
+    // Write data to source_b and flush to segments.
+    let key_b = Key::new(ns_b, TypeTag::KV, b"key_b".to_vec());
+    seed(&store, key_b, Value::Int(2), 2);
+    store.rotate_memtable(&source_b);
+    store.flush_oldest_frozen(&source_b).unwrap();
+
+    // First fork: source_a → dest. Should succeed.
+    store.branches.entry(dest).or_insert_with(BranchState::new);
+    let result1 = store.fork_branch(&source_a, &dest);
+    assert!(result1.is_ok(), "First fork must succeed");
+
+    // Second fork: source_b → dest. Must fail because dest already has inherited layers.
+    let result2 = store.fork_branch(&source_b, &dest);
+    assert!(
+        result2.is_err(),
+        "Second fork to same destination must be rejected"
+    );
+    assert_eq!(
+        result2.unwrap_err().kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+
+    // Verify refcounts: only source_a's segments should be referenced.
+    let dest_state = store.branches.get(&dest).unwrap();
+    assert_eq!(
+        dest_state.inherited_layers.len(),
+        1,
+        "Dest should have exactly one inherited layer (from source_a)"
+    );
+    assert_eq!(
+        dest_state.inherited_layers[0].source_branch_id, source_a,
+        "Inherited layer must be from the first fork's source"
+    );
+
+    // Verify source_a's segment refcounts are 1 (referenced by dest).
+    for level in &dest_state.inherited_layers[0].segments.levels {
+        for seg in level {
+            assert_eq!(
+                store.ref_registry.ref_count(seg.file_id()),
+                1,
+                "Winning fork's segment {} must have refcount 1",
+                seg.file_id()
+            );
+        }
+    }
+    drop(dest_state);
+
+    // Verify source_b's segments had their refcounts rolled back to 0.
+    let source_b_state = store.branches.get(&source_b).unwrap();
+    let source_b_ver = source_b_state.version.load();
+    for level in &source_b_ver.levels {
+        for seg in level {
+            assert_eq!(
+                store.ref_registry.ref_count(seg.file_id()),
+                0,
+                "Rejected fork's segment {} must have refcount 0 (rollback)",
+                seg.file_id()
+            );
+        }
+    }
+}
+
+#[test]
+fn test_issue_1720_concurrent_fork_same_dest_concurrent() {
+    // Stress test: many threads race to fork different sources to the same dest.
+    // Exactly one must succeed; all others must fail.
+    use std::sync::Barrier;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(SegmentedStore::with_dir(dir.path().to_path_buf(), 0));
+
+    let num_threads = 8;
+    let dest = BranchId::from_bytes([99; 16]);
+
+    // Create source branches with flushed segments.
+    let sources: Vec<BranchId> = (0..num_threads)
+        .map(|i| BranchId::from_bytes([i as u8 + 1; 16]))
+        .collect();
+
+    for (i, src) in sources.iter().enumerate() {
+        let ns = Arc::new(Namespace::new(*src, "default".to_string()));
+        let key = Key::new(ns, TypeTag::KV, format!("key_{i}").into_bytes());
+        seed(&store, key, Value::Int(i as i64), (i + 1) as u64);
+        store.rotate_memtable(src);
+        store.flush_oldest_frozen(src).unwrap();
+    }
+
+    // Pre-create the dest entry.
+    store.branches.entry(dest).or_insert_with(BranchState::new);
+
+    let barrier = Arc::new(Barrier::new(num_threads));
+    let results: Vec<_> = sources
+        .iter()
+        .map(|src| {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            let src = *src;
+            std::thread::spawn(move || {
+                barrier.wait();
+                store.fork_branch(&src, &dest)
+            })
+        })
+        .collect();
+
+    let outcomes: Vec<_> = results.into_iter().map(|h| h.join().unwrap()).collect();
+    let successes: Vec<_> = outcomes.iter().filter(|r| r.is_ok()).collect();
+    let failures: Vec<_> = outcomes.iter().filter(|r| r.is_err()).collect();
+
+    assert_eq!(
+        successes.len(),
+        1,
+        "Exactly one concurrent fork must succeed, got {}",
+        successes.len()
+    );
+    assert_eq!(failures.len(), num_threads - 1, "All other forks must fail");
+
+    // Verify dest has exactly one set of inherited layers.
+    let dest_state = store.branches.get(&dest).unwrap();
+    assert_eq!(
+        dest_state.inherited_layers.len(),
+        1,
+        "Dest must have exactly one inherited layer"
+    );
+
+    // Verify the winning source's segments have refcount 1.
+    let winner = dest_state.inherited_layers[0].source_branch_id;
+    for level in &dest_state.inherited_layers[0].segments.levels {
+        for seg in level {
+            assert_eq!(
+                store.ref_registry.ref_count(seg.file_id()),
+                1,
+                "Winner's segment {} must have refcount 1",
+                seg.file_id()
+            );
+        }
+    }
+    drop(dest_state);
+
+    // Verify all losing sources' segments have refcount 0 (rolled back).
+    for src in &sources {
+        if *src == winner {
+            continue;
+        }
+        let src_state = store.branches.get(src).unwrap();
+        let src_ver = src_state.version.load();
+        for level in &src_ver.levels {
+            for seg in level {
+                assert_eq!(
+                    store.ref_registry.ref_count(seg.file_id()),
+                    0,
+                    "Loser {:?} segment {} must have refcount 0",
+                    src,
+                    seg.file_id()
+                );
+            }
+        }
+    }
 }
