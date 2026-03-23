@@ -16,8 +16,10 @@ use strata_core::types::Key;
 use strata_core::value::Value;
 use strata_core::{Timestamp, Version, VersionedValue};
 
+use crate::bloom::BloomFilter;
 use crossbeam_skiplist::SkipMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------
@@ -100,6 +102,8 @@ pub struct Memtable {
     max_commit: AtomicU64,
     /// Lowest commit_id seen in any put.
     min_commit: AtomicU64,
+    /// Bloom filter built lazily on first frozen read (skips absent-key probes).
+    bloom: OnceLock<BloomFilter>,
 }
 
 impl Memtable {
@@ -112,6 +116,7 @@ impl Memtable {
             frozen: AtomicBool::new(false),
             max_commit: AtomicU64::new(0),
             min_commit: AtomicU64::new(u64::MAX),
+            bloom: OnceLock::new(),
         }
     }
 
@@ -207,6 +212,15 @@ impl Memtable {
         seek_bytes: &[u8],
         snapshot_commit: u64,
     ) -> Option<(u64, MemtableEntry)> {
+        // For frozen memtables, check the bloom filter first to skip
+        // skiplist probes for keys that are definitely absent (#1755).
+        if self.frozen.load(Ordering::Acquire) {
+            let bloom = self.bloom.get_or_init(|| self.build_bloom());
+            if !bloom.maybe_contains(typed_key) {
+                return None;
+            }
+        }
+
         let seek_key = InternalKey::from_bytes(seek_bytes.to_vec());
         for entry in self.map.range(seek_key..) {
             let ik = entry.key();
@@ -313,6 +327,26 @@ impl Memtable {
     /// Lowest commit_id seen.
     pub fn min_commit(&self) -> u64 {
         self.min_commit.load(Ordering::Relaxed)
+    }
+
+    /// Return the bloom filter if it has been built (frozen memtables only).
+    pub fn frozen_bloom(&self) -> Option<&BloomFilter> {
+        self.bloom.get()
+    }
+
+    /// Build a bloom filter from all unique typed-key prefixes in this memtable.
+    fn build_bloom(&self) -> BloomFilter {
+        let mut typed_keys: Vec<Vec<u8>> = Vec::new();
+        let mut last_prefix: &[u8] = &[];
+        for entry in self.map.iter() {
+            let prefix = entry.key().typed_key_prefix();
+            if prefix != last_prefix {
+                typed_keys.push(prefix.to_vec());
+                last_prefix = typed_keys.last().unwrap();
+            }
+        }
+        let key_refs: Vec<&[u8]> = typed_keys.iter().map(|k| k.as_slice()).collect();
+        BloomFilter::build(&key_refs, 10)
     }
 }
 
@@ -575,6 +609,118 @@ mod tests {
         mt.put(&key("k3"), 3, Value::Int(3), false);
         assert_eq!(mt.max_commit(), 10);
         assert_eq!(mt.min_commit(), 3);
+    }
+
+    // ===== Frozen bloom filter (issue #1755) =====
+
+    #[test]
+    fn test_issue_1755_frozen_memtable_bloom_skips_absent_keys() {
+        use crate::key_encoding::InternalKey;
+
+        let mt = Memtable::new(0);
+        for i in 0..1000u64 {
+            mt.put(
+                &key(&format!("present_{i:04}")),
+                i + 1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+
+        // Read a key that exists — must be found (no false negatives).
+        let typed_hit = encode_typed_key(&key("present_0500"));
+        let seek_hit = InternalKey::from_typed_key_bytes(&typed_hit, u64::MAX);
+        let hit = mt.get_versioned_preencoded(&typed_hit, seek_hit.as_bytes(), u64::MAX);
+        assert!(
+            hit.is_some(),
+            "existing key must be found in frozen memtable"
+        );
+
+        // Bloom must have been built after the frozen read.
+        let bloom = mt
+            .frozen_bloom()
+            .expect("bloom filter should be built after first frozen read");
+
+        // Bloom must report present for keys that exist (no false negatives).
+        assert!(
+            bloom.maybe_contains(&typed_hit),
+            "bloom must not produce false negatives"
+        );
+
+        // Bloom should report absent for a key that was never written.
+        // With 10 bits/key and 1000 keys, FPR ≈ 1% — one specific key
+        // has a ~99% chance of being correctly filtered.
+        let typed_miss = encode_typed_key(&key("absent_key_xyz"));
+        assert!(
+            !bloom.maybe_contains(&typed_miss),
+            "bloom should filter absent keys"
+        );
+    }
+
+    #[test]
+    fn test_issue_1755_bloom_not_built_for_active_memtable() {
+        let mt = Memtable::new(0);
+        mt.put(&key("k1"), 1, Value::Int(1), false);
+        // Active (unfrozen) memtable should not have a bloom.
+        assert!(
+            mt.frozen_bloom().is_none(),
+            "active memtable must not have bloom"
+        );
+    }
+
+    #[test]
+    fn test_issue_1755_empty_frozen_memtable_bloom() {
+        use crate::key_encoding::InternalKey;
+
+        let mt = Memtable::new(0);
+        mt.freeze();
+
+        // Reading from empty frozen memtable should return None and build bloom.
+        let typed = encode_typed_key(&key("any"));
+        let seek = InternalKey::from_typed_key_bytes(&typed, u64::MAX);
+        assert!(mt
+            .get_versioned_preencoded(&typed, seek.as_bytes(), u64::MAX)
+            .is_none());
+        // Empty bloom always returns false — correct.
+        assert!(mt.frozen_bloom().is_some());
+    }
+
+    #[test]
+    fn test_issue_1755_bloom_does_not_hide_tombstones() {
+        use crate::key_encoding::InternalKey;
+
+        let mt = Memtable::new(0);
+        mt.put(&key("deleted"), 1, Value::Null, true); // tombstone
+        mt.freeze();
+
+        let typed = encode_typed_key(&key("deleted"));
+        let seek = InternalKey::from_typed_key_bytes(&typed, u64::MAX);
+        let result = mt.get_versioned_preencoded(&typed, seek.as_bytes(), u64::MAX);
+        assert!(result.is_some(), "tombstone must be visible through bloom");
+        assert!(result.unwrap().1.is_tombstone);
+    }
+
+    #[test]
+    fn test_issue_1755_bloom_with_multiversion_key() {
+        use crate::key_encoding::InternalKey;
+
+        let mt = Memtable::new(0);
+        mt.put(&key("mv"), 1, Value::Int(10), false);
+        mt.put(&key("mv"), 2, Value::Int(20), false);
+        mt.put(&key("mv"), 3, Value::Int(30), false);
+        mt.freeze();
+
+        let typed = encode_typed_key(&key("mv"));
+        let seek = InternalKey::from_typed_key_bytes(&typed, u64::MAX);
+
+        // Snapshot at version 2 should see value 20.
+        let result = mt.get_versioned_preencoded(&typed, seek.as_bytes(), 2);
+        assert_eq!(result.unwrap().1.value, Value::Int(20));
+
+        // Snapshot at version 0 should see nothing.
+        let result = mt.get_versioned_preencoded(&typed, seek.as_bytes(), 0);
+        assert!(result.is_none());
     }
 
     // ===== Concurrent reads =====
