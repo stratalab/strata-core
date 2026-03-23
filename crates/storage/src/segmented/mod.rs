@@ -1018,7 +1018,7 @@ impl SegmentedStore {
                     if source
                         .frozen
                         .last()
-                        .map_or(false, |last| last.id() == mt.id())
+                        .is_some_and(|last| last.id() == mt.id())
                     {
                         source.frozen.pop();
                         self.total_frozen_count.fetch_sub(1, Ordering::Relaxed);
@@ -1321,7 +1321,7 @@ impl SegmentedStore {
             if found_for_current {
                 continue;
             }
-            if entry.is_expired() || entry.timestamp.as_micros() > max_ts {
+            if entry.is_expired_at(max_ts) || entry.timestamp.as_micros() > max_ts {
                 continue;
             }
             found_for_current = true;
@@ -1352,7 +1352,7 @@ impl SegmentedStore {
         };
         let all_versions = Self::get_all_versions_from_branch(&branch, key);
         for (commit_id, entry) in all_versions {
-            if entry.is_expired() {
+            if entry.is_expired_at(max_timestamp) {
                 continue;
             }
             if entry.timestamp.as_micros() <= max_timestamp {
@@ -1461,7 +1461,7 @@ impl SegmentedStore {
             if found_for_current {
                 continue;
             }
-            if entry.is_expired() || entry.timestamp.as_micros() > max_timestamp {
+            if entry.is_expired_at(max_timestamp) || entry.timestamp.as_micros() > max_timestamp {
                 continue;
             }
             found_for_current = true;

@@ -49,6 +49,20 @@ impl MemtableEntry {
         false
     }
 
+    /// Check if this entry was expired at a given timestamp (microseconds since epoch).
+    ///
+    /// Used by time-travel queries to evaluate TTL against the query timestamp
+    /// instead of wall-clock now.
+    pub fn is_expired_at(&self, query_ts_micros: u64) -> bool {
+        if self.ttl_ms != 0 {
+            let query = Timestamp::from_micros(query_ts_micros);
+            if let Some(age) = query.duration_since(self.timestamp) {
+                return age >= Duration::from_millis(self.ttl_ms);
+            }
+        }
+        false
+    }
+
     /// Convert to a `VersionedValue` using the given commit_id.
     pub fn to_versioned(&self, commit_id: u64) -> VersionedValue {
         VersionedValue {
