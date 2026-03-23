@@ -314,15 +314,15 @@ impl WalWriter {
                 // Data is already written to the BufWriter by append().
                 // The background thread periodically calls sync_if_overdue().
                 //
-                // Safety net: if background thread is stalled (3× interval without sync),
+                // Safety net: if background thread is stalled (interval elapsed without sync),
                 // perform inline sync to maintain durability guarantee.
-                let deadline_ms = interval_ms.saturating_mul(3);
+                let deadline_ms = interval_ms;
                 let elapsed_ms = self.last_sync_time.elapsed().as_millis() as u64;
                 if self.has_unsynced_data && elapsed_ms >= deadline_ms {
-                    warn!(target: "strata::wal",
+                    debug!(target: "strata::wal",
                         elapsed_ms,
                         deadline_ms,
-                        "Background flush thread appears stalled — inline sync fallback");
+                        "Inline sync fallback — background thread did not sync within interval");
                     if let Some(ref mut segment) = self.segment {
                         let start = Instant::now();
                         segment.sync()?;
@@ -1190,7 +1190,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
-        // Use a very short interval so the 3× deadline is easily exceeded
+        // Use a very short interval so the deadline is easily exceeded
         let mut writer = make_writer(
             &wal_dir,
             DurabilityMode::Standard {
@@ -1231,7 +1231,7 @@ mod tests {
         let mut writer = make_writer(
             &wal_dir,
             DurabilityMode::Standard {
-                interval_ms: 60_000, // 60s — deadline is 180s
+                interval_ms: 60_000, // 60s deadline
                 batch_size: 10000,
             },
         );
@@ -1246,7 +1246,7 @@ mod tests {
         let sync_calls_before = writer.total_sync_calls;
         writer.maybe_sync().unwrap();
 
-        // No sync should have occurred — we're well within the 180s deadline
+        // No sync should have occurred — we're well within the 60s deadline
         assert_eq!(writer.total_sync_calls, sync_calls_before);
         // Data should still be marked unsynced
         assert!(writer.has_unsynced_data);
@@ -1280,6 +1280,43 @@ mod tests {
         // No sync even though deadline exceeded — no unsynced data
         assert_eq!(writer.total_sync_calls, sync_calls_before);
         assert!(!writer.has_unsynced_data);
+    }
+
+    #[test]
+    fn test_issue_1715_inline_sync_at_configured_interval() {
+        // Issue #1715: The inline sync safety net should trigger at interval_ms,
+        // not 3×interval_ms. The data loss window must match the configured interval.
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let interval_ms = 50;
+        let mut writer = make_writer(
+            &wal_dir,
+            DurabilityMode::Standard {
+                interval_ms,
+                batch_size: 10000,
+            },
+        );
+
+        // Write a record so there's data on disk
+        writer.append(&make_record(1)).unwrap();
+
+        // Set last_sync_time to just past interval_ms ago (but well under 3×interval_ms)
+        writer.has_unsynced_data = true;
+        writer.last_sync_time = Instant::now() - std::time::Duration::from_millis(interval_ms + 10);
+
+        let sync_calls_before = writer.total_sync_calls;
+        writer.maybe_sync().unwrap();
+
+        // The inline safety net should trigger at interval_ms, not 3×interval_ms.
+        // With the bug, this would NOT trigger because 60ms < 150ms (3×50ms).
+        assert!(
+            writer.total_sync_calls > sync_calls_before,
+            "Inline sync should trigger at interval_ms ({}ms), not 3×interval_ms ({}ms)",
+            interval_ms,
+            interval_ms * 3,
+        );
+        assert!(!writer.has_unsynced_data, "Sync should reset unsynced flag");
     }
 
     // ========================================================================
