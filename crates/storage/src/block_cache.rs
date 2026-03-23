@@ -148,7 +148,7 @@ impl ClockShard {
 /// exclusive write lock with CLOCK-based eviction.
 pub struct BlockCache {
     shards: Vec<parking_lot::RwLock<ClockShard>>,
-    total_capacity: usize,
+    total_capacity: AtomicUsize,
     hits: AtomicU64,
     misses: AtomicU64,
 }
@@ -181,7 +181,7 @@ impl BlockCache {
             .collect();
         Self {
             shards,
-            total_capacity: capacity_bytes,
+            total_capacity: AtomicUsize::new(capacity_bytes),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         }
@@ -263,6 +263,12 @@ impl BlockCache {
 
         // Evict until there's room
         shard.evict_for(size);
+
+        // Hard capacity check: if eviction couldn't free enough space
+        // (e.g., shard is full of Pinned entries), reject the insertion.
+        if shard.current_bytes + size > shard.capacity_bytes {
+            return data;
+        }
 
         if effective_priority == Priority::Pinned {
             shard.pinned_bytes += size;
@@ -351,6 +357,17 @@ impl BlockCache {
         }
     }
 
+    /// Update the cache capacity, distributing evenly across shards.
+    fn set_capacity(&self, capacity_bytes: usize) {
+        let per_shard = capacity_bytes / NUM_SHARDS;
+        for rwlock in &self.shards {
+            let mut shard = rwlock.write();
+            shard.capacity_bytes = per_shard;
+            shard.pinned_budget = per_shard / 10;
+        }
+        self.total_capacity.store(capacity_bytes, Ordering::Relaxed);
+    }
+
     /// Get cache statistics (aggregated across all shards).
     pub fn stats(&self) -> BlockCacheStats {
         let mut total_entries = 0;
@@ -373,7 +390,7 @@ impl BlockCache {
             misses: self.misses.load(Ordering::Relaxed),
             entries: total_entries,
             size_bytes: total_bytes,
-            capacity_bytes: self.total_capacity,
+            capacity_bytes: self.total_capacity.load(Ordering::Relaxed),
             pinned_bytes: total_pinned_bytes,
             pinned_entries: total_pinned_entries,
         }
@@ -428,9 +445,17 @@ pub fn auto_detect_capacity() -> usize {
 static GLOBAL_CACHE: std::sync::OnceLock<BlockCache> = std::sync::OnceLock::new();
 static GLOBAL_CAPACITY: AtomicUsize = AtomicUsize::new(DEFAULT_CAPACITY_BYTES);
 
-/// Set the global block cache capacity. Must be called before any reads.
+/// Set the global block cache capacity.
+///
+/// If the cache is already initialized, updates the per-shard capacity on
+/// the live instance. If not yet initialized, stores the value for use
+/// when `global_cache()` first creates the cache.
 pub fn set_global_capacity(bytes: usize) {
     GLOBAL_CAPACITY.store(bytes, Ordering::Relaxed);
+    // Apply to the live cache if already initialized.
+    if let Some(cache) = GLOBAL_CACHE.get() {
+        cache.set_capacity(bytes);
+    }
 }
 
 /// Get or create the global block cache.
@@ -811,5 +836,80 @@ mod tests {
         assert!(cache.get(42, 0).is_none());
         assert!(cache.get(42, 100).is_none());
         assert!(cache.get(99, 0).is_some());
+    }
+
+    #[test]
+    fn test_issue_1684_capacity_hard_bound() {
+        // Fill a shard entirely with Pinned entries (which evict_for never
+        // evicts), then attempt another insertion. The insert must be rejected
+        // so that current_bytes never exceeds capacity_bytes.
+        let cache = BlockCache::new(16 * 50); // 50 bytes per shard
+
+        // Raise pinned_budget so we can fill the shard with Pinned entries
+        {
+            let mut shard = cache.shards[0].write();
+            shard.pinned_budget = 50;
+        }
+        let keys = find_keys_in_shard(0, 4);
+
+        // Fill shard 0 to exactly 50 bytes of Pinned entries
+        cache.insert_with_priority(keys[0], 0, vec![0xAA; 25], Priority::Pinned);
+        cache.insert_with_priority(keys[1], 0, vec![0xBB; 25], Priority::Pinned);
+        assert_eq!(cache.stats().size_bytes, 50, "shard should be at capacity");
+
+        // Insert a new entry — evict_for cannot free Pinned entries,
+        // so the insertion must be rejected to enforce the hard bound.
+        let result = cache.insert(keys[2], 0, vec![0xCC; 10]);
+        assert_eq!(
+            &*result,
+            &vec![0xCC; 10],
+            "data is returned even if not cached"
+        );
+
+        let stats = cache.stats();
+        assert!(
+            stats.size_bytes <= 50,
+            "capacity should be a hard bound, but size_bytes={} > capacity=50",
+            stats.size_bytes
+        );
+        assert!(
+            cache.get(keys[2], 0).is_none(),
+            "entry should not be cached when eviction cannot free enough space"
+        );
+    }
+
+    #[test]
+    fn test_issue_1684_set_capacity_updates_live_cache() {
+        // Verify that set_capacity() actually changes per-shard limits
+        // on a live cache instance (the fix for the singleton race).
+        let cache = BlockCache::new(16 * 100); // 100 bytes per shard
+        assert_eq!(cache.stats().capacity_bytes, 16 * 100);
+
+        // Resize down to 50 bytes per shard
+        cache.set_capacity(16 * 50);
+        assert_eq!(cache.stats().capacity_bytes, 16 * 50);
+
+        // Verify the new per-shard capacity is enforced
+        let keys = find_keys_in_shard(0, 3);
+        cache.insert(keys[0], 0, vec![0xAA; 40]);
+        assert!(
+            cache.get(keys[0], 0).is_some(),
+            "40 bytes fits in 50-byte shard"
+        );
+
+        // 40 + 20 = 60 > 50 — the second insert must trigger eviction or rejection
+        {
+            let shard = cache.shards[0].read();
+            for entry in shard.map.values() {
+                entry.clock.store(0, Ordering::Relaxed);
+            }
+        }
+        cache.insert(keys[1], 0, vec![0xBB; 20]);
+        let shard = cache.shards[0].read();
+        assert!(
+            shard.current_bytes <= 50,
+            "resized shard capacity must be enforced, got {} bytes",
+            shard.current_bytes
+        );
     }
 }
