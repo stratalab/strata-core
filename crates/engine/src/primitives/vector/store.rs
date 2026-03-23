@@ -1683,12 +1683,22 @@ impl VectorStore {
             })?;
         let backend = self.load_backend_from_kv(&collection_id, &config, space)?;
 
-        // Double-check via entry API: another thread may have loaded it
+        // Double-check via entry API: another thread may have loaded it,
+        // or a concurrent delete may have removed the collection (#1738 / 9.5.A).
         use dashmap::mapref::entry::Entry;
         match state.backends.entry(collection_id) {
             Entry::Occupied(_) => {}
             Entry::Vacant(e) => {
-                e.insert(backend);
+                // Re-verify collection still exists in KV before inserting.
+                // A concurrent delete_collection could have removed the config
+                // between our initial load and this point, and inserting here
+                // would resurrect a stale backend.
+                if self
+                    .load_collection_config(branch_id, space, name)?
+                    .is_some()
+                {
+                    e.insert(backend);
+                }
             }
         }
         Ok(())
@@ -4755,5 +4765,70 @@ mod tests {
             "search should still return existing vector, got keys: {:?}",
             keys
         );
+    }
+
+    /// Issue #1738 / 9.5.A: ensure_collection_loaded() can resurrect a deleted
+    /// backend. Thread A loads config from KV, Thread B deletes collection
+    /// (KV + DashMap), Thread A inserts stale backend.
+    ///
+    /// This concurrent test races ensure_collection_loaded against delete_collection
+    /// and verifies that after delete completes, no stale backend remains.
+    #[test]
+    fn test_issue_1738_ensure_collection_loaded_resurrection() {
+        for _ in 0..20 {
+            let db = Database::cache().unwrap();
+            let store = VectorStore::new(db.clone());
+            let branch_id = BranchId::new();
+
+            let config = VectorConfig::for_minilm();
+            store
+                .create_collection(branch_id, "default", "resurrect", config)
+                .unwrap();
+
+            // Remove backend from DashMap to force ensure_collection_loaded to reload
+            {
+                let state = store.state().unwrap();
+                let cid = CollectionId::new(branch_id, "resurrect");
+                state.backends.remove(&cid);
+            }
+
+            let store1 = VectorStore::new(db.clone());
+            let store2 = VectorStore::new(db.clone());
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+            let b1 = barrier.clone();
+            let loader = std::thread::spawn(move || {
+                b1.wait();
+                let _ = store1.ensure_collection_loaded(branch_id, "default", "resurrect");
+            });
+
+            let b2 = barrier.clone();
+            let deleter = std::thread::spawn(move || {
+                b2.wait();
+                let _ = store2.delete_collection(branch_id, "default", "resurrect");
+            });
+
+            loader.join().unwrap();
+            deleter.join().unwrap();
+
+            // After delete_collection completes, verify consistency:
+            // If config doesn't exist in KV, backend must not exist in DashMap
+            let config_exists = store
+                .load_collection_config(branch_id, "default", "resurrect")
+                .unwrap_or(None)
+                .is_some();
+
+            if !config_exists {
+                let state = store.state().unwrap();
+                let cid = CollectionId::new(branch_id, "resurrect");
+                assert!(
+                    !state.backends.contains_key(&cid),
+                    "Backend exists in DashMap but config was deleted from KV — \
+                     ensure_collection_loaded resurrected a stale backend"
+                );
+            }
+
+            db.shutdown().unwrap();
+        }
     }
 }
