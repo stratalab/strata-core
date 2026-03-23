@@ -8796,3 +8796,125 @@ fn test_issue_1721_fork_resets_materializing_status() {
     let val = store.get_versioned(&child_key, u64::MAX).unwrap().unwrap();
     assert_eq!(val.value, Value::Int(0));
 }
+
+/// Issue #1718 M-13: Two concurrent `flush_oldest_frozen` calls for the same
+/// branch must not install duplicate segments from the same frozen memtable.
+#[test]
+fn test_issue_1718_concurrent_flush_no_duplicate_segments() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(SegmentedStore::with_dir(dir.path().to_path_buf(), 0));
+    let b = branch();
+
+    // Write data and rotate to create exactly one frozen memtable.
+    for i in 0..10u64 {
+        store
+            .put_with_version_mode(
+                kv_key(&format!("k{:04}", i)),
+                Value::Int(i as i64),
+                i + 1,
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
+    }
+    store.rotate_memtable(&b);
+    assert_eq!(store.branch_frozen_count(&b), 1);
+
+    // Launch two threads that both try to flush the same frozen memtable.
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let s = Arc::clone(&store);
+            let bar = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                bar.wait();
+                s.flush_oldest_frozen(&branch()).unwrap()
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Exactly ONE segment should be installed (not two duplicates).
+    let seg_count = store.branch_segment_count(&b);
+    assert_eq!(
+        seg_count, 1,
+        "Expected 1 segment from the single frozen memtable, got {} (duplicate detected)",
+        seg_count
+    );
+
+    // The frozen list should be empty (memtable was consumed).
+    assert_eq!(store.branch_frozen_count(&b), 0);
+
+    // All data is readable.
+    for i in 0..10u64 {
+        let result = store
+            .get_versioned(&kv_key(&format!("k{:04}", i)), u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.value, Value::Int(i as i64));
+    }
+}
+
+/// Issue #1718 M-13 stress: Many concurrent flushes must not produce duplicates.
+#[test]
+fn test_issue_1718_concurrent_flush_no_duplicate_segments_stress() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(SegmentedStore::with_dir(dir.path().to_path_buf(), 0));
+    let b = branch();
+
+    // Create 3 frozen memtables.
+    for batch in 0..3u64 {
+        for i in 0..5u64 {
+            let key_idx = batch * 5 + i;
+            store
+                .put_with_version_mode(
+                    kv_key(&format!("k{:04}", key_idx)),
+                    Value::Int(key_idx as i64),
+                    key_idx + 1,
+                    None,
+                    WriteMode::Append,
+                )
+                .unwrap();
+        }
+        store.rotate_memtable(&b);
+    }
+    assert_eq!(store.branch_frozen_count(&b), 3);
+
+    // Launch 8 threads all racing to flush.
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let s = Arc::clone(&store);
+            let bar = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                bar.wait();
+                while s.flush_oldest_frozen(&branch()).unwrap() {}
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Exactly 3 segments (one per frozen memtable), no duplicates.
+    let seg_count = store.branch_segment_count(&b);
+    assert_eq!(
+        seg_count, 3,
+        "Expected 3 segments from 3 frozen memtables, got {} (duplicates detected)",
+        seg_count
+    );
+    assert_eq!(store.branch_frozen_count(&b), 0);
+
+    // All data readable.
+    for i in 0..15u64 {
+        let result = store
+            .get_versioned(&kv_key(&format!("k{:04}", i)), u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.value, Value::Int(i as i64));
+    }
+}
