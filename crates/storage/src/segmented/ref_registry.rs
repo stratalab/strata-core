@@ -25,6 +25,11 @@ pub(crate) struct SegmentRefRegistry {
     /// Fork increments hold a **read** guard (concurrent forks OK).
     /// Segment deletion holds a **write** guard (exclusive with forks).
     deletion_barrier: RwLock<()>,
+    /// Test-only hook: called between `drop(entry)` and `remove_if` in
+    /// `decrement()`, enabling deterministic reproduction of the race
+    /// window where a concurrent increment can slip in (#1719).
+    #[cfg(test)]
+    pub(crate) post_fetch_update_hook: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl SegmentRefRegistry {
@@ -33,6 +38,8 @@ impl SegmentRefRegistry {
         Self {
             refs: DashMap::new(),
             deletion_barrier: RwLock::new(()),
+            #[cfg(test)]
+            post_fetch_update_hook: std::sync::Mutex::new(None),
         }
     }
 
@@ -91,20 +98,35 @@ impl SegmentRefRegistry {
         });
         drop(entry); // release read guard before remove_if
 
+        // Test hook: allows injecting a concurrent increment between
+        // drop(entry) and remove_if to reproduce the #1719 race.
+        #[cfg(test)]
+        {
+            let guard = self.post_fetch_update_hook.lock().unwrap();
+            if let Some(hook) = guard.as_ref() {
+                hook();
+            }
+        }
+
         match result {
             Ok(prev) if prev <= 1 => {
-                // Count reached zero — clean up atomically
-                self.refs
-                    .remove_if(&id, |_, count| count.load(Ordering::Relaxed) == 0);
-                true
+                // Count reached zero — clean up only if still zero.
+                // A concurrent increment may have bumped the count back above
+                // zero between drop(entry) and here (#1719).
+                let removed = self
+                    .refs
+                    .remove_if(&id, |_, count| count.load(Ordering::Acquire) == 0);
+                removed.is_some()
             }
             Ok(_) => false, // still referenced
             Err(_) => {
                 // Count was already zero — over-decrement (logic bug in caller).
-                // Safe to return true; attempt cleanup of stale entry.
-                self.refs
-                    .remove_if(&id, |_, count| count.load(Ordering::Relaxed) == 0);
-                true
+                // Attempt cleanup of stale entry; only report safe-to-delete
+                // if the entry was actually removed.
+                let removed = self
+                    .refs
+                    .remove_if(&id, |_, count| count.load(Ordering::Acquire) == 0);
+                removed.is_some()
             }
         }
     }
@@ -196,6 +218,110 @@ mod tests {
         assert!(!reg.decrement(20)); // 20: 2 → 1
         assert!(!reg.is_referenced(10));
         assert!(reg.is_referenced(20));
+    }
+
+    /// #1719: decrement must return false if a concurrent increment
+    /// prevents remove_if from actually removing the entry.
+    ///
+    /// Uses the test hook to deterministically inject an increment between
+    /// drop(entry) and remove_if inside decrement(), reproducing the exact
+    /// race described in the issue.
+    #[test]
+    fn test_issue_1719_decrement_returns_false_when_concurrent_increment() {
+        use std::sync::Arc;
+
+        let reg = Arc::new(SegmentRefRegistry::new());
+        reg.increment(1); // count = 1
+        assert_eq!(reg.ref_count(1), 1);
+
+        // Install hook: simulates a concurrent fork_branch increment
+        // that slips in between drop(entry) and remove_if.
+        let hook_reg = Arc::downgrade(&reg);
+        *reg.post_fetch_update_hook.lock().unwrap() = Some(Box::new(move || {
+            if let Some(r) = hook_reg.upgrade() {
+                r.increment(1); // concurrent fork re-references the segment
+            }
+        }));
+
+        // Decrement: fetch_update 1→0 (prev=1), drop(entry),
+        // hook runs (increment 0→1), remove_if sees count=1 → no removal.
+        // BUG: returns true (only checks prev<=1)
+        // FIX: returns false (checks remove_if result)
+        let safe = reg.decrement(1);
+
+        // Clear hook to break Arc cycle before assertions
+        *reg.post_fetch_update_hook.lock().unwrap() = None;
+
+        assert!(
+            !safe,
+            "decrement must return false when concurrent increment prevents removal"
+        );
+        assert_eq!(reg.ref_count(1), 1);
+        assert!(reg.is_referenced(1));
+    }
+
+    /// #1719 concurrent stress test: interleave decrement and increment
+    /// on the same segment ID. After all threads complete, verify the
+    /// registry is consistent (no corrupted entries, no false positives).
+    #[test]
+    fn test_issue_1719_decrement_concurrent_increment_stress() {
+        use std::sync::Arc;
+        use std::sync::Barrier;
+
+        for _ in 0..100 {
+            let reg = Arc::new(SegmentRefRegistry::new());
+            // Start with refcount 2 (two children sharing segment)
+            reg.increment(1);
+            reg.increment(1);
+            assert_eq!(reg.ref_count(1), 2);
+
+            // Barrier for 3 threads only (main thread does NOT participate)
+            let barrier = Arc::new(Barrier::new(3));
+
+            // Thread 1: decrement (2→1)
+            let r1 = Arc::clone(&reg);
+            let b1 = Arc::clone(&barrier);
+            let t1 = std::thread::spawn(move || {
+                b1.wait();
+                r1.decrement(1)
+            });
+
+            // Thread 2: decrement (should go 1→0)
+            let r2 = Arc::clone(&reg);
+            let b2 = Arc::clone(&barrier);
+            let t2 = std::thread::spawn(move || {
+                b2.wait();
+                r2.decrement(1)
+            });
+
+            // Thread 3: increment (concurrent fork re-referencing)
+            let r3 = Arc::clone(&reg);
+            let b3 = Arc::clone(&barrier);
+            let t3 = std::thread::spawn(move || {
+                b3.wait();
+                r3.increment(1);
+            });
+
+            let d1 = t1.join().unwrap();
+            let d2 = t2.join().unwrap();
+            t3.join().unwrap();
+
+            // After 2 decrements and 1 increment from initial count 2:
+            // net count should be 2 - 2 + 1 = 1
+            let count = reg.ref_count(1);
+            assert_eq!(count, 1, "refcount must be 1 after 2 dec + 1 inc from 2");
+            assert!(reg.is_referenced(1));
+
+            // KEY INVARIANT: if the segment is still referenced,
+            // at most one decrement may have returned "safe to delete".
+            // With the bug, both decrements could return true.
+            let safe_count = d1 as usize + d2 as usize;
+            assert!(
+                safe_count <= 1,
+                "at most one decrement should return safe-to-delete when segment is still referenced, got {}",
+                safe_count,
+            );
+        }
     }
 
     #[test]
