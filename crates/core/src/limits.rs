@@ -704,7 +704,7 @@ mod tests {
         assert!(limits.validate_value_full(&Value::Int(42)).is_ok());
         assert!(limits.validate_value_full(&Value::Int(i64::MIN)).is_ok());
         assert!(limits.validate_value_full(&Value::Int(i64::MAX)).is_ok());
-        assert!(limits.validate_value_full(&Value::Float(3.14)).is_ok());
+        assert!(limits.validate_value_full(&Value::Float(2.78)).is_ok());
         assert!(limits.validate_value_full(&Value::Float(0.0)).is_ok());
         assert!(limits.validate_value_full(&Value::Float(-0.0)).is_ok());
     }

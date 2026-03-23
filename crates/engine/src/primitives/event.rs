@@ -858,7 +858,7 @@ mod tests {
             .append(&branch_id, "default", "test", Value::Bool(true))
             .is_err());
         assert!(log
-            .append(&branch_id, "default", "test", Value::Float(3.14))
+            .append(&branch_id, "default", "test", Value::Float(2.78))
             .is_err());
     }
 

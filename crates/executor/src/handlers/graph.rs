@@ -946,6 +946,13 @@ pub fn graph_sssp(
     Ok(Output::GraphScoreSummary(summary))
 }
 
+/// Convert serde_json::Value to strata_core::Value.
+fn serde_json_to_value(json: serde_json::Value) -> Result<Value> {
+    crate::bridge::serde_json_to_value_public(json).map_err(|e| Error::Serialization {
+        reason: e.to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1312,11 +1319,4 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         assert!(!json.contains("\"all\""));
     }
-}
-
-/// Convert serde_json::Value to strata_core::Value.
-fn serde_json_to_value(json: serde_json::Value) -> Result<Value> {
-    crate::bridge::serde_json_to_value_public(json).map_err(|e| Error::Serialization {
-        reason: e.to_string(),
-    })
 }

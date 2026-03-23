@@ -961,7 +961,7 @@ mod tests {
         let s: JsonScalar = 42i32.into();
         assert!(matches!(s, JsonScalar::Number(_)));
 
-        let s: JsonScalar = 3.14f64.into();
+        let s: JsonScalar = 2.78f64.into();
         assert!(matches!(s, JsonScalar::Number(_)));
 
         let s: JsonScalar = "hello".into();

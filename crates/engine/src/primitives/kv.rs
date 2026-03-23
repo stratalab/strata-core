@@ -680,11 +680,11 @@ mod tests {
         );
 
         // Float
-        kv.put(&branch_id, "default", "float", Value::Float(3.14))
+        kv.put(&branch_id, "default", "float", Value::Float(2.78))
             .unwrap();
         assert_eq!(
             kv.get(&branch_id, "default", "float").unwrap(),
-            Some(Value::Float(3.14))
+            Some(Value::Float(2.78))
         );
 
         // Boolean
@@ -1141,7 +1141,7 @@ mod tests {
         kv.put(&branch_id, "default", "bool_doc", Value::Bool(true))
             .unwrap();
         // But JSON-serializable values should be
-        kv.put(&branch_id, "default", "float_doc", Value::Float(3.14))
+        kv.put(&branch_id, "default", "float_doc", Value::Float(2.78))
             .unwrap();
 
         let req = crate::SearchRequest::new(branch_id, "42");
