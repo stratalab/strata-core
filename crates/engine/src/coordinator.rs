@@ -300,6 +300,14 @@ impl TransactionCoordinator {
         self.manager.current_version()
     }
 
+    /// Get the current version after draining all in-flight commits (#1710).
+    ///
+    /// Safe to use as a checkpoint watermark — no version ≤ the returned
+    /// value has storage application still in progress.
+    pub fn quiesced_version(&self) -> u64 {
+        self.manager.quiesced_version()
+    }
+
     /// Get next transaction ID (for internal use)
     pub fn next_txn_id(&self) -> StrataResult<u64> {
         self.manager.next_txn_id().map_err(StrataError::from)
