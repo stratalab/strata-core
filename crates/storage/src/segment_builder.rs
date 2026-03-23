@@ -1236,7 +1236,7 @@ pub(crate) fn parse_header(data: &[u8; KV_HEADER_SIZE]) -> Option<KVHeader> {
         return None;
     }
     let format_version = u16::from_le_bytes(data[8..10].try_into().ok()?);
-    if !(2..=FORMAT_VERSION).contains(&format_version) {
+    if !(4..=FORMAT_VERSION).contains(&format_version) {
         return None;
     }
     let commit_min = u64::from_le_bytes(data[16..24].try_into().ok()?);
@@ -2965,5 +2965,45 @@ mod tests {
             meta.file_size,
             elapsed.as_secs_f64() * 1000.0
         );
+    }
+
+    /// Issue #1713: parse_header accepted format versions 2-3 even though
+    /// the reader only has v4+ decoders. v2/v3 segments would open but
+    /// silently return None on all lookups.
+    #[test]
+    fn test_issue_1713_reject_unsupported_format_versions() {
+        // Build a valid header then patch the format_version field
+        let valid = encode_header(10, 1, 5, 4096);
+        assert!(parse_header(&valid).is_some(), "v7 header must parse");
+
+        // v2 and v3 should be rejected — no decoder exists for them
+        for bad_version in [2u16, 3u16] {
+            let mut hdr = valid;
+            hdr[8..10].copy_from_slice(&bad_version.to_le_bytes());
+            assert!(
+                parse_header(&hdr).is_none(),
+                "format version {bad_version} must be rejected (no decoder exists)"
+            );
+        }
+
+        // v4 through current FORMAT_VERSION should still be accepted
+        for ok_version in 4..=FORMAT_VERSION {
+            let mut hdr = valid;
+            hdr[8..10].copy_from_slice(&ok_version.to_le_bytes());
+            assert!(
+                parse_header(&hdr).is_some(),
+                "format version {ok_version} must be accepted"
+            );
+        }
+
+        // v0, v1, and versions above FORMAT_VERSION should be rejected
+        for bad_version in [0u16, 1u16, FORMAT_VERSION + 1] {
+            let mut hdr = valid;
+            hdr[8..10].copy_from_slice(&bad_version.to_le_bytes());
+            assert!(
+                parse_header(&hdr).is_none(),
+                "format version {bad_version} must be rejected"
+            );
+        }
     }
 }
