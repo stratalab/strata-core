@@ -309,20 +309,33 @@ impl WalWriter {
                 }
                 self.reset_sync_counters();
             }
-            DurabilityMode::Standard { interval_ms, .. } => {
+            DurabilityMode::Standard {
+                interval_ms,
+                batch_size,
+            } => {
                 // Standard mode: fsync is deferred to the background flush thread (#969).
                 // Data is already written to the BufWriter by append().
                 // The background thread periodically calls sync_if_overdue().
                 //
-                // Safety net: if background thread is stalled (interval elapsed without sync),
-                // perform inline sync to maintain durability guarantee.
+                // Sync triggers (whichever comes first):
+                // 1. batch_size writes reached — inline sync to bound data loss by write count
+                // 2. Safety net: background thread stalled (interval elapsed without sync)
+                let batch_triggered = self.writes_since_sync >= batch_size;
                 let deadline_ms = interval_ms;
                 let elapsed_ms = self.last_sync_time.elapsed().as_millis() as u64;
-                if self.has_unsynced_data && elapsed_ms >= deadline_ms {
-                    debug!(target: "strata::wal",
-                        elapsed_ms,
-                        deadline_ms,
-                        "Inline sync fallback — background thread did not sync within interval");
+                let deadline_triggered = elapsed_ms >= deadline_ms;
+                if self.has_unsynced_data && (batch_triggered || deadline_triggered) {
+                    if deadline_triggered {
+                        debug!(target: "strata::wal",
+                            elapsed_ms,
+                            deadline_ms,
+                            "Inline sync fallback — background thread did not sync within interval");
+                    } else {
+                        debug!(target: "strata::wal",
+                            writes = self.writes_since_sync,
+                            batch_size,
+                            "Batch size reached — inline sync");
+                    }
                     if let Some(ref mut segment) = self.segment {
                         let start = Instant::now();
                         segment.sync()?;
@@ -419,8 +432,14 @@ impl WalWriter {
             return Ok(false);
         }
 
-        if let DurabilityMode::Standard { interval_ms, .. } = self.durability {
-            if self.last_sync_time.elapsed().as_millis() as u64 >= interval_ms {
+        if let DurabilityMode::Standard {
+            interval_ms,
+            batch_size,
+        } = self.durability
+        {
+            if self.last_sync_time.elapsed().as_millis() as u64 >= interval_ms
+                || self.writes_since_sync >= batch_size
+            {
                 if let Some(ref mut segment) = self.segment {
                     let start = Instant::now();
                     segment.sync()?;
@@ -1595,6 +1614,86 @@ mod tests {
             result.records.len(),
             20,
             "All 20 records must survive rotation"
+        );
+    }
+
+    #[test]
+    fn test_issue_1714_batch_size_triggers_sync() {
+        // DurabilityMode::Standard { batch_size } should trigger fsync when
+        // writes_since_sync reaches batch_size, even if interval_ms hasn't elapsed.
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let mut writer = make_writer(
+            &wal_dir,
+            DurabilityMode::Standard {
+                interval_ms: 600_000, // 10 minutes — will never elapse during this test
+                batch_size: 5,
+            },
+        );
+
+        let sync_calls_before = writer.counters().sync_calls;
+
+        // Write exactly batch_size records
+        for i in 0..5 {
+            writer.append(&make_record(i)).unwrap();
+        }
+
+        let sync_calls_after = writer.counters().sync_calls;
+        assert!(
+            sync_calls_after > sync_calls_before,
+            "batch_size=5 should have triggered at least one sync after 5 writes, \
+             but sync_calls went from {} to {}",
+            sync_calls_before,
+            sync_calls_after,
+        );
+
+        // Verify counters were reset after the sync
+        assert_eq!(
+            writer.writes_since_sync, 0,
+            "writes_since_sync should be reset after batch_size-triggered sync"
+        );
+    }
+
+    #[test]
+    fn test_issue_1714_batch_size_sync_if_overdue() {
+        // sync_if_overdue() should also respect batch_size, not just interval_ms.
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let mut writer = make_writer(
+            &wal_dir,
+            DurabilityMode::Standard {
+                interval_ms: 600_000, // 10 minutes — will never elapse
+                batch_size: 3,
+            },
+        );
+
+        // Write 2 records (below batch_size), then simulate the state where
+        // maybe_sync didn't trigger (writes < batch_size) but we want to test
+        // sync_if_overdue's batch_size check directly.
+        writer.append(&make_record(1)).unwrap();
+        writer.append(&make_record(2)).unwrap();
+
+        // Manually set writes_since_sync to batch_size to test sync_if_overdue
+        // independently of maybe_sync (which already handles it inline).
+        writer.writes_since_sync = 3;
+        writer.has_unsynced_data = true;
+
+        let sync_calls_before = writer.total_sync_calls;
+        let synced = writer.sync_if_overdue().unwrap();
+
+        assert!(
+            synced,
+            "sync_if_overdue should return true when writes_since_sync >= batch_size"
+        );
+        assert!(
+            writer.total_sync_calls > sync_calls_before,
+            "sync_if_overdue should have performed a sync"
+        );
+        assert_eq!(
+            writer.writes_since_sync, 0,
+            "writes_since_sync should be reset after sync_if_overdue"
         );
     }
 
