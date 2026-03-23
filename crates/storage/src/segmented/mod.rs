@@ -838,14 +838,16 @@ impl SegmentedStore {
         self.write_branch_manifest(child_branch_id);
 
         // Decrement refcounts for each segment in the removed layer.
-        // Do NOT delete files here — the parent may still own the segment
-        // in its version.levels. Orphaned files (parent compacted away the
-        // segment before this decrement) are cleaned up by gc_orphan_segments.
         for level in &layer_segments.levels {
             for seg in level {
                 self.ref_registry.decrement(seg.file_id());
             }
         }
+
+        // Garbage-collect orphan segment files (#1705).
+        // Refcount decrements above may have released the last reference to
+        // segments whose parent already compacted them away.
+        self.gc_orphan_segments();
 
         Ok(MaterializeResult {
             entries_materialized,
