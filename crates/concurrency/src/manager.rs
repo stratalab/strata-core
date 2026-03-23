@@ -324,9 +324,8 @@ impl TransactionManager {
         // Step 4: Apply to storage
         if let Err(e) = txn.apply_writes(store, commit_version) {
             if wal.is_some() {
-                // WAL says committed but storage failed - serious error
-                // Log error but return success since WAL is authoritative
-                // Recovery will replay the transaction anyway
+                // WAL says committed but storage failed — data is durable
+                // but NOT visible to reads until restart replays WAL (#1725).
                 tracing::error!(
                     target: "strata::txn",
                     txn_id = txn.txn_id,
@@ -334,6 +333,10 @@ impl TransactionManager {
                     error = %e,
                     "Storage application failed after WAL commit - will be recovered on restart"
                 );
+                return Err(CommitError::DurableButNotVisible(format!(
+                    "Storage application failed after WAL commit: {}",
+                    e
+                )));
             } else {
                 // No WAL - storage failure means data loss, return error
                 txn.status = TransactionStatus::Aborted {
@@ -457,6 +460,10 @@ impl TransactionManager {
                     error = %e,
                     "Storage application failed after WAL commit - will be recovered on restart"
                 );
+                return Err(CommitError::DurableButNotVisible(format!(
+                    "Storage application failed after WAL commit: {}",
+                    e
+                )));
             } else {
                 txn.status = TransactionStatus::Aborted {
                     reason: format!("Storage application failed: {}", e),
@@ -603,6 +610,10 @@ impl TransactionManager {
                     error = %e,
                     "Storage application failed after WAL commit - will be recovered on restart"
                 );
+                return Err(CommitError::DurableButNotVisible(format!(
+                    "Storage application failed after WAL commit: {}",
+                    e
+                )));
             } else {
                 txn.status = TransactionStatus::Aborted {
                     reason: format!("Storage application failed: {}", e),
@@ -2049,5 +2060,178 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
+    }
+
+    /// Storage wrapper that always fails on apply_writes_atomic.
+    /// Used to simulate storage failure after WAL commit.
+    struct FailingApplyStorage {
+        inner: SegmentedStore,
+    }
+
+    impl Storage for FailingApplyStorage {
+        fn get_versioned(
+            &self,
+            key: &Key,
+            max_version: u64,
+        ) -> strata_core::error::StrataResult<Option<strata_core::contract::VersionedValue>>
+        {
+            self.inner.get_versioned(key, max_version)
+        }
+
+        fn get_history(
+            &self,
+            key: &Key,
+            limit: Option<usize>,
+            before_version: Option<u64>,
+        ) -> strata_core::error::StrataResult<Vec<strata_core::contract::VersionedValue>> {
+            self.inner.get_history(key, limit, before_version)
+        }
+
+        fn scan_prefix(
+            &self,
+            prefix: &Key,
+            max_version: u64,
+        ) -> strata_core::error::StrataResult<Vec<(Key, strata_core::contract::VersionedValue)>>
+        {
+            self.inner.scan_prefix(prefix, max_version)
+        }
+
+        fn current_version(&self) -> u64 {
+            self.inner.current_version()
+        }
+
+        fn put_with_version_mode(
+            &self,
+            key: Key,
+            value: Value,
+            version: u64,
+            ttl: Option<std::time::Duration>,
+            mode: strata_core::traits::WriteMode,
+        ) -> strata_core::error::StrataResult<()> {
+            self.inner
+                .put_with_version_mode(key, value, version, ttl, mode)
+        }
+
+        fn delete_with_version(
+            &self,
+            key: &Key,
+            version: u64,
+        ) -> strata_core::error::StrataResult<()> {
+            self.inner.delete_with_version(key, version)
+        }
+
+        fn apply_writes_atomic(
+            &self,
+            _writes: Vec<(Key, Value, strata_core::traits::WriteMode)>,
+            _deletes: Vec<Key>,
+            _version: u64,
+        ) -> strata_core::error::StrataResult<()> {
+            Err(strata_core::error::StrataError::storage(
+                "simulated storage failure",
+            ))
+        }
+    }
+
+    /// Issue #1725: apply_writes failure after WAL commit must NOT return Ok.
+    ///
+    /// When apply_writes fails after the WAL record is written, the data is
+    /// durable (will be recovered on restart) but NOT visible to reads in
+    /// the current process. Returning Ok misleads the caller into thinking
+    /// the data is immediately readable.
+    #[test]
+    fn test_issue_1725_apply_writes_failure_after_wal_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let mut wal = create_test_wal(dir.path());
+        let real_store = Arc::new(SegmentedStore::new());
+        let failing_store = FailingApplyStorage {
+            inner: SegmentedStore::new(),
+        };
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = create_test_key(&ns, "invisible_key");
+
+        // Create a transaction with a write (blind write — skips validation)
+        let mut txn = TransactionContext::with_store(1, branch_id, real_store);
+        txn.put(key.clone(), Value::Int(42)).unwrap();
+
+        // Commit should return an error because apply_writes fails,
+        // even though WAL write succeeds.
+        let result = manager.commit(&mut txn, &failing_store, Some(&mut wal));
+        assert!(
+            result.is_err(),
+            "commit() must return Err when apply_writes fails after WAL write, got Ok({:?})",
+            result.unwrap()
+        );
+
+        // Verify it's the right error variant
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CommitError::DurableButNotVisible(_)),
+            "Expected DurableButNotVisible error, got: {:?}",
+            err
+        );
+    }
+
+    /// Issue #1725: Same test for the commit_with_wal_arc path.
+    #[test]
+    fn test_issue_1725_apply_writes_failure_after_wal_arc_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let wal = Arc::new(ParkingMutex::new(create_test_wal(dir.path())));
+        let real_store = Arc::new(SegmentedStore::new());
+        let failing_store = FailingApplyStorage {
+            inner: SegmentedStore::new(),
+        };
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = create_test_key(&ns, "invisible_key");
+
+        let mut txn = TransactionContext::with_store(2, branch_id, real_store);
+        txn.put(key.clone(), Value::Int(43)).unwrap();
+
+        let result = manager.commit_with_wal_arc(&mut txn, &failing_store, Some(&wal));
+        assert!(
+            result.is_err(),
+            "commit_with_wal_arc() must return Err when apply_writes fails after WAL write"
+        );
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CommitError::DurableButNotVisible(_)),
+            "Expected DurableButNotVisible error, got: {:?}",
+            err
+        );
+    }
+
+    /// Issue #1725: Same test for the commit_with_version path.
+    #[test]
+    fn test_issue_1725_apply_writes_failure_after_wal_version_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let mut wal = create_test_wal(dir.path());
+        let real_store = Arc::new(SegmentedStore::new());
+        let failing_store = FailingApplyStorage {
+            inner: SegmentedStore::new(),
+        };
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = create_test_key(&ns, "invisible_key");
+
+        let mut txn = TransactionContext::with_store(3, branch_id, real_store);
+        txn.put(key.clone(), Value::Int(44)).unwrap();
+
+        let result = manager.commit_with_version(&mut txn, &failing_store, Some(&mut wal), 42);
+        assert!(
+            result.is_err(),
+            "commit_with_version() must return Err when apply_writes fails after WAL write"
+        );
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CommitError::DurableButNotVisible(_)),
+            "Expected DurableButNotVisible error, got: {:?}",
+            err
+        );
     }
 }
