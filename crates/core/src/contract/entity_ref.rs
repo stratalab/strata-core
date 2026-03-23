@@ -466,12 +466,14 @@ mod tests {
         let branch_id = BranchId::new();
 
         // Create one of each type
-        let refs = [EntityRef::kv(branch_id, "k"),
+        let refs = [
+            EntityRef::kv(branch_id, "k"),
             EntityRef::event(branch_id, 0),
             EntityRef::state(branch_id, "s"),
             EntityRef::branch(branch_id),
             EntityRef::json(branch_id, "j"),
-            EntityRef::vector(branch_id, "c", "k")];
+            EntityRef::vector(branch_id, "c", "k"),
+        ];
 
         // Verify they map to all 6 primitive types
         let types: std::collections::HashSet<_> = refs.iter().map(|r| r.primitive_type()).collect();

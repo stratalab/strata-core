@@ -2832,8 +2832,7 @@ mod profiling_tests {
         let (compact, _heap) = build_compact_graph(n, dim);
 
         // Build a HashMap mirror for comparison
-        let hashmap_nodes: StdHashMap<VectorId, &CompactHnswNode> =
-            compact.iter_nodes().collect();
+        let hashmap_nodes: StdHashMap<VectorId, &CompactHnswNode> = compact.iter_nodes().collect();
 
         // Pre-generate random lookup IDs
         let lookup_ids: Vec<VectorId> = (0..num_lookups)
