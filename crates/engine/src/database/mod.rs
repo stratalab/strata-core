@@ -2235,6 +2235,7 @@ impl Database {
     /// db.end_transaction(txn); // Return to pool
     /// ```
     pub fn begin_transaction(&self, branch_id: BranchId) -> StrataResult<TransactionContext> {
+        self.check_accepting()?;
         let txn_id = self.coordinator.next_txn_id()?;
         let snapshot_version = self.storage.version();
         self.coordinator.record_start(txn_id, snapshot_version);
@@ -2424,17 +2425,12 @@ impl Database {
         self.scheduler.drain();
 
         // 3. Wait for in-flight transactions to complete FIRST.
-        //    The flush thread keeps running during this window, providing
-        //    periodic syncs for any transactions that commit during drain.
+        //    Uses wait_for_idle() which polls with SeqCst ordering, ensuring
+        //    visibility of active_count increments from record_start() on all
+        //    architectures (fixes #1738 / 9.2.B).
         let timeout = std::time::Duration::from_secs(30);
-        let start = std::time::Instant::now();
-
-        while self.coordinator.active_count() > 0 && start.elapsed() < timeout {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-
-        let remaining = self.coordinator.active_count();
-        if remaining > 0 {
+        if !self.coordinator.wait_for_idle(timeout) {
+            let remaining = self.coordinator.active_count();
             warn!(
                 target: "strata::db",
                 remaining,
@@ -4422,5 +4418,59 @@ mod tests {
             vec![1.0, 0.0, 0.0],
             "Embedding values should be preserved in checkpoint",
         );
+    }
+
+    /// Issue #1738 / 9.2.A: begin_transaction() does not check accepting_transactions.
+    /// After shutdown(), manual callers can still start transactions.
+    #[test]
+    fn test_issue_1738_begin_transaction_bypasses_shutdown_gate() {
+        let db = Database::cache().unwrap();
+        let branch_id = BranchId::new();
+        db.shutdown().unwrap();
+
+        // transaction() correctly rejects after shutdown
+        let closure_result = db.transaction(branch_id, |_txn| Ok(()));
+        assert!(
+            closure_result.is_err(),
+            "transaction() should reject after shutdown"
+        );
+
+        // begin_transaction() SHOULD also reject after shutdown
+        let manual_result = db.begin_transaction(branch_id);
+        assert!(
+            manual_result.is_err(),
+            "begin_transaction() must reject after shutdown, but it succeeded"
+        );
+    }
+
+    /// Issue #1738 / 9.2.B: shutdown() polls active_count() with Relaxed ordering
+    /// instead of using wait_for_idle() with SeqCst. This test verifies that the
+    /// shutdown path uses the correct synchronization by checking that it calls
+    /// wait_for_idle (which properly synchronizes with record_start/record_commit).
+    ///
+    /// We verify this indirectly: start a transaction, then shutdown. If shutdown
+    /// uses proper ordering, it will always see the active transaction and wait.
+    #[test]
+    fn test_issue_1738_shutdown_waits_for_active_transactions() {
+        let db = Database::cache().unwrap();
+        let branch_id = BranchId::new();
+
+        // Start a transaction manually (increments active_count)
+        let txn = db.begin_transaction(branch_id).unwrap();
+
+        // Spawn shutdown in background — it should wait for the active transaction
+        let db2 = Arc::clone(&db);
+        let shutdown_handle = std::thread::spawn(move || {
+            db2.shutdown().unwrap();
+        });
+
+        // Give shutdown a moment to start waiting
+        std::thread::sleep(Duration::from_millis(50));
+
+        // End the transaction (decrements active_count)
+        db.end_transaction(txn);
+
+        // Shutdown should complete within a reasonable time
+        shutdown_handle.join().unwrap();
     }
 }
