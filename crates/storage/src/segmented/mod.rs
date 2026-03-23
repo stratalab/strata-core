@@ -942,20 +942,24 @@ impl SegmentedStore {
             ));
         }
 
-        // 1. Flush source memtables to segments
+        // 1. Flush bulk memtable data to segments (outside exclusive lock).
         self.rotate_memtable(source_id);
         while self.flush_oldest_frozen(source_id)? {}
 
-        // 2. Capture fork_version
-        let fork_version = self.version.load(Ordering::Acquire);
-
-        // 3. Snapshot source segments + clone inherited layers.
+        // 2. Acquire exclusive lock on source branch, drain any straggler
+        //    writes, then capture fork_version + snapshot atomically.
         //
-        // CRITICAL: Increment refcounts BEFORE dropping the source guard.
-        // Without this, concurrent parent compaction can delete segments
-        // between the snapshot and the refcount increment (see #1662).
-        let (dest_layers, segments_shared) = {
-            let source = match self.branches.get(source_id) {
+        //    Between step 1 and this get_mut, concurrent writes may have
+        //    committed data to the source's active memtable.  The exclusive
+        //    DashMap guard blocks further writes to the same shard, so we
+        //    can inline-flush the stragglers and capture a consistent
+        //    snapshot (see #1679).
+        //
+        //    CRITICAL: Increment refcounts BEFORE dropping the source guard.
+        //    Without this, concurrent parent compaction can delete segments
+        //    between the snapshot and the refcount increment (see #1662).
+        let (dest_layers, segments_shared, fork_version, source_manifest_dirty) = {
+            let mut source = match self.branches.get_mut(source_id) {
                 Some(b) => b,
                 None => {
                     return Err(io::Error::new(
@@ -964,6 +968,65 @@ impl SegmentedStore {
                     ))
                 }
             };
+
+            // Inline-rotate: move straggler writes from active to frozen.
+            if !source.active.is_empty() {
+                let next_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
+                let old = std::mem::replace(&mut source.active, Memtable::new(next_id));
+                old.freeze();
+                source.frozen.insert(0, Arc::new(old));
+                self.total_frozen_count.fetch_add(1, Ordering::Relaxed);
+            }
+
+            // Inline-flush: build segments from frozen memtables while
+            // holding the exclusive guard.  Typically 0–1 tiny memtables
+            // (only the stragglers from above), so I/O is bounded.
+            let mut source_manifest_dirty = false;
+            if let Some(segments_dir) = &self.segments_dir {
+                while let Some(mt) = source.frozen.last().cloned() {
+                    let seg_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
+                    let branch_hex = hex_encode_branch(source_id);
+                    let branch_dir = segments_dir.join(&branch_hex);
+                    std::fs::create_dir_all(&branch_dir)?;
+                    let seg_path = branch_dir.join(format!("{}.sst", seg_id));
+                    let builder = SegmentBuilder::default()
+                        .with_compression(crate::segment_builder::CompressionCodec::None);
+                    builder.build_from_iter(mt.iter_all(), &seg_path)?;
+                    let segment = KVSegment::open(&seg_path)?;
+                    segment.pin_bloom_partitions();
+
+                    // Install segment into source's SegmentVersion.
+                    let old_ver = source.version.load();
+                    let mut new_l0 = Vec::with_capacity(old_ver.l0_segments().len() + 1);
+                    new_l0.push(Arc::new(segment));
+                    new_l0.extend(old_ver.l0_segments().iter().cloned());
+                    let mut new_levels = old_ver.levels.clone();
+                    new_levels[0] = new_l0;
+                    source
+                        .version
+                        .store(Arc::new(SegmentVersion { levels: new_levels }));
+
+                    // Remove the flushed frozen memtable.
+                    if source
+                        .frozen
+                        .last()
+                        .map_or(false, |last| last.id() == mt.id())
+                    {
+                        source.frozen.pop();
+                        self.total_frozen_count.fetch_sub(1, Ordering::Relaxed);
+                    }
+                    source_manifest_dirty = true;
+                }
+                if source_manifest_dirty {
+                    refresh_level_targets(&mut source);
+                }
+            }
+
+            // All source data is now in segments.  Capture fork_version
+            // under the exclusive guard — no concurrent writes can advance
+            // it before we snapshot.
+            let fork_version = self.version.load(Ordering::Acquire);
+
             let source_segments = source.version.load_full();
             let source_inherited: Vec<InheritedLayer> = source
                 .inherited_layers
@@ -976,7 +1039,7 @@ impl SegmentedStore {
                 })
                 .collect();
 
-            // 4. Build dest layers: [source_own, ...source_inherited]
+            // Build dest layers: [source_own, ...source_inherited]
             let mut layers = Vec::with_capacity(1 + source_inherited.len());
             layers.push(InheritedLayer {
                 source_branch_id: *source_id,
@@ -986,7 +1049,7 @@ impl SegmentedStore {
             });
             layers.extend(source_inherited);
 
-            // 5. Increment refcounts while source guard is still held.
+            // Increment refcounts while source guard is still held.
             // The DashMap (branches) and ref_registry are independent
             // DashMaps, so no deadlock risk.
             let mut shared = 0usize;
@@ -999,9 +1062,14 @@ impl SegmentedStore {
                 }
             }
 
-            (layers, shared)
+            (layers, shared, fork_version, source_manifest_dirty)
             // source DashMap guard drops here — segments are now protected
         };
+
+        // Persist source manifest if we inline-flushed segments.
+        if source_manifest_dirty {
+            self.write_branch_manifest(source_id);
+        }
 
         // 6. Attach to dest branch, decrementing refcounts for any prior layers
         let mut dest = self

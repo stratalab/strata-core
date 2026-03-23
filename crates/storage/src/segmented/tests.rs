@@ -7472,3 +7472,132 @@ fn test_issue_1677_shadow_check_returns_true_on_corruption() {
         "shadow check must return true on corruption to prevent stale data resurrection"
     );
 }
+
+// =========================================================================
+// Issue #1679 — fork_branch() not serialized against concurrent writes
+// =========================================================================
+
+/// Concurrent stress test: continuously write to a parent branch while calling
+/// fork_branch(). The child must see every version <= fork_version with
+/// no omissions.
+#[test]
+fn test_issue_1679_fork_concurrent_write_visibility() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use std::thread;
+
+    let dir = tempfile::tempdir().unwrap();
+    // write_buffer_size=0 disables auto-rotation, keeping writes in the
+    // memtable where the race is most likely to surface.
+    let store = Arc::new(SegmentedStore::with_dir(dir.path().to_path_buf(), 0));
+
+    // Seed initial data so parent branch exists with segments
+    seed(&store, parent_kv("init"), Value::Int(0), 1);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+
+    // Spawn writer threads that continuously write to the parent branch.
+    // Each thread writes sequentially named keys so we can enumerate them.
+    let mut writers = Vec::new();
+    for t in 0..2u8 {
+        let store_c = Arc::clone(&store);
+        let stop_c = Arc::clone(&stop);
+        writers.push(thread::spawn(move || {
+            let mut i = 0u64;
+            while !stop_c.load(std::sync::atomic::Ordering::Relaxed) {
+                let v = store_c.next_version();
+                let key_name = format!("w{}_k{}", t, i);
+                store_c
+                    .put_with_version_mode(
+                        parent_kv(&key_name),
+                        Value::Int(v as i64),
+                        v,
+                        None,
+                        WriteMode::Append,
+                    )
+                    .unwrap();
+                i += 1;
+                if i % 3 == 0 {
+                    thread::yield_now();
+                }
+            }
+        }));
+    }
+
+    // Perform multiple forks while writers are active
+    let mut failures = Vec::new();
+    for fork_idx in 0..20u8 {
+        let fork_branch_id = BranchId::from_bytes([50 + fork_idx; 16]);
+        store
+            .branches
+            .entry(fork_branch_id)
+            .or_insert_with(BranchState::new);
+
+        let (fork_version, _) = store
+            .fork_branch(&parent_branch(), &fork_branch_id)
+            .unwrap();
+
+        // For each key visible in the parent at fork_version, verify the
+        // child also sees it through inheritance.
+        let child_ns = Arc::new(Namespace::new(fork_branch_id, "default".to_string()));
+
+        for t in 0..2u8 {
+            for i in 0..50u64 {
+                let key_name = format!("w{}_k{}", t, i);
+                let parent_val = store
+                    .get_versioned(&parent_kv(&key_name), fork_version)
+                    .unwrap();
+                if let Some(parent_entry) = parent_val {
+                    let child_key = Key::new(
+                        Arc::clone(&child_ns),
+                        TypeTag::KV,
+                        key_name.as_bytes().to_vec(),
+                    );
+                    match store.get_versioned(&child_key, u64::MAX) {
+                        Ok(Some(child_entry)) => {
+                            if child_entry.value != parent_entry.value {
+                                failures.push(format!(
+                                    "fork {}: key {} value mismatch",
+                                    fork_idx, key_name
+                                ));
+                            }
+                        }
+                        Ok(None) => {
+                            failures.push(format!(
+                                "fork {}: key {} visible in parent@v{} but MISSING in child",
+                                fork_idx, key_name, fork_version
+                            ));
+                        }
+                        Err(e) => {
+                            failures
+                                .push(format!("fork {}: key {} error: {}", fork_idx, key_name, e));
+                        }
+                    }
+                }
+            }
+        }
+
+        if failures.len() > 10 {
+            break;
+        }
+    }
+
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for w in writers {
+        w.join().unwrap();
+    }
+
+    assert!(
+        failures.is_empty(),
+        "Child branch missed {} entries visible in parent at fork_version:\n{}",
+        failures.len(),
+        failures
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
