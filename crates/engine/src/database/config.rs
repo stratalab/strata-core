@@ -88,6 +88,30 @@ pub struct StorageConfig {
     /// Mirrors RocksDB's `level0_stop_writes_trigger`. Default: 36.
     #[serde(default = "default_l0_stop_writes_trigger")]
     pub l0_stop_writes_trigger: usize,
+    /// Number of background worker threads for compaction, flush, and maintenance.
+    /// Default: min(4, available CPU cores). On single-core devices set to 1.
+    #[serde(default = "default_background_threads")]
+    pub background_threads: usize,
+    /// Target size for a single output segment file in bytes.
+    /// Default: 64 MiB. On embedded devices (Pi), use 4–8 MiB.
+    #[serde(default = "default_target_file_size")]
+    pub target_file_size: u64,
+    /// Target total size for L1 in bytes. Higher levels are multiplied by 10×.
+    /// Default: 256 MiB. On embedded devices (Pi), use 32 MiB.
+    #[serde(default = "default_level_base_bytes")]
+    pub level_base_bytes: u64,
+    /// Data block size in bytes for segment files.
+    /// Default: 4096 (4 KiB). Larger blocks improve throughput at the cost of read amplification.
+    #[serde(default = "default_data_block_size")]
+    pub data_block_size: usize,
+    /// Bloom filter bits per key. Higher values reduce false positives but use more memory.
+    /// Default: 10.
+    #[serde(default = "default_bloom_bits_per_key")]
+    pub bloom_bits_per_key: usize,
+    /// Compaction I/O rate limit in bytes per second. 0 = unlimited (default).
+    /// On slow storage (SD cards), set to e.g. 5–10 MB/s to avoid starving user I/O.
+    #[serde(default)]
+    pub compaction_rate_limit: u64,
 }
 
 fn default_max_branches() -> usize {
@@ -114,6 +138,28 @@ fn default_l0_stop_writes_trigger() -> usize {
     0 // disabled by default until compaction throughput improves
 }
 
+fn default_background_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().min(4))
+        .unwrap_or(1)
+}
+
+fn default_target_file_size() -> u64 {
+    64 << 20 // 64 MiB
+}
+
+fn default_level_base_bytes() -> u64 {
+    256 << 20 // 256 MiB
+}
+
+fn default_data_block_size() -> usize {
+    4096 // 4 KiB
+}
+
+fn default_bloom_bits_per_key() -> usize {
+    10
+}
+
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
@@ -125,6 +171,12 @@ impl Default for StorageConfig {
             max_immutable_memtables: default_max_immutable_memtables(),
             l0_slowdown_writes_trigger: default_l0_slowdown_writes_trigger(),
             l0_stop_writes_trigger: default_l0_stop_writes_trigger(),
+            background_threads: default_background_threads(),
+            target_file_size: default_target_file_size(),
+            level_base_bytes: default_level_base_bytes(),
+            data_block_size: default_data_block_size(),
+            bloom_bits_per_key: default_bloom_bits_per_key(),
+            compaction_rate_limit: 0,
         }
     }
 }
@@ -318,6 +370,12 @@ auto_embed = false
 # block_cache_size = 0          # 0 = auto (max(256 MiB, available_ram / 4))
 # write_buffer_size = 134217728  # 128 MiB; memtable rotation threshold
 # max_immutable_memtables = 4   # max frozen memtables per branch before write stalling
+# background_threads = 4        # compaction/flush workers; default min(4, CPU cores)
+# target_file_size = 67108864   # 64 MiB; segment file target (Pi: 4-8 MiB)
+# level_base_bytes = 268435456  # 256 MiB; L1 target size (Pi: 32 MiB)
+# data_block_size = 4096        # 4 KiB; segment data block size
+# bloom_bits_per_key = 10       # bloom filter bits per key
+# compaction_rate_limit = 0     # 0 = unlimited; bytes/sec cap for compaction I/O
 "#
     }
 
@@ -911,5 +969,93 @@ auto_embed = false
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: StrataConfig = toml::from_str(&toml_str).unwrap();
         assert!(parsed.allow_lossy_recovery);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #1737: Scale-span config gaps
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_issue_1737_background_threads_default_bounded() {
+        // S-H2: background_threads must default to min(4, available_parallelism)
+        let config = StorageConfig::default();
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let expected = cpus.min(4);
+        assert_eq!(
+            config.background_threads, expected,
+            "background_threads should default to min(4, available_parallelism()={})",
+            cpus
+        );
+    }
+
+    #[test]
+    fn test_issue_1737_storage_constants_configurable() {
+        // S-H8: critical storage constants must be configurable via StorageConfig
+        let config = StorageConfig::default();
+        assert_eq!(config.target_file_size, 64 * 1024 * 1024); // 64 MiB
+        assert_eq!(config.level_base_bytes, 256 * 1024 * 1024); // 256 MiB
+        assert_eq!(config.data_block_size, 4096); // 4 KiB
+        assert_eq!(config.bloom_bits_per_key, 10);
+    }
+
+    #[test]
+    fn test_issue_1737_compaction_rate_limit_in_config() {
+        // S-M7: compaction_rate_limit must be configurable via strata.toml
+        let config = StorageConfig::default();
+        assert_eq!(config.compaction_rate_limit, 0, "default 0 = unlimited");
+    }
+
+    #[test]
+    fn test_issue_1737_config_round_trip() {
+        // All new fields must survive TOML serialization round-trip
+        let toml_str = r#"
+[storage]
+background_threads = 2
+target_file_size = 8388608
+level_base_bytes = 33554432
+data_block_size = 8192
+bloom_bits_per_key = 12
+compaction_rate_limit = 10485760
+"#;
+        let config: StrataConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.storage.background_threads, 2);
+        assert_eq!(config.storage.target_file_size, 8 * 1024 * 1024);
+        assert_eq!(config.storage.level_base_bytes, 32 * 1024 * 1024);
+        assert_eq!(config.storage.data_block_size, 8192);
+        assert_eq!(config.storage.bloom_bits_per_key, 12);
+        assert_eq!(config.storage.compaction_rate_limit, 10 * 1024 * 1024);
+
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        let reparsed: StrataConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.storage.background_threads, 2);
+        assert_eq!(reparsed.storage.target_file_size, 8 * 1024 * 1024);
+        assert_eq!(reparsed.storage.level_base_bytes, 32 * 1024 * 1024);
+        assert_eq!(reparsed.storage.data_block_size, 8192);
+        assert_eq!(reparsed.storage.bloom_bits_per_key, 12);
+        assert_eq!(reparsed.storage.compaction_rate_limit, 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_issue_1737_backward_compat_missing_new_fields() {
+        // Old config files without the new fields must still parse with correct defaults
+        let old_toml = r#"
+durability = "standard"
+[storage]
+max_branches = 512
+"#;
+        let config: StrataConfig = toml::from_str(old_toml).unwrap();
+        assert_eq!(config.storage.max_branches, 512);
+        // New fields should have their defaults
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        assert_eq!(config.storage.background_threads, cpus.min(4));
+        assert_eq!(config.storage.target_file_size, 64 * 1024 * 1024);
+        assert_eq!(config.storage.level_base_bytes, 256 * 1024 * 1024);
+        assert_eq!(config.storage.data_block_size, 4096);
+        assert_eq!(config.storage.bloom_bits_per_key, 10);
+        assert_eq!(config.storage.compaction_rate_limit, 0);
     }
 }

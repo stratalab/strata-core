@@ -21,11 +21,15 @@ pub(super) struct LevelTargets {
 /// Algorithm (RocksDB `CalculateBaseBytes`):
 /// 1. Find the largest non-empty non-L0 level (the "bottom" level).
 /// 2. Compute base (L1 target) = bottom_bytes / multiplier^(bottom_level - 1).
-/// 3. Clamp base between MIN_BASE_BYTES (1MB) and MAX_BASE_BYTES (256MB).
+/// 3. Clamp base between MIN_BASE_BYTES (1MB) and `max_base` (configurable, default 256MB).
 /// 4. Forward-compute all targets: target[i] = base * multiplier^(i-1).
 ///
 /// For empty databases (no non-L0 data), uses MIN_BASE_BYTES as base.
-pub(super) fn recalculate_level_targets(level_bytes: &[u64; NUM_LEVELS]) -> LevelTargets {
+pub(super) fn recalculate_level_targets(
+    level_bytes: &[u64; NUM_LEVELS],
+    max_base: u64,
+) -> LevelTargets {
+    let max_base = max_base.max(MIN_BASE_BYTES); // safety: never below minimum
     let mut max_bytes = [0u64; NUM_LEVELS];
     max_bytes[0] = 0; // L0 uses count-based trigger
 
@@ -47,7 +51,7 @@ pub(super) fn recalculate_level_targets(level_bytes: &[u64; NUM_LEVELS]) -> Leve
         for _ in 1..bottom_level {
             b /= LEVEL_MULTIPLIER;
         }
-        b.clamp(MIN_BASE_BYTES, MAX_BASE_BYTES)
+        b.clamp(MIN_BASE_BYTES, max_base)
     };
 
     // 3. Forward-compute all targets
@@ -225,7 +229,8 @@ impl SegmentedStore {
             .with_drop_expired(is_bottommost)
             .with_is_bottommost(is_bottommost);
 
-        let mut builder = SegmentBuilder::default()
+        let mut builder = self
+            .make_segment_builder()
             .with_compression(crate::segment_builder::CompressionCodec::None);
         if let Some(ref l) = limiter {
             builder = builder.with_rate_limiter(Arc::clone(l));
@@ -274,7 +279,7 @@ impl SegmentedStore {
             branch
                 .version
                 .store(Arc::new(SegmentVersion { levels: new_levels }));
-            refresh_level_targets(&mut branch);
+            refresh_level_targets(&mut branch, self.level_base_bytes());
         }
 
         // Persist manifest BEFORE deleting old files — if we crash after
@@ -382,7 +387,8 @@ impl SegmentedStore {
             .with_drop_expired(is_bottommost)
             .with_is_bottommost(is_bottommost);
 
-        let mut builder = SegmentBuilder::default()
+        let mut builder = self
+            .make_segment_builder()
             .with_compression(crate::segment_builder::CompressionCodec::None);
         if let Some(ref l) = limiter {
             builder = builder.with_rate_limiter(Arc::clone(l));
@@ -430,7 +436,7 @@ impl SegmentedStore {
             branch
                 .version
                 .store(Arc::new(SegmentVersion { levels: new_levels }));
-            refresh_level_targets(&mut branch);
+            refresh_level_targets(&mut branch, self.level_base_bytes());
         }
 
         // Persist manifest BEFORE deleting old files (crash safety).
@@ -579,11 +585,12 @@ impl SegmentedStore {
 
         let next_id = &self.next_segment_id;
         let start_id = next_id.load(Ordering::Relaxed);
-        let bloom_bits = super::bloom_bits_for_level(1, 10);
+        let bloom_bits = super::bloom_bits_for_level(1, self.bloom_bits_per_key());
         let compression = super::compression_for_level(1);
         let mut splitting_builder = crate::segment_builder::SplittingSegmentBuilder::default()
             .with_bloom_bits(bloom_bits)
-            .with_compression(compression);
+            .with_compression(compression)
+            .with_data_block_size(self.data_block_size());
         if let Some(ref l) = limiter {
             splitting_builder = splitting_builder.with_rate_limiter(Arc::clone(l));
         }
@@ -650,7 +657,7 @@ impl SegmentedStore {
             branch
                 .version
                 .store(Arc::new(SegmentVersion { levels: new_levels }));
-            refresh_level_targets(&mut branch);
+            refresh_level_targets(&mut branch, self.level_base_bytes());
         }
 
         // Persist manifest BEFORE deleting old files (crash safety).
@@ -769,7 +776,8 @@ impl SegmentedStore {
         if level > 0
             && input_segs.len() == 1
             && overlap_segs.is_empty()
-            && grandparent_bytes_in_range(&grandparent_segs, &input_segs) <= MAX_GRANDPARENT_OVERLAP
+            && grandparent_bytes_in_range(&grandparent_segs, &input_segs)
+                <= self.target_file_size() * 10
         {
             // Metadata-only move: shift file to level+1 without I/O
             let moved_seg = Arc::clone(&input_segs[0]);
@@ -794,7 +802,7 @@ impl SegmentedStore {
             branch
                 .version
                 .store(Arc::new(SegmentVersion { levels: new_levels }));
-            refresh_level_targets(&mut branch);
+            refresh_level_targets(&mut branch, self.level_base_bytes());
             drop(branch);
             self.write_branch_manifest(branch_id);
 
@@ -835,11 +843,12 @@ impl SegmentedStore {
 
         let next_id = &self.next_segment_id;
         let start_id = next_id.load(Ordering::Relaxed);
-        let bloom_bits = super::bloom_bits_for_level(level + 1, 10);
+        let bloom_bits = super::bloom_bits_for_level(level + 1, self.bloom_bits_per_key());
         let compression = super::compression_for_level(level + 1);
         let mut splitting_builder = crate::segment_builder::SplittingSegmentBuilder::default()
             .with_bloom_bits(bloom_bits)
-            .with_compression(compression);
+            .with_compression(compression)
+            .with_data_block_size(self.data_block_size());
         if let Some(ref l) = limiter {
             splitting_builder = splitting_builder.with_rate_limiter(Arc::clone(l));
         }
@@ -848,10 +857,11 @@ impl SegmentedStore {
         //
         // Tracks cumulative overlap: each time the output key advances past a
         // grandparent file's max key, that grandparent's file size is added to
-        // `gp_overlap_bytes`.  When the total exceeds MAX_GRANDPARENT_OVERLAP,
-        // a split is forced and the counter resets.  This limits how many
-        // grandparent files a single output segment will overlap during the
-        // *next* compaction (L+1 → L+2).
+        // `gp_overlap_bytes`.  When the total exceeds the max grandparent overlap
+        // threshold (target_file_size × 10), a split is forced and the counter
+        // resets.  This limits how many grandparent files a single output segment
+        // will overlap during the *next* compaction (L+1 → L+2).
+        let max_gp_overlap = self.target_file_size() * 10;
         let gp_segs = grandparent_segs;
         let mut gp_idx: usize = 0;
         let mut gp_overlap_bytes: u64 = 0;
@@ -869,7 +879,7 @@ impl SegmentedStore {
                     break;
                 }
             }
-            if gp_overlap_bytes > MAX_GRANDPARENT_OVERLAP {
+            if gp_overlap_bytes > max_gp_overlap {
                 gp_overlap_bytes = 0;
                 return true;
             }
@@ -941,7 +951,7 @@ impl SegmentedStore {
             branch
                 .version
                 .store(Arc::new(SegmentVersion { levels: new_levels }));
-            refresh_level_targets(&mut branch);
+            refresh_level_targets(&mut branch, self.level_base_bytes());
         }
 
         // ── 5. Cleanup ─────────────────────────────────────────────────

@@ -51,20 +51,12 @@ const LEVEL_BASE_BYTES: u64 = 256 << 20;
 /// Size multiplier between adjacent levels.
 const LEVEL_MULTIPLIER: u64 = 10;
 
-/// Maximum cumulative overlap with grandparent (L+2) files before forcing an
-/// output split.  Set to 10 × TARGET_FILE_SIZE (640MB).
-const MAX_GRANDPARENT_OVERLAP: u64 = 10 * TARGET_FILE_SIZE;
-
 /// Maximum inherited layer depth before background materialization is triggered.
 const MAX_INHERITED_LAYERS: usize = 4;
 
 /// Minimum L1 target size for dynamic level sizing (1MB).
 /// Prevents degenerate zero-size targets on tiny embedded datasets.
 const MIN_BASE_BYTES: u64 = 1 << 20;
-
-/// Maximum L1 target size for dynamic level sizing.
-/// Equals LEVEL_BASE_BYTES (256MB) — the static default.
-const MAX_BASE_BYTES: u64 = LEVEL_BASE_BYTES;
 
 /// Monkey-optimal bloom bits per key for a given target level.
 ///
@@ -258,20 +250,23 @@ impl BranchState {
             min_timestamp: AtomicU64::new(u64::MAX),
             max_timestamp: AtomicU64::new(0),
             compact_pointers: vec![None; NUM_LEVELS],
-            level_targets: compaction::recalculate_level_targets(&[0u64; NUM_LEVELS]),
+            level_targets: compaction::recalculate_level_targets(
+                &[0u64; NUM_LEVELS],
+                LEVEL_BASE_BYTES,
+            ),
             inherited_layers: Vec::new(),
         }
     }
 }
 
 /// Recompute cached level targets from the current segment version.
-fn refresh_level_targets(branch: &mut BranchState) {
+fn refresh_level_targets(branch: &mut BranchState, max_base_bytes: u64) {
     let ver = branch.version.load();
     let mut actual_bytes = [0u64; NUM_LEVELS];
     for (level, segs) in ver.levels.iter().enumerate() {
         actual_bytes[level] = segs.iter().map(|s| s.file_size()).sum();
     }
-    branch.level_targets = compaction::recalculate_level_targets(&actual_bytes);
+    branch.level_targets = compaction::recalculate_level_targets(&actual_bytes, max_base_bytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -315,6 +310,15 @@ pub struct SegmentedStore {
     ref_registry: ref_registry::SegmentRefRegistry,
     /// Branches currently being materialized (prevents concurrent materialization #1703).
     materializing_branches: DashMap<BranchId, ()>,
+    /// Target size for a single output segment file. Default: 64 MiB.
+    target_file_size: AtomicU64,
+    /// Target total size for L1. Also used as MAX_BASE_BYTES for dynamic level sizing.
+    /// Default: 256 MiB.
+    level_base_bytes: AtomicU64,
+    /// Data block size in bytes for segment files. Default: 4096 (4 KiB).
+    data_block_size: AtomicUsize,
+    /// Bloom filter bits per key (base value). Default: 10.
+    bloom_bits_per_key: AtomicUsize,
 }
 
 impl SegmentedStore {
@@ -339,6 +343,10 @@ impl SegmentedStore {
             compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
             ref_registry: ref_registry::SegmentRefRegistry::new(),
             materializing_branches: DashMap::new(),
+            target_file_size: AtomicU64::new(TARGET_FILE_SIZE),
+            level_base_bytes: AtomicU64::new(LEVEL_BASE_BYTES),
+            data_block_size: AtomicUsize::new(4096),
+            bloom_bits_per_key: AtomicUsize::new(10),
         }
     }
 
@@ -364,6 +372,10 @@ impl SegmentedStore {
             compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
             ref_registry: ref_registry::SegmentRefRegistry::new(),
             materializing_branches: DashMap::new(),
+            target_file_size: AtomicU64::new(TARGET_FILE_SIZE),
+            level_base_bytes: AtomicU64::new(LEVEL_BASE_BYTES),
+            data_block_size: AtomicUsize::new(4096),
+            bloom_bits_per_key: AtomicUsize::new(10),
         }
     }
 
@@ -389,6 +401,10 @@ impl SegmentedStore {
             compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
             ref_registry: ref_registry::SegmentRefRegistry::new(),
             materializing_branches: DashMap::new(),
+            target_file_size: AtomicU64::new(TARGET_FILE_SIZE),
+            level_base_bytes: AtomicU64::new(LEVEL_BASE_BYTES),
+            data_block_size: AtomicUsize::new(4096),
+            bloom_bits_per_key: AtomicUsize::new(10),
         }
     }
 
@@ -430,6 +446,56 @@ impl SegmentedStore {
             self.compaction_rate_limiter.store(Some(std::sync::Arc::new(
                 crate::rate_limiter::RateLimiter::new(bytes_per_sec),
             )));
+        }
+    }
+
+    /// Set the target segment file size in bytes.
+    pub fn set_target_file_size(&self, bytes: u64) {
+        self.target_file_size.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Get the configured target segment file size.
+    pub fn target_file_size(&self) -> u64 {
+        self.target_file_size.load(Ordering::Relaxed)
+    }
+
+    /// Set the L1 target size (level_base_bytes) in bytes.
+    pub fn set_level_base_bytes(&self, bytes: u64) {
+        self.level_base_bytes.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Get the configured L1 target size.
+    pub fn level_base_bytes(&self) -> u64 {
+        self.level_base_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Set the data block size in bytes for new segments.
+    pub fn set_data_block_size(&self, bytes: usize) {
+        self.data_block_size.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Get the configured data block size.
+    pub fn data_block_size(&self) -> usize {
+        self.data_block_size.load(Ordering::Relaxed)
+    }
+
+    /// Set the bloom filter bits per key for new segments.
+    pub fn set_bloom_bits_per_key(&self, bits: usize) {
+        self.bloom_bits_per_key.store(bits, Ordering::Relaxed);
+    }
+
+    /// Get the configured bloom bits per key.
+    pub fn bloom_bits_per_key(&self) -> usize {
+        self.bloom_bits_per_key.load(Ordering::Relaxed)
+    }
+
+    /// Create a `SegmentBuilder` pre-configured with this store's
+    /// `data_block_size` and `bloom_bits_per_key`.
+    fn make_segment_builder(&self) -> SegmentBuilder {
+        SegmentBuilder {
+            data_block_size: self.data_block_size(),
+            bloom_bits_per_key: self.bloom_bits_per_key(),
+            ..SegmentBuilder::default()
         }
     }
 
@@ -780,7 +846,7 @@ impl SegmentedStore {
             std::fs::create_dir_all(&branch_dir)?;
 
             let next_id = &self.next_segment_id;
-            let builder = SplittingSegmentBuilder::new(TARGET_FILE_SIZE)
+            let builder = SplittingSegmentBuilder::new(self.target_file_size())
                 .with_compression(crate::segment_builder::CompressionCodec::None);
             let built = builder.build_split(entries.into_iter(), |_split_idx| {
                 let seg_id = next_id.fetch_add(1, Ordering::Relaxed);
@@ -831,7 +897,7 @@ impl SegmentedStore {
                 branch.inherited_layers.remove(idx);
             }
 
-            refresh_level_targets(&mut branch);
+            refresh_level_targets(&mut branch, self.level_base_bytes());
         }
 
         // 2f. Cleanup
@@ -999,7 +1065,8 @@ impl SegmentedStore {
                     let branch_dir = segments_dir.join(&branch_hex);
                     std::fs::create_dir_all(&branch_dir)?;
                     let seg_path = branch_dir.join(format!("{}.sst", seg_id));
-                    let builder = SegmentBuilder::default()
+                    let builder = self
+                        .make_segment_builder()
                         .with_compression(crate::segment_builder::CompressionCodec::None);
                     builder.build_from_iter(mt.iter_all(), &seg_path)?;
                     let segment = KVSegment::open(&seg_path)?;
@@ -1028,7 +1095,7 @@ impl SegmentedStore {
                     source_manifest_dirty = true;
                 }
                 if source_manifest_dirty {
-                    refresh_level_targets(&mut source);
+                    refresh_level_targets(&mut source, self.level_base_bytes());
                 }
             }
 
@@ -1844,7 +1911,8 @@ impl SegmentedStore {
         let branch_dir = segments_dir.join(&branch_hex);
         std::fs::create_dir_all(&branch_dir)?;
         let seg_path = branch_dir.join(format!("{}.sst", seg_id));
-        let builder = SegmentBuilder::default()
+        let builder = self
+            .make_segment_builder()
             .with_compression(crate::segment_builder::CompressionCodec::None);
         builder.build_from_iter(frozen_mt.iter_all(), &seg_path)?;
 
@@ -1874,7 +1942,7 @@ impl SegmentedStore {
         branch
             .version
             .store(Arc::new(SegmentVersion { levels: new_levels }));
-        refresh_level_targets(&mut branch);
+        refresh_level_targets(&mut branch, self.level_base_bytes());
 
         // Persist level assignments
         drop(branch);
@@ -2152,7 +2220,7 @@ impl SegmentedStore {
             branch
                 .version
                 .store(Arc::new(SegmentVersion { levels: new_levels }));
-            refresh_level_targets(&mut branch);
+            refresh_level_targets(&mut branch, self.level_base_bytes());
 
             // Collect inherited layer info for second pass (deferred resolution).
             if let Some(manifest) = manifest {
