@@ -162,7 +162,12 @@ impl MmapVectorData {
         }
 
         // Count
-        let count = u64::from_le_bytes(data[12..20].try_into().unwrap()) as usize;
+        let count_u64 = u64::from_le_bytes(data[12..20].try_into().unwrap());
+        let count = usize::try_from(count_u64).map_err(|_| {
+            VectorError::Serialization(format!(
+                "mmap count {count_u64} exceeds platform pointer size"
+            ))
+        })?;
 
         // next_id
         let next_id = u64::from_le_bytes(data[20..28].try_into().unwrap());
@@ -202,7 +207,12 @@ impl MmapVectorData {
                     "mmap truncated in free_slots".into(),
                 ));
             }
-            let slot = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()) as usize;
+            let slot_u64 = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+            let slot = usize::try_from(slot_u64).map_err(|_| {
+                VectorError::Serialization(format!(
+                    "mmap free slot offset {slot_u64} exceeds platform pointer size"
+                ))
+            })?;
             free_slots.push(slot);
             pos += 8;
         }
@@ -470,6 +480,54 @@ mod tests {
 
         let result = MmapVectorData::open(&path, 3);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_issue_1735_mmap_rejects_oversized_count() {
+        // Craft a valid-looking mmap file with count > u32::MAX.
+        // On 32-bit, this must error (not silently truncate).
+        // On 64-bit, this errors because the file is too small for the count.
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("big_count.vec");
+
+        let big_count: u64 = (u32::MAX as u64) + 1;
+        let mut data = Vec::new();
+        data.extend_from_slice(MAGIC); // 4B
+        data.extend_from_slice(&VERSION.to_le_bytes()); // 4B
+        data.extend_from_slice(&3u32.to_le_bytes()); // dimension 4B
+        data.extend_from_slice(&big_count.to_le_bytes()); // count 8B
+        data.extend_from_slice(&1u64.to_le_bytes()); // next_id 8B
+                                                     // No entries follow — file is truncated relative to count
+        data.extend(vec![0u8; 256]);
+
+        std::fs::write(&path, &data).unwrap();
+        let result = MmapVectorData::open(&path, 3);
+        assert!(result.is_err(), "should reject file with oversized count");
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn test_issue_1735_mmap_count_exceeds_32bit() {
+        // On 32-bit specifically, verify the error mentions platform size.
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("big_count_32.vec");
+
+        let big_count: u64 = (u32::MAX as u64) + 1;
+        let mut data = Vec::new();
+        data.extend_from_slice(MAGIC);
+        data.extend_from_slice(&VERSION.to_le_bytes());
+        data.extend_from_slice(&3u32.to_le_bytes());
+        data.extend_from_slice(&big_count.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend(vec![0u8; 256]);
+
+        std::fs::write(&path, &data).unwrap();
+        let err = MmapVectorData::open(&path, 3).unwrap_err().to_string();
+        assert!(
+            err.contains("exceeds"),
+            "expected platform size error, got: {}",
+            err
+        );
     }
 
     // ====================================================================

@@ -395,6 +395,12 @@ pub fn file_path_hash(path: &std::path::Path) -> u64 {
 #[allow(dead_code)]
 const MAX_AUTO_CACHE_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
+/// Compute cache capacity from available memory in bytes (testable helper).
+fn compute_cache_from_available(available_bytes: usize) -> usize {
+    let quarter = available_bytes / 4;
+    quarter.min(MAX_AUTO_CACHE_BYTES)
+}
+
 /// Auto-detect a reasonable cache capacity based on available system memory.
 pub fn auto_detect_capacity() -> usize {
     #[cfg(target_os = "linux")]
@@ -404,8 +410,7 @@ pub fn auto_detect_capacity() -> usize {
                 if let Some(rest) = line.strip_prefix("MemAvailable:") {
                     if let Some(kb_str) = rest.split_whitespace().next() {
                         if let Ok(kb) = kb_str.parse::<usize>() {
-                            let quarter = (kb * 1024) / 4;
-                            return quarter.clamp(256 * 1024 * 1024, MAX_AUTO_CACHE_BYTES);
+                            return compute_cache_from_available(kb * 1024);
                         }
                     }
                 }
@@ -619,11 +624,34 @@ mod tests {
     #[test]
     fn auto_detect_returns_positive() {
         let cap = auto_detect_capacity();
-        assert!(
-            cap >= 256 * 1024 * 1024,
-            "auto-detect should return at least 256 MiB, got {}",
-            cap
+        assert!(cap > 0, "auto-detect should return positive value, got 0");
+    }
+
+    #[test]
+    fn test_issue_1735_no_minimum_cache_clamp() {
+        // Pi Zero scenario: 350 MB available → quarter = 87.5 MB
+        // Bug: clamp(256 MiB, ...) forces 256 MiB — 73% of usable RAM
+        let pi_available = 350 * 1024 * 1024; // 350 MB
+        let cap = compute_cache_from_available(pi_available);
+        let quarter = pi_available / 4;
+        assert_eq!(
+            cap, quarter,
+            "cache {} should be 25% of available ({}), not clamped up",
+            cap, quarter
         );
+    }
+
+    #[test]
+    fn test_issue_1735_max_cap_still_enforced() {
+        // 32 GB available → quarter = 8 GB, should be capped to 4 GB
+        let big_available = 32 * 1024 * 1024 * 1024;
+        let cap = compute_cache_from_available(big_available);
+        assert_eq!(cap, MAX_AUTO_CACHE_BYTES);
+    }
+
+    #[test]
+    fn test_issue_1735_zero_available_returns_zero() {
+        assert_eq!(compute_cache_from_available(0), 0);
     }
 
     /// Helper: find `count` file_ids that map to a given shard.
