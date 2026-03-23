@@ -1560,6 +1560,7 @@ impl SegmentedStore {
         value: Value,
         version: u64,
         timestamp_micros: u64,
+        ttl_ms: u64,
     ) -> StrataResult<()> {
         let branch_id = key.namespace.branch_id;
 
@@ -1572,7 +1573,7 @@ impl SegmentedStore {
             value,
             is_tombstone: false,
             timestamp: Timestamp::from_micros(timestamp_micros),
-            ttl_ms: 0,
+            ttl_ms,
         };
         let ts = entry.timestamp.as_micros();
         branch.active.put_entry(&key, version, entry);
@@ -1625,6 +1626,7 @@ impl SegmentedStore {
         deletes: Vec<Key>,
         version: u64,
         timestamp_micros: u64,
+        put_ttls: &[u64],
     ) -> StrataResult<()> {
         if writes.is_empty() && deletes.is_empty() {
             return Ok(());
@@ -1634,13 +1636,14 @@ impl SegmentedStore {
         let ts = timestamp.as_micros();
 
         // Group puts by branch.
-        let mut puts_by_branch: std::collections::HashMap<BranchId, Vec<(Key, Value)>> =
+        let mut puts_by_branch: std::collections::HashMap<BranchId, Vec<(Key, Value, u64)>> =
             std::collections::HashMap::new();
-        for (key, value) in writes {
+        for (i, (key, value)) in writes.into_iter().enumerate() {
+            let ttl_ms = put_ttls.get(i).copied().unwrap_or(0);
             puts_by_branch
                 .entry(key.namespace.branch_id)
                 .or_default()
-                .push((key, value));
+                .push((key, value, ttl_ms));
         }
 
         // Group deletes by branch.
@@ -1659,12 +1662,12 @@ impl SegmentedStore {
                 .branches
                 .entry(branch_id)
                 .or_insert_with(BranchState::new);
-            for (key, value) in entries {
+            for (key, value, ttl_ms) in entries {
                 let entry = MemtableEntry {
                     value,
                     is_tombstone: false,
                     timestamp,
-                    ttl_ms: 0,
+                    ttl_ms,
                 };
                 branch.active.put_entry(&key, version, entry);
             }
@@ -2953,6 +2956,7 @@ impl Storage for SegmentedStore {
         writes: Vec<(Key, Value, WriteMode)>,
         deletes: Vec<Key>,
         version: u64,
+        put_ttls: &[u64],
     ) -> StrataResult<()> {
         if writes.is_empty() && deletes.is_empty() {
             return Ok(());
@@ -2960,13 +2964,14 @@ impl Storage for SegmentedStore {
 
         // Group puts and deletes by branch — acquire each DashMap guard once
         // per branch instead of per entry.
-        let mut puts_by_branch: std::collections::HashMap<BranchId, Vec<(Key, Value)>> =
+        let mut puts_by_branch: std::collections::HashMap<BranchId, Vec<(Key, Value, u64)>> =
             std::collections::HashMap::new();
-        for (key, value, _mode) in writes {
+        for (i, (key, value, _mode)) in writes.into_iter().enumerate() {
+            let ttl_ms = put_ttls.get(i).copied().unwrap_or(0);
             puts_by_branch
                 .entry(key.namespace.branch_id)
                 .or_default()
-                .push((key, value));
+                .push((key, value, ttl_ms));
         }
         let mut deletes_by_branch: std::collections::HashMap<BranchId, Vec<Key>> =
             std::collections::HashMap::new();
@@ -2986,12 +2991,12 @@ impl Storage for SegmentedStore {
                 .branches
                 .entry(branch_id)
                 .or_insert_with(BranchState::new);
-            for (key, value) in entries {
+            for (key, value, ttl_ms) in entries {
                 let entry = MemtableEntry {
                     value,
                     is_tombstone: false,
                     timestamp,
-                    ttl_ms: 0,
+                    ttl_ms,
                 };
                 branch.active.put_entry(&key, version, entry);
             }

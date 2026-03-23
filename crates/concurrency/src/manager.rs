@@ -1946,12 +1946,14 @@ mod tests {
             writes: Vec<(Key, Value, strata_core::traits::WriteMode)>,
             deletes: Vec<Key>,
             version: u64,
+            put_ttls: &[u64],
         ) -> strata_core::error::StrataResult<()> {
             // Signal that apply has started (version already allocated)
             self.apply_started.wait();
             // Delay to widen the in-flight window
             std::thread::sleep(self.delay);
-            self.inner.apply_writes_atomic(writes, deletes, version)
+            self.inner
+                .apply_writes_atomic(writes, deletes, version, put_ttls)
         }
     }
 
@@ -2135,6 +2137,7 @@ mod tests {
             _writes: Vec<(Key, Value, strata_core::traits::WriteMode)>,
             _deletes: Vec<Key>,
             _version: u64,
+            _put_ttls: &[u64],
         ) -> strata_core::error::StrataResult<()> {
             Err(strata_core::error::StrataError::storage(
                 "simulated storage failure",

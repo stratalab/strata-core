@@ -1242,10 +1242,10 @@ impl Database {
                 }
             }
 
-            // Apply puts and deletes atomically with original WAL timestamp.
-            // Combines #1699 (preserve commit timestamp for time-travel) and
-            // #1707 (defer version bump until all entries installed, preventing
-            // partial-state visibility for concurrent follower readers).
+            // Apply puts and deletes atomically with original WAL timestamp
+            // and TTL. Combines #1699 (preserve commit timestamp for time-travel),
+            // #1707 (defer version bump until all entries installed), and
+            // #1740 (preserve TTL through WAL replay).
             {
                 let writes: Vec<_> = payload
                     .puts
@@ -1258,6 +1258,7 @@ impl Database {
                     deletes,
                     payload.version,
                     record.timestamp,
+                    &payload.put_ttls,
                 )?;
             }
 
@@ -2545,6 +2546,7 @@ mod tests {
             version,
             puts,
             deletes,
+            put_ttls: vec![],
         };
         // Use version (commit_version) as WAL record ordering key (#1696)
         let record = WalRecord::new(

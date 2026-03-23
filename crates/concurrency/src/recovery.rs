@@ -130,13 +130,15 @@ impl RecoveryCoordinator {
             max_version = max_version.max(payload.version);
 
             // Apply puts — use recovery-specific method to preserve original
-            // commit timestamp instead of generating a new Timestamp::now() (#1619).
-            for (key, value) in &payload.puts {
+            // commit timestamp and TTL (#1619, #1740).
+            for (i, (key, value)) in payload.puts.iter().enumerate() {
+                let ttl_ms = payload.put_ttls.get(i).copied().unwrap_or(0);
                 storage.put_recovery_entry(
                     key.clone(),
                     value.clone(),
                     payload.version,
                     record.timestamp,
+                    ttl_ms,
                 )?;
                 stats.writes_applied += 1;
             }
@@ -295,6 +297,7 @@ mod tests {
             version,
             puts,
             deletes,
+            put_ttls: vec![],
         };
         let record = WalRecord::new(
             txn_id,
