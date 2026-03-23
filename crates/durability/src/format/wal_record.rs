@@ -217,6 +217,11 @@ impl WalSegment {
         let header = SegmentHeader::new(segment_number, database_uuid);
         file.write_all(&header.to_bytes())?;
 
+        // Fsync the parent directory so the new file's directory entry is
+        // durable. Without this, a power loss can silently lose the entire
+        // segment even though the file contents were fsynced (issue #1711).
+        Self::fsync_parent_directory(dir)?;
+
         Ok(WalSegment {
             file,
             segment_number,
@@ -371,6 +376,24 @@ impl WalSegment {
             database_uuid: header.database_uuid,
             header_size: actual_header_size,
         })
+    }
+
+    /// Fsync a parent directory to make new directory entries durable.
+    /// Retries once on transient failure (matching disk_snapshot::fsync_directory).
+    fn fsync_parent_directory(dir: &Path) -> std::io::Result<()> {
+        let do_sync = || -> std::io::Result<()> {
+            let dir_file = File::open(dir)?;
+            dir_file.sync_all()
+        };
+        match do_sync() {
+            Ok(()) => Ok(()),
+            Err(first_err) => {
+                tracing::warn!(target: "strata::wal",
+                    error = %first_err, path = %dir.display(),
+                    "WAL directory fsync failed, retrying once");
+                do_sync()
+            }
+        }
     }
 
     /// Generate segment file path.
@@ -881,6 +904,53 @@ mod tests {
             result.is_none(),
             "Should reject v2 header with corrupted payload"
         );
+    }
+
+    /// Issue #1711: WalSegment::create() must fsync the parent directory so the
+    /// new segment's directory entry survives power loss.
+    ///
+    /// We cannot simulate power loss in a unit test, but we verify that:
+    /// 1. create() succeeds without error (including the directory fsync path)
+    /// 2. The segment file is immediately visible via directory listing
+    /// 3. Multiple segments in the same directory all remain visible after creation
+    #[test]
+    fn test_issue_1711_create_fsyncs_parent_directory() {
+        let dir = tempdir().unwrap();
+        let uuid = [0xAA; 16];
+
+        // Create several segments in the same directory — each must fsync the
+        // parent directory so its directory entry is durable.
+        for i in 1..=5 {
+            let segment = WalSegment::create(dir.path(), i, uuid).unwrap();
+            assert_eq!(segment.segment_number(), i);
+            drop(segment);
+
+            // Verify segment file is visible in the directory listing
+            let expected_path = WalSegment::segment_path(dir.path(), i);
+            assert!(
+                expected_path.exists(),
+                "Segment {} should exist after create()",
+                i
+            );
+        }
+
+        // Verify all segments are visible by listing the directory
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "seg"))
+            .collect();
+        assert_eq!(entries.len(), 5, "All 5 segments should be visible");
+
+        // Verify each segment can be reopened (directory entry intact)
+        for i in 1..=5 {
+            let segment = WalSegment::open_read(dir.path(), i).unwrap();
+            assert_eq!(segment.segment_number(), i);
+        }
+
+        // Verify the parent directory can be opened and synced (mechanism test)
+        let dir_fd = File::open(dir.path()).unwrap();
+        dir_fd.sync_all().unwrap();
     }
 
     #[test]
