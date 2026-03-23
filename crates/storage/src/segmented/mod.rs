@@ -1867,16 +1867,18 @@ impl SegmentedStore {
                 }
             }
 
-            // Try to read manifest for level assignments
+            // Try to read manifest for level assignments.
+            // A corrupt manifest is a fatal error — silently loading all files
+            // as L0 would introduce orphaned SSTs from failed compactions (#1680).
             let manifest = match crate::manifest::read_manifest(&path) {
                 Ok(m) => m,
                 Err(e) => {
-                    tracing::warn!(
+                    tracing::error!(
                         branch = %dir_name,
                         error = %e,
-                        "corrupt manifest, falling back to all-L0"
+                        "corrupt manifest, refusing to load segments without manifest authority"
                     );
-                    None
+                    return Err(e);
                 }
             };
 

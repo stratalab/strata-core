@@ -3102,7 +3102,7 @@ fn recover_without_manifest_all_l0() {
 }
 
 #[test]
-fn recover_manifest_corrupt_falls_back_to_l0() {
+fn recover_manifest_corrupt_returns_error() {
     let dir = tempfile::tempdir().unwrap();
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
     let b = branch();
@@ -3115,18 +3115,13 @@ fn recover_manifest_corrupt_falls_back_to_l0() {
     let manifest_path = branch_dir.join("segments.manifest");
     std::fs::write(&manifest_path, b"corrupted data!").unwrap();
 
-    // Recover — corrupt manifest falls back to all-L0
+    // Recover — corrupt manifest must return error, not silently load all as L0 (#1680)
     let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
-    store2.recover_segments().unwrap();
-
-    assert_eq!(store2.l0_segment_count(&b), 1);
-    assert_eq!(store2.l1_segment_count(&b), 0);
-
-    // Data still correct
-    assert!(store2
-        .get_versioned(&kv_key("a"), u64::MAX)
-        .unwrap()
-        .is_some());
+    let result = store2.recover_segments();
+    assert!(
+        result.is_err(),
+        "corrupt manifest must cause recovery error"
+    );
 }
 
 // ========================================================================
@@ -7470,6 +7465,63 @@ fn test_issue_1677_shadow_check_returns_true_on_corruption() {
     assert!(
         result,
         "shadow check must return true on corruption to prevent stale data resurrection"
+    );
+}
+
+// =============================================================================
+// #1680: Recovery must not load orphaned SSTs when manifest is corrupt
+// =============================================================================
+
+/// When a manifest file exists but is corrupt, recovery should return an error
+/// rather than silently loading all SSTs (including orphans) as L0.
+#[test]
+fn test_issue_1680_corrupt_manifest_rejects_orphan_loading() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // Flush a real segment so we get a valid manifest + SST on disk.
+    seed(&store, kv_key("real"), Value::Int(1), 1);
+    store.rotate_memtable(&branch());
+    store.flush_oldest_frozen(&branch()).unwrap();
+
+    // Create an orphan SST (simulates a compaction output that crashed
+    // before the manifest was updated to include it).
+    let branch_hex = super::hex_encode_branch(&branch());
+    let branch_dir = dir.path().join(&branch_hex);
+
+    // Write a second real segment to act as the orphan.
+    seed(&store, kv_key("orphan"), Value::Int(999), 2);
+    store.rotate_memtable(&branch());
+    store.flush_oldest_frozen(&branch()).unwrap();
+
+    // Now read the manifest, remove the orphan entry, and write it back
+    // so the manifest only knows about the first segment.
+    let manifest = crate::manifest::read_manifest(&branch_dir)
+        .unwrap()
+        .unwrap();
+    assert!(
+        manifest.entries.len() >= 2,
+        "should have at least 2 segments"
+    );
+    // Keep only the first entry (the "real" segment)
+    let kept_entries = vec![manifest.entries[0].clone()];
+    crate::manifest::write_manifest(&branch_dir, &kept_entries, &manifest.inherited_layers)
+        .unwrap();
+
+    // Now corrupt the manifest file.
+    let manifest_path = branch_dir.join("segments.manifest");
+    let mut data = std::fs::read(&manifest_path).unwrap();
+    // Flip a byte in the middle to cause CRC mismatch.
+    let mid = data.len() / 2;
+    data[mid] ^= 0xFF;
+    std::fs::write(&manifest_path, &data).unwrap();
+
+    // Recovery should fail — NOT silently load all SSTs as L0.
+    let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let result = store2.recover_segments();
+    assert!(
+        result.is_err(),
+        "corrupt manifest must cause recovery error, not silent all-L0 fallback"
     );
 }
 
