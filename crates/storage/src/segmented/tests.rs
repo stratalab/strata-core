@@ -7391,6 +7391,104 @@ fn gc_orphan_segments_cleans_leaked_files() {
     assert_eq!(deleted, 0, "no orphans should remain after clear_branch GC");
 }
 
+/// #1705: materialize_layer must GC orphaned segments after decrementing refcounts.
+///
+/// Sequence: parent has segments → fork → parent compacts (old segs kept because
+/// refcount > 0) → child materializes (refcount → 0) → orphaned .sst files must
+/// be cleaned up by gc_orphan_segments called from materialize_layer.
+#[test]
+fn test_issue_1705_materialize_layer_gc_orphan_segments() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // Write TWO batches to parent so compaction can merge them
+    for i in 0..50 {
+        seed(
+            &store,
+            parent_kv(&format!("k{:04}", i)),
+            Value::Int(i as i64),
+            1,
+        );
+    }
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    for i in 50..100 {
+        seed(
+            &store,
+            parent_kv(&format!("k{:04}", i)),
+            Value::Int(i as i64),
+            2,
+        );
+    }
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // Fork → child inherits 2 segments, refcount=1 each
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    // Collect the inherited segment paths
+    let child_state = store.branches.get(&child_branch()).unwrap();
+    let inherited_paths: Vec<std::path::PathBuf> = child_state
+        .inherited_layers
+        .iter()
+        .flat_map(|l| l.segments.levels.iter())
+        .flat_map(|level| level.iter().map(|s| s.file_path().to_path_buf()))
+        .collect();
+    drop(child_state);
+    assert!(
+        inherited_paths.len() >= 2,
+        "expected at least 2 inherited segments"
+    );
+
+    // Parent compacts: S1 + S2 → S3. Old segments kept (refcount > 0).
+    store.compact_branch(&parent_branch(), 0).unwrap();
+    for path in &inherited_paths {
+        assert!(
+            path.exists(),
+            "segment should survive compaction (refcount > 0)"
+        );
+    }
+
+    // Child materializes the inherited layer → refcount → 0.
+    // materialize_layer should run gc_orphan_segments internally,
+    // cleaning up the orphaned files.
+    let result = store.materialize_layer(&child_branch(), 0).unwrap();
+    assert!(
+        result.entries_materialized > 0,
+        "should materialize entries"
+    );
+
+    // Orphaned segments should be deleted (GC ran as part of materialize_layer).
+    for path in &inherited_paths {
+        assert!(
+            !path.exists(),
+            "orphaned segment {:?} should be deleted by GC after materialize_layer",
+            path
+        );
+    }
+
+    // Calling GC again should find nothing to delete.
+    let deleted = store.gc_orphan_segments();
+    assert_eq!(
+        deleted, 0,
+        "no orphans should remain after materialize_layer GC"
+    );
+
+    // Child should still read materialized data from its own segments
+    let val = store
+        .get_versioned(&child_kv("k0000"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(val.value, Value::Int(0));
+}
+
 // ===== Issue #1677: Corruption must not resurrect stale data =====
 
 /// Regression test for issue #1677.
