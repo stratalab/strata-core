@@ -162,7 +162,7 @@ Coordinates the commit protocol. Owns two atomic counters and per-branch commit 
 |-------|------|---------|
 | `version` | `AtomicU64` | Global monotonic version counter (shared across all branches) |
 | `next_txn_id` | `AtomicU64` | Next transaction ID (unique per TransactionManager) |
-| `commit_locks` | `DashMap<BranchId, Mutex<()>>` | Per-branch commit serialization |
+| `commit_locks` | `DashMap<BranchId, Arc<Mutex<()>>>` | Per-branch commit serialization (#1781: Arc decouples shard lock from commit duration) |
 
 ### 2.2 Counter Allocation
 
