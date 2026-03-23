@@ -85,6 +85,12 @@ impl LlamaCppContext {
             512
         };
 
+        // Encoder-only models (BERT, NomicBERT, etc.) have no KV cache, so
+        // llama_get_kv_self returns null. llama_model_has_encoder only returns
+        // true for encoder-decoder models (T5), so we also check for a null
+        // KV cache to detect encoder-only architectures that need encode().
+        let has_encoder = has_encoder || api.kv_self_is_null(ctx);
+
         info!(
             n_embd = n_embd,
             vocab_size = vocab_size,
@@ -374,5 +380,31 @@ mod tests {
         let expected = Path::new("/tmp/../tmp/./model.gguf").to_str().unwrap();
         let cstr = result.unwrap();
         assert_eq!(cstr.to_str().unwrap(), expected);
+    }
+
+    /// Issue #1769: BERT (encoder-only) models must set has_encoder=true so that
+    /// embed() calls llama_encode() instead of llama_decode(). Without this,
+    /// llama.cpp logs "cannot decode batches with this context" per batch.
+    #[test]
+    #[ignore]
+    fn test_issue_1769_bert_model_uses_encode() {
+        let registry = crate::registry::ModelRegistry::new();
+        let path = match registry.resolve("miniLM") {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("skipping test_issue_1769: {e}");
+                return;
+            }
+        };
+        let ctx = LlamaCppContext::load_for_embedding(&path)
+            .expect("load_for_embedding should succeed for MiniLM");
+
+        // MiniLM is a BERT encoder-only model. It has no KV cache and must
+        // use llama_encode(), so has_encoder must be true.
+        assert!(
+            ctx.has_encoder,
+            "BERT/MiniLM should have has_encoder=true to use llama_encode(), \
+             but got false — llama_decode() will log 'cannot decode batches' warnings"
+        );
     }
 }

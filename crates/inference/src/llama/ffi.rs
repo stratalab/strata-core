@@ -164,7 +164,6 @@ extern "C" {
     pub fn llama_free(ctx: LlamaContext);
 
     // Memory (b5440 uses the older KV cache API -- called via shims above)
-    #[allow(dead_code)]
     pub fn llama_get_kv_self(ctx: LlamaContext) -> LlamaMemory;
     pub fn llama_kv_self_clear(ctx: LlamaContext);
 
@@ -362,6 +361,11 @@ impl LlamaCppApi {
 
     pub fn get_memory(&self, ctx: LlamaContext) -> LlamaMemory {
         unsafe { shim_get_memory(ctx) }
+    }
+
+    /// Returns true if the context has no KV cache (encoder-only models like BERT).
+    pub fn kv_self_is_null(&self, ctx: LlamaContext) -> bool {
+        unsafe { llama_get_kv_self(ctx) }.is_null()
     }
 
     pub fn memory_clear(&self, mem: LlamaMemory, data: bool) {
