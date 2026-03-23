@@ -187,6 +187,19 @@ pub fn search(
         SearchMode::Vector => "vector",
     };
     let model_name = p.db.config().model.map(|m| m.model.clone());
+
+    // Surface embedding progress when auto-embed is active with pending items
+    let embed_status = crate::handlers::embed_hook::embed_status(p);
+    let (embedding_pending, embedding_total) =
+        if embed_status.auto_embed && embed_status.pending > 0 {
+            (
+                Some(embed_status.pending as u64),
+                Some(embed_status.total_queued),
+            )
+        } else {
+            (None, None)
+        };
+
     let stats = SearchStatsOutput {
         elapsed_ms: response.stats.elapsed_micros as f64 / 1000.0,
         candidates_considered: response.stats.candidates_considered,
@@ -207,6 +220,8 @@ pub fn search(
             None
         },
         rerank_model: if rerank_used { model_name } else { None },
+        embedding_pending,
+        embedding_total,
     };
 
     // Convert SearchResponse hits to SearchResultHit

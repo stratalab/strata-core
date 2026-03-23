@@ -627,6 +627,8 @@ fn test_output_search_results_with_stats() {
             rerank_used: false,
             expansion_model: None,
             rerank_model: None,
+            embedding_pending: None,
+            embedding_total: None,
         },
     });
 }
@@ -646,6 +648,29 @@ fn test_output_search_results_with_model_names() {
             rerank_used: true,
             expansion_model: Some("qwen3:1.7b".to_string()),
             rerank_model: Some("qwen3:1.7b".to_string()),
+            embedding_pending: None,
+            embedding_total: None,
+        },
+    });
+}
+
+#[test]
+fn test_output_search_results_with_embedding_progress() {
+    test_output_round_trip(Output::SearchResults {
+        hits: vec![],
+        stats: SearchStatsOutput {
+            elapsed_ms: 3.0,
+            candidates_considered: 10,
+            candidates_by_primitive: std::collections::HashMap::new(),
+            index_used: false,
+            truncated: false,
+            mode: "hybrid".to_string(),
+            expansion_used: false,
+            rerank_used: false,
+            expansion_model: None,
+            rerank_model: None,
+            embedding_pending: Some(42),
+            embedding_total: Some(100),
         },
     });
 }
