@@ -7974,3 +7974,164 @@ fn test_issue_1682_segment_deletion_races_fork_refcount_concurrent() {
         }
     }
 }
+
+// ===== Issue #1698: Time-travel TTL evaluates against wall-clock now =====
+
+/// Insert a MemtableEntry with explicit timestamp and TTL into the store.
+fn seed_with_timestamp_and_ttl(
+    store: &SegmentedStore,
+    key: Key,
+    value: Value,
+    version: u64,
+    timestamp: Timestamp,
+    ttl_ms: u64,
+) {
+    let branch_id = key.namespace.branch_id;
+    let branch = store
+        .branches
+        .entry(branch_id)
+        .or_insert_with(BranchState::new);
+    let entry = MemtableEntry {
+        value,
+        is_tombstone: false,
+        timestamp,
+        ttl_ms,
+    };
+    branch.active.put_entry(&key, version, entry);
+}
+
+#[test]
+fn test_issue_1698_get_at_timestamp_ttl_uses_query_time() {
+    // Scenario from issue #1698:
+    // - Entry written at t=100s with TTL=60s (expires at t=160s)
+    // - Query at t=120s (entry alive at this time)
+    // - Query runs at wall-clock now >> 160s
+    // Expected: entry returned (alive at t=120s)
+    // Bug: is_expired() evaluates against now, skipping the entry
+    let store = SegmentedStore::new();
+    let key = kv_key("ttl_key");
+
+    let write_ts = Timestamp::from_micros(100_000_000); // 100 seconds
+    let ttl_ms = 60_000; // 60 seconds
+    seed_with_timestamp_and_ttl(&store, key.clone(), Value::Int(42), 1, write_ts, ttl_ms);
+
+    // Query at t=120s — entry should be alive (written at t=100, TTL=60s, expires at t=160s)
+    let query_ts = 120_000_000u64; // 120 seconds in microseconds
+    let result = store.get_at_timestamp(&key, query_ts).unwrap();
+    assert!(
+        result.is_some(),
+        "Entry should be visible at t=120s (TTL expires at t=160s, not yet expired)"
+    );
+    assert_eq!(result.unwrap().value, Value::Int(42));
+}
+
+#[test]
+fn test_issue_1698_get_at_timestamp_ttl_expired_at_query_time() {
+    // Entry written at t=100s with TTL=60s (expires at t=160s)
+    // Query at t=200s — entry should be expired at query time
+    let store = SegmentedStore::new();
+    let key = kv_key("ttl_key_expired");
+
+    let write_ts = Timestamp::from_micros(100_000_000);
+    let ttl_ms = 60_000;
+    seed_with_timestamp_and_ttl(&store, key.clone(), Value::Int(42), 1, write_ts, ttl_ms);
+
+    let query_ts = 200_000_000u64; // 200 seconds
+    let result = store.get_at_timestamp(&key, query_ts).unwrap();
+    assert!(
+        result.is_none(),
+        "Entry should be expired at t=200s (TTL expired at t=160s)"
+    );
+}
+
+#[test]
+fn test_issue_1698_list_by_type_at_timestamp_ttl_uses_query_time() {
+    let store = SegmentedStore::new();
+    let key = kv_key("ttl_list_key");
+
+    let write_ts = Timestamp::from_micros(100_000_000);
+    let ttl_ms = 60_000;
+    seed_with_timestamp_and_ttl(&store, key.clone(), Value::Int(99), 1, write_ts, ttl_ms);
+
+    // Query at t=120s — entry alive
+    let query_ts = 120_000_000u64;
+    let results = store.list_by_type_at_timestamp(&branch(), TypeTag::KV, query_ts);
+    assert_eq!(results.len(), 1, "Entry should be visible at t=120s");
+    assert_eq!(results[0].1.value, Value::Int(99));
+}
+
+#[test]
+fn test_issue_1698_scan_prefix_at_timestamp_ttl_uses_query_time() {
+    let store = SegmentedStore::new();
+    let key = kv_key("ttl_scan_key");
+
+    let write_ts = Timestamp::from_micros(100_000_000);
+    let ttl_ms = 60_000;
+    seed_with_timestamp_and_ttl(&store, key.clone(), Value::Int(77), 1, write_ts, ttl_ms);
+
+    // Query at t=120s — entry alive
+    let query_ts = 120_000_000u64;
+    let prefix = kv_key("ttl_scan");
+    let results = store.scan_prefix_at_timestamp(&prefix, query_ts).unwrap();
+    assert_eq!(results.len(), 1, "Entry should be visible at t=120s");
+    assert_eq!(results[0].1.value, Value::Int(77));
+}
+
+#[test]
+fn test_issue_1698_list_by_type_at_timestamp_ttl_expired_at_query_time() {
+    let store = SegmentedStore::new();
+    let key = kv_key("ttl_list_exp");
+
+    let write_ts = Timestamp::from_micros(100_000_000);
+    let ttl_ms = 60_000;
+    seed_with_timestamp_and_ttl(&store, key.clone(), Value::Int(99), 1, write_ts, ttl_ms);
+
+    // Query at t=200s — entry expired at query time
+    let query_ts = 200_000_000u64;
+    let results = store.list_by_type_at_timestamp(&branch(), TypeTag::KV, query_ts);
+    assert_eq!(results.len(), 0, "Entry should be expired at t=200s");
+}
+
+#[test]
+fn test_issue_1698_scan_prefix_at_timestamp_ttl_expired_at_query_time() {
+    let store = SegmentedStore::new();
+    let key = kv_key("ttl_scan_exp");
+
+    let write_ts = Timestamp::from_micros(100_000_000);
+    let ttl_ms = 60_000;
+    seed_with_timestamp_and_ttl(&store, key.clone(), Value::Int(77), 1, write_ts, ttl_ms);
+
+    // Query at t=200s — entry expired at query time
+    let query_ts = 200_000_000u64;
+    let prefix = kv_key("ttl_scan");
+    let results = store.scan_prefix_at_timestamp(&prefix, query_ts).unwrap();
+    assert_eq!(results.len(), 0, "Entry should be expired at t=200s");
+}
+
+#[test]
+fn test_issue_1698_get_at_timestamp_ttl_exact_expiry_boundary() {
+    // Entry written at t=100s with TTL=60s → expires at exactly t=160s
+    // Query at t=160s (exact boundary) — should be expired (>= semantics)
+    let store = SegmentedStore::new();
+    let key = kv_key("ttl_boundary");
+
+    let write_ts = Timestamp::from_micros(100_000_000);
+    let ttl_ms = 60_000; // 60s = 60_000_000 micros
+    seed_with_timestamp_and_ttl(&store, key.clone(), Value::Int(42), 1, write_ts, ttl_ms);
+
+    // Exact boundary: 100s + 60s = 160s
+    let query_ts = 160_000_000u64;
+    let result = store.get_at_timestamp(&key, query_ts).unwrap();
+    assert!(
+        result.is_none(),
+        "Entry should be expired at exact boundary t=160s (>= semantics)"
+    );
+
+    // One microsecond before boundary: still alive
+    let query_ts_before = 159_999_999u64;
+    let result_before = store.get_at_timestamp(&key, query_ts_before).unwrap();
+    assert!(
+        result_before.is_some(),
+        "Entry should be alive 1µs before expiry"
+    );
+}
