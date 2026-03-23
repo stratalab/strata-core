@@ -1932,27 +1932,40 @@ impl SegmentedStore {
             .branches
             .entry(*branch_id)
             .or_insert_with(BranchState::new);
-        if let Some(last) = branch.frozen.last() {
+        let popped = if let Some(last) = branch.frozen.last() {
             if last.id() == frozen_mt.id() {
                 branch.frozen.pop();
                 self.total_frozen_count.fetch_sub(1, Ordering::Relaxed);
+                true
+            } else {
+                false
             }
-        }
-        // Build new version with the new segment prepended (newest first).
-        let old_ver = branch.version.load();
-        let mut new_l0 = Vec::with_capacity(old_ver.l0_segments().len() + 1);
-        new_l0.push(Arc::new(segment));
-        new_l0.extend(old_ver.l0_segments().iter().cloned());
-        let mut new_levels = old_ver.levels.clone();
-        new_levels[0] = new_l0;
-        branch
-            .version
-            .store(Arc::new(SegmentVersion { levels: new_levels }));
-        refresh_level_targets(&mut branch, self.level_base_bytes());
+        } else {
+            false
+        };
 
-        // Persist level assignments
-        drop(branch);
-        self.write_branch_manifest(branch_id);
+        if popped {
+            // Build new version with the new segment prepended (newest first).
+            let old_ver = branch.version.load();
+            let mut new_l0 = Vec::with_capacity(old_ver.l0_segments().len() + 1);
+            new_l0.push(Arc::new(segment));
+            new_l0.extend(old_ver.l0_segments().iter().cloned());
+            let mut new_levels = old_ver.levels.clone();
+            new_levels[0] = new_l0;
+            branch
+                .version
+                .store(Arc::new(SegmentVersion { levels: new_levels }));
+            refresh_level_targets(&mut branch, self.level_base_bytes());
+
+            // Persist level assignments
+            drop(branch);
+            self.write_branch_manifest(branch_id);
+        } else {
+            // Another thread already flushed this memtable; discard the
+            // duplicate segment file we just built.
+            drop(branch);
+            let _ = std::fs::remove_file(&seg_path);
+        }
 
         Ok(true)
     }
