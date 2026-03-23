@@ -967,8 +967,7 @@ mod tests {
         for seg_num in 1..=2u64 {
             let meta = crate::format::segment_meta::SegmentMeta::read_from_file(&wal_dir, seg_num)
                 .unwrap()
-                .unwrap_or_else(|| panic!("Segment {} should have .meta after recovery",
-                    seg_num));
+                .unwrap_or_else(|| panic!("Segment {} should have .meta after recovery", seg_num));
             assert_eq!(meta.segment_number, seg_num);
             assert_eq!(meta.record_count, 1);
         }

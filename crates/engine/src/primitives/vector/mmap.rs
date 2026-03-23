@@ -174,9 +174,9 @@ impl MmapVectorData {
 
         // Validate file is large enough before allocating (#1780).
         // Each id_to_offset entry is 16 bytes (VectorId u64 + offset u64).
-        let entries_bytes = count.checked_mul(16).ok_or_else(|| {
-            VectorError::Serialization("mmap count overflow".into())
-        })?;
+        let entries_bytes = count
+            .checked_mul(16)
+            .ok_or_else(|| VectorError::Serialization("mmap count overflow".into()))?;
         if HEADER_SIZE + entries_bytes > mmap.len() {
             return Err(VectorError::Serialization(format!(
                 "mmap claims {} entries but file is only {} bytes",
@@ -214,9 +214,9 @@ impl MmapVectorData {
         pos += 4;
 
         // Validate file can hold claimed free slots before allocating (#1780).
-        let free_slots_bytes = free_slots_count.checked_mul(8).ok_or_else(|| {
-            VectorError::Serialization("mmap free_slots_count overflow".into())
-        })?;
+        let free_slots_bytes = free_slots_count
+            .checked_mul(8)
+            .ok_or_else(|| VectorError::Serialization("mmap free_slots_count overflow".into()))?;
         if pos + free_slots_bytes > mmap.len() {
             return Err(VectorError::Serialization(format!(
                 "mmap claims {} free slots but only {} bytes remain",

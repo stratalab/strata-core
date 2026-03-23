@@ -1703,8 +1703,7 @@ mod tests {
         let branch_id = BranchId::new();
         let doc_id = "test-doc";
 
-        let result =
-            store.delete_at_path(&branch_id, "default", doc_id, &"field".parse().unwrap());
+        let result = store.delete_at_path(&branch_id, "default", doc_id, &"field".parse().unwrap());
         assert!(result.is_err());
     }
 
