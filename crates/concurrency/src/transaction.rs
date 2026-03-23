@@ -50,6 +50,13 @@ pub enum CommitError {
 
     /// Counter overflow (transaction ID or version counter reached u64::MAX)
     CounterOverflow(String),
+
+    /// Storage application failed after WAL commit (#1725)
+    ///
+    /// The transaction IS durable (WAL record written) and will be recovered
+    /// on restart, but it is NOT visible to reads in the current process.
+    /// The caller must not assume the data is immediately readable.
+    DurableButNotVisible(String),
 }
 
 impl std::fmt::Display for CommitError {
@@ -62,6 +69,13 @@ impl std::fmt::Display for CommitError {
             CommitError::WALError(msg) => write!(f, "WAL error: {}", msg),
             CommitError::StorageError(msg) => write!(f, "Storage error during validation: {}", msg),
             CommitError::CounterOverflow(msg) => write!(f, "Counter overflow: {}", msg),
+            CommitError::DurableButNotVisible(msg) => {
+                write!(
+                    f,
+                    "Durable but not visible (will recover on restart): {}",
+                    msg
+                )
+            }
         }
     }
 }
@@ -87,6 +101,10 @@ impl From<CommitError> for StrataError {
             CommitError::CounterOverflow(msg) => {
                 StrataError::capacity_exceeded(msg, usize::MAX, usize::MAX)
             }
+            CommitError::DurableButNotVisible(msg) => StrataError::Storage {
+                message: format!("Durable but not visible (will recover on restart): {}", msg),
+                source: None,
+            },
         }
     }
 }
