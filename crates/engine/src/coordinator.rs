@@ -300,6 +300,14 @@ impl TransactionCoordinator {
         self.manager.current_version()
     }
 
+    /// Ensure the version counter is at least `floor` (#1726).
+    ///
+    /// Called after segment recovery to prevent version collisions when the
+    /// WAL has been fully compacted.
+    pub fn bump_version_floor(&self, floor: u64) {
+        self.manager.bump_version_floor(floor);
+    }
+
     /// Get the current version after draining all in-flight commits (#1710).
     ///
     /// Safe to use as a checkpoint watermark — no version ≤ the returned
