@@ -14,8 +14,8 @@ use strata_core::value::Value;
 use strata_engine::Database;
 use tempfile::TempDir;
 
-fn create_ns(branch_id: BranchId) -> Namespace {
-    Namespace::new(branch_id, "default".to_string())
+fn create_ns(branch_id: BranchId) -> Arc<Namespace> {
+    Arc::new(Namespace::new(branch_id, "default".to_string()))
 }
 
 /// Benchmark: Single-threaded transactions (no contention)

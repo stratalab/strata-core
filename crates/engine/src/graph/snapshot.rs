@@ -144,7 +144,7 @@ mod tests {
         let adj = snap.to_adjacency_list();
         assert_eq!(adj.get("A").unwrap().len(), 2);
         assert_eq!(adj.get("B").unwrap().len(), 1);
-        assert!(adj.get("C").is_none()); // C has no outgoing
+        assert!(!adj.contains_key("C")); // C has no outgoing
     }
 
     #[test]

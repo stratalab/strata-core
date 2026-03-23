@@ -332,7 +332,7 @@ mod tests {
     /// Helper to create a KV EntityRef
     fn make_kv_doc_ref(branch_id: &BranchId, key: &str) -> EntityRef {
         EntityRef::Kv {
-            branch_id: branch_id.clone(),
+            branch_id: *branch_id,
             key: key.to_string(),
         }
     }

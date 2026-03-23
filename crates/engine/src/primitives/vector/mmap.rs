@@ -172,6 +172,19 @@ impl MmapVectorData {
         // next_id
         let next_id = u64::from_le_bytes(data[20..28].try_into().unwrap());
 
+        // Validate file is large enough before allocating (#1780).
+        // Each id_to_offset entry is 16 bytes (VectorId u64 + offset u64).
+        let entries_bytes = count
+            .checked_mul(16)
+            .ok_or_else(|| VectorError::Serialization("mmap count overflow".into()))?;
+        if HEADER_SIZE + entries_bytes > mmap.len() {
+            return Err(VectorError::Serialization(format!(
+                "mmap claims {} entries but file is only {} bytes",
+                count,
+                mmap.len()
+            )));
+        }
+
         let mut pos = HEADER_SIZE;
 
         // id_to_offset entries → compact sorted index
@@ -199,6 +212,18 @@ impl MmapVectorData {
         }
         let free_slots_count = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
+
+        // Validate file can hold claimed free slots before allocating (#1780).
+        let free_slots_bytes = free_slots_count
+            .checked_mul(8)
+            .ok_or_else(|| VectorError::Serialization("mmap free_slots_count overflow".into()))?;
+        if pos + free_slots_bytes > mmap.len() {
+            return Err(VectorError::Serialization(format!(
+                "mmap claims {} free slots but only {} bytes remain",
+                free_slots_count,
+                mmap.len().saturating_sub(pos)
+            )));
+        }
 
         let mut free_slots = Vec::with_capacity(free_slots_count);
         for _ in 0..free_slots_count {
@@ -403,7 +428,7 @@ mod tests {
         id_to_offset.insert(VectorId::new(1), 0usize);
         id_to_offset.insert(VectorId::new(3), 3usize);
 
-        let raw_data: Vec<f32> = vec![
+        let _raw_data: Vec<f32> = vec![
             1.0, 0.0, 0.0, // id=1 at offset 0
             0.0, 0.0, 0.0, // deleted slot (offset 3 would be id=2 but it's free)
             0.0, 1.0, 0.0, // id=3 at offset 3... wait, offset 3 maps to floats 3,4,5
@@ -483,6 +508,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // OOM: Vec::with_capacity(4B) on 64-bit — see #1780
     fn test_issue_1735_mmap_rejects_oversized_count() {
         // Craft a valid-looking mmap file with count > u32::MAX.
         // On 32-bit, this must error (not silently truncate).

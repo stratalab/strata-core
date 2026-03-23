@@ -644,12 +644,9 @@ mod tests {
 
     #[test]
     fn test_issue_1697_max_versions_respects_snapshot_floor() {
-        // Scenario from issue #1697:
-        // max_versions=1, snapshot_floor=6 (active snapshot at version 5)
-        // Key K has versions 6 and 5.
-        // Without snapshot_floor, version 5 would be dropped (only 1 allowed).
-        // With snapshot_floor=6, version 5 must be preserved because an active
-        // snapshot might need it.
+        // max_versions=1, versions 6 and 5.
+        // snapshot_floor=5 (gc_safe_point returned min_active_version=5).
+        // Version 5 has commit_id >= snapshot_floor → protected from pruning.
         let items = vec![
             (InternalKey::encode(&key("k"), 6), entry(60)),
             (InternalKey::encode(&key("k"), 5), entry(50)),
@@ -657,15 +654,18 @@ mod tests {
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 0)
             .with_max_versions(1)
-            .with_snapshot_floor(6)
+            .with_snapshot_floor(5)
             .collect();
-        // Both versions must survive: version 5 is >= snapshot_floor is false,
-        // but it's needed because a snapshot at version 5 could read it.
-        // Actually snapshot_floor=6 means versions < 6 are safe to drop
-        // ONLY IF they exceed max_versions. But version 5 might be read by
-        // a snapshot pinned at version 5, so snapshot_floor should be the
-        // min_active_version (5), meaning versions >= 5 cannot be dropped.
-        // Let's use snapshot_floor=5 (the min active version).
+        assert_eq!(
+            result.len(),
+            2,
+            "version 5 must survive: active snapshot at version 5 needs it"
+        );
+        assert_eq!(result[0].0.commit_id(), 6);
+        assert_eq!(result[1].0.commit_id(), 5);
+
+        // snapshot_floor=6: version 5 (commit_id 5 < 6) is NOT protected.
+        // max_versions=1 drops it normally.
         let items2 = vec![
             (InternalKey::encode(&key("k"), 6), entry(60)),
             (InternalKey::encode(&key("k"), 5), entry(50)),
@@ -673,15 +673,14 @@ mod tests {
         let merge2 = MergeIterator::new(vec![items2.into_iter()]);
         let result2: Vec<_> = CompactionIterator::new(merge2, 0)
             .with_max_versions(1)
-            .with_snapshot_floor(5)
+            .with_snapshot_floor(6)
             .collect();
         assert_eq!(
             result2.len(),
-            2,
-            "version 5 must survive: active snapshot at version 5 needs it"
+            1,
+            "version 5 is below snapshot_floor=6, not protected"
         );
         assert_eq!(result2[0].0.commit_id(), 6);
-        assert_eq!(result2[1].0.commit_id(), 5);
     }
 
     #[test]
@@ -726,6 +725,46 @@ mod tests {
             "no snapshot protection, max_versions=1 keeps only newest"
         );
         assert_eq!(result[0].0.commit_id(), 6);
+    }
+
+    #[test]
+    fn test_issue_1697_snapshot_floor_with_prune_floor() {
+        // prune_floor=4, max_versions=1, snapshot_floor=3.
+        // Versions: 6 (above floor), 3 (below floor = floor entry).
+        // Without snapshot_floor, max_versions=1 keeps version 6, drops floor entry 3.
+        // With snapshot_floor=3, floor entry 3 has commit_id >= snapshot_floor → protected.
+        let items = vec![
+            (InternalKey::encode(&key("k"), 6), entry(60)),
+            (InternalKey::encode(&key("k"), 3), entry(30)),
+        ];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 4)
+            .with_max_versions(1)
+            .with_snapshot_floor(3)
+            .collect();
+        assert_eq!(result.len(), 2, "floor entry protected by snapshot_floor");
+        assert_eq!(result[0].0.commit_id(), 6);
+        assert_eq!(result[1].0.commit_id(), 3);
+    }
+
+    #[test]
+    fn test_issue_1697_snapshot_floor_protects_tombstone() {
+        // max_versions=1, snapshot_floor=5. Tombstone at version 5 is the second
+        // version for this key. Without protection, max_versions drops it.
+        // With snapshot_floor=5, commit_id 5 >= 5 → protected.
+        let items = vec![
+            (InternalKey::encode(&key("k"), 8), entry(80)),
+            (InternalKey::encode(&key("k"), 5), tombstone()),
+        ];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 0)
+            .with_max_versions(1)
+            .with_snapshot_floor(5)
+            .collect();
+        assert_eq!(result.len(), 2, "tombstone at snapshot_floor must survive");
+        assert_eq!(result[0].0.commit_id(), 8);
+        assert!(result[1].1.is_tombstone);
+        assert_eq!(result[1].0.commit_id(), 5);
     }
 
     // -----------------------------------------------------------------------

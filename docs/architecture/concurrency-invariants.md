@@ -213,13 +213,14 @@ Writes are invisible to all other transactions until commit step 4 (apply to sto
 ### commit_locks (manager.rs:83)
 
 ```rust
-let branch_lock = self.commit_locks
+let commit_mutex = self.commit_locks
     .entry(txn.branch_id)
-    .or_insert_with(|| Mutex::new(()));
-let _commit_guard = branch_lock.lock();
+    .or_insert_with(|| Arc::new(Mutex::new(())))
+    .clone(); // clone Arc, drop RefMut → releases shard lock (#1781)
+let _commit_guard = commit_mutex.lock();
 ```
 
-**Safe**: `entry().or_insert_with()` is atomic — DashMap guarantees at-most-once initialization. Two threads on the same branch both reach the Mutex, but one blocks on `lock()`.
+**Safe**: `entry().or_insert_with()` is atomic — DashMap guarantees at-most-once initialization. The `Arc::clone()` drops the `RefMut` (releasing the DashMap shard lock) while keeping the Mutex alive. Two threads on the same branch get the same `Arc<Mutex>`, so one blocks on `lock()`. Threads on different branches no longer contend on DashMap shard locks (#1781).
 
 ### shards (sharded.rs:234)
 

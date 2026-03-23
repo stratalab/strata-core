@@ -866,7 +866,7 @@ CAS is validated independently from the read set. `expected_version=0` means
 pub struct TransactionManager {
     version: AtomicU64,
     next_txn_id: AtomicU64,
-    commit_locks: DashMap<BranchId, Mutex<()>>,
+    commit_locks: DashMap<BranchId, Arc<Mutex<()>>>,
 }
 ```
 

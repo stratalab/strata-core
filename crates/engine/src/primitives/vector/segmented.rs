@@ -2328,7 +2328,7 @@ mod tests {
 
         // Write a manifest with an invalid size (not 8 + N*24)
         let manifest_path = dir.join("segments.manifest");
-        std::fs::write(&manifest_path, &[0u8; 13]).unwrap(); // 13 bytes — invalid
+        std::fs::write(&manifest_path, [0u8; 13]).unwrap(); // 13 bytes — invalid
 
         let mut backend = make_backend_with_threshold(3, DistanceMetric::Cosine, 3);
         let loaded = backend.load_graphs_from_disk(&dir).unwrap();
@@ -2456,7 +2456,7 @@ mod tests {
         // heap_flush_threshold=5: flush after 5 overlay vectors
         for i in 1..=6 {
             backend
-                .insert_with_timestamp(VectorId::new(i), &[i as f32, 0.0, 0.0], i as u64)
+                .insert_with_timestamp(VectorId::new(i), &[i as f32, 0.0, 0.0], i)
                 .unwrap();
         }
 
@@ -2466,7 +2466,7 @@ mod tests {
         // Insert more after flush
         for i in 7..=9 {
             backend
-                .insert_with_timestamp(VectorId::new(i), &[i as f32, 0.0, 0.0], i as u64)
+                .insert_with_timestamp(VectorId::new(i), &[i as f32, 0.0, 0.0], i)
                 .unwrap();
         }
 
@@ -2829,7 +2829,7 @@ mod tests {
         // Insert 3 → seal to segment 1
         for i in 1..=3 {
             backend
-                .insert_with_timestamp(VectorId::new(i), &[i as f32, 0.0, 0.0], i as u64)
+                .insert_with_timestamp(VectorId::new(i), &[i as f32, 0.0, 0.0], i)
                 .unwrap();
         }
         assert_eq!(backend.segment_count(), 1);
@@ -2837,7 +2837,7 @@ mod tests {
         // Insert 3 more → seal to segment 2
         for i in 4..=6 {
             backend
-                .insert_with_timestamp(VectorId::new(i), &[i as f32, 0.0, 0.0], i as u64)
+                .insert_with_timestamp(VectorId::new(i), &[i as f32, 0.0, 0.0], i)
                 .unwrap();
         }
         assert_eq!(backend.segment_count(), 2);
@@ -2845,7 +2845,7 @@ mod tests {
         // Insert 3 more → seal to segment 3 → exceeds threshold of 2 → compact to 1
         for i in 7..=9 {
             backend
-                .insert_with_timestamp(VectorId::new(i), &[i as f32, 0.0, 0.0], i as u64)
+                .insert_with_timestamp(VectorId::new(i), &[i as f32, 0.0, 0.0], i)
                 .unwrap();
         }
         assert_eq!(
@@ -2882,7 +2882,7 @@ mod tests {
         // Create 5 segments (15 vectors, seal every 3)
         for i in 1..=15 {
             backend
-                .insert_with_timestamp(VectorId::new(i), &[i as f32, 0.0, 0.0], i as u64)
+                .insert_with_timestamp(VectorId::new(i), &[i as f32, 0.0, 0.0], i)
                 .unwrap();
         }
         assert_eq!(
@@ -2900,7 +2900,7 @@ mod tests {
         // Insert 5 vectors → seal
         for i in 1..=5 {
             backend
-                .insert_with_timestamp(VectorId::new(i), &[i as f32, 0.0, 0.0], i as u64)
+                .insert_with_timestamp(VectorId::new(i), &[i as f32, 0.0, 0.0], i)
                 .unwrap();
         }
         assert_eq!(backend.segment_count(), 1);
@@ -2940,7 +2940,7 @@ mod tests {
         ];
         for &(id, score_component) in &embeddings {
             backend
-                .insert_with_timestamp(VectorId::new(id), &[score_component, 0.0, 0.0], id as u64)
+                .insert_with_timestamp(VectorId::new(id), &[score_component, 0.0, 0.0], id)
                 .unwrap();
         }
 
@@ -3088,6 +3088,7 @@ mod profiling_tests {
     /// Times 100 queries. Then compact() into 1 segment, times same queries.
     /// Reports QPS and recall@10 for both configurations.
     #[test]
+    #[ignore] // profiling test — run explicitly with `cargo test -- --ignored`
     fn profile_segment_fanout_vs_compact() {
         use crate::primitives::vector::brute_force::BruteForceBackend;
 

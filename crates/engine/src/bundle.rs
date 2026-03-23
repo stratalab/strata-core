@@ -468,7 +468,7 @@ mod tests {
         assert!(format_micros(0).starts_with("1970-"));
 
         // Some timestamp in 2025
-        let ts = 1706_000_000_000_000u64; // approx Jan 2024
+        let ts = 1_706_000_000_000_000u64; // approx Jan 2024
         let formatted = format_micros(ts);
         assert!(!formatted.is_empty());
         assert!(formatted.ends_with('Z'));

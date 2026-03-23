@@ -558,7 +558,7 @@ fn flush_produces_valid_segment_file() {
     let sst_files: Vec<_> = std::fs::read_dir(&branch_dir)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "sst"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
         .collect();
     assert!(!sst_files.is_empty());
 
@@ -1660,7 +1660,7 @@ fn compact_concurrent_flush_preserves_new_segment() {
 #[test]
 fn apply_batch_equivalent_to_individual() {
     let store = SegmentedStore::new();
-    let b = branch();
+    let _b = branch();
 
     // Write some keys individually
     seed(&store, kv_key("a"), Value::Int(1), 1);
@@ -1713,7 +1713,7 @@ fn apply_batch_cross_branch() {
 #[test]
 fn apply_batch_with_deletes() {
     let store = SegmentedStore::new();
-    let b = branch();
+    let _b = branch();
 
     // Write first
     seed(&store, kv_key("a"), Value::Int(1), 1);
@@ -3102,7 +3102,7 @@ fn recover_without_manifest_all_l0() {
 }
 
 #[test]
-fn recover_manifest_corrupt_falls_back_to_l0() {
+fn recover_manifest_corrupt_returns_error() {
     let dir = tempfile::tempdir().unwrap();
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
     let b = branch();
@@ -3115,18 +3115,23 @@ fn recover_manifest_corrupt_falls_back_to_l0() {
     let manifest_path = branch_dir.join("segments.manifest");
     std::fs::write(&manifest_path, b"corrupted data!").unwrap();
 
-    // Recover — corrupt manifest falls back to all-L0
+    // Recover — corrupt manifest must NOT silently load all as L0 (#1680).
+    // The branch is skipped (own segments not loaded), but recovery itself
+    // succeeds so other branches are unaffected (#1691).
     let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
-    store2.recover_segments().unwrap();
-
-    assert_eq!(store2.l0_segment_count(&b), 1);
-    assert_eq!(store2.l1_segment_count(&b), 0);
-
-    // Data still correct
-    assert!(store2
-        .get_versioned(&kv_key("a"), u64::MAX)
-        .unwrap()
-        .is_some());
+    let info = store2.recover_segments().unwrap();
+    assert!(
+        info.corrupt_manifest_branches > 0,
+        "corrupt manifest branch must be reported"
+    );
+    // The corrupt branch's data must NOT be accessible.
+    assert!(
+        store2
+            .get_versioned(&kv_key("a"), u64::MAX)
+            .unwrap()
+            .is_none(),
+        "corrupt-manifest branch must not have segments loaded"
+    );
 }
 
 // ========================================================================
@@ -7076,6 +7081,97 @@ fn test_issue_1701_recovery_inherited_layer_finds_orphan_segments() {
 }
 
 // =============================================================================
+// #1691: Inherited-layer recovery independent of source branch state
+// =============================================================================
+
+/// Recovery of child's inherited layers must not depend on the source branch's
+/// manifest being intact.  If the parent's manifest is corrupt, recovery should
+/// skip the parent (not load its own segments) but still open the inherited
+/// segment files directly so the child branch is unaffected.
+#[test]
+fn test_issue_1691_inherited_layer_recovery_independent_of_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // 1. Write parent data in two flushes → 2 L0 segments
+    seed(&store, parent_kv("a"), Value::Int(1), 1);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    seed(&store, parent_kv("b"), Value::Int(2), 2);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // 2. Fork parent → child (child inherits both segments)
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    let (_fork_ver, shared) = store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+    assert!(shared >= 2, "child should share at least 2 segments");
+
+    // Verify child can read inherited data before crash
+    let val_a = store
+        .get_versioned(&child_kv("a"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(val_a.value, Value::Int(1));
+
+    // 3. Drop store (simulate crash)
+    drop(store);
+
+    // 4. Corrupt the PARENT's manifest — the child's manifest is intact.
+    //    This simulates a scenario where the source branch's recovery state
+    //    is broken, but the child's own data and the segment files are fine.
+    let parent_hex = super::hex_encode_branch(&parent_branch());
+    let parent_dir = dir.path().join(&parent_hex);
+    let manifest_path = parent_dir.join("segments.manifest");
+    let mut data = std::fs::read(&manifest_path).unwrap();
+    let mid = data.len() / 2;
+    data[mid] ^= 0xFF; // Flip a byte to cause CRC mismatch
+    std::fs::write(&manifest_path, &data).unwrap();
+
+    // 5. Recovery: should NOT fail entirely just because the parent's
+    //    manifest is corrupt.  The child's inherited segments should be
+    //    resolved directly from disk, independent of the source branch.
+    let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let info = store2.recover_segments().unwrap();
+
+    // 6. Child must still see inherited data after recovery.
+    let val_a_recovered = store2.get_versioned(&child_kv("a"), u64::MAX).unwrap();
+    assert!(
+        val_a_recovered.is_some(),
+        "child should see inherited key 'a' after recovery"
+    );
+    assert_eq!(val_a_recovered.unwrap().value, Value::Int(1));
+
+    let val_b_recovered = store2.get_versioned(&child_kv("b"), u64::MAX).unwrap();
+    assert!(
+        val_b_recovered.is_some(),
+        "child should see inherited key 'b' after recovery"
+    );
+    assert_eq!(val_b_recovered.unwrap().value, Value::Int(2));
+
+    // 7. The parent branch should NOT have been loaded with its own
+    //    segments (corrupt manifest → skipped).  The parent's segment
+    //    files still exist on disk, so the child's direct opens worked.
+    assert!(
+        info.corrupt_manifest_branches > 0,
+        "should report parent's corrupt manifest"
+    );
+    // Parent branch must not have its own segments loaded.
+    assert!(
+        store2
+            .get_versioned(&parent_kv("a"), u64::MAX)
+            .unwrap()
+            .is_none(),
+        "parent branch own segments must not be loaded (corrupt manifest)"
+    );
+}
+
+// =============================================================================
 // #1703: Concurrent materialize_layer is serialized
 // =============================================================================
 
@@ -7600,4 +7696,281 @@ fn test_issue_1679_fork_concurrent_write_visibility() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+// =============================================================================
+// #1680: Recovery must not load orphaned SSTs when manifest is corrupt
+// =============================================================================
+
+/// When a manifest file exists but is corrupt, recovery should return an error
+/// rather than silently loading all SSTs (including orphans) as L0.
+#[test]
+fn test_issue_1680_corrupt_manifest_rejects_orphan_loading() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // Flush a real segment so we get a valid manifest + SST on disk.
+    seed(&store, kv_key("real"), Value::Int(1), 1);
+    store.rotate_memtable(&branch());
+    store.flush_oldest_frozen(&branch()).unwrap();
+
+    // Create an orphan SST (simulates a compaction output that crashed
+    // before the manifest was updated to include it).
+    let branch_hex = super::hex_encode_branch(&branch());
+    let branch_dir = dir.path().join(&branch_hex);
+
+    // Write a second real segment to act as the orphan.
+    seed(&store, kv_key("orphan"), Value::Int(999), 2);
+    store.rotate_memtable(&branch());
+    store.flush_oldest_frozen(&branch()).unwrap();
+
+    // Now read the manifest, remove the orphan entry, and write it back
+    // so the manifest only knows about the first segment.
+    let manifest = crate::manifest::read_manifest(&branch_dir)
+        .unwrap()
+        .unwrap();
+    assert!(
+        manifest.entries.len() >= 2,
+        "should have at least 2 segments"
+    );
+    // Keep only the first entry (the "real" segment)
+    let kept_entries = vec![manifest.entries[0].clone()];
+    crate::manifest::write_manifest(&branch_dir, &kept_entries, &manifest.inherited_layers)
+        .unwrap();
+
+    // Now corrupt the manifest file.
+    let manifest_path = branch_dir.join("segments.manifest");
+    let mut data = std::fs::read(&manifest_path).unwrap();
+    // Flip a byte in the middle to cause CRC mismatch.
+    let mid = data.len() / 2;
+    data[mid] ^= 0xFF;
+    std::fs::write(&manifest_path, &data).unwrap();
+
+    // Recovery must NOT silently load all SSTs as L0 (#1680).
+    // The branch is skipped (own segments not loaded) but recovery succeeds
+    // so other branches remain functional (#1691).
+    let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let info = store2.recover_segments().unwrap();
+    assert!(
+        info.corrupt_manifest_branches > 0,
+        "corrupt manifest must be reported, not silently load as L0"
+    );
+    // The orphan SST must NOT be accessible (no L0 fallback).
+    let orphan_val = store2.get_versioned(&kv_key("orphan"), u64::MAX).unwrap();
+    assert!(
+        orphan_val.is_none(),
+        "orphan segment must not be loaded when manifest is corrupt"
+    );
+    // The real segment must also not be accessible (branch skipped entirely).
+    let real_val = store2.get_versioned(&kv_key("real"), u64::MAX).unwrap();
+    assert!(
+        real_val.is_none(),
+        "no segments should be loaded for corrupt-manifest branch"
+    );
+}
+
+// =====================================================================
+// Issue #1682: Shared-segment deletion races fork_branch refcount
+// =====================================================================
+
+/// #1682: delete_segment_if_unreferenced must not delete a segment file
+/// while a concurrent fork_branch is about to increment its refcount.
+///
+/// Setup: parent has 2 L0 segments. We fork a child, then clear it
+/// (refcount drops to 0), then race fork + compact on the parent.
+/// If the deletion barrier is missing, compaction can delete the segment
+/// file between is_referenced() returning false and the new fork's
+/// increment() call.
+#[test]
+fn test_issue_1682_segment_deletion_races_fork_refcount() {
+    use std::sync::{Arc, Barrier};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(SegmentedStore::with_dir(dir.path().to_path_buf(), 0));
+
+    // Populate parent with 2 L0 segments (needed for compaction).
+    for i in 0..50 {
+        seed(
+            &store,
+            parent_kv(&format!("k{:04}", i)),
+            Value::Int(i as i64),
+            1,
+        );
+    }
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    for i in 50..100 {
+        seed(
+            &store,
+            parent_kv(&format!("k{:04}", i)),
+            Value::Int(i as i64),
+            2,
+        );
+    }
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // Verify we have 2 L0 segments (needed for compaction).
+    {
+        let p = store.branches.get(&parent_branch()).unwrap();
+        let ver = p.version.load_full();
+        assert_eq!(ver.l0_segments().len(), 2, "should have 2 L0 segments");
+    }
+
+    // Fork child1 from parent → refcounts = 1 for parent segments.
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    // Clear child1 → refcounts back to 0.
+    store.clear_branch(&child_branch());
+
+    // Now race: fork a new child (child2) + compact parent concurrently.
+    // Without the deletion barrier, compaction can see refcount=0 and
+    // delete the segment file before fork increments the refcount.
+    let child2 = BranchId::from_bytes([40; 16]);
+    store
+        .branches
+        .entry(child2)
+        .or_insert_with(BranchState::new);
+
+    let barrier = Arc::new(Barrier::new(2));
+
+    let s1 = Arc::clone(&store);
+    let b1 = Arc::clone(&barrier);
+    let fork_handle = std::thread::spawn(move || {
+        b1.wait();
+        s1.fork_branch(&parent_branch(), &child2)
+    });
+
+    let s2 = Arc::clone(&store);
+    let b2 = Arc::clone(&barrier);
+    let compact_handle = std::thread::spawn(move || {
+        b2.wait();
+        s2.compact_branch(&parent_branch(), 0)
+    });
+
+    let fork_result = fork_handle.join().unwrap().unwrap();
+    let _compact_result = compact_handle.join().unwrap();
+
+    assert!(fork_result.1 > 0, "fork should share segments");
+
+    // The critical assertion: child2 must read ALL inherited data.
+    // If the race hit, segment files are deleted and reads fail with ENOENT.
+    let child2_ns = Arc::new(Namespace::new(
+        BranchId::from_bytes([40; 16]),
+        "default".to_string(),
+    ));
+    for i in 0..100 {
+        let key = Key::new(
+            Arc::clone(&child2_ns),
+            TypeTag::KV,
+            format!("k{:04}", i).as_bytes().to_vec(),
+        );
+        let result = store.get_versioned(&key, u64::MAX).unwrap();
+        assert!(
+            result.is_some(),
+            "child2 should see inherited key {:04} — segment file must not be deleted by race",
+            i
+        );
+    }
+}
+
+/// #1682 stress variant: run multiple rounds to increase the probability
+/// of hitting the race window between is_referenced() and remove_file().
+#[test]
+fn test_issue_1682_segment_deletion_races_fork_refcount_concurrent() {
+    use std::sync::{Arc, Barrier};
+
+    for round in 0..20 {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SegmentedStore::with_dir(dir.path().to_path_buf(), 0));
+
+        // Two L0 segments on parent.
+        for i in 0..30 {
+            seed(
+                &store,
+                parent_kv(&format!("r{}k{:04}", round, i)),
+                Value::Int(i as i64),
+                1,
+            );
+        }
+        store.rotate_memtable(&parent_branch());
+        store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+        for i in 30..60 {
+            seed(
+                &store,
+                parent_kv(&format!("r{}k{:04}", round, i)),
+                Value::Int(i as i64),
+                2,
+            );
+        }
+        store.rotate_memtable(&parent_branch());
+        store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+        // Fork child1 → refcount = 1, then clear → refcount = 0.
+        store
+            .branches
+            .entry(child_branch())
+            .or_insert_with(BranchState::new);
+        store
+            .fork_branch(&parent_branch(), &child_branch())
+            .unwrap();
+        store.clear_branch(&child_branch());
+
+        // Race fork child2 + compact.
+        let child2 = BranchId::from_bytes([40; 16]);
+        store
+            .branches
+            .entry(child2)
+            .or_insert_with(BranchState::new);
+
+        let barrier = Arc::new(Barrier::new(2));
+
+        let s1 = Arc::clone(&store);
+        let b1 = Arc::clone(&barrier);
+        let t1 = std::thread::spawn(move || {
+            b1.wait();
+            s1.fork_branch(&parent_branch(), &child2)
+        });
+
+        let s2 = Arc::clone(&store);
+        let b2 = Arc::clone(&barrier);
+        let t2 = std::thread::spawn(move || {
+            b2.wait();
+            s2.compact_branch(&parent_branch(), 0)
+        });
+
+        let fork_result = t1.join().unwrap().unwrap();
+        let _compact = t2.join().unwrap();
+
+        assert!(
+            fork_result.1 > 0,
+            "round {}: fork should share segments",
+            round
+        );
+
+        // Verify all data readable from child2.
+        let child2_ns = Arc::new(Namespace::new(child2, "default".to_string()));
+        for i in 0..60 {
+            let key = Key::new(
+                Arc::clone(&child2_ns),
+                TypeTag::KV,
+                format!("r{}k{:04}", round, i).as_bytes().to_vec(),
+            );
+            let result = store.get_versioned(&key, u64::MAX).unwrap();
+            assert!(
+                result.is_some(),
+                "round {}: child2 missing key {:04} — segment file may have been deleted by race",
+                round,
+                i,
+            );
+        }
+    }
 }

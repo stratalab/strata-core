@@ -458,6 +458,13 @@ impl SegmentBuilder {
         // 9. Atomic rename
         std::fs::rename(&tmp_path, path)?;
 
+        // 10. Fsync parent directory so the rename is durable on crash.
+        if let Some(parent) = path.parent() {
+            if let Ok(dir_fd) = std::fs::File::open(parent) {
+                let _ = dir_fd.sync_all();
+            }
+        }
+
         Ok(SegmentMeta {
             entry_count,
             commit_min,
@@ -1266,6 +1273,166 @@ pub(crate) const FOOTER_SZ: usize = FOOTER_SIZE;
 pub(crate) const FRAME_OVERHEAD: usize = BLOCK_FRAME_OVERHEAD;
 pub(crate) const IDX_TYPE_PARTITIONED: u8 = INDEX_TYPE_PARTITIONED;
 
+// ---------------------------------------------------------------------------
+// SplittingSegmentBuilder — splits output at target file size
+// ---------------------------------------------------------------------------
+
+/// Builds multiple segment files, splitting at `target_file_size` boundaries.
+///
+/// Wraps `SegmentBuilder` and automatically finalizes the current segment
+/// and starts a new one when the output exceeds the target size. Splits
+/// only at key boundaries (never between versions of the same logical key).
+pub struct SplittingSegmentBuilder {
+    /// Underlying builder configuration.
+    inner: SegmentBuilder,
+    /// Target file size in bytes (default 64MB).
+    pub target_file_size: u64,
+}
+
+impl SplittingSegmentBuilder {
+    /// Create a new splitting builder with the given target file size.
+    pub fn new(target_file_size: u64) -> Self {
+        Self {
+            inner: SegmentBuilder::default(),
+            target_file_size,
+        }
+    }
+
+    /// Set the bloom filter bits per key for output segments.
+    pub fn with_bloom_bits(mut self, bits_per_key: usize) -> Self {
+        self.inner.bloom_bits_per_key = bits_per_key;
+        self
+    }
+
+    /// Set the compression codec for output segments.
+    pub fn with_compression(mut self, codec: CompressionCodec) -> Self {
+        self.inner.compression = codec;
+        self
+    }
+
+    /// Set a rate limiter for throttling data block writes during compaction.
+    pub fn with_rate_limiter(
+        mut self,
+        limiter: std::sync::Arc<crate::rate_limiter::RateLimiter>,
+    ) -> Self {
+        self.inner.rate_limiter = Some(limiter);
+        self
+    }
+
+    /// Build one or more segment files from a sorted iterator.
+    ///
+    /// Returns `(path, metadata)` for each output segment. The `path_fn`
+    /// closure is called with a split index (0, 1, 2, ...) to generate
+    /// the path for each output segment.
+    ///
+    /// Split points are chosen at logical key boundaries — all versions
+    /// of a given key stay in the same segment.
+    pub fn build_split<I, F>(
+        &self,
+        iter: I,
+        path_fn: F,
+    ) -> io::Result<Vec<(std::path::PathBuf, SegmentMeta)>>
+    where
+        I: Iterator<Item = (InternalKey, MemtableEntry)>,
+        F: Fn(usize) -> std::path::PathBuf,
+    {
+        self.build_split_with_predicate(iter, path_fn, |_| false)
+    }
+
+    /// Build one or more segment files, with an additional split predicate.
+    ///
+    /// In addition to splitting at `target_file_size` boundaries, the caller
+    /// can supply a `should_split` predicate that receives the typed_key_prefix
+    /// of each new logical key.  When the predicate returns `true`, a split is
+    /// forced even if the current segment hasn't reached `target_file_size`.
+    ///
+    /// This is used for grandparent-aware splitting during leveled compaction:
+    /// the predicate tracks cumulative overlap with L+2 files and forces a
+    /// split when the overlap exceeds a threshold.
+    pub fn build_split_with_predicate<I, F, P>(
+        &self,
+        iter: I,
+        path_fn: F,
+        mut should_split: P,
+    ) -> io::Result<Vec<(std::path::PathBuf, SegmentMeta)>>
+    where
+        I: Iterator<Item = (InternalKey, MemtableEntry)>,
+        F: Fn(usize) -> std::path::PathBuf,
+        P: FnMut(&[u8]) -> bool,
+    {
+        let mut results: Vec<(std::path::PathBuf, SegmentMeta)> = Vec::new();
+        let mut split_idx: usize = 0;
+
+        // Buffer entries for the current segment
+        let mut current_entries: Vec<(InternalKey, MemtableEntry)> = Vec::new();
+        let mut current_bytes: u64 = 0;
+        let mut last_typed_key: Option<Vec<u8>> = None;
+
+        for (ik, entry) in iter {
+            let typed_key = ik.typed_key_prefix().to_vec();
+
+            // At a key boundary (new logical key), check if we should split
+            if last_typed_key.as_ref() != Some(&typed_key)
+                && !current_entries.is_empty()
+                && (current_bytes >= self.target_file_size || should_split(&typed_key))
+            {
+                let path = path_fn(split_idx);
+                let meta = self
+                    .inner
+                    .build_from_iter(current_entries.drain(..), &path)?;
+                if meta.entry_count > 0 {
+                    results.push((path, meta));
+                    split_idx += 1;
+                }
+                current_bytes = 0;
+            }
+
+            last_typed_key = Some(typed_key);
+
+            // Estimate entry size: ik + 25 bytes header + value
+            let entry_size = ik.as_bytes().len() as u64 + 25 + estimate_value_size(&entry);
+            current_bytes += entry_size;
+            current_entries.push((ik, entry));
+        }
+
+        // Flush remaining entries
+        if !current_entries.is_empty() {
+            let path = path_fn(split_idx);
+            let meta = self
+                .inner
+                .build_from_iter(current_entries.drain(..), &path)?;
+            if meta.entry_count > 0 {
+                results.push((path, meta));
+            }
+        }
+
+        Ok(results)
+    }
+}
+
+impl Default for SplittingSegmentBuilder {
+    fn default() -> Self {
+        Self::new(64 * 1024 * 1024) // 64MB
+    }
+}
+
+/// Estimate serialized value size without actually serializing.
+fn estimate_value_size(entry: &MemtableEntry) -> u64 {
+    if entry.is_tombstone {
+        0
+    } else {
+        match &entry.value {
+            strata_core::value::Value::Null => 1,
+            strata_core::value::Value::Bool(_) => 2,
+            strata_core::value::Value::Int(_) => 9,
+            strata_core::value::Value::Float(_) => 9,
+            strata_core::value::Value::String(s) => 8 + s.len() as u64,
+            strata_core::value::Value::Bytes(b) => 8 + b.len() as u64,
+            _ => 64, // arrays, objects — rough estimate
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1641,11 +1808,10 @@ mod tests {
         // Build a block buffer manually and verify trailer offsets
         let mut buf = Vec::new();
         let mut offsets = vec![0u32];
-        let mut entry_count = 0usize;
         let mut prev_key = Vec::new();
 
         // Write 32 entries, capturing offsets at restart boundaries
-        for i in 0..32u32 {
+        for (entry_count, i) in (0..32u32).enumerate() {
             let is_restart = entry_count > 0 && entry_count % RESTART_INTERVAL == 0;
             if is_restart {
                 offsets.push(buf.len() as u32);
@@ -1661,7 +1827,6 @@ mod tests {
             let is_restart_point = entry_count == 0 || is_restart;
             encode_entry_v4(&prev_key, &ik, &entry, &mut buf, is_restart_point);
             prev_key = ik.as_bytes().to_vec();
-            entry_count += 1;
         }
 
         assert_eq!(offsets.len(), 2); // offsets at entry 0 and entry 16
@@ -1683,9 +1848,8 @@ mod tests {
         let build_and_count_restarts = |n: u32| -> usize {
             let mut buf = Vec::new();
             let mut offsets = vec![0u32];
-            let mut count = 0usize;
             let mut prev_key = Vec::new();
-            for i in 0..n {
+            for (count, i) in (0..n).enumerate() {
                 let is_restart = count > 0 && count % RESTART_INTERVAL == 0;
                 if is_restart {
                     offsets.push(buf.len() as u32);
@@ -1701,7 +1865,6 @@ mod tests {
                 let is_restart_point = count == 0 || is_restart;
                 encode_entry_v4(&prev_key, &ik, &entry, &mut buf, is_restart_point);
                 prev_key = ik.as_bytes().to_vec();
-                count += 1;
             }
             append_restart_trailer(&mut buf, &offsets);
             let (_, num) = parse_restart_trailer(&buf).unwrap();
@@ -2440,164 +2603,43 @@ mod tests {
             assert_eq!(e.unwrap().value, Value::Int(i as i64));
         }
     }
-}
 
-// ---------------------------------------------------------------------------
-// SplittingSegmentBuilder — splits output at target file size
-// ---------------------------------------------------------------------------
-
-/// Builds multiple segment files, splitting at `target_file_size` boundaries.
-///
-/// Wraps `SegmentBuilder` and automatically finalizes the current segment
-/// and starts a new one when the output exceeds the target size. Splits
-/// only at key boundaries (never between versions of the same logical key).
-pub struct SplittingSegmentBuilder {
-    /// Underlying builder configuration.
-    inner: SegmentBuilder,
-    /// Target file size in bytes (default 64MB).
-    pub target_file_size: u64,
-}
-
-impl SplittingSegmentBuilder {
-    /// Create a new splitting builder with the given target file size.
-    pub fn new(target_file_size: u64) -> Self {
-        Self {
-            inner: SegmentBuilder::default(),
-            target_file_size,
-        }
-    }
-
-    /// Set the bloom filter bits per key for output segments.
-    pub fn with_bloom_bits(mut self, bits_per_key: usize) -> Self {
-        self.inner.bloom_bits_per_key = bits_per_key;
-        self
-    }
-
-    /// Set the compression codec for output segments.
-    pub fn with_compression(mut self, codec: CompressionCodec) -> Self {
-        self.inner.compression = codec;
-        self
-    }
-
-    /// Set a rate limiter for throttling data block writes during compaction.
-    pub fn with_rate_limiter(
-        mut self,
-        limiter: std::sync::Arc<crate::rate_limiter::RateLimiter>,
-    ) -> Self {
-        self.inner.rate_limiter = Some(limiter);
-        self
-    }
-
-    /// Build one or more segment files from a sorted iterator.
+    /// Verify that `build_from_iter` follows the crash-safe write protocol:
+    /// write temp → sync temp → rename → fsync parent directory.
     ///
-    /// Returns `(path, metadata)` for each output segment. The `path_fn`
-    /// closure is called with a split index (0, 1, 2, ...) to generate
-    /// the path for each output segment.
-    ///
-    /// Split points are chosen at logical key boundaries — all versions
-    /// of a given key stay in the same segment.
-    pub fn build_split<I, F>(
-        &self,
-        iter: I,
-        path_fn: F,
-    ) -> io::Result<Vec<(std::path::PathBuf, SegmentMeta)>>
-    where
-        I: Iterator<Item = (InternalKey, MemtableEntry)>,
-        F: Fn(usize) -> std::path::PathBuf,
-    {
-        self.build_split_with_predicate(iter, path_fn, |_| false)
-    }
+    /// We cannot observe fsync calls directly in a unit test, but we verify:
+    /// 1. The final file exists and is valid (readable segment).
+    /// 2. No `.tmp` file remains after build (rename completed).
+    /// 3. The parent directory is sync-able (fsync succeeds).
+    #[test]
+    fn test_issue_1681_segment_build_dir_fsync_after_rename() {
+        use crate::segment::KVSegment;
 
-    /// Build one or more segment files, with an additional split predicate.
-    ///
-    /// In addition to splitting at `target_file_size` boundaries, the caller
-    /// can supply a `should_split` predicate that receives the typed_key_prefix
-    /// of each new logical key.  When the predicate returns `true`, a split is
-    /// forced even if the current segment hasn't reached `target_file_size`.
-    ///
-    /// This is used for grandparent-aware splitting during leveled compaction:
-    /// the predicate tracks cumulative overlap with L+2 files and forces a
-    /// split when the overlap exceeds a threshold.
-    pub fn build_split_with_predicate<I, F, P>(
-        &self,
-        iter: I,
-        path_fn: F,
-        mut should_split: P,
-    ) -> io::Result<Vec<(std::path::PathBuf, SegmentMeta)>>
-    where
-        I: Iterator<Item = (InternalKey, MemtableEntry)>,
-        F: Fn(usize) -> std::path::PathBuf,
-        P: FnMut(&[u8]) -> bool,
-    {
-        let mut results: Vec<(std::path::PathBuf, SegmentMeta)> = Vec::new();
-        let mut split_idx: usize = 0;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crash_safe.sst");
+        let tmp_path = path.with_extension("tmp");
 
-        // Buffer entries for the current segment
-        let mut current_entries: Vec<(InternalKey, MemtableEntry)> = Vec::new();
-        let mut current_bytes: u64 = 0;
-        let mut last_typed_key: Option<Vec<u8>> = None;
+        let mt = Memtable::new(0);
+        mt.put(&key("a"), 1, Value::Int(1), false);
+        mt.put(&key("b"), 2, Value::Int(2), false);
+        mt.freeze();
 
-        for (ik, entry) in iter {
-            let typed_key = ik.typed_key_prefix().to_vec();
+        let builder = SegmentBuilder::default();
+        builder.build_from_iter(mt.iter_all(), &path).unwrap();
 
-            // At a key boundary (new logical key), check if we should split
-            if last_typed_key.as_ref() != Some(&typed_key)
-                && !current_entries.is_empty()
-                && (current_bytes >= self.target_file_size || should_split(&typed_key))
-            {
-                let path = path_fn(split_idx);
-                let meta = self
-                    .inner
-                    .build_from_iter(current_entries.drain(..), &path)?;
-                if meta.entry_count > 0 {
-                    results.push((path, meta));
-                    split_idx += 1;
-                }
-                current_bytes = 0;
-            }
+        // 1. Final file exists and is valid
+        assert!(path.exists(), "segment file must exist after build");
+        let seg = KVSegment::open(&path).unwrap();
+        assert_eq!(seg.entry_count(), 2);
 
-            last_typed_key = Some(typed_key);
+        // 2. Temp file is cleaned up (rename succeeded)
+        assert!(
+            !tmp_path.exists(),
+            "temp file must not exist after build (rename must have completed)"
+        );
 
-            // Estimate entry size: ik + 25 bytes header + value
-            let entry_size = ik.as_bytes().len() as u64 + 25 + estimate_value_size(&entry);
-            current_bytes += entry_size;
-            current_entries.push((ik, entry));
-        }
-
-        // Flush remaining entries
-        if !current_entries.is_empty() {
-            let path = path_fn(split_idx);
-            let meta = self
-                .inner
-                .build_from_iter(current_entries.drain(..), &path)?;
-            if meta.entry_count > 0 {
-                results.push((path, meta));
-            }
-        }
-
-        Ok(results)
-    }
-}
-
-impl Default for SplittingSegmentBuilder {
-    fn default() -> Self {
-        Self::new(64 * 1024 * 1024) // 64MB
-    }
-}
-
-/// Estimate serialized value size without actually serializing.
-fn estimate_value_size(entry: &MemtableEntry) -> u64 {
-    if entry.is_tombstone {
-        0
-    } else {
-        match &entry.value {
-            strata_core::value::Value::Null => 1,
-            strata_core::value::Value::Bool(_) => 2,
-            strata_core::value::Value::Int(_) => 9,
-            strata_core::value::Value::Float(_) => 9,
-            strata_core::value::Value::String(s) => 8 + s.len() as u64,
-            strata_core::value::Value::Bytes(b) => 8 + b.len() as u64,
-            _ => 64, // arrays, objects — rough estimate
-        }
+        // 3. Verify the parent directory is sync-able (non-trivial on some FS)
+        let dir_fd = std::fs::File::open(dir.path()).unwrap();
+        dir_fd.sync_all().unwrap();
     }
 }

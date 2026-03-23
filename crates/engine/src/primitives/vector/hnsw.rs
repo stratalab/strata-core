@@ -2742,6 +2742,7 @@ mod profiling_tests {
     /// - Full search_with_heap_ef (end-to-end)
     /// - Post-processing overhead (difference)
     #[test]
+    #[ignore] // profiling test — run explicitly with `cargo test -- --ignored`
     fn profile_search_path_breakdown() {
         let n = 10_000;
         let dim = 128;
@@ -2822,6 +2823,7 @@ mod profiling_tests {
     /// (a) Dense get_node() (current path — O(1) array index)
     /// (b) HashMap (rebuilt from iter_nodes for comparison)
     #[test]
+    #[ignore] // profiling test — run explicitly with `cargo test -- --ignored`
     fn profile_dense_vs_hashmap_lookup() {
         let n = 50_000;
         let dim = 128;
@@ -2830,8 +2832,7 @@ mod profiling_tests {
         let (compact, _heap) = build_compact_graph(n, dim);
 
         // Build a HashMap mirror for comparison
-        let hashmap_nodes: StdHashMap<VectorId, &CompactHnswNode> =
-            compact.iter_nodes().map(|(k, v)| (k, v)).collect();
+        let hashmap_nodes: StdHashMap<VectorId, &CompactHnswNode> = compact.iter_nodes().collect();
 
         // Pre-generate random lookup IDs
         let lookup_ids: Vec<VectorId> = (0..num_lookups)
@@ -2885,6 +2886,7 @@ mod profiling_tests {
     /// - Method A: compute_similarity(q, v, Cosine) — recomputes norms
     /// - Method B: cosine_similarity_with_norms(q, v, q_norm, v_norm) — cached
     #[test]
+    #[ignore] // profiling test — run explicitly with `cargo test -- --ignored`
     fn profile_norm_cache_vs_recompute() {
         use crate::primitives::vector::distance::cosine_similarity_with_norms;
 
@@ -2967,6 +2969,7 @@ mod profiling_tests {
     /// - visited_checks / visited_marks
     /// - candidate_pushes / result_pushes
     #[test]
+    #[ignore] // profiling test — run explicitly with `cargo test -- --ignored`
     fn profile_operation_counts() {
         let n = 10_000;
         let dim = 128;

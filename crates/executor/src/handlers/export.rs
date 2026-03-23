@@ -598,9 +598,9 @@ mod tests {
 
     #[test]
     fn render_csv_float_value() {
-        let rows = vec![row("k", Value::Float(3.14))];
+        let rows = vec![row("k", Value::Float(2.78))];
         let csv = render_csv(&rows);
-        assert!(csv.contains("k,3.14"));
+        assert!(csv.contains("k,2.78"));
     }
 
     #[test]

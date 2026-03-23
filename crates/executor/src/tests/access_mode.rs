@@ -334,11 +334,8 @@ fn test_read_only_allows_all_reads() {
         let result = executor.execute(cmd);
         // Should not be AccessDenied — the actual result may be Ok or a
         // domain error (e.g. KeyNotFound), but never AccessDenied.
-        match &result {
-            Err(Error::AccessDenied { .. }) => {
-                panic!("read command {} was blocked by AccessDenied", name)
-            }
-            _ => {} // any other result is fine
+        if let Err(Error::AccessDenied { .. }) = &result {
+            panic!("read command {} was blocked by AccessDenied", name)
         }
     }
 }

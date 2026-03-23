@@ -466,7 +466,7 @@ mod tests {
         let branch_id = BranchId::new();
 
         // Create one of each type
-        let refs = vec![
+        let refs = [
             EntityRef::kv(branch_id, "k"),
             EntityRef::event(branch_id, 0),
             EntityRef::state(branch_id, "s"),

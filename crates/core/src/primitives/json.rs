@@ -1564,8 +1564,8 @@ mod tests {
 
     #[test]
     fn test_json_value_from_f64() {
-        let v = JsonValue::from(3.14f64);
-        assert!((v.as_f64().unwrap() - 3.14).abs() < f64::EPSILON);
+        let v = JsonValue::from(2.78f64);
+        assert!((v.as_f64().unwrap() - 2.78).abs() < f64::EPSILON);
     }
 
     #[test]

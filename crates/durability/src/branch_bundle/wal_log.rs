@@ -439,7 +439,7 @@ mod tests {
     }
 
     fn make_test_payloads(branch_id_str: &str) -> Vec<BranchlogPayload> {
-        let branch_id = BranchId::from_string(branch_id_str).unwrap_or_else(|| BranchId::new());
+        let branch_id = BranchId::from_string(branch_id_str).unwrap_or_default();
         let ns = Arc::new(Namespace::for_branch(branch_id));
         vec![
             BranchlogPayload {

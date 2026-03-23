@@ -425,12 +425,12 @@ mod tests {
 
     #[test]
     fn test_value_float() {
-        let value = Value::Float(3.14);
+        let value = Value::Float(2.78);
         assert!(matches!(value, Value::Float(_)));
         assert!(value.is_float());
 
         if let Some(f) = value.as_float() {
-            assert!((f - 3.14).abs() < f64::EPSILON);
+            assert!((f - 2.78).abs() < f64::EPSILON);
         }
     }
 
@@ -494,7 +494,7 @@ mod tests {
             Value::Null,
             Value::Bool(true),
             Value::Int(42),
-            Value::Float(3.14),
+            Value::Float(2.78),
             Value::String("test".to_string()),
             Value::Bytes(vec![1, 2, 3]),
             Value::array(vec![Value::Int(1), Value::String("a".to_string())]),
@@ -574,8 +574,8 @@ mod tests {
 
     #[test]
     fn test_from_f64() {
-        let v: Value = 3.14f64.into();
-        assert!(matches!(v, Value::Float(f) if (f - 3.14).abs() < f64::EPSILON));
+        let v: Value = 2.78f64.into();
+        assert!(matches!(v, Value::Float(f) if (f - 2.78).abs() < f64::EPSILON));
     }
 
     #[test]
