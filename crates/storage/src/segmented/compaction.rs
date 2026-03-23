@@ -230,11 +230,26 @@ impl SegmentedStore {
         if let Some(ref l) = limiter {
             builder = builder.with_rate_limiter(Arc::clone(l));
         }
-        let meta = builder.build_from_iter(compaction_iter, &seg_path)?;
-        check_corruption_flags(&corruption_flags)?;
+        let meta = match builder.build_from_iter(compaction_iter, &seg_path) {
+            Ok(meta) => meta,
+            Err(e) => {
+                cleanup_partial_compaction_outputs(&branch_dir, seg_id, seg_id + 1);
+                return Err(e);
+            }
+        };
+        if let Err(e) = check_corruption_flags(&corruption_flags) {
+            cleanup_partial_compaction_outputs(&branch_dir, seg_id, seg_id + 1);
+            return Err(e);
+        }
 
         // Open the newly written segment.
-        let new_segment = KVSegment::open(&seg_path)?;
+        let new_segment = match KVSegment::open(&seg_path) {
+            Ok(seg) => seg,
+            Err(e) => {
+                cleanup_partial_compaction_outputs(&branch_dir, seg_id, seg_id + 1);
+                return Err(e);
+            }
+        };
 
         // Swap: remove only the segments we compacted, insert the new one.
         // Any segments added by concurrent flushes (not in old_segments) are kept.
@@ -372,10 +387,25 @@ impl SegmentedStore {
         if let Some(ref l) = limiter {
             builder = builder.with_rate_limiter(Arc::clone(l));
         }
-        let meta = builder.build_from_iter(compaction_iter, &seg_path)?;
-        check_corruption_flags(&corruption_flags)?;
+        let meta = match builder.build_from_iter(compaction_iter, &seg_path) {
+            Ok(meta) => meta,
+            Err(e) => {
+                cleanup_partial_compaction_outputs(&branch_dir, seg_id, seg_id + 1);
+                return Err(e);
+            }
+        };
+        if let Err(e) = check_corruption_flags(&corruption_flags) {
+            cleanup_partial_compaction_outputs(&branch_dir, seg_id, seg_id + 1);
+            return Err(e);
+        }
 
-        let new_segment = KVSegment::open(&seg_path)?;
+        let new_segment = match KVSegment::open(&seg_path) {
+            Ok(seg) => seg,
+            Err(e) => {
+                cleanup_partial_compaction_outputs(&branch_dir, seg_id, seg_id + 1);
+                return Err(e);
+            }
+        };
 
         // Swap: remove only the segments we compacted, insert the new one.
         // Any segments added by concurrent flushes (not in selected_segments) are kept.
@@ -548,6 +578,7 @@ impl SegmentedStore {
         std::fs::create_dir_all(&branch_dir)?;
 
         let next_id = &self.next_segment_id;
+        let start_id = next_id.load(Ordering::Relaxed);
         let bloom_bits = super::bloom_bits_for_level(1, 10);
         let compression = super::compression_for_level(1);
         let mut splitting_builder = crate::segment_builder::SplittingSegmentBuilder::default()
@@ -556,11 +587,23 @@ impl SegmentedStore {
         if let Some(ref l) = limiter {
             splitting_builder = splitting_builder.with_rate_limiter(Arc::clone(l));
         }
-        let outputs = splitting_builder.build_split(compaction_iter, |_split_idx| {
+        let outputs = match splitting_builder.build_split(compaction_iter, |_split_idx| {
             let id = next_id.fetch_add(1, Ordering::Relaxed);
             branch_dir.join(format!("{}.sst", id))
-        })?;
-        check_corruption_flags(&corruption_flags)?;
+        }) {
+            Ok(outputs) => outputs,
+            Err(e) => {
+                let end_id = next_id.load(Ordering::Relaxed);
+                cleanup_partial_compaction_outputs(&branch_dir, start_id, end_id);
+                return Err(e);
+            }
+        };
+        if let Err(e) = check_corruption_flags(&corruption_flags) {
+            for (path, _) in &outputs {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(e);
+        }
 
         let output_entries: u64 = outputs.iter().map(|(_, m)| m.entry_count).sum();
         let output_file_size: u64 = outputs.iter().map(|(_, m)| m.file_size).sum();
@@ -568,7 +611,15 @@ impl SegmentedStore {
         // Open all output segments
         let mut new_l1_segments: Vec<Arc<KVSegment>> = Vec::new();
         for (path, _meta) in &outputs {
-            new_l1_segments.push(Arc::new(KVSegment::open(path)?));
+            match KVSegment::open(path) {
+                Ok(seg) => new_l1_segments.push(Arc::new(seg)),
+                Err(e) => {
+                    for (p, _) in &outputs {
+                        let _ = std::fs::remove_file(p);
+                    }
+                    return Err(e);
+                }
+            }
         }
 
         // Atomic swap: L0 = only concurrently-flushed segments, L1 = non-overlapping + new
@@ -783,6 +834,7 @@ impl SegmentedStore {
         std::fs::create_dir_all(&branch_dir)?;
 
         let next_id = &self.next_segment_id;
+        let start_id = next_id.load(Ordering::Relaxed);
         let bloom_bits = super::bloom_bits_for_level(level + 1, 10);
         let compression = super::compression_for_level(level + 1);
         let mut splitting_builder = crate::segment_builder::SplittingSegmentBuilder::default()
@@ -824,15 +876,27 @@ impl SegmentedStore {
             false
         };
 
-        let outputs = splitting_builder.build_split_with_predicate(
+        let outputs = match splitting_builder.build_split_with_predicate(
             compaction_iter,
             |_split_idx| {
                 let id = next_id.fetch_add(1, Ordering::Relaxed);
                 branch_dir.join(format!("{}.sst", id))
             },
             should_split,
-        )?;
-        check_corruption_flags(&corruption_flags)?;
+        ) {
+            Ok(outputs) => outputs,
+            Err(e) => {
+                let end_id = next_id.load(Ordering::Relaxed);
+                cleanup_partial_compaction_outputs(&branch_dir, start_id, end_id);
+                return Err(e);
+            }
+        };
+        if let Err(e) = check_corruption_flags(&corruption_flags) {
+            for (path, _) in &outputs {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(e);
+        }
 
         let output_entries: u64 = outputs.iter().map(|(_, m)| m.entry_count).sum();
         let output_file_size: u64 = outputs.iter().map(|(_, m)| m.file_size).sum();
@@ -840,7 +904,15 @@ impl SegmentedStore {
         // Open all output segments
         let mut new_output_segments: Vec<Arc<KVSegment>> = Vec::new();
         for (path, _meta) in &outputs {
-            new_output_segments.push(Arc::new(KVSegment::open(path)?));
+            match KVSegment::open(path) {
+                Ok(seg) => new_output_segments.push(Arc::new(seg)),
+                Err(e) => {
+                    for (p, _) in &outputs {
+                        let _ = std::fs::remove_file(p);
+                    }
+                    return Err(e);
+                }
+            }
         }
 
         // ── 4. Atomic version swap ─────────────────────────────────────
@@ -924,6 +996,18 @@ fn streaming_sources(
         })
         .collect();
     (sources, corruption_flags)
+}
+
+/// Remove partial compaction output files left by a failed build.
+///
+/// Cleans up both `.sst` (fully written then renamed) and `.tmp` (partially
+/// written) files for segment IDs in `[start_id, end_id)`. Best-effort:
+/// errors are ignored because we're already on an error path.
+fn cleanup_partial_compaction_outputs(dir: &std::path::Path, start_id: u64, end_id: u64) {
+    for id in start_id..end_id {
+        let _ = std::fs::remove_file(dir.join(format!("{}.sst", id)));
+        let _ = std::fs::remove_file(dir.join(format!("{}.tmp", id)));
+    }
 }
 
 /// Check if any corruption flag was set during iteration.

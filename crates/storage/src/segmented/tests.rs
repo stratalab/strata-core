@@ -8233,3 +8233,146 @@ fn test_issue_1698_get_at_timestamp_ttl_exact_expiry_boundary() {
         "Entry should be alive 1µs before expiry"
     );
 }
+
+/// Regression test: failed compaction must not leave partial .sst output files on disk.
+///
+/// When `build_from_iter` succeeds but corruption is detected (or the build itself
+/// fails due to disk full / I/O error), the compaction error path must clean up any
+/// output .sst or .tmp files. Otherwise, the files become orphans that waste disk
+/// space — critical when the disk is already full.
+#[test]
+fn test_issue_1716_compact_branch_cleans_up_on_failure() {
+    use crate::segment_builder::HEADER_SIZE;
+
+    let dir = tempfile::tempdir().unwrap();
+    let seg_dir = dir.path().join("segments");
+    let store = SegmentedStore::with_dir(seg_dir.clone(), 1024);
+    let bid = branch();
+
+    // Flush two L0 segments (compact_branch requires >= 2)
+    seed(&store, kv_key("a"), Value::Int(1), 1);
+    store.rotate_memtable(&bid);
+    store.flush_oldest_frozen(&bid).unwrap();
+
+    seed(&store, kv_key("b"), Value::Int(2), 2);
+    store.rotate_memtable(&bid);
+    store.flush_oldest_frozen(&bid).unwrap();
+
+    // Count .sst files before compaction attempt
+    let branch_hex = hex_encode_branch(&bid);
+    let branch_dir = seg_dir.join(&branch_hex);
+    let count_sst_files = |dir: &std::path::Path| -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|ext| ext == "sst" || ext == "tmp")
+            })
+            .count()
+    };
+    let sst_before = count_sst_files(&branch_dir);
+    assert_eq!(sst_before, 2, "should have exactly 2 L0 .sst files");
+
+    // Corrupt the first segment's data-block CRC to trigger corruption detection
+    let mut sst_files: Vec<std::path::PathBuf> = std::fs::read_dir(&branch_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "sst"))
+        .collect();
+    sst_files.sort();
+    let target = &sst_files[0];
+    let data = std::fs::read(target).unwrap();
+    let data_len =
+        u32::from_le_bytes(data[HEADER_SIZE + 4..HEADER_SIZE + 8].try_into().unwrap()) as usize;
+    let crc_offset = HEADER_SIZE + 8 + data_len;
+    let mut corrupt = data.clone();
+    corrupt[crc_offset] ^= 0xFF;
+    std::fs::write(target, &corrupt).unwrap();
+
+    // Attempt compaction — should fail due to corruption
+    let result = store.compact_branch(&bid, 0);
+    assert!(result.is_err(), "compaction must fail on corrupt segment");
+
+    // After failed compaction, no new .sst or .tmp files should remain
+    let sst_after = count_sst_files(&branch_dir);
+    assert_eq!(
+        sst_after, sst_before,
+        "failed compaction must not leave orphan .sst/.tmp files on disk \
+         (before={sst_before}, after={sst_after})"
+    );
+}
+
+/// Regression test: failed compact_l0_to_l1 must not leave partial output files.
+///
+/// Uses two L0 segments and corrupts only one, so the output file is written
+/// from the good segment's data before corruption is detected by check_corruption_flags.
+#[test]
+fn test_issue_1716_compact_l0_to_l1_cleans_up_on_failure() {
+    use crate::segment_builder::HEADER_SIZE;
+
+    let dir = tempfile::tempdir().unwrap();
+    let seg_dir = dir.path().join("segments");
+    let store = SegmentedStore::with_dir(seg_dir.clone(), 1024);
+    let bid = branch();
+
+    // Flush two L0 segments so compact_l0_to_l1 has work to do and produces output
+    seed(&store, kv_key("a"), Value::Int(1), 1);
+    store.rotate_memtable(&bid);
+    store.flush_oldest_frozen(&bid).unwrap();
+
+    seed(&store, kv_key("b"), Value::Int(2), 2);
+    store.rotate_memtable(&bid);
+    store.flush_oldest_frozen(&bid).unwrap();
+
+    // Count files before
+    let branch_hex = hex_encode_branch(&bid);
+    let branch_dir = seg_dir.join(&branch_hex);
+    let count_files = |dir: &std::path::Path| -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|ext| ext == "sst" || ext == "tmp")
+            })
+            .count()
+    };
+    let files_before = count_files(&branch_dir);
+    assert_eq!(files_before, 2, "should have exactly 2 L0 .sst files");
+
+    // Corrupt only one segment so data from the other flows through to output
+    let mut sst_files: Vec<std::path::PathBuf> = std::fs::read_dir(&branch_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "sst"))
+        .collect();
+    sst_files.sort();
+    let target = &sst_files[0];
+    let data = std::fs::read(target).unwrap();
+    let data_len =
+        u32::from_le_bytes(data[HEADER_SIZE + 4..HEADER_SIZE + 8].try_into().unwrap()) as usize;
+    let crc_offset = HEADER_SIZE + 8 + data_len;
+    let mut corrupt = data.clone();
+    corrupt[crc_offset] ^= 0xFF;
+    std::fs::write(target, &corrupt).unwrap();
+
+    // Attempt compact_l0_to_l1 — should fail due to corruption
+    let result = store.compact_l0_to_l1(&bid, 0);
+    assert!(
+        result.is_err(),
+        "compact_l0_to_l1 must fail on corrupt segment"
+    );
+
+    // No orphan files should remain
+    let files_after = count_files(&branch_dir);
+    assert_eq!(
+        files_after, files_before,
+        "failed compact_l0_to_l1 must not leave orphan files \
+         (before={files_before}, after={files_after})"
+    );
+}
