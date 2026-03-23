@@ -3115,12 +3115,22 @@ fn recover_manifest_corrupt_returns_error() {
     let manifest_path = branch_dir.join("segments.manifest");
     std::fs::write(&manifest_path, b"corrupted data!").unwrap();
 
-    // Recover — corrupt manifest must return error, not silently load all as L0 (#1680)
+    // Recover — corrupt manifest must NOT silently load all as L0 (#1680).
+    // The branch is skipped (own segments not loaded), but recovery itself
+    // succeeds so other branches are unaffected (#1691).
     let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
-    let result = store2.recover_segments();
+    let info = store2.recover_segments().unwrap();
     assert!(
-        result.is_err(),
-        "corrupt manifest must cause recovery error"
+        info.corrupt_manifest_branches > 0,
+        "corrupt manifest branch must be reported"
+    );
+    // The corrupt branch's data must NOT be accessible.
+    assert!(
+        store2
+            .get_versioned(&kv_key("a"), u64::MAX)
+            .unwrap()
+            .is_none(),
+        "corrupt-manifest branch must not have segments loaded"
     );
 }
 
@@ -7071,6 +7081,97 @@ fn test_issue_1701_recovery_inherited_layer_finds_orphan_segments() {
 }
 
 // =============================================================================
+// #1691: Inherited-layer recovery independent of source branch state
+// =============================================================================
+
+/// Recovery of child's inherited layers must not depend on the source branch's
+/// manifest being intact.  If the parent's manifest is corrupt, recovery should
+/// skip the parent (not load its own segments) but still open the inherited
+/// segment files directly so the child branch is unaffected.
+#[test]
+fn test_issue_1691_inherited_layer_recovery_independent_of_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // 1. Write parent data in two flushes → 2 L0 segments
+    seed(&store, parent_kv("a"), Value::Int(1), 1);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    seed(&store, parent_kv("b"), Value::Int(2), 2);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // 2. Fork parent → child (child inherits both segments)
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    let (_fork_ver, shared) = store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+    assert!(shared >= 2, "child should share at least 2 segments");
+
+    // Verify child can read inherited data before crash
+    let val_a = store
+        .get_versioned(&child_kv("a"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(val_a.value, Value::Int(1));
+
+    // 3. Drop store (simulate crash)
+    drop(store);
+
+    // 4. Corrupt the PARENT's manifest — the child's manifest is intact.
+    //    This simulates a scenario where the source branch's recovery state
+    //    is broken, but the child's own data and the segment files are fine.
+    let parent_hex = super::hex_encode_branch(&parent_branch());
+    let parent_dir = dir.path().join(&parent_hex);
+    let manifest_path = parent_dir.join("segments.manifest");
+    let mut data = std::fs::read(&manifest_path).unwrap();
+    let mid = data.len() / 2;
+    data[mid] ^= 0xFF; // Flip a byte to cause CRC mismatch
+    std::fs::write(&manifest_path, &data).unwrap();
+
+    // 5. Recovery: should NOT fail entirely just because the parent's
+    //    manifest is corrupt.  The child's inherited segments should be
+    //    resolved directly from disk, independent of the source branch.
+    let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let info = store2.recover_segments().unwrap();
+
+    // 6. Child must still see inherited data after recovery.
+    let val_a_recovered = store2.get_versioned(&child_kv("a"), u64::MAX).unwrap();
+    assert!(
+        val_a_recovered.is_some(),
+        "child should see inherited key 'a' after recovery"
+    );
+    assert_eq!(val_a_recovered.unwrap().value, Value::Int(1));
+
+    let val_b_recovered = store2.get_versioned(&child_kv("b"), u64::MAX).unwrap();
+    assert!(
+        val_b_recovered.is_some(),
+        "child should see inherited key 'b' after recovery"
+    );
+    assert_eq!(val_b_recovered.unwrap().value, Value::Int(2));
+
+    // 7. The parent branch should NOT have been loaded with its own
+    //    segments (corrupt manifest → skipped).  The parent's segment
+    //    files still exist on disk, so the child's direct opens worked.
+    assert!(
+        info.corrupt_manifest_branches > 0,
+        "should report parent's corrupt manifest"
+    );
+    // Parent branch must not have its own segments loaded.
+    assert!(
+        store2
+            .get_versioned(&parent_kv("a"), u64::MAX)
+            .unwrap()
+            .is_none(),
+        "parent branch own segments must not be loaded (corrupt manifest)"
+    );
+}
+
+// =============================================================================
 // #1703: Concurrent materialize_layer is serialized
 // =============================================================================
 
@@ -7516,12 +7617,26 @@ fn test_issue_1680_corrupt_manifest_rejects_orphan_loading() {
     data[mid] ^= 0xFF;
     std::fs::write(&manifest_path, &data).unwrap();
 
-    // Recovery should fail — NOT silently load all SSTs as L0.
+    // Recovery must NOT silently load all SSTs as L0 (#1680).
+    // The branch is skipped (own segments not loaded) but recovery succeeds
+    // so other branches remain functional (#1691).
     let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
-    let result = store2.recover_segments();
+    let info = store2.recover_segments().unwrap();
     assert!(
-        result.is_err(),
-        "corrupt manifest must cause recovery error, not silent all-L0 fallback"
+        info.corrupt_manifest_branches > 0,
+        "corrupt manifest must be reported, not silently load as L0"
+    );
+    // The orphan SST must NOT be accessible (no L0 fallback).
+    let orphan_val = store2.get_versioned(&kv_key("orphan"), u64::MAX).unwrap();
+    assert!(
+        orphan_val.is_none(),
+        "orphan segment must not be loaded when manifest is corrupt"
+    );
+    // The real segment must also not be accessible (branch skipped entirely).
+    let real_val = store2.get_versioned(&kv_key("real"), u64::MAX).unwrap();
+    assert!(
+        real_val.is_none(),
+        "no segments should be loaded for corrupt-manifest branch"
     );
 }
 

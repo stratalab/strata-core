@@ -1816,14 +1816,6 @@ impl SegmentedStore {
         let mut deferred_inherited: Vec<(BranchId, Vec<crate::manifest::ManifestInheritedLayer>)> =
             Vec::new();
 
-        // All opened segments per branch, including orphans not in the manifest.
-        // Needed so the second pass (inherited layer resolution) can find segments
-        // that are orphans in the parent's active version but still needed by children.
-        let mut all_opened: std::collections::HashMap<
-            BranchId,
-            std::collections::HashMap<String, Arc<KVSegment>>,
-        > = std::collections::HashMap::new();
-
         for entry in std::fs::read_dir(segments_dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -1868,17 +1860,20 @@ impl SegmentedStore {
             }
 
             // Try to read manifest for level assignments.
-            // A corrupt manifest is a fatal error — silently loading all files
-            // as L0 would introduce orphaned SSTs from failed compactions (#1680).
+            // A corrupt manifest means we cannot safely load this branch's own
+            // segments (loading all as L0 would reintroduce orphans — #1680).
+            // Skip the branch but do NOT abort: other branches (and children
+            // that inherit segments from this branch) can still recover (#1691).
             let manifest = match crate::manifest::read_manifest(&path) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::error!(
                         branch = %dir_name,
                         error = %e,
-                        "corrupt manifest, refusing to load segments without manifest authority"
+                        "corrupt manifest, skipping branch (own segments not loaded)"
                     );
-                    return Err(e);
+                    info.corrupt_manifest_branches += 1;
+                    continue;
                 }
             };
 
@@ -1889,19 +1884,6 @@ impl SegmentedStore {
             if branch_segments.is_empty() && !has_inherited {
                 continue;
             }
-
-            // Record all opened segments for this branch (including orphans)
-            // so inherited layer resolution can find them in the second pass.
-            let branch_seg_map: std::collections::HashMap<String, Arc<KVSegment>> = branch_segments
-                .iter()
-                .filter_map(|seg| {
-                    seg.file_path()
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|name| (name.to_string(), Arc::clone(seg)))
-                })
-                .collect();
-            all_opened.insert(branch_id, branch_seg_map);
 
             // Partition segments into levels based on manifest.
             //
@@ -2017,40 +1999,46 @@ impl SegmentedStore {
             let mut inherited_layers = Vec::new();
 
             for ml in &manifest_layers {
-                // Look up ALL opened segments for the source branch, including
-                // orphans not loaded into its active version. This is critical
-                // for #1701: after parent compaction, the pre-compaction segments
-                // are orphans in the parent's manifest but still needed by
-                // children's inherited layers.
-                let source_segs = match all_opened.get(&ml.source_branch_id) {
-                    Some(segs) => segs,
-                    None => {
-                        tracing::warn!(
-                            child = %hex_encode_branch(&child_id),
-                            source = %hex_encode_branch(&ml.source_branch_id),
-                            "inherited layer references missing source branch, skipping"
-                        );
-                        info.layers_dropped.push((child_id, ml.source_branch_id));
-                        continue;
-                    }
-                };
-
-                // Build SegmentVersion from manifest entries using all opened
-                // segments (including orphans not in the source branch's active version).
+                // Open inherited segment files directly by path (#1691).
+                // The child's manifest has the source_branch_id and filename,
+                // which is enough to construct the full path.  This makes
+                // resolution independent of the source branch's recovery state
+                // (e.g. the source may have a corrupt manifest, or its
+                // directory may have been partially cleaned up).
+                let source_dir = segments_dir.join(hex_encode_branch(&ml.source_branch_id));
                 let mut layer_levels: Vec<Vec<Arc<KVSegment>>> = vec![Vec::new(); NUM_LEVELS];
+                let mut any_found = false;
 
                 for entry in &ml.entries {
                     let level = (entry.level as usize).min(NUM_LEVELS - 1);
-                    if let Some(seg) = source_segs.get(&entry.filename) {
-                        layer_levels[level].push(Arc::clone(seg));
-                    } else {
-                        tracing::warn!(
-                            child = %hex_encode_branch(&child_id),
-                            source = %hex_encode_branch(&ml.source_branch_id),
-                            segment = %entry.filename,
-                            "inherited layer segment not found in source branch"
-                        );
+                    let seg_path = source_dir.join(&entry.filename);
+                    match KVSegment::open(&seg_path) {
+                        Ok(seg) => {
+                            // Track segment ID to avoid collisions.
+                            if let Some(stem) = seg_path.file_stem().and_then(|s| s.to_str()) {
+                                if let Ok(file_seg_id) = stem.parse::<u64>() {
+                                    self.next_segment_id
+                                        .fetch_max(file_seg_id + 1, Ordering::Relaxed);
+                                }
+                            }
+                            layer_levels[level].push(Arc::new(seg));
+                            any_found = true;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                child = %hex_encode_branch(&child_id),
+                                source = %hex_encode_branch(&ml.source_branch_id),
+                                segment = %entry.filename,
+                                error = %e,
+                                "inherited layer segment not found on disk"
+                            );
+                        }
                     }
+                }
+
+                if !any_found {
+                    info.layers_dropped.push((child_id, ml.source_branch_id));
+                    continue;
                 }
 
                 // Sort levels consistently
@@ -2532,6 +2520,10 @@ pub struct RecoverSegmentsInfo {
     /// These are skipped during recovery to prevent stale data from shadowing
     /// compacted data (#1701).
     pub orphans_skipped: usize,
+    /// Number of branches skipped because their manifest was corrupt (#1691).
+    /// Own segments for these branches are not loaded, but their segment
+    /// files remain on disk for children to open directly.
+    pub corrupt_manifest_branches: usize,
 }
 
 impl Default for SegmentedStore {
