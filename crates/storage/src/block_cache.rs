@@ -195,7 +195,8 @@ impl BlockCache {
     /// Determine which shard a key maps to.
     #[inline]
     fn shard_index(key: &CacheKey) -> usize {
-        let h = key.file_id.wrapping_mul(0x517cc1b727220a95) ^ key.block_offset;
+        let bh = key.block_offset.wrapping_mul(0x9e3779b97f4a7c15);
+        let h = key.file_id.wrapping_mul(0x517cc1b727220a95) ^ (bh >> 32) ^ bh;
         (h as usize) & (NUM_SHARDS - 1)
     }
 
@@ -652,6 +653,34 @@ mod tests {
     #[test]
     fn test_issue_1735_zero_available_returns_zero() {
         assert_eq!(compute_cache_from_available(0), 0);
+    }
+
+    #[test]
+    fn test_issue_1717_shard_distribution_with_aligned_offsets() {
+        // Block offsets are multiples of 64KB (0x10000) in practice.
+        // With NUM_SHARDS=16, all blocks from the same file should NOT
+        // map to the same shard — they should spread across shards.
+        let file_id = 42u64;
+        let block_size: u64 = 64 * 1024; // 64KB
+
+        let mut shards_seen = std::collections::HashSet::new();
+        for i in 0..64u64 {
+            let offset = i * block_size;
+            let key = CacheKey {
+                file_id,
+                block_offset: offset,
+            };
+            shards_seen.insert(BlockCache::shard_index(&key));
+        }
+
+        // 64 blocks across 16 shards: a decent hash should hit at least 8 shards.
+        // The bug causes all 64 to land in exactly 1 shard.
+        assert!(
+            shards_seen.len() >= 8,
+            "64 blocks from the same file should use at least 8 of 16 shards, \
+             but only {} shards were used (poor distribution due to aligned offsets)",
+            shards_seen.len()
+        );
     }
 
     /// Helper: find `count` file_ids that map to a given shard.
