@@ -3629,7 +3629,7 @@ fn compact_level_ephemeral_returns_none() {
 #[test]
 fn recalculate_targets_empty_db() {
     let level_bytes = [0u64; NUM_LEVELS];
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     // All levels derive from MIN_BASE_BYTES when no non-L0 data exists
     assert_eq!(targets.max_bytes[0], 0); // L0 unused (count-based)
     assert_eq!(targets.max_bytes[1], MIN_BASE_BYTES); // 1MB
@@ -3644,7 +3644,7 @@ fn recalculate_targets_empty_db() {
 fn recalculate_targets_small_db() {
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[1] = 100 << 20; // 100MB in L1
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     // Dynamic: base = 100MB (derived from bottom level L1)
     assert_eq!(targets.max_bytes[0], 0);
     assert_eq!(targets.max_bytes[1], 100 << 20);
@@ -3660,14 +3660,14 @@ fn recalculate_targets_scales_up() {
     let data: u64 = 30 * (1 << 30); // 30 GiB in L3
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[3] = data;
-    let targets = recalculate_level_targets(&level_bytes);
-    // base = 30GiB / 10^2 = ~307MB → clamped to MAX_BASE_BYTES (256MB)
-    assert_eq!(targets.max_bytes[1], MAX_BASE_BYTES);
-    assert_eq!(targets.max_bytes[2], MAX_BASE_BYTES * 10);
-    assert_eq!(targets.max_bytes[3], MAX_BASE_BYTES * 100);
-    assert_eq!(targets.max_bytes[4], MAX_BASE_BYTES * 1_000);
-    assert_eq!(targets.max_bytes[5], MAX_BASE_BYTES * 10_000);
-    assert_eq!(targets.max_bytes[6], MAX_BASE_BYTES * 100_000);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
+    // base = 30GiB / 10^2 = ~307MB → clamped to LEVEL_BASE_BYTES (256MB)
+    assert_eq!(targets.max_bytes[1], LEVEL_BASE_BYTES);
+    assert_eq!(targets.max_bytes[2], LEVEL_BASE_BYTES * 10);
+    assert_eq!(targets.max_bytes[3], LEVEL_BASE_BYTES * 100);
+    assert_eq!(targets.max_bytes[4], LEVEL_BASE_BYTES * 1_000);
+    assert_eq!(targets.max_bytes[5], LEVEL_BASE_BYTES * 10_000);
+    assert_eq!(targets.max_bytes[6], LEVEL_BASE_BYTES * 100_000);
 }
 
 #[test]
@@ -3676,22 +3676,22 @@ fn recalculate_targets_anchor_at_high_level() {
     let data: u64 = 3 * (1u64 << 40); // 3 TiB in L5
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[5] = data;
-    let targets = recalculate_level_targets(&level_bytes);
-    // base = 3TiB / 10^4 = ~322MB → clamped to MAX_BASE_BYTES (256MB)
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
+    // base = 3TiB / 10^4 = ~322MB → clamped to LEVEL_BASE_BYTES (256MB)
     assert_eq!(targets.max_bytes[0], 0);
-    assert_eq!(targets.max_bytes[1], MAX_BASE_BYTES);
-    assert_eq!(targets.max_bytes[2], MAX_BASE_BYTES * 10);
-    assert_eq!(targets.max_bytes[3], MAX_BASE_BYTES * 100);
-    assert_eq!(targets.max_bytes[4], MAX_BASE_BYTES * 1_000);
-    assert_eq!(targets.max_bytes[5], MAX_BASE_BYTES * 10_000);
-    assert_eq!(targets.max_bytes[6], MAX_BASE_BYTES * 100_000);
+    assert_eq!(targets.max_bytes[1], LEVEL_BASE_BYTES);
+    assert_eq!(targets.max_bytes[2], LEVEL_BASE_BYTES * 10);
+    assert_eq!(targets.max_bytes[3], LEVEL_BASE_BYTES * 100);
+    assert_eq!(targets.max_bytes[4], LEVEL_BASE_BYTES * 1_000);
+    assert_eq!(targets.max_bytes[5], LEVEL_BASE_BYTES * 10_000);
+    assert_eq!(targets.max_bytes[6], LEVEL_BASE_BYTES * 100_000);
 }
 
 #[test]
 fn recalculate_targets_tiny_db() {
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[1] = 10 << 20; // 10MB in L1
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     // base = 10MB — within [MIN, MAX], full geometric chain
     assert_eq!(targets.max_bytes[0], 0);
     assert_eq!(targets.max_bytes[1], 10 << 20);
@@ -3706,7 +3706,7 @@ fn recalculate_targets_tiny_db() {
 fn recalculate_targets_sub_minimum() {
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[1] = 512 * 1024; // 512KB in L1
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     // 512KB < MIN_BASE_BYTES → clamped to 1MB, full chain from MIN
     assert_eq!(targets.max_bytes[1], MIN_BASE_BYTES);
     assert_eq!(targets.max_bytes[2], MIN_BASE_BYTES * 10);
@@ -3719,7 +3719,7 @@ fn recalculate_targets_multi_level_data() {
     level_bytes[1] = 200 << 20; // 200MB
     level_bytes[2] = 2 << 30; // 2GB
     level_bytes[3] = 15 << 30; // 15GB — largest non-L0 level
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     // base = 15GB / 10^2 = ~153MB → within [MIN, MAX] range
     let expected_base: u64 = (15u64 << 30) / 100;
     assert_eq!(targets.max_bytes[1], expected_base);
@@ -3736,7 +3736,7 @@ fn recalculate_targets_multi_level_data() {
 fn recalculate_targets_only_l0() {
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[0] = 500 << 20; // 500MB in L0 only
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     // L0 is ignored — no non-L0 data → uses MIN_BASE_BYTES
     assert_eq!(targets.max_bytes[0], 0);
     assert_eq!(targets.max_bytes[1], MIN_BASE_BYTES);
@@ -3747,7 +3747,7 @@ fn recalculate_targets_only_l0() {
 fn recalculate_targets_empty_intermediate() {
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[4] = 100 << 30; // 100GB in L4 only (L1-L3 empty)
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     // base = 100GB / 10^3 = ~102MB
     let expected_base: u64 = (100u64 << 30) / 1_000;
     assert_eq!(targets.max_bytes[1], expected_base);
@@ -3763,10 +3763,10 @@ fn recalculate_targets_data_at_l6() {
     // L6 is the highest level — requires maximum backward divisions (5).
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[6] = 100u64 << 40; // 100 TiB in L6
-    let targets = recalculate_level_targets(&level_bytes);
-    // base = 100TiB / 10^5 = ~1.1GB → clamped to MAX_BASE_BYTES (256MB)
-    assert_eq!(targets.max_bytes[1], MAX_BASE_BYTES);
-    assert_eq!(targets.max_bytes[6], MAX_BASE_BYTES * 100_000);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
+    // base = 100TiB / 10^5 = ~1.1GB → clamped to LEVEL_BASE_BYTES (256MB)
+    assert_eq!(targets.max_bytes[1], LEVEL_BASE_BYTES);
+    assert_eq!(targets.max_bytes[6], LEVEL_BASE_BYTES * 100_000);
 }
 
 #[test]
@@ -3776,9 +3776,9 @@ fn recalculate_targets_data_at_l6_unclamped() {
     let data: u64 = 10u64 * (1u64 << 40); // 10 TiB
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[6] = data;
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     let expected_base = data / 100_000;
-    assert!(expected_base > MIN_BASE_BYTES && expected_base < MAX_BASE_BYTES);
+    assert!(expected_base > MIN_BASE_BYTES && expected_base < LEVEL_BASE_BYTES);
     assert_eq!(targets.max_bytes[1], expected_base);
     assert_eq!(targets.max_bytes[2], expected_base * 10);
     assert_eq!(targets.max_bytes[6], expected_base * 100_000);
@@ -3791,9 +3791,9 @@ fn recalculate_targets_lower_level_dominates() {
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[2] = 50 << 30; // 50GB in L2
     level_bytes[5] = 1 << 30; // 1GB in L5
-    let targets = recalculate_level_targets(&level_bytes);
-    // base = 50GB / 10^1 = 5GB → clamped to MAX_BASE_BYTES (256MB)
-    assert_eq!(targets.max_bytes[1], MAX_BASE_BYTES);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
+    // base = 50GB / 10^1 = 5GB → clamped to LEVEL_BASE_BYTES (256MB)
+    assert_eq!(targets.max_bytes[1], LEVEL_BASE_BYTES);
     // L2 actual (50GB) vs target (2.56GB) → score ~19.5 → aggressive compaction
     assert!(level_bytes[2] as f64 / targets.max_bytes[2] as f64 > 10.0);
 }
@@ -3804,27 +3804,27 @@ fn recalculate_targets_base_exactly_at_min() {
     // Data at L1 = 1MB → base = 1MB = MIN_BASE_BYTES.
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[1] = MIN_BASE_BYTES;
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     assert_eq!(targets.max_bytes[1], MIN_BASE_BYTES);
 }
 
 #[test]
 fn recalculate_targets_base_exactly_at_max() {
-    // Data at L1 = 256MB → base = 256MB = MAX_BASE_BYTES.
+    // Data at L1 = 256MB → base = 256MB = LEVEL_BASE_BYTES.
     let mut level_bytes = [0u64; NUM_LEVELS];
-    level_bytes[1] = MAX_BASE_BYTES;
-    let targets = recalculate_level_targets(&level_bytes);
-    assert_eq!(targets.max_bytes[1], MAX_BASE_BYTES);
-    assert_eq!(targets.max_bytes[2], MAX_BASE_BYTES * 10);
+    level_bytes[1] = LEVEL_BASE_BYTES;
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
+    assert_eq!(targets.max_bytes[1], LEVEL_BASE_BYTES);
+    assert_eq!(targets.max_bytes[2], LEVEL_BASE_BYTES * 10);
 }
 
 #[test]
 fn recalculate_targets_base_just_above_max_clamps() {
-    // Data at L1 = 300MB → base = 300MB > MAX_BASE_BYTES → clamped to 256MB.
+    // Data at L1 = 300MB → base = 300MB > LEVEL_BASE_BYTES → clamped to 256MB.
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[1] = 300 << 20;
-    let targets = recalculate_level_targets(&level_bytes);
-    assert_eq!(targets.max_bytes[1], MAX_BASE_BYTES);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
+    assert_eq!(targets.max_bytes[1], LEVEL_BASE_BYTES);
 }
 
 #[test]
@@ -3833,7 +3833,7 @@ fn recalculate_targets_score_meaningful_for_small_db() {
     // not 0.04 (which is what the old 256MB static target produced).
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[1] = 10 << 20; // 10MB
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     let score = level_bytes[1] as f64 / targets.max_bytes[1] as f64;
     assert!(
         (score - 1.0).abs() < 0.01,

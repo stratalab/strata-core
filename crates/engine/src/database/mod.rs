@@ -468,6 +468,12 @@ impl Database {
         storage.set_max_branches(cfg.storage.max_branches);
         storage.set_max_versions_per_key(cfg.storage.max_versions_per_key);
         storage.set_max_immutable_memtables(cfg.storage.max_immutable_memtables);
+        storage.set_target_file_size(cfg.storage.target_file_size);
+        storage.set_level_base_bytes(cfg.storage.level_base_bytes);
+        storage.set_data_block_size(cfg.storage.data_block_size);
+        storage.set_bloom_bits_per_key(cfg.storage.bloom_bits_per_key);
+
+        let bg_threads = cfg.storage.background_threads.max(1);
 
         // Recover previously flushed segments from disk
         match storage.recover_segments() {
@@ -507,7 +513,7 @@ impl Database {
             config: parking_lot::RwLock::new(cfg),
             flush_shutdown: Arc::new(AtomicBool::new(false)),
             flush_handle: ParkingMutex::new(None), // No flush thread
-            scheduler: Arc::new(BackgroundScheduler::new(4, 4096)),
+            scheduler: Arc::new(BackgroundScheduler::new(bg_threads, 4096)),
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
@@ -648,6 +654,15 @@ impl Database {
         storage.set_max_branches(cfg.storage.max_branches);
         storage.set_max_versions_per_key(cfg.storage.max_versions_per_key);
         storage.set_max_immutable_memtables(cfg.storage.max_immutable_memtables);
+        storage.set_target_file_size(cfg.storage.target_file_size);
+        storage.set_level_base_bytes(cfg.storage.level_base_bytes);
+        storage.set_data_block_size(cfg.storage.data_block_size);
+        storage.set_bloom_bits_per_key(cfg.storage.bloom_bits_per_key);
+        if cfg.storage.compaction_rate_limit > 0 {
+            storage.set_compaction_rate_limit(cfg.storage.compaction_rate_limit);
+        }
+
+        let bg_threads = cfg.storage.background_threads.max(1);
 
         // Recover previously flushed segments from disk
         match storage.recover_segments() {
@@ -689,7 +704,7 @@ impl Database {
             config: parking_lot::RwLock::new(cfg),
             flush_shutdown,
             flush_handle: ParkingMutex::new(flush_handle),
-            scheduler: Arc::new(BackgroundScheduler::new(4, 4096)),
+            scheduler: Arc::new(BackgroundScheduler::new(bg_threads, 4096)),
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
@@ -753,6 +768,8 @@ impl Database {
         storage.set_max_versions_per_key(cfg.storage.max_versions_per_key);
         storage.set_max_immutable_memtables(cfg.storage.max_immutable_memtables);
 
+        let bg_threads = cfg.storage.background_threads.max(1);
+
         // Create coordinator starting at version 1 (no recovery needed), with write buffer limit
         let mut coordinator = TransactionCoordinator::new(1);
         coordinator.set_max_write_buffer_entries(cfg.storage.max_write_buffer_entries);
@@ -769,7 +786,7 @@ impl Database {
             config: parking_lot::RwLock::new(StrataConfig::default()),
             flush_shutdown: Arc::new(AtomicBool::new(false)),
             flush_handle: ParkingMutex::new(None),
-            scheduler: Arc::new(BackgroundScheduler::new(4, 4096)),
+            scheduler: Arc::new(BackgroundScheduler::new(bg_threads, 4096)),
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),

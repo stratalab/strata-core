@@ -1310,6 +1310,12 @@ impl SplittingSegmentBuilder {
         self
     }
 
+    /// Set the data block size in bytes for output segments.
+    pub fn with_data_block_size(mut self, bytes: usize) -> Self {
+        self.inner.data_block_size = bytes;
+        self
+    }
+
     /// Set a rate limiter for throttling data block writes during compaction.
     pub fn with_rate_limiter(
         mut self,
