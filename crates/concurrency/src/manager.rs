@@ -302,9 +302,13 @@ impl TransactionManager {
         // Step 2: Allocate commit version
         let commit_version = self.allocate_version()?;
 
-        // Step 3: Write to WAL (durability) - only for transactions with mutations
-        // Skip WAL for read-only transactions (no writes, deletes, CAS ops, or JSON patches)
-        let has_mutations = !txn.is_read_only() || !txn.json_writes().is_empty();
+        // Step 2.5: Materialize JSON patches into write_set (#1739 OCC-H1)
+        txn.materialize_json_writes()
+            .map_err(|e| CommitError::WALError(format!("JSON materialization failed: {}", e)))?;
+
+        // Step 3: Write to WAL (durability) - only for transactions with mutations.
+        // After materialization, json_writes are in write_set, so is_read_only() covers all cases.
+        let has_mutations = !txn.is_read_only();
         if has_mutations {
             if let Some(wal) = wal.as_mut() {
                 let payload = TransactionPayload::from_transaction(txn, commit_version);
@@ -433,7 +437,11 @@ impl TransactionManager {
 
         let commit_version = self.allocate_version()?;
 
-        let has_mutations = !txn.is_read_only() || !txn.json_writes().is_empty();
+        // Materialize JSON patches into write_set (#1739 OCC-H1)
+        txn.materialize_json_writes()
+            .map_err(|e| CommitError::WALError(format!("JSON materialization failed: {}", e)))?;
+
+        let has_mutations = !txn.is_read_only();
         if has_mutations {
             if let Some(wal_arc) = wal_arc {
                 let payload = TransactionPayload::from_transaction(txn, commit_version);
@@ -588,8 +596,12 @@ impl TransactionManager {
         // Advance local counter so it stays in sync
         self.version.fetch_max(commit_version, Ordering::AcqRel);
 
+        // Materialize JSON patches into write_set (#1739 OCC-H1)
+        txn.materialize_json_writes()
+            .map_err(|e| CommitError::WALError(format!("JSON materialization failed: {}", e)))?;
+
         // Write to WAL
-        let has_mutations = !txn.is_read_only() || !txn.json_writes().is_empty();
+        let has_mutations = !txn.is_read_only();
         if has_mutations {
             if let Some(wal) = wal.as_mut() {
                 let payload = TransactionPayload::from_transaction(txn, commit_version);
@@ -661,7 +673,7 @@ impl Default for TransactionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TransactionContext;
+    use crate::{JsonStoreExt, TransactionContext};
     use parking_lot::Mutex as ParkingMutex;
     use std::sync::Arc;
     use strata_core::types::{Key, Namespace};
@@ -2242,6 +2254,257 @@ mod tests {
             matches!(err, CommitError::DurableButNotVisible(_)),
             "Expected DurableButNotVisible error, got: {:?}",
             err
+        );
+    }
+
+    // ========================================================================
+    // Issue #1739: OCC-H1 — JSON mutation path validates but never persists.
+    // json_writes are ignored by apply_writes() and TransactionPayload.
+    // ========================================================================
+
+    #[test]
+    fn test_issue_1739_json_writes_persisted_to_storage() {
+        use strata_core::primitives::json::JsonPath;
+
+        let store = Arc::new(SegmentedStore::new());
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let json_key = Key::new_json(ns.clone(), "doc1");
+
+        // Step 1: Store a base JSON document via a regular KV put.
+        let base_doc = serde_json::json!({"name": "alice", "age": 30});
+        let base_bytes = rmp_serde::to_vec(&base_doc).unwrap();
+        let mut txn0 = TransactionContext::with_store(
+            manager.next_txn_id().unwrap(),
+            branch_id,
+            Arc::clone(&store),
+        );
+        txn0.put(json_key.clone(), Value::Bytes(base_bytes))
+            .unwrap();
+        manager.commit(&mut txn0, store.as_ref(), None).unwrap();
+
+        // Step 2: Start a JSON-only transaction that modifies the document.
+        let mut txn1 = TransactionContext::with_store(
+            manager.next_txn_id().unwrap(),
+            branch_id,
+            Arc::clone(&store),
+        );
+        txn1.json_set(
+            &json_key,
+            &"age".parse::<JsonPath>().unwrap(),
+            serde_json::json!(31).into(),
+        )
+        .unwrap();
+
+        // Commit the JSON-only transaction.
+        let commit_v = manager.commit(&mut txn1, store.as_ref(), None).unwrap();
+
+        // Step 3: Read back from storage and verify the document was updated.
+        let result = store.get_versioned(&json_key, commit_v).unwrap();
+        assert!(
+            result.is_some(),
+            "JSON document must exist in storage after json_set commit"
+        );
+        let vv = result.unwrap();
+        let stored_bytes = match &vv.value {
+            Value::Bytes(b) => b,
+            other => panic!("Expected Value::Bytes, got {:?}", other),
+        };
+        let stored_doc: serde_json::Value = rmp_serde::from_slice(stored_bytes).unwrap();
+        assert_eq!(
+            stored_doc,
+            serde_json::json!({"name": "alice", "age": 31}),
+            "JSON document must reflect the json_set patch"
+        );
+    }
+
+    #[test]
+    fn test_issue_1739_json_writes_included_in_wal_payload() {
+        use strata_core::primitives::json::JsonPath;
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let mut wal = create_test_wal(&wal_dir);
+        let store = Arc::new(SegmentedStore::new());
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let json_key = Key::new_json(ns.clone(), "doc1");
+
+        // Store a base JSON document.
+        let base_doc = serde_json::json!({"x": 1});
+        let base_bytes = rmp_serde::to_vec(&base_doc).unwrap();
+        let mut txn0 = TransactionContext::with_store(
+            manager.next_txn_id().unwrap(),
+            branch_id,
+            Arc::clone(&store),
+        );
+        txn0.put(json_key.clone(), Value::Bytes(base_bytes))
+            .unwrap();
+        manager
+            .commit(&mut txn0, store.as_ref(), Some(&mut wal))
+            .unwrap();
+
+        // JSON-only transaction.
+        let mut txn1 = TransactionContext::with_store(
+            manager.next_txn_id().unwrap(),
+            branch_id,
+            Arc::clone(&store),
+        );
+        txn1.json_set(
+            &json_key,
+            &"x".parse::<JsonPath>().unwrap(),
+            serde_json::json!(99).into(),
+        )
+        .unwrap();
+        let commit_v = manager
+            .commit(&mut txn1, store.as_ref(), Some(&mut wal))
+            .unwrap();
+
+        // Read WAL and verify the payload contains the JSON put.
+        wal.flush().unwrap();
+        let reader = WalReader::new();
+        let records = reader.read_all_after_watermark(&wal_dir, 0).unwrap();
+        // Record[0] = base doc put, Record[1] = json_set commit
+        assert!(records.len() >= 2, "Expected at least 2 WAL records");
+        let payload = TransactionPayload::from_bytes(&records[1].writeset).unwrap();
+        assert_eq!(payload.version, commit_v);
+        assert!(
+            !payload.puts.is_empty(),
+            "WAL payload must contain the materialized JSON put"
+        );
+        assert_eq!(
+            payload.puts[0].0, json_key,
+            "WAL payload put key must match the JSON document key"
+        );
+        // Verify the WAL value is the correctly patched document, not just any bytes
+        let wal_bytes = match &payload.puts[0].1 {
+            Value::Bytes(b) => b,
+            other => panic!("Expected Value::Bytes in WAL payload, got {:?}", other),
+        };
+        let wal_doc: serde_json::Value = rmp_serde::from_slice(wal_bytes).unwrap();
+        assert_eq!(
+            wal_doc,
+            serde_json::json!({"x": 99}),
+            "WAL payload must contain the correctly patched document"
+        );
+    }
+
+    // ========================================================================
+    // Issue #1739: OCC-M1 — Same-key put + CAS must be rejected.
+    // ========================================================================
+
+    #[test]
+    fn test_issue_1739_cas_rejects_key_already_in_write_set() {
+        let store = Arc::new(SegmentedStore::new());
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = create_test_key(&ns, "k1");
+
+        let mut txn = TransactionContext::with_store(
+            manager.next_txn_id().unwrap(),
+            branch_id,
+            Arc::clone(&store),
+        );
+        // First: put(K, v1)
+        txn.put(key.clone(), Value::Int(1)).unwrap();
+        // Then: cas(K, ...) on the same key — must be rejected
+        let result = txn.cas(key.clone(), 0, Value::Int(2));
+        assert!(
+            result.is_err(),
+            "cas() must reject a key already in write_set"
+        );
+    }
+
+    #[test]
+    fn test_issue_1739_put_rejects_key_already_in_cas_set() {
+        let store = Arc::new(SegmentedStore::new());
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = create_test_key(&ns, "k1");
+
+        let mut txn = TransactionContext::with_store(
+            manager.next_txn_id().unwrap(),
+            branch_id,
+            Arc::clone(&store),
+        );
+        // First: cas(K, 0, v1)
+        txn.cas(key.clone(), 0, Value::Int(1)).unwrap();
+        // Then: put(K, v2) on the same key — must be rejected
+        let result = txn.put(key.clone(), Value::Int(2));
+        assert!(
+            result.is_err(),
+            "put() must reject a key already in cas_set"
+        );
+    }
+
+    #[test]
+    fn test_issue_1739_delete_rejects_key_already_in_cas_set() {
+        let store = Arc::new(SegmentedStore::new());
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = create_test_key(&ns, "k1");
+
+        let mut txn = TransactionContext::with_store(
+            manager.next_txn_id().unwrap(),
+            branch_id,
+            Arc::clone(&store),
+        );
+        // First: cas(K, 0, v1)
+        txn.cas(key.clone(), 0, Value::Int(1)).unwrap();
+        // Then: delete(K) on the same key — must be rejected
+        let result = txn.delete(key.clone());
+        assert!(
+            result.is_err(),
+            "delete() must reject a key already in cas_set"
+        );
+    }
+
+    #[test]
+    fn test_issue_1739_cas_rejects_key_already_in_delete_set() {
+        let store = Arc::new(SegmentedStore::new());
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = create_test_key(&ns, "k1");
+
+        let mut txn = TransactionContext::with_store(
+            manager.next_txn_id().unwrap(),
+            branch_id,
+            Arc::clone(&store),
+        );
+        // First: delete(K)
+        txn.delete(key.clone()).unwrap();
+        // Then: cas(K, ...) on the same key — must be rejected
+        let result = txn.cas(key.clone(), 0, Value::Int(2));
+        assert!(
+            result.is_err(),
+            "cas() must reject a key already in delete_set"
+        );
+    }
+
+    #[test]
+    fn test_issue_1739_cas_with_read_rejects_key_already_in_write_set() {
+        let store = Arc::new(SegmentedStore::new());
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = create_test_key(&ns, "k1");
+
+        let mut txn = TransactionContext::with_store(
+            manager.next_txn_id().unwrap(),
+            branch_id,
+            Arc::clone(&store),
+        );
+        txn.put(key.clone(), Value::Int(1)).unwrap();
+        let result = txn.cas_with_read(key.clone(), 0, Value::Int(2));
+        assert!(
+            result.is_err(),
+            "cas_with_read() must reject a key already in write_set"
         );
     }
 }
