@@ -458,6 +458,13 @@ impl SegmentBuilder {
         // 9. Atomic rename
         std::fs::rename(&tmp_path, path)?;
 
+        // 10. Fsync parent directory so the rename is durable on crash.
+        if let Some(parent) = path.parent() {
+            if let Ok(dir_fd) = std::fs::File::open(parent) {
+                let _ = dir_fd.sync_all();
+            }
+        }
+
         Ok(SegmentMeta {
             entry_count,
             commit_min,
@@ -2595,5 +2602,44 @@ mod tests {
             assert!(e.is_some());
             assert_eq!(e.unwrap().value, Value::Int(i as i64));
         }
+    }
+
+    /// Verify that `build_from_iter` follows the crash-safe write protocol:
+    /// write temp → sync temp → rename → fsync parent directory.
+    ///
+    /// We cannot observe fsync calls directly in a unit test, but we verify:
+    /// 1. The final file exists and is valid (readable segment).
+    /// 2. No `.tmp` file remains after build (rename completed).
+    /// 3. The parent directory is sync-able (fsync succeeds).
+    #[test]
+    fn test_issue_1681_segment_build_dir_fsync_after_rename() {
+        use crate::segment::KVSegment;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crash_safe.sst");
+        let tmp_path = path.with_extension("tmp");
+
+        let mt = Memtable::new(0);
+        mt.put(&key("a"), 1, Value::Int(1), false);
+        mt.put(&key("b"), 2, Value::Int(2), false);
+        mt.freeze();
+
+        let builder = SegmentBuilder::default();
+        builder.build_from_iter(mt.iter_all(), &path).unwrap();
+
+        // 1. Final file exists and is valid
+        assert!(path.exists(), "segment file must exist after build");
+        let seg = KVSegment::open(&path).unwrap();
+        assert_eq!(seg.entry_count(), 2);
+
+        // 2. Temp file is cleaned up (rename succeeded)
+        assert!(
+            !tmp_path.exists(),
+            "temp file must not exist after build (rename must have completed)"
+        );
+
+        // 3. Verify the parent directory is sync-able (non-trivial on some FS)
+        let dir_fd = std::fs::File::open(dir.path()).unwrap();
+        dir_fd.sync_all().unwrap();
     }
 }
