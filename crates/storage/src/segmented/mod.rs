@@ -1112,7 +1112,10 @@ impl SegmentedStore {
                     source_branch_id: l.source_branch_id,
                     fork_version: l.fork_version,
                     segments: Arc::clone(&l.segments),
-                    status: l.status,
+                    // Always reset to Active: the child has not started any
+                    // materialization.  Copying Materializing would permanently
+                    // block the child from materializing this layer (#1721).
+                    status: LayerStatus::Active,
                 })
                 .collect();
 
