@@ -793,8 +793,11 @@ impl SegmentedStore {
 
                     let typed_key = ik.typed_key_prefix();
 
-                    // Rewrite branch_id: source → child
-                    let child_typed_key = rewrite_branch_id_bytes(typed_key, child_branch_id);
+                    // Rewrite branch_id: source → child (skip corrupt keys)
+                    let Some(child_typed_key) = rewrite_branch_id_bytes(typed_key, child_branch_id)
+                    else {
+                        continue;
+                    };
 
                     // Shadow detection (cached per logical key)
                     let is_shadowed = if last_shadow_key.as_deref() == Some(&child_typed_key) {
@@ -821,8 +824,12 @@ impl SegmentedStore {
                         continue;
                     }
 
-                    // Rewrite full internal key: source → child
-                    let child_ik_bytes = rewrite_branch_id_bytes(ik.as_bytes(), child_branch_id);
+                    // Rewrite full internal key: source → child (skip corrupt keys)
+                    let Some(child_ik_bytes) =
+                        rewrite_branch_id_bytes(ik.as_bytes(), child_branch_id)
+                    else {
+                        continue;
+                    };
                     let child_ik = InternalKey::from_bytes(child_ik_bytes);
 
                     entries.push((child_ik, segment_entry_to_memtable_entry(se)));
@@ -966,7 +973,10 @@ impl SegmentedStore {
         fork_version: u64,
     ) -> bool {
         // Rewrite typed_key from child → source namespace
-        let src_typed_key = rewrite_branch_id_bytes(child_typed_key, &source_branch_id);
+        let Some(src_typed_key) = rewrite_branch_id_bytes(child_typed_key, &source_branch_id)
+        else {
+            return false; // Corrupt key can't exist
+        };
         let src_seek_ik = InternalKey::from_typed_key_bytes(&src_typed_key, u64::MAX);
         let src_seek_bytes = src_seek_ik.as_bytes();
 
@@ -2482,7 +2492,10 @@ impl SegmentedStore {
             }
             let effective_version = max_version.min(layer.fork_version);
             // Rewrite typed_key: child branch_id → source branch_id
-            let src_typed_key = rewrite_branch_id_bytes(&typed_key, &layer.source_branch_id);
+            let Some(src_typed_key) = rewrite_branch_id_bytes(&typed_key, &layer.source_branch_id)
+            else {
+                continue; // Skip layer if key is corrupt
+            };
             let src_seek_ik = InternalKey::from_typed_key_bytes(&src_typed_key, u64::MAX);
             let src_seek_bytes = src_seek_ik.as_bytes();
 
