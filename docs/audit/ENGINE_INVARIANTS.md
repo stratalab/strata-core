@@ -360,8 +360,8 @@ on every append. Verify `sync()` calls `flush()` (BufWriter → OS) then `sync_a
 ### ACID-007: Standard mode durability window is bounded
 
 In `Standard` mode, fsync is periodic (every `interval_ms` or `batch_size` commits, whichever first).
-The data loss window MUST NOT exceed `interval_ms × 3` (the safety-net threshold). If the background
-flush thread stalls beyond 3× interval, an inline fsync MUST be triggered.
+The data loss window MUST NOT exceed `interval_ms`. If the background flush thread stalls beyond
+`interval_ms` without a sync, an inline fsync MUST be triggered.
 
 **Audit**: Find the Standard mode logic in `maybe_sync`. Verify the safety-net threshold. Find the
 background flush thread (if it exists). Verify it calls `sync_if_overdue` periodically. If the
