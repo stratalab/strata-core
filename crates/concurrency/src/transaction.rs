@@ -7,7 +7,7 @@
 //! See `docs/architecture/M2_TRANSACTION_SEMANTICS.md` for the full specification.
 
 use crate::validation::{validate_transaction, ValidationResult};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use strata_core::primitives::json::{get_at_path, JsonPatch, JsonPath, JsonValue};
@@ -754,37 +754,63 @@ impl TransactionContext {
         })?;
 
         // Get all matching keys from store (bounded by start_version)
+        // Storage returns results already sorted by Key via MergeIterator + MvccIterator.
         let snapshot_results = store.scan_prefix(prefix, self.start_version)?;
 
-        // Build result set with read-your-writes using BTreeMap for sorted output
-        let mut results: BTreeMap<Key, Value> = BTreeMap::new();
+        // Pre-allocate read_set capacity to reduce rehashing
+        if !self.read_only {
+            self.read_set.reserve(snapshot_results.len());
+        }
 
-        // Add snapshot results (excluding deleted keys from results, but tracking ALL in read_set)
+        // Track all snapshot keys in read_set, filter out deleted keys
+        let mut snapshot_filtered: Vec<(Key, Value)> = Vec::with_capacity(snapshot_results.len());
         for (key, vv) in snapshot_results {
-            // Always track in read_set - we observed this key exists at this version.
-            // This is important for conflict detection: if another transaction modifies
-            // a key we observed during scan (even if we're deleting it), we should detect
-            // the conflict. Otherwise, our delete could overwrite concurrent updates.
             if !self.read_only {
                 self.read_set.insert(key.clone(), vv.version.as_u64());
             }
-
             if !self.delete_set.contains(&key) {
-                // Only include non-deleted keys in the result set
-                results.insert(key, vv.value);
+                snapshot_filtered.push((key, vv.value));
             }
         }
 
-        // Add/overwrite with write_set entries matching prefix
-        for (key, value) in &self.write_set {
-            if key.starts_with(prefix) {
-                // Write_set entries are NOT tracked in read_set
-                // (they're our own uncommitted writes)
-                results.insert(key.clone(), value.clone());
-            }
+        // Collect write_set entries matching prefix
+        let mut write_matches: Vec<(Key, Value)> = self
+            .write_set
+            .iter()
+            .filter(|(key, _)| key.starts_with(prefix))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+
+        // Fast path: no buffered writes overlap, snapshot is already sorted
+        if write_matches.is_empty() {
+            return Ok(snapshot_filtered);
         }
 
-        Ok(results.into_iter().collect())
+        write_matches.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+        // Sorted merge: write_matches takes precedence on key collision
+        let mut result = Vec::with_capacity(snapshot_filtered.len() + write_matches.len());
+        let mut snap_iter = snapshot_filtered.into_iter().peekable();
+        let mut write_iter = write_matches.into_iter().peekable();
+
+        while let (Some((sk, _)), Some((wk, _))) = (snap_iter.peek(), write_iter.peek()) {
+            match sk.cmp(wk) {
+                std::cmp::Ordering::Less => {
+                    result.push(snap_iter.next().unwrap());
+                }
+                std::cmp::Ordering::Greater => {
+                    result.push(write_iter.next().unwrap());
+                }
+                std::cmp::Ordering::Equal => {
+                    snap_iter.next(); // discard snapshot, write_set wins
+                    result.push(write_iter.next().unwrap());
+                }
+            }
+        }
+        result.extend(snap_iter);
+        result.extend(write_iter);
+
+        Ok(result)
     }
 
     /// Get the version that was read for a key (from read_set)
@@ -2530,5 +2556,69 @@ mod tests {
 
         // With allow_cross_branch, cross-branch get should succeed (returns None, no data)
         assert!(txn.get(&cross_key).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_issue_1766_scan_prefix_sorted_merge_with_write_set() {
+        // Verify scan_prefix returns correctly sorted, deduplicated results
+        // when write_set entries interleave with and override snapshot entries.
+        let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
+
+        let store = Arc::new(SegmentedStore::new());
+        // Insert snapshot keys: a, c, e, g
+        for (name, val) in [("a", 1), ("c", 3), ("e", 5), ("g", 7)] {
+            store
+                .put_with_version_mode(
+                    test_key(&ns, name),
+                    Value::Int(val),
+                    10,
+                    None,
+                    WriteMode::Append,
+                )
+                .unwrap();
+        }
+
+        let mut txn = TransactionContext::with_store(100, branch_id, store);
+
+        // Buffer writes that interleave (b, d) and override (c, e)
+        txn.put(test_key(&ns, "b"), Value::Int(20)).unwrap();
+        txn.put(test_key(&ns, "d"), Value::Int(40)).unwrap();
+        txn.put(test_key(&ns, "c"), Value::Int(30)).unwrap(); // overrides snapshot c=3
+        txn.put(test_key(&ns, "e"), Value::Int(50)).unwrap(); // overrides snapshot e=5
+
+        // Delete snapshot key g
+        txn.delete(test_key(&ns, "g")).unwrap();
+
+        let prefix = Key::new(ns.clone(), TypeTag::KV, vec![]);
+        let results = txn.scan_prefix(&prefix).unwrap();
+
+        let keys: Vec<String> = results
+            .iter()
+            .filter_map(|(k, _)| k.user_key_string())
+            .collect();
+        let vals: Vec<&Value> = results.iter().map(|(_, v)| v).collect();
+
+        // Must be sorted: a, b, c, d, e (g deleted)
+        assert_eq!(keys, vec!["a", "b", "c", "d", "e"]);
+        // Snapshot values for a; write_set values for b, c, d, e
+        assert_eq!(
+            vals,
+            vec![
+                &Value::Int(1),
+                &Value::Int(20),
+                &Value::Int(30),
+                &Value::Int(40),
+                &Value::Int(50),
+            ]
+        );
+
+        // read_set should contain snapshot keys (a, c, e, g) but NOT write-only keys (b, d)
+        assert!(txn.read_set.contains_key(&test_key(&ns, "a")));
+        assert!(txn.read_set.contains_key(&test_key(&ns, "c")));
+        assert!(txn.read_set.contains_key(&test_key(&ns, "e")));
+        assert!(txn.read_set.contains_key(&test_key(&ns, "g"))); // tracked even though deleted
+        assert!(!txn.read_set.contains_key(&test_key(&ns, "b")));
+        assert!(!txn.read_set.contains_key(&test_key(&ns, "d")));
     }
 }
