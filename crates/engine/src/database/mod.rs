@@ -2980,7 +2980,10 @@ mod tests {
     }
 
     #[test]
-    fn test_checkpoint_then_compact() {
+    fn test_checkpoint_then_compact_without_flush_fails() {
+        // Issue #1730: compact() after checkpoint-only must fail because
+        // recovery cannot load snapshots. WAL compaction is only safe
+        // when driven by the flush watermark (data in SST segments).
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("db");
         let db = Database::open(&db_path).unwrap();
@@ -2996,11 +2999,12 @@ mod tests {
         })
         .unwrap();
 
-        // Checkpoint first
+        // Checkpoint creates snapshot but no flush watermark
         assert!(db.checkpoint().is_ok());
 
-        // Now compact should succeed
-        assert!(db.compact().is_ok());
+        // Compact must fail — snapshot watermark alone is not safe
+        let result = db.compact();
+        assert!(result.is_err());
     }
 
     #[test]
@@ -3844,5 +3848,120 @@ mod tests {
 
         // Clean up reader
         db.coordinator.record_abort(reader.txn_id);
+    }
+
+    #[test]
+    fn test_issue_1730_checkpoint_compact_recovery_data_loss() {
+        // Issue #1730: checkpoint+compact deletes WAL segments, but recovery
+        // is WAL-only and never loads snapshots. This causes data loss.
+        //
+        // After the fix, compact() must refuse to delete WAL segments based
+        // on the snapshot watermark alone, since recovery cannot load snapshots.
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("db");
+
+        let branch_id = BranchId::new();
+
+        // Step 1: Write data
+        {
+            let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+            let ns = create_test_namespace(branch_id);
+            let key = Key::new_kv(ns, "critical_data");
+
+            db.transaction(branch_id, |txn| {
+                txn.put(key.clone(), Value::String("must_survive".to_string()))?;
+                Ok(())
+            })
+            .unwrap();
+
+            // Step 2: Checkpoint (creates snapshot, sets watermark in MANIFEST)
+            db.checkpoint().unwrap();
+
+            // Step 3: Compact — should NOT delete WAL segments since recovery
+            // cannot load snapshots. With the fix, this returns an error.
+            let compact_result = db.compact();
+            assert!(
+                compact_result.is_err(),
+                "compact() must fail when only snapshot watermark exists \
+                 (no flush watermark) because recovery cannot load snapshots"
+            );
+        }
+        // Database dropped (simulates clean shutdown)
+
+        // Clear the registry so reopen doesn't return the cached instance
+        OPEN_DATABASES.lock().clear();
+
+        // Step 4: Reopen — recovery replays WAL
+        {
+            let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+
+            let ns = create_test_namespace(branch_id);
+            let key = Key::new_kv(ns, "critical_data");
+
+            // Step 5: Data MUST still be present
+            let result = db.storage().get_versioned(&key, u64::MAX).unwrap();
+            assert!(
+                result.is_some(),
+                "CRITICAL: Data lost after checkpoint+compact+recovery! \
+                 WAL segments were deleted but recovery never loaded the snapshot."
+            );
+            assert_eq!(
+                result.unwrap().value,
+                Value::String("must_survive".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn test_issue_1730_standard_durability() {
+        // Same as above but with Standard durability mode (disk-based, batched fsync).
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("db");
+
+        let branch_id = BranchId::new();
+        let durability = DurabilityMode::Standard {
+            interval_ms: 100,
+            batch_size: 1,
+        };
+
+        {
+            let db = Database::open_with_durability(&db_path, durability).unwrap();
+            let ns = create_test_namespace(branch_id);
+            let key = Key::new_kv(ns, "standard_data");
+
+            db.transaction(branch_id, |txn| {
+                txn.put(key.clone(), Value::String("durable".to_string()))?;
+                Ok(())
+            })
+            .unwrap();
+
+            // Ensure WAL is flushed to disk
+            db.flush().unwrap();
+
+            db.checkpoint().unwrap();
+
+            // compact() must fail — only snapshot watermark, no flush watermark
+            let compact_result = db.compact();
+            assert!(
+                compact_result.is_err(),
+                "compact() after checkpoint-only must fail under Standard durability"
+            );
+        }
+
+        OPEN_DATABASES.lock().clear();
+
+        // Reopen and verify data survived
+        {
+            let db = Database::open_with_durability(&db_path, durability).unwrap();
+            let ns = create_test_namespace(branch_id);
+            let key = Key::new_kv(ns, "standard_data");
+
+            let result = db.storage().get_versioned(&key, u64::MAX).unwrap();
+            assert!(
+                result.is_some(),
+                "Data must survive checkpoint+failed-compact+recovery under Standard durability"
+            );
+            assert_eq!(result.unwrap().value, Value::String("durable".to_string()));
+        }
     }
 }

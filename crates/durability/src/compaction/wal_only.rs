@@ -77,7 +77,7 @@ impl WalOnlyCompactor {
         let start_time = std::time::Instant::now();
         let mut info = CompactInfo::new(CompactMode::WALOnly);
 
-        // Get effective watermark from MANIFEST (min of snapshot and flush watermarks)
+        // Get effective watermark from MANIFEST (flush watermark only; see #1730)
         let (watermark, manifest_active) = {
             let manifest = self.manifest.lock();
             let m = manifest.manifest();
@@ -307,19 +307,12 @@ impl WalOnlyCompactor {
 
 /// Compute the effective watermark for WAL truncation.
 ///
-/// Uses the minimum of the snapshot watermark and the flush watermark,
-/// so WAL segments are only deleted when covered by both (if both exist).
-/// Returns `None` if neither watermark is available.
+/// Returns the flush watermark from the MANIFEST, ignoring the snapshot
+/// watermark. Snapshot-aware recovery is not yet implemented (#1730), so
+/// WAL segments must only be deleted when their data is persisted in
+/// on-disk SST segments (tracked by `flushed_through_commit_id`).
 fn effective_watermark(manifest: &crate::format::Manifest) -> Option<u64> {
-    match (
-        manifest.snapshot_watermark,
-        manifest.flushed_through_commit_id,
-    ) {
-        (Some(sw), Some(fw)) => Some(sw.min(fw)),
-        (Some(sw), None) => Some(sw),
-        (None, Some(fw)) => Some(fw),
-        (None, None) => None,
-    }
+    manifest.flushed_through_commit_id
 }
 
 /// Generate segment file path
@@ -420,10 +413,10 @@ mod tests {
         create_segment_with_records(&wal_dir, 2, &[4, 5, 6]).unwrap();
         create_segment_with_records(&wal_dir, 3, &[7, 8, 9]).unwrap();
 
-        // Set snapshot watermark at txn 6 and active segment at 4
+        // Set flush watermark at txn 6 and active segment at 4
         {
             let mut m = manifest.lock();
-            m.set_snapshot_watermark(1, 6).unwrap();
+            m.set_flush_watermark(6).unwrap();
             m.manifest_mut().active_wal_segment = 4;
             m.persist().unwrap();
         }
@@ -453,7 +446,7 @@ mod tests {
         // Set watermark high but active segment is 1
         {
             let mut m = manifest.lock();
-            m.set_snapshot_watermark(1, 100).unwrap();
+            m.set_flush_watermark(100).unwrap();
             m.manifest_mut().active_wal_segment = 1; // Segment 1 is active
             m.persist().unwrap();
         }
@@ -470,10 +463,10 @@ mod tests {
     fn test_compact_empty_wal() {
         let (_dir, wal_dir, manifest) = setup_test_env();
 
-        // Set snapshot watermark but no segments
+        // Set flush watermark but no segments
         {
             let mut m = manifest.lock();
-            m.set_snapshot_watermark(1, 100).unwrap();
+            m.set_flush_watermark(100).unwrap();
             m.persist().unwrap();
         }
 
@@ -498,7 +491,7 @@ mod tests {
         // Set watermark and active segment
         {
             let mut m = manifest.lock();
-            m.set_snapshot_watermark(1, 5).unwrap();
+            m.set_flush_watermark(5).unwrap();
             m.manifest_mut().active_wal_segment = 10;
             m.persist().unwrap();
         }
@@ -537,7 +530,7 @@ mod tests {
 
         {
             let mut m = manifest.lock();
-            m.set_snapshot_watermark(1, 10).unwrap();
+            m.set_flush_watermark(10).unwrap();
             m.manifest_mut().active_wal_segment = 10;
             m.persist().unwrap();
         }
@@ -580,7 +573,7 @@ mod tests {
         // Set watermark to cover segment 1 only
         {
             let mut m = manifest.lock();
-            m.set_snapshot_watermark(1, 3).unwrap();
+            m.set_flush_watermark(3).unwrap();
             m.manifest_mut().active_wal_segment = 10;
             m.persist().unwrap();
         }
@@ -616,7 +609,7 @@ mod tests {
         // Set watermark at exactly max_txn_id=3 and active segment high
         {
             let mut m = manifest.lock();
-            m.set_snapshot_watermark(1, 3).unwrap();
+            m.set_flush_watermark(3).unwrap();
             m.manifest_mut().active_wal_segment = 10;
             m.persist().unwrap();
         }
@@ -646,7 +639,7 @@ mod tests {
         // safe_active = max(3, 5) = 5. Segments >= 5 are protected.
         {
             let mut m = manifest.lock();
-            m.set_snapshot_watermark(1, 100).unwrap(); // high watermark covers all
+            m.set_flush_watermark(100).unwrap(); // high watermark covers all
             m.manifest_mut().active_wal_segment = 3;
             m.persist().unwrap();
         }
@@ -677,7 +670,7 @@ mod tests {
         // MANIFEST active=5, override=3 → max(5,3)=5
         {
             let mut m = manifest.lock();
-            m.set_snapshot_watermark(1, 100).unwrap();
+            m.set_flush_watermark(100).unwrap();
             m.manifest_mut().active_wal_segment = 5;
             m.persist().unwrap();
         }
@@ -699,7 +692,7 @@ mod tests {
 
         {
             let mut m = manifest.lock();
-            m.set_snapshot_watermark(1, 10).unwrap();
+            m.set_flush_watermark(10).unwrap();
             m.manifest_mut().active_wal_segment = 3;
             m.persist().unwrap();
         }
@@ -731,7 +724,7 @@ mod tests {
 
         {
             let mut m = manifest.lock();
-            m.set_snapshot_watermark(1, 5).unwrap();
+            m.set_flush_watermark(5).unwrap();
             m.manifest_mut().active_wal_segment = 2; // stale
             m.persist().unwrap();
         }
@@ -782,30 +775,30 @@ mod tests {
     }
 
     #[test]
-    fn test_wal_truncation_uses_min_of_both_watermarks() {
+    fn test_wal_truncation_ignores_snapshot_watermark() {
+        // Issue #1730: snapshot watermark must NOT drive WAL deletion because
+        // recovery is WAL-only and cannot load snapshots.
         let (_dir, wal_dir, manifest) = setup_test_env();
 
         create_segment_with_records(&wal_dir, 1, &[1, 2, 3]).unwrap();
         create_segment_with_records(&wal_dir, 2, &[4, 5, 6]).unwrap();
-        create_segment_with_records(&wal_dir, 3, &[7, 8, 9]).unwrap();
 
-        // Snapshot watermark at 6, flush watermark at 4 → effective = min(6, 4) = 4
+        // Set only snapshot watermark (no flush watermark)
         {
             let mut m = manifest.lock();
-            m.set_snapshot_watermark(1, 6).unwrap();
-            m.manifest_mut().flushed_through_commit_id = Some(4);
+            m.set_snapshot_watermark(1, 100).unwrap();
             m.manifest_mut().active_wal_segment = 10;
             m.persist().unwrap();
         }
 
         let compactor = WalOnlyCompactor::new(wal_dir.clone(), manifest);
-        let info = compactor.compact().unwrap();
+        let result = compactor.compact();
 
-        // Only segment 1 covered (max txn 3 <= 4)
-        assert_eq!(info.wal_segments_removed, 1);
-        assert!(!segment_path(&wal_dir, 1).exists());
+        // Must return NoSnapshot because snapshot watermark alone is not safe
+        assert!(matches!(result, Err(CompactionError::NoSnapshot)));
+        // WAL segments must NOT be deleted
+        assert!(segment_path(&wal_dir, 1).exists());
         assert!(segment_path(&wal_dir, 2).exists());
-        assert!(segment_path(&wal_dir, 3).exists());
     }
 
     #[test]
@@ -838,7 +831,7 @@ mod tests {
 
         {
             let mut m = manifest.lock();
-            m.set_snapshot_watermark(1, 10).unwrap(); // covers everything
+            m.set_flush_watermark(10).unwrap(); // covers everything
             m.manifest_mut().active_wal_segment = 2; // stale: writer is at 4
             m.persist().unwrap();
         }
