@@ -2002,6 +2002,7 @@ mod tests {
     /// Issue #1710 stress variant: concurrent commits on multiple branches
     /// with interleaved quiesced_version() calls.
     #[test]
+    #[ignore] // Deadlock: DashMap shard lock held through barrier — see #1781
     fn test_issue_1710_quiesced_version_concurrent_multi_branch() {
         let apply_started = Arc::new(std::sync::Barrier::new(5)); // 4 writers + 1 reader
         let store = Arc::new(DelayedStorage {
