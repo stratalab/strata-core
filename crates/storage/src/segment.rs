@@ -22,9 +22,9 @@ use crate::bloom::BloomFilter;
 use crate::key_encoding::{encode_typed_key, encode_typed_key_prefix, InternalKey};
 use crate::segment_builder::{
     decode_entry_header_ref_v4, decode_entry_header_v4, decode_entry_v4, decode_entry_value,
-    parse_filter_index, parse_footer, parse_framed_block, parse_header, parse_index_block,
-    parse_properties_block, EntryHeader, FilterIndexEntry, Footer, IndexEntry, KVHeader,
-    PropertiesBlock, FOOTER_SZ, FRAME_OVERHEAD, HEADER_SIZE, IDX_TYPE_PARTITIONED,
+    parse_filter_index, parse_footer, parse_framed_block, parse_framed_block_raw, parse_header,
+    parse_index_block, parse_properties_block, EntryHeader, FilterIndexEntry, Footer, IndexEntry,
+    KVHeader, PropertiesBlock, FOOTER_SZ, FRAME_OVERHEAD, HEADER_SIZE, IDX_TYPE_PARTITIONED,
 };
 use strata_core::error::StrataError;
 use strata_core::types::Key;
@@ -575,13 +575,26 @@ impl KVSegment {
             ))
         })?;
 
-        let codec_byte = raw[1];
-        let (_, data) = parse_framed_block(&raw).ok_or_else(|| {
-            StrataError::corruption(format!(
-                "data block CRC mismatch or truncation at offset {} in {:?}",
-                block_offset, self.file_path
-            ))
-        })?;
+        let (_block_type, codec_byte, reserved, data, stored_crc) = parse_framed_block_raw(&raw)
+            .ok_or_else(|| {
+                StrataError::corruption(format!(
+                    "data block truncation at offset {} in {:?}",
+                    block_offset, self.file_path
+                ))
+            })?;
+
+        let pre_compression_crc = reserved & 1 == 1;
+
+        // For legacy blocks (reserved bit 0 = 0), verify CRC on compressed data
+        if !pre_compression_crc {
+            let computed_crc = crc32fast::hash(data);
+            if stored_crc != computed_crc {
+                return Err(StrataError::corruption(format!(
+                    "data block CRC mismatch at offset {} in {:?}",
+                    block_offset, self.file_path
+                )));
+            }
+        }
 
         let decompressed = match codec_byte {
             0 => data.to_vec(), // Uncompressed
@@ -598,6 +611,19 @@ impl KVSegment {
                 )));
             }
         };
+
+        // For new blocks (reserved bit 0 = 1), verify CRC on uncompressed data.
+        // This ensures the crc32fast buffer is always >= data_block_size (~4KB),
+        // above the 64-byte threshold for PCLMULQDQ hardware acceleration.
+        if pre_compression_crc {
+            let computed_crc = crc32fast::hash(&decompressed);
+            if stored_crc != computed_crc {
+                return Err(StrataError::corruption(format!(
+                    "data block CRC mismatch (pre-compression) at offset {} in {:?}",
+                    block_offset, self.file_path
+                )));
+            }
+        }
 
         // Cache the decompressed block
         Ok(cache.insert(self.file_id, block_offset, decompressed))
