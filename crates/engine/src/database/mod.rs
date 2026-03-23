@@ -1900,7 +1900,7 @@ impl Database {
 
         if self
             .scheduler
-            .submit(crate::background::TaskPriority::Low, move || {
+            .submit(crate::background::TaskPriority::High, move || {
                 // Compact all branches that are over target.
                 let branch_ids = storage.branch_ids();
                 for branch_id in &branch_ids {
