@@ -1018,7 +1018,7 @@ impl SegmentedStore {
                     if source
                         .frozen
                         .last()
-                        .map_or(false, |last| last.id() == mt.id())
+                        .is_some_and(|last| last.id() == mt.id())
                     {
                         source.frozen.pop();
                         self.total_frozen_count.fetch_sub(1, Ordering::Relaxed);
