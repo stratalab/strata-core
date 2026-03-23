@@ -2398,6 +2398,10 @@ mod tests {
         // empty. Pre-fix, this early-returned and skipped materialization.
         write_kv(&db, "root", "default", "trigger", Value::Int(999));
 
+        // Materialization now runs on the background scheduler (#1736).
+        // Drain to ensure it completes before checking.
+        db.scheduler().drain();
+
         // Post-fix, materialization should have run on the leaf branch.
         let layers_after = storage.inherited_layer_count(&leaf_id);
         assert!(

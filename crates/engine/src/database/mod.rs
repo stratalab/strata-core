@@ -212,6 +212,10 @@ pub struct Database {
     /// Background task scheduler for deferred work (embedding, GC, etc.)
     scheduler: Arc<BackgroundScheduler>,
 
+    /// Flag preventing duplicate background compaction submissions.
+    /// Set to `true` when a compaction task is in flight; cleared when it completes.
+    compaction_in_flight: Arc<AtomicBool>,
+
     /// Condition variable signalled by compaction when L0 count drops.
     /// Writers wait on this when L0 exceeds `l0_stop_writes_trigger`.
     write_stall_cv: Arc<parking_lot::Condvar>,
@@ -504,6 +508,7 @@ impl Database {
             flush_shutdown: Arc::new(AtomicBool::new(false)),
             flush_handle: ParkingMutex::new(None), // No flush thread
             scheduler: Arc::new(BackgroundScheduler::new(4, 4096)),
+            compaction_in_flight: Arc::new(AtomicBool::new(false)),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
             _lock_file: None, // No lock acquired
@@ -685,6 +690,7 @@ impl Database {
             flush_shutdown,
             flush_handle: ParkingMutex::new(flush_handle),
             scheduler: Arc::new(BackgroundScheduler::new(4, 4096)),
+            compaction_in_flight: Arc::new(AtomicBool::new(false)),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
             _lock_file: lock_file,
@@ -764,6 +770,7 @@ impl Database {
             flush_shutdown: Arc::new(AtomicBool::new(false)),
             flush_handle: ParkingMutex::new(None),
             scheduler: Arc::new(BackgroundScheduler::new(4, 4096)),
+            compaction_in_flight: Arc::new(AtomicBool::new(false)),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
             _lock_file: None, // No lock for ephemeral databases
@@ -1834,10 +1841,11 @@ impl Database {
         Ok(())
     }
 
-    /// Flush frozen memtables and compact synchronously on the writer's thread.
+    /// Flush frozen memtables synchronously and schedule compaction in the background.
     ///
-    /// Writes pay the cost so reads never hit a deep L0. This keeps L0 at ≤4
-    /// segments at all times.
+    /// Flush runs inline to free memtable memory. Compaction and materialization
+    /// are deferred to the background scheduler so the writer thread is not
+    /// blocked by potentially slow I/O (#1736).
     fn schedule_flush_if_needed(&self) {
         if self.storage.segments_dir().is_none() {
             return;
@@ -1846,12 +1854,11 @@ impl Database {
         // Update snapshot floor so compaction respects active snapshots (#1697).
         self.storage.set_snapshot_floor(self.gc_safe_point());
 
-        // 1. Flush and compact branches that need it.
+        // 1. Flush frozen memtables synchronously (frees memtable memory).
         let branches = self.storage.branches_needing_flush();
-        for branch_id in branches {
-            // Flush all frozen memtables
+        for branch_id in &branches {
             loop {
-                match self.storage.flush_oldest_frozen(&branch_id) {
+                match self.storage.flush_oldest_frozen(branch_id) {
                     Ok(true) => {
                         Self::update_flush_watermark(&self.storage, &self.data_dir, &self.wal_dir);
                     }
@@ -1867,53 +1874,89 @@ impl Database {
                     }
                 }
             }
-
-            // Compact until all levels are below target
-            loop {
-                match self.storage.pick_and_compact(&branch_id, 0) {
-                    Ok(Some(_)) => {
-                        self.write_stall_cv.notify_all();
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "strata::compact",
-                            ?branch_id,
-                            error = %e,
-                            "compaction failed"
-                        );
-                        break;
-                    }
-                }
-            }
         }
 
-        // 2. Materialize inherited layers that exceed depth limit.
-        //    Decoupled from flush — runs even when no branches need flushing (#1704).
-        for branch_id in self.storage.branches_needing_materialization() {
-            let layer_count = self.storage.inherited_layer_count(&branch_id);
-            if layer_count > 0 {
-                let deepest = layer_count - 1;
-                match self.storage.materialize_layer(&branch_id, deepest) {
-                    Ok(result) => {
-                        tracing::info!(
-                            target: "strata::materialize",
-                            ?branch_id,
-                            entries = result.entries_materialized,
-                            segments = result.segments_created,
-                            "materialized inherited layer"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "strata::materialize",
-                            ?branch_id,
-                            error = %e,
-                            "materialization failed"
-                        );
+        // 2. Schedule compaction and materialization on background thread.
+        self.schedule_background_compaction();
+    }
+
+    /// Submit a compaction + materialization task to the background scheduler.
+    ///
+    /// At most one background compaction task is in flight at a time. If one is
+    /// already running, this call is a no-op — the running task will pick up any
+    /// newly-flushed L0 segments.
+    fn schedule_background_compaction(&self) {
+        if self
+            .compaction_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        let storage = Arc::clone(&self.storage);
+        let write_stall_cv = Arc::clone(&self.write_stall_cv);
+        let flag = Arc::clone(&self.compaction_in_flight);
+
+        if self
+            .scheduler
+            .submit(crate::background::TaskPriority::Low, move || {
+                // Compact all branches that are over target.
+                let branch_ids = storage.branch_ids();
+                for branch_id in &branch_ids {
+                    loop {
+                        match storage.pick_and_compact(branch_id, 0) {
+                            Ok(Some(_)) => {
+                                write_stall_cv.notify_all();
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "strata::compact",
+                                    ?branch_id,
+                                    error = %e,
+                                    "background compaction failed"
+                                );
+                                break;
+                            }
+                        }
                     }
                 }
-            }
+
+                // Materialize inherited layers that exceed depth limit (#1704).
+                for branch_id in storage.branches_needing_materialization() {
+                    let layer_count = storage.inherited_layer_count(&branch_id);
+                    if layer_count > 0 {
+                        let deepest = layer_count - 1;
+                        match storage.materialize_layer(&branch_id, deepest) {
+                            Ok(result) => {
+                                tracing::info!(
+                                    target: "strata::materialize",
+                                    ?branch_id,
+                                    entries = result.entries_materialized,
+                                    segments = result.segments_created,
+                                    "materialized inherited layer"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "strata::materialize",
+                                    ?branch_id,
+                                    error = %e,
+                                    "materialization failed"
+                                );
+                            }
+                        }
+                    }
+                }
+
+                flag.store(false, Ordering::Release);
+            })
+            .is_err()
+        {
+            // Submit failed (queue full or shutdown) — clear the flag so future
+            // compaction attempts are not permanently blocked.
+            self.compaction_in_flight.store(false, Ordering::Release);
         }
     }
 
@@ -4127,6 +4170,75 @@ mod tests {
              Got {:?}, indicating split timestamps between put and delete.",
             b_at_a_ts.map(|v| v.value),
         );
+    }
+
+    /// Issue #1736: Compaction must run on the background scheduler, not inline
+    /// on the writer thread. We verify by checking that the background scheduler
+    /// completed compaction tasks — before the fix, compaction ran synchronously
+    /// and the scheduler had zero completed tasks.
+    #[test]
+    fn test_issue_1736_compaction_runs_in_background() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("db");
+
+        // Tiny write buffer: forces a memtable rotation (and flush) after ~1-2 writes.
+        let cfg = StrataConfig {
+            durability: "always".to_string(),
+            storage: StorageConfig {
+                write_buffer_size: 256,
+                ..StorageConfig::default()
+            },
+            ..StrataConfig::default()
+        };
+
+        let db = Database::open_with_config(&db_path, cfg).unwrap();
+        let branch_id = BranchId::new();
+        let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
+
+        let tasks_before = db.scheduler.stats().tasks_completed;
+
+        // Write enough entries to create 6+ L0 segments, triggering compaction.
+        // Each write ~100 bytes; write_buffer_size=256 → rotation every ~2-3 writes.
+        for i in 0..20 {
+            let key = Key::new_kv(ns.clone(), format!("key_{:04}", i));
+            db.transaction(
+                branch_id,
+                |txn: &mut strata_concurrency::TransactionContext| {
+                    txn.put(key.clone(), Value::String(format!("value_{}", i)))?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+
+        // Drain the scheduler to ensure all background tasks complete.
+        db.scheduler.drain();
+
+        let tasks_after = db.scheduler.stats().tasks_completed;
+        let bg_tasks = tasks_after - tasks_before;
+
+        // With background compaction (fix): scheduler ran compaction tasks → bg_tasks > 0.
+        // With synchronous compaction (bug): scheduler was never used → bg_tasks == 0.
+        assert!(
+            bg_tasks > 0,
+            "Background scheduler should have completed compaction tasks. \
+             tasks_completed before={}, after={}, delta={}. \
+             If delta is 0, compaction ran synchronously on the writer thread.",
+            tasks_before,
+            tasks_after,
+            bg_tasks,
+        );
+
+        // Verify data integrity: all entries should be readable after compaction.
+        for i in 0..20 {
+            let key = Key::new_kv(ns.clone(), format!("key_{:04}", i));
+            let entry = db
+                .storage
+                .get_versioned(&key, u64::MAX)
+                .unwrap()
+                .unwrap_or_else(|| panic!("key_{:04} should exist after compaction", i));
+            assert_eq!(entry.value, Value::String(format!("value_{}", i)),);
+        }
     }
 
     #[test]
