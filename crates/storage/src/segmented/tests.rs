@@ -7472,3 +7472,209 @@ fn test_issue_1677_shadow_check_returns_true_on_corruption() {
         "shadow check must return true on corruption to prevent stale data resurrection"
     );
 }
+
+// =====================================================================
+// Issue #1682: Shared-segment deletion races fork_branch refcount
+// =====================================================================
+
+/// #1682: delete_segment_if_unreferenced must not delete a segment file
+/// while a concurrent fork_branch is about to increment its refcount.
+///
+/// Setup: parent has 2 L0 segments. We fork a child, then clear it
+/// (refcount drops to 0), then race fork + compact on the parent.
+/// If the deletion barrier is missing, compaction can delete the segment
+/// file between is_referenced() returning false and the new fork's
+/// increment() call.
+#[test]
+fn test_issue_1682_segment_deletion_races_fork_refcount() {
+    use std::sync::{Arc, Barrier};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(SegmentedStore::with_dir(dir.path().to_path_buf(), 0));
+
+    // Populate parent with 2 L0 segments (needed for compaction).
+    for i in 0..50 {
+        seed(
+            &store,
+            parent_kv(&format!("k{:04}", i)),
+            Value::Int(i as i64),
+            1,
+        );
+    }
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    for i in 50..100 {
+        seed(
+            &store,
+            parent_kv(&format!("k{:04}", i)),
+            Value::Int(i as i64),
+            2,
+        );
+    }
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // Verify we have 2 L0 segments (needed for compaction).
+    {
+        let p = store.branches.get(&parent_branch()).unwrap();
+        let ver = p.version.load_full();
+        assert_eq!(ver.l0_segments().len(), 2, "should have 2 L0 segments");
+    }
+
+    // Fork child1 from parent → refcounts = 1 for parent segments.
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    // Clear child1 → refcounts back to 0.
+    store.clear_branch(&child_branch());
+
+    // Now race: fork a new child (child2) + compact parent concurrently.
+    // Without the deletion barrier, compaction can see refcount=0 and
+    // delete the segment file before fork increments the refcount.
+    let child2 = BranchId::from_bytes([40; 16]);
+    store
+        .branches
+        .entry(child2)
+        .or_insert_with(BranchState::new);
+
+    let barrier = Arc::new(Barrier::new(2));
+
+    let s1 = Arc::clone(&store);
+    let b1 = Arc::clone(&barrier);
+    let fork_handle = std::thread::spawn(move || {
+        b1.wait();
+        s1.fork_branch(&parent_branch(), &child2)
+    });
+
+    let s2 = Arc::clone(&store);
+    let b2 = Arc::clone(&barrier);
+    let compact_handle = std::thread::spawn(move || {
+        b2.wait();
+        s2.compact_branch(&parent_branch(), 0)
+    });
+
+    let fork_result = fork_handle.join().unwrap().unwrap();
+    let _compact_result = compact_handle.join().unwrap();
+
+    assert!(fork_result.1 > 0, "fork should share segments");
+
+    // The critical assertion: child2 must read ALL inherited data.
+    // If the race hit, segment files are deleted and reads fail with ENOENT.
+    let child2_ns = Arc::new(Namespace::new(
+        BranchId::from_bytes([40; 16]),
+        "default".to_string(),
+    ));
+    for i in 0..100 {
+        let key = Key::new(
+            Arc::clone(&child2_ns),
+            TypeTag::KV,
+            format!("k{:04}", i).as_bytes().to_vec(),
+        );
+        let result = store.get_versioned(&key, u64::MAX).unwrap();
+        assert!(
+            result.is_some(),
+            "child2 should see inherited key {:04} — segment file must not be deleted by race",
+            i
+        );
+    }
+}
+
+/// #1682 stress variant: run multiple rounds to increase the probability
+/// of hitting the race window between is_referenced() and remove_file().
+#[test]
+fn test_issue_1682_segment_deletion_races_fork_refcount_concurrent() {
+    use std::sync::{Arc, Barrier};
+
+    for round in 0..20 {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SegmentedStore::with_dir(dir.path().to_path_buf(), 0));
+
+        // Two L0 segments on parent.
+        for i in 0..30 {
+            seed(
+                &store,
+                parent_kv(&format!("r{}k{:04}", round, i)),
+                Value::Int(i as i64),
+                1,
+            );
+        }
+        store.rotate_memtable(&parent_branch());
+        store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+        for i in 30..60 {
+            seed(
+                &store,
+                parent_kv(&format!("r{}k{:04}", round, i)),
+                Value::Int(i as i64),
+                2,
+            );
+        }
+        store.rotate_memtable(&parent_branch());
+        store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+        // Fork child1 → refcount = 1, then clear → refcount = 0.
+        store
+            .branches
+            .entry(child_branch())
+            .or_insert_with(BranchState::new);
+        store
+            .fork_branch(&parent_branch(), &child_branch())
+            .unwrap();
+        store.clear_branch(&child_branch());
+
+        // Race fork child2 + compact.
+        let child2 = BranchId::from_bytes([40; 16]);
+        store
+            .branches
+            .entry(child2)
+            .or_insert_with(BranchState::new);
+
+        let barrier = Arc::new(Barrier::new(2));
+
+        let s1 = Arc::clone(&store);
+        let b1 = Arc::clone(&barrier);
+        let t1 = std::thread::spawn(move || {
+            b1.wait();
+            s1.fork_branch(&parent_branch(), &child2)
+        });
+
+        let s2 = Arc::clone(&store);
+        let b2 = Arc::clone(&barrier);
+        let t2 = std::thread::spawn(move || {
+            b2.wait();
+            s2.compact_branch(&parent_branch(), 0)
+        });
+
+        let fork_result = t1.join().unwrap().unwrap();
+        let _compact = t2.join().unwrap();
+
+        assert!(
+            fork_result.1 > 0,
+            "round {}: fork should share segments",
+            round
+        );
+
+        // Verify all data readable from child2.
+        let child2_ns = Arc::new(Namespace::new(child2, "default".to_string()));
+        for i in 0..60 {
+            let key = Key::new(
+                Arc::clone(&child2_ns),
+                TypeTag::KV,
+                format!("r{}k{:04}", round, i).as_bytes().to_vec(),
+            );
+            let result = store.get_versioned(&key, u64::MAX).unwrap();
+            assert!(
+                result.is_some(),
+                "round {}: child2 missing key {:04} — segment file may have been deleted by race",
+                round,
+                i,
+            );
+        }
+    }
+}
