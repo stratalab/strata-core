@@ -536,17 +536,20 @@ impl VectorStore {
             })
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
-        // Only update backend AFTER KV commit succeeds
-        backend.insert_with_timestamp(vector_id, embedding, record.created_at)?;
-
-        // Store inline metadata for O(1) search resolution
-        backend.set_inline_meta(
-            vector_id,
-            super::types::InlineMeta {
-                key: key.to_string(),
-                source_ref: inline_source_ref,
-            },
-        );
+        // Update backend AFTER KV commit succeeds. Backend failure is non-fatal
+        // since KV is already committed — get() falls back to KV record (Issue #1731).
+        if let Err(e) = backend.insert_with_timestamp(vector_id, embedding, record.created_at) {
+            warn!(target: "strata::vector", collection, key, error = %e, "Backend insert failed after KV commit; vector is durable but not searchable until recovery");
+        } else {
+            // Store inline metadata for O(1) search resolution
+            backend.set_inline_meta(
+                vector_id,
+                super::types::InlineMeta {
+                    key: key.to_string(),
+                    source_ref: inline_source_ref,
+                },
+            );
+        }
 
         drop(backend);
 
@@ -596,7 +599,9 @@ impl VectorStore {
         let record = VectorRecord::from_bytes(bytes)?;
         let vector_id = VectorId(record.vector_id);
 
-        // Get embedding from backend
+        // Get embedding: prefer backend, fall back to KV record (ARCH-003).
+        // The backend may be missing this vector if a crash or error occurred
+        // between KV commit and backend update (Issue #1731).
         let state = self.state()?;
         let backend =
             state
@@ -606,13 +611,21 @@ impl VectorStore {
                     name: collection.to_string(),
                 })?;
 
-        let embedding = backend
-            .get(vector_id)
-            .ok_or_else(|| VectorError::Internal("Embedding missing from backend".to_string()))?;
+        let embedding = if !record.embedding.is_empty() {
+            record.embedding
+        } else {
+            // Backend is a fallback only for the current-time get() path, where
+            // the backend embedding is guaranteed to match the current KV version.
+            backend.get(vector_id).map(|e| e.to_vec()).ok_or_else(|| {
+                VectorError::Internal(
+                    "Embedding missing from both backend and KV record".to_string(),
+                )
+            })?
+        };
 
         let entry = VectorEntry {
             key: key.to_string(),
-            embedding: embedding.to_vec(),
+            embedding,
             metadata: record.metadata,
             vector_id,
             version: Version::counter(record.version),
@@ -664,23 +677,12 @@ impl VectorStore {
         // Use the embedding stored in the VectorRecord (historical snapshot).
         // The backend only holds the *current* embedding, which may differ if the
         // vector was re-upserted after as_of_ts.
-        let embedding = if record.embedding.is_empty() {
-            // Legacy records without stored embeddings: fall back to backend
-            let collection_id = CollectionId::new(branch_id, collection);
-            let vector_id = VectorId(record.vector_id);
-            let state = self.state()?;
-            let backend = state.backends.get(&collection_id).ok_or_else(|| {
-                VectorError::CollectionNotFound {
-                    name: collection.to_string(),
-                }
-            })?;
-            backend
-                .get(vector_id)
-                .ok_or_else(|| VectorError::Internal("Embedding missing from backend".to_string()))?
-                .to_vec()
-        } else {
-            record.embedding
-        };
+        if record.embedding.is_empty() {
+            return Err(VectorError::Internal(
+                "Historical embedding unavailable (pre-embedding-storage record)".to_string(),
+            ));
+        }
+        let embedding = record.embedding;
 
         Ok(Some(VectorEntry {
             key: key.to_string(),
@@ -722,11 +724,19 @@ impl VectorStore {
             .transaction(branch_id, |txn| txn.delete(kv_key.clone()))
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
-        // Backend after KV succeeds
+        // Backend after KV succeeds. Non-fatal since KV is already deleted and
+        // search verifies KV existence for candidates (Issue #1731).
         if let Some(mut backend) = state.backends.get_mut(&collection_id) {
             use super::types::now_micros;
-            backend.delete_with_timestamp(vector_id, now_micros())?;
-            backend.remove_inline_meta(vector_id);
+            match backend.delete_with_timestamp(vector_id, now_micros()) {
+                Ok(_) => {
+                    backend.remove_inline_meta(vector_id);
+                }
+                Err(e) => {
+                    warn!(target: "strata::vector", collection, key, error = %e,
+                        "Backend delete failed after KV delete; search will filter via KV check");
+                }
+            }
         }
 
         Ok(true)
@@ -826,16 +836,20 @@ impl VectorStore {
             })
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
-        // Update backend for each entry (after successful KV commit)
+        // Update backend for each entry (after successful KV commit).
+        // Backend failures are non-fatal since KV is already committed (Issue #1731).
         for (vector_id, key, embedding, created_at) in backend_updates {
-            backend.insert_with_timestamp(vector_id, &embedding, created_at)?;
-            backend.set_inline_meta(
-                vector_id,
-                super::types::InlineMeta {
-                    key,
-                    source_ref: None,
-                },
-            );
+            if let Err(e) = backend.insert_with_timestamp(vector_id, &embedding, created_at) {
+                warn!(target: "strata::vector", collection, key, error = %e, "Backend insert failed after KV commit in batch");
+            } else {
+                backend.set_inline_meta(
+                    vector_id,
+                    super::types::InlineMeta {
+                        key,
+                        source_ref: None,
+                    },
+                );
+            }
         }
 
         drop(backend);
@@ -899,7 +913,9 @@ impl VectorStore {
         let mut matches = Vec::with_capacity(k);
 
         if filter.is_none() {
-            // No filter - simple case, fetch exactly k with O(1) inline meta lookup
+            // No filter - simple case, fetch exactly k with O(1) inline meta lookup.
+            // Each candidate is verified against KV to skip deleted vectors (Issue #1731).
+            let namespace = self.namespace_for(branch_id, space);
             let state = self.state()?;
             let backend = state.backends.get(&collection_id).ok_or_else(|| {
                 VectorError::CollectionNotFound {
@@ -910,20 +926,28 @@ impl VectorStore {
 
             for (vector_id, score) in candidates {
                 if let Some(meta) = backend.get_inline_meta(vector_id) {
+                    // Verify vector still exists in KV (may have been deleted)
+                    let kv_key = Key::new_vector(namespace.clone(), collection, &meta.key);
+                    if self.get_vector_record_by_key(&kv_key)?.is_none() {
+                        continue;
+                    }
                     matches.push(VectorMatch {
                         key: meta.key.clone(),
                         score,
                         metadata: None,
                     });
                 } else {
-                    // Fallback to KV scan for vectors without inline meta
-                    let (key, metadata) =
-                        self.get_key_and_metadata(branch_id, space, collection, vector_id)?;
-                    matches.push(VectorMatch {
-                        key,
-                        score,
-                        metadata,
-                    });
+                    // Fallback to KV scan — implicitly skips deleted vectors
+                    match self.get_key_and_metadata(branch_id, space, collection, vector_id) {
+                        Ok((key, metadata)) => {
+                            matches.push(VectorMatch {
+                                key,
+                                score,
+                                metadata,
+                            });
+                        }
+                        Err(_) => continue,
+                    }
                 }
             }
             drop(backend);
@@ -949,15 +973,19 @@ impl VectorStore {
 
                 matches.clear();
                 for (vector_id, score) in candidates {
-                    // Use inline meta for O(1) key lookup, then point-get for metadata
+                    // Use inline meta for O(1) key lookup, then point-get for metadata.
+                    // Skip candidates deleted from KV (Issue #1731).
                     let (key, metadata) = if let Some(meta) = backend.get_inline_meta(vector_id) {
                         let kv_key = Key::new_vector(namespace.clone(), collection, &meta.key);
-                        let md = self
-                            .get_vector_record_by_key(&kv_key)?
-                            .and_then(|r| r.metadata);
-                        (meta.key.clone(), md)
+                        match self.get_vector_record_by_key(&kv_key)? {
+                            Some(r) => (meta.key.clone(), r.metadata),
+                            None => continue,
+                        }
                     } else {
-                        self.get_key_and_metadata(branch_id, space, collection, vector_id)?
+                        match self.get_key_and_metadata(branch_id, space, collection, vector_id) {
+                            Ok(result) => result,
+                            Err(_) => continue,
+                        }
                     };
 
                     // Apply filter
@@ -1995,12 +2023,18 @@ impl VectorStore {
                 })?;
 
         let candidates = backend.search(query, k);
+        let namespace = self.namespace_for(branch_id, space);
 
         let mut matches: Vec<VectorMatchWithSource> = Vec::with_capacity(candidates.len());
         let mut fallback_candidates: Vec<(VectorId, f32)> = Vec::new();
 
         for &(vid, score) in &candidates {
             if let Some(meta) = backend.get_inline_meta(vid) {
+                // Verify vector still exists in KV (Issue #1731)
+                let kv_key = Key::new_vector(namespace.clone(), collection, &meta.key);
+                if self.get_vector_record_by_key(&kv_key)?.is_none() {
+                    continue;
+                }
                 matches.push(VectorMatchWithSource::new(
                     meta.key.clone(),
                     score,
@@ -2103,12 +2137,18 @@ impl VectorStore {
                 })?;
 
         let candidates = backend.search_in_range(query, k, start_ts, end_ts);
+        let namespace = self.namespace_for(branch_id, space);
 
         let mut matches: Vec<VectorMatchWithSource> = Vec::with_capacity(candidates.len());
         let mut fallback_candidates: Vec<(VectorId, f32)> = Vec::new();
 
         for &(vid, score) in &candidates {
             if let Some(meta) = backend.get_inline_meta(vid) {
+                // Verify vector still exists in KV (Issue #1731)
+                let kv_key = Key::new_vector(namespace.clone(), collection, &meta.key);
+                if self.get_vector_record_by_key(&kv_key)?.is_none() {
+                    continue;
+                }
                 matches.push(VectorMatchWithSource::new(
                     meta.key.clone(),
                     score,
@@ -4615,6 +4655,105 @@ mod tests {
             results.len(),
             6,
             "search after insert-on-reloaded-backend should find all 6"
+        );
+    }
+
+    // ====================================================================
+    // Issue #1731: Backend treated as authority, not derived cache
+    // ====================================================================
+
+    /// Test that get() falls back to KV record embedding when backend is missing it.
+    /// This simulates a crash between KV commit and backend update.
+    #[test]
+    fn test_issue_1731_get_falls_back_to_kv_embedding() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        let embedding = vec![1.0, 0.0, 0.0];
+        store
+            .insert(branch_id, "default", "test", "vec1", &embedding, None)
+            .unwrap();
+
+        // Verify get() works normally
+        let entry = store
+            .get(branch_id, "default", "test", "vec1")
+            .unwrap()
+            .expect("should exist");
+        assert_eq!(entry.value.embedding, vec![1.0, 0.0, 0.0]);
+
+        // Now remove the vector from the backend only (simulating crash/failure)
+        let state = store.state().unwrap();
+        let collection_id = CollectionId::new(branch_id, "test");
+        let mut backend = state.backends.get_mut(&collection_id).unwrap();
+        let vector_id = entry.value.vector_id;
+        backend.delete(vector_id).unwrap();
+        drop(backend);
+        drop(state);
+
+        // get() should still work by falling back to KV record embedding
+        let result = store.get(branch_id, "default", "test", "vec1");
+        assert!(
+            result.is_ok(),
+            "get() should succeed by falling back to KV embedding, got: {:?}",
+            result.err()
+        );
+        let entry = result.unwrap().expect("should exist in KV");
+        assert_eq!(
+            entry.value.embedding,
+            vec![1.0, 0.0, 0.0],
+            "embedding should come from KV record"
+        );
+    }
+
+    /// Test that search() does not return vectors deleted from KV but still in backend.
+    /// This simulates a delete where KV succeeded but backend removal failed.
+    #[test]
+    fn test_issue_1731_search_skips_kv_deleted_vectors() {
+        let (_temp, db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        // Insert two vectors
+        store
+            .insert(branch_id, "default", "test", "vec1", &[1.0, 0.0, 0.0], None)
+            .unwrap();
+        store
+            .insert(branch_id, "default", "test", "vec2", &[0.0, 1.0, 0.0], None)
+            .unwrap();
+
+        // Delete vec1 from KV only (simulating backend delete failure)
+        let kv_key = Key::new_vector(
+            Arc::new(Namespace::for_branch_space(branch_id, "default")),
+            "test",
+            "vec1",
+        );
+        db.transaction(branch_id, |txn| txn.delete(kv_key.clone()))
+            .unwrap();
+
+        // Search should NOT return vec1 (it's deleted from KV)
+        let results = store
+            .search(branch_id, "default", "test", &[1.0, 0.0, 0.0], 10, None)
+            .unwrap();
+
+        let keys: Vec<&str> = results.iter().map(|m| m.key.as_str()).collect();
+        assert!(
+            !keys.contains(&"vec1"),
+            "search should not return KV-deleted vector, got keys: {:?}",
+            keys
+        );
+        assert!(
+            keys.contains(&"vec2"),
+            "search should still return existing vector, got keys: {:?}",
+            keys
         );
     }
 }
