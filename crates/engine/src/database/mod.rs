@@ -1224,22 +1224,23 @@ impl Database {
                 }
             }
 
-            // Apply puts
+            // Apply puts with original WAL timestamp (#1699).
+            // Using put_recovery_entry ensures all entries from the same
+            // transaction share the WAL record's commit timestamp, so
+            // time-travel queries see atomic transactions, not partial state.
             for (key, value) in &payload.puts {
-                use strata_core::traits::{Storage, WriteMode};
-                self.storage.put_with_version_mode(
+                self.storage.put_recovery_entry(
                     key.clone(),
                     value.clone(),
                     payload.version,
-                    None,
-                    WriteMode::Append,
+                    record.timestamp,
                 )?;
             }
 
-            // Apply deletes
+            // Apply deletes with original WAL timestamp (#1699)
             for key in &payload.deletes {
-                use strata_core::traits::Storage;
-                Storage::delete_with_version(self.storage.as_ref(), key, payload.version)?;
+                self.storage
+                    .delete_recovery_entry(key, payload.version, record.timestamp)?;
             }
 
             // --- Update BM25 search index ---
@@ -2368,10 +2369,11 @@ impl Drop for Database {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::time::Duration;
     use strata_concurrency::TransactionPayload;
     use strata_core::types::{Key, Namespace};
     use strata_core::value::Value;
-    use strata_core::Storage;
+    use strata_core::{Storage, Timestamp};
     use strata_durability::format::WalRecord;
     use strata_durability::now_micros;
     use tempfile::TempDir;
@@ -3963,5 +3965,84 @@ mod tests {
             );
             assert_eq!(result.unwrap().value, Value::String("durable".to_string()));
         }
+    }
+
+    /// Issue #1699: Follower refresh must use the WAL record's commit timestamp,
+    /// not Timestamp::now(), so that all entries from the same transaction share
+    /// a single timestamp for correct time-travel queries.
+    ///
+    /// Without the fix, each put_with_version_mode / delete_with_version call
+    /// creates its own Timestamp::now(), splitting a transaction across multiple
+    /// timestamps and causing time-travel queries to see partial state.
+    #[test]
+    fn test_issue_1699_refresh_preserves_wal_timestamp() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("db");
+        let branch_id = BranchId::default();
+        let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
+
+        // 1. Open primary with Always durability (syncs every commit to WAL)
+        let primary = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+
+        // 2. Pre-populate key B
+        let key_b = Key::new_kv(ns.clone(), "b");
+        primary
+            .transaction(branch_id, |txn| {
+                txn.put(key_b.clone(), Value::String("old".into()))?;
+                Ok(())
+            })
+            .unwrap();
+
+        // 3. Open follower — initial recovery replays B via RecoveryCoordinator (correct path)
+        let follower = Database::open_follower(&db_path).unwrap();
+
+        // 4. Primary commits: put A + delete B in one transaction
+        let key_a = Key::new_kv(ns.clone(), "a");
+        primary
+            .transaction(branch_id, |txn| {
+                txn.put(key_a.clone(), Value::String("new".into()))?;
+                txn.delete(key_b.clone())?;
+                Ok(())
+            })
+            .unwrap();
+
+        // Record upper bound on the WAL record's timestamp
+        let commit_ts_upper = Timestamp::now().as_micros();
+
+        // 5. Sleep to create a clear gap between commit time and refresh time.
+        //    100ms = 100_000 microseconds — far larger than any clock jitter.
+        std::thread::sleep(Duration::from_millis(100));
+
+        // 6. Follower refresh — applies the new WAL records via Database::refresh
+        let applied = follower.refresh().unwrap();
+        assert!(applied > 0, "follower should apply the new transaction");
+
+        // 7. Check: A's entry timestamp should come from the WAL record (near
+        //    commit time), NOT from Timestamp::now() during refresh.
+        let a_entry = follower
+            .storage()
+            .get_versioned(&key_a, u64::MAX)
+            .unwrap()
+            .expect("key A should exist after refresh");
+        let a_ts = a_entry.timestamp.as_micros();
+
+        assert!(
+            a_ts <= commit_ts_upper,
+            "Entry timestamp ({}) should be from WAL record (≤ {}), \
+             not from Timestamp::now() during refresh",
+            a_ts,
+            commit_ts_upper,
+        );
+
+        // 8. Time-travel at A's timestamp: B should be deleted (same transaction).
+        //    With split timestamps, B's tombstone has a later timestamp than A's put,
+        //    so querying at A's timestamp would incorrectly show B as still alive.
+        let b_at_a_ts = follower.storage().get_at_timestamp(&key_b, a_ts).unwrap();
+        assert!(
+            b_at_a_ts.is_none(),
+            "Key B should be deleted at A's timestamp (same transaction). \
+             Got {:?}, indicating split timestamps between put and delete.",
+            b_at_a_ts.map(|v| v.value),
+        );
     }
 }
