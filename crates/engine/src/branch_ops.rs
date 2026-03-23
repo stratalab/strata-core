@@ -2323,4 +2323,80 @@ mod tests {
             assert_eq!(val, Some(Value::Int(i)));
         }
     }
+
+    /// Regression test for #1704: materialization must run even when no branches
+    /// need flushing.
+    ///
+    /// Before the fix, `schedule_flush_if_needed()` returned early when
+    /// `branches_needing_flush()` was empty, skipping the materialization loop.
+    /// This meant deeply-forked idle branches accumulated inherited layers
+    /// indefinitely.
+    ///
+    /// This test creates a fork chain exceeding MAX_INHERITED_LAYERS (4), then
+    /// triggers `schedule_flush_if_needed` via a write to a separate branch
+    /// (which doesn't fill its memtable, so no flush is needed). The leaf
+    /// branch's inherited layers must still get materialized.
+    #[test]
+    fn test_issue_1704_materialization_runs_without_pending_flush() {
+        // Chain: root → b1 → b2 → b3 → b4 → leaf
+        // leaf ends up with 5 inherited layers (> MAX_INHERITED_LAYERS=4).
+        let branch_names = ["root", "b1", "b2", "b3", "b4", "leaf"];
+
+        let (_temp, db) = setup_with_branch(branch_names[0]);
+
+        // Write data to root so it has segments to inherit.
+        write_kv(&db, "root", "default", "origin", Value::Int(0));
+
+        // Build the fork chain. Each fork flushes the source's memtable
+        // and the child inherits [source_own, ...source_inherited].
+        // fork_branch() creates the destination branch internally.
+        for i in 1..branch_names.len() {
+            let source = branch_names[i - 1];
+            let dest = branch_names[i];
+
+            // Write data to source before forking (ensures source has segments).
+            write_kv(
+                &db,
+                source,
+                "default",
+                &format!("{}_key", source),
+                Value::Int(i as i64),
+            );
+
+            fork_branch(&db, source, dest).unwrap();
+        }
+
+        let leaf_id = resolve_branch_name("leaf");
+        let storage = db.storage();
+
+        let layers_before = storage.inherited_layer_count(&leaf_id);
+        assert!(
+            layers_before > 4,
+            "leaf should exceed MAX_INHERITED_LAYERS (4), got {}",
+            layers_before,
+        );
+
+        // Write to root — triggers schedule_flush_if_needed().
+        // Root's memtable is NOT full, so branches_needing_flush() returns
+        // empty. Pre-fix, this early-returned and skipped materialization.
+        write_kv(&db, "root", "default", "trigger", Value::Int(999));
+
+        // Post-fix, materialization should have run on the leaf branch.
+        let layers_after = storage.inherited_layer_count(&leaf_id);
+        assert!(
+            layers_after < layers_before,
+            "leaf inherited layers should decrease after materialization \
+             (before={}, after={})",
+            layers_before,
+            layers_after,
+        );
+
+        // Verify data is still accessible on the leaf branch.
+        let val = read_kv(&db, "leaf", "default", "origin");
+        assert_eq!(
+            val,
+            Some(Value::Int(0)),
+            "root data must be visible on leaf"
+        );
+    }
 }
