@@ -174,6 +174,16 @@ impl SegmentBuilder {
         let file = std::fs::File::create(&tmp_path)?;
         let mut w = BufWriter::new(file);
 
+        // Reuse a single Zstd compressor context across all blocks to avoid
+        // expensive hash-table re-initialization per block (issue #1763).
+        let mut zstd_compressor = match self.compression {
+            CompressionCodec::Zstd(level) => Some(
+                zstd::bulk::Compressor::new(level)
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("zstd init: {e}")))?,
+            ),
+            CompressionCodec::None => None,
+        };
+
         // 1. Write placeholder header (backfill later)
         let header_placeholder = [0u8; KV_HEADER_SIZE];
         w.write_all(&header_placeholder)?;
@@ -283,6 +293,7 @@ impl SegmentBuilder {
                     BLOCK_TYPE_DATA,
                     &block_buf,
                     self.compression,
+                    zstd_compressor.as_mut(),
                 )?;
                 let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
                 if let Some(ref limiter) = self.rate_limiter {
@@ -328,6 +339,7 @@ impl SegmentBuilder {
                 BLOCK_TYPE_DATA,
                 &block_buf,
                 self.compression,
+                zstd_compressor.as_mut(),
             )?;
             let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
             if let Some(ref limiter) = self.rate_limiter {
@@ -956,10 +968,21 @@ fn write_framed_block_compressed<W: Write>(
     block_type: u8,
     data: &[u8],
     codec: CompressionCodec,
+    compressor: Option<&mut zstd::bulk::Compressor<'_>>,
 ) -> io::Result<usize> {
     let (write_data, codec_byte, pre_compression_crc) = match codec {
-        CompressionCodec::Zstd(level) if !data.is_empty() => {
-            match zstd::encode_all(std::io::Cursor::new(data), level) {
+        CompressionCodec::Zstd(_) if !data.is_empty() => {
+            let result = if let Some(ctx) = compressor {
+                ctx.compress(data)
+            } else {
+                // Fallback for callers without a persistent context
+                let level = match codec {
+                    CompressionCodec::Zstd(l) => l,
+                    _ => unreachable!(),
+                };
+                zstd::encode_all(std::io::Cursor::new(data), level)
+            };
+            match result {
                 Ok(compressed) if compressed.len() < data.len() => {
                     // CRC covers uncompressed data so the buffer passed to
                     // crc32fast is always >= data_block_size, well above the
@@ -2868,5 +2891,79 @@ mod tests {
             let e = seg.point_lookup(&k, u64::MAX).unwrap().unwrap();
             assert_eq!(e.value, Value::Int(i as i64));
         }
+    }
+
+    /// Issue #1763: Zstd compressor context should be reused across blocks within a
+    /// single segment build, avoiding expensive hash table re-initialization per block.
+    ///
+    /// This test builds a segment with many small blocks (1 KiB target) and Zstd
+    /// compression, then verifies all entries roundtrip correctly. It also measures
+    /// compression time to detect the ~2x improvement from context reuse.
+    #[test]
+    fn test_issue_1763_zstd_context_reuse_across_blocks() {
+        use crate::segment::KVSegment;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ctx_reuse.sst");
+
+        // Write enough data to produce many blocks (>100 blocks with 1 KiB block size)
+        let mt = Memtable::new(0);
+        let num_entries = 2000u32;
+        for i in 0..num_entries {
+            let k = key(&format!("key_{:08}", i));
+            // Repetitive data that compresses well — exercises the compressor hash tables
+            let val = Value::String(format!("val_{:08}_{}", i, "x".repeat(100)));
+            mt.put(&k, i as u64 + 1, val, false);
+        }
+        mt.freeze();
+
+        // Use small block size (1 KiB) to force many blocks — amplifies per-block overhead
+        let builder = SegmentBuilder {
+            data_block_size: 1024,
+            bloom_bits_per_key: 10,
+            compression: CompressionCodec::Zstd(3),
+            rate_limiter: None,
+        };
+
+        let start = std::time::Instant::now();
+        let meta = builder.build_from_iter(mt.iter_all(), &path).unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(meta.entry_count, num_entries as u64);
+
+        // Verify all entries roundtrip correctly
+        let seg = KVSegment::open(&path).unwrap();
+        for i in 0..num_entries {
+            let k = key(&format!("key_{:08}", i));
+            let e = seg
+                .point_lookup(&k, u64::MAX)
+                .unwrap()
+                .unwrap_or_else(|| panic!("missing key_{:08}", i));
+            assert_eq!(
+                e.value,
+                Value::String(format!("val_{:08}_{}", i, "x".repeat(100)))
+            );
+            assert_eq!(e.commit_id, i as u64 + 1);
+        }
+
+        // Verify iteration works across all compressed blocks
+        let all: Vec<_> = seg.iter_seek_all().collect();
+        assert_eq!(all.len(), num_entries as usize);
+
+        // Sanity: the segment should have multiple data blocks (1 KiB target with ~130B entries)
+        // If file_size > 2 * block overhead, we definitely have many blocks.
+        assert!(
+            meta.file_size > 4096,
+            "segment should span multiple blocks, got {} bytes",
+            meta.file_size
+        );
+
+        // Log timing for manual comparison (not a hard assertion — CI variance is too high)
+        eprintln!(
+            "issue_1763: {} entries, {} bytes, {:.1}ms — context reuse should be <50ms on modern HW",
+            num_entries,
+            meta.file_size,
+            elapsed.as_secs_f64() * 1000.0
+        );
     }
 }
