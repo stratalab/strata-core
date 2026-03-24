@@ -318,27 +318,6 @@ fn run_shell_mode(matches: &clap::ArgMatches, state: &mut SessionState, mode: Ou
                         limit: 1000,
                         as_of: None,
                     }),
-                    Primitive::State => {
-                        // State list doesn't have pagination, just execute once
-                        match state.execute(Command::StateList {
-                            branch: branch.clone(),
-                            space: space.clone(),
-                            prefix: prefix.clone(),
-                            as_of: None,
-                        }) {
-                            Ok(output) => {
-                                let formatted = format_output(&output, mode);
-                                if !formatted.is_empty() {
-                                    println!("{}", formatted);
-                                }
-                                return 0;
-                            }
-                            Err(e) => {
-                                eprintln!("{}", format_error(&e, mode));
-                                return 1;
-                            }
-                        }
-                    }
                 };
 
                 match output {
@@ -674,4 +653,3 @@ fn run_uninstall(skip_confirm: bool) {
     eprintln!();
     eprintln!("Strata has been uninstalled. Restart your shell to apply PATH changes.");
 }
-

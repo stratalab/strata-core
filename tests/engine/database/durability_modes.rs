@@ -70,30 +70,6 @@ fn eventlog_append_same_across_modes() {
 }
 
 #[test]
-fn statecell_cas_same_across_modes() {
-    test_across_modes("statecell_cas", |db| {
-        let branch_id = BranchId::new();
-        let state = StateCell::new(db);
-
-        state
-            .init(&branch_id, "default", "cell", Value::Int(1))
-            .unwrap();
-        let read = state.getv(&branch_id, "default", "cell").unwrap();
-        let version = read
-            .as_ref()
-            .map(|v| v.version())
-            .unwrap_or(Version::from(0u64));
-
-        let cas_result = state.cas(&branch_id, "default", "cell", version, Value::Int(2));
-
-        (
-            cas_result.is_ok(),
-            state.get(&branch_id, "default", "cell").unwrap(),
-        )
-    });
-}
-
-#[test]
 fn json_create_get_same_across_modes() {
     test_across_modes("json_create_get", |db| {
         let branch_id = BranchId::new();
@@ -237,7 +213,6 @@ fn all_primitives_work_in_all_modes() {
 
         let kv = KVStore::new(db.clone());
         let event = EventLog::new(db.clone());
-        let state = StateCell::new(db.clone());
         let json = JsonStore::new(db.clone());
         let branch_idx = BranchIndex::new(db.clone());
 
@@ -247,11 +222,6 @@ fn all_primitives_work_in_all_modes() {
         // Event
         event
             .append(&branch_id, "default", "e", event_payload(Value::Int(2)))
-            .unwrap();
-
-        // State
-        state
-            .init(&branch_id, "default", "s", Value::Int(3))
             .unwrap();
 
         // JSON

@@ -7,7 +7,6 @@
 //! | `kv` | 15 | KVStore, KVStoreBatch |
 //! | `json` | 17 | JsonStore |
 //! | `event` | 11 | EventLog |
-//! | `state` | 8 | StateCell |
 //! | `vector` | 19 | VectorStore |
 //! | `branch` | 24 | BranchIndex |
 //! | `transaction` | 5 | TransactionControl |
@@ -29,7 +28,6 @@ pub mod kv;
 pub mod models;
 pub mod search;
 pub mod space;
-pub mod state;
 pub mod vector;
 
 use std::sync::Arc;

@@ -296,7 +296,7 @@ impl BranchIndex {
     ///
     /// This deletes:
     /// - The branch metadata
-    /// - All branch-scoped data (KV, Events, States, JSON, Vectors)
+    /// - All branch-scoped data (KV, Events, JSON, Vectors)
     ///
     /// USE WITH CAUTION - this is irreversible!
     pub fn delete_branch(&self, branch_id: &str) -> StrataResult<()> {
@@ -356,7 +356,6 @@ impl BranchIndex {
         for type_tag in [
             TypeTag::KV,
             TypeTag::Event,
-            TypeTag::State,
             TypeTag::Trace, // Deprecated but kept for backwards compatibility
             TypeTag::Json,
             TypeTag::Vector,

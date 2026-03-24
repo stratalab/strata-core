@@ -75,9 +75,6 @@ fn all_primitives_isolated_between_branches() {
 
     // Write to branch A
     p.kv.put(&branch_a, "default", "k", Value::Int(1)).unwrap();
-    p.state
-        .init(&branch_a, "default", "s", Value::Int(1))
-        .unwrap();
     p.event
         .append(&branch_a, "default", "e", int_payload(1))
         .unwrap();
@@ -98,9 +95,6 @@ fn all_primitives_isolated_between_branches() {
 
     // Write different values to branch B
     p.kv.put(&branch_b, "default", "k", Value::Int(2)).unwrap();
-    p.state
-        .init(&branch_b, "default", "s", Value::Int(2))
-        .unwrap();
     p.event
         .append(&branch_b, "default", "e", int_payload(2))
         .unwrap();
@@ -126,15 +120,6 @@ fn all_primitives_isolated_between_branches() {
     );
     assert_eq!(
         p.kv.get(&branch_b, "default", "k").unwrap().unwrap(),
-        Value::Int(2)
-    );
-
-    assert_eq!(
-        p.state.get(&branch_a, "default", "s").unwrap().unwrap(),
-        Value::Int(1)
-    );
-    assert_eq!(
-        p.state.get(&branch_b, "default", "s").unwrap().unwrap(),
         Value::Int(2)
     );
 
@@ -548,24 +533,22 @@ fn test_diff_with_all_primitives() {
         )
         .unwrap();
 
-    // Write State to both with different values
-    p.state
-        .init(&id_x, "default", "cell", Value::Int(10))
+    // Write KV to both with different values (to test "modified")
+    p.kv.put(&id_x, "default", "shared-key", Value::Int(10))
         .unwrap();
-    p.state
-        .init(&id_y, "default", "cell", Value::Int(20))
+    p.kv.put(&id_y, "default", "shared-key", Value::Int(20))
         .unwrap();
 
     let diff = branch_ops::diff_branches(&test_db.db, "x", "y").unwrap();
 
     // kv-key is only in x → removed
     // doc is only in y → added
-    // cell is in both with different values → modified
+    // shared-key is in both with different values → modified
     assert!(diff.summary.total_removed >= 1, "KV key should be removed");
     assert!(diff.summary.total_added >= 1, "JSON doc should be added");
     assert!(
         diff.summary.total_modified >= 1,
-        "State cell should be modified"
+        "Shared KV key should be modified"
     );
 }
 

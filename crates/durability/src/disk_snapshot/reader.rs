@@ -353,11 +353,10 @@ mod tests {
         )
         .unwrap();
 
-        // Create snapshot with all 6 primitive types
+        // Create snapshot with all 5 primitive types
         let sections = vec![
             SnapshotSection::new(primitive_tags::KV, b"kv_data".to_vec()),
             SnapshotSection::new(primitive_tags::EVENT, b"event_data".to_vec()),
-            SnapshotSection::new(primitive_tags::STATE, b"state_data".to_vec()),
             SnapshotSection::new(primitive_tags::BRANCH, b"branch_data".to_vec()),
             SnapshotSection::new(primitive_tags::JSON, b"json_data".to_vec()),
             SnapshotSection::new(primitive_tags::VECTOR, b"vector_data".to_vec()),
@@ -368,7 +367,7 @@ mod tests {
         let reader = SnapshotReader::new(Box::new(IdentityCodec));
         let loaded = reader.load(&info.path).unwrap();
 
-        assert_eq!(loaded.sections.len(), 6);
+        assert_eq!(loaded.sections.len(), 5);
 
         // Verify each section
         let kv = loaded.find_section(primitive_tags::KV).unwrap();

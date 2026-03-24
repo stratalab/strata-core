@@ -1140,10 +1140,7 @@ mod tests {
         assert!(path.exists());
 
         registry.check_and_clean_corrupt("miniLM", &path);
-        assert!(
-            path.exists(),
-            "correctly-sized file should not be deleted"
-        );
+        assert!(path.exists(), "correctly-sized file should not be deleted");
     }
 
     #[test]

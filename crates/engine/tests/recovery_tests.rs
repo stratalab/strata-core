@@ -9,10 +9,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use strata_core::contract::Version;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
-use strata_engine::{BranchIndex, EventLog, KVStore, StateCell};
+use strata_engine::{BranchIndex, EventLog, KVStore};
 use strata_engine::{Database, SearchRequest};
 use tempfile::TempDir;
 
@@ -263,135 +262,6 @@ fn test_event_log_multiple_events_survives_recovery() {
     );
 }
 
-/// Test StateCell version survives recovery
-#[test]
-fn test_state_cell_version_survives_recovery() {
-    let (db, temp_dir, branch_id) = setup();
-    let path = get_path(&temp_dir);
-
-    let state_cell = StateCell::new(db.clone());
-
-    // Init creates version 1
-    state_cell
-        .init(&branch_id, "default", "counter", Value::Int(0))
-        .unwrap();
-
-    // CAS increments version
-    state_cell
-        .cas(
-            &branch_id,
-            "default",
-            "counter",
-            Version::counter(1),
-            Value::Int(10),
-        )
-        .unwrap(); // -> v2
-    state_cell
-        .cas(
-            &branch_id,
-            "default",
-            "counter",
-            Version::counter(2),
-            Value::Int(20),
-        )
-        .unwrap(); // -> v3
-    state_cell
-        .cas(
-            &branch_id,
-            "default",
-            "counter",
-            Version::counter(3),
-            Value::Int(30),
-        )
-        .unwrap(); // -> v4
-
-    // Verify before crash
-    let state = state_cell
-        .get(&branch_id, "default", "counter")
-        .unwrap()
-        .unwrap();
-    assert_eq!(state, Value::Int(30));
-
-    // Simulate crash
-    drop(state_cell);
-    drop(db);
-
-    // Recovery
-    let db = Database::open(&path).unwrap();
-    let state_cell = StateCell::new(db.clone());
-
-    // Value is correct
-    let state = state_cell
-        .get(&branch_id, "default", "counter")
-        .unwrap()
-        .unwrap();
-    assert_eq!(state, Value::Int(30));
-
-    // CAS works with correct version
-    let new_versioned = state_cell
-        .cas(
-            &branch_id,
-            "default",
-            "counter",
-            Version::counter(4),
-            Value::Int(40),
-        )
-        .unwrap();
-    assert_eq!(new_versioned, Version::counter(5));
-
-    // CAS with old version fails
-    let result = state_cell.cas(
-        &branch_id,
-        "default",
-        "counter",
-        Version::counter(4),
-        Value::Int(999),
-    );
-    assert!(result.is_err());
-}
-
-/// Test StateCell set operation survives recovery
-#[test]
-fn test_state_cell_set_survives_recovery() {
-    let (db, temp_dir, branch_id) = setup();
-    let path = get_path(&temp_dir);
-
-    let state_cell = StateCell::new(db.clone());
-
-    // Init and set
-    state_cell
-        .init(
-            &branch_id,
-            "default",
-            "status",
-            Value::String("initial".into()),
-        )
-        .unwrap();
-    state_cell
-        .set(
-            &branch_id,
-            "default",
-            "status",
-            Value::String("updated".into()),
-        )
-        .unwrap();
-
-    // Simulate crash
-    drop(state_cell);
-    drop(db);
-
-    // Recovery
-    let db = Database::open(&path).unwrap();
-    let state_cell = StateCell::new(db.clone());
-
-    // Value preserved
-    let state = state_cell
-        .get(&branch_id, "default", "status")
-        .unwrap()
-        .unwrap();
-    assert_eq!(state, Value::String("updated".into()));
-}
-
 /// Test BranchIndex survives recovery
 #[test]
 fn test_branch_index_survives_recovery() {
@@ -508,35 +378,26 @@ fn test_branch_delete_survives_recovery() {
 /// Test cross-primitive transaction survives recovery
 #[test]
 fn test_cross_primitive_transaction_survives_recovery() {
-    use strata_engine::{EventLogExt, KVStoreExt, StateCellExt};
+    use strata_engine::{EventLogExt, KVStoreExt};
 
     let (db, temp_dir, branch_id) = setup();
     let path = get_path(&temp_dir);
-
-    // Initialize state cell
-    let state_cell = StateCell::new(db.clone());
-    state_cell
-        .init(&branch_id, "default", "txn_state", Value::Int(0))
-        .unwrap();
 
     // Perform atomic transaction
     let result = db.transaction(branch_id, |txn| {
         txn.kv_put("txn_key", Value::String("txn_value".into()))?;
         txn.event_append("txn_event", int_payload(100))?;
-        txn.state_set("txn_state", Value::Int(42))?;
         Ok(())
     });
     assert!(result.is_ok());
 
     // Simulate crash
-    drop(state_cell);
     drop(db);
 
     // Recovery
     let db = Database::open(&path).unwrap();
     let kv = KVStore::new(db.clone());
     let event_log = EventLog::new(db.clone());
-    let state_cell = StateCell::new(db.clone());
 
     // All operations survived
     assert_eq!(
@@ -544,11 +405,6 @@ fn test_cross_primitive_transaction_survives_recovery() {
         Some(Value::String("txn_value".into()))
     );
     assert_eq!(event_log.len(&branch_id, "default").unwrap(), 1);
-    let state = state_cell
-        .get(&branch_id, "default", "txn_state")
-        .unwrap()
-        .unwrap();
-    assert_eq!(state, Value::Int(42));
 }
 
 /// Test multiple sequential recoveries
@@ -635,7 +491,6 @@ fn test_all_primitives_recover_together() {
         let branch_index = BranchIndex::new(db.clone());
         let kv = KVStore::new(db.clone());
         let event_log = EventLog::new(db.clone());
-        let state_cell = StateCell::new(db.clone());
 
         // Create branch
         let branch_meta = branch_index.create_branch("full-test").unwrap();
@@ -653,19 +508,6 @@ fn test_all_primitives_recover_together() {
         event_log
             .append(&branch_id, "default", "full_event", int_payload(999))
             .unwrap();
-
-        state_cell
-            .init(&branch_id, "default", "full_state", Value::Int(0))
-            .unwrap();
-        state_cell
-            .cas(
-                &branch_id,
-                "default",
-                "full_state",
-                Version::counter(1),
-                Value::Int(100),
-            )
-            .unwrap();
     }
 
     // Phase 2: Verify all recovered
@@ -674,7 +516,6 @@ fn test_all_primitives_recover_together() {
         let branch_index = BranchIndex::new(db.clone());
         let kv = KVStore::new(db.clone());
         let event_log = EventLog::new(db.clone());
-        let state_cell = StateCell::new(db.clone());
 
         // BranchIndex
         let branch = branch_index.get_branch("full-test").unwrap().unwrap();
@@ -690,13 +531,6 @@ fn test_all_primitives_recover_together() {
         assert_eq!(event_log.len(&branch_id, "default").unwrap(), 1);
         let event = event_log.get(&branch_id, "default", 0).unwrap().unwrap();
         assert_eq!(event.value.payload, int_payload(999));
-
-        // StateCell
-        let state = state_cell
-            .get(&branch_id, "default", "full_state")
-            .unwrap()
-            .unwrap();
-        assert_eq!(state, Value::Int(100));
     }
 }
 

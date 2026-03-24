@@ -41,7 +41,7 @@ use crate::{Command, Error, Executor, Output, Result};
 /// open transaction with read-your-writes semantics.
 ///
 /// When no transaction is active, commands delegate to the inner `Executor`.
-/// When a transaction is active, data commands (KV, Event, State, JSON)
+/// When a transaction is active, data commands (KV, Event, JSON)
 /// route through the engine's `Transaction<'a>` / `TransactionOps` trait,
 /// while non-transactional commands (Branch, Vector, DB) still delegate to
 /// the `Executor`.
@@ -197,21 +197,17 @@ impl Session {
             | Command::SpaceCreate { .. }
             | Command::SpaceDelete { .. }
             | Command::SpaceExists { .. }
-            // Version history commands (KvGetv, StateGetv, JsonGetv) require
+            // Version history commands (KvGetv, JsonGetv) require
             // storage-layer version chains which are not available through the
             // transaction context. These always read from the committed store,
             // even during an active transaction.
             | Command::KvGetv { .. }
-            | Command::StateGetv { .. }
             | Command::JsonGetv { .. }
             // JsonList enumerates keys via storage-layer scan. Making it
             // txn-aware would require merging the write-set with a committed
             // prefix scan, which is non-trivial. It reads from the committed
             // store even during an active transaction.
             | Command::JsonList { .. }
-            // StateList enumerates keys via storage-layer scan. Like JsonList,
-            // it reads from the committed store even during an active transaction.
-            | Command::StateList { .. }
             // EventGetByType filters events by type tag at the storage layer.
             // The transaction write-set does not maintain per-type indexes, so
             // this always reads from the committed store even during an active
@@ -282,7 +278,10 @@ impl Session {
                     | strata_core::StrataError::WriteConflict { .. } => {
                         Err(Error::TransactionConflict {
                             reason: e.to_string(),
-                            hint: Some("Another write modified this key. Retry your transaction.".to_string()),
+                            hint: Some(
+                                "Another write modified this key. Retry your transaction."
+                                    .to_string(),
+                            ),
                         })
                     }
                     strata_core::StrataError::Storage { .. }
@@ -334,13 +333,6 @@ impl Session {
             | Command::KvDelete { space, .. }
             | Command::KvList { space, .. }
             | Command::KvGetv { space, .. }
-            | Command::StateSet { space, .. }
-            | Command::StateGet { space, .. }
-            | Command::StateGetv { space, .. }
-            | Command::StateDelete { space, .. }
-            | Command::StateInit { space, .. }
-            | Command::StateCas { space, .. }
-            | Command::StateList { space, .. }
             | Command::EventAppend { space, .. }
             | Command::EventGet { space, .. }
             | Command::EventGetByType { space, .. }
@@ -409,23 +401,6 @@ impl Session {
                 }
             }
 
-            // === State reads — via ctx for snapshot fallback ===
-            Command::StateGet { cell, .. } => {
-                let full_key = Key::new_state(ns, &cell);
-                let result = ctx.get(&full_key).map_err(Error::from)?;
-                match result {
-                    Some(strata_core::value::Value::String(s)) => {
-                        let state: strata_core::State =
-                            serde_json::from_str(&s).map_err(|e| Error::Serialization {
-                                reason: e.to_string(),
-                            })?;
-                        Ok(Output::Maybe(Some(state.value)))
-                    }
-                    Some(other) => Ok(Output::Maybe(Some(other))),
-                    None => Ok(Output::Maybe(None)),
-                }
-            }
-
             // === JSON reads — via ctx for snapshot fallback ===
             Command::JsonGet { key, path, .. } => {
                 let full_key = Key::new_json(ns.clone(), &key);
@@ -486,17 +461,6 @@ impl Session {
                 })
             }
 
-            // === State delete — via ctx ===
-            Command::StateDelete { cell, .. } => {
-                let full_key = Key::new_state(ns, &cell);
-                let existed = ctx.exists(&full_key).map_err(Error::from)?;
-                ctx.delete(full_key).map_err(Error::from)?;
-                Ok(Output::DeleteResult {
-                    key: cell,
-                    deleted: existed,
-                })
-            }
-
             // === Event operations — use Transaction for hash chaining ===
             Command::EventAppend {
                 event_type,
@@ -526,62 +490,6 @@ impl Session {
                 let mut txn = Transaction::new(ctx, ns);
                 let len = txn.event_len().map_err(Error::from)?;
                 Ok(Output::Uint(len))
-            }
-
-            // === State writes — use Transaction ===
-            Command::StateInit { cell, value, .. } => {
-                let mut txn = Transaction::new(ctx, ns);
-                let version = txn.state_init(&cell, value).map_err(Error::from)?;
-                Ok(Output::WriteResult {
-                    key: cell,
-                    version: extract_version(&version),
-                })
-            }
-            Command::StateCas {
-                cell,
-                expected_counter,
-                value,
-                ..
-            } => {
-                let mut txn = Transaction::new(ctx, ns);
-                let expected = match expected_counter {
-                    Some(v) => strata_core::Version::Counter(v),
-                    None => strata_core::Version::Counter(0),
-                };
-                let version = txn.state_cas(&cell, expected, value).map_err(Error::from)?;
-                Ok(Output::StateCasResult {
-                    cell,
-                    success: true,
-                    version: Some(extract_version(&version)),
-                    current_value: None,
-                    current_version: None,
-                })
-            }
-            Command::StateSet { cell, value, .. } => {
-                // Construct key using the space-aware namespace (not StateCellExt
-                // which hardcodes the "default" space).
-                let full_key = Key::new_state(ns, &cell);
-                let new_version = match ctx.get(&full_key).map_err(Error::from)? {
-                    Some(strata_core::value::Value::String(s)) => {
-                        let current: strata_core::State =
-                            serde_json::from_str(&s).map_err(|e| Error::Serialization {
-                                reason: e.to_string(),
-                            })?;
-                        current.version.increment()
-                    }
-                    _ => strata_core::Version::counter(1),
-                };
-                let new_state = strata_core::State::with_version(value, new_version);
-                let serialized = serde_json::to_string(&new_state)
-                    .map(strata_core::value::Value::String)
-                    .map_err(|e| Error::Serialization {
-                        reason: e.to_string(),
-                    })?;
-                ctx.put(full_key, serialized).map_err(Error::from)?;
-                Ok(Output::WriteResult {
-                    key: cell,
-                    version: extract_version(&new_version),
-                })
             }
 
             // === JSON writes — use Transaction ===

@@ -28,10 +28,9 @@ use tracing::info;
 // Data TypeTags to scan (all user data types)
 // =============================================================================
 
-const DATA_TYPE_TAGS: [TypeTag; 6] = [
+const DATA_TYPE_TAGS: [TypeTag; 5] = [
     TypeTag::KV,
     TypeTag::Event,
-    TypeTag::State,
     TypeTag::Json,
     TypeTag::Vector,
     TypeTag::VectorConfig,
@@ -184,7 +183,6 @@ fn primitive_to_type_tags(prim: PrimitiveType) -> Vec<TypeTag> {
     match prim {
         PrimitiveType::Kv => vec![TypeTag::KV],
         PrimitiveType::Event => vec![TypeTag::Event],
-        PrimitiveType::State => vec![TypeTag::State],
         PrimitiveType::Json => vec![TypeTag::Json],
         PrimitiveType::Vector => vec![TypeTag::Vector, TypeTag::VectorConfig],
         PrimitiveType::Branch => vec![], // Branch metadata is not scanned in diffs
@@ -196,10 +194,9 @@ fn type_tag_to_primitive(tag: TypeTag) -> PrimitiveType {
     match tag {
         TypeTag::KV => PrimitiveType::Kv,
         TypeTag::Event => PrimitiveType::Event,
-        TypeTag::State => PrimitiveType::State,
         TypeTag::Json => PrimitiveType::Json,
         TypeTag::Vector | TypeTag::VectorConfig => PrimitiveType::Vector,
-        _ => PrimitiveType::Kv, // fallback for Branch/Space/Trace metadata tags
+        _ => PrimitiveType::Kv, // fallback for Branch/Space/State/Trace metadata tags
     }
 }
 
@@ -822,19 +819,6 @@ mod tests {
         .unwrap();
     }
 
-    fn write_state(db: &Arc<Database>, branch: &str, space: &str, key: &str, value: Value) {
-        let branch_id = resolve_branch_name(branch);
-        let ns = Arc::new(Namespace::for_branch_space(branch_id, space));
-        db.transaction(branch_id, |txn| {
-            txn.put(
-                Key::new(ns.clone(), TypeTag::State, key.as_bytes().to_vec()),
-                value,
-            )?;
-            Ok(())
-        })
-        .unwrap();
-    }
-
     fn write_json(db: &Arc<Database>, branch: &str, space: &str, key: &str, value: Value) {
         let branch_id = resolve_branch_name(branch);
         let ns = Arc::new(Namespace::for_branch_space(branch_id, space));
@@ -872,7 +856,6 @@ mod tests {
         // Write various data types
         write_kv(&db, "source", "default", "k1", Value::String("v1".into()));
         write_kv(&db, "source", "default", "k2", Value::Int(42));
-        write_state(&db, "source", "default", "s1", Value::Bool(true));
         write_json(
             &db,
             "source",
@@ -894,18 +877,9 @@ mod tests {
         );
         assert_eq!(read_kv(&db, "dest", "default", "k2"), Some(Value::Int(42)));
 
-        // Verify state data visible through inherited layers
+        // Verify JSON data visible through inherited layers
         let dest_id = resolve_branch_name("dest");
         let storage = db.storage();
-        let state_entries = storage.list_by_type(&dest_id, TypeTag::State);
-        assert!(
-            state_entries
-                .iter()
-                .any(|(k, _)| *k.user_key == *b"s1" && k.namespace.space == "default"),
-            "State data should be visible through inherited layers"
-        );
-
-        // Verify JSON data visible through inherited layers
         let json_entries = storage.list_by_type(&dest_id, TypeTag::Json);
         assert!(
             json_entries
@@ -1655,14 +1629,13 @@ mod tests {
         let branch_index = BranchIndex::new(db.clone());
         branch_index.create_branch("b").unwrap();
 
-        // Write KV and State data to branch A only
+        // Write KV and JSON data to branch A only
         write_kv(&db, "a", "default", "kv1", Value::Int(1));
-        write_state(&db, "a", "default", "st1", Value::Bool(true));
         write_json(&db, "a", "default", "j1", Value::String("doc".into()));
 
-        // Unfiltered: should see all 3 removed
+        // Unfiltered: should see all 2 removed
         let diff_all = diff_branches(&db, "a", "b").unwrap();
-        assert_eq!(diff_all.summary.total_removed, 3);
+        assert_eq!(diff_all.summary.total_removed, 2);
 
         // Filter to KV only: should see 1 removed
         let diff_kv = diff_branches_with_options(
@@ -1681,26 +1654,6 @@ mod tests {
         assert_eq!(diff_kv.summary.total_removed, 1);
         assert_eq!(diff_kv.spaces[0].removed[0].primitive, PrimitiveType::Kv);
         assert_eq!(diff_kv.spaces[0].removed[0].key, "kv1");
-
-        // Filter to State only: should see 1 removed
-        let diff_state = diff_branches_with_options(
-            &db,
-            "a",
-            "b",
-            DiffOptions {
-                filter: Some(DiffFilter {
-                    primitives: Some(vec![PrimitiveType::State]),
-                    spaces: None,
-                }),
-                as_of: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(diff_state.summary.total_removed, 1);
-        assert_eq!(
-            diff_state.spaces[0].removed[0].primitive,
-            PrimitiveType::State
-        );
     }
 
     #[test]
@@ -1710,7 +1663,6 @@ mod tests {
         branch_index.create_branch("b").unwrap();
 
         write_kv(&db, "a", "default", "kv1", Value::Int(1));
-        write_state(&db, "a", "default", "st1", Value::Bool(true));
         write_json(&db, "a", "default", "j1", Value::String("doc".into()));
 
         // Filter to KV + Json: should see 2 removed
@@ -1795,9 +1747,8 @@ mod tests {
         let id_a = resolve_branch_name("a");
         space_index.register(id_a, "alpha").unwrap();
 
-        // KV in default, State in alpha, KV in alpha
+        // KV in default, KV in alpha
         write_kv(&db, "a", "default", "kv_d", Value::Int(1));
-        write_state(&db, "a", "alpha", "st_a", Value::Bool(true));
         write_kv(&db, "a", "alpha", "kv_a", Value::Int(2));
 
         // Filter: KV only + alpha only → should see 1 removed (kv_a)
@@ -1957,9 +1908,8 @@ mod tests {
         let branch_index = BranchIndex::new(db.clone());
         branch_index.create_branch("b").unwrap();
 
-        // Write KV and State at different times
+        // Write KV data
         write_kv(&db, "a", "default", "kv1", Value::Int(1));
-        write_state(&db, "a", "default", "st1", Value::Bool(true));
 
         std::thread::sleep(std::time::Duration::from_millis(10));
         let snapshot_ts = std::time::SystemTime::now()
@@ -1967,7 +1917,7 @@ mod tests {
             .unwrap()
             .as_micros() as u64;
 
-        // Both KV and State exist at snapshot_ts; filter to KV only
+        // KV exists at snapshot_ts; filter to KV only
         let diff = diff_branches_with_options(
             &db,
             "a",

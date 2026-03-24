@@ -277,41 +277,6 @@ fn export_empty_jsonl_format() {
 }
 
 // =============================================================================
-// State exports
-// =============================================================================
-
-#[test]
-fn export_state_csv() {
-    let strata = Strata::cache().unwrap();
-    strata.state_set("counter", Value::Int(42)).unwrap();
-    strata.state_set("flag", Value::Bool(true)).unwrap();
-    let executor = Executor::new(strata.database());
-
-    let result = executor
-        .execute(Command::DbExport {
-            branch: None,
-            space: None,
-            primitive: ExportPrimitive::State,
-            format: ExportFormat::Csv,
-            prefix: None,
-            limit: None,
-            path: None,
-        })
-        .unwrap();
-
-    match result {
-        Output::Exported(r) => {
-            assert_eq!(r.row_count, 2);
-            let data = r.data.unwrap();
-            assert!(data.starts_with("key,value"));
-            assert!(data.contains("counter,42") || data.contains("counter,42\n"));
-            assert!(data.contains("flag,true"));
-        }
-        other => panic!("expected Exported, got {:?}", other),
-    }
-}
-
-// =============================================================================
 // Event exports
 // =============================================================================
 

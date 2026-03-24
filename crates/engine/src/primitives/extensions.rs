@@ -18,9 +18,6 @@
 //!     // Event operation
 //!     txn.event_append("type", payload)?;
 //!
-//!     // State operation
-//!     txn.state_cas("cell", version, new_value)?;
-//!
 //!     Ok(())
 //! })?;
 //! ```
@@ -66,25 +63,6 @@ pub trait EventLogExt {
 
     /// Read an event by sequence number
     fn event_get(&mut self, sequence: u64) -> StrataResult<Option<Value>>;
-}
-
-/// State cell operations within a transaction
-///
-/// Implemented in `state_cell.rs`
-pub trait StateCellExt {
-    /// Read current state
-    fn state_get(&mut self, name: &str) -> StrataResult<Option<Value>>;
-
-    /// Compare-and-swap update, returns new version
-    fn state_cas(
-        &mut self,
-        name: &str,
-        expected_version: Version,
-        new_value: Value,
-    ) -> StrataResult<Version>;
-
-    /// Unconditional set, returns new version
-    fn state_set(&mut self, name: &str, value: Value) -> StrataResult<Version>;
 }
 
 /// JSON store operations within a transaction
@@ -143,6 +121,5 @@ mod tests {
         // Verify traits can be used as trait objects if needed
         fn _accepts_kv_ext(_ext: &dyn KVStoreExt) {}
         fn _accepts_event_ext(_ext: &dyn EventLogExt) {}
-        fn _accepts_state_ext(_ext: &dyn StateCellExt) {}
     }
 }

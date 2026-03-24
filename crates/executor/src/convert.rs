@@ -33,10 +33,6 @@ impl From<StrataError> for Error {
                         stream: entity_str,
                         hint: None,
                     },
-                    EntityRef::State { .. } => Error::CellNotFound {
-                        cell: entity_str,
-                        hint: None,
-                    },
                 }
             }
 

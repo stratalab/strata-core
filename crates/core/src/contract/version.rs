@@ -13,7 +13,7 @@
 //! - **Sequence**: Position-based versioning (EventLog)
 //!   Represents position in an append-only log. Unique within a branch's event log.
 //!
-//! - **Counter**: Per-entity counter (StateCell)
+//! - **Counter**: Per-entity counter
 //!   Increments on each modification. Used for CAS operations.
 //!
 //! ## Comparison
@@ -52,8 +52,6 @@ pub enum Version {
     Sequence(u64),
 
     /// Counter-based version
-    ///
-    /// Used by: StateCell
     ///
     /// Per-entity mutation counter. Increments on each modification.
     /// Used for compare-and-swap (CAS) operations.

@@ -3,7 +3,7 @@
 //! The public API for StrataDB - an embedded database for AI applications.
 //!
 //! This is the only crate users need to import. It provides:
-//! - [`Strata`] - The main database interface with 6 data primitives
+//! - [`Strata`] - The main database interface with data primitives
 //! - [`Value`] - The universal value type for all data
 //! - [`Command`]/[`Output`] - Low-level command interface (for SDKs)
 //!
@@ -27,7 +27,6 @@
 //! | Primitive | Use Case |
 //! |-----------|----------|
 //! | **KV** | General key-value storage |
-//! | **StateCell** | Mutable state with compare-and-swap |
 //! | **EventLog** | Immutable append-only streams |
 //! | **JSONStore** | Structured documents with paths |
 //! | **VectorStore** | Embeddings & similarity search |

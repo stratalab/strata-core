@@ -102,21 +102,6 @@ pub struct EventSnapshotEntry {
     pub timestamp: u64,
 }
 
-/// Snapshot entry for State primitive
-///
-/// Format: name_len(4) + name + value_len(4) + value + counter(8) + timestamp(8)
-#[derive(Debug, Clone, PartialEq)]
-pub struct StateSnapshotEntry {
-    /// State cell name
-    pub name: String,
-    /// Value bytes (pre-codec)
-    pub value: Vec<u8>,
-    /// CAS counter
-    pub counter: u64,
-    /// Timestamp (microseconds since epoch)
-    pub timestamp: u64,
-}
-
 /// Snapshot entry for Run primitive
 ///
 /// Format: branch_id(16 bytes UUID) + name_len(4) + name + created_at(8) + metadata_len(4) + metadata
@@ -269,51 +254,6 @@ impl SnapshotSerializer {
             entries.push(EventSnapshotEntry {
                 sequence,
                 payload,
-                timestamp,
-            });
-        }
-        Ok(entries)
-    }
-
-    /// Serialize State entries to bytes
-    pub fn serialize_states(&self, entries: &[StateSnapshotEntry]) -> Vec<u8> {
-        let mut data = Vec::new();
-
-        data.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-
-        for entry in entries {
-            let name_bytes = entry.name.as_bytes();
-            data.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
-            data.extend_from_slice(name_bytes);
-
-            let value_bytes = self.codec.encode(&entry.value);
-            data.extend_from_slice(&(value_bytes.len() as u32).to_le_bytes());
-            data.extend_from_slice(&value_bytes);
-
-            data.extend_from_slice(&entry.counter.to_le_bytes());
-            data.extend_from_slice(&entry.timestamp.to_le_bytes());
-        }
-
-        data
-    }
-
-    /// Deserialize State entries from bytes
-    pub fn deserialize_states(
-        &self,
-        data: &[u8],
-    ) -> Result<Vec<StateSnapshotEntry>, PrimitiveSerializeError> {
-        let mut r = CursorReader::new(data);
-        let count = r.read_u32()? as usize;
-        let mut entries = Vec::with_capacity(count);
-        for _ in 0..count {
-            let name = r.read_string()?;
-            let value = self.codec.decode(r.read_blob()?)?;
-            let counter = r.read_u64()?;
-            let timestamp = r.read_u64()?;
-            entries.push(StateSnapshotEntry {
-                name,
-                value,
-                counter,
                 timestamp,
             });
         }
@@ -593,31 +533,6 @@ mod tests {
 
         let data = serializer.serialize_events(&entries);
         let parsed = serializer.deserialize_events(&data).unwrap();
-
-        assert_eq!(entries, parsed);
-    }
-
-    #[test]
-    fn test_states_roundtrip() {
-        let serializer = test_serializer();
-
-        let entries = vec![
-            StateSnapshotEntry {
-                name: "state1".to_string(),
-                value: b"value1".to_vec(),
-                counter: 10,
-                timestamp: 1000,
-            },
-            StateSnapshotEntry {
-                name: "state2".to_string(),
-                value: b"value2".to_vec(),
-                counter: 20,
-                timestamp: 2000,
-            },
-        ];
-
-        let data = serializer.serialize_states(&entries);
-        let parsed = serializer.deserialize_states(&data).unwrap();
 
         assert_eq!(entries, parsed);
     }

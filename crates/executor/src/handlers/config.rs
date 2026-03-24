@@ -189,10 +189,7 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
                     value.trim()
                 )
             };
-            return Err(Error::InvalidInput {
-                reason,
-                hint: None,
-            });
+            return Err(Error::InvalidInput { reason, hint: None });
         }
     }
 
@@ -371,16 +368,12 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
                     .unwrap_or(cfg.storage.l0_stop_writes_trigger)
             }
             "target_file_size" => {
-                cfg.storage.target_file_size = value
-                    .trim()
-                    .parse()
-                    .unwrap_or(cfg.storage.target_file_size)
+                cfg.storage.target_file_size =
+                    value.trim().parse().unwrap_or(cfg.storage.target_file_size)
             }
             "level_base_bytes" => {
-                cfg.storage.level_base_bytes = value
-                    .trim()
-                    .parse()
-                    .unwrap_or(cfg.storage.level_base_bytes)
+                cfg.storage.level_base_bytes =
+                    value.trim().parse().unwrap_or(cfg.storage.level_base_bytes)
             }
             "data_block_size" => {
                 cfg.storage.data_block_size =
@@ -544,9 +537,7 @@ pub fn configure_get_key(p: &Arc<Primitives>, key: String) -> Result<Output> {
         "block_cache_size" => Some(cfg.storage.block_cache_size.to_string()),
         "write_buffer_size" => Some(cfg.storage.write_buffer_size.to_string()),
         "max_immutable_memtables" => Some(cfg.storage.max_immutable_memtables.to_string()),
-        "l0_slowdown_writes_trigger" => {
-            Some(cfg.storage.l0_slowdown_writes_trigger.to_string())
-        }
+        "l0_slowdown_writes_trigger" => Some(cfg.storage.l0_slowdown_writes_trigger.to_string()),
         "l0_stop_writes_trigger" => Some(cfg.storage.l0_stop_writes_trigger.to_string()),
         "target_file_size" => Some(cfg.storage.target_file_size.to_string()),
         "level_base_bytes" => Some(cfg.storage.level_base_bytes.to_string()),

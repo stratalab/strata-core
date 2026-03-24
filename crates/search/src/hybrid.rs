@@ -21,12 +21,12 @@ use std::sync::Arc;
 use std::time::Instant;
 use strata_core::PrimitiveType;
 use strata_core::StrataResult;
-use strata_engine::database::{SHADOW_EVENT, SHADOW_JSON, SHADOW_KV, SHADOW_STATE};
+use strata_engine::database::{SHADOW_EVENT, SHADOW_JSON, SHADOW_KV};
 use strata_engine::search::{
     SearchBudget, SearchHit, SearchMode, SearchRequest, SearchResponse, SearchStats,
 };
 use strata_engine::Database;
-use strata_engine::{BranchIndex, EventLog, JsonStore, KVStore, StateCell, VectorStore};
+use strata_engine::{BranchIndex, EventLog, JsonStore, KVStore, VectorStore};
 
 /// Result type for BM25 search across primitives: (results, total_candidates, any_truncated)
 type Bm25SearchResult = (Vec<(PrimitiveType, SearchResponse)>, usize, bool);
@@ -55,7 +55,7 @@ type Bm25SearchResult = (Vec<(PrimitiveType, SearchResponse)>, usize, bool);
 /// │  ┌────────────────────────────────────┐ │
 /// │  │     Search Each Primitive          │ │
 /// │  │  ┌───┐ ┌────┐ ┌─────┐ ┌─────┐     │ │
-/// │  │  │KV │ │JSON│ │Event│ │State│ ... │ │
+/// │  │  │KV │ │JSON│ │Event│ ...         │ │
 /// │  │  └─┬─┘ └──┬─┘ └──┬──┘ └──┬──┘     │ │
 /// │  └────┼──────┼──────┼───────┼────────┘ │
 /// │       └──────┴──────┴───────┘          │
@@ -86,7 +86,6 @@ pub struct HybridSearch {
     kv: KVStore,
     json: JsonStore,
     event: EventLog,
-    state: StateCell,
     branch_index: BranchIndex,
     vector: VectorStore,
 }
@@ -101,7 +100,6 @@ impl HybridSearch {
             kv: KVStore::new(db.clone()),
             json: JsonStore::new(db.clone()),
             event: EventLog::new(db.clone()),
-            state: StateCell::new(db.clone()),
             branch_index: BranchIndex::new(db.clone()),
             vector: VectorStore::new(db.clone()),
             db,
@@ -116,7 +114,6 @@ impl HybridSearch {
             kv: KVStore::new(db.clone()),
             json: JsonStore::new(db.clone()),
             event: EventLog::new(db.clone()),
-            state: StateCell::new(db.clone()),
             branch_index: BranchIndex::new(db.clone()),
             vector: VectorStore::new(db.clone()),
             db,
@@ -229,7 +226,7 @@ impl HybridSearch {
         // Vector search for Hybrid mode: search shadow collections in parallel
         if is_hybrid {
             if let Some(query_embedding) = query_embedding {
-                let shadow_collections = [SHADOW_KV, SHADOW_JSON, SHADOW_EVENT, SHADOW_STATE];
+                let shadow_collections = [SHADOW_KV, SHADOW_JSON, SHADOW_EVENT];
 
                 let vector_hits: Vec<SearchHit> = shadow_collections
                     .par_iter()
@@ -372,7 +369,6 @@ impl HybridSearch {
             PrimitiveType::Kv => self.kv.search(req),
             PrimitiveType::Json => self.json.search(req),
             PrimitiveType::Event => self.event.search(req),
-            PrimitiveType::State => self.state.search(req),
             PrimitiveType::Branch => self.branch_index.search(req),
             // Vector primitive now implements Searchable.
             // Per M8_ARCHITECTURE.md Section 12.3:

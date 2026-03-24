@@ -45,7 +45,6 @@ mod inference;
 mod json;
 mod kv;
 mod space;
-mod state;
 mod system;
 mod vector;
 
@@ -809,17 +808,6 @@ mod tests {
     }
 
     #[test]
-    fn test_state_set_get() {
-        let db = create_strata();
-
-        // Simplified API: just pass &str directly
-        db.state_set("cell", "state").unwrap();
-        let value = db.state_get("cell").unwrap();
-        assert!(value.is_some());
-        assert_eq!(value.unwrap(), Value::String("state".into()));
-    }
-
-    #[test]
     fn test_event_append_range() {
         let db = create_strata();
 
@@ -999,7 +987,6 @@ mod tests {
 
         // Put data in default branch (simplified API)
         db.kv_put("kv-key", 1i64).unwrap();
-        db.state_set("state-cell", 10i64).unwrap();
         db.event_append(
             "stream",
             Value::object([("x".to_string(), Value::Int(100))].into_iter().collect()),
@@ -1012,7 +999,6 @@ mod tests {
 
         // None of the data should exist in this branch
         assert!(db.kv_get("kv-key").unwrap().is_none());
-        assert!(db.state_get("state-cell").unwrap().is_none());
         assert_eq!(db.event_len().unwrap(), 0);
     }
 
@@ -1735,16 +1721,6 @@ mod tests {
     }
 
     #[test]
-    fn test_system_branch_state_roundtrip() {
-        let db = Strata::cache().unwrap();
-        let sys = db.system_branch();
-
-        sys.state_set("_ai:pref:theme", "dark").unwrap();
-        let val = sys.state_get("_ai:pref:theme").unwrap();
-        assert_eq!(val, Some(Value::String("dark".into())));
-    }
-
-    #[test]
     fn test_system_branch_event_roundtrip() {
         let db = Strata::cache().unwrap();
         let sys = db.system_branch();
@@ -1832,15 +1808,6 @@ mod tests {
 
         let val = db.json_get_as_of("doc", "$", None).unwrap();
         assert!(val.is_some());
-    }
-
-    #[test]
-    fn test_state_get_as_of() {
-        let db = create_strata();
-        db.state_set("cell", "val").unwrap();
-
-        let val = db.state_get_as_of("cell", None).unwrap();
-        assert_eq!(val, Some(Value::String("val".into())));
     }
 
     #[test]
@@ -1958,28 +1925,6 @@ mod tests {
 
         // Verify deleted
         assert!(db.json_get("del1", "$").unwrap().is_none());
-    }
-
-    #[test]
-    fn test_state_batch_set() {
-        use crate::types::BatchStateEntry;
-        let db = create_strata();
-
-        let entries = vec![
-            BatchStateEntry {
-                cell: "s1".to_string(),
-                value: Value::Int(10),
-            },
-            BatchStateEntry {
-                cell: "s2".to_string(),
-                value: Value::Int(20),
-            },
-        ];
-        let results = db.state_batch_set(entries).unwrap();
-        assert_eq!(results.len(), 2);
-
-        assert_eq!(db.state_get("s1").unwrap(), Some(Value::Int(10)));
-        assert_eq!(db.state_get("s2").unwrap(), Some(Value::Int(20)));
     }
 
     #[test]
@@ -2189,16 +2134,6 @@ mod tests {
     // =========================================================================
     // Tests for #1499 gap methods
     // =========================================================================
-
-    #[test]
-    fn test_state_list_as_of() {
-        let db = create_strata();
-        db.state_set("sl:a", "1").unwrap();
-        db.state_set("sl:b", "2").unwrap();
-
-        let keys = db.state_list_as_of(Some("sl:"), None).unwrap();
-        assert_eq!(keys.len(), 2);
-    }
 
     #[test]
     fn test_json_list_as_of() {

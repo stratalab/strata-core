@@ -1341,7 +1341,8 @@ impl SegmentedStore {
     /// Changes take effect on the next memtable rotation (the active memtable
     /// continues at its current size; new memtables use the updated threshold).
     pub fn set_write_buffer_size(&self, bytes: usize) {
-        self.write_buffer_size.store(bytes as u64, Ordering::Relaxed);
+        self.write_buffer_size
+            .store(bytes as u64, Ordering::Relaxed);
     }
 
     /// Set maximum frozen memtables per branch before write stalling (0 = unlimited).

@@ -160,49 +160,6 @@ fn read_your_writes_kv() {
 }
 
 #[test]
-fn read_your_writes_state() {
-    let mut session = create_session();
-
-    session
-        .execute(Command::TxnBegin {
-            branch: None,
-            options: None,
-        })
-        .unwrap();
-
-    // Note: StateSet goes through executor, StateInit goes through transaction
-    session
-        .execute(Command::StateInit {
-            branch: None,
-            space: None,
-            cell: "cell".into(),
-            value: Value::String("value".into()),
-        })
-        .unwrap();
-
-    let output = session
-        .execute(Command::StateGet {
-            branch: None,
-            space: None,
-            cell: "cell".into(),
-            as_of: None,
-        })
-        .unwrap();
-
-    match output {
-        Output::MaybeVersioned(Some(vv)) => {
-            assert_eq!(vv.value, Value::String("value".into()));
-        }
-        Output::Maybe(Some(val)) => {
-            assert_eq!(val, Value::String("value".into()));
-        }
-        _ => panic!("Expected to read our own write"),
-    }
-
-    session.execute(Command::TxnCommit).unwrap();
-}
-
-#[test]
 fn read_your_writes_event() {
     let mut session = create_session();
 
@@ -274,87 +231,6 @@ fn rollback_discards_kv_writes() {
             branch: None,
             space: None,
             key: "rollback_test".into(),
-            as_of: None,
-        })
-        .unwrap();
-
-    assert!(matches!(
-        output,
-        Output::MaybeVersioned(None) | Output::Maybe(None)
-    ));
-}
-
-#[test]
-fn rollback_discards_state_writes() {
-    let db = create_db();
-    let mut session = Session::new(db.clone());
-
-    session
-        .execute(Command::TxnBegin {
-            branch: None,
-            options: None,
-        })
-        .unwrap();
-
-    // Use StateInit which goes through transaction
-    session
-        .execute(Command::StateInit {
-            branch: None,
-            space: None,
-            cell: "rollback_cell".into(),
-            value: Value::String("uncommitted".into()),
-        })
-        .unwrap();
-
-    session.execute(Command::TxnRollback).unwrap();
-
-    // Verify not visible
-    let executor = strata_executor::Executor::new(db);
-    let output = executor
-        .execute(Command::StateGet {
-            branch: None,
-            space: None,
-            cell: "rollback_cell".into(),
-            as_of: None,
-        })
-        .unwrap();
-
-    assert!(matches!(
-        output,
-        Output::MaybeVersioned(None) | Output::Maybe(None)
-    ));
-}
-
-#[test]
-fn rollback_discards_state_set_writes() {
-    let db = create_db();
-    let mut session = Session::new(db.clone());
-
-    session
-        .execute(Command::TxnBegin {
-            branch: None,
-            options: None,
-        })
-        .unwrap();
-
-    // Regression guard: StateSet must remain in transaction scope.
-    session
-        .execute(Command::StateSet {
-            branch: None,
-            space: None,
-            cell: "rollback_state_set_cell".into(),
-            value: Value::String("txn-only".into()),
-        })
-        .unwrap();
-
-    session.execute(Command::TxnRollback).unwrap();
-
-    let executor = strata_executor::Executor::new(db);
-    let output = executor
-        .execute(Command::StateGet {
-            branch: None,
-            space: None,
-            cell: "rollback_state_set_cell".into(),
             as_of: None,
         })
         .unwrap();
@@ -651,16 +527,6 @@ fn cross_primitive_transaction() {
         })
         .unwrap();
 
-    // State - use StateInit for transaction support
-    session
-        .execute(Command::StateInit {
-            branch: None,
-            space: None,
-            cell: "state_cell".into(),
-            value: Value::Int(2),
-        })
-        .unwrap();
-
     // Event - append supported in transactions
     session
         .execute(Command::EventAppend {
@@ -686,19 +552,6 @@ fn cross_primitive_transaction() {
         .unwrap();
     assert!(matches!(
         kv_out,
-        Output::MaybeVersioned(Some(_)) | Output::Maybe(Some(_))
-    ));
-
-    let state_out = executor
-        .execute(Command::StateGet {
-            branch: None,
-            space: None,
-            cell: "state_cell".into(),
-            as_of: None,
-        })
-        .unwrap();
-    assert!(matches!(
-        state_out,
         Output::MaybeVersioned(Some(_)) | Output::Maybe(Some(_))
     ));
 

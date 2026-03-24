@@ -6,7 +6,6 @@
 //! # Supported Operations
 //! - KV: key-value operations (get, put, delete, exists, list)
 //! - Event: append-only event log operations
-//! - State: compare-and-swap state cells
 //! - JSON: document operations with path-based access
 //!
 //! This implementation provides:
@@ -14,7 +13,6 @@
 //! - Read set tracking for conflict detection
 //! - Proper key construction with namespaces
 //! - Event buffering with sequence allocation
-//! - State cell CAS (compare-and-swap) support
 //! - JSON document operations via TransactionContext
 
 use crate::primitives::event::{EventLogMeta, HASH_VERSION_SHA256};
@@ -23,7 +21,7 @@ use std::sync::Arc;
 use strata_concurrency::{JsonStoreExt, TransactionContext};
 use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 use strata_core::{
-    EntityRef, Event, JsonPath, JsonValue, State, StrataError, Timestamp, Value, Version, Versioned,
+    EntityRef, Event, JsonPath, JsonValue, StrataError, Timestamp, Value, Version, Versioned,
 };
 
 /// Transaction wrapper that implements TransactionOps
@@ -41,10 +39,6 @@ use strata_core::{
 ///
 ///     // Event operations
 ///     txn.event_append("event_type", json!({}))?;
-///
-///     // State operations
-///     txn.state_init("counter", Value::Int(0))?;
-///     txn.state_cas("counter", 1, Value::Int(1))?;
 ///
 ///     Ok(())
 /// })?;
@@ -132,11 +126,6 @@ impl<'a> Transaction<'a> {
     /// Get the next sequence number for a new event
     fn next_sequence(&self) -> u64 {
         self.base_sequence + self.pending_events.len() as u64
-    }
-
-    /// Create a state key for the given name
-    fn state_key(&self, name: &str) -> Key {
-        Key::new_state(self.namespace.clone(), name)
     }
 
     /// Create a JSON key for the given document ID
@@ -307,99 +296,6 @@ impl<'a> TransactionOps for Transaction<'a> {
     fn event_len(&mut self) -> Result<u64, StrataError> {
         // Base sequence from snapshot + pending events
         Ok(self.base_sequence + self.pending_events.len() as u64)
-    }
-
-    // =========================================================================
-    // State Operations (Phase 3)
-    // =========================================================================
-
-    fn state_get(&mut self, name: &str) -> Result<Option<Versioned<State>>, StrataError> {
-        let full_key = self.state_key(name);
-
-        // Delegate to ctx.get() which checks write_set → delete_set → snapshot
-        match self.ctx.get(&full_key)? {
-            Some(Value::String(s)) => {
-                let state: State =
-                    serde_json::from_str(&s).map_err(|e| StrataError::Serialization {
-                        message: e.to_string(),
-                    })?;
-                Ok(Some(Versioned::new(state.clone(), state.version)))
-            }
-            _ => Ok(None),
-        }
-    }
-
-    fn state_init(&mut self, name: &str, value: Value) -> Result<Version, StrataError> {
-        let full_key = self.state_key(name);
-
-        // Check if state already exists (in write_set, or snapshot)
-        if self.ctx.get(&full_key)?.is_some() {
-            return Err(StrataError::invalid_operation(
-                EntityRef::state(self.branch_id(), name),
-                "state already exists",
-            ));
-        }
-
-        // Create new state with version 1
-        let state = State::new(value);
-        let version = state.version;
-
-        // Serialize as Value::String (matching StateCell primitive format)
-        let state_json = serde_json::to_string(&state).map_err(|e| StrataError::Serialization {
-            message: e.to_string(),
-        })?;
-
-        self.ctx.put(full_key, Value::String(state_json))?;
-
-        Ok(version)
-    }
-
-    fn state_cas(
-        &mut self,
-        name: &str,
-        expected_version: Version,
-        value: Value,
-    ) -> Result<Version, StrataError> {
-        let full_key = self.state_key(name);
-
-        // Read current state (write_set → delete_set → snapshot)
-        let current_state = match self.ctx.get(&full_key)? {
-            Some(Value::String(s)) => {
-                let state: State =
-                    serde_json::from_str(&s).map_err(|e| StrataError::Serialization {
-                        message: e.to_string(),
-                    })?;
-                Some(state)
-            }
-            _ => None,
-        };
-
-        // For CAS, state must exist
-        let current = current_state
-            .ok_or_else(|| StrataError::not_found(EntityRef::state(self.branch_id(), name)))?;
-
-        // Check version matches
-        if current.version != expected_version {
-            return Err(StrataError::version_conflict(
-                EntityRef::state(self.branch_id(), name),
-                expected_version,
-                current.version,
-            ));
-        }
-
-        // Create new state with incremented version
-        let new_version = expected_version.increment();
-        let new_state = State::with_version(value, new_version);
-
-        // Serialize as Value::String (matching StateCell primitive format)
-        let state_json =
-            serde_json::to_string(&new_state).map_err(|e| StrataError::Serialization {
-                message: e.to_string(),
-            })?;
-
-        self.ctx.put(full_key, Value::String(state_json))?;
-
-        Ok(new_version)
     }
 
     // =========================================================================
@@ -755,88 +651,6 @@ mod tests {
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].event_type, "e1");
         assert_eq!(pending[1].event_type, "e2");
-    }
-
-    // =========================================================================
-    // State Tests
-    // =========================================================================
-
-    #[test]
-    fn test_state_init_and_read() {
-        let ns = create_test_namespace();
-        let mut ctx = create_test_context(&ns);
-        let mut txn = Transaction::new(&mut ctx, ns.clone());
-
-        // Initialize a state cell
-        let version = txn.state_init("counter", Value::Int(0)).unwrap();
-        assert_eq!(version, Version::counter(1)); // Version 1 for new state
-
-        // Read it back (read-your-writes)
-        let result = txn.state_get("counter").unwrap();
-        assert!(result.is_some());
-        let versioned = result.unwrap();
-        assert_eq!(versioned.value.value, Value::Int(0));
-        assert_eq!(versioned.value.version, Version::counter(1));
-    }
-
-    #[test]
-    fn test_state_cas_success() {
-        let ns = create_test_namespace();
-        let mut ctx = create_test_context(&ns);
-        let mut txn = Transaction::new(&mut ctx, ns.clone());
-
-        // Initialize then CAS
-        txn.state_init("counter", Value::Int(0)).unwrap();
-        let new_version = txn
-            .state_cas("counter", Version::counter(1), Value::Int(1))
-            .unwrap();
-        assert_eq!(new_version, Version::counter(2)); // Version incremented
-
-        // Verify the value changed
-        let result = txn.state_get("counter").unwrap().unwrap();
-        assert_eq!(result.value.value, Value::Int(1));
-        assert_eq!(result.value.version, Version::counter(2));
-    }
-
-    #[test]
-    fn test_state_cas_version_mismatch() {
-        let ns = create_test_namespace();
-        let mut ctx = create_test_context(&ns);
-        let mut txn = Transaction::new(&mut ctx, ns.clone());
-
-        // Initialize then CAS with wrong version
-        txn.state_init("counter", Value::Int(0)).unwrap();
-        let result = txn.state_cas("counter", Version::counter(99), Value::Int(1)); // Wrong version
-
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            StrataError::VersionConflict {
-                expected, actual, ..
-            } => {
-                assert_eq!(expected, Version::counter(99));
-                assert_eq!(actual, Version::counter(1));
-            }
-            _ => panic!("Expected VersionConflict error"),
-        }
-    }
-
-    #[test]
-    fn test_state_init_duplicate_fails() {
-        let ns = create_test_namespace();
-        let mut ctx = create_test_context(&ns);
-        let mut txn = Transaction::new(&mut ctx, ns.clone());
-
-        // Initialize twice should fail
-        txn.state_init("counter", Value::Int(0)).unwrap();
-        let result = txn.state_init("counter", Value::Int(1));
-
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            StrataError::InvalidOperation { reason, .. } => {
-                assert!(reason.contains("already exists"));
-            }
-            _ => panic!("Expected InvalidOperation error"),
-        }
     }
 
     // =========================================================================

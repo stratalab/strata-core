@@ -72,27 +72,6 @@ fn committed_event_data_survives_restart() {
 }
 
 #[test]
-fn committed_statecell_survives_restart() {
-    let mut test_db = TestDb::new_strict();
-    let branch_id = test_db.branch_id;
-
-    let state = test_db.state();
-    let v = state
-        .init(&branch_id, "default", "counter", Value::Int(0))
-        .unwrap();
-    state
-        .cas(&branch_id, "default", "counter", v, Value::Int(42))
-        .unwrap();
-
-    test_db.reopen();
-
-    let state = test_db.state();
-    let val = state.get(&branch_id, "default", "counter").unwrap();
-    assert!(val.is_some());
-    assert_eq!(val.unwrap(), Value::Int(42));
-}
-
-#[test]
 fn committed_vector_data_survives_restart() {
     let mut test_db = TestDb::new_strict();
     let branch_id = test_db.branch_id;

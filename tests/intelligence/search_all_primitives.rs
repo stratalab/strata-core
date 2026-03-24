@@ -21,7 +21,6 @@ fn test_searchable_primitives() {
     assert_searchable(&p.kv);
     assert_searchable(&p.json);
     assert_searchable(&p.event);
-    assert_searchable(&p.state);
 
     // When ISSUE-001 is fixed, add:
     // assert_searchable(&p.vector);
@@ -36,7 +35,6 @@ fn test_primitive_kinds() {
     assert_eq!(p.kv.primitive_kind(), PrimitiveType::Kv);
     assert_eq!(p.json.primitive_kind(), PrimitiveType::Json);
     assert_eq!(p.event.primitive_kind(), PrimitiveType::Event);
-    assert_eq!(p.state.primitive_kind(), PrimitiveType::State);
 
     // When ISSUE-001 is fixed:
     // assert_eq!(p.vector.primitive_kind(), PrimitiveType::Vector);

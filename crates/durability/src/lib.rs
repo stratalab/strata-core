@@ -91,7 +91,6 @@ pub use format::{
     SnapshotHeaderError,
     SnapshotSerializer,
     SnapshotWatermark,
-    StateSnapshotEntry,
     VectorCollectionSnapshotEntry,
     VectorSnapshotEntry,
     WalRecord,

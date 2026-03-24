@@ -300,15 +300,6 @@ fn format_raw(output: &Output) -> String {
                 "0".to_string()
             }
         }
-        Output::StateCasResult {
-            success, version, ..
-        } => {
-            if *success {
-                version.map(|v| v.to_string()).unwrap_or_default()
-            } else {
-                String::new()
-            }
-        }
         Output::KeysPage { keys, .. } => keys.join("\n"),
         Output::Keys(keys) => keys.join("\n"),
         Output::JsonListResult { keys, .. } => keys.join("\n"),
@@ -430,12 +421,11 @@ fn format_raw(output: &Output) -> String {
             kv_queued,
             json_queued,
             event_queued,
-            state_queued,
             new_dimension,
         } => {
             format!(
-                "{}\t{}\t{}\t{}\t{}",
-                kv_queued, json_queued, event_queued, state_queued, new_dimension
+                "{}\t{}\t{}\t{}",
+                kv_queued, json_queued, event_queued, new_dimension
             )
         }
         Output::BatchResults(results) => results
@@ -616,32 +606,6 @@ fn format_human(output: &Output) -> String {
             "(delete) collection={} key={} deleted={}",
             collection, key, deleted
         ),
-        Output::StateCasResult {
-            cell,
-            success,
-            version,
-            current_value,
-            current_version,
-        } => {
-            if *success {
-                format!(
-                    "(cas) cell={} success version={}",
-                    cell,
-                    version.map(|v| v.to_string()).unwrap_or_default()
-                )
-            } else {
-                let cv = current_value
-                    .as_ref()
-                    .map(format_value_human)
-                    .unwrap_or_else(|| "(nil)".to_string());
-                format!(
-                    "(cas) cell={} conflict current_version={} current_value={}",
-                    cell,
-                    current_version.map(|v| v.to_string()).unwrap_or_default(),
-                    cv
-                )
-            }
-        }
         Output::KeysPage {
             keys,
             has_more,
@@ -860,11 +824,6 @@ fn format_human(output: &Output) -> String {
             lines.push(format!("  kv:     {} keys", d.primitives.kv.count));
             lines.push(format!("  json:   {} docs", d.primitives.json.count));
             lines.push(format!("  events: {} entries", d.primitives.events.count));
-            lines.push(format!(
-                "  state:  {} cells [{}]",
-                d.primitives.state.count,
-                d.primitives.state.cells.join(", ")
-            ));
             if d.primitives.vector.collections.is_empty() {
                 lines.push("  vector: (none)".to_string());
             } else {
@@ -1048,13 +1007,12 @@ fn format_human(output: &Output) -> String {
             kv_queued,
             json_queued,
             event_queued,
-            state_queued,
             new_dimension,
         } => {
-            let total = kv_queued + json_queued + event_queued + state_queued;
+            let total = kv_queued + json_queued + event_queued;
             format!(
-                "Reindex started: {} items queued (kv: {}, json: {}, event: {}, state: {})\nNew dimension: {}\nRun EMBED STATUS to track progress.",
-                total, kv_queued, json_queued, event_queued, state_queued, new_dimension
+                "Reindex started: {} items queued (kv: {}, json: {}, event: {})\nNew dimension: {}\nRun EMBED STATUS to track progress.",
+                total, kv_queued, json_queued, event_queued, new_dimension
             )
         }
         Output::BatchResults(results) => {

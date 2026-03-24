@@ -190,31 +190,6 @@ fn test_command_event_len() {
 }
 
 // =============================================================================
-// State Command Tests
-// =============================================================================
-
-#[test]
-fn test_command_state_set() {
-    test_command_round_trip(Command::StateSet {
-        branch: Some(BranchId::from("default")),
-        space: None,
-        cell: "counter".to_string(),
-        value: Value::Int(42),
-    });
-}
-
-#[test]
-fn test_command_state_cas() {
-    test_command_round_trip(Command::StateCas {
-        branch: Some(BranchId::from("default")),
-        space: None,
-        cell: "counter".to_string(),
-        expected_counter: Some(5),
-        value: Value::Int(6),
-    });
-}
-
-// =============================================================================
 // Vector Command Tests
 // =============================================================================
 
@@ -409,10 +384,6 @@ fn test_output_described() {
             kv: CountSummary { count: 10 },
             json: CountSummary { count: 5 },
             events: CountSummary { count: 100 },
-            state: StateSummary {
-                count: 2,
-                cells: vec!["status".to_string(), "counter".to_string()],
-            },
             vector: VectorSummary {
                 collections: vec![VectorCollectionSummary {
                     name: "embeddings".to_string(),
@@ -1229,71 +1200,6 @@ fn test_output_vector_delete_result() {
     });
 }
 
-#[test]
-fn test_output_state_cas_result_success() {
-    test_output_round_trip(Output::StateCasResult {
-        cell: "counter".to_string(),
-        success: true,
-        version: Some(6),
-        current_value: None,
-        current_version: None,
-    });
-}
-
-#[test]
-fn test_output_state_cas_result_conflict() {
-    test_output_round_trip(Output::StateCasResult {
-        cell: "counter".to_string(),
-        success: false,
-        version: None,
-        current_value: Some(Value::Int(5)),
-        current_version: Some(3),
-    });
-}
-
-#[test]
-fn test_output_state_cas_result_skip_none_fields() {
-    // On success, current_value and current_version should be absent from JSON
-    let output = Output::StateCasResult {
-        cell: "c".to_string(),
-        success: true,
-        version: Some(1),
-        current_value: None,
-        current_version: None,
-    };
-    let json = serde_json::to_string(&output).unwrap();
-    assert!(
-        !json.contains("current_value"),
-        "None fields should be skipped: {}",
-        json
-    );
-    assert!(
-        !json.contains("current_version"),
-        "None fields should be skipped: {}",
-        json
-    );
-
-    // On conflict, version should be absent
-    let output = Output::StateCasResult {
-        cell: "c".to_string(),
-        success: false,
-        version: None,
-        current_value: Some(Value::Int(10)),
-        current_version: Some(2),
-    };
-    let json = serde_json::to_string(&output).unwrap();
-    assert!(
-        json.contains("current_value"),
-        "Conflict fields should be present: {}",
-        json
-    );
-    assert!(
-        json.contains("current_version"),
-        "Conflict fields should be present: {}",
-        json
-    );
-}
-
 // =============================================================================
 // Pagination Output Tests (#1444)
 // =============================================================================
@@ -1433,15 +1339,6 @@ fn test_command_db_export() {
         format: ExportFormat::Jsonl,
         prefix: None,
         limit: Some(50),
-        path: None,
-    });
-    test_command_round_trip(Command::DbExport {
-        branch: None,
-        space: None,
-        primitive: ExportPrimitive::State,
-        format: ExportFormat::Json,
-        prefix: None,
-        limit: None,
         path: None,
     });
 }

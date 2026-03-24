@@ -3,29 +3,28 @@
 //! This type supports Invariant 6: Everything is Introspectable.
 //! Every entity can report what kind of primitive it is.
 //!
-//! ## The Six Primitives
+//! ## The Five Primitives
 //!
-//! The database has exactly six primitives:
+//! The database has exactly five primitives:
 //!
 //! | Primitive | Purpose | Versioning |
 //! |-----------|---------|------------|
 //! | Kv | Key-value store | TxnId |
 //! | Event | Append-only event log | Sequence |
-//! | State | Named state cells with CAS | Counter |
 //! | Branch | Branch lifecycle management | TxnId |
 //! | Json | JSON document store | TxnId |
 //! | Vector | Vector similarity search | TxnId |
 
 use serde::{Deserialize, Serialize};
 
-/// The six primitive types in the database
+/// The five primitive types in the database
 ///
 /// This enum identifies which primitive a value or operation belongs to.
 /// Used for type discrimination, routing, and introspection.
 ///
 /// ## Invariant
 ///
-/// This enum MUST have exactly 6 variants - one for each primitive.
+/// This enum MUST have exactly 5 variants - one for each primitive.
 /// Adding a new primitive requires adding a variant here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PrimitiveType {
@@ -40,12 +39,6 @@ pub enum PrimitiveType {
     /// Append-only event stream with sequence numbers.
     /// Versioning: Sequence
     Event,
-
-    /// State cell
-    ///
-    /// Named state cells with compare-and-swap.
-    /// Versioning: Counter
-    State,
 
     /// Branch index
     ///
@@ -68,10 +61,9 @@ pub enum PrimitiveType {
 
 impl PrimitiveType {
     /// All primitive types (for iteration)
-    pub const ALL: [PrimitiveType; 6] = [
+    pub const ALL: [PrimitiveType; 5] = [
         PrimitiveType::Kv,
         PrimitiveType::Event,
-        PrimitiveType::State,
         PrimitiveType::Branch,
         PrimitiveType::Json,
         PrimitiveType::Vector,
@@ -87,7 +79,6 @@ impl PrimitiveType {
         match self {
             PrimitiveType::Kv => "KVStore",
             PrimitiveType::Event => "EventLog",
-            PrimitiveType::State => "StateCell",
             PrimitiveType::Branch => "BranchIndex",
             PrimitiveType::Json => "JsonStore",
             PrimitiveType::Vector => "VectorStore",
@@ -99,7 +90,6 @@ impl PrimitiveType {
         match self {
             PrimitiveType::Kv => "kv",
             PrimitiveType::Event => "event",
-            PrimitiveType::State => "state",
             PrimitiveType::Branch => "branch",
             PrimitiveType::Json => "json",
             PrimitiveType::Vector => "vector",
@@ -111,7 +101,6 @@ impl PrimitiveType {
         match id {
             "kv" => Some(PrimitiveType::Kv),
             "event" => Some(PrimitiveType::Event),
-            "state" => Some(PrimitiveType::State),
             "branch" => Some(PrimitiveType::Branch),
             "json" => Some(PrimitiveType::Json),
             "vector" => Some(PrimitiveType::Vector),
@@ -121,13 +110,12 @@ impl PrimitiveType {
 
     /// Check if this primitive supports CRUD lifecycle
     ///
-    /// Kv, State, Branch, Json, Vector support full CRUD.
+    /// Kv, Branch, Json, Vector support full CRUD.
     /// Event is append-only (CR only).
     pub const fn supports_crud(&self) -> bool {
         match self {
             PrimitiveType::Kv => true,
             PrimitiveType::Event => false, // Append-only
-            PrimitiveType::State => true,
             PrimitiveType::Branch => true,
             PrimitiveType::Json => true,
             PrimitiveType::Vector => true,
@@ -145,7 +133,6 @@ impl PrimitiveType {
     /// - KV: 0x10-0x1F
     /// - JSON: 0x20-0x2F
     /// - Event: 0x30-0x3F
-    /// - State: 0x40-0x4F
     /// - Branch: 0x60-0x6F
     /// - Vector: 0x70-0x7F
     pub const fn entry_type_range(&self) -> (u8, u8) {
@@ -153,7 +140,6 @@ impl PrimitiveType {
             PrimitiveType::Kv => (0x10, 0x1F),
             PrimitiveType::Json => (0x20, 0x2F),
             PrimitiveType::Event => (0x30, 0x3F),
-            PrimitiveType::State => (0x40, 0x4F),
             PrimitiveType::Branch => (0x60, 0x6F),
             PrimitiveType::Vector => (0x70, 0x7F),
         }
@@ -167,7 +153,6 @@ impl PrimitiveType {
             PrimitiveType::Kv => 1,
             PrimitiveType::Json => 2,
             PrimitiveType::Event => 3,
-            PrimitiveType::State => 4,
             PrimitiveType::Branch => 6,
             PrimitiveType::Vector => 7,
         }
@@ -191,12 +176,11 @@ mod tests {
     #[test]
     fn test_primitive_type_all() {
         let all = PrimitiveType::all();
-        assert_eq!(all.len(), 6);
+        assert_eq!(all.len(), 5);
 
         // Verify all variants are present
         assert!(all.contains(&PrimitiveType::Kv));
         assert!(all.contains(&PrimitiveType::Event));
-        assert!(all.contains(&PrimitiveType::State));
         assert!(all.contains(&PrimitiveType::Branch));
         assert!(all.contains(&PrimitiveType::Json));
         assert!(all.contains(&PrimitiveType::Vector));
@@ -204,14 +188,13 @@ mod tests {
 
     #[test]
     fn test_primitive_type_const_all() {
-        assert_eq!(PrimitiveType::ALL.len(), 6);
+        assert_eq!(PrimitiveType::ALL.len(), 5);
     }
 
     #[test]
     fn test_primitive_type_names() {
         assert_eq!(PrimitiveType::Kv.name(), "KVStore");
         assert_eq!(PrimitiveType::Event.name(), "EventLog");
-        assert_eq!(PrimitiveType::State.name(), "StateCell");
         assert_eq!(PrimitiveType::Branch.name(), "BranchIndex");
         assert_eq!(PrimitiveType::Json.name(), "JsonStore");
         assert_eq!(PrimitiveType::Vector.name(), "VectorStore");
@@ -221,7 +204,6 @@ mod tests {
     fn test_primitive_type_ids() {
         assert_eq!(PrimitiveType::Kv.id(), "kv");
         assert_eq!(PrimitiveType::Event.id(), "event");
-        assert_eq!(PrimitiveType::State.id(), "state");
         assert_eq!(PrimitiveType::Branch.id(), "branch");
         assert_eq!(PrimitiveType::Json.id(), "json");
         assert_eq!(PrimitiveType::Vector.id(), "vector");
@@ -231,7 +213,6 @@ mod tests {
     fn test_primitive_type_from_id() {
         assert_eq!(PrimitiveType::from_id("kv"), Some(PrimitiveType::Kv));
         assert_eq!(PrimitiveType::from_id("event"), Some(PrimitiveType::Event));
-        assert_eq!(PrimitiveType::from_id("state"), Some(PrimitiveType::State));
         assert_eq!(
             PrimitiveType::from_id("branch"),
             Some(PrimitiveType::Branch)
@@ -241,6 +222,7 @@ mod tests {
             PrimitiveType::from_id("vector"),
             Some(PrimitiveType::Vector)
         );
+        assert_eq!(PrimitiveType::from_id("state"), None);
         assert_eq!(PrimitiveType::from_id("invalid"), None);
     }
 
@@ -264,7 +246,6 @@ mod tests {
     fn test_primitive_type_supports_crud() {
         // Full CRUD
         assert!(PrimitiveType::Kv.supports_crud());
-        assert!(PrimitiveType::State.supports_crud());
         assert!(PrimitiveType::Branch.supports_crud());
         assert!(PrimitiveType::Json.supports_crud());
         assert!(PrimitiveType::Vector.supports_crud());
@@ -278,7 +259,6 @@ mod tests {
         assert!(PrimitiveType::Event.is_append_only());
 
         assert!(!PrimitiveType::Kv.is_append_only());
-        assert!(!PrimitiveType::State.is_append_only());
         assert!(!PrimitiveType::Branch.is_append_only());
         assert!(!PrimitiveType::Json.is_append_only());
         assert!(!PrimitiveType::Vector.is_append_only());
@@ -299,7 +279,7 @@ mod tests {
         for pt in PrimitiveType::all() {
             set.insert(*pt);
         }
-        assert_eq!(set.len(), 6, "All PrimitiveTypes should be unique");
+        assert_eq!(set.len(), 5, "All PrimitiveTypes should be unique");
     }
 
     #[test]
@@ -315,7 +295,7 @@ mod tests {
     fn test_primitive_type_equality() {
         assert_eq!(PrimitiveType::Kv, PrimitiveType::Kv);
         assert_ne!(PrimitiveType::Kv, PrimitiveType::Event);
-        assert_ne!(PrimitiveType::Event, PrimitiveType::State);
+        assert_ne!(PrimitiveType::Event, PrimitiveType::Branch);
     }
 
     #[test]
@@ -323,7 +303,6 @@ mod tests {
         assert_eq!(PrimitiveType::Kv.entry_type_range(), (0x10, 0x1F));
         assert_eq!(PrimitiveType::Json.entry_type_range(), (0x20, 0x2F));
         assert_eq!(PrimitiveType::Event.entry_type_range(), (0x30, 0x3F));
-        assert_eq!(PrimitiveType::State.entry_type_range(), (0x40, 0x4F));
         assert_eq!(PrimitiveType::Branch.entry_type_range(), (0x60, 0x6F));
         assert_eq!(PrimitiveType::Vector.entry_type_range(), (0x70, 0x7F));
     }
@@ -333,7 +312,6 @@ mod tests {
         assert_eq!(PrimitiveType::Kv.primitive_id(), 1);
         assert_eq!(PrimitiveType::Json.primitive_id(), 2);
         assert_eq!(PrimitiveType::Event.primitive_id(), 3);
-        assert_eq!(PrimitiveType::State.primitive_id(), 4);
         assert_eq!(PrimitiveType::Branch.primitive_id(), 6);
         assert_eq!(PrimitiveType::Vector.primitive_id(), 7);
     }
@@ -368,7 +346,7 @@ mod tests {
             .iter()
             .map(|pt| pt.primitive_id())
             .collect();
-        assert_eq!(ids.len(), 6, "All primitive IDs must be unique");
+        assert_eq!(ids.len(), 5, "All primitive IDs must be unique");
     }
 
     #[test]

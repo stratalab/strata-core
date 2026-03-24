@@ -97,30 +97,6 @@ fn test_read_only_blocks_all_writes() {
             event_type: "t".into(),
             payload: Value::object(Default::default()),
         },
-        Command::StateSet {
-            branch: None,
-            space: None,
-            cell: "c".into(),
-            value: Value::Int(1),
-        },
-        Command::StateCas {
-            branch: None,
-            space: None,
-            cell: "c".into(),
-            expected_counter: None,
-            value: Value::Int(1),
-        },
-        Command::StateInit {
-            branch: None,
-            space: None,
-            cell: "c".into(),
-            value: Value::Int(1),
-        },
-        Command::StateDelete {
-            branch: None,
-            space: None,
-            cell: "c".into(),
-        },
         Command::VectorUpsert {
             branch: None,
             space: None,
@@ -253,24 +229,6 @@ fn test_read_only_allows_all_reads() {
         Command::EventLen {
             branch: None,
             space: None,
-        },
-        Command::StateGet {
-            branch: None,
-            space: None,
-            cell: "c".into(),
-            as_of: None,
-        },
-        Command::StateGetv {
-            branch: None,
-            space: None,
-            cell: "c".into(),
-            as_of: None,
-        },
-        Command::StateList {
-            branch: None,
-            space: None,
-            prefix: None,
-            as_of: None,
         },
         Command::VectorListCollections {
             branch: None,
@@ -432,30 +390,6 @@ fn test_is_write_classification() {
             event_type: "".into(),
             payload: Value::Null,
         },
-        Command::StateSet {
-            branch: None,
-            space: None,
-            cell: "".into(),
-            value: Value::Null,
-        },
-        Command::StateCas {
-            branch: None,
-            space: None,
-            cell: "".into(),
-            expected_counter: None,
-            value: Value::Null,
-        },
-        Command::StateInit {
-            branch: None,
-            space: None,
-            cell: "".into(),
-            value: Value::Null,
-        },
-        Command::StateDelete {
-            branch: None,
-            space: None,
-            cell: "".into(),
-        },
         Command::VectorUpsert {
             branch: None,
             space: None,
@@ -591,24 +525,6 @@ fn test_is_write_classification() {
         Command::EventLen {
             branch: None,
             space: None,
-        },
-        Command::StateGet {
-            branch: None,
-            space: None,
-            cell: "".into(),
-            as_of: None,
-        },
-        Command::StateGetv {
-            branch: None,
-            space: None,
-            cell: "".into(),
-            as_of: None,
-        },
-        Command::StateList {
-            branch: None,
-            space: None,
-            prefix: None,
-            as_of: None,
         },
         Command::VectorGet {
             branch: None,

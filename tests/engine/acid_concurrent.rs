@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
-use strata_engine::{EventLogExt, KVStoreExt, StateCellExt};
+use strata_engine::{EventLogExt, KVStoreExt};
 
 fn event_payload(data: Value) -> Value {
     Value::object(HashMap::from([("data".to_string(), data)]))
@@ -181,7 +181,6 @@ fn concurrent_cross_primitive_transactions() {
 
                             txn.kv_put("counter", Value::Int(n + 1))?;
                             txn.event_append("increment", event_payload(Value::Int(n + 1)))?;
-                            txn.state_set("last_value", Value::Int(n + 1))?;
                             Ok(())
                         });
 
@@ -266,7 +265,6 @@ fn concurrent_cross_primitive_conflict_atomicity() {
                     let _current = txn.kv_get("shared")?;
                     txn.kv_put("shared", Value::Int(1))?;
                     txn.event_append("conflict_test", event_payload(Value::Int(i)))?;
-                    txn.state_set("conflict_state", Value::Int(i))?;
                     Ok(())
                 });
 

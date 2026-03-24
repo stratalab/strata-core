@@ -7,5 +7,5 @@
 mod handle;
 mod index;
 
-pub use handle::{BranchHandle, EventHandle, JsonHandle, KvHandle, StateHandle};
+pub use handle::{BranchHandle, EventHandle, JsonHandle, KvHandle};
 pub use index::{resolve_branch_name, BranchIndex, BranchMetadata, BranchStatus};

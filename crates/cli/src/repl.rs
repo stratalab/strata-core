@@ -333,27 +333,6 @@ fn execute_action(matches: &clap::ArgMatches, state: &mut SessionState, mode: Ou
                         limit: 1000,
                         as_of: None,
                     }),
-                    Primitive::State => {
-                        // State list doesn't have pagination, just execute once
-                        match state.execute(Command::StateList {
-                            branch: branch.clone(),
-                            space: space.clone(),
-                            prefix: prefix.clone(),
-                            as_of: None,
-                        }) {
-                            Ok(output) => {
-                                let formatted = format_output(&output, mode);
-                                if !formatted.is_empty() {
-                                    println!("{}", formatted);
-                                }
-                                return true;
-                            }
-                            Err(e) => {
-                                eprintln!("{}", format_error(&e, mode));
-                                return false;
-                            }
-                        }
-                    }
                 };
 
                 match output {
@@ -470,8 +449,8 @@ fn print_help(command: Option<&str>) {
 
 /// Known top-level commands for TAB completion.
 const TOP_LEVEL_COMMANDS: &[&str] = &[
-    "kv", "json", "event", "state", "vector", "graph", "branch", "space", "begin", "commit",
-    "rollback", "txn", "ping", "info", "health", "init", "flush", "compact", "search", "config", "use", "help",
+    "kv", "json", "event", "vector", "graph", "branch", "space", "begin", "commit", "rollback",
+    "txn", "ping", "info", "health", "init", "flush", "compact", "search", "config", "use", "help",
     "quit", "exit", "clear",
 ];
 
@@ -481,7 +460,6 @@ fn subcommands_for(cmd: &str) -> &'static [&'static str] {
         "kv" => &["put", "get", "del", "list", "history"],
         "json" => &["set", "get", "del", "list", "history"],
         "event" => &["append", "get", "list", "len"],
-        "state" => &["set", "get", "del", "init", "cas", "list", "history"],
         "vector" => &[
             "upsert",
             "get",

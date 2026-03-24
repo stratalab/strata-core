@@ -1763,9 +1763,7 @@ fn configure_set_storage_params_round_trip() {
         }
 
         let get_result = executor
-            .execute(Command::ConfigureGetKey {
-                key: (*key).into(),
-            })
+            .execute(Command::ConfigureGetKey { key: (*key).into() })
             .unwrap();
         assert_eq!(
             get_result,
@@ -1798,11 +1796,7 @@ fn configure_set_open_time_only_keys_rejected() {
             key: key.into(),
             value: "4".into(),
         });
-        assert!(
-            result.is_err(),
-            "{} should be rejected at runtime",
-            key
-        );
+        assert!(result.is_err(), "{} should be rejected at runtime", key);
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("open time"),

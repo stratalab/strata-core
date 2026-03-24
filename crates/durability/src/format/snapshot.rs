@@ -314,7 +314,6 @@ mod tests {
     fn test_primitive_tags() {
         assert_eq!(primitive_tags::tag_name(primitive_tags::KV), "KV");
         assert_eq!(primitive_tags::tag_name(primitive_tags::EVENT), "Event");
-        assert_eq!(primitive_tags::tag_name(primitive_tags::STATE), "State");
         assert_eq!(primitive_tags::tag_name(primitive_tags::BRANCH), "Branch");
         assert_eq!(primitive_tags::tag_name(primitive_tags::JSON), "Json");
         assert_eq!(primitive_tags::tag_name(primitive_tags::VECTOR), "Vector");
@@ -323,13 +322,12 @@ mod tests {
 
     #[test]
     fn test_all_tags() {
-        assert_eq!(primitive_tags::ALL_TAGS.len(), 6);
+        assert_eq!(primitive_tags::ALL_TAGS.len(), 5);
         assert_eq!(
             primitive_tags::ALL_TAGS,
             [
                 primitive_tags::KV,
                 primitive_tags::EVENT,
-                primitive_tags::STATE,
                 primitive_tags::BRANCH,
                 primitive_tags::JSON,
                 primitive_tags::VECTOR,

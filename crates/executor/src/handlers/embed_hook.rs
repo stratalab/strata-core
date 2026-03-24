@@ -14,7 +14,7 @@ use crate::bridge::Primitives;
 use crate::output::EmbedStatusInfo;
 
 // Re-export shadow collection names from engine (single source of truth).
-pub use strata_engine::database::{SHADOW_EVENT, SHADOW_JSON, SHADOW_KV, SHADOW_STATE};
+pub use strata_engine::database::{SHADOW_EVENT, SHADOW_JSON, SHADOW_KV};
 
 /// Separator for composite shadow keys (ASCII Unit Separator).
 /// Avoids ambiguity since "/" is allowed in both space and key names.
@@ -473,7 +473,7 @@ pub fn reindex_embeddings(
     flush_embed_buffer(p);
 
     // 3. Delete all shadow collections for this branch
-    let shadow_names: &[&str] = &[SHADOW_KV, SHADOW_JSON, SHADOW_EVENT, SHADOW_STATE];
+    let shadow_names: &[&str] = &[SHADOW_KV, SHADOW_JSON, SHADOW_EVENT];
     for name in shadow_names {
         if let Err(e) = p.vector.delete_system_collection(branch_id, name) {
             tracing::warn!(
@@ -500,7 +500,6 @@ pub fn reindex_embeddings(
     let mut kv_queued: u64 = 0;
     let mut json_queued: u64 = 0;
     let mut event_queued: u64 = 0;
-    let mut state_queued: u64 = 0;
 
     for space in &spaces {
         // KV
@@ -558,26 +557,6 @@ pub fn reindex_embeddings(
             }
         }
 
-        // State
-        if let Ok(names) = p.state.list(&branch_id, space, None) {
-            for name in &names {
-                if let Ok(Some(value)) = p.state.get(&branch_id, space, name) {
-                    if let Some(text) = extract_text(&value) {
-                        queue_embed_text(
-                            p,
-                            branch_id,
-                            space,
-                            SHADOW_STATE,
-                            name,
-                            &text,
-                            strata_core::EntityRef::state(branch_id, name),
-                        );
-                        state_queued += 1;
-                    }
-                }
-            }
-        }
-
         // Events (sequences are 0-based)
         if let Ok(len) = p.event.len(&branch_id, space) {
             for seq in 0..len {
@@ -616,7 +595,6 @@ pub fn reindex_embeddings(
         kv_queued,
         json_queued,
         event_queued,
-        state_queued,
         new_dimension = dim,
         "Reindex embeddings started"
     );
@@ -625,7 +603,6 @@ pub fn reindex_embeddings(
         kv_queued,
         json_queued,
         event_queued,
-        state_queued,
         new_dimension: dim,
     })
 }

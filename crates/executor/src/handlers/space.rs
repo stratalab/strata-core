@@ -61,7 +61,6 @@ pub fn space_delete(
         for type_tag in [
             TypeTag::KV,
             TypeTag::Event,
-            TypeTag::State,
             TypeTag::Trace,
             TypeTag::Json,
             TypeTag::Vector,

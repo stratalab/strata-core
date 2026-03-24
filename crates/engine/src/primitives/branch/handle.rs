@@ -5,7 +5,7 @@
 //! `BranchHandle` binds a `BranchId` to a `Database`, eliminating the need to
 //! pass `branch_id` to every operation. It provides:
 //!
-//! - `kv()`, `events()`, `state()`, `json()`, `vectors()` - primitive handles
+//! - `kv()`, `events()`, `json()`, `vectors()` - primitive handles
 //! - `transaction()` - execute atomic cross-primitive transactions
 //!
 //! ## Usage
@@ -28,7 +28,7 @@
 //! ## BranchHandle Pattern Implementation
 
 use crate::database::Database;
-use crate::primitives::extensions::{EventLogExt, JsonStoreExt, KVStoreExt, StateCellExt};
+use crate::primitives::extensions::{EventLogExt, JsonStoreExt, KVStoreExt};
 use std::sync::Arc;
 use strata_concurrency::TransactionContext;
 use strata_core::contract::{Timestamp, Version, Versioned};
@@ -101,11 +101,6 @@ impl BranchHandle {
     /// Access the Event primitive for this branch
     pub fn events(&self) -> EventHandle {
         EventHandle::new(self.db.clone(), self.branch_id)
-    }
-
-    /// Access the State primitive for this branch
-    pub fn state(&self) -> StateHandle {
-        StateHandle::new(self.db.clone(), self.branch_id)
     }
 
     /// Access the Json primitive for this branch
@@ -219,48 +214,6 @@ impl EventHandle {
 }
 
 // ============================================================================
-// StateHandle
-// ============================================================================
-
-/// Handle for State operations scoped to a branch
-#[derive(Clone)]
-pub struct StateHandle {
-    db: Arc<Database>,
-    branch_id: BranchId,
-}
-
-impl StateHandle {
-    /// Create a new StateHandle
-    pub(crate) fn new(db: Arc<Database>, branch_id: BranchId) -> Self {
-        Self { db, branch_id }
-    }
-
-    /// Get current state
-    pub fn get(&self, name: &str) -> StrataResult<Option<Value>> {
-        self.db
-            .transaction(self.branch_id, |txn| txn.state_get(name))
-    }
-
-    /// Compare-and-swap update
-    pub fn cas(
-        &self,
-        name: &str,
-        expected_version: Version,
-        new_value: Value,
-    ) -> StrataResult<Version> {
-        self.db.transaction(self.branch_id, |txn| {
-            txn.state_cas(name, expected_version, new_value)
-        })
-    }
-
-    /// Unconditional set
-    pub fn set(&self, name: &str, value: Value) -> StrataResult<Version> {
-        self.db
-            .transaction(self.branch_id, |txn| txn.state_set(name, value))
-    }
-}
-
-// ============================================================================
 // JsonHandle
 // ============================================================================
 
@@ -306,7 +259,6 @@ mod tests {
         assert_clone_send_sync::<BranchHandle>();
         assert_clone_send_sync::<KvHandle>();
         assert_clone_send_sync::<EventHandle>();
-        assert_clone_send_sync::<StateHandle>();
         assert_clone_send_sync::<JsonHandle>();
     }
 }

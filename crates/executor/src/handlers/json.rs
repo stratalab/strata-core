@@ -25,9 +25,8 @@ pub fn json_getv(
 ) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;
     convert_result(validate_key(&key))?;
-    let result = convert_result(p.json.getv(&branch_id, &space, &key)).map_err(|e| {
-        enrich_json_error(p, &branch_id, &space, e)
-    })?;
+    let result = convert_result(p.json.getv(&branch_id, &space, &key))
+        .map_err(|e| enrich_json_error(p, &branch_id, &space, e))?;
     let mapped = result
         .map(|history| {
             history

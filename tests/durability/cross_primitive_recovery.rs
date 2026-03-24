@@ -1,18 +1,18 @@
 //! Cross-Primitive Recovery Tests
 //!
-//! Verify that all 6 primitives recover atomically — if one recovers,
+//! Verify that all 5 primitives recover atomically — if one recovers,
 //! they all recover. No primitive is left behind.
 
 use crate::common::*;
 
 #[test]
-fn all_six_primitives_recover_together() {
+fn all_five_primitives_recover_together() {
     let mut test_db = TestDb::new_strict();
     let branch_id = test_db.branch_id;
 
     let p = test_db.all_primitives();
 
-    // Write to all 6 primitives
+    // Write to all 5 primitives
     p.kv.put(&branch_id, "default", "k1", Value::Int(1))
         .unwrap();
 
@@ -25,15 +25,6 @@ fn all_six_primitives_recover_together() {
         .append(&branch_id, "default", "stream", int_payload(42))
         .unwrap();
 
-    p.state
-        .init(
-            &branch_id,
-            "default",
-            "cell",
-            Value::String("initial".into()),
-        )
-        .unwrap();
-
     p.vector
         .create_collection(branch_id, "default", "col", config_small())
         .unwrap();
@@ -44,7 +35,7 @@ fn all_six_primitives_recover_together() {
     drop(p);
     test_db.reopen();
 
-    // Verify all 6 primitives recovered
+    // Verify all 5 primitives recovered
     let p = test_db.all_primitives();
 
     let kv_val = p.kv.get(&branch_id, "default", "k1").unwrap();
@@ -59,10 +50,6 @@ fn all_six_primitives_recover_together() {
         .get_by_type(&branch_id, "default", "stream", None, None)
         .unwrap();
     assert_eq!(events.len(), 1, "EventLog should recover");
-
-    let state_val = p.state.get(&branch_id, "default", "cell").unwrap();
-    let state_val = state_val.expect("StateCell should recover");
-    assert_eq!(state_val, Value::String("initial".into()));
 
     let vec_val = p.vector.get(branch_id, "default", "col", "v1").unwrap();
     let vec_val = vec_val.expect("VectorStore should recover");

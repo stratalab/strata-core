@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 pub use strata_core::{BranchId, JsonPath, JsonValue, Value, Version};
 pub use strata_engine::{
     register_search_recovery, register_vector_recovery, BranchIndex, Database, DistanceMetric,
-    EventLog, JsonStore, KVStore, StateCell, StorageDtype, StrataConfig, VectorConfig, VectorStore,
+    EventLog, JsonStore, KVStore, StorageDtype, StrataConfig, VectorConfig, VectorStore,
 };
 use tempfile::TempDir;
 
@@ -86,13 +86,12 @@ impl TestDb {
         TestDb { db, dir, branch_id }
     }
 
-    /// Get all 6 primitives.
+    /// Get all 5 primitives.
     pub fn all_primitives(&self) -> AllPrimitives {
         AllPrimitives {
             kv: KVStore::new(self.db.clone()),
             json: JsonStore::new(self.db.clone()),
             event: EventLog::new(self.db.clone()),
-            state: StateCell::new(self.db.clone()),
             branch: BranchIndex::new(self.db.clone()),
             vector: VectorStore::new(self.db.clone()),
         }
@@ -108,10 +107,6 @@ impl TestDb {
 
     pub fn event(&self) -> EventLog {
         EventLog::new(self.db.clone())
-    }
-
-    pub fn state(&self) -> StateCell {
-        StateCell::new(self.db.clone())
     }
 
     pub fn branch_index(&self) -> BranchIndex {
@@ -166,12 +161,11 @@ impl Default for TestDb {
     }
 }
 
-/// Container for all 6 primitives.
+/// Container for all 5 primitives.
 pub struct AllPrimitives {
     pub kv: KVStore,
     pub json: JsonStore,
     pub event: EventLog,
-    pub state: StateCell,
     pub branch: BranchIndex,
     pub vector: VectorStore,
 }
@@ -867,17 +861,6 @@ pub fn assert_all_primitives_healthy(test_db: &TestDb) {
         .append(&branch_id, "default", "test_event", empty_payload())
         .expect("Event should append");
 
-    // State
-    let state_key = unique_key();
-    p.state
-        .init(
-            &branch_id,
-            "default",
-            &state_key,
-            Value::String("initial".into()),
-        )
-        .expect("State should init");
-
     // Vector
     let collection = unique_key();
     p.vector
@@ -1222,7 +1205,6 @@ pub mod core_types {
         vec![
             EntityRef::kv(branch_id, "test_key"),
             EntityRef::event(branch_id, 1),
-            EntityRef::state(branch_id, "test_state"),
             EntityRef::branch(branch_id),
             EntityRef::json(branch_id, "test_doc"),
             EntityRef::vector(branch_id, "test_collection", "test_vector"),
@@ -1233,7 +1215,6 @@ pub mod core_types {
         vec![
             PrimitiveType::Kv,
             PrimitiveType::Event,
-            PrimitiveType::State,
             PrimitiveType::Branch,
             PrimitiveType::Json,
             PrimitiveType::Vector,

@@ -80,24 +80,6 @@ fn collect_json(
     Ok(rows)
 }
 
-fn collect_state(
-    p: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
-    space: &str,
-    prefix: Option<&str>,
-    limit: Option<u64>,
-) -> Result<Vec<ExportRow>> {
-    let cells = convert_result(p.state.list(&branch_id, space, prefix))?;
-    let max = limit.map(|l| l as usize).unwrap_or(usize::MAX);
-    let mut rows = Vec::new();
-    for cell in cells.into_iter().take(max) {
-        if let Some(value) = convert_result(p.state.get(&branch_id, space, &cell))? {
-            rows.push(ExportRow { key: cell, value });
-        }
-    }
-    Ok(rows)
-}
-
 fn collect_events(
     p: &Arc<Primitives>,
     branch_id: strata_core::types::BranchId,
@@ -363,7 +345,6 @@ pub fn db_export(
     let rows = match primitive {
         ExportPrimitive::Kv => collect_kv(p, branch_id, &space, prefix.as_deref(), limit)?,
         ExportPrimitive::Json => collect_json(p, branch_id, &space, prefix.as_deref(), limit)?,
-        ExportPrimitive::State => collect_state(p, branch_id, &space, prefix.as_deref(), limit)?,
         ExportPrimitive::Events => collect_events(p, branch_id, &space, limit)?,
     };
 

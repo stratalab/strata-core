@@ -138,7 +138,7 @@ impl PartialOrd for Namespace {
 /// These values are part of the on-disk format and MUST NOT change:
 /// - KV = 0x01
 /// - Event = 0x02
-/// - State = 0x03
+/// - 0x03 was formerly State (StateCell was removed)
 /// - Branch = 0x05
 /// - Space = 0x06
 /// - Vector = 0x10 (vector metadata)
@@ -147,7 +147,7 @@ impl PartialOrd for Namespace {
 ///
 /// Note: 0x04 was formerly Trace (TraceStore was removed in 0.12.0)
 ///
-/// Ordering: KV < Event < State < Trace < Branch < Space < Vector < Json < VectorConfig
+/// Ordering: KV < Event < (Trace) < Branch < Space < Vector < Json < VectorConfig
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum TypeTag {
@@ -155,8 +155,6 @@ pub enum TypeTag {
     KV = 0x01,
     /// Event log entries
     Event = 0x02,
-    /// State cell records (renamed from StateMachine )
-    State = 0x03,
     /// Reserved for backwards compatibility (TraceStore was removed in 0.12.0).
     ///
     /// This variant is preserved **only** for legacy deserialization of on-disk data
@@ -189,7 +187,7 @@ impl TypeTag {
         match byte {
             0x01 => Some(TypeTag::KV),
             0x02 => Some(TypeTag::Event),
-            0x03 => Some(TypeTag::State),
+            // 0x03 was formerly State (StateCell removed, never shipped)
             0x04 => Some(TypeTag::Trace), // Legacy only: preserved for deserialization, never for new writes
             0x05 => Some(TypeTag::Branch),
             0x06 => Some(TypeTag::Space),
@@ -242,7 +240,7 @@ pub struct Key {
     /// Wrapped in Arc for memory-efficient sharing — all keys in the same
     /// namespace (e.g., all graph edges on a branch) share a single allocation.
     pub namespace: Arc<Namespace>,
-    /// Type discriminator (KV, Event, State, Trace, Branch, etc.)
+    /// Type discriminator (KV, Event, Trace, Branch, etc.)
     pub type_tag: TypeTag,
     /// User-defined key bytes (supports arbitrary binary keys)
     ///
@@ -314,13 +312,6 @@ impl Key {
         Self::new(namespace, TypeTag::Event, user_key)
     }
 
-    /// Create a state cell key
-    ///
-    /// Helper that automatically sets type_tag to TypeTag::State
-    pub fn new_state(namespace: Arc<Namespace>, key: impl AsRef<[u8]>) -> Self {
-        Self::new(namespace, TypeTag::State, key.as_ref().to_vec())
-    }
-
     /// Create a branch index key
     ///
     /// Helper that automatically sets type_tag to TypeTag::Branch and
@@ -358,7 +349,7 @@ impl Key {
     /// Create key for JSON document storage
     ///
     /// Helper that automatically sets type_tag to TypeTag::Json and
-    /// uses the document ID string as the key (consistent with KV, State).
+    /// uses the document ID string as the key (consistent with KV).
     ///
     /// # Example
     ///
@@ -846,8 +837,8 @@ mod tests {
     fn test_typetag_ordering() {
         // TypeTag ordering must be stable for BTreeMap
         assert!(TypeTag::KV < TypeTag::Event);
-        assert!(TypeTag::Event < TypeTag::State);
-        assert!(TypeTag::State < TypeTag::Branch);
+        assert!(TypeTag::Event < TypeTag::Trace);
+        assert!(TypeTag::Trace < TypeTag::Branch);
         assert!(TypeTag::Branch < TypeTag::Space);
         assert!(TypeTag::Space < TypeTag::Vector);
         assert!(TypeTag::Vector < TypeTag::Json);
@@ -855,7 +846,7 @@ mod tests {
         // Verify numeric values match spec
         assert_eq!(TypeTag::KV as u8, 0x01);
         assert_eq!(TypeTag::Event as u8, 0x02);
-        assert_eq!(TypeTag::State as u8, 0x03);
+        // 0x03 was formerly State (StateCell was removed)
         // TypeTag::Trace (0x04) is deprecated but still exists for backwards compatibility
         assert_eq!(TypeTag::Trace as u8, 0x04);
         assert_eq!(TypeTag::Branch as u8, 0x05);
@@ -869,7 +860,7 @@ mod tests {
     fn test_typetag_as_byte() {
         assert_eq!(TypeTag::KV.as_byte(), 0x01);
         assert_eq!(TypeTag::Event.as_byte(), 0x02);
-        assert_eq!(TypeTag::State.as_byte(), 0x03);
+        // 0x03 was formerly State (StateCell was removed)
         // TypeTag::Trace (0x04) is deprecated but still exists for backwards compatibility
         assert_eq!(TypeTag::Trace.as_byte(), 0x04);
         assert_eq!(TypeTag::Branch.as_byte(), 0x05);
@@ -883,7 +874,8 @@ mod tests {
     fn test_typetag_from_byte() {
         assert_eq!(TypeTag::from_byte(0x01), Some(TypeTag::KV));
         assert_eq!(TypeTag::from_byte(0x02), Some(TypeTag::Event));
-        assert_eq!(TypeTag::from_byte(0x03), Some(TypeTag::State));
+        // 0x03 was formerly State (StateCell was removed)
+        assert_eq!(TypeTag::from_byte(0x03), None);
         // 0x04 still parses to Trace for backwards compatibility
         assert_eq!(TypeTag::from_byte(0x04), Some(TypeTag::Trace));
         assert_eq!(TypeTag::from_byte(0x05), Some(TypeTag::Branch));
@@ -895,16 +887,18 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_typetag_no_collisions() {
         // Ensure all TypeTag values are unique
         let tags = [
             TypeTag::KV,
             TypeTag::Event,
-            TypeTag::State,
+            TypeTag::Trace,
             TypeTag::Branch,
             TypeTag::Space,
             TypeTag::Vector,
             TypeTag::Json,
+            TypeTag::VectorConfig,
         ];
         let bytes: Vec<u8> = tags.iter().map(|t| t.as_byte()).collect();
         let unique: std::collections::HashSet<u8> = bytes.iter().cloned().collect();
@@ -912,16 +906,18 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_typetag_serialization() {
         // Test JSON serialization roundtrip for all variants
         let tags = vec![
             TypeTag::KV,
             TypeTag::Event,
-            TypeTag::State,
+            TypeTag::Trace,
             TypeTag::Branch,
             TypeTag::Space,
             TypeTag::Vector,
             TypeTag::Json,
+            TypeTag::VectorConfig,
         ];
 
         for tag in tags {
@@ -965,7 +961,6 @@ mod tests {
         let all_tags = [
             TypeTag::KV,
             TypeTag::Event,
-            TypeTag::State,
             TypeTag::Trace,
             TypeTag::Branch,
             TypeTag::Space,
@@ -993,7 +988,6 @@ mod tests {
         let tags_in_order = [
             TypeTag::KV,
             TypeTag::Event,
-            TypeTag::State,
             TypeTag::Trace,
             TypeTag::Branch,
             TypeTag::Space,
@@ -1060,11 +1054,6 @@ mod tests {
             u64::from_be_bytes((*event_key.user_key).try_into().unwrap()),
             42
         );
-
-        // Test state cell helper
-        let state_key = Key::new_state(ns.clone(), "state1");
-        assert_eq!(state_key.type_tag, TypeTag::State);
-        assert_eq!(&*state_key.user_key, b"state1");
 
         // Test branch index helper
         let branch_key = Key::new_branch(ns.clone(), branch_id);

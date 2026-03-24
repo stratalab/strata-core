@@ -27,7 +27,6 @@ use crate::types::*;
 /// | KV | 4 | Key-value operations |
 /// | JSON | 17 | JSON document operations |
 /// | Event | 4 | Event log operations (MVP) |
-/// | State | 4 | State cell operations (MVP) |
 /// | Vector | 7 | Vector store operations (MVP) |
 /// | Branch | 5 | Branch lifecycle operations (MVP) |
 /// | Transaction | 5 | Transaction control |
@@ -365,129 +364,6 @@ pub enum Command {
         /// Target space (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         space: Option<String>,
-    },
-
-    // ==================== State (4 MVP + 1 batch) ====================
-    // MVP: set, read, cas, init
-    /// Batch set multiple state cells in a single transaction.
-    /// Returns: `Output::BatchResults`
-    StateBatchSet {
-        /// Target branch (defaults to "default").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        branch: Option<BranchId>,
-        /// Target space (defaults to "default").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        space: Option<String>,
-        /// State cell entries to set.
-        entries: Vec<BatchStateEntry>,
-    },
-
-    /// Set a state cell value (unconditional write).
-    /// Returns: `Output::Version`
-    StateSet {
-        /// Target branch (defaults to "default").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        branch: Option<BranchId>,
-        /// Target space (defaults to "default").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        space: Option<String>,
-        /// Cell name.
-        cell: String,
-        /// Value to store.
-        value: Value,
-    },
-
-    /// Read a state cell value.
-    /// Returns: `Output::MaybeVersioned`
-    StateGet {
-        /// Target branch (defaults to "default").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        branch: Option<BranchId>,
-        /// Target space (defaults to "default").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        space: Option<String>,
-        /// Cell name.
-        cell: String,
-        /// Optional timestamp for time-travel reads (microseconds since epoch).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        as_of: Option<u64>,
-    },
-
-    /// Compare-and-swap on a state cell.
-    /// Returns: `Output::MaybeVersion`
-    StateCas {
-        /// Target branch (defaults to "default").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        branch: Option<BranchId>,
-        /// Target space (defaults to "default").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        space: Option<String>,
-        /// Cell name.
-        cell: String,
-        /// Expected version counter (`None` means cell must not exist).
-        expected_counter: Option<u64>,
-        /// New value to swap in.
-        value: Value,
-    },
-
-    /// Get full version history for a state cell.
-    /// Returns: `Output::VersionHistory`
-    StateGetv {
-        /// Target branch (defaults to "default").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        branch: Option<BranchId>,
-        /// Target space (defaults to "default").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        space: Option<String>,
-        /// Cell name.
-        cell: String,
-        /// Optional timestamp for time-travel reads (microseconds since epoch).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        as_of: Option<u64>,
-    },
-
-    /// Initialize a state cell (only if it doesn't exist).
-    /// Returns: `Output::Version`
-    StateInit {
-        /// Target branch (defaults to "default").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        branch: Option<BranchId>,
-        /// Target space (defaults to "default").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        space: Option<String>,
-        /// Cell name.
-        cell: String,
-        /// Initial value.
-        value: Value,
-    },
-
-    /// Delete a state cell.
-    /// Returns: `Output::Bool` (true if cell existed)
-    StateDelete {
-        /// Target branch (defaults to "default").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        branch: Option<BranchId>,
-        /// Target space (defaults to "default").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        space: Option<String>,
-        /// Cell name.
-        cell: String,
-    },
-
-    /// List state cell names with optional prefix filter.
-    /// Returns: `Output::Keys`
-    StateList {
-        /// Target branch (defaults to "default").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        branch: Option<BranchId>,
-        /// Target space (defaults to "default").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        space: Option<String>,
-        /// Optional cell name prefix filter.
-        prefix: Option<String>,
-        /// Optional timestamp for time-travel reads (microseconds since epoch).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        as_of: Option<u64>,
     },
 
     // ==================== Vector (7 MVP) ====================
@@ -1631,11 +1507,6 @@ impl Command {
                 | Command::JsonDelete { .. }
                 | Command::EventAppend { .. }
                 | Command::EventBatchAppend { .. }
-                | Command::StateSet { .. }
-                | Command::StateBatchSet { .. }
-                | Command::StateCas { .. }
-                | Command::StateInit { .. }
-                | Command::StateDelete { .. }
                 | Command::VectorUpsert { .. }
                 | Command::VectorDelete { .. }
                 | Command::VectorCreateCollection { .. }
@@ -1700,14 +1571,6 @@ impl Command {
             Command::EventGet { .. } => "EventGet",
             Command::EventGetByType { .. } => "EventGetByType",
             Command::EventLen { .. } => "EventLen",
-            Command::StateSet { .. } => "StateSet",
-            Command::StateBatchSet { .. } => "StateBatchSet",
-            Command::StateGet { .. } => "StateGet",
-            Command::StateCas { .. } => "StateCas",
-            Command::StateGetv { .. } => "StateGetv",
-            Command::StateInit { .. } => "StateInit",
-            Command::StateDelete { .. } => "StateDelete",
-            Command::StateList { .. } => "StateList",
             Command::VectorUpsert { .. } => "VectorUpsert",
             Command::VectorGet { .. } => "VectorGet",
             Command::VectorDelete { .. } => "VectorDelete",
@@ -1850,15 +1713,6 @@ impl Command {
             | Command::EventGet { branch, space, .. }
             | Command::EventGetByType { branch, space, .. }
             | Command::EventLen { branch, space, .. }
-            // State
-            | Command::StateSet { branch, space, .. }
-            | Command::StateBatchSet { branch, space, .. }
-            | Command::StateGet { branch, space, .. }
-            | Command::StateGetv { branch, space, .. }
-            | Command::StateCas { branch, space, .. }
-            | Command::StateInit { branch, space, .. }
-            | Command::StateDelete { branch, space, .. }
-            | Command::StateList { branch, space, .. }
             // Vector (7 MVP)
             | Command::VectorUpsert { branch, space, .. }
             | Command::VectorGet { branch, space, .. }
@@ -2011,14 +1865,6 @@ impl Command {
             | Command::EventGet { branch, .. }
             | Command::EventGetByType { branch, .. }
             | Command::EventLen { branch, .. }
-            | Command::StateSet { branch, .. }
-            | Command::StateBatchSet { branch, .. }
-            | Command::StateGet { branch, .. }
-            | Command::StateGetv { branch, .. }
-            | Command::StateCas { branch, .. }
-            | Command::StateInit { branch, .. }
-            | Command::StateDelete { branch, .. }
-            | Command::StateList { branch, .. }
             | Command::VectorUpsert { branch, .. }
             | Command::VectorGet { branch, .. }
             | Command::VectorDelete { branch, .. }

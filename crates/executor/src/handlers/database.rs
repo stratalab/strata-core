@@ -8,7 +8,7 @@ use crate::bridge::{from_engine_metric, is_internal_collection, to_core_branch_i
 use crate::convert::convert_result;
 use crate::types::{
     BranchId, CapabilitySummary, ConfigSummary, CountSummary, DescribeResult, GraphSummary,
-    GraphSummaryEntry, PrimitiveSummary, StateSummary, VectorCollectionSummary, VectorSummary,
+    GraphSummaryEntry, PrimitiveSummary, VectorCollectionSummary, VectorSummary,
 };
 use crate::{Output, Result};
 
@@ -88,13 +88,6 @@ pub fn describe(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
         warn!("describe: event len failed: {}", e);
         0
     });
-
-    // -- State cells --
-    let state_cells =
-        convert_result(p.state.list(&branch_id, default_space, None)).unwrap_or_else(|e| {
-            warn!("describe: state list failed: {}", e);
-            Vec::new()
-        });
 
     // -- Vector collections --
     let vector_collections = p
@@ -192,10 +185,6 @@ pub fn describe(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
             kv: CountSummary { count: kv_count },
             json: CountSummary { count: json_count },
             events: CountSummary { count: event_count },
-            state: StateSummary {
-                count: state_cells.len() as u64,
-                cells: state_cells,
-            },
             vector: VectorSummary {
                 collections: vector_collections,
             },

@@ -417,29 +417,3 @@ fn test_event_append_in_txn() {
 
     session.execute(Command::TxnCommit).unwrap();
 }
-
-// =============================================================================
-// State Operations In Transaction
-// =============================================================================
-
-#[test]
-fn test_state_init_in_txn() {
-    let mut session = create_test_session();
-
-    session
-        .execute(Command::TxnBegin {
-            branch: None,
-            options: None,
-        })
-        .unwrap();
-
-    let result = session.execute(Command::StateInit {
-        branch: None,
-        space: None,
-        cell: "counter".to_string(),
-        value: Value::Int(0),
-    });
-    assert!(result.is_ok(), "StateInit should succeed in txn");
-
-    session.execute(Command::TxnCommit).unwrap();
-}

@@ -450,7 +450,9 @@ mod tests {
 
         // Verify the retry counter was reset (attempt count should be 1, not MAX_RETRIES).
         let err_guard = state.load_error.lock().unwrap_or_else(|e| e.into_inner());
-        let (_, attempts) = err_guard.as_ref().expect("should have error after fresh attempt");
+        let (_, attempts) = err_guard
+            .as_ref()
+            .expect("should have error after fresh attempt");
         assert_eq!(
             *attempts, 1,
             "attempt count should be 1 after poison recovery cleared state, got {}",

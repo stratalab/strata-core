@@ -65,7 +65,6 @@ pub enum CliAction {
 pub enum Primitive {
     Kv,
     Json,
-    State,
 }
 
 /// Branch operations that bypass the Command enum.
@@ -154,7 +153,6 @@ pub fn matches_to_action(matches: &ArgMatches, state: &SessionState) -> Result<C
         "kv" => parse_kv(sub_matches, state),
         "json" => parse_json(sub_matches, state),
         "event" => parse_event(sub_matches, state),
-        "state" => parse_state(sub_matches, state),
         "vector" => parse_vector_cmd(sub_matches, state),
         "graph" => parse_graph(sub_matches, state),
         "branch" => parse_branch(sub_matches, state),
@@ -186,7 +184,6 @@ pub fn matches_to_action(matches: &ArgMatches, state: &SessionState) -> Result<C
                 "kv",
                 "json",
                 "event",
-                "state",
                 "vector",
                 "graph",
                 "branch",
@@ -586,128 +583,6 @@ fn parse_event(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
             "event",
             other,
             &["append", "get", "list", "len"],
-        )),
-    }
-}
-
-// =========================================================================
-// State
-// =========================================================================
-
-fn parse_state(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
-    let (sub, m) = matches.subcommand().ok_or("No state subcommand")?;
-    match sub {
-        "set" => {
-            let cell = m.get_one::<String>("cell").unwrap().clone();
-
-            let value = if let Some(file_path) = m.get_one::<String>("file") {
-                read_value_from_source(file_path)?
-            } else {
-                let raw = m.get_one::<String>("value").unwrap();
-                parse_value(raw)
-            };
-
-            Ok(CliAction::Execute(Command::StateSet {
-                branch: branch(state),
-                space: space(state),
-                cell,
-                value,
-            }))
-        }
-        "get" => {
-            let cell = m.get_one::<String>("cell").unwrap().clone();
-            let with_version = m.get_flag("with-version");
-
-            let cmd = Command::StateGet {
-                branch: branch(state),
-                space: space(state),
-                cell,
-                as_of: None,
-            };
-
-            if with_version {
-                Ok(CliAction::GetWithVersion {
-                    command: cmd,
-                    with_version: true,
-                })
-            } else {
-                Ok(CliAction::Execute(cmd))
-            }
-        }
-        "del" => {
-            let cell = m.get_one::<String>("cell").unwrap().clone();
-            Ok(CliAction::Execute(Command::StateDelete {
-                branch: branch(state),
-                space: space(state),
-                cell,
-            }))
-        }
-        "init" => {
-            let cell = m.get_one::<String>("cell").unwrap().clone();
-            let raw = m.get_one::<String>("value").unwrap();
-            let value = parse_value(raw);
-            Ok(CliAction::Execute(Command::StateInit {
-                branch: branch(state),
-                space: space(state),
-                cell,
-                value,
-            }))
-        }
-        "cas" => {
-            let cell = m.get_one::<String>("cell").unwrap().clone();
-            let expected_str = m.get_one::<String>("expected").unwrap();
-            let expected_counter = if expected_str == "none" {
-                None
-            } else {
-                Some(
-                    expected_str
-                        .parse::<u64>()
-                        .map_err(|e| format!("Invalid expected version: {}", e))?,
-                )
-            };
-            let raw = m.get_one::<String>("value").unwrap();
-            let value = parse_value(raw);
-            Ok(CliAction::Execute(Command::StateCas {
-                branch: branch(state),
-                space: space(state),
-                cell,
-                expected_counter,
-                value,
-            }))
-        }
-        "list" => {
-            let all = m.get_flag("all");
-            let prefix = m.get_one::<String>("prefix").cloned();
-
-            if all {
-                Ok(CliAction::ListAll {
-                    branch: branch(state),
-                    space: space(state),
-                    prefix,
-                    primitive: Primitive::State,
-                })
-            } else {
-                Ok(CliAction::Execute(Command::StateList {
-                    branch: branch(state),
-                    space: space(state),
-                    prefix,
-                    as_of: None,
-                }))
-            }
-        }
-        "history" => {
-            let cell = m.get_one::<String>("cell").unwrap().clone();
-            Ok(CliAction::Execute(Command::StateGetv {
-                branch: branch(state),
-                space: space(state),
-                cell,
-                as_of: None,
-            }))
-        }
-        other => Err(unknown_subcommand(
-            "state",
-            other,
-            &["set", "get", "del", "init", "cas", "list", "history"],
         )),
     }
 }

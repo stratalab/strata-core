@@ -63,7 +63,14 @@ fn health_returns_all_subsystems() {
             let names: Vec<&str> = report.subsystems.iter().map(|s| s.name.as_str()).collect();
             assert_eq!(
                 names,
-                &["storage", "wal", "flush_thread", "disk", "coordinator", "scheduler"]
+                &[
+                    "storage",
+                    "wal",
+                    "flush_thread",
+                    "disk",
+                    "coordinator",
+                    "scheduler"
+                ]
             );
             // Every subsystem should be healthy on a fresh ephemeral DB
             for sub in &report.subsystems {
@@ -280,49 +287,6 @@ fn event_len_returns_count() {
     match output {
         Output::Uint(count) => assert_eq!(count, 5),
         _ => panic!("Expected Uint output"),
-    }
-}
-
-// ============================================================================
-// State Commands
-// ============================================================================
-
-#[test]
-fn state_set_read_cycle() {
-    let executor = create_executor();
-
-    let output = executor
-        .execute(Command::StateSet {
-            branch: None,
-            space: None,
-            cell: "status".into(),
-            value: Value::String("active".into()),
-        })
-        .unwrap();
-
-    match &output {
-        Output::WriteResult { key, version } => {
-            assert_eq!(key, "status", "WriteResult should echo cell name as key");
-            assert!(*version > 0);
-        }
-        _ => panic!("Expected WriteResult output, got {:?}", output),
-    }
-
-    let output = executor
-        .execute(Command::StateGet {
-            branch: None,
-            space: None,
-            cell: "status".into(),
-            as_of: None,
-        })
-        .unwrap();
-
-    match output {
-        Output::MaybeVersioned(Some(vv)) => {
-            let v = vv.value;
-            assert_eq!(v, Value::String("active".into()));
-        }
-        _ => panic!("Expected Maybe(Some) output"),
     }
 }
 
@@ -762,152 +726,6 @@ fn different_branches_are_isolated() {
 // ============================================================================
 
 #[test]
-fn state_delete_returns_delete_result() {
-    let executor = create_executor();
-
-    executor
-        .execute(Command::StateSet {
-            branch: None,
-            space: None,
-            cell: "temp".into(),
-            value: Value::Int(1),
-        })
-        .unwrap();
-
-    let output = executor
-        .execute(Command::StateDelete {
-            branch: None,
-            space: None,
-            cell: "temp".into(),
-        })
-        .unwrap();
-
-    match output {
-        Output::DeleteResult { key, deleted } => {
-            assert_eq!(key, "temp", "DeleteResult should echo cell name as key");
-            assert!(deleted, "Existing cell should report deleted=true");
-        }
-        _ => panic!("Expected DeleteResult, got {:?}", output),
-    }
-
-    // Delete again
-    let output = executor
-        .execute(Command::StateDelete {
-            branch: None,
-            space: None,
-            cell: "temp".into(),
-        })
-        .unwrap();
-
-    match output {
-        Output::DeleteResult { key, deleted } => {
-            assert_eq!(key, "temp");
-            assert!(!deleted, "Missing cell should report deleted=false");
-        }
-        _ => panic!("Expected DeleteResult, got {:?}", output),
-    }
-}
-
-#[test]
-fn state_cas_success_returns_version() {
-    let executor = create_executor();
-
-    // Init cell
-    executor
-        .execute(Command::StateInit {
-            branch: None,
-            space: None,
-            cell: "counter".into(),
-            value: Value::Int(0),
-        })
-        .unwrap();
-
-    // CAS with correct expected counter (0 for first write)
-    let output = executor
-        .execute(Command::StateCas {
-            branch: None,
-            space: None,
-            cell: "counter".into(),
-            expected_counter: Some(1),
-            value: Value::Int(1),
-        })
-        .unwrap();
-
-    match output {
-        Output::StateCasResult {
-            cell,
-            success,
-            version,
-            current_value,
-            current_version,
-        } => {
-            assert_eq!(cell, "counter", "StateCasResult should echo cell name");
-            assert!(success, "CAS should succeed with correct counter");
-            assert!(version.is_some(), "Success should include version");
-            assert!(
-                current_value.is_none(),
-                "Success should not include current_value"
-            );
-            assert!(
-                current_version.is_none(),
-                "Success should not include current_version"
-            );
-        }
-        _ => panic!("Expected StateCasResult, got {:?}", output),
-    }
-}
-
-#[test]
-fn state_cas_conflict_returns_current_value() {
-    let executor = create_executor();
-
-    // Init cell
-    executor
-        .execute(Command::StateInit {
-            branch: None,
-            space: None,
-            cell: "counter".into(),
-            value: Value::Int(42),
-        })
-        .unwrap();
-
-    // CAS with wrong expected counter
-    let output = executor
-        .execute(Command::StateCas {
-            branch: None,
-            space: None,
-            cell: "counter".into(),
-            expected_counter: Some(999), // wrong
-            value: Value::Int(100),
-        })
-        .unwrap();
-
-    match output {
-        Output::StateCasResult {
-            cell,
-            success,
-            version,
-            current_value,
-            current_version,
-        } => {
-            assert_eq!(cell, "counter", "StateCasResult should echo cell name");
-            assert!(!success, "CAS should fail with wrong counter");
-            assert!(version.is_none(), "Conflict should not include version");
-            assert_eq!(
-                current_value,
-                Some(Value::Int(42)),
-                "Conflict should return current value for retry"
-            );
-            assert!(
-                current_version.is_some(),
-                "Conflict should return current version for retry"
-            );
-        }
-        _ => panic!("Expected StateCasResult, got {:?}", output),
-    }
-}
-
-#[test]
 fn vector_delete_returns_delete_result() {
     let executor = create_executor();
 
@@ -1155,46 +973,6 @@ fn kv_list_exact_limit_returns_no_more() {
 // ============================================================================
 // Error Hint Tests (#1442)
 // ============================================================================
-
-#[test]
-fn state_cell_not_found_includes_fuzzy_hint() {
-    let executor = create_executor();
-
-    // Create a cell with a known name
-    executor
-        .execute(Command::StateSet {
-            branch: None,
-            space: None,
-            cell: "counter".into(),
-            value: Value::Int(0),
-        })
-        .unwrap();
-
-    // State delete on non-existent cell returns DeleteResult(deleted=false),
-    // it doesn't error. Check via getv instead which does error for non-existent cells.
-    let result = executor.execute(Command::StateGetv {
-        branch: None,
-        space: None,
-        cell: "countr".into(), // typo
-        as_of: None,
-    });
-
-    match result {
-        // CellNotFound with a helpful hint
-        Err(Error::CellNotFound { cell, hint }) => {
-            assert_eq!(cell, "countr");
-            let hint_text = hint.expect("CellNotFound should include fuzzy hint");
-            assert!(
-                hint_text.contains("counter"),
-                "Hint should suggest 'counter', got: {}",
-                hint_text
-            );
-        }
-        // Some primitives may not error on not-found, just return None
-        Ok(_) => {} // acceptable - state_getv may return None instead of error
-        Err(e) => panic!("Unexpected error type: {:?}", e),
-    }
-}
 
 #[test]
 fn access_denied_includes_read_only_hint() {
