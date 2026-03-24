@@ -232,6 +232,24 @@ const DEFAULT_SEAL_THRESHOLD: usize = 100_000;
 ///
 /// The version field tracks index state for consistency checking.
 /// Incremented on every update operation.
+///
+/// # Memory Ordering
+///
+/// The metric counters (`total_docs`, `total_doc_len`, `active_doc_count`) use
+/// `Relaxed` ordering for mutations (fetch_add/fetch_sub/store) because:
+/// 1. They are observational metrics — approximate counts are acceptable.
+/// 2. They do not synchronize any other memory operations.
+/// 3. Atomic RMW instructions guarantee no torn reads regardless of ordering.
+///
+/// The *read* side uses `Acquire` in BM25-scoring methods (`total_docs()`,
+/// `avg_doc_len()`, `compute_idf()`) for stronger visibility guarantees when
+/// computing scores that depend on these values. For internal bookkeeping reads
+/// (e.g. seal threshold checks), `Relaxed` is used since approximate values
+/// are sufficient.
+///
+/// The `sealing` flag uses `Acquire` on the CAS success path and `Release` on
+/// the subsequent store to establish a critical section that prevents concurrent
+/// auto-seals.
 pub struct InvertedIndex {
     // --- Active segment (DashMap-based, mutable) ---
     /// Term -> PostingList mapping (active segment)
@@ -333,6 +351,8 @@ impl InvertedIndex {
         self.doc_terms.write().unwrap().clear();
         self.doc_id_map.clear();
         self.sealed.write().unwrap().clear();
+        // Relaxed: clear() is called during logical reset — the subsequent
+        // version bump (Release) establishes the visibility fence.
         self.total_docs.store(0, Ordering::Relaxed);
         self.total_doc_len.store(0, Ordering::Relaxed);
         self.active_doc_count.store(0, Ordering::Relaxed);
@@ -718,13 +738,16 @@ impl InvertedIndex {
             lengths[idx] = Some(doc_len);
         }
 
+        // Relaxed: observational counters — the version bump below (Release)
+        // is the synchronization fence for readers checking index freshness.
         self.total_docs.fetch_add(1, Ordering::Relaxed);
         self.total_doc_len
             .fetch_add(doc_len as usize, Ordering::Relaxed);
         self.active_doc_count.fetch_add(1, Ordering::Relaxed);
         self.version.fetch_add(1, Ordering::Release);
 
-        // Check if we should seal the active segment
+        // Relaxed: approximate count is fine for threshold-based seal decisions.
+        // The actual sealing is guarded by the CAS on `sealing` (Acquire).
         let active_count = self.active_doc_count.load(Ordering::Relaxed);
         if active_count >= self.seal_threshold {
             self.try_seal_active();
@@ -797,6 +820,8 @@ impl InvertedIndex {
         }
 
         // Update global stats
+        // Relaxed: observational counters (see struct-level doc). The version
+        // bump (Release) is the synchronization fence for freshness checks.
         if active_removed || doc_len.is_some() {
             self.total_docs.fetch_sub(1, Ordering::Relaxed);
             if let Some(len) = doc_len {
@@ -818,11 +843,15 @@ impl InvertedIndex {
     ///
     /// Uses CAS on `sealing` to prevent concurrent auto-seals.
     fn try_seal_active(&self) {
+        // Relaxed: approximate count is sufficient for the threshold check.
+        // A slightly stale value just delays or advances the seal by one doc.
         let active_count = self.active_doc_count.load(Ordering::Relaxed);
         if active_count < self.seal_threshold {
             return;
         }
-        // Prevent concurrent auto-seals
+        // CAS with Acquire on success ensures all prior index writes are
+        // visible before we start reading the active segment for sealing.
+        // Relaxed on failure: we just bail, no ordering needed.
         if self
             .sealing
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -843,6 +872,7 @@ impl InvertedIndex {
     /// across seals, enabling re-index detection and accurate `total_doc_len`
     /// adjustment when removing docs from sealed segments.
     pub fn seal_active(&self) {
+        // Relaxed: early-exit check — exact count not needed.
         let active_count = self.active_doc_count.load(Ordering::Relaxed);
         if active_count == 0 {
             return;
@@ -880,6 +910,7 @@ impl InvertedIndex {
         }
         let actual_doc_count = seen_docs.len() as u32;
 
+        // Relaxed: uniqueness is guaranteed by fetch_add atomicity.
         let segment_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
 
         // Build the sealed segment
@@ -907,6 +938,7 @@ impl InvertedIndex {
         // Subtract only the count of docs we actually drained, not reset to 0,
         // so concurrent inserts keep their active_doc_count contribution (#1738 / 9.5.B).
         self.sealed.write().unwrap().push(seg);
+        // Relaxed: observational bookkeeping (see struct-level doc).
         self.active_doc_count
             .fetch_sub(actual_doc_count as usize, Ordering::Relaxed);
     }
@@ -993,7 +1025,9 @@ impl InvertedIndex {
         // Restore DocIdMap
         self.doc_id_map.restore_from_vec(data.doc_id_map);
 
-        // Restore global stats
+        // Restore global stats.
+        // Relaxed: recovery runs single-threaded before the index is visible
+        // to other threads, so no ordering is needed.
         self.total_docs
             .store(data.total_docs as usize, Ordering::Relaxed);
         self.total_doc_len
@@ -1024,7 +1058,8 @@ impl InvertedIndex {
             }
         }
 
-        // Active segment starts empty
+        // Active segment starts empty after recovery.
+        // Relaxed: single-threaded recovery path (same as above).
         self.postings.clear();
         self.doc_freqs.clear();
         self.active_doc_count.store(0, Ordering::Relaxed);
