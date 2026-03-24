@@ -57,6 +57,13 @@ impl AutoEmbedState {
             .unwrap_or_else(|e| e.into_inner())
             .insert(key);
     }
+
+    fn remove_branch(&self, branch_prefix: &str) {
+        self.shadow_collections_created
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|k| !k.starts_with(branch_prefix));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +140,31 @@ pub fn maybe_embed_text(
     if !p.db.auto_embed_enabled() {
         return;
     }
+    queue_embed_text(
+        p,
+        branch_id,
+        space,
+        shadow_collection,
+        key,
+        text,
+        source_ref,
+    );
+}
 
+/// Queue text for embedding without checking the auto_embed flag.
+///
+/// Used by `reindex_embeddings` which is an explicit user action and must
+/// work even when auto-embed is disabled due to dimension mismatch.
+#[cfg(feature = "embed")]
+fn queue_embed_text(
+    p: &Arc<Primitives>,
+    branch_id: strata_core::types::BranchId,
+    space: &str,
+    shadow_collection: &'static str,
+    key: &str,
+    text: &str,
+    source_ref: strata_core::EntityRef,
+) {
     let buf = match p.db.extension::<EmbedBuffer>() {
         Ok(b) => b,
         Err(e) => {
@@ -166,7 +197,6 @@ pub fn maybe_embed_text(
             })
             .is_err()
         {
-            // Backpressure or shutdown — fall back to synchronous flush
             flush_embed_buffer(p);
         }
     }
@@ -414,6 +444,201 @@ pub fn extract_text(value: &strata_core::Value) -> Option<String> {
 #[cfg(not(feature = "embed"))]
 pub fn extract_text(_value: &strata_core::Value) -> Option<String> {
     None
+}
+
+/// Re-index all embeddings for a branch with the currently configured model.
+///
+/// Deletes all shadow collections, recreates with the new model's dimension,
+/// and queues all existing KV/JSON/Event/State data for re-embedding.
+#[cfg(feature = "embed")]
+pub fn reindex_embeddings(
+    p: &Arc<Primitives>,
+    branch_id: strata_core::types::BranchId,
+) -> crate::Result<crate::Output> {
+    use strata_core::primitives::json::JsonPath;
+
+    // 1. Determine new model dimension
+    let model_state =
+        p.db.extension::<strata_intelligence::embed::EmbedModelState>()
+            .map_err(|e| crate::Error::Internal {
+                reason: format!("Failed to get embed model state: {}", e),
+            })?;
+    let dim = model_state
+        .embedding_dim()
+        .ok_or_else(|| crate::Error::Internal {
+            reason: "Embedding model not loaded — cannot determine dimension".into(),
+        })?;
+
+    // 2. Delete all shadow collections for this branch
+    let shadow_names: &[&str] = &[SHADOW_KV, SHADOW_JSON, SHADOW_EVENT, SHADOW_STATE];
+    for name in shadow_names {
+        if let Err(e) = p.vector.delete_system_collection(branch_id, name) {
+            tracing::warn!(
+                target: "strata::embed",
+                collection = *name,
+                error = %e,
+                "Failed to delete shadow collection during reindex"
+            );
+        }
+    }
+
+    // 3. Clear AutoEmbedState cache for this branch
+    if let Ok(state) = p.db.extension::<AutoEmbedState>() {
+        let branch_prefix = format!("{:?}{}", branch_id.as_bytes(), SHADOW_KEY_SEP);
+        state.remove_branch(&branch_prefix);
+    }
+
+    // 4. Flush any pending embeds from the old model
+    flush_embed_buffer(p);
+
+    // 5. Enumerate all data across all spaces and queue for re-embedding
+    let spaces = p
+        .space
+        .list(branch_id)
+        .unwrap_or_else(|_| vec!["default".to_string()]);
+
+    let mut kv_queued: u64 = 0;
+    let mut json_queued: u64 = 0;
+    let mut event_queued: u64 = 0;
+    let mut state_queued: u64 = 0;
+
+    for space in &spaces {
+        // KV
+        if let Ok(keys) = p.kv.list(&branch_id, space, None) {
+            for key in &keys {
+                if let Ok(Some(value)) = p.kv.get(&branch_id, space, key) {
+                    if let Some(text) = extract_text(&value) {
+                        queue_embed_text(
+                            p,
+                            branch_id,
+                            space,
+                            SHADOW_KV,
+                            key,
+                            &text,
+                            strata_core::EntityRef::kv(branch_id, key),
+                        );
+                        kv_queued += 1;
+                    }
+                }
+            }
+        }
+
+        // JSON
+        let mut cursor: Option<String> = None;
+        loop {
+            let result = match p
+                .json
+                .list(&branch_id, space, None, cursor.as_deref(), 1000)
+            {
+                Ok(r) => r,
+                Err(_) => break,
+            };
+            for doc_id in &result.doc_ids {
+                if let Ok(Some(json_val)) = p.json.get(&branch_id, space, doc_id, &JsonPath::root())
+                {
+                    if let Ok(value) = crate::bridge::json_to_value(json_val) {
+                        if let Some(text) = extract_text(&value) {
+                            queue_embed_text(
+                                p,
+                                branch_id,
+                                space,
+                                SHADOW_JSON,
+                                doc_id,
+                                &text,
+                                strata_core::EntityRef::json(branch_id, doc_id),
+                            );
+                            json_queued += 1;
+                        }
+                    }
+                }
+            }
+            match result.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+
+        // State
+        if let Ok(names) = p.state.list(&branch_id, space, None) {
+            for name in &names {
+                if let Ok(Some(value)) = p.state.get(&branch_id, space, name) {
+                    if let Some(text) = extract_text(&value) {
+                        queue_embed_text(
+                            p,
+                            branch_id,
+                            space,
+                            SHADOW_STATE,
+                            name,
+                            &text,
+                            strata_core::EntityRef::state(branch_id, name),
+                        );
+                        state_queued += 1;
+                    }
+                }
+            }
+        }
+
+        // Events
+        if let Ok(len) = p.event.len(&branch_id, space) {
+            for seq in 1..=len {
+                if let Ok(Some(versioned_event)) = p.event.get(&branch_id, space, seq) {
+                    let payload = strata_core::Value::String(
+                        serde_json::to_string(&versioned_event.value.payload).unwrap_or_default(),
+                    );
+                    if let Some(text) = extract_text(&payload) {
+                        let event_key = seq.to_string();
+                        queue_embed_text(
+                            p,
+                            branch_id,
+                            space,
+                            SHADOW_EVENT,
+                            &event_key,
+                            &text,
+                            strata_core::EntityRef::event(branch_id, seq),
+                        );
+                        event_queued += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // 6. Trigger a flush to start processing
+    let p_clone = Arc::clone(p);
+    let _ =
+        p.db.scheduler()
+            .submit(strata_engine::TaskPriority::Normal, move || {
+                flush_embed_buffer(&p_clone)
+            });
+
+    tracing::info!(
+        target: "strata::embed",
+        kv_queued,
+        json_queued,
+        event_queued,
+        state_queued,
+        new_dimension = dim,
+        "Reindex embeddings started"
+    );
+
+    Ok(crate::Output::ReindexResult {
+        kv_queued,
+        json_queued,
+        event_queued,
+        state_queued,
+        new_dimension: dim,
+    })
+}
+
+/// Embed feature not compiled in.
+#[cfg(not(feature = "embed"))]
+pub fn reindex_embeddings(
+    _p: &Arc<Primitives>,
+    _branch_id: strata_core::types::BranchId,
+) -> crate::Result<crate::Output> {
+    Err(crate::Error::Internal {
+        reason: "The 'embed' feature is not enabled. Rebuild with --features embed".into(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -914,14 +1139,16 @@ fn ensure_shadow_collection(
                         collection = name,
                         existing_dim,
                         model_dim = dim,
-                        "Shadow collection dimension mismatch: collection has {}-d vectors \
-                         but loaded model produces {}-d embeddings. Embedding disabled for \
-                         this collection. Re-index to fix.",
+                        "Embed model dimension changed. Existing embeddings are {}-d \
+                         but configured model produces {}-d vectors. Auto-embed is \
+                         disabled. Either switch to a {}-d model or run \
+                         REINDEX EMBEDDINGS to replace all embeddings.",
                         existing_dim,
                         dim,
+                        existing_dim,
                     );
                     // Do NOT cache — this disables embedding for this collection
-                    // until the user re-indexes with the correct model.
+                    // until the user runs REINDEX EMBEDDINGS or switches models.
                 }
                 _ => {
                     state.insert(cache_key);

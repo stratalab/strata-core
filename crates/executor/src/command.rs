@@ -1081,6 +1081,16 @@ pub enum Command {
     /// Returns: `Output::EmbedStatus`
     EmbedStatus,
 
+    /// Re-index all embeddings with the currently configured model.
+    /// Drops existing shadow collections, recreates with new dimensions,
+    /// and queues all data for re-embedding.
+    /// Returns: `Output::ReindexResult`
+    ReindexEmbeddings {
+        /// Target branch (defaults to current branch).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+    },
+
     /// Get the current database configuration.
     /// Returns: `Output::Config`
     ConfigGet,
@@ -1657,6 +1667,7 @@ impl Command {
                 | Command::GraphDefineLinkType { .. }
                 | Command::GraphDeleteLinkType { .. }
                 | Command::GraphFreezeOntology { .. }
+                | Command::ReindexEmbeddings { .. }
         )
     }
 
@@ -1736,6 +1747,7 @@ impl Command {
             Command::JsonSample { .. } => "JsonSample",
             Command::VectorSample { .. } => "VectorSample",
             Command::EmbedStatus => "EmbedStatus",
+            Command::ReindexEmbeddings { .. } => "ReindexEmbeddings",
             Command::ConfigGet => "ConfigGet",
             Command::ConfigureSet { .. } => "ConfigureSet",
             Command::ConfigureGetKey { .. } => "ConfigureGetKey",
@@ -1880,7 +1892,8 @@ impl Command {
             Command::SpaceList { branch, .. }
             | Command::SpaceCreate { branch, .. }
             | Command::SpaceDelete { branch, .. }
-            | Command::SpaceExists { branch, .. } => {
+            | Command::SpaceExists { branch, .. }
+            | Command::ReindexEmbeddings { branch, .. } => {
                 resolve_branch!(branch);
             }
 
@@ -2025,11 +2038,12 @@ impl Command {
             | Command::TimeRange { branch, .. }
             | Command::Describe { branch, .. } => branch.as_ref(),
 
-            // Space commands
+            // Space commands + reindex
             Command::SpaceList { branch, .. }
             | Command::SpaceCreate { branch, .. }
             | Command::SpaceDelete { branch, .. }
-            | Command::SpaceExists { branch, .. } => branch.as_ref(),
+            | Command::SpaceExists { branch, .. }
+            | Command::ReindexEmbeddings { branch, .. } => branch.as_ref(),
 
             // Graph commands
             Command::GraphCreate { branch, .. }

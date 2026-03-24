@@ -302,6 +302,20 @@ pub enum Output {
     /// Embedding pipeline status
     EmbedStatus(EmbedStatusInfo),
 
+    /// Result of re-indexing all embeddings
+    ReindexResult {
+        /// KV entries queued for re-embedding
+        kv_queued: u64,
+        /// JSON documents queued for re-embedding
+        json_queued: u64,
+        /// Events queued for re-embedding
+        event_queued: u64,
+        /// State cells queued for re-embedding
+        state_queued: u64,
+        /// New embedding dimension
+        new_dimension: usize,
+    },
+
     /// Single embedding vector
     Embedding(Vec<f32>),
 

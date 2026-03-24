@@ -425,6 +425,18 @@ fn format_raw(output: &Output) -> String {
                 info.scheduler_queue_depth
             )
         }
+        Output::ReindexResult {
+            kv_queued,
+            json_queued,
+            event_queued,
+            state_queued,
+            new_dimension,
+        } => {
+            format!(
+                "{}\t{}\t{}\t{}\t{}",
+                kv_queued, json_queued, event_queued, state_queued, new_dimension
+            )
+        }
         Output::BatchResults(results) => results
             .iter()
             .map(|r| match (&r.version, &r.error) {
@@ -1018,6 +1030,19 @@ fn format_human(output: &Output) -> String {
                 info.total_failed,
                 info.scheduler_queue_depth,
                 info.scheduler_active_tasks
+            )
+        }
+        Output::ReindexResult {
+            kv_queued,
+            json_queued,
+            event_queued,
+            state_queued,
+            new_dimension,
+        } => {
+            let total = kv_queued + json_queued + event_queued + state_queued;
+            format!(
+                "Reindex started: {} items queued (kv: {}, json: {}, event: {}, state: {})\nNew dimension: {}\nRun EMBED STATUS to track progress.",
+                total, kv_queued, json_queued, event_queued, state_queued, new_dimension
             )
         }
         Output::BatchResults(results) => {
