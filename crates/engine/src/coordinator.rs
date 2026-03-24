@@ -53,6 +53,8 @@ pub struct TransactionCoordinator {
     gc_safe_version: AtomicU64,
     /// Maximum entries in a transaction's write buffer (0 = unlimited).
     max_write_buffer_entries: usize,
+    /// Effective transaction timeout. Defaults to `TRANSACTION_TIMEOUT`.
+    transaction_timeout: Duration,
 }
 
 impl TransactionCoordinator {
@@ -78,6 +80,7 @@ impl TransactionCoordinator {
             total_aborted: AtomicU64::new(0),
             gc_safe_version: AtomicU64::new(0),
             max_write_buffer_entries: 0,
+            transaction_timeout: Self::TRANSACTION_TIMEOUT,
         }
     }
 
@@ -104,6 +107,7 @@ impl TransactionCoordinator {
             total_aborted: AtomicU64::new(0),
             gc_safe_version: AtomicU64::new(0),
             max_write_buffer_entries: 0,
+            transaction_timeout: Self::TRANSACTION_TIMEOUT,
         }
     }
 
@@ -123,6 +127,7 @@ impl TransactionCoordinator {
             total_aborted: AtomicU64::new(0),
             gc_safe_version: AtomicU64::new(0),
             max_write_buffer_entries,
+            transaction_timeout: Self::TRANSACTION_TIMEOUT,
         }
     }
 
@@ -157,6 +162,24 @@ impl TransactionCoordinator {
         Ok(txn)
     }
 
+    /// Enforce the transaction timeout. If expired, records an abort
+    /// (decrementing active_count) and returns `TransactionTimeout`.
+    fn enforce_timeout(&self, txn: &TransactionContext) -> StrataResult<()> {
+        if txn.is_expired(self.transaction_timeout) {
+            let elapsed = txn.elapsed();
+            warn!(
+                target: "strata::txn",
+                txn_id = txn.txn_id,
+                elapsed_ms = elapsed.as_millis() as u64,
+                timeout_ms = self.transaction_timeout.as_millis() as u64,
+                "Transaction expired — rejecting commit"
+            );
+            self.record_abort(txn.txn_id);
+            return Err(StrataError::transaction_timeout(elapsed.as_millis() as u64));
+        }
+        Ok(())
+    }
+
     /// Commit a transaction through the concurrency layer
     ///
     /// Delegates the full commit protocol to TransactionManager:
@@ -185,6 +208,7 @@ impl TransactionCoordinator {
         store: &S,
         wal: Option<&mut WalWriter>,
     ) -> StrataResult<u64> {
+        self.enforce_timeout(txn)?;
         let txn_id = txn.txn_id;
         self.handle_commit_result(txn_id, self.manager.commit(txn, store, wal))
     }
@@ -199,6 +223,7 @@ impl TransactionCoordinator {
         store: &S,
         wal_arc: Option<&Arc<ParkingMutex<WalWriter>>>,
     ) -> StrataResult<u64> {
+        self.enforce_timeout(txn)?;
         let txn_id = txn.txn_id;
         self.handle_commit_result(
             txn_id,
@@ -366,6 +391,7 @@ impl TransactionCoordinator {
         wal: Option<&mut WalWriter>,
         version: u64,
     ) -> StrataResult<u64> {
+        self.enforce_timeout(txn)?;
         let txn_id = txn.txn_id;
         self.handle_commit_result(
             txn_id,
@@ -478,6 +504,11 @@ impl TransactionCoordinator {
     /// Allocate commit version (test-only)
     pub fn allocate_commit_version(&self) -> StrataResult<u64> {
         self.manager.allocate_version().map_err(StrataError::from)
+    }
+
+    /// Override the transaction timeout (test-only).
+    pub fn set_transaction_timeout(&mut self, timeout: Duration) {
+        self.transaction_timeout = timeout;
     }
 }
 
@@ -1608,6 +1639,62 @@ mod tests {
         let metrics = coordinator.metrics();
         assert_eq!(metrics.total_started, 8 * 200);
         assert_eq!(metrics.total_committed, 8 * 200);
+    }
+
+    /// Issue #1728: TRANSACTION_TIMEOUT must be enforced at commit time.
+    /// An expired transaction must be rejected with TransactionTimeout error
+    /// and its active_count must be decremented (preventing GC stall).
+    #[test]
+    fn test_issue_1728_expired_transaction_rejected_at_commit() {
+        use std::time::Duration;
+
+        let mut coordinator = TransactionCoordinator::new(0);
+        let storage = create_test_storage();
+        let branch_id = BranchId::new();
+
+        // Set a very short timeout for testing
+        coordinator.set_transaction_timeout(Duration::from_millis(1));
+
+        let mut txn = coordinator.start_transaction(branch_id, &storage).unwrap();
+        assert_eq!(coordinator.active_count(), 1);
+
+        // Wait for the transaction to expire
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(txn.is_expired(Duration::from_millis(1)));
+
+        // Commit should be rejected with TransactionTimeout
+        let result = coordinator.commit_with_wal_arc(&mut txn, storage.as_ref(), None);
+        assert!(result.is_err(), "expired transaction must be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, StrataError::TransactionTimeout { .. }),
+            "expected TransactionTimeout, got: {err}"
+        );
+
+        // active_count must have been decremented (the whole point of #1728)
+        assert_eq!(
+            coordinator.active_count(),
+            0,
+            "expired transaction must decrement active_count to unblock GC"
+        );
+    }
+
+    /// Issue #1728: A non-expired transaction must still commit successfully.
+    #[test]
+    fn test_issue_1728_non_expired_transaction_commits() {
+        let coordinator = TransactionCoordinator::new(0);
+        let storage = create_test_storage();
+        let branch_id = BranchId::new();
+
+        // Default timeout is 5 minutes — transaction is not expired
+        let mut txn = coordinator.start_transaction(branch_id, &storage).unwrap();
+
+        let result = coordinator.commit_with_wal_arc(&mut txn, storage.as_ref(), None);
+        assert!(
+            result.is_ok(),
+            "non-expired transaction must commit: {result:?}"
+        );
+        assert_eq!(coordinator.active_count(), 0);
     }
 
     /// Test that interleaved start/commit from multiple threads with
