@@ -357,14 +357,6 @@ impl Writeset {
                     cursor,
                 ))
             }
-            0x03 => {
-                // StateCell was removed — tag 0x03 is no longer supported
-                Err(WritesetError::InvalidEntityRef)
-            }
-            0x04 => {
-                // TraceStore was removed — tag 0x04 is no longer supported
-                Err(WritesetError::InvalidEntityRef)
-            }
             primitive_tags::BRANCH => Ok((EntityRef::Branch { branch_id }, cursor)),
             primitive_tags::JSON => {
                 let (doc_id, consumed) = Self::read_string(&bytes[cursor..])?;

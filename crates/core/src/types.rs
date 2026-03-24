@@ -138,16 +138,13 @@ impl PartialOrd for Namespace {
 /// These values are part of the on-disk format and MUST NOT change:
 /// - KV = 0x01
 /// - Event = 0x02
-/// - 0x03 was formerly State (StateCell was removed)
-/// - Branch = 0x05
-/// - Space = 0x06
-/// - Vector = 0x10 (vector metadata)
-/// - Json = 0x11 (JSON primitive)
-/// - VectorConfig = 0x12 (vector collection config)
+/// - Branch = 0x03
+/// - Space = 0x04
+/// - Vector = 0x05
+/// - Json = 0x06
+/// - VectorConfig = 0x07
 ///
-/// Note: 0x04 was formerly Trace (TraceStore was removed in 0.12.0)
-///
-/// Ordering: KV < Event < (Trace) < Branch < Space < Vector < Json < VectorConfig
+/// Ordering: KV < Event < Branch < Space < Vector < Json < VectorConfig
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum TypeTag {
@@ -155,24 +152,16 @@ pub enum TypeTag {
     KV = 0x01,
     /// Event log entries
     Event = 0x02,
-    /// Reserved for backwards compatibility (TraceStore was removed in 0.12.0).
-    ///
-    /// This variant is preserved **only** for legacy deserialization of on-disk data
-    /// that may contain `0x04` type tags. It must never be used for new writes.
-    /// The `from_byte(0x04)` arm returns `Some(TypeTag::Trace)` to avoid data loss
-    /// during recovery of databases created before 0.12.0.
-    #[deprecated(since = "0.12.0", note = "TraceStore primitive was removed")]
-    Trace = 0x04,
     /// Branch index entries
-    Branch = 0x05,
+    Branch = 0x03,
     /// Space metadata entries
-    Space = 0x06,
+    Space = 0x04,
     /// Vector store entries
-    Vector = 0x10,
+    Vector = 0x05,
     /// JSON document store entries
-    Json = 0x11,
+    Json = 0x06,
     /// Vector collection configuration
-    VectorConfig = 0x12,
+    VectorConfig = 0x07,
 }
 
 impl TypeTag {
@@ -182,18 +171,15 @@ impl TypeTag {
     }
 
     /// Try to create from byte
-    #[allow(deprecated)]
     pub fn from_byte(byte: u8) -> Option<Self> {
         match byte {
             0x01 => Some(TypeTag::KV),
             0x02 => Some(TypeTag::Event),
-            // 0x03 was formerly State (StateCell removed, never shipped)
-            0x04 => Some(TypeTag::Trace), // Legacy only: preserved for deserialization, never for new writes
-            0x05 => Some(TypeTag::Branch),
-            0x06 => Some(TypeTag::Space),
-            0x10 => Some(TypeTag::Vector),
-            0x11 => Some(TypeTag::Json),
-            0x12 => Some(TypeTag::VectorConfig),
+            0x03 => Some(TypeTag::Branch),
+            0x04 => Some(TypeTag::Space),
+            0x05 => Some(TypeTag::Vector),
+            0x06 => Some(TypeTag::Json),
+            0x07 => Some(TypeTag::VectorConfig),
             _ => None,
         }
     }
@@ -833,12 +819,10 @@ mod tests {
     // ========================================
 
     #[test]
-    #[allow(deprecated)]
     fn test_typetag_ordering() {
         // TypeTag ordering must be stable for BTreeMap
         assert!(TypeTag::KV < TypeTag::Event);
-        assert!(TypeTag::Event < TypeTag::Trace);
-        assert!(TypeTag::Trace < TypeTag::Branch);
+        assert!(TypeTag::Event < TypeTag::Branch);
         assert!(TypeTag::Branch < TypeTag::Space);
         assert!(TypeTag::Space < TypeTag::Vector);
         assert!(TypeTag::Vector < TypeTag::Json);
@@ -846,54 +830,42 @@ mod tests {
         // Verify numeric values match spec
         assert_eq!(TypeTag::KV as u8, 0x01);
         assert_eq!(TypeTag::Event as u8, 0x02);
-        // 0x03 was formerly State (StateCell was removed)
-        // TypeTag::Trace (0x04) is deprecated but still exists for backwards compatibility
-        assert_eq!(TypeTag::Trace as u8, 0x04);
-        assert_eq!(TypeTag::Branch as u8, 0x05);
-        assert_eq!(TypeTag::Space as u8, 0x06);
-        assert_eq!(TypeTag::Vector as u8, 0x10);
-        assert_eq!(TypeTag::Json as u8, 0x11);
+        assert_eq!(TypeTag::Branch as u8, 0x03);
+        assert_eq!(TypeTag::Space as u8, 0x04);
+        assert_eq!(TypeTag::Vector as u8, 0x05);
+        assert_eq!(TypeTag::Json as u8, 0x06);
     }
 
     #[test]
-    #[allow(deprecated)]
     fn test_typetag_as_byte() {
         assert_eq!(TypeTag::KV.as_byte(), 0x01);
         assert_eq!(TypeTag::Event.as_byte(), 0x02);
-        // 0x03 was formerly State (StateCell was removed)
-        // TypeTag::Trace (0x04) is deprecated but still exists for backwards compatibility
-        assert_eq!(TypeTag::Trace.as_byte(), 0x04);
-        assert_eq!(TypeTag::Branch.as_byte(), 0x05);
-        assert_eq!(TypeTag::Space.as_byte(), 0x06);
-        assert_eq!(TypeTag::Vector.as_byte(), 0x10);
-        assert_eq!(TypeTag::Json.as_byte(), 0x11);
+        assert_eq!(TypeTag::Branch.as_byte(), 0x03);
+        assert_eq!(TypeTag::Space.as_byte(), 0x04);
+        assert_eq!(TypeTag::Vector.as_byte(), 0x05);
+        assert_eq!(TypeTag::Json.as_byte(), 0x06);
     }
 
     #[test]
-    #[allow(deprecated)]
     fn test_typetag_from_byte() {
         assert_eq!(TypeTag::from_byte(0x01), Some(TypeTag::KV));
         assert_eq!(TypeTag::from_byte(0x02), Some(TypeTag::Event));
-        // 0x03 was formerly State (StateCell was removed)
-        assert_eq!(TypeTag::from_byte(0x03), None);
-        // 0x04 still parses to Trace for backwards compatibility
-        assert_eq!(TypeTag::from_byte(0x04), Some(TypeTag::Trace));
-        assert_eq!(TypeTag::from_byte(0x05), Some(TypeTag::Branch));
-        assert_eq!(TypeTag::from_byte(0x06), Some(TypeTag::Space));
-        assert_eq!(TypeTag::from_byte(0x10), Some(TypeTag::Vector));
-        assert_eq!(TypeTag::from_byte(0x11), Some(TypeTag::Json));
+        assert_eq!(TypeTag::from_byte(0x03), Some(TypeTag::Branch));
+        assert_eq!(TypeTag::from_byte(0x04), Some(TypeTag::Space));
+        assert_eq!(TypeTag::from_byte(0x05), Some(TypeTag::Vector));
+        assert_eq!(TypeTag::from_byte(0x06), Some(TypeTag::Json));
+        assert_eq!(TypeTag::from_byte(0x07), Some(TypeTag::VectorConfig));
         assert_eq!(TypeTag::from_byte(0x00), None);
+        assert_eq!(TypeTag::from_byte(0x08), None);
         assert_eq!(TypeTag::from_byte(0xFF), None);
     }
 
     #[test]
-    #[allow(deprecated)]
     fn test_typetag_no_collisions() {
         // Ensure all TypeTag values are unique
         let tags = [
             TypeTag::KV,
             TypeTag::Event,
-            TypeTag::Trace,
             TypeTag::Branch,
             TypeTag::Space,
             TypeTag::Vector,
@@ -906,13 +878,11 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn test_typetag_serialization() {
         // Test JSON serialization roundtrip for all variants
         let tags = vec![
             TypeTag::KV,
             TypeTag::Event,
-            TypeTag::Trace,
             TypeTag::Branch,
             TypeTag::Space,
             TypeTag::Vector,
@@ -933,10 +903,9 @@ mod tests {
 
     #[test]
     fn test_typetag_from_byte_gap_values_return_none() {
-        // Bytes between defined variants must return None (on-disk format safety)
+        // Bytes outside defined variants must return None (on-disk format safety)
         for byte in [
-            0x00, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x13, 0x14, 0x20, 0x80,
-            0xFE, 0xFF,
+            0x00, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x20, 0x80, 0xFE, 0xFF,
         ] {
             assert_eq!(
                 TypeTag::from_byte(byte),
@@ -949,19 +918,17 @@ mod tests {
 
     #[test]
     fn test_typetag_vectorconfig_byte_roundtrip() {
-        // VectorConfig (0x12) was added later - verify it's properly wired
-        assert_eq!(TypeTag::VectorConfig.as_byte(), 0x12);
-        assert_eq!(TypeTag::from_byte(0x12), Some(TypeTag::VectorConfig));
+        // VectorConfig (0x07) - verify it's properly wired
+        assert_eq!(TypeTag::VectorConfig.as_byte(), 0x07);
+        assert_eq!(TypeTag::from_byte(0x07), Some(TypeTag::VectorConfig));
     }
 
     #[test]
     fn test_typetag_as_byte_from_byte_roundtrip_exhaustive() {
         // Every valid TypeTag must roundtrip through as_byte/from_byte
-        #[allow(deprecated)]
         let all_tags = [
             TypeTag::KV,
             TypeTag::Event,
-            TypeTag::Trace,
             TypeTag::Branch,
             TypeTag::Space,
             TypeTag::Vector,
@@ -984,11 +951,9 @@ mod tests {
     #[test]
     fn test_typetag_ordering_matches_byte_values() {
         // BTreeMap ordering must match the numeric byte values
-        #[allow(deprecated)]
         let tags_in_order = [
             TypeTag::KV,
             TypeTag::Event,
-            TypeTag::Trace,
             TypeTag::Branch,
             TypeTag::Space,
             TypeTag::Vector,
