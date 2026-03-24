@@ -51,6 +51,47 @@ const KNOWN_KEYS: &[&str] = &[
     "model_name",
     "model_api_key",
     "model_timeout_ms",
+    // Storage parameters (hot-swappable at runtime)
+    "max_branches",
+    "max_write_buffer_entries",
+    "max_versions_per_key",
+    "block_cache_size",
+    "write_buffer_size",
+    "max_immutable_memtables",
+    "l0_slowdown_writes_trigger",
+    "l0_stop_writes_trigger",
+    "target_file_size",
+    "level_base_bytes",
+    "data_block_size",
+    "bloom_bits_per_key",
+    "compaction_rate_limit",
+    // Open-time only (rejected at runtime with clear error)
+    "background_threads",
+    "allow_lossy_recovery",
+];
+
+/// Keys that can only be set at database open time.
+const OPEN_TIME_ONLY_KEYS: &[&str] = &["background_threads", "allow_lossy_recovery"];
+
+/// Storage keys that accept usize values (≥ 0).
+const STORAGE_USIZE_KEYS: &[&str] = &[
+    "max_branches",
+    "max_write_buffer_entries",
+    "max_versions_per_key",
+    "block_cache_size",
+    "write_buffer_size",
+    "max_immutable_memtables",
+    "l0_slowdown_writes_trigger",
+    "l0_stop_writes_trigger",
+    "data_block_size",
+    "bloom_bits_per_key",
+];
+
+/// Storage keys that accept u64 values (≥ 0).
+const STORAGE_U64_KEYS: &[&str] = &[
+    "target_file_size",
+    "level_base_bytes",
+    "compaction_rate_limit",
 ];
 
 /// Handle ConfigureSet command: set a named configuration key.
@@ -63,6 +104,17 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
         return Err(Error::InvalidInput {
             reason: format!("Unknown configuration key: {:?}", key.trim()),
             hint,
+        });
+    }
+
+    // Reject open-time-only keys
+    if OPEN_TIME_ONLY_KEYS.contains(&key_lower.as_str()) {
+        return Err(Error::InvalidInput {
+            reason: format!(
+                "{:?} can only be set at database open time (in strata.toml), not at runtime",
+                key_lower
+            ),
+            hint: None,
         });
     }
 
@@ -122,16 +174,23 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
         );
     }
 
-    // Validate durability
+    // Validate durability (only standard/always at runtime; cache is open-time only)
     if key_lower == "durability" {
         let v = value.trim().to_ascii_lowercase();
-        let valid = ["standard", "always", "cache"];
+        let valid = ["standard", "always"];
         if !valid.contains(&v.as_str()) {
-            return Err(Error::InvalidInput {
-                reason: format!(
-                    "Invalid durability mode: {:?}. Valid values: standard, always, cache",
+            let reason = if v == "cache" {
+                "Cannot switch to cache mode at runtime. Cache mode has no WAL \
+                 infrastructure and must be selected at open time via Database::cache()."
+                    .to_string()
+            } else {
+                format!(
+                    "Invalid durability mode: {:?}. Valid values: standard, always",
                     value.trim()
-                ),
+                )
+            };
+            return Err(Error::InvalidInput {
+                reason,
                 hint: None,
             });
         }
@@ -213,18 +272,135 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
         })?;
     }
 
-    // Durability uses persist_config_deferred (allows changing durability)
+    // Validate storage usize keys
+    if STORAGE_USIZE_KEYS.contains(&key_lower.as_str()) {
+        let _: usize = value.trim().parse().map_err(|_| Error::InvalidInput {
+            reason: format!(
+                "Invalid {} value: {:?}. Expected a non-negative integer",
+                key_lower,
+                value.trim()
+            ),
+            hint: None,
+        })?;
+    }
+
+    // Validate storage u64 keys
+    if STORAGE_U64_KEYS.contains(&key_lower.as_str()) {
+        let _: u64 = value.trim().parse().map_err(|_| Error::InvalidInput {
+            reason: format!(
+                "Invalid {} value: {:?}. Expected a non-negative integer",
+                key_lower,
+                value.trim()
+            ),
+            hint: None,
+        })?;
+    }
+
+    // Durability: update config + apply live to WAL writer
     if key_lower == "durability" {
         let v = value.trim().to_ascii_lowercase();
         let effective = v.clone();
-        p.db.persist_config_deferred(|cfg| {
+        // Parse the target mode
+        let mode = match v.as_str() {
+            "standard" => crate::DurabilityMode::standard_default(),
+            "always" => crate::DurabilityMode::Always,
+            _ => unreachable!(), // validated above
+        };
+        p.db.update_config(|cfg| {
             cfg.durability = v;
         })
         .map_err(crate::Error::from)?;
-        tracing::info!(
-            target: "strata::config",
-            "durability changed; takes effect on next restart"
-        );
+        // Apply live to the WAL writer (no-op on ephemeral/cache databases)
+        if let Err(e) = p.db.set_durability_mode(mode) {
+            // Ephemeral databases have no WAL — durability change is config-only
+            tracing::debug!(target: "strata::config", error = %e, "Durability mode not applied to WAL (ephemeral database)");
+        }
+        return Ok(Output::ConfigSetResult {
+            key: key_lower,
+            new_value: effective,
+        });
+    }
+
+    // Storage parameter keys — route through update_config (which applies live)
+    if STORAGE_USIZE_KEYS.contains(&key_lower.as_str())
+        || STORAGE_U64_KEYS.contains(&key_lower.as_str())
+    {
+        let effective = value.trim().to_string();
+        p.db.update_config(|cfg| match key_lower.as_str() {
+            "max_branches" => {
+                cfg.storage.max_branches = value.trim().parse().unwrap_or(cfg.storage.max_branches)
+            }
+            "max_write_buffer_entries" => {
+                cfg.storage.max_write_buffer_entries = value
+                    .trim()
+                    .parse()
+                    .unwrap_or(cfg.storage.max_write_buffer_entries)
+            }
+            "max_versions_per_key" => {
+                cfg.storage.max_versions_per_key = value
+                    .trim()
+                    .parse()
+                    .unwrap_or(cfg.storage.max_versions_per_key)
+            }
+            "block_cache_size" => {
+                cfg.storage.block_cache_size =
+                    value.trim().parse().unwrap_or(cfg.storage.block_cache_size)
+            }
+            "write_buffer_size" => {
+                cfg.storage.write_buffer_size = value
+                    .trim()
+                    .parse()
+                    .unwrap_or(cfg.storage.write_buffer_size)
+            }
+            "max_immutable_memtables" => {
+                cfg.storage.max_immutable_memtables = value
+                    .trim()
+                    .parse()
+                    .unwrap_or(cfg.storage.max_immutable_memtables)
+            }
+            "l0_slowdown_writes_trigger" => {
+                cfg.storage.l0_slowdown_writes_trigger = value
+                    .trim()
+                    .parse()
+                    .unwrap_or(cfg.storage.l0_slowdown_writes_trigger)
+            }
+            "l0_stop_writes_trigger" => {
+                cfg.storage.l0_stop_writes_trigger = value
+                    .trim()
+                    .parse()
+                    .unwrap_or(cfg.storage.l0_stop_writes_trigger)
+            }
+            "target_file_size" => {
+                cfg.storage.target_file_size = value
+                    .trim()
+                    .parse()
+                    .unwrap_or(cfg.storage.target_file_size)
+            }
+            "level_base_bytes" => {
+                cfg.storage.level_base_bytes = value
+                    .trim()
+                    .parse()
+                    .unwrap_or(cfg.storage.level_base_bytes)
+            }
+            "data_block_size" => {
+                cfg.storage.data_block_size =
+                    value.trim().parse().unwrap_or(cfg.storage.data_block_size)
+            }
+            "bloom_bits_per_key" => {
+                cfg.storage.bloom_bits_per_key = value
+                    .trim()
+                    .parse()
+                    .unwrap_or(cfg.storage.bloom_bits_per_key)
+            }
+            "compaction_rate_limit" => {
+                cfg.storage.compaction_rate_limit = value
+                    .trim()
+                    .parse()
+                    .unwrap_or(cfg.storage.compaction_rate_limit)
+            }
+            _ => unreachable!(),
+        })
+        .map_err(crate::Error::from)?;
         return Ok(Output::ConfigSetResult {
             key: key_lower,
             new_value: effective,
@@ -361,6 +537,25 @@ pub fn configure_get_key(p: &Arc<Primitives>, key: String) -> Result<Output> {
             .as_ref()
             .and_then(|m| m.api_key.as_deref().map(mask_api_key)),
         "model_timeout_ms" => cfg.model.as_ref().map(|m| m.timeout_ms.to_string()),
+        // Storage parameters
+        "max_branches" => Some(cfg.storage.max_branches.to_string()),
+        "max_write_buffer_entries" => Some(cfg.storage.max_write_buffer_entries.to_string()),
+        "max_versions_per_key" => Some(cfg.storage.max_versions_per_key.to_string()),
+        "block_cache_size" => Some(cfg.storage.block_cache_size.to_string()),
+        "write_buffer_size" => Some(cfg.storage.write_buffer_size.to_string()),
+        "max_immutable_memtables" => Some(cfg.storage.max_immutable_memtables.to_string()),
+        "l0_slowdown_writes_trigger" => {
+            Some(cfg.storage.l0_slowdown_writes_trigger.to_string())
+        }
+        "l0_stop_writes_trigger" => Some(cfg.storage.l0_stop_writes_trigger.to_string()),
+        "target_file_size" => Some(cfg.storage.target_file_size.to_string()),
+        "level_base_bytes" => Some(cfg.storage.level_base_bytes.to_string()),
+        "data_block_size" => Some(cfg.storage.data_block_size.to_string()),
+        "bloom_bits_per_key" => Some(cfg.storage.bloom_bits_per_key.to_string()),
+        "compaction_rate_limit" => Some(cfg.storage.compaction_rate_limit.to_string()),
+        // Open-time only keys still readable
+        "background_threads" => Some(cfg.storage.background_threads.to_string()),
+        "allow_lossy_recovery" => Some(cfg.allow_lossy_recovery.to_string()),
         _ => unreachable!(),
     };
 

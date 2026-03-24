@@ -285,7 +285,7 @@ pub struct SegmentedStore {
     /// Directory for segment files.  `None` = ephemeral (memtable-only).
     segments_dir: Option<PathBuf>,
     /// Memtable rotation threshold in bytes.  0 = disabled.
-    write_buffer_size: u64,
+    write_buffer_size: AtomicU64,
     /// Monotonic counter for memtable IDs and segment file names.
     next_segment_id: AtomicU64,
     /// Memory pressure tracking.
@@ -331,7 +331,7 @@ impl SegmentedStore {
             branches: DashMap::new(),
             version: AtomicU64::new(0),
             segments_dir: None,
-            write_buffer_size: 0,
+            write_buffer_size: AtomicU64::new(0),
             next_segment_id: AtomicU64::new(1),
             pressure: MemoryPressure::disabled(),
             bulk_load_branches: DashMap::new(),
@@ -360,7 +360,7 @@ impl SegmentedStore {
             branches: DashMap::new(),
             version: AtomicU64::new(0),
             segments_dir: Some(segments_dir),
-            write_buffer_size: write_buffer_size as u64,
+            write_buffer_size: AtomicU64::new(write_buffer_size as u64),
             next_segment_id: AtomicU64::new(1),
             pressure: MemoryPressure::disabled(),
             bulk_load_branches: DashMap::new(),
@@ -389,7 +389,7 @@ impl SegmentedStore {
             branches: DashMap::new(),
             version: AtomicU64::new(0),
             segments_dir: Some(segments_dir),
-            write_buffer_size: write_buffer_size as u64,
+            write_buffer_size: AtomicU64::new(write_buffer_size as u64),
             next_segment_id: AtomicU64::new(1),
             pressure,
             bulk_load_branches: DashMap::new(),
@@ -1328,6 +1328,14 @@ impl SegmentedStore {
     /// before triggering compaction so that active snapshots are not violated.
     pub fn set_snapshot_floor(&self, floor: u64) {
         self.snapshot_floor.store(floor, Ordering::Relaxed);
+    }
+
+    /// Set the memtable write buffer size in bytes.
+    ///
+    /// Changes take effect on the next memtable rotation (the active memtable
+    /// continues at its current size; new memtables use the updated threshold).
+    pub fn set_write_buffer_size(&self, bytes: usize) {
+        self.write_buffer_size.store(bytes as u64, Ordering::Relaxed);
     }
 
     /// Set maximum frozen memtables per branch before write stalling (0 = unlimited).
@@ -2398,8 +2406,9 @@ impl SegmentedStore {
     /// Called after every write within the DashMap entry guard.
     #[inline]
     fn maybe_rotate_branch(&self, branch_id: BranchId, branch: &mut BranchState) {
-        if self.write_buffer_size > 0
-            && branch.active.approx_bytes() >= self.write_buffer_size
+        let wbs = self.write_buffer_size.load(Ordering::Relaxed);
+        if wbs > 0
+            && branch.active.approx_bytes() >= wbs
             && !self.bulk_load_branches.contains_key(&branch_id)
         {
             // Write stalling: skip rotation if too many frozen memtables.

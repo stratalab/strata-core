@@ -773,7 +773,7 @@ impl Database {
         let bg_threads = cfg.storage.background_threads.max(1);
 
         // Create coordinator starting at version 1 (no recovery needed), with write buffer limit
-        let mut coordinator = TransactionCoordinator::new(1);
+        let coordinator = TransactionCoordinator::new(1);
         coordinator.set_max_write_buffer_entries(cfg.storage.max_write_buffer_entries);
 
         let db = Arc::new(Self {
@@ -993,41 +993,114 @@ impl Database {
     ///
     /// The closure receives a mutable reference to the config. After the
     /// closure returns, the updated config is written to `strata.toml` for
-    /// disk-backed databases. Changing the durability mode at runtime is
-    /// rejected.
+    /// disk-backed databases, and storage/coordinator/cache parameters are
+    /// applied to the live database immediately.
     pub fn update_config<F: FnOnce(&mut StrataConfig)>(&self, f: F) -> StrataResult<()> {
         let mut guard = self.config.write();
-        let old_durability = guard.durability.clone();
         f(&mut guard);
-        if guard.durability != old_durability {
-            guard.durability = old_durability;
-            return Err(StrataError::invalid_input(
-                "Cannot change durability mode at runtime. \
-                 Set durability before opening the database."
-                    .to_string(),
-            ));
-        }
         // Persist to strata.toml for disk-backed databases
         if self.persistence_mode == PersistenceMode::Disk && !self.data_dir.as_os_str().is_empty() {
             let config_path = self.data_dir.join(config::CONFIG_FILE_NAME);
             guard.write_to_file(&config_path)?;
         }
+        // Apply storage/coordinator/cache parameters to the live database
+        self.apply_storage_config_inner(&guard);
         Ok(())
     }
 
-    /// Apply a mutation to the configuration and persist without rejecting
-    /// durability changes.
+    /// Push storage-layer configuration to the live database.
     ///
-    /// Unlike [`update_config`](Self::update_config), this method allows the
-    /// durability field to be changed. The new value is persisted to
-    /// `strata.toml` but only takes effect on the next database open.
-    pub fn persist_config_deferred<F: FnOnce(&mut StrataConfig)>(&self, f: F) -> StrataResult<()> {
-        let mut guard = self.config.write();
-        f(&mut guard);
-        if self.persistence_mode == PersistenceMode::Disk && !self.data_dir.as_os_str().is_empty() {
-            let config_path = self.data_dir.join(config::CONFIG_FILE_NAME);
-            guard.write_to_file(&config_path)?;
+    /// Called after every `update_config()` to make storage, coordinator,
+    /// and block cache parameters take effect immediately.
+    fn apply_storage_config_inner(&self, cfg: &StrataConfig) {
+        self.storage.set_max_branches(cfg.storage.max_branches);
+        self.storage
+            .set_max_versions_per_key(cfg.storage.max_versions_per_key);
+        self.storage
+            .set_max_immutable_memtables(cfg.storage.max_immutable_memtables);
+        self.storage
+            .set_write_buffer_size(cfg.storage.write_buffer_size);
+        self.storage
+            .set_target_file_size(cfg.storage.target_file_size);
+        self.storage
+            .set_level_base_bytes(cfg.storage.level_base_bytes);
+        self.storage
+            .set_data_block_size(cfg.storage.data_block_size);
+        self.storage
+            .set_bloom_bits_per_key(cfg.storage.bloom_bits_per_key);
+        self.storage
+            .set_compaction_rate_limit(cfg.storage.compaction_rate_limit);
+
+        self.coordinator
+            .set_max_write_buffer_entries(cfg.storage.max_write_buffer_entries);
+
+        // Block cache
+        use strata_storage::block_cache;
+        let cache_bytes = if cfg.storage.block_cache_size > 0 {
+            cfg.storage.block_cache_size
+        } else {
+            block_cache::auto_detect_capacity()
+        };
+        block_cache::set_global_capacity(cache_bytes);
+    }
+
+    /// Switch the durability mode at runtime (Standard ↔ Always only).
+    ///
+    /// Updates the WAL writer's fsync policy. If switching to Standard mode
+    /// and no background flush thread exists, one is spawned.
+    pub fn set_durability_mode(&self, mode: DurabilityMode) -> StrataResult<()> {
+        let wal = self.wal_writer.as_ref().ok_or_else(|| {
+            StrataError::invalid_input(
+                "Cannot change durability mode on an ephemeral (cache) database".to_string(),
+            )
+        })?;
+
+        // Apply to the WAL writer
+        wal.lock()
+            .set_durability_mode(mode)
+            .map_err(|e| StrataError::invalid_input(e.to_string()))?;
+
+        // If switching to Standard mode, ensure the background flush thread
+        // is running. When the database was opened in Always mode, no flush
+        // thread was started.
+        if let DurabilityMode::Standard { interval_ms, .. } = mode {
+            let mut handle_guard = self.flush_handle.lock();
+            if handle_guard.is_none() {
+                let wal_clone = Arc::clone(wal);
+                let shutdown = Arc::clone(&self.flush_shutdown);
+                let interval = std::time::Duration::from_millis(interval_ms);
+                // Reset the shutdown flag in case a previous thread was stopped
+                self.flush_shutdown.store(false, Ordering::SeqCst);
+                let handle = std::thread::Builder::new()
+                    .name("strata-wal-flush".to_string())
+                    .spawn(move || {
+                        while !shutdown.load(Ordering::Relaxed) {
+                            std::thread::sleep(interval);
+                            if shutdown.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            let mut wal = wal_clone.lock();
+                            if let Err(e) = wal.sync_if_overdue() {
+                                tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
+                            }
+                            wal.flush_active_meta();
+                        }
+                        // Final sync
+                        let mut wal = wal_clone.lock();
+                        if let Err(e) = wal.flush() {
+                            tracing::error!(target: "strata::wal", error = %e, "Final WAL flush failed during shutdown");
+                        }
+                    })
+                    .map_err(|e| {
+                        StrataError::internal(format!(
+                            "failed to spawn WAL flush thread: {}",
+                            e
+                        ))
+                    })?;
+                *handle_guard = Some(handle);
+            }
         }
+
         Ok(())
     }
 

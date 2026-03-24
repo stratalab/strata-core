@@ -840,7 +840,8 @@ fn configure_get_durability_default_is_standard() {
 fn configure_set_durability_valid_modes() {
     let executor = create_test_executor();
 
-    for mode in ["standard", "always", "cache"] {
+    // Only standard and always are valid at runtime; cache is open-time only.
+    for mode in ["standard", "always"] {
         let result = executor.execute(Command::ConfigureSet {
             key: "durability".into(),
             value: mode.into(),
@@ -864,6 +865,23 @@ fn configure_set_durability_valid_modes() {
             mode
         );
     }
+}
+
+#[test]
+fn configure_set_durability_cache_rejected() {
+    let executor = create_test_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "durability".into(),
+        value: "cache".into(),
+    });
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("Cannot switch to cache mode"),
+        "Error: {}",
+        msg
+    );
 }
 
 #[test]
@@ -1396,7 +1414,7 @@ fn unknown_key_error_lists_all_new_keys() {
     }
     // Keys beyond the 10-candidate display cap are summarised as "and N more"
     assert!(
-        msg.contains("and 5 more"),
+        msg.contains("and 20 more"),
         "Error should indicate truncated keys: {}",
         msg
     );
@@ -1699,4 +1717,130 @@ fn configure_set_result_model_config_keys() {
         }
         other => panic!("Expected ConfigSetResult, got {:?}", other),
     }
+}
+
+// =============================================================================
+// Storage parameter hot-swap (#1543)
+// =============================================================================
+
+#[test]
+fn configure_set_storage_params_round_trip() {
+    let executor = create_test_executor();
+
+    let cases: &[(&str, &str)] = &[
+        ("max_branches", "2048"),
+        ("max_write_buffer_entries", "1000000"),
+        ("max_versions_per_key", "5"),
+        ("block_cache_size", "536870912"),
+        ("write_buffer_size", "67108864"),
+        ("max_immutable_memtables", "8"),
+        ("l0_slowdown_writes_trigger", "20"),
+        ("l0_stop_writes_trigger", "36"),
+        ("target_file_size", "33554432"),
+        ("level_base_bytes", "134217728"),
+        ("data_block_size", "8192"),
+        ("bloom_bits_per_key", "15"),
+        ("compaction_rate_limit", "10485760"),
+    ];
+
+    for (key, value) in cases {
+        let set_result = executor
+            .execute(Command::ConfigureSet {
+                key: (*key).into(),
+                value: (*value).into(),
+            })
+            .unwrap_or_else(|e| panic!("config set {} = {} failed: {:?}", key, value, e));
+
+        match &set_result {
+            Output::ConfigSetResult { new_value, .. } => {
+                assert_eq!(
+                    new_value, value,
+                    "ConfigSetResult for {} should echo the value",
+                    key
+                );
+            }
+            other => panic!("Expected ConfigSetResult for {}, got {:?}", key, other),
+        }
+
+        let get_result = executor
+            .execute(Command::ConfigureGetKey {
+                key: (*key).into(),
+            })
+            .unwrap();
+        assert_eq!(
+            get_result,
+            Output::ConfigValue(Some((*value).into())),
+            "config get {} should return the set value",
+            key
+        );
+    }
+}
+
+#[test]
+fn configure_set_storage_param_invalid_value_rejected() {
+    let executor = create_test_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "max_branches".into(),
+        value: "not-a-number".into(),
+    });
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("non-negative integer"), "Error: {}", msg);
+}
+
+#[test]
+fn configure_set_open_time_only_keys_rejected() {
+    let executor = create_test_executor();
+
+    for key in ["background_threads", "allow_lossy_recovery"] {
+        let result = executor.execute(Command::ConfigureSet {
+            key: key.into(),
+            value: "4".into(),
+        });
+        assert!(
+            result.is_err(),
+            "{} should be rejected at runtime",
+            key
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("open time"),
+            "{} error should mention open time: {}",
+            key,
+            msg
+        );
+    }
+}
+
+#[test]
+fn configure_get_open_time_only_keys_readable() {
+    let executor = create_test_executor();
+
+    // background_threads and allow_lossy_recovery should be readable even though not settable
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "background_threads".into(),
+        })
+        .unwrap();
+    match result {
+        Output::ConfigValue(Some(v)) => {
+            let _: usize = v.parse().expect("background_threads should parse as usize");
+        }
+        other => panic!(
+            "Expected ConfigValue(Some(_)) for background_threads, got {:?}",
+            other
+        ),
+    }
+
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "allow_lossy_recovery".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        result,
+        Output::ConfigValue(Some("false".into())),
+        "allow_lossy_recovery default should be false"
+    );
 }
