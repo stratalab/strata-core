@@ -11,6 +11,7 @@
 
 use crate::key_encoding::InternalKey;
 use crate::memtable::MemtableEntry;
+use strata_core::types::TypeTag;
 
 /// Pruning iterator for segment compaction.
 ///
@@ -115,6 +116,14 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for CompactionIt
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let (ik, entry) = self.inner.next()?;
+
+            // Event entries are exempt from all pruning (#1729).
+            // EventLog relies on a SHA-256 hash chain for tamper evidence;
+            // dropping any event breaks chain verification.
+            if ik.type_tag_byte() == TypeTag::Event.as_byte() {
+                return Some((ik, entry));
+            }
+
             let prefix = ik.typed_key_prefix().to_vec();
 
             // New logical key — reset tracking
@@ -953,5 +962,100 @@ mod tests {
         assert_eq!(candidates[0].segment_indices.len(), 4);
         assert_eq!(candidates[1].tier, 1);
         assert_eq!(candidates[1].segment_indices.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #1729: EventLog entries must be exempt from compaction pruning
+    // -----------------------------------------------------------------------
+
+    /// Create a Key with TypeTag::Event (sequence-based event key).
+    fn event_key(sequence: u64) -> Key {
+        let ns = Arc::new(Namespace::new(branch(), "default".to_string()));
+        Key::new(ns, TypeTag::Event, sequence.to_be_bytes().to_vec())
+    }
+
+    #[test]
+    fn test_issue_1729_event_entries_exempt_from_version_pruning() {
+        // Event entries at commit_ids 1, 2, 3 with prune_floor=10.
+        // Normal KV entries below floor would be pruned to keep only the
+        // newest floor entry. But Event entries must ALL survive because
+        // dropping any event breaks the hash chain.
+        let items = vec![
+            (InternalKey::encode(&event_key(0), 1), entry(100)),
+            (InternalKey::encode(&event_key(1), 2), entry(200)),
+            (InternalKey::encode(&event_key(2), 3), entry(300)),
+        ];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 10).collect();
+        assert_eq!(
+            result.len(),
+            3,
+            "all Event entries must survive compaction regardless of prune_floor"
+        );
+    }
+
+    #[test]
+    fn test_issue_1729_event_entries_exempt_from_max_versions() {
+        // Event metadata key updated multiple times (same key, different versions).
+        // max_versions=1 would normally keep only the newest. But Event entries
+        // must be exempt from max_versions pruning.
+        let meta_key = {
+            let ns = Arc::new(Namespace::new(branch(), "default".to_string()));
+            Key::new(ns, TypeTag::Event, b"__meta__".to_vec())
+        };
+        let items = vec![
+            (InternalKey::encode(&meta_key, 10), entry(100)),
+            (InternalKey::encode(&meta_key, 8), entry(80)),
+            (InternalKey::encode(&meta_key, 5), entry(50)),
+        ];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 0)
+            .with_max_versions(1)
+            .collect();
+        assert_eq!(
+            result.len(),
+            3,
+            "Event entries must be exempt from max_versions pruning"
+        );
+    }
+
+    #[test]
+    fn test_issue_1729_event_entries_exempt_from_ttl_expiration() {
+        // An expired Event entry below prune_floor — normally dropped by
+        // drop_expired. But Event entries must never be dropped by TTL.
+        let items = vec![(InternalKey::encode(&event_key(0), 5), expired_entry(100))];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 10)
+            .with_drop_expired(true)
+            .collect();
+        assert_eq!(
+            result.len(),
+            1,
+            "expired Event entry must NOT be dropped — hash chain integrity"
+        );
+    }
+
+    #[test]
+    fn test_issue_1729_kv_entries_still_pruned_normally() {
+        // Verify that KV entries are still subject to normal pruning rules
+        // when Event entries are exempt. Mix of KV and Event entries.
+        let kv = key("user:alice");
+        let ev = event_key(0);
+        let items = vec![
+            // KV entry below floor — should be kept as floor entry
+            (InternalKey::encode(&kv, 3), entry(30)),
+            (InternalKey::encode(&kv, 1), entry(10)),
+            // Event entry below floor — must be kept (exempt)
+            (InternalKey::encode(&ev, 2), entry(200)),
+        ];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 10).collect();
+        // KV: keeps only floor entry (v3), prunes v1
+        // Event: keeps v2 (exempt from pruning)
+        assert_eq!(result.len(), 2, "KV pruned normally, Event exempt");
+        // The KV floor entry
+        assert_eq!(result[0].0.commit_id(), 3);
+        // The Event entry
+        assert_eq!(result[1].0.commit_id(), 2);
     }
 }

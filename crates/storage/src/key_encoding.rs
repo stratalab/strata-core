@@ -188,6 +188,21 @@ impl InternalKey {
         &self.0[..self.0.len() - 8]
     }
 
+    /// Extract the TypeTag byte from the encoded key.
+    ///
+    /// Layout: `branch_id (16) | space (null-terminated) | type_tag (1) | ...`
+    /// Finds the first NUL after offset 16 (end of space) and returns the
+    /// byte immediately after it.
+    pub fn type_tag_byte(&self) -> u8 {
+        // Skip 16-byte branch_id, then find the NUL that terminates the space name.
+        let after_branch = &self.0[16..];
+        let nul_pos = after_branch
+            .iter()
+            .position(|&b| b == 0x00)
+            .expect("InternalKey missing space NUL terminator");
+        after_branch[nul_pos + 1]
+    }
+
     /// Extract the commit_id from the trailing 8 bytes.
     pub fn commit_id(&self) -> u64 {
         let len = self.0.len();
