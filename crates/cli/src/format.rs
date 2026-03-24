@@ -375,6 +375,7 @@ fn format_raw(output: &Output) -> String {
         Output::Described(_) => serde_json::to_string_pretty(output).unwrap_or_default(),
         Output::Pong { version } => version.clone(),
         Output::Health(report) => serde_json::to_string_pretty(report).unwrap_or_default(),
+        Output::Metrics(_) => serde_json::to_string_pretty(output).unwrap_or_default(),
         Output::SearchResults { hits, .. } => hits
             .iter()
             .map(|h| format!("{}\t{}\t{}", h.entity, h.primitive, h.score))
@@ -915,6 +916,60 @@ fn format_human(output: &Output) -> String {
             for sub in &report.subsystems {
                 let msg = sub.message.as_deref().unwrap_or("");
                 lines.push(format!("  {:<14} {} ({})", sub.name, sub.status, msg));
+            }
+            lines.join("\n")
+        }
+        Output::Metrics(m) => {
+            let mut lines = Vec::new();
+            lines.push(format!("uptime: {}s", m.uptime_secs));
+            lines.push(String::new());
+            lines.push("transactions".to_string());
+            lines.push(format!("  active:      {}", m.transactions.active_count));
+            lines.push(format!("  committed:   {}", m.transactions.total_committed));
+            lines.push(format!("  aborted:     {}", m.transactions.total_aborted));
+            lines.push(format!(
+                "  commit_rate: {:.1}%",
+                m.transactions.commit_rate * 100.0
+            ));
+            lines.push(String::new());
+            lines.push("wal".to_string());
+            match &m.wal_counters {
+                Some(c) => {
+                    lines.push(format!("  appends:     {}", c.wal_appends));
+                    lines.push(format!("  syncs:       {}", c.sync_calls));
+                    lines.push(format!("  bytes:       {}", c.bytes_written));
+                }
+                None => lines.push("  (ephemeral)".to_string()),
+            }
+            lines.push(String::new());
+            lines.push("scheduler".to_string());
+            lines.push(format!("  queued:      {}", m.scheduler.queue_depth));
+            lines.push(format!("  active:      {}", m.scheduler.active_tasks));
+            lines.push(format!("  completed:   {}", m.scheduler.tasks_completed));
+            lines.push(format!("  workers:     {}", m.scheduler.worker_count));
+            lines.push(String::new());
+            lines.push("storage".to_string());
+            lines.push(format!("  branches:    {}", m.storage.total_branches));
+            lines.push(format!("  entries:     {}", m.storage.total_entries));
+            lines.push(format!("  memory:      {} bytes", m.storage.estimated_bytes));
+            lines.push(String::new());
+            lines.push("cache".to_string());
+            lines.push(format!("  hits:        {}", m.cache.hits));
+            lines.push(format!("  misses:      {}", m.cache.misses));
+            lines.push(format!("  hit_ratio:   {:.1}%", m.cache.hit_ratio * 100.0));
+            lines.push(format!(
+                "  size:        {} / {} bytes",
+                m.cache.size_bytes, m.cache.capacity_bytes
+            ));
+            lines.push(String::new());
+            lines.push("disk".to_string());
+            lines.push(format!("  wal:         {} bytes", m.disk_usage.wal.total_bytes));
+            lines.push(format!("  snapshots:   {} bytes", m.disk_usage.snapshot_bytes));
+            match m.available_disk_bytes {
+                Some(avail) => {
+                    lines.push(format!("  available:   {} MB", avail / (1024 * 1024)))
+                }
+                None => lines.push("  available:   (ephemeral)".to_string()),
             }
             lines.join("\n")
         }

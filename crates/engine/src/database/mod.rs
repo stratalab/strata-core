@@ -153,12 +153,70 @@ impl std::fmt::Display for SubsystemStatus {
 // ============================================================================
 
 /// Database disk usage summary.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DatabaseDiskUsage {
     /// WAL directory usage.
     pub wal: strata_durability::WalDiskUsage,
     /// Snapshot directory usage in bytes.
     pub snapshot_bytes: u64,
+}
+
+// ============================================================================
+// Unified Metrics
+// ============================================================================
+
+/// Unified database metrics snapshot from `Database::metrics()`.
+///
+/// Aggregates all subsystem metrics. The health check (`Database::health()`)
+/// consumes this internally rather than poking each subsystem directly.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SystemMetrics {
+    /// Seconds since the database was opened.
+    pub uptime_secs: u64,
+    /// Transaction metrics.
+    pub transactions: crate::coordinator::TransactionMetrics,
+    /// WAL counters (None for ephemeral databases).
+    pub wal_counters: Option<strata_durability::WalCounters>,
+    /// WAL disk usage (None for ephemeral databases).
+    pub wal_disk_usage: Option<strata_durability::WalDiskUsage>,
+    /// Background scheduler metrics.
+    pub scheduler: crate::background::SchedulerStats,
+    /// Storage memory usage summary.
+    pub storage: StorageMetricsSummary,
+    /// Block cache performance metrics.
+    pub cache: CacheMetrics,
+    /// Database disk usage (WAL + snapshots).
+    pub disk_usage: DatabaseDiskUsage,
+    /// Available disk space in bytes (None for ephemeral databases).
+    pub available_disk_bytes: Option<u64>,
+}
+
+/// Summary of storage memory usage (excludes per-branch detail).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StorageMetricsSummary {
+    /// Total number of branches.
+    pub total_branches: usize,
+    /// Total entries across all branches.
+    pub total_entries: usize,
+    /// Estimated total memory usage in bytes.
+    pub estimated_bytes: usize,
+}
+
+/// Block cache performance metrics.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CacheMetrics {
+    /// Number of cache hits.
+    pub hits: u64,
+    /// Number of cache misses.
+    pub misses: u64,
+    /// Current number of cached blocks.
+    pub entries: usize,
+    /// Current total size of cached data in bytes.
+    pub size_bytes: usize,
+    /// Maximum capacity in bytes.
+    pub capacity_bytes: usize,
+    /// Hit ratio (0.0 to 1.0).
+    pub hit_ratio: f64,
 }
 
 /// Sum file sizes in a directory (non-recursive, best-effort).
@@ -994,44 +1052,106 @@ impl Database {
         self.storage.memory_stats().total_entries as u64
     }
 
+    /// Collect a unified snapshot of all database metrics.
+    ///
+    /// This is the single aggregation point for all subsystem metrics.
+    /// The health check (`health()`) calls this internally.
+    pub fn metrics(&self) -> SystemMetrics {
+        let transactions = self.coordinator.metrics();
+
+        let wal_counters = self.durability_counters();
+        let wal_disk_usage = self
+            .wal_writer
+            .as_ref()
+            .map(|w| w.lock().wal_disk_usage());
+
+        let scheduler = self.scheduler.stats();
+
+        let mem_stats = self.storage.memory_stats();
+        let storage = StorageMetricsSummary {
+            total_branches: mem_stats.total_branches,
+            total_entries: mem_stats.total_entries,
+            estimated_bytes: mem_stats.estimated_bytes,
+        };
+
+        let bc = strata_storage::block_cache::global_cache().stats();
+        let total_accesses = bc.hits + bc.misses;
+        let cache = CacheMetrics {
+            hits: bc.hits,
+            misses: bc.misses,
+            entries: bc.entries,
+            size_bytes: bc.size_bytes,
+            capacity_bytes: bc.capacity_bytes,
+            hit_ratio: if total_accesses > 0 {
+                bc.hits as f64 / total_accesses as f64
+            } else {
+                0.0
+            },
+        };
+
+        let disk_usage = self.disk_usage();
+
+        let available_disk_bytes = if self.data_dir.as_os_str().is_empty() {
+            None
+        } else {
+            fs2::available_space(&self.data_dir).ok()
+        };
+
+        SystemMetrics {
+            uptime_secs: self.uptime_secs(),
+            transactions,
+            wal_counters,
+            wal_disk_usage,
+            scheduler,
+            storage,
+            cache,
+            disk_usage,
+            available_disk_bytes,
+        }
+    }
+
     /// Run health checks against all subsystems and return a report.
+    ///
+    /// Collects metrics via `self.metrics()` and interprets them into
+    /// healthy/degraded/unhealthy status levels. The flush thread liveness
+    /// check is the only direct subsystem access (not a metric).
     pub fn health(&self) -> HealthReport {
+        let m = self.metrics();
         let mut subsystems = Vec::new();
 
-        // 1. Storage — check the storage layer is accessible (cheap: atomic reads only)
-        {
-            let branch_count = self.storage.branch_count();
-            let version = self.storage.version();
-            subsystems.push(SubsystemHealth {
-                name: "storage".into(),
-                status: SubsystemStatus::Healthy,
-                message: Some(format!(
-                    "{} branches, version {}",
-                    branch_count, version
-                )),
-            });
-        }
+        // 1. Storage
+        subsystems.push(SubsystemHealth {
+            name: "storage".into(),
+            status: SubsystemStatus::Healthy,
+            message: Some(format!(
+                "{} branches, {} entries",
+                m.storage.total_branches, m.storage.total_entries
+            )),
+        });
 
-        // 2. WAL — check the WAL writer is present and functional
+        // 2. WAL
         {
-            let (status, message) = match &self.wal_writer {
-                Some(wal) => {
-                    let counters = wal.lock().counters();
-                    (
-                        SubsystemStatus::Healthy,
-                        Some(format!(
-                            "{} appends, {} syncs, {} bytes written",
-                            counters.wal_appends, counters.sync_calls, counters.bytes_written
-                        )),
-                    )
-                }
+            let (status, message) = match &m.wal_counters {
+                Some(counters) => (
+                    SubsystemStatus::Healthy,
+                    Some(format!(
+                        "{} appends, {} syncs, {} bytes written",
+                        counters.wal_appends, counters.sync_calls, counters.bytes_written
+                    )),
+                ),
                 None => {
                     if self.persistence_mode == PersistenceMode::Ephemeral {
                         (SubsystemStatus::Healthy, Some("ephemeral (no WAL)".into()))
                     } else if self.follower {
-                        (SubsystemStatus::Healthy, Some("follower (read-only, no WAL writer)".into()))
+                        (
+                            SubsystemStatus::Healthy,
+                            Some("follower (read-only, no WAL writer)".into()),
+                        )
                     } else {
-                        (SubsystemStatus::Unhealthy, Some("WAL writer is missing".into()))
+                        (
+                            SubsystemStatus::Unhealthy,
+                            Some("WAL writer is missing".into()),
+                        )
                     }
                 }
             };
@@ -1042,7 +1162,7 @@ impl Database {
             });
         }
 
-        // 3. Flush thread — check if alive (Standard mode only)
+        // 3. Flush thread — liveness check, not derivable from metrics
         {
             let guard = self.flush_handle.lock();
             let (status, message) = if let Some(handle) = guard.as_ref() {
@@ -1073,35 +1193,36 @@ impl Database {
             });
         }
 
-        // 4. Disk — check available space on data_dir
+        // 4. Disk
         {
-            let (status, message) = if self.data_dir.as_os_str().is_empty() {
-                (SubsystemStatus::Healthy, Some("ephemeral (no disk)".into()))
-            } else {
-                match fs2::available_space(&self.data_dir) {
-                    Ok(avail) => {
-                        let avail_mb = avail / (1024 * 1024);
-                        if avail_mb < 100 {
-                            (
-                                SubsystemStatus::Unhealthy,
-                                Some(format!("{} MB available (critically low)", avail_mb)),
-                            )
-                        } else if avail_mb < 1024 {
-                            (
-                                SubsystemStatus::Degraded,
-                                Some(format!("{} MB available (low)", avail_mb)),
-                            )
-                        } else {
-                            (
-                                SubsystemStatus::Healthy,
-                                Some(format!("{} MB available", avail_mb)),
-                            )
-                        }
+            let is_ephemeral = self.data_dir.as_os_str().is_empty();
+            let (status, message) = match m.available_disk_bytes {
+                None if is_ephemeral => (
+                    SubsystemStatus::Healthy,
+                    Some("ephemeral (no disk)".into()),
+                ),
+                None => (
+                    SubsystemStatus::Degraded,
+                    Some("could not check disk space".into()),
+                ),
+                Some(avail) => {
+                    let avail_mb = avail / (1024 * 1024);
+                    if avail_mb < 100 {
+                        (
+                            SubsystemStatus::Unhealthy,
+                            Some(format!("{} MB available (critically low)", avail_mb)),
+                        )
+                    } else if avail_mb < 1024 {
+                        (
+                            SubsystemStatus::Degraded,
+                            Some(format!("{} MB available (low)", avail_mb)),
+                        )
+                    } else {
+                        (
+                            SubsystemStatus::Healthy,
+                            Some(format!("{} MB available", avail_mb)),
+                        )
                     }
-                    Err(e) => (
-                        SubsystemStatus::Degraded,
-                        Some(format!("could not check: {}", e)),
-                    ),
                 }
             };
             subsystems.push(SubsystemHealth {
@@ -1111,9 +1232,8 @@ impl Database {
             });
         }
 
-        // 5. Coordinator — check transaction processing
+        // 5. Coordinator
         {
-            let metrics = self.coordinator.metrics();
             let status = if !self.is_open() {
                 SubsystemStatus::Unhealthy
             } else {
@@ -1124,15 +1244,16 @@ impl Database {
                 status,
                 message: Some(format!(
                     "{} active, {} committed, {} aborted",
-                    metrics.active_count, metrics.total_committed, metrics.total_aborted
+                    m.transactions.active_count,
+                    m.transactions.total_committed,
+                    m.transactions.total_aborted
                 )),
             });
         }
 
-        // 6. Scheduler — check background task queue
+        // 6. Scheduler
         {
-            let stats = self.scheduler.stats();
-            let status = if stats.queue_depth > 1000 {
+            let status = if m.scheduler.queue_depth > 1000 {
                 SubsystemStatus::Degraded
             } else {
                 SubsystemStatus::Healthy
@@ -1142,12 +1263,13 @@ impl Database {
                 status,
                 message: Some(format!(
                     "{} queued, {} active, {} completed",
-                    stats.queue_depth, stats.active_tasks, stats.tasks_completed
+                    m.scheduler.queue_depth,
+                    m.scheduler.active_tasks,
+                    m.scheduler.tasks_completed
                 )),
             });
         }
 
-        // Compute overall status: worst of all subsystems
         let overall = subsystems
             .iter()
             .map(|s| &s.status)
@@ -1157,7 +1279,7 @@ impl Database {
 
         HealthReport {
             status: overall,
-            uptime_secs: self.uptime_secs(),
+            uptime_secs: m.uptime_secs,
             subsystems,
         }
     }

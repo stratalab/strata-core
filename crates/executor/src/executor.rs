@@ -251,6 +251,10 @@ impl Executor {
                 let report = self.primitives.db.health();
                 Ok(Output::Health(report))
             }
+            Command::Metrics => {
+                let metrics = self.primitives.db.metrics();
+                Ok(Output::Metrics(metrics))
+            }
             Command::Flush => {
                 crate::handlers::embed_hook::flush_embed_buffer(&self.primitives);
                 self.primitives.db.scheduler().drain();

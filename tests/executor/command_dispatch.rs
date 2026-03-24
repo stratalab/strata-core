@@ -81,6 +81,30 @@ fn health_returns_all_subsystems() {
 }
 
 #[test]
+fn metrics_returns_all_subsystem_data() {
+    let executor = create_executor();
+
+    let output = executor.execute(Command::Metrics).unwrap();
+
+    match output {
+        Output::Metrics(m) => {
+            assert!(m.uptime_secs <= 1);
+            // Ephemeral DB has no WAL
+            assert!(m.wal_counters.is_none());
+            assert!(m.wal_disk_usage.is_none());
+            assert!(m.available_disk_bytes.is_none());
+            // Storage should have branches (system branch at minimum)
+            assert!(m.storage.total_branches >= 1);
+            // Scheduler should have workers
+            assert!(m.scheduler.worker_count >= 1);
+            // Cache hit ratio should be 0.0 on fresh DB
+            assert_eq!(m.cache.hit_ratio, 0.0);
+        }
+        _ => panic!("Expected Metrics output"),
+    }
+}
+
+#[test]
 fn flush_returns_unit() {
     let executor = create_executor();
 
