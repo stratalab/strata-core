@@ -722,6 +722,19 @@ impl SegmentedStore {
             branch_id: *child_branch_id,
         };
 
+        // 1b. Flush child memtables to disk so shadow detection sees all
+        //     child writes (#1694).  Same pattern as fork_branch.
+        {
+            let has_active = self
+                .branches
+                .get(child_branch_id)
+                .is_some_and(|b| !b.active.is_empty());
+            if has_active {
+                self.rotate_memtable(child_branch_id);
+            }
+        }
+        while self.flush_oldest_frozen(child_branch_id)? {}
+
         // 2a. Snapshot under read guard
         let (layer_segments, source_branch_id, fork_version, own_version, closer_layers) = {
             let branch = match self.branches.get(child_branch_id) {
