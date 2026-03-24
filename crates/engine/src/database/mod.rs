@@ -37,6 +37,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use strata_concurrency::{RecoveryCoordinator, TransactionContext};
 use strata_core::types::TypeTag;
 use strata_core::types::{BranchId, Key};
@@ -98,6 +99,53 @@ pub(crate) enum PersistenceMode {
     /// depending on the `DurabilityMode`.
     #[default]
     Disk,
+}
+
+// ============================================================================
+// Health Check Types
+// ============================================================================
+
+/// Overall health report from `Database::health()`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HealthReport {
+    /// Worst-case status across all subsystems.
+    pub status: SubsystemStatus,
+    /// Seconds since the database was opened.
+    pub uptime_secs: u64,
+    /// Per-subsystem health details.
+    pub subsystems: Vec<SubsystemHealth>,
+}
+
+/// Health status of a single subsystem.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SubsystemHealth {
+    /// Subsystem name (e.g. "storage", "wal", "disk").
+    pub name: String,
+    /// Current status.
+    pub status: SubsystemStatus,
+    /// Human-readable detail.
+    pub message: Option<String>,
+}
+
+/// Three-level health status.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub enum SubsystemStatus {
+    /// Everything is working normally.
+    Healthy,
+    /// Working but with warnings (e.g. low disk, large queue).
+    Degraded,
+    /// Subsystem is not functional.
+    Unhealthy,
+}
+
+impl std::fmt::Display for SubsystemStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SubsystemStatus::Healthy => write!(f, "healthy"),
+            SubsystemStatus::Degraded => write!(f, "degraded"),
+            SubsystemStatus::Unhealthy => write!(f, "unhealthy"),
+        }
+    }
 }
 
 // ============================================================================
@@ -239,6 +287,9 @@ pub struct Database {
 
     /// Whether shutdown() has already completed (prevents double freeze in Drop).
     shutdown_complete: AtomicBool,
+
+    /// Instant when this database instance was created (for uptime tracking).
+    opened_at: Instant,
 }
 
 impl Database {
@@ -523,6 +574,7 @@ impl Database {
             wal_watermark,
             follower: true,
             shutdown_complete: AtomicBool::new(false),
+            opened_at: Instant::now(),
         });
 
         crate::primitives::vector::register_vector_recovery();
@@ -715,6 +767,7 @@ impl Database {
             wal_watermark,
             follower: false,
             shutdown_complete: AtomicBool::new(false),
+            opened_at: Instant::now(),
         });
 
         crate::branch_dag::init_system_branch(&db);
@@ -797,6 +850,7 @@ impl Database {
             wal_watermark: AtomicU64::new(0),
             follower: false,
             shutdown_complete: AtomicBool::new(false),
+            opened_at: Instant::now(),
         });
 
         // Note: Ephemeral databases are NOT registered in the global registry
@@ -925,6 +979,187 @@ impl Database {
     /// Returns a reference to the background task scheduler.
     pub fn scheduler(&self) -> &BackgroundScheduler {
         &self.scheduler
+    }
+
+    /// Seconds since the database was opened.
+    pub fn uptime_secs(&self) -> u64 {
+        self.opened_at.elapsed().as_secs()
+    }
+
+    /// Approximate total number of entries (keys) across all branches.
+    ///
+    /// Includes both in-memory (memtable) entries and on-disk segment entries.
+    /// This is an approximation — concurrent writes may cause slight drift.
+    pub fn approximate_total_keys(&self) -> u64 {
+        self.storage.memory_stats().total_entries as u64
+    }
+
+    /// Run health checks against all subsystems and return a report.
+    pub fn health(&self) -> HealthReport {
+        let mut subsystems = Vec::new();
+
+        // 1. Storage — check the storage layer is accessible (cheap: atomic reads only)
+        {
+            let branch_count = self.storage.branch_count();
+            let version = self.storage.version();
+            subsystems.push(SubsystemHealth {
+                name: "storage".into(),
+                status: SubsystemStatus::Healthy,
+                message: Some(format!(
+                    "{} branches, version {}",
+                    branch_count, version
+                )),
+            });
+        }
+
+        // 2. WAL — check the WAL writer is present and functional
+        {
+            let (status, message) = match &self.wal_writer {
+                Some(wal) => {
+                    let counters = wal.lock().counters();
+                    (
+                        SubsystemStatus::Healthy,
+                        Some(format!(
+                            "{} appends, {} syncs, {} bytes written",
+                            counters.wal_appends, counters.sync_calls, counters.bytes_written
+                        )),
+                    )
+                }
+                None => {
+                    if self.persistence_mode == PersistenceMode::Ephemeral {
+                        (SubsystemStatus::Healthy, Some("ephemeral (no WAL)".into()))
+                    } else if self.follower {
+                        (SubsystemStatus::Healthy, Some("follower (read-only, no WAL writer)".into()))
+                    } else {
+                        (SubsystemStatus::Unhealthy, Some("WAL writer is missing".into()))
+                    }
+                }
+            };
+            subsystems.push(SubsystemHealth {
+                name: "wal".into(),
+                status,
+                message,
+            });
+        }
+
+        // 3. Flush thread — check if alive (Standard mode only)
+        {
+            let guard = self.flush_handle.lock();
+            let (status, message) = if let Some(handle) = guard.as_ref() {
+                if handle.is_finished() {
+                    (
+                        SubsystemStatus::Unhealthy,
+                        Some("flush thread has exited unexpectedly".into()),
+                    )
+                } else {
+                    (SubsystemStatus::Healthy, Some("running".into()))
+                }
+            } else {
+                match self.durability_mode {
+                    DurabilityMode::Standard { .. } => (
+                        SubsystemStatus::Degraded,
+                        Some("flush thread not running (standard mode)".into()),
+                    ),
+                    _ => (
+                        SubsystemStatus::Healthy,
+                        Some("not applicable (cache/always mode)".into()),
+                    ),
+                }
+            };
+            subsystems.push(SubsystemHealth {
+                name: "flush_thread".into(),
+                status,
+                message,
+            });
+        }
+
+        // 4. Disk — check available space on data_dir
+        {
+            let (status, message) = if self.data_dir.as_os_str().is_empty() {
+                (SubsystemStatus::Healthy, Some("ephemeral (no disk)".into()))
+            } else {
+                match fs2::available_space(&self.data_dir) {
+                    Ok(avail) => {
+                        let avail_mb = avail / (1024 * 1024);
+                        if avail_mb < 100 {
+                            (
+                                SubsystemStatus::Unhealthy,
+                                Some(format!("{} MB available (critically low)", avail_mb)),
+                            )
+                        } else if avail_mb < 1024 {
+                            (
+                                SubsystemStatus::Degraded,
+                                Some(format!("{} MB available (low)", avail_mb)),
+                            )
+                        } else {
+                            (
+                                SubsystemStatus::Healthy,
+                                Some(format!("{} MB available", avail_mb)),
+                            )
+                        }
+                    }
+                    Err(e) => (
+                        SubsystemStatus::Degraded,
+                        Some(format!("could not check: {}", e)),
+                    ),
+                }
+            };
+            subsystems.push(SubsystemHealth {
+                name: "disk".into(),
+                status,
+                message,
+            });
+        }
+
+        // 5. Coordinator — check transaction processing
+        {
+            let metrics = self.coordinator.metrics();
+            let status = if !self.is_open() {
+                SubsystemStatus::Unhealthy
+            } else {
+                SubsystemStatus::Healthy
+            };
+            subsystems.push(SubsystemHealth {
+                name: "coordinator".into(),
+                status,
+                message: Some(format!(
+                    "{} active, {} committed, {} aborted",
+                    metrics.active_count, metrics.total_committed, metrics.total_aborted
+                )),
+            });
+        }
+
+        // 6. Scheduler — check background task queue
+        {
+            let stats = self.scheduler.stats();
+            let status = if stats.queue_depth > 1000 {
+                SubsystemStatus::Degraded
+            } else {
+                SubsystemStatus::Healthy
+            };
+            subsystems.push(SubsystemHealth {
+                name: "scheduler".into(),
+                status,
+                message: Some(format!(
+                    "{} queued, {} active, {} completed",
+                    stats.queue_depth, stats.active_tasks, stats.tasks_completed
+                )),
+            });
+        }
+
+        // Compute overall status: worst of all subsystems
+        let overall = subsystems
+            .iter()
+            .map(|s| &s.status)
+            .max()
+            .cloned()
+            .unwrap_or(SubsystemStatus::Healthy);
+
+        HealthReport {
+            status: overall,
+            uptime_secs: self.uptime_secs(),
+            subsystems,
+        }
     }
 
     // ========================================================================

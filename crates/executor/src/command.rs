@@ -783,12 +783,16 @@ pub enum Command {
         branch: Option<BranchId>,
     },
 
-    // ==================== Database (4) ====================
+    // ==================== Database (5) ====================
     /// Ping the database to check connectivity
     Ping,
 
     /// Get database information
     Info,
+
+    /// Run health checks on all subsystems.
+    /// Returns: `Output::Health`
+    Health,
 
     /// Flush pending writes to disk
     Flush,
@@ -1731,6 +1735,7 @@ impl Command {
             Command::RetentionPreview { .. } => "RetentionPreview",
             Command::Ping => "Ping",
             Command::Info => "Info",
+            Command::Health => "Health",
             Command::Flush => "Flush",
             Command::Compact => "Compact",
             Command::Describe { .. } => "Describe",
@@ -1949,6 +1954,7 @@ impl Command {
             | Command::TxnIsActive
             | Command::Ping
             | Command::Info
+            | Command::Health
             | Command::Flush
             | Command::Compact
             | Command::EmbedStatus

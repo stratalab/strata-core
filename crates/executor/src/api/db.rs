@@ -1,14 +1,14 @@
-//! Database operations: ping, info, flush, compact, configuration.
+//! Database operations: ping, info, health, flush, compact, configuration.
 
 use super::Strata;
 use crate::output::EmbedStatusInfo;
 use crate::types::*;
 use crate::{Command, Error, Output, Result};
-use strata_engine::StrataConfig;
+use strata_engine::{HealthReport, StrataConfig};
 
 impl Strata {
     // =========================================================================
-    // Database Operations (4)
+    // Database Operations (5)
     // =========================================================================
 
     /// Ping the database.
@@ -27,6 +27,16 @@ impl Strata {
             Output::DatabaseInfo(info) => Ok(info),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for Info".into(),
+            }),
+        }
+    }
+
+    /// Run health checks on all subsystems.
+    pub fn health(&self) -> Result<HealthReport> {
+        match self.execute_cmd(Command::Health)? {
+            Output::Health(report) => Ok(report),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for Health".into(),
             }),
         }
     }

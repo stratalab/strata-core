@@ -28,6 +28,42 @@ fn info_returns_database_info() {
     let info = db.info().unwrap();
 
     assert!(!info.version.is_empty());
+    assert!(info.total_keys > 0, "should count system branch entries");
+    // branch_count is user-visible branches; default branch is lazy-created
+}
+
+#[test]
+fn health_returns_healthy_for_cache_db() {
+    let db = create_strata();
+
+    let report = db.health().unwrap();
+
+    assert_eq!(report.status, strata_engine::SubsystemStatus::Healthy);
+    assert_eq!(report.subsystems.len(), 6);
+    // WAL message should indicate ephemeral
+    let wal = report.subsystems.iter().find(|s| s.name == "wal").unwrap();
+    assert!(
+        wal.message.as_deref().unwrap().contains("ephemeral"),
+        "WAL message should mention ephemeral, got: {:?}",
+        wal.message
+    );
+}
+
+#[test]
+fn health_info_total_keys_increases_after_writes() {
+    let db = create_strata();
+
+    let before = db.info().unwrap().total_keys;
+    db.kv_put("k1", "v1").unwrap();
+    db.kv_put("k2", "v2").unwrap();
+    let after = db.info().unwrap().total_keys;
+
+    assert!(
+        after >= before + 2,
+        "total_keys should increase by at least 2 after writing 2 keys: before={}, after={}",
+        before,
+        after
+    );
 }
 
 #[test]

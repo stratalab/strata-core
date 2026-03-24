@@ -165,6 +165,7 @@ pub fn matches_to_action(matches: &ArgMatches, state: &SessionState) -> Result<C
         "txn" => parse_txn(sub_matches),
         "ping" => Ok(CliAction::Execute(Command::Ping)),
         "info" => Ok(CliAction::Execute(Command::Info)),
+        "health" => Ok(CliAction::Execute(Command::Health)),
         "flush" => Ok(CliAction::Execute(Command::Flush)),
         "compact" => Ok(CliAction::Execute(Command::Compact)),
         "describe" => Ok(CliAction::Execute(Command::Describe {
@@ -196,6 +197,8 @@ pub fn matches_to_action(matches: &ArgMatches, state: &SessionState) -> Result<C
                 "txn",
                 "ping",
                 "info",
+                "health",
+                "init",
                 "flush",
                 "compact",
                 "describe",

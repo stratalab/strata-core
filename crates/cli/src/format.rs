@@ -374,6 +374,7 @@ fn format_raw(output: &Output) -> String {
         }
         Output::Described(_) => serde_json::to_string_pretty(output).unwrap_or_default(),
         Output::Pong { version } => version.clone(),
+        Output::Health(report) => serde_json::to_string_pretty(report).unwrap_or_default(),
         Output::SearchResults { hits, .. } => hits
             .iter()
             .map(|h| format!("{}\t{}\t{}", h.entity, h.primitive, h.score))
@@ -906,6 +907,17 @@ fn format_human(output: &Output) -> String {
             lines.join("\n")
         }
         Output::Pong { version } => format!("PONG {}", version),
+        Output::Health(report) => {
+            let mut lines = Vec::new();
+            lines.push(format!("status: {}", report.status));
+            lines.push(format!("uptime: {}s", report.uptime_secs));
+            lines.push(String::new());
+            for sub in &report.subsystems {
+                let msg = sub.message.as_deref().unwrap_or("");
+                lines.push(format!("  {:<14} {} ({})", sub.name, sub.status, msg));
+            }
+            lines.join("\n")
+        }
         Output::SearchResults { hits, stats } => {
             let mut parts = Vec::new();
             if hits.is_empty() {

@@ -7,6 +7,7 @@
 
 mod commands;
 mod format;
+mod init;
 mod parse;
 mod repl;
 mod state;
@@ -32,8 +33,19 @@ fn main() {
     let matches = cli.get_matches();
 
     // Handle subcommands that don't need a database.
-    if matches.subcommand_name() == Some("setup") {
-        run_setup();
+    if matches.subcommand_name() == Some("init") {
+        let non_interactive = matches
+            .subcommand()
+            .map(|(_, sub)| sub.get_flag("non-interactive"))
+            .unwrap_or(false);
+        let default_path = matches
+            .get_one::<String>("db")
+            .map(|s| s.as_str())
+            .unwrap_or("~/Documents/Strata");
+        if let Err(e) = init::run_init(default_path, non_interactive) {
+            eprintln!("{}", e);
+            process::exit(1);
+        }
         return;
     }
     if let Some(("uninstall", sub)) = matches.subcommand() {
@@ -70,6 +82,26 @@ fn main() {
         .get_one::<String>("db")
         .map(|s| s.as_str())
         .unwrap_or(".strata");
+
+    // Auto-trigger in-place init when bare `strata` is run with no existing database
+    if matches.subcommand().is_none()
+        && std::io::stdin().is_terminal()
+        && !matches.get_flag("cache")
+        && matches.get_one::<String>("db").is_none()
+        && !PathBuf::from(".strata").join("strata.toml").exists()
+    {
+        match init::run_init_in_place(false) {
+            Ok(db) => {
+                let mut state = SessionState::new(db, "default".into(), "default".into());
+                repl::run_repl(&mut state, output_mode, ".strata");
+                return;
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                process::exit(1);
+            }
+        }
+    }
 
     // Open database
     let db = match open_database(&matches, db_path) {
@@ -643,24 +675,3 @@ fn run_uninstall(skip_confirm: bool) {
     eprintln!("Strata has been uninstalled. Restart your shell to apply PATH changes.");
 }
 
-fn run_setup() {
-    #[cfg(feature = "embed")]
-    {
-        eprintln!("Downloading MiniLM-L6-v2 embedding model...");
-        match strata_intelligence::embed::download::ensure_model() {
-            Ok(path) => {
-                eprintln!("Model files ready at {}", path.display());
-            }
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                process::exit(1);
-            }
-        }
-    }
-
-    #[cfg(not(feature = "embed"))]
-    {
-        eprintln!("The 'embed' feature is not enabled. Rebuild with --features embed");
-        process::exit(1);
-    }
-}

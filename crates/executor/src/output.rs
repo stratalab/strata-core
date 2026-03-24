@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use strata_core::Value;
 use strata_engine::branch_ops::{BranchDiffResult, ForkInfo, MergeInfo};
-use strata_engine::{StrataConfig, WalCounters};
+use strata_engine::{HealthReport, StrataConfig, WalCounters};
 
 use crate::types::*;
 
@@ -239,6 +239,9 @@ pub enum Output {
         /// Database engine version string.
         version: String,
     },
+
+    /// Health check report with per-subsystem status.
+    Health(HealthReport),
 
     // ==================== Intelligence ====================
     /// Search results across primitives

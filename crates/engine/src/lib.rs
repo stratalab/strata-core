@@ -33,7 +33,10 @@ pub mod transaction_ops; // TransactionOps Trait Definition
 
 pub use background::{BackgroundScheduler, BackpressureError, SchedulerStats, TaskPriority};
 pub use coordinator::{TransactionCoordinator, TransactionMetrics};
-pub use database::{Database, DatabaseDiskUsage, ModelConfig, StrataConfig};
+pub use database::{
+    Database, DatabaseDiskUsage, HealthReport, ModelConfig, StorageConfig, StrataConfig,
+    SubsystemHealth, SubsystemStatus,
+};
 pub use instrumentation::PerfTrace;
 pub use recovery::{
     recover_all_participants, register_recovery_participant, RecoveryFn, RecoveryParticipant,
