@@ -10,7 +10,7 @@ publish = false
 
 [features]
 default = []
-perf-trace = []  # Enable per-layer timing instrumentation for M4
+perf-trace = ["strata-concurrency/perf-trace"]  # Enable per-operation timing instrumentation
 embed = []       # Marker feature: auto-embed runtime is available
 
 [dependencies]
