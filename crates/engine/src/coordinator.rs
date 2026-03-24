@@ -10,7 +10,7 @@
 //! - Commit rate calculation
 
 use parking_lot::Mutex as ParkingMutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use strata_concurrency::{RecoveryResult, TransactionContext, TransactionManager};
@@ -52,7 +52,7 @@ pub struct TransactionCoordinator {
     /// Initialized to 0 (no drain has occurred yet).
     gc_safe_version: AtomicU64,
     /// Maximum entries in a transaction's write buffer (0 = unlimited).
-    max_write_buffer_entries: usize,
+    max_write_buffer_entries: AtomicUsize,
     /// Effective transaction timeout. Defaults to `TRANSACTION_TIMEOUT`.
     transaction_timeout: Duration,
 }
@@ -79,7 +79,7 @@ impl TransactionCoordinator {
             total_committed: AtomicU64::new(0),
             total_aborted: AtomicU64::new(0),
             gc_safe_version: AtomicU64::new(0),
-            max_write_buffer_entries: 0,
+            max_write_buffer_entries: AtomicUsize::new(0),
             transaction_timeout: Self::TRANSACTION_TIMEOUT,
         }
     }
@@ -106,7 +106,7 @@ impl TransactionCoordinator {
             total_committed: AtomicU64::new(0),
             total_aborted: AtomicU64::new(0),
             gc_safe_version: AtomicU64::new(0),
-            max_write_buffer_entries: 0,
+            max_write_buffer_entries: AtomicUsize::new(0),
             transaction_timeout: Self::TRANSACTION_TIMEOUT,
         }
     }
@@ -126,7 +126,7 @@ impl TransactionCoordinator {
             total_committed: AtomicU64::new(0),
             total_aborted: AtomicU64::new(0),
             gc_safe_version: AtomicU64::new(0),
-            max_write_buffer_entries,
+            max_write_buffer_entries: AtomicUsize::new(max_write_buffer_entries),
             transaction_timeout: Self::TRANSACTION_TIMEOUT,
         }
     }
@@ -158,7 +158,7 @@ impl TransactionCoordinator {
         debug!(target: "strata::txn", branch_id = %branch_id, "Transaction started");
 
         let mut txn = TransactionContext::with_store(txn_id, branch_id, Arc::clone(storage));
-        txn.set_max_write_entries(self.max_write_buffer_entries);
+        txn.set_max_write_entries(self.max_write_buffer_entries.load(Ordering::Relaxed));
         Ok(txn)
     }
 
@@ -348,12 +348,12 @@ impl TransactionCoordinator {
 
     /// Get the configured max write buffer entries limit.
     pub fn max_write_buffer_entries(&self) -> usize {
-        self.max_write_buffer_entries
+        self.max_write_buffer_entries.load(Ordering::Relaxed)
     }
 
     /// Set the max write buffer entries limit.
-    pub fn set_max_write_buffer_entries(&mut self, max: usize) {
-        self.max_write_buffer_entries = max;
+    pub fn set_max_write_buffer_entries(&self, max: usize) {
+        self.max_write_buffer_entries.store(max, Ordering::Relaxed);
     }
 
     /// Remove the per-branch commit lock for a deleted branch.

@@ -197,7 +197,8 @@ impl Default for StorageConfig {
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StrataConfig {
-    /// Durability mode: `"standard"`, `"always"`, or `"cache"`.
+    /// Durability mode: `"standard"` or `"always"` (switchable at runtime).
+    /// `"cache"` is valid in strata.toml for backward compat but cannot be set at runtime.
     #[serde(default = "default_durability_str")]
     pub durability: String,
     /// Enable automatic text embedding for semantic search.
@@ -322,10 +323,11 @@ impl StrataConfig {
     pub fn default_toml() -> &'static str {
         r#"# Strata database configuration
 #
-# Durability mode: "standard" (default), "always", or "cache"
+# Durability mode: "standard" (default) or "always"
 #   "standard" = periodic fsync (~100ms), may lose last interval on crash
 #   "always"   = fsync every commit, zero data loss
-#   "cache"    = no fsync, all data lost on crash (fastest)
+# Switchable at runtime via CONFIG SET durability.
+# Cache mode is selected at open time via Database::cache(), not here.
 durability = "standard"
 
 # Auto-embed: automatically generate embeddings for text data (default: false)

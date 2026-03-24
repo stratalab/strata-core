@@ -456,6 +456,37 @@ impl WalWriter {
         Ok(false)
     }
 
+    /// Get the current durability mode.
+    pub fn durability_mode(&self) -> DurabilityMode {
+        self.durability
+    }
+
+    /// Switch the durability mode at runtime.
+    ///
+    /// Only Standard ↔ Always switching is supported. Switching to or from
+    /// Cache is rejected because Cache mode has no WAL infrastructure.
+    ///
+    /// When switching to Always, any buffered unsynced data is flushed
+    /// immediately to satisfy the stronger durability guarantee.
+    pub fn set_durability_mode(&mut self, mode: DurabilityMode) -> std::io::Result<()> {
+        if matches!(mode, DurabilityMode::Cache) || matches!(self.durability, DurabilityMode::Cache)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Cannot switch to or from Cache mode at runtime",
+            ));
+        }
+        let old = self.durability;
+        self.durability = mode;
+        // When switching to Always, flush any unsynced data immediately
+        if matches!(mode, DurabilityMode::Always) && !matches!(old, DurabilityMode::Always) {
+            if self.has_unsynced_data {
+                self.flush()?;
+            }
+        }
+        Ok(())
+    }
+
     /// Get the current segment number.
     pub fn current_segment(&self) -> u64 {
         self.current_segment_number
