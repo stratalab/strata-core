@@ -339,7 +339,7 @@ Edge mutations follow a read-modify-write cycle within a single transaction:
 1. Read packed bytes from KV (or empty() if absent)
 2. remove_edge() if upsert (existing edge with same target+type)
 3. append_edge() with new data
-4. put_replace() back to KV (skips MVCC versioning — blob is mutable)
+4. put_replace() back to KV (KeepLast(1) retention hint — blob is mutable)
 ```
 
 ---
@@ -588,7 +588,7 @@ All edges from/to a single node are stored in one packed binary KV entry. This r
 Traversal and analytics algorithms build an in-memory `AdjacencyIndex` from a single bulk scan, then run entirely in-memory. This avoids N per-node KV transactions during traversal. The index is exposed publicly (`bfs_with_index`) so callers can reuse it across multiple traversals.
 
 ### put_replace for Adjacency Lists
-Adjacency lists use `put_replace` instead of standard `put`, which skips MVCC version tracking. These are mutable blobs that are always fully overwritten, so versioning adds overhead without benefit.
+Adjacency lists use `put_replace` instead of standard `put`, which marks the key with `WriteMode::KeepLast(1)`. The write still appends a new MVCC version; older versions are pruned at compaction time. This signals single-version intent for mutable blobs that are always fully overwritten.
 
 ### Catalog for Graph Listing
 Graph names are maintained in a `__catalog__` JSON array for O(1) listing. Legacy data without a catalog falls back to scanning for `__meta__` keys and lazily creates the catalog.

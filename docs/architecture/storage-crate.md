@@ -90,7 +90,7 @@ Most keys only ever have one version (especially graph edges, configs, metadata)
 
 ### WriteMode
 
-`WriteMode::KeepLast(n)` keeps at most `n` versions, pruning oldest after write. `KeepLast(1)` drops all history and stores only the new value. Used by graph adjacency lists to avoid unbounded version chains. `ShardedStore::max_versions_per_key` provides a global default applied to `WriteMode::Append` writes.
+`WriteMode::KeepLast(n)` is a retention hint: at most `n` versions should be kept. The memtable always appends unconditionally; actual pruning to `n` versions happens at compaction time via `max_versions_per_key`. `KeepLast(1)` is used by graph adjacency lists to signal single-version intent without paying for immediate pruning. `max_versions_per_key` provides a global default applied to all writes during compaction.
 
 ---
 

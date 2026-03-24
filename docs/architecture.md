@@ -365,15 +365,9 @@ most recent version. This is the common case for application reads.
 
 **WriteMode handling:**
 
-```rust
-pub fn put(&mut self, value: StoredValue, mode: WriteMode) {
-    match mode {
-        WriteMode::Append     => self.push(value),            // Add version
-        WriteMode::KeepLast(1) => self.replace_latest(value), // Drop history
-        WriteMode::KeepLast(n) => { self.push(value); self.truncate_to(n); }
-    }
-}
-```
+`WriteMode::KeepLast(n)` is a retention hint — the memtable always appends
+unconditionally (same as `Append`). Pruning to `n` versions is deferred to
+compaction time via `max_versions_per_key`.
 
 **GC:**
 

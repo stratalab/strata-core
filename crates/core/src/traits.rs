@@ -13,8 +13,11 @@ use crate::value::Value;
 /// Controls how a write interacts with existing versions of a key.
 ///
 /// - `Append` (default): Standard MVCC — adds a new version, preserving history.
-/// - `KeepLast(n)`: Keep at most `n` versions, pruning oldest after write.
-///   `KeepLast(1)` replaces the old `Replace` behavior (single-version).
+/// - `KeepLast(n)`: Retention hint — at most `n` versions should be kept.
+///   The memtable always appends unconditionally; actual pruning happens at
+///   compaction time via `max_versions_per_key`. This mode is advisory:
+///   callers should not assume older versions are removed immediately.
+///   `KeepLast(1)` replaces the old `Replace` behavior.
 ///   Use for internal data (e.g., graph adjacency lists) where unbounded
 ///   version history wastes memory without providing value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -22,7 +25,8 @@ pub enum WriteMode {
     /// Standard MVCC: push a new version onto the chain (keeps history)
     #[default]
     Append,
-    /// Keep at most N versions, pruning oldest after write.
+    /// Retention hint: keep at most N versions. Pruning is deferred to
+    /// compaction — the write itself always appends a new version.
     /// `KeepLast(1)` replaces the old `Replace` behavior.
     /// `KeepLast(n)` for n > 1 keeps bounded history.
     KeepLast(usize),
@@ -134,7 +138,8 @@ pub trait Storage: Send + Sync {
     ///
     /// Write modes:
     /// - `Append`: standard MVCC (adds version to chain, preserves history)
-    /// - `KeepLast(n)`: keep at most n versions, pruning oldest after write
+    /// - `KeepLast(n)`: retention hint — the write always appends; pruning to
+    ///   n versions is deferred to compaction time
     ///
     /// # Arguments
     /// * `key` - The key to write
