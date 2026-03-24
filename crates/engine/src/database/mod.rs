@@ -1263,8 +1263,9 @@ impl Database {
 
             // Apply puts and deletes atomically with original WAL timestamp
             // and TTL. Combines #1699 (preserve commit timestamp for time-travel),
-            // #1707 (defer version bump until all entries installed), and
-            // #1740 (preserve TTL through WAL replay).
+            // #1707 (defer version bump until all entries installed),
+            // #1734 (defer version bump until secondary indexes are updated),
+            // and #1740 (preserve TTL through WAL replay).
             {
                 let writes: Vec<_> = payload
                     .puts
@@ -1448,6 +1449,11 @@ impl Database {
                     }
                 }
             }
+
+            // Issue #1734: Advance visible version AFTER secondary indexes are
+            // updated, so readers never see KV data without corresponding
+            // BM25/HNSW entries.
+            self.storage.advance_version(payload.version);
 
             applied += 1;
         }
