@@ -9000,3 +9000,88 @@ fn test_issue_1718_concurrent_flush_no_duplicate_segments_stress() {
         assert_eq!(result.value, Value::Int(i as i64));
     }
 }
+
+/// #1694: Materialization shadow detection must consider child memtable writes.
+///
+/// If a child writes a key to its memtable (not yet flushed) that shadows an
+/// inherited key, the materializer should recognize the shadow and skip the
+/// inherited entry. Without the fix, the unflushed memtable write is invisible
+/// to shadow detection, causing unnecessary materialization.
+#[test]
+fn test_issue_1694_materialize_shadow_detection_ignores_memtable() {
+    let (_dir, store) = setup_parent_with_segments(&[("a", 1, 1), ("b", 2, 2)]);
+
+    // Fork child from parent — child inherits both "a" and "b"
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+    assert_eq!(store.inherited_layer_count(&child_branch()), 1);
+
+    // Write "a" to child's memtable at a newer version — shadows inherited "a".
+    // Crucially, do NOT flush — the write stays in the active memtable.
+    seed(&store, child_kv("a"), Value::Int(999), 10);
+
+    // Verify the memtable write is in the active memtable (not flushed)
+    assert!(!store.has_frozen(&child_branch()));
+    assert_eq!(store.branch_segment_count(&child_branch()), 0);
+
+    // Materialize the inherited layer
+    let result = store.materialize_layer(&child_branch(), 0).unwrap();
+
+    // Only "b" should be materialized — "a" is shadowed by the child's memtable write.
+    assert_eq!(
+        result.entries_materialized, 1,
+        "Only 'b' should be materialized; 'a' is shadowed by the child's memtable write"
+    );
+
+    // Verify reads return the child's value for "a" and the materialized value for "b"
+    let val_a = store
+        .get_versioned(&child_kv("a"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(val_a.value, Value::Int(999), "child's memtable write wins");
+
+    let val_b = store
+        .get_versioned(&child_kv("b"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(val_b.value, Value::Int(2), "inherited 'b' is materialized");
+}
+
+/// #1694 variant: shadow detection must also see frozen (unflushed) memtables.
+#[test]
+fn test_issue_1694_materialize_shadow_detection_ignores_frozen_memtable() {
+    let (_dir, store) = setup_parent_with_segments(&[("x", 10, 1), ("y", 20, 2)]);
+
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    // Write "x" to child, then rotate so it lands in a frozen memtable (not flushed).
+    seed(&store, child_kv("x"), Value::Int(777), 10);
+    store.rotate_memtable(&child_branch());
+    assert!(store.has_frozen(&child_branch()));
+    assert_eq!(store.branch_segment_count(&child_branch()), 0);
+
+    let result = store.materialize_layer(&child_branch(), 0).unwrap();
+
+    // Only "y" should be materialized — "x" is shadowed by the frozen memtable.
+    assert_eq!(
+        result.entries_materialized, 1,
+        "Only 'y' should be materialized; 'x' is shadowed by child's frozen memtable"
+    );
+
+    let val_x = store
+        .get_versioned(&child_kv("x"), u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(val_x.value, Value::Int(777), "child's frozen write wins");
+}
