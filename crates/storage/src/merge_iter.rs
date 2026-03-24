@@ -13,8 +13,13 @@
 use crate::key_encoding::InternalKey;
 use crate::memtable::MemtableEntry;
 
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::iter::Peekable;
 use strata_core::types::BranchId;
+
+/// Source count threshold: use linear scan at or below this, heap above.
+const HEAP_THRESHOLD: usize = 4;
 
 // ---------------------------------------------------------------------------
 // MergeIterator
@@ -27,10 +32,53 @@ use strata_core::types::BranchId;
 /// segments). When two sources yield the same InternalKey, the lower index
 /// wins (newer data takes precedence).
 ///
-/// With typically 1-3 sources, a linear scan for the minimum outperforms a
-/// `BinaryHeap`.
+/// For ≤ 4 sources a linear scan is used (lower overhead). Above that
+/// threshold a binary min-heap provides O(log k) per `next()` call.
 pub struct MergeIterator<I: Iterator<Item = (InternalKey, MemtableEntry)>> {
-    sources: Vec<Peekable<I>>,
+    state: MergeState<I>,
+}
+
+enum MergeState<I: Iterator<Item = (InternalKey, MemtableEntry)>> {
+    Linear {
+        sources: Vec<Peekable<I>>,
+    },
+    Heap {
+        sources: Vec<I>,
+        heap: BinaryHeap<HeapItem>,
+    },
+}
+
+/// Entry stored in the binary heap for the heap-based merge path.
+struct HeapItem {
+    key: InternalKey,
+    entry: MemtableEntry,
+    source_idx: usize,
+}
+
+impl PartialEq for HeapItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.source_idx == other.source_idx
+    }
+}
+
+impl Eq for HeapItem {}
+
+impl PartialOrd for HeapItem {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for HeapItem {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // BinaryHeap is a max-heap; reverse comparison for min-heap behavior.
+        // Primary: ascending key order (reverse → other before self).
+        // Tie-break: ascending source_idx (lower index = newer = wins).
+        other
+            .key
+            .cmp(&self.key)
+            .then_with(|| other.source_idx.cmp(&self.source_idx))
+    }
 }
 
 impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> MergeIterator<I> {
@@ -39,8 +87,27 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> MergeIterator<I> {
     /// Sources must be sorted in ascending `InternalKey` order.
     /// `sources[0]` is the newest; `sources[N-1]` is the oldest.
     pub fn new(sources: Vec<I>) -> Self {
-        Self {
-            sources: sources.into_iter().map(|s| s.peekable()).collect(),
+        if sources.len() > HEAP_THRESHOLD {
+            let mut sources: Vec<I> = sources.into_iter().collect();
+            let mut heap = BinaryHeap::with_capacity(sources.len());
+            for (i, source) in sources.iter_mut().enumerate() {
+                if let Some((key, entry)) = source.next() {
+                    heap.push(HeapItem {
+                        key,
+                        entry,
+                        source_idx: i,
+                    });
+                }
+            }
+            Self {
+                state: MergeState::Heap { sources, heap },
+            }
+        } else {
+            Self {
+                state: MergeState::Linear {
+                    sources: sources.into_iter().map(|s| s.peekable()).collect(),
+                },
+            }
         }
     }
 }
@@ -49,26 +116,39 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for MergeIterato
     type Item = (InternalKey, MemtableEntry);
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Find source with the smallest key.  On ties, prefer lower index (newer).
-        // Two-pass approach: first find the min key, then advance that source.
-        let mut min_idx: Option<usize> = None;
-        let mut min_key: Option<&InternalKey> = None;
+        match &mut self.state {
+            MergeState::Linear { sources } => {
+                // Find source with the smallest key. On ties, prefer lower index (newer).
+                let mut min_idx: Option<usize> = None;
+                let mut min_key: Option<&InternalKey> = None;
 
-        for (i, source) in self.sources.iter_mut().enumerate() {
-            if let Some((ik, _)) = source.peek() {
-                let is_smaller = match min_key {
-                    None => true,
-                    Some(current) => ik < current,
-                };
-                if is_smaller {
-                    min_idx = Some(i);
-                    min_key = Some(ik);
+                for (i, source) in sources.iter_mut().enumerate() {
+                    if let Some((ik, _)) = source.peek() {
+                        let is_smaller = match min_key {
+                            None => true,
+                            Some(current) => ik < current,
+                        };
+                        if is_smaller {
+                            min_idx = Some(i);
+                            min_key = Some(ik);
+                        }
+                    }
                 }
-                // On equal keys, keep the lower index (newer source)
+
+                min_idx.and_then(|i| sources[i].next())
+            }
+            MergeState::Heap { sources, heap } => {
+                let item = heap.pop()?;
+                if let Some((key, entry)) = sources[item.source_idx].next() {
+                    heap.push(HeapItem {
+                        key,
+                        entry,
+                        source_idx: item.source_idx,
+                    });
+                }
+                Some((item.key, item.entry))
             }
         }
-
-        min_idx.and_then(|i| self.sources[i].next())
     }
 }
 
@@ -306,6 +386,79 @@ mod tests {
         let results: Vec<_> = MvccIterator::new(merge, u64::MAX).collect();
         assert_eq!(results.len(), 1);
         assert!(results[0].1.is_tombstone);
+    }
+
+    /// Issue #1686: MergeIterator must produce correct results with many sources
+    /// (heap-based path). Verifies ordering and tie-breaking with 8 sources.
+    #[test]
+    fn test_issue_1686_merge_iterator_heap_correctness() {
+        // 8 sources — each has one unique key plus a shared key "m" at commit_id=10.
+        // The shared key tests tie-breaking: source 0 (newest) must win.
+        let shared_key = key("m");
+        let shared_ik = InternalKey::encode(&shared_key, 10);
+
+        let keys = ["a", "b", "c", "d", "e", "f", "g", "h"];
+        let mut sources: Vec<Vec<(InternalKey, MemtableEntry)>> = Vec::new();
+        for (i, k) in keys.iter().enumerate() {
+            let unique_ik = InternalKey::encode(&key(k), 1);
+            let mut items = vec![(unique_ik, entry(i as i64))];
+            // All 8 sources contain the shared key "m"
+            items.push((shared_ik.clone(), entry(100 + i as i64)));
+            items.sort_by(|a, b| a.0.cmp(&b.0));
+            sources.push(items);
+        }
+
+        let iters: Vec<_> = sources.into_iter().map(|s| s.into_iter()).collect();
+        assert_eq!(iters.len(), 8); // above any reasonable linear threshold
+
+        let merged: Vec<_> = MergeIterator::new(iters).collect();
+
+        // Total items: 8 unique + 8 copies of shared key = 16
+        assert_eq!(merged.len(), 16);
+
+        // Verify ascending key order throughout
+        for pair in merged.windows(2) {
+            assert!(
+                pair[0].0 <= pair[1].0,
+                "merge output not in ascending order"
+            );
+        }
+
+        // Find all entries for the shared key "m" — source 0 must come first (tie-break)
+        let shared_entries: Vec<_> = merged
+            .iter()
+            .filter(|(ik, _)| ik.typed_key_prefix() == shared_ik.typed_key_prefix())
+            .collect();
+        assert_eq!(shared_entries.len(), 8);
+        // Source i produced entry(100+i). Tie-breaking by source index means
+        // they appear in source order: 100, 101, 102, ..., 107.
+        for (i, (_, e)) in shared_entries.iter().enumerate() {
+            assert_eq!(e.value, Value::Int(100 + i as i64));
+        }
+    }
+
+    /// Issue #1686: MergeIterator with many sources through MvccIterator
+    /// produces correct MVCC deduplication.
+    #[test]
+    fn test_issue_1686_merge_iterator_heap_with_mvcc() {
+        // 6 sources, each with the same key "k" at different commit_ids.
+        // Source 0 has commit_id=6 (newest), source 5 has commit_id=1 (oldest).
+        // Snapshot at version 4 should pick commit_id=4 from source 2.
+        let k = key("k");
+        let mut sources: Vec<Vec<(InternalKey, MemtableEntry)>> = Vec::new();
+        for i in 0..6 {
+            let commit_id = 6 - i as u64; // source 0 → commit 6, source 5 → commit 1
+            let ik = InternalKey::encode(&k, commit_id);
+            sources.push(vec![(ik, entry(commit_id as i64 * 10))]);
+        }
+
+        let iters: Vec<_> = sources.into_iter().map(|s| s.into_iter()).collect();
+        let merge = MergeIterator::new(iters);
+        let results: Vec<_> = MvccIterator::new(merge, 4).collect();
+
+        assert_eq!(results.len(), 1);
+        // commit_id=4 → value=40
+        assert_eq!(results[0].1.value, Value::Int(40));
     }
 
     #[test]
