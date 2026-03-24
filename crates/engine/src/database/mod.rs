@@ -433,7 +433,8 @@ impl Database {
 
         // Recovery — purely read-only (no truncation, no file writes)
         let recovery = RecoveryCoordinator::new(wal_dir.clone())
-            .with_segments(segments_dir, cfg.storage.write_buffer_size);
+            .with_segments(segments_dir, cfg.storage.write_buffer_size)
+            .with_lossy_recovery(cfg.allow_lossy_recovery);
         let result = match recovery.recover() {
             Ok(result) => result,
             Err(e) => {
@@ -555,7 +556,8 @@ impl Database {
         // Use RecoveryCoordinator for proper transaction-aware recovery
         // This reads all WalRecords from the segmented WAL directory
         let recovery = RecoveryCoordinator::new(wal_dir.clone())
-            .with_segments(segments_dir, cfg.storage.write_buffer_size);
+            .with_segments(segments_dir, cfg.storage.write_buffer_size)
+            .with_lossy_recovery(cfg.allow_lossy_recovery);
         let result = match recovery.recover() {
             Ok(result) => result,
             Err(e) => {
