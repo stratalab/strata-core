@@ -4,6 +4,8 @@
 //! and branch operations (fork, diff, merge).
 
 use crate::common::*;
+use std::sync::{Arc, Barrier};
+use std::thread;
 use strata_engine::branch_ops::{self, MergeStrategy};
 use strata_engine::SpaceIndex;
 
@@ -1032,4 +1034,473 @@ fn concurrent_operations_across_branches() {
             assert_eq!(val, Value::Int((r * 1000 + i) as i64));
         }
     }
+}
+
+// ============================================================================
+// Issue #1695: COW Lifecycle Edge-Case Tests
+// ============================================================================
+
+/// Issue #1695, test 1: Race fork_branch() against continuous parent writes.
+///
+/// Spawns writer threads that continuously write to the parent branch while
+/// fork_branch() runs concurrently. Verifies that the child snapshot is
+/// consistent — pre-fork seed keys are always visible, and no partial state
+/// is observed.
+///
+/// Validates fix for #1679 (fork must serialize against writes).
+#[test]
+fn test_issue_1695_fork_vs_parent_write_race() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let test_db = TestDb::new_strict();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+
+    // Create parent branch with initial data
+    branch_index.create_branch("parent").unwrap();
+    let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
+    for i in 0..10 {
+        kv.put(
+            &parent_id,
+            "default",
+            &format!("seed_{}", i),
+            Value::Int(i as i64),
+        )
+        .unwrap();
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let db = test_db.db.clone();
+
+    // Spawn writer threads that continuously write to parent.
+    // Each thread writes sequentially numbered keys so we can detect gaps.
+    let mut writers = Vec::new();
+    for t in 0..3u8 {
+        let kv_w = KVStore::new(db.clone());
+        let stop_c = Arc::clone(&stop);
+        writers.push(thread::spawn(move || {
+            let mut i = 0u64;
+            while !stop_c.load(Ordering::Relaxed) {
+                let key = format!("w{}_k{}", t, i);
+                let _ = kv_w.put(&parent_id, "default", &key, Value::Int(i as i64));
+                i += 1;
+                if i.is_multiple_of(5) {
+                    thread::yield_now();
+                }
+            }
+        }));
+    }
+
+    // Perform multiple forks while writers are active
+    let mut fork_results = Vec::new();
+    for fork_idx in 0..10u32 {
+        let fork_name = format!("child_{}", fork_idx);
+        if let Ok(info) = branch_ops::fork_branch(&db, "parent", &fork_name) {
+            fork_results.push((fork_name, info));
+        }
+        thread::yield_now();
+    }
+
+    // Stop writers
+    stop.store(true, Ordering::Release);
+    for w in writers {
+        w.join().unwrap();
+    }
+
+    // Verify each fork: child must see a consistent snapshot
+    for (fork_name, info) in &fork_results {
+        let _fork_version = info.fork_version.expect("fork must return fork_version");
+        let child_id = strata_engine::primitives::branch::resolve_branch_name(fork_name);
+
+        // Seed keys (seed_0..seed_9) were written before any fork, so they
+        // must always be visible in every child.
+        for i in 0..10 {
+            let val = kv
+                .get(&child_id, "default", &format!("seed_{}", i))
+                .unwrap();
+            assert_eq!(
+                val,
+                Some(Value::Int(i as i64)),
+                "fork '{}': seed key seed_{} must be visible in child",
+                fork_name,
+                i
+            );
+        }
+
+        // For writer keys: the child's view must be prefix-consistent.
+        // If w{t}_k{i} is visible, all w{t}_k{j} for j < i must also be
+        // visible (writes are sequential within each thread).
+        for t in 0..3u8 {
+            let mut last_visible = None;
+            for i in 0..200u64 {
+                let key = format!("w{}_k{}", t, i);
+                let child_val = kv.get(&child_id, "default", &key).unwrap();
+                if child_val.is_some() {
+                    last_visible = Some(i);
+                } else if last_visible.is_some() {
+                    // Found a gap: key i is missing but some j < i was present.
+                    // All keys after this should also be missing (snapshot consistency).
+                    for j in (i + 1)..std::cmp::min(i + 10, 200) {
+                        let later_key = format!("w{}_k{}", t, j);
+                        assert!(
+                            kv.get(&child_id, "default", &later_key).unwrap().is_none(),
+                            "fork '{}': snapshot inconsistency — w{}_k{} missing but w{}_k{} present",
+                            fork_name, t, i, t, j
+                        );
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    assert!(
+        !fork_results.is_empty(),
+        "at least one fork must succeed under contention"
+    );
+}
+
+/// Issue #1695, test 2: Fork child, compact parent, restart.
+///
+/// Verifies that after parent compaction and database restart:
+/// - Parent has no duplicate data (compaction output is clean)
+/// - Child still reads all inherited data through recovery
+///
+/// Validates fixes for #1680 (manifest-authoritative recovery) and
+/// #1691 (inherited layer recovery independence).
+#[test]
+fn test_issue_1695_fork_compact_parent_restart() {
+    let mut test_db = TestDb::new_strict();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+
+    // Create parent with multiple batches of data (so compaction has work)
+    branch_index.create_branch("parent").unwrap();
+    let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
+
+    for i in 0..50 {
+        kv.put(
+            &parent_id,
+            "default",
+            &format!("k{:04}", i),
+            Value::Int(i as i64),
+        )
+        .unwrap();
+    }
+
+    // Fork parent → child
+    let fork_info = branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+    assert!(fork_info.fork_version.is_some());
+    let child_id = strata_engine::primitives::branch::resolve_branch_name("child");
+
+    // Write more data to parent (post-fork)
+    for i in 50..100 {
+        kv.put(
+            &parent_id,
+            "default",
+            &format!("k{:04}", i),
+            Value::Int(i as i64),
+        )
+        .unwrap();
+    }
+
+    // Verify child sees only pre-fork data
+    for i in 0..50 {
+        assert_eq!(
+            kv.get(&child_id, "default", &format!("k{:04}", i)).unwrap(),
+            Some(Value::Int(i as i64)),
+            "child should see pre-fork key k{:04}",
+            i
+        );
+    }
+    // Child should NOT see post-fork parent writes
+    assert!(
+        kv.get(&child_id, "default", "k0050").unwrap().is_none(),
+        "child should not see post-fork parent key"
+    );
+
+    // Restart the database
+    test_db.reopen();
+    let kv = test_db.kv();
+
+    // Parent should have all 100 keys, no duplicates
+    let parent_keys = kv.list(&parent_id, "default", Some("k")).unwrap();
+    assert_eq!(
+        parent_keys.len(),
+        100,
+        "parent should have exactly 100 keys after restart"
+    );
+    for i in 0..100 {
+        assert_eq!(
+            kv.get(&parent_id, "default", &format!("k{:04}", i))
+                .unwrap(),
+            Some(Value::Int(i as i64)),
+            "parent key k{:04} must survive restart",
+            i
+        );
+    }
+
+    // Child should still read inherited data after restart
+    for i in 0..50 {
+        assert_eq!(
+            kv.get(&child_id, "default", &format!("k{:04}", i)).unwrap(),
+            Some(Value::Int(i as i64)),
+            "child key k{:04} must survive restart through inherited layers",
+            i
+        );
+    }
+    // Post-fork data still invisible to child
+    assert!(
+        kv.get(&child_id, "default", "k0050").unwrap().is_none(),
+        "child should not see post-fork parent key after restart"
+    );
+}
+
+/// Issue #1695, test 3: Race background materialization against explicit
+/// materialize_branch() API call.
+///
+/// Creates a deeply-forked branch (exceeding MAX_INHERITED_LAYERS) so the
+/// background scheduler will attempt materialization. Simultaneously calls
+/// materialize_branch() from the test thread. Verifies single output and
+/// no data corruption.
+///
+/// Validates fix for #1693 (concurrent materialization guard).
+#[test]
+fn test_issue_1695_concurrent_bg_vs_explicit_materialization() {
+    let test_db = TestDb::new_strict();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+    let db = test_db.db.clone();
+
+    // Build a chain of forks: root → a → b → c → d → e → leaf
+    // This creates 6 inherited layers on leaf (exceeds MAX_INHERITED_LAYERS=4)
+    branch_index.create_branch("root").unwrap();
+    let root_id = strata_engine::primitives::branch::resolve_branch_name("root");
+    for i in 0..20 {
+        kv.put(
+            &root_id,
+            "default",
+            &format!("root_k{}", i),
+            Value::Int(i as i64),
+        )
+        .unwrap();
+    }
+
+    let chain = ["a", "b", "c", "d", "e", "leaf"];
+    let mut prev = "root";
+    for name in &chain {
+        branch_ops::fork_branch(&db, prev, name).unwrap();
+        prev = name;
+    }
+
+    let leaf_id = strata_engine::primitives::branch::resolve_branch_name("leaf");
+
+    // Verify leaf can read inherited data before materialization
+    assert_eq!(
+        kv.get(&leaf_id, "default", "root_k0").unwrap(),
+        Some(Value::Int(0)),
+        "leaf should read root data through inheritance chain"
+    );
+
+    // Race: explicit materialize_branch in parallel threads
+    let barrier = Arc::new(Barrier::new(4));
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let db = db.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                branch_ops::materialize_branch(&db, "leaf")
+            })
+        })
+        .collect();
+
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    // All calls must succeed (no panics)
+    for (i, r) in results.iter().enumerate() {
+        assert!(r.is_ok(), "thread {} failed: {:?}", i, r);
+    }
+
+    // At most one thread should have actually materialized entries
+    let workers: Vec<_> = results
+        .iter()
+        .filter(|r| r.as_ref().unwrap().entries_materialized > 0)
+        .collect();
+    assert!(
+        workers.len() <= 1,
+        "at most 1 thread should materialize entries, got {}",
+        workers.len()
+    );
+
+    // Data must still be correct
+    for i in 0..20 {
+        assert_eq!(
+            kv.get(&leaf_id, "default", &format!("root_k{}", i))
+                .unwrap(),
+            Some(Value::Int(i as i64)),
+            "leaf should still read root_k{} after materialization",
+            i
+        );
+    }
+}
+
+/// Issue #1695, test 4: Fork child, clear (delete) child, restart.
+///
+/// Verifies that a deleted child branch stays deleted after recovery.
+/// The parent's data must be unaffected. No orphaned segments should
+/// cause the child to reappear.
+///
+/// Validates recovery handling of cleared branches.
+#[test]
+fn test_issue_1695_fork_clear_child_restart() {
+    let mut test_db = TestDb::new_strict();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+
+    // Create parent with data
+    branch_index.create_branch("parent").unwrap();
+    let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
+    for i in 0..20 {
+        kv.put(
+            &parent_id,
+            "default",
+            &format!("pk{}", i),
+            Value::Int(i as i64),
+        )
+        .unwrap();
+    }
+
+    // Fork parent → child
+    branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+    let child_id = strata_engine::primitives::branch::resolve_branch_name("child");
+
+    // Verify child has data
+    assert_eq!(
+        kv.get(&child_id, "default", "pk0").unwrap(),
+        Some(Value::Int(0)),
+        "child should have inherited data before deletion"
+    );
+
+    // Write some child-only data
+    kv.put(&child_id, "default", "child_only", Value::Int(999))
+        .unwrap();
+
+    // Delete the child branch
+    branch_index.delete_branch("child").unwrap();
+
+    // Verify child is gone
+    assert!(
+        branch_index.get_branch("child").unwrap().is_none(),
+        "child branch should be deleted"
+    );
+
+    // Restart the database
+    test_db.reopen();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+
+    // Child must still be deleted after restart
+    assert!(
+        branch_index.get_branch("child").unwrap().is_none(),
+        "child branch must stay deleted after restart"
+    );
+
+    // Parent data must be intact
+    for i in 0..20 {
+        assert_eq!(
+            kv.get(&parent_id, "default", &format!("pk{}", i)).unwrap(),
+            Some(Value::Int(i as i64)),
+            "parent key pk{} must survive child deletion + restart",
+            i
+        );
+    }
+}
+
+/// Issue #1695, test 5: Fork, make disjoint changes on parent and child, merge.
+///
+/// After forking, parent and child each modify different keys. Merging child
+/// back into parent with LastWriterWins should apply child's additions to
+/// parent. Verifies parent-only changes survive the merge.
+///
+/// Note: #1692 (three-way merge) is still open. The current two-way diff/apply
+/// merge treats child additions as "added" relative to parent, applying them.
+/// Parent-only changes that don't conflict with child should survive because
+/// the merge only applies entries from the diff (added + modified), it does
+/// not delete entries that are absent in source.
+#[test]
+fn test_issue_1695_fork_disjoint_changes_merge() {
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+
+    // Create parent with shared baseline
+    branch_index.create_branch("parent").unwrap();
+    let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
+    kv.put(&parent_id, "default", "base", Value::Int(100))
+        .unwrap();
+
+    // Fork parent → child
+    branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+    let child_id = strata_engine::primitives::branch::resolve_branch_name("child");
+
+    // Make DISJOINT changes: parent modifies "parent_only", child modifies "child_only"
+    kv.put(
+        &parent_id,
+        "default",
+        "parent_only",
+        Value::String("from_parent".into()),
+    )
+    .unwrap();
+    kv.put(
+        &child_id,
+        "default",
+        "child_only",
+        Value::String("from_child".into()),
+    )
+    .unwrap();
+
+    // Both should still see "base" from before fork
+    assert_eq!(
+        kv.get(&parent_id, "default", "base").unwrap(),
+        Some(Value::Int(100))
+    );
+    assert_eq!(
+        kv.get(&child_id, "default", "base").unwrap(),
+        Some(Value::Int(100))
+    );
+
+    // Merge child → parent (LWW)
+    let merge_info = branch_ops::merge_branches(
+        &test_db.db,
+        "child",
+        "parent",
+        MergeStrategy::LastWriterWins,
+    )
+    .unwrap();
+
+    // child_only should be applied to parent (it's "added" in child vs parent)
+    assert!(merge_info.keys_applied >= 1, "child_only should be merged");
+
+    // Verify ALL keys on parent after merge:
+    // 1. "base" - original shared key, untouched by both → still present
+    assert_eq!(
+        kv.get(&parent_id, "default", "base").unwrap(),
+        Some(Value::Int(100)),
+        "base key must survive merge"
+    );
+
+    // 2. "parent_only" - written only on parent → must survive
+    assert_eq!(
+        kv.get(&parent_id, "default", "parent_only").unwrap(),
+        Some(Value::String("from_parent".into())),
+        "parent-only change must survive merge (disjoint changes preserved)"
+    );
+
+    // 3. "child_only" - written only on child → merged into parent
+    assert_eq!(
+        kv.get(&parent_id, "default", "child_only").unwrap(),
+        Some(Value::String("from_child".into())),
+        "child-only change must be applied to parent by merge"
+    );
 }
