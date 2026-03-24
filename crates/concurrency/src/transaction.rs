@@ -950,12 +950,13 @@ impl TransactionContext {
         Ok(())
     }
 
-    /// Buffer a write that will replace (not append) at commit time.
+    /// Buffer a write with a single-version retention hint.
     ///
-    /// Same as `put()`, but marks this key for `WriteMode::KeepLast(1)` so the
-    /// storage layer overwrites all previous versions instead of accumulating
-    /// a new MVCC version. Use for internal data (e.g., graph adjacency lists)
-    /// where version history is not needed and would waste memory.
+    /// Same as `put()`, but marks this key for `WriteMode::KeepLast(1)`.
+    /// The write still appends a new MVCC version at commit time; older
+    /// versions are pruned later during compaction, not at write time.
+    /// Use for internal data (e.g., graph adjacency lists) where version
+    /// history is not needed and would waste memory.
     pub fn put_replace(&mut self, key: Key, value: Value) -> StrataResult<()> {
         self.key_write_modes
             .insert(key.clone(), WriteMode::KeepLast(1));
@@ -2235,7 +2236,7 @@ mod tests {
         let result = txn.apply_writes(&*store, 4).unwrap();
         assert_eq!(result.puts_applied, 1);
 
-        // The KeepLast(1) mode should have pruned old versions
+        // KeepLast(1) is a retention hint — write still appends (issue #1700)
         let latest = Storage::get_versioned(&*store, &key, u64::MAX)
             .unwrap()
             .unwrap();

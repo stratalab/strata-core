@@ -86,7 +86,7 @@ Key design decisions:
 ### 1.3 Write Path
 
 - `put(key, value)` — buffer in write_set, clear from delete_set if present
-- `put_replace(key, value)` — same as put, but marks key for `WriteMode::KeepLast(1)` (overwrites all previous versions instead of appending MVCC version)
+- `put_replace(key, value)` — same as put, but marks key for `WriteMode::KeepLast(1)` (retention hint: older versions are pruned at compaction, not at write time)
 - `delete(key)` — buffer in delete_set, clear from write_set if present
 - `cas(key, expected_version, new_value)` — buffer in cas_set (validated at commit, not call time)
 - `cas_with_read(key, ...)` — like cas but also reads from snapshot to populate read_set

@@ -449,6 +449,70 @@ fn get_version_only_tombstoned() {
     assert_eq!(store.get_version_only(&kv_key("k")).unwrap(), None);
 }
 
+/// Issue #1700: WriteMode::KeepLast is a compaction-time retention hint, NOT
+/// a write-time pruning directive.  The memtable always appends — pruning
+/// happens only during compaction via `max_versions_per_key`.
+#[test]
+fn test_issue_1700_keep_last_does_not_prune_at_write_time() {
+    let store = SegmentedStore::new();
+    let key = kv_key("adj_list");
+
+    // Write 3 versions with Append
+    for v in 1..=3u64 {
+        store
+            .put_with_version_mode(
+                key.clone(),
+                Value::Int(v as i64),
+                v,
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
+    }
+    assert_eq!(store.get_history(&key, None, None).unwrap().len(), 3);
+
+    // Write a 4th version with KeepLast(1) — memtable must still keep all 4.
+    store
+        .put_with_version_mode(key.clone(), Value::Int(99), 4, None, WriteMode::KeepLast(1))
+        .unwrap();
+
+    let history = store.get_history(&key, None, None).unwrap();
+    assert_eq!(
+        history.len(),
+        4,
+        "KeepLast(1) must not prune at write time; all 4 versions should be present"
+    );
+    // Latest version is the KeepLast write
+    assert_eq!(history[0].value, Value::Int(99));
+    assert_eq!(history[0].version.as_u64(), 4);
+}
+
+/// Issue #1700: apply_batch with KeepLast entries preserves all versions.
+#[test]
+fn test_issue_1700_apply_batch_keep_last_preserves_versions() {
+    let store = SegmentedStore::new();
+    let key = kv_key("batch_adj");
+
+    // Seed 2 versions
+    seed(&store, key.clone(), Value::Int(1), 1);
+    seed(&store, key.clone(), Value::Int(2), 2);
+
+    // Batch write with KeepLast(1)
+    store
+        .apply_batch(
+            vec![(key.clone(), Value::Int(3), WriteMode::KeepLast(1))],
+            3,
+        )
+        .unwrap();
+
+    let history = store.get_history(&key, None, None).unwrap();
+    assert_eq!(
+        history.len(),
+        3,
+        "apply_batch with KeepLast must not prune; all 3 versions should be present"
+    );
+}
+
 #[test]
 fn delete_nonexistent_key() {
     let store = SegmentedStore::new();
