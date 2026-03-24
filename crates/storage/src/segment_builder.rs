@@ -796,10 +796,16 @@ fn encode_entry_v4(
         buf.push(VALUE_KIND_PUT);
         buf.extend_from_slice(&entry.timestamp.as_micros().to_le_bytes());
         buf.extend_from_slice(&entry.ttl_ms.to_le_bytes());
-        let value_bytes =
-            bincode::serialize(&entry.value).expect("Value serialization should not fail");
-        buf.extend_from_slice(&(value_bytes.len() as u32).to_le_bytes());
-        buf.extend_from_slice(&value_bytes);
+        if let Some(ref raw) = entry.raw_value {
+            // Zero-copy passthrough: use pre-encoded bincode bytes (#1765)
+            buf.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+            buf.extend_from_slice(raw);
+        } else {
+            let value_bytes =
+                bincode::serialize(&entry.value).expect("Value serialization should not fail");
+            buf.extend_from_slice(&(value_bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&value_bytes);
+        }
     }
 }
 
@@ -904,6 +910,36 @@ pub(crate) fn decode_entry_v4(
         ik,
         hdr.is_tombstone,
         value,
+        hdr.timestamp,
+        hdr.ttl_ms,
+        hdr.total_len,
+    ))
+}
+
+/// Decode a v4 entry without deserializing the value payload (#1765).
+///
+/// Returns raw bincode bytes instead of a `Value`, eliminating the
+/// deserialize→serialize round-trip during compaction.
+#[allow(clippy::type_complexity)]
+pub(crate) fn decode_entry_v4_raw(
+    data: &[u8],
+    prev_key: &mut Vec<u8>,
+) -> Option<(InternalKey, bool, Option<Vec<u8>>, u64, u64, usize)> {
+    let hdr = decode_entry_header_v4(data, prev_key)?;
+    let ik = InternalKey::try_from_bytes(prev_key.clone())?;
+    let raw_value = if hdr.is_tombstone {
+        None
+    } else {
+        let end = hdr.value_start + hdr.value_len;
+        if end > data.len() {
+            return None;
+        }
+        Some(data[hdr.value_start..end].to_vec())
+    };
+    Some((
+        ik,
+        hdr.is_tombstone,
+        raw_value,
         hdr.timestamp,
         hdr.ttl_ms,
         hdr.total_len,
@@ -1651,6 +1687,7 @@ mod tests {
                 is_tombstone: false,
                 timestamp: ts,
                 ttl_ms: 60_000,
+                raw_value: None,
             },
         );
         mt.put_entry(
@@ -1661,6 +1698,7 @@ mod tests {
                 is_tombstone: true,
                 timestamp: strata_core::Timestamp::from_micros(999),
                 ttl_ms: 0,
+                raw_value: None,
             },
         );
         mt.freeze();
@@ -1889,6 +1927,7 @@ mod tests {
                 is_tombstone: false,
                 timestamp: strata_core::Timestamp::now(),
                 ttl_ms: 0,
+                raw_value: None,
             };
             let is_restart_point = entry_count == 0 || is_restart;
             encode_entry_v4(&prev_key, &ik, &entry, &mut buf, is_restart_point);
@@ -1927,6 +1966,7 @@ mod tests {
                     is_tombstone: false,
                     timestamp: strata_core::Timestamp::now(),
                     ttl_ms: 0,
+                    raw_value: None,
                 };
                 let is_restart_point = count == 0 || is_restart;
                 encode_entry_v4(&prev_key, &ik, &entry, &mut buf, is_restart_point);
@@ -2002,6 +2042,7 @@ mod tests {
             is_tombstone: false,
             timestamp: strata_core::Timestamp::now(),
             ttl_ms: 0,
+            raw_value: None,
         };
 
         let mut buf = Vec::new();
@@ -2026,6 +2067,7 @@ mod tests {
             is_tombstone: true,
             timestamp: strata_core::Timestamp::now(),
             ttl_ms: 5_000,
+            raw_value: None,
         };
 
         let mut buf = Vec::new();
@@ -2053,6 +2095,7 @@ mod tests {
             is_tombstone: false,
             timestamp: strata_core::Timestamp::now(),
             ttl_ms: 0,
+            raw_value: None,
         };
 
         let mut buf = Vec::new();
@@ -2096,6 +2139,7 @@ mod tests {
                 is_tombstone: false,
                 timestamp: strata_core::Timestamp::now(),
                 ttl_ms: 0,
+                raw_value: None,
             };
             let is_restart = i == 0 || i % RESTART_INTERVAL as u32 == 0;
             encode_entry_v4(&prev_key, &ik, &entry, &mut buf, is_restart);

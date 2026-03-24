@@ -279,6 +279,7 @@ mod tests {
             is_tombstone: false,
             timestamp: Timestamp::now(),
             ttl_ms: 0,
+            raw_value: None,
         }
     }
 
@@ -288,6 +289,7 @@ mod tests {
             is_tombstone: true,
             timestamp: Timestamp::now(),
             ttl_ms: 0,
+            raw_value: None,
         }
     }
 

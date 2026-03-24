@@ -994,8 +994,9 @@ fn streaming_sources(
         .map(|seg| {
             let flag = Arc::new(AtomicBool::new(false));
             corruption_flags.push(Arc::clone(&flag));
-            let owned =
-                crate::segment::OwnedSegmentIter::new(Arc::clone(seg)).with_corruption_flag(flag);
+            let owned = crate::segment::OwnedSegmentIter::new(Arc::clone(seg))
+                .with_raw_values()
+                .with_corruption_flag(flag);
             if let Some(ref limiter) = rate_limiter {
                 let throttled =
                     crate::segment::ThrottledSegmentIter::new(owned, Arc::clone(limiter));
