@@ -252,6 +252,10 @@ impl Executor {
                 let report = self.primitives.db.health();
                 Ok(Output::Health(report))
             }
+            Command::Metrics => {
+                let metrics = self.primitives.db.metrics();
+                Ok(Output::Metrics(metrics))
+            }
             Command::Flush => {
                 crate::handlers::embed_hook::flush_embed_buffer(&self.primitives);
                 self.primitives.db.scheduler().drain();
@@ -900,6 +904,7 @@ impl Executor {
             | Command::TxnInfo
             | Command::TxnIsActive => Err(Error::Internal {
                 reason: "Transaction commands not yet implemented".to_string(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
 
             // Retention commands
@@ -919,6 +924,7 @@ impl Executor {
             Command::RetentionStats { .. } | Command::RetentionPreview { .. } => {
                 Err(Error::Internal {
                     reason: "Retention commands not yet implemented".to_string(),
+                    hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
                 })
             }
 

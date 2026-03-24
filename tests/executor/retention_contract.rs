@@ -23,7 +23,7 @@ fn retention_stats_and_preview_are_not_yet_implemented() {
     let preview = executor.execute(Command::RetentionPreview { branch: None });
 
     match stats {
-        Err(Error::Internal { reason }) => {
+        Err(Error::Internal { reason, .. }) => {
             assert!(
                 reason.contains("not yet implemented"),
                 "unexpected reason: {reason}"
@@ -36,7 +36,7 @@ fn retention_stats_and_preview_are_not_yet_implemented() {
     }
 
     match preview {
-        Err(Error::Internal { reason }) => {
+        Err(Error::Internal { reason, .. }) => {
             assert!(
                 reason.contains("not yet implemented"),
                 "unexpected reason: {reason}"

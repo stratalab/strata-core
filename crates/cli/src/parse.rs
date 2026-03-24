@@ -164,6 +164,7 @@ pub fn matches_to_action(matches: &ArgMatches, state: &SessionState) -> Result<C
         "ping" => Ok(CliAction::Execute(Command::Ping)),
         "info" => Ok(CliAction::Execute(Command::Info)),
         "health" => Ok(CliAction::Execute(Command::Health)),
+        "metrics" => Ok(CliAction::Execute(Command::Metrics)),
         "flush" => Ok(CliAction::Execute(Command::Flush)),
         "compact" => Ok(CliAction::Execute(Command::Compact)),
         "describe" => Ok(CliAction::Execute(Command::Describe {
@@ -195,6 +196,7 @@ pub fn matches_to_action(matches: &ArgMatches, state: &SessionState) -> Result<C
                 "ping",
                 "info",
                 "health",
+                "metrics",
                 "init",
                 "flush",
                 "compact",

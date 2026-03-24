@@ -364,12 +364,14 @@ pub fn db_export(
             if !parent.as_os_str().is_empty() && !parent.exists() {
                 return Err(Error::Io {
                     reason: format!("Parent directory '{}' does not exist", parent.display()),
+                    hint: None,
                 });
             }
         }
 
         std::fs::write(&file_path, &rendered).map_err(|e| Error::Io {
             reason: format!("Failed to write export file: {}", e),
+            hint: None,
         })?;
 
         Ok(Output::Exported(ExportResult {

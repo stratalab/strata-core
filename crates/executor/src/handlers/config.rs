@@ -214,12 +214,12 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
                 "Invalid bm25_k1 value: {:?}. Expected a positive number",
                 value.trim()
             ),
-            hint: None,
+            hint: Some("Typical range is 1.2\u{2013}2.0 (default: 1.2).".to_string()),
         })?;
         if !v.is_finite() || v <= 0.0 {
             return Err(Error::InvalidInput {
                 reason: "bm25_k1 must be a finite number greater than 0".to_string(),
-                hint: None,
+                hint: Some("Typical range is 1.2\u{2013}2.0 (default: 1.2).".to_string()),
             });
         }
     }
@@ -231,12 +231,12 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
                 "Invalid bm25_b value: {:?}. Expected a number between 0 and 1",
                 value.trim()
             ),
-            hint: None,
+            hint: Some("Typical range is 0.0\u{2013}1.0 (default: 0.75).".to_string()),
         })?;
         if !v.is_finite() || !(0.0..=1.0).contains(&v) {
             return Err(Error::InvalidInput {
                 reason: "bm25_b must be a finite number between 0 and 1 (inclusive)".to_string(),
-                hint: None,
+                hint: Some("Typical range is 0.0\u{2013}1.0 (default: 0.75).".to_string()),
             });
         }
     }
@@ -446,21 +446,11 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
             .unwrap_or_else(|| value.clone()),
         "anthropic_api_key" | "openai_api_key" | "google_api_key" => mask_api_key(&value),
         "auto_embed" => value.trim().eq_ignore_ascii_case("true").to_string(),
-        "bm25_k1" => value
-            .trim()
-            .parse::<f32>()
-            .map(|v| v.to_string())
-            .unwrap_or_else(|_| value.clone()),
-        "bm25_b" => value
-            .trim()
-            .parse::<f32>()
-            .map(|v| v.to_string())
-            .unwrap_or_else(|_| value.clone()),
-        "embed_batch_size" => value
-            .trim()
-            .parse::<usize>()
-            .map(|v| v.to_string())
-            .unwrap_or_else(|_| value.clone()),
+        // Pre-existing validators above already reject non-numeric values,
+        // so parse() here is guaranteed to succeed for valid inputs.
+        "bm25_k1" => value.trim().parse::<f32>().unwrap().to_string(),
+        "bm25_b" => value.trim().parse::<f32>().unwrap().to_string(),
+        "embed_batch_size" => value.trim().parse::<usize>().unwrap().to_string(),
         _ => value.clone(),
     };
 
@@ -479,6 +469,7 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
             cfg.auto_embed = value.trim().eq_ignore_ascii_case("true");
         }
         "bm25_k1" => {
+            // Pre-existing validators above guarantee parse succeeds.
             cfg.bm25_k1 = value.trim().parse().ok();
         }
         "bm25_b" => {

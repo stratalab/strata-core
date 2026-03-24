@@ -34,6 +34,7 @@ pub fn generate(
         p.db.extension::<GenerateModelState>()
             .map_err(|e| Error::Internal {
                 reason: format!("Failed to get generate model state: {}", e),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             })?;
 
     // Read provider config from the database
@@ -44,7 +45,7 @@ pub fn generate(
         // Local inference: load from the model registry
         state
             .get_or_load(&model)
-            .map_err(|e| Error::Internal { reason: e })?
+            .map_err(|e| Error::Internal { reason: e, hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()) })?
     } else {
         // Cloud provider: parse provider kind, look up API key, dispatch
         let provider_kind: strata_intelligence::ProviderKind =
@@ -97,7 +98,7 @@ pub fn generate(
             api_key.into_inner(),
             &resolved_model,
         )
-        .map_err(|e| Error::Internal { reason: e })?
+        .map_err(|e| Error::Internal { reason: e, hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()) })?
     };
 
     let request = strata_intelligence::GenerateRequest {
@@ -128,9 +129,10 @@ pub fn generate(
                 response.completion_tokens,
             ))
         })
-        .map_err(|e| Error::Internal { reason: e })?
+        .map_err(|e| Error::Internal { reason: e, hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()) })?
         .map_err(|e| Error::Internal {
             reason: format!("Generation failed: {}", e),
+            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
         })?;
 
     Ok(Output::Generated(GenerationResult {
@@ -157,20 +159,22 @@ pub fn tokenize(
         p.db.extension::<GenerateModelState>()
             .map_err(|e| Error::Internal {
                 reason: format!("Failed to get generate model state: {}", e),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             })?;
 
     let entry = state
         .get_or_load(&model)
-        .map_err(|e| Error::Internal { reason: e })?;
+        .map_err(|e| Error::Internal { reason: e, hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()) })?;
 
     let add_special = add_special_tokens.unwrap_or(true);
 
     let ids = strata_intelligence::generate::with_engine(&entry, |engine| {
         engine.encode(&text, add_special)
     })
-    .map_err(|e| Error::Internal { reason: e })?
+    .map_err(|e| Error::Internal { reason: e, hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()) })?
     .map_err(|e| Error::Internal {
         reason: format!("Tokenization failed: {}", e),
+        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
     })?;
 
     let count = ids.len();
@@ -186,16 +190,18 @@ pub fn detokenize(p: &Arc<Primitives>, model: String, ids: Vec<u32>) -> Result<O
         p.db.extension::<GenerateModelState>()
             .map_err(|e| Error::Internal {
                 reason: format!("Failed to get generate model state: {}", e),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             })?;
 
     let entry = state
         .get_or_load(&model)
-        .map_err(|e| Error::Internal { reason: e })?;
+        .map_err(|e| Error::Internal { reason: e, hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()) })?;
 
     let text = strata_intelligence::generate::with_engine(&entry, |engine| engine.decode(&ids))
-        .map_err(|e| Error::Internal { reason: e })?
+        .map_err(|e| Error::Internal { reason: e, hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()) })?
         .map_err(|e| Error::Internal {
             reason: format!("Detokenization failed: {}", e),
+            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
         })?;
 
     Ok(Output::Text(text))
@@ -210,6 +216,7 @@ pub fn generate_unload(p: &Arc<Primitives>, model: String) -> Result<Output> {
         p.db.extension::<GenerateModelState>()
             .map_err(|e| Error::Internal {
                 reason: format!("Failed to get generate model state: {}", e),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             })?;
 
     let was_loaded = state.unload(&model);
@@ -236,6 +243,7 @@ pub fn generate(
 ) -> Result<Output> {
     Err(Error::Internal {
         reason: "Generation not available: compile with --features embed".to_string(),
+        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
     })
 }
 
@@ -248,6 +256,7 @@ pub fn tokenize(
 ) -> Result<Output> {
     Err(Error::Internal {
         reason: "Generation not available: compile with --features embed".to_string(),
+        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
     })
 }
 
@@ -255,6 +264,7 @@ pub fn tokenize(
 pub fn detokenize(_p: &Arc<Primitives>, _model: String, _ids: Vec<u32>) -> Result<Output> {
     Err(Error::Internal {
         reason: "Generation not available: compile with --features embed".to_string(),
+        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
     })
 }
 
@@ -262,5 +272,6 @@ pub fn detokenize(_p: &Arc<Primitives>, _model: String, _ids: Vec<u32>) -> Resul
 pub fn generate_unload(_p: &Arc<Primitives>, _model: String) -> Result<Output> {
     Err(Error::Internal {
         reason: "Generation not available: compile with --features embed".to_string(),
+        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
     })
 }

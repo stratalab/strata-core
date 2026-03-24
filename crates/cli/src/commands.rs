@@ -89,6 +89,7 @@ pub fn build_cli() -> Command {
         .subcommand(build_ping())
         .subcommand(build_info())
         .subcommand(build_health())
+        .subcommand(build_metrics())
         .subcommand(build_flush())
         .subcommand(build_compact())
         .subcommand(build_describe())
@@ -125,6 +126,7 @@ pub fn build_repl_cmd() -> Command {
         .subcommand(build_ping())
         .subcommand(build_info())
         .subcommand(build_health())
+        .subcommand(build_metrics())
         .subcommand(build_flush())
         .subcommand(build_compact())
         .subcommand(build_search())
@@ -667,6 +669,10 @@ fn build_info() -> Command {
 
 fn build_health() -> Command {
     Command::new("health").about("Run health checks on all database subsystems")
+}
+
+fn build_metrics() -> Command {
+    Command::new("metrics").about("Show unified database metrics")
 }
 
 fn build_flush() -> Command {

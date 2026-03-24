@@ -287,9 +287,11 @@ impl Session {
                     strata_core::StrataError::Storage { .. }
                     | strata_core::StrataError::Corruption { .. } => Err(Error::Io {
                         reason: e.to_string(),
+                        hint: None,
                     }),
                     _ => Err(Error::Internal {
                         reason: e.to_string(),
+                        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
                     }),
                 }
             }

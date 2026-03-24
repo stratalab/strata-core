@@ -31,6 +31,7 @@ impl Strata {
             Output::BranchWithVersion { info, version } => Ok((info, version)),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchCreate".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -46,6 +47,7 @@ impl Strata {
             Output::MaybeBranchInfo(info) => Ok(info),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchGet".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -70,6 +72,7 @@ impl Strata {
             Output::BranchInfoList(branches) => Ok(branches),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchList".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -82,6 +85,7 @@ impl Strata {
             Output::Bool(exists) => Ok(exists),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchExists".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -100,6 +104,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchDelete".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }

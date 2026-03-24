@@ -577,10 +577,10 @@ mod tests {
         assert!(primitives.contains(&PrimitiveType::Kv));
         assert!(primitives.contains(&PrimitiveType::Json));
 
-        // Without filter selects all 6 primitives
+        // Without filter selects all 5 primitives
         let req_all = SearchRequest::new(branch_id, "test");
         let all_primitives = hybrid.select_primitives(&req_all);
-        assert_eq!(all_primitives.len(), 6);
+        assert_eq!(all_primitives.len(), 5);
     }
 
     #[test]

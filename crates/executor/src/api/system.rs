@@ -53,6 +53,7 @@ impl<'a> SystemBranch<'a> {
             Output::WriteResult { version, .. } => Ok(version),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for KvPut".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -69,6 +70,7 @@ impl<'a> SystemBranch<'a> {
             Output::Maybe(v) => Ok(v),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for KvGet".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -83,6 +85,7 @@ impl<'a> SystemBranch<'a> {
             Output::DeleteResult { deleted, .. } => Ok(deleted),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for KvDelete".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -100,6 +103,7 @@ impl<'a> SystemBranch<'a> {
             Output::Keys(keys) => Ok(keys),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for KvList".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -122,6 +126,7 @@ impl<'a> SystemBranch<'a> {
             Output::WriteResult { version, .. } => Ok(version),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for JsonSet".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -141,6 +146,7 @@ impl<'a> SystemBranch<'a> {
             Output::Maybe(v) => Ok(v),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for JsonGet".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -156,6 +162,7 @@ impl<'a> SystemBranch<'a> {
             Output::Uint(count) => Ok(count),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for JsonDelete".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -175,6 +182,7 @@ impl<'a> SystemBranch<'a> {
             Output::EventAppendResult { sequence, .. } => Ok(sequence),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for EventAppend".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -190,6 +198,7 @@ impl<'a> SystemBranch<'a> {
             Output::MaybeVersioned(v) => Ok(v),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for EventGet".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }

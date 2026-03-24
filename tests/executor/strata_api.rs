@@ -67,6 +67,20 @@ fn health_info_total_keys_increases_after_writes() {
 }
 
 #[test]
+fn metrics_returns_unified_snapshot() {
+    let db = create_strata();
+
+    let m = db.metrics().unwrap();
+
+    assert!(m.uptime_secs <= 1);
+    assert!(m.scheduler.worker_count >= 1);
+    assert!(m.storage.total_branches >= 1);
+    // Ephemeral has no WAL or disk
+    assert!(m.wal_counters.is_none());
+    assert!(m.available_disk_bytes.is_none());
+}
+
+#[test]
 fn flush_succeeds() {
     let db = create_strata();
 

@@ -289,7 +289,9 @@ impl WalOnlyCompactor {
                 Err(WalRecordError::ChecksumMismatch { .. }) => {
                     break;
                 }
-                Err(_) => {
+                Err(e) => {
+                    warn!(target: "strata::compaction", error = %e, cursor = cursor,
+                        "Unexpected WAL record error during compaction scan, stopping");
                     break;
                 }
             }

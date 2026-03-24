@@ -462,11 +462,13 @@ pub fn reindex_embeddings(
         p.db.extension::<strata_intelligence::embed::EmbedModelState>()
             .map_err(|e| crate::Error::Internal {
                 reason: format!("Failed to get embed model state: {}", e),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             })?;
     let dim = model_state
         .embedding_dim()
         .ok_or_else(|| crate::Error::Internal {
             reason: "Embedding model not loaded — cannot determine dimension".into(),
+            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
         })?;
 
     // 2. Flush any pending embeds from the old model BEFORE deleting collections
@@ -615,6 +617,7 @@ pub fn reindex_embeddings(
 ) -> crate::Result<crate::Output> {
     Err(crate::Error::Internal {
         reason: "The 'embed' feature is not enabled. Rebuild with --features embed".into(),
+        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
     })
 }
 

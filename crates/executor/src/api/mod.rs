@@ -136,6 +136,7 @@ impl Strata {
             // Follower mode: read-only, never write to the database directory
             let db = Database::open_follower(&data_dir).map_err(|e| Error::Internal {
                 reason: format!("Failed to open database (follower): {}", e),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             })?;
             let access_mode = AccessMode::ReadOnly;
             let executor = Executor::new_with_mode(db, access_mode);
@@ -150,6 +151,7 @@ impl Strata {
 
         std::fs::create_dir_all(&data_dir).map_err(|e| Error::Internal {
             reason: format!("Failed to create data directory: {}", e),
+            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
         })?;
 
         // Read existing config (or defaults)
@@ -157,10 +159,12 @@ impl Strata {
         strata_engine::database::config::StrataConfig::write_default_if_missing(&config_path)
             .map_err(|e| Error::Internal {
                 reason: format!("Failed to write default config: {}", e),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             })?;
         let cfg = strata_engine::database::config::StrataConfig::from_file(&config_path).map_err(
             |e| Error::Internal {
                 reason: format!("Failed to read config: {}", e),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             },
         )?;
 
@@ -199,6 +203,7 @@ impl Strata {
                                     .execute(Command::Ping)
                                     .map_err(|_| Error::Internal {
                                         reason: "Connected to IPC server but ping failed".into(),
+                                        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
                                     })?;
                                 return Ok(Self {
                                     backend,
@@ -218,6 +223,7 @@ impl Strata {
                                     .map_err(|e| {
                                         Error::Internal {
                                             reason: format!("Failed to read config: {}", e),
+                                            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
                                         }
                                     })?;
                                 match Database::open_with_config(&data_dir, cfg2) {
@@ -244,6 +250,7 @@ impl Strata {
                                                  Run `strata up` to enable shared access, \
                                                  or use --follower for read-only access."
                                                 .into(),
+                                            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
                                         });
                                     }
                                 }
@@ -255,11 +262,13 @@ impl Strata {
                                  Run `strata up` to enable shared access, \
                                  or use --follower for read-only access."
                                 .into(),
+                            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
                         });
                     }
                 }
                 Err(Error::Internal {
                     reason: format!("Failed to open database: {}", e),
+                    hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
                 })
             }
         }
@@ -279,6 +288,7 @@ impl Strata {
         ensure_vector_recovery();
         let db = Database::cache().map_err(|e| Error::Internal {
             reason: format!("Failed to open cache database: {}", e),
+            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
         })?;
         let executor = Executor::new(db);
 
@@ -322,6 +332,7 @@ impl Strata {
                 let c = client.lock().unwrap_or_else(|e| e.into_inner());
                 let new_client = c.connect_new().map_err(|e| Error::Io {
                     reason: format!("Failed to open new IPC connection: {}", e),
+                    hint: None,
                 })?;
                 Ok(Self {
                     backend: Backend::Ipc {
@@ -383,6 +394,7 @@ impl Strata {
             }
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchExists".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -402,6 +414,7 @@ impl Strata {
             }),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchExists".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -448,6 +461,7 @@ impl Strata {
             Output::DurabilityCounters(c) => Ok(c),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for DurabilityCounters".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -691,6 +705,7 @@ impl Strata {
             Output::SpaceList(spaces) => Ok(spaces),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for SpaceList".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -714,6 +729,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for SpaceDelete".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -733,6 +749,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for SpaceDelete".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }

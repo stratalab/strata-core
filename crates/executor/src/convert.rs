@@ -42,7 +42,11 @@ impl From<StrataError> for Error {
             },
 
             // Type errors
-            StrataError::WrongType { expected, actual } => Error::WrongType { expected, actual },
+            StrataError::WrongType { expected, actual } => Error::WrongType {
+                expected,
+                actual,
+                hint: None,
+            },
 
             // Conflict errors (temporal failures)
             StrataError::Conflict { reason, .. } => Error::Conflict { reason },
@@ -57,6 +61,7 @@ impl From<StrataError> for Error {
                     actual: actual_num,
                     expected_type: version_type_name(&expected).to_string(),
                     actual_type: version_type_name(&actual).to_string(),
+                    hint: Some("Re-read the current value and retry your operation.".to_string()),
                 }
             }
 
@@ -127,16 +132,27 @@ impl From<StrataError> for Error {
                 } else {
                     message
                 };
-                Error::Io { reason }
+                let hint = io_hint(&reason);
+                Error::Io { reason, hint }
             }
 
             StrataError::Serialization { message } => Error::Serialization { reason: message },
 
             StrataError::Corruption { message } => Error::Io {
                 reason: format!("Data corruption: {}", message),
+                hint: Some(
+                    "The database may need recovery. Re-open to attempt automatic repair."
+                        .to_string(),
+                ),
             },
 
-            StrataError::Internal { message } => Error::Internal { reason: message },
+            StrataError::Internal { message } => Error::Internal {
+                reason: message,
+                hint: Some(
+                    "This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues"
+                        .to_string(),
+                ),
+            },
         }
     }
 }
@@ -144,6 +160,23 @@ impl From<StrataError> for Error {
 /// Convert a strata_core::StrataResult to an executor Result.
 pub fn convert_result<T>(result: strata_core::StrataResult<T>) -> crate::Result<T> {
     result.map_err(Error::from)
+}
+
+/// Generate an actionable hint for I/O errors based on the error message.
+///
+/// Returns `None` for errors we can't classify — a missing hint is better
+/// than a misleading one.
+fn io_hint(reason: &str) -> Option<String> {
+    let lower = reason.to_lowercase();
+    if lower.contains("permission denied") {
+        Some("Check file permissions on the database directory.".to_string())
+    } else if lower.contains("no space") || lower.contains("disk full") {
+        Some("Free disk space or move the database to a larger volume.".to_string())
+    } else if lower.contains("not found") || lower.contains("no such file") {
+        Some("Check that the database path exists and is accessible.".to_string())
+    } else {
+        None
+    }
 }
 
 /// Extract a u64 from a Version enum.
@@ -196,6 +229,7 @@ mod tests {
                 actual,
                 expected_type,
                 actual_type,
+                ..
             } => {
                 assert_eq!(expected, 5);
                 assert_eq!(actual, 6);
@@ -211,7 +245,7 @@ mod tests {
         let err = StrataError::wrong_type("Int", "String");
         let converted: Error = err.into();
         match converted {
-            Error::WrongType { expected, actual } => {
+            Error::WrongType { expected, actual, .. } => {
                 assert_eq!(expected, "Int");
                 assert_eq!(actual, "String");
             }
@@ -224,7 +258,7 @@ mod tests {
         let err = StrataError::internal("something went wrong");
         let converted: Error = err.into();
         match converted {
-            Error::Internal { reason } => assert!(reason.contains("something went wrong")),
+            Error::Internal { reason, .. } => assert!(reason.contains("something went wrong")),
             _ => panic!("Expected Internal"),
         }
     }

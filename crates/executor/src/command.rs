@@ -670,6 +670,10 @@ pub enum Command {
     /// Returns: `Output::Health`
     Health,
 
+    /// Get unified database metrics.
+    /// Returns: `Output::Metrics`
+    Metrics,
+
     /// Flush pending writes to disk
     Flush,
 
@@ -1599,6 +1603,7 @@ impl Command {
             Command::Ping => "Ping",
             Command::Info => "Info",
             Command::Health => "Health",
+            Command::Metrics => "Metrics",
             Command::Flush => "Flush",
             Command::Compact => "Compact",
             Command::Describe { .. } => "Describe",
@@ -1809,6 +1814,7 @@ impl Command {
             | Command::Ping
             | Command::Info
             | Command::Health
+            | Command::Metrics
             | Command::Flush
             | Command::Compact
             | Command::EmbedStatus

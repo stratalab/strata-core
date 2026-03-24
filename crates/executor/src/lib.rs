@@ -77,7 +77,7 @@ pub use api::{
     DiffSummary, ForkInfo, MergeInfo, MergeStrategy, SpaceDiff, Strata, SystemBranch,
 };
 pub use command::Command;
-pub use error::Error;
+pub use error::{Error, ErrorSeverity};
 pub use executor::Executor;
 pub use ipc::IpcServer;
 pub use output::{EmbedStatusInfo, Output};
@@ -94,7 +94,7 @@ pub use strata_security::{AccessMode, OpenOptions};
 pub use strata_engine::WalCounters;
 
 // Re-export configuration types so users don't need strata-engine directly
-pub use strata_engine::{ModelConfig, StorageConfig, StrataConfig};
+pub use strata_engine::{ModelConfig, StorageConfig, StrataConfig, SystemMetrics};
 
 // Re-export Database and DurabilityMode so users can open/create databases
 // and create sessions without depending on strata-engine directly

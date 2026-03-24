@@ -1,10 +1,10 @@
-//! Database operations: ping, info, health, flush, compact, configuration.
+//! Database operations: ping, info, health, metrics, flush, compact, configuration.
 
 use super::Strata;
 use crate::output::EmbedStatusInfo;
 use crate::types::*;
 use crate::{Command, Error, Output, Result};
-use strata_engine::{HealthReport, StrataConfig};
+use strata_engine::{HealthReport, StrataConfig, SystemMetrics};
 
 impl Strata {
     // =========================================================================
@@ -17,6 +17,7 @@ impl Strata {
             Output::Pong { version } => Ok(version),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for Ping".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -27,6 +28,7 @@ impl Strata {
             Output::DatabaseInfo(info) => Ok(info),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for Info".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -37,6 +39,18 @@ impl Strata {
             Output::Health(report) => Ok(report),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for Health".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
+
+    /// Get unified database metrics.
+    pub fn metrics(&self) -> Result<SystemMetrics> {
+        match self.execute_cmd(Command::Metrics)? {
+            Output::Metrics(m) => Ok(m),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for Metrics".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -47,6 +61,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for Flush".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -57,6 +72,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for Compact".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -74,6 +90,7 @@ impl Strata {
             Output::BranchExported(result) => Ok(result),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchExport".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -86,6 +103,7 @@ impl Strata {
             Output::BranchImported(result) => Ok(result),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchImport".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -98,6 +116,7 @@ impl Strata {
             Output::BundleValidated(result) => Ok(result),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchBundleValidate".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -123,6 +142,7 @@ impl Strata {
             Output::ConfigSetResult { .. } => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for ConfigureSet".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -138,6 +158,7 @@ impl Strata {
             Output::ConfigValue(v) => Ok(v),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for ConfigureGetKey".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -150,6 +171,7 @@ impl Strata {
             Output::Config(cfg) => Ok(cfg),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for ConfigGet".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -173,6 +195,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for ConfigureModel".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -187,6 +210,7 @@ impl Strata {
             Output::Embedding(vec) => Ok(vec),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for Embed".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -201,6 +225,7 @@ impl Strata {
             Output::Embeddings(vecs) => Ok(vecs),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for EmbedBatch".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -211,6 +236,7 @@ impl Strata {
             Output::EmbedStatus(info) => Ok(info),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for EmbedStatus".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -221,6 +247,7 @@ impl Strata {
             Output::Bool(enabled) => Ok(enabled),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for AutoEmbedStatus".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -233,6 +260,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for ConfigSetAutoEmbed".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -249,6 +277,7 @@ impl Strata {
             Output::Described(result) => Ok(result),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for Describe".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -267,6 +296,7 @@ impl Strata {
             } => Ok((oldest_ts, latest_ts)),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for TimeRange".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -281,6 +311,7 @@ impl Strata {
             Output::SearchResults { hits, stats } => Ok((hits, stats)),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for Search".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -295,6 +326,7 @@ impl Strata {
             Output::Uint(count) => Ok(count),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for KvCount".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -309,6 +341,7 @@ impl Strata {
             Output::Uint(count) => Ok(count),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for JsonCount".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -328,6 +361,7 @@ impl Strata {
             Output::SampleResult { total_count, items } => Ok((total_count, items)),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for KvSample".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -343,6 +377,7 @@ impl Strata {
             Output::SampleResult { total_count, items } => Ok((total_count, items)),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for JsonSample".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -362,6 +397,7 @@ impl Strata {
             Output::SampleResult { total_count, items } => Ok((total_count, items)),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for VectorSample".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -378,6 +414,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for RetentionApply".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -393,6 +430,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for RetentionStats".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -408,6 +446,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for RetentionPreview".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
