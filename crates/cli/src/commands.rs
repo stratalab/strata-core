@@ -89,11 +89,12 @@ pub fn build_cli() -> Command {
         .subcommand(build_txn())
         .subcommand(build_ping())
         .subcommand(build_info())
+        .subcommand(build_health())
         .subcommand(build_flush())
         .subcommand(build_compact())
         .subcommand(build_describe())
         .subcommand(build_search())
-        .subcommand(build_setup())
+        .subcommand(build_init())
         .subcommand(build_uninstall())
         .subcommand(build_configure_model())
         .subcommand(build_embed())
@@ -125,6 +126,7 @@ pub fn build_repl_cmd() -> Command {
         .subcommand(build_txn())
         .subcommand(build_ping())
         .subcommand(build_info())
+        .subcommand(build_health())
         .subcommand(build_flush())
         .subcommand(build_compact())
         .subcommand(build_search())
@@ -749,6 +751,10 @@ fn build_info() -> Command {
     Command::new("info").about("Get database information")
 }
 
+fn build_health() -> Command {
+    Command::new("health").about("Run health checks on all database subsystems")
+}
+
 fn build_flush() -> Command {
     Command::new("flush").about("Flush pending writes to disk")
 }
@@ -821,8 +827,15 @@ fn build_search() -> Command {
 // Setup
 // =========================================================================
 
-fn build_setup() -> Command {
-    Command::new("setup").about("Download model files for auto-embedding")
+fn build_init() -> Command {
+    Command::new("init")
+        .about("Set up a new Strata database with guided setup")
+        .arg(
+            Arg::new("non-interactive")
+                .long("non-interactive")
+                .help("Accept all defaults, skip prompts (for CI and automation)")
+                .action(clap::ArgAction::SetTrue),
+        )
 }
 
 fn build_uninstall() -> Command {

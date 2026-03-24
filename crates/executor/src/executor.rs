@@ -242,10 +242,14 @@ impl Executor {
                     .unwrap_or(0);
                 Ok(Output::DatabaseInfo(crate::types::DatabaseInfo {
                     version: env!("CARGO_PKG_VERSION").to_string(),
-                    uptime_secs: 0,
+                    uptime_secs: self.primitives.db.uptime_secs(),
                     branch_count,
-                    total_keys: 0,
+                    total_keys: self.primitives.db.approximate_total_keys(),
                 }))
+            }
+            Command::Health => {
+                let report = self.primitives.db.health();
+                Ok(Output::Health(report))
             }
             Command::Flush => {
                 crate::handlers::embed_hook::flush_embed_buffer(&self.primitives);

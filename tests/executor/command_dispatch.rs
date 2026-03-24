@@ -34,8 +34,49 @@ fn info_returns_database_info() {
     match output {
         Output::DatabaseInfo(info) => {
             assert!(!info.version.is_empty());
+            // Uptime should be 0 or very small for a just-opened database
+            assert!(info.uptime_secs <= 1);
+            // Cache database has system branch entries in storage
+            assert!(info.total_keys > 0);
+            // branch_count is user-visible branches (default branch is lazy-created)
         }
         _ => panic!("Expected DatabaseInfo output"),
+    }
+}
+
+#[test]
+fn health_returns_all_subsystems() {
+    let executor = create_executor();
+
+    let output = executor.execute(Command::Health).unwrap();
+
+    match output {
+        Output::Health(report) => {
+            assert_eq!(
+                report.status,
+                strata_engine::SubsystemStatus::Healthy,
+                "ephemeral DB should be fully healthy"
+            );
+            assert!(report.uptime_secs <= 1);
+            // All 6 subsystems present
+            assert_eq!(report.subsystems.len(), 6);
+            let names: Vec<&str> = report.subsystems.iter().map(|s| s.name.as_str()).collect();
+            assert_eq!(
+                names,
+                &["storage", "wal", "flush_thread", "disk", "coordinator", "scheduler"]
+            );
+            // Every subsystem should be healthy on a fresh ephemeral DB
+            for sub in &report.subsystems {
+                assert_eq!(
+                    sub.status,
+                    strata_engine::SubsystemStatus::Healthy,
+                    "subsystem '{}' should be healthy, got: {:?}",
+                    sub.name,
+                    sub.message
+                );
+            }
+        }
+        _ => panic!("Expected Health output"),
     }
 }
 

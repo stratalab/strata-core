@@ -418,6 +418,12 @@ impl SegmentedStore {
         self.version.load(Ordering::Acquire)
     }
 
+    /// Number of branches currently tracked by the store.
+    #[inline]
+    pub fn branch_count(&self) -> usize {
+        self.branches.len()
+    }
+
     /// Increment version and return new value.
     ///
     /// # Panics
