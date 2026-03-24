@@ -203,12 +203,15 @@ pub enum Error {
 
     // ==================== Constraint Errors ====================
     /// Vector dimension mismatch
-    #[error("dimension mismatch: expected {expected}, got {actual}")]
+    #[error("dimension mismatch: expected {expected}, got {actual}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
     DimensionMismatch {
         /// Expected dimensionality.
         expected: usize,
         /// Actual dimensionality provided.
         actual: usize,
+        /// Optional actionable hint (e.g. model identification).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
     },
 
     /// Constraint violation
@@ -247,18 +250,29 @@ pub enum Error {
 
     // ==================== Transaction Errors ====================
     /// No active transaction
-    #[error("no active transaction")]
-    TransactionNotActive,
+    #[error("no active transaction{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
+    TransactionNotActive {
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
+    },
 
     /// Transaction already active
-    #[error("transaction already active")]
-    TransactionAlreadyActive,
+    #[error("transaction already active{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
+    TransactionAlreadyActive {
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
+    },
 
     /// Transaction conflict (commit-time validation failure)
-    #[error("transaction conflict: {reason}")]
+    #[error("transaction conflict: {reason}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
     TransactionConflict {
         /// Description of the transaction conflict.
         reason: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
     },
 
     // ==================== System Errors ====================

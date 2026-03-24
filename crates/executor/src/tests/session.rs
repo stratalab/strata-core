@@ -68,7 +68,7 @@ fn test_double_begin_returns_error() {
         options: None,
     });
     assert!(
-        matches!(result, Err(Error::TransactionAlreadyActive)),
+        matches!(result, Err(Error::TransactionAlreadyActive { .. })),
         "Expected TransactionAlreadyActive, got {:?}",
         result,
     );
@@ -80,7 +80,7 @@ fn test_commit_without_begin_returns_error() {
 
     let result = session.execute(Command::TxnCommit);
     assert!(
-        matches!(result, Err(Error::TransactionNotActive)),
+        matches!(result, Err(Error::TransactionNotActive { .. })),
         "Expected TransactionNotActive, got {:?}",
         result,
     );
@@ -92,7 +92,7 @@ fn test_abort_without_begin_returns_error() {
 
     let result = session.execute(Command::TxnRollback);
     assert!(
-        matches!(result, Err(Error::TransactionNotActive)),
+        matches!(result, Err(Error::TransactionNotActive { .. })),
         "Expected TransactionNotActive, got {:?}",
         result,
     );

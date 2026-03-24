@@ -76,7 +76,7 @@ impl From<StrataError> for Error {
                 reason: format!("Transaction timeout after {}ms", duration_ms),
             },
 
-            StrataError::TransactionNotActive { .. } => Error::TransactionNotActive,
+            StrataError::TransactionNotActive { .. } => Error::TransactionNotActive { hint: None },
 
             // Validation errors
             StrataError::InvalidOperation { entity_ref, reason } => Error::ConstraintViolation {
@@ -92,6 +92,7 @@ impl From<StrataError> for Error {
             StrataError::DimensionMismatch { expected, got } => Error::DimensionMismatch {
                 expected,
                 actual: got,
+                hint: None,
             },
 
             StrataError::CapacityExceeded {
@@ -237,7 +238,9 @@ mod tests {
         let err = StrataError::dimension_mismatch(384, 768);
         let converted: Error = err.into();
         match converted {
-            Error::DimensionMismatch { expected, actual } => {
+            Error::DimensionMismatch {
+                expected, actual, ..
+            } => {
                 assert_eq!(expected, 384);
                 assert_eq!(actual, 768);
             }

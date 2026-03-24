@@ -121,7 +121,8 @@ pub fn event_get_by_type(
         &event_type,
         after_sequence,
         limit.map(|l| l as usize),
-    ))?;
+    ))
+    .map_err(|e| enrich_event_error(p, &core_branch_id, &space, e))?;
 
     let versioned: Vec<VersionedValue> = events
         .into_iter()
@@ -150,7 +151,8 @@ pub fn event_get_by_type_at(
         convert_result(
             p.event
                 .get_by_type(&core_branch_id, &space, &event_type, None, None),
-        )?;
+        )
+        .map_err(|e| enrich_event_error(p, &core_branch_id, &space, e))?;
 
     // Filter events by timestamp
     let versioned: Vec<VersionedValue> = events
@@ -255,6 +257,26 @@ pub fn event_batch_append(
     }
 
     Ok(Output::BatchResults(results))
+}
+
+/// Enrich a StreamNotFound error with fuzzy-match suggestions on event types.
+fn enrich_event_error(
+    p: &Arc<Primitives>,
+    branch_id: &strata_core::types::BranchId,
+    space: &str,
+    err: crate::Error,
+) -> crate::Error {
+    match err {
+        crate::Error::StreamNotFound {
+            stream,
+            hint: None,
+        } => {
+            let candidates = p.event.list_types(branch_id, space).unwrap_or_default();
+            let hint = crate::suggest::format_hint("event types", &candidates, &stream, 2);
+            crate::Error::StreamNotFound { stream, hint }
+        }
+        other => other,
+    }
 }
 
 /// Handle EventLen command.

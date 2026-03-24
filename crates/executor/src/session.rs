@@ -240,7 +240,9 @@ impl Session {
 
     fn handle_begin(&mut self, cmd: &Command) -> Result<Output> {
         if self.txn_ctx.is_some() {
-            return Err(Error::TransactionAlreadyActive);
+            return Err(Error::TransactionAlreadyActive {
+                hint: Some("Commit or rollback before starting a new one.".to_string()),
+            });
         }
 
         let branch = match cmd {
@@ -257,7 +259,9 @@ impl Session {
     }
 
     fn handle_commit(&mut self) -> Result<Output> {
-        let mut ctx = self.txn_ctx.take().ok_or(Error::TransactionNotActive)?;
+        let mut ctx = self.txn_ctx.take().ok_or(Error::TransactionNotActive {
+            hint: Some("Start one with: begin".to_string()),
+        })?;
         self.txn_branch_id = None;
 
         match self.db.commit_transaction(&mut ctx) {
@@ -278,6 +282,7 @@ impl Session {
                     | strata_core::StrataError::WriteConflict { .. } => {
                         Err(Error::TransactionConflict {
                             reason: e.to_string(),
+                            hint: Some("Another write modified this key. Retry your transaction.".to_string()),
                         })
                     }
                     strata_core::StrataError::Storage { .. }
@@ -293,7 +298,9 @@ impl Session {
     }
 
     fn handle_abort(&mut self) -> Result<Output> {
-        let ctx = self.txn_ctx.take().ok_or(Error::TransactionNotActive)?;
+        let ctx = self.txn_ctx.take().ok_or(Error::TransactionNotActive {
+            hint: Some("Start one with: begin".to_string()),
+        })?;
         self.txn_branch_id = None;
         self.db.end_transaction(ctx);
         Ok(Output::TxnAborted)
