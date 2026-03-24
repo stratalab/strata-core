@@ -100,7 +100,7 @@ inherits = "release"
 [features]
 default = ["jemalloc"]
 jemalloc = ["dep:tikv-jemallocator"]
-perf-trace = []  # Enable per-layer timing instrumentation for M4
+perf-trace = ["strata-engine/perf-trace"]  # Enable per-operation timing instrumentation
 # Basic comparison benchmarks (redb, LMDB, SQLite)
 comparison-benchmarks = ["dep:redb", "dep:heed", "dep:rusqlite"]
 # Enable USearch for vector comparisons (requires C++ build tools)

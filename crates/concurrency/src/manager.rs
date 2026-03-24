@@ -33,6 +33,7 @@ use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use strata_core::perf_time;
 use strata_core::traits::Storage;
 use strata_core::types::BranchId;
 use strata_durability::format::WalRecord;
@@ -401,6 +402,11 @@ impl TransactionManager {
             return Ok(self.version.load(Ordering::Acquire));
         }
 
+        #[cfg(feature = "perf-trace")]
+        let commit_start = std::time::Instant::now();
+        #[allow(unused_mut, unused_variables)]
+        let mut trace = strata_core::instrumentation::PerfTrace::new();
+
         // Acquire quiesce read lock so checkpoint's quiesced_version() can
         // drain all in-flight commits before reading the version counter (#1710).
         let _quiesce_guard = self.commit_quiesce.read();
@@ -431,7 +437,9 @@ impl TransactionManager {
             }
             txn.status = TransactionStatus::Committed;
         } else {
-            txn.commit(store)?;
+            perf_time!(trace, read_set_validate_ns, {
+                txn.commit(store)?;
+            });
             tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, "Validation passed");
         }
 
@@ -444,53 +452,76 @@ impl TransactionManager {
         let has_mutations = !txn.is_read_only();
         if has_mutations {
             if let Some(wal_arc) = wal_arc {
-                let payload = TransactionPayload::from_transaction(txn, commit_version);
-                let timestamp = now_micros();
-                // Use commit_version as WAL record ordering key (#1696)
-                let record = WalRecord::new(
-                    commit_version,
-                    *txn.branch_id.as_bytes(),
-                    timestamp,
-                    payload.to_bytes(),
-                );
-                let record_bytes = record.to_bytes();
-                {
-                    let mut wal = wal_arc.lock();
-                    if let Err(e) =
-                        wal.append_pre_serialized(&record_bytes, commit_version, timestamp)
+                perf_time!(trace, wal_append_ns, {
+                    let payload = TransactionPayload::from_transaction(txn, commit_version);
+                    let timestamp = now_micros();
+                    // Use commit_version as WAL record ordering key (#1696)
+                    let record = WalRecord::new(
+                        commit_version,
+                        *txn.branch_id.as_bytes(),
+                        timestamp,
+                        payload.to_bytes(),
+                    );
+                    let record_bytes = record.to_bytes();
                     {
-                        txn.status = TransactionStatus::Aborted {
-                            reason: format!("WAL write failed: {}", e),
-                        };
-                        return Err(CommitError::WALError(e.to_string()));
+                        let mut wal = wal_arc.lock();
+                        if let Err(e) =
+                            wal.append_pre_serialized(&record_bytes, commit_version, timestamp)
+                        {
+                            txn.status = TransactionStatus::Aborted {
+                                reason: format!("WAL write failed: {}", e),
+                            };
+                            return Err(CommitError::WALError(e.to_string()));
+                        }
                     }
-                }
+                });
                 tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, commit_version, "WAL durable");
             }
         }
 
-        if let Err(e) = txn.apply_writes(store, commit_version) {
-            if wal_arc.is_some() {
-                tracing::error!(
-                    target: "strata::txn",
-                    txn_id = txn.txn_id,
-                    commit_version = commit_version,
-                    error = %e,
-                    "Storage application failed after WAL commit - will be recovered on restart"
-                );
-                return Err(CommitError::DurableButNotVisible(format!(
-                    "Storage application failed after WAL commit: {}",
-                    e
-                )));
-            } else {
-                txn.status = TransactionStatus::Aborted {
-                    reason: format!("Storage application failed: {}", e),
-                };
-                return Err(CommitError::WALError(format!(
-                    "Storage application failed (no WAL): {}",
-                    e
-                )));
+        perf_time!(trace, write_set_apply_ns, {
+            if let Err(e) = txn.apply_writes(store, commit_version) {
+                if wal_arc.is_some() {
+                    tracing::error!(
+                        target: "strata::txn",
+                        txn_id = txn.txn_id,
+                        commit_version = commit_version,
+                        error = %e,
+                        "Storage application failed after WAL commit - will be recovered on restart"
+                    );
+                    return Err(CommitError::DurableButNotVisible(format!(
+                        "Storage application failed after WAL commit: {}",
+                        e
+                    )));
+                } else {
+                    txn.status = TransactionStatus::Aborted {
+                        reason: format!("Storage application failed: {}", e),
+                    };
+                    return Err(CommitError::WALError(format!(
+                        "Storage application failed (no WAL): {}",
+                        e
+                    )));
+                }
             }
+        });
+
+        #[cfg(feature = "perf-trace")]
+        {
+            trace.commit_total_ns = commit_start.elapsed().as_nanos() as u64;
+            trace.keys_read = txn.read_set.len();
+            trace.keys_written = txn.write_set.len();
+            tracing::info!(
+                target: "strata::perf",
+                txn_id = txn.txn_id,
+                commit_version,
+                total_us = trace.commit_total_ns / 1000,
+                validate_us = trace.read_set_validate_ns / 1000,
+                wal_us = trace.wal_append_ns / 1000,
+                apply_us = trace.write_set_apply_ns / 1000,
+                keys_read = trace.keys_read,
+                keys_written = trace.keys_written,
+                "commit perf trace"
+            );
         }
 
         Ok(commit_version)

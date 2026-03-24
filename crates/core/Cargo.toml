@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+default = []
+perf-trace = []  # Enable per-operation timing instrumentation
+
 [dependencies]
 uuid = { workspace = true }
 serde = { workspace = true }
