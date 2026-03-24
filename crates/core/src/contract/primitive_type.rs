@@ -133,15 +133,15 @@ impl PrimitiveType {
     /// - KV: 0x10-0x1F
     /// - JSON: 0x20-0x2F
     /// - Event: 0x30-0x3F
-    /// - Branch: 0x60-0x6F
-    /// - Vector: 0x70-0x7F
+    /// - Branch: 0x40-0x4F
+    /// - Vector: 0x50-0x5F
     pub const fn entry_type_range(&self) -> (u8, u8) {
         match self {
             PrimitiveType::Kv => (0x10, 0x1F),
             PrimitiveType::Json => (0x20, 0x2F),
             PrimitiveType::Event => (0x30, 0x3F),
-            PrimitiveType::Branch => (0x60, 0x6F),
-            PrimitiveType::Vector => (0x70, 0x7F),
+            PrimitiveType::Branch => (0x40, 0x4F),
+            PrimitiveType::Vector => (0x50, 0x5F),
         }
     }
 
@@ -153,8 +153,8 @@ impl PrimitiveType {
             PrimitiveType::Kv => 1,
             PrimitiveType::Json => 2,
             PrimitiveType::Event => 3,
-            PrimitiveType::Branch => 6,
-            PrimitiveType::Vector => 7,
+            PrimitiveType::Branch => 4,
+            PrimitiveType::Vector => 5,
         }
     }
 }
@@ -303,8 +303,8 @@ mod tests {
         assert_eq!(PrimitiveType::Kv.entry_type_range(), (0x10, 0x1F));
         assert_eq!(PrimitiveType::Json.entry_type_range(), (0x20, 0x2F));
         assert_eq!(PrimitiveType::Event.entry_type_range(), (0x30, 0x3F));
-        assert_eq!(PrimitiveType::Branch.entry_type_range(), (0x60, 0x6F));
-        assert_eq!(PrimitiveType::Vector.entry_type_range(), (0x70, 0x7F));
+        assert_eq!(PrimitiveType::Branch.entry_type_range(), (0x40, 0x4F));
+        assert_eq!(PrimitiveType::Vector.entry_type_range(), (0x50, 0x5F));
     }
 
     #[test]
@@ -312,8 +312,8 @@ mod tests {
         assert_eq!(PrimitiveType::Kv.primitive_id(), 1);
         assert_eq!(PrimitiveType::Json.primitive_id(), 2);
         assert_eq!(PrimitiveType::Event.primitive_id(), 3);
-        assert_eq!(PrimitiveType::Branch.primitive_id(), 6);
-        assert_eq!(PrimitiveType::Vector.primitive_id(), 7);
+        assert_eq!(PrimitiveType::Branch.primitive_id(), 4);
+        assert_eq!(PrimitiveType::Vector.primitive_id(), 5);
     }
 
     #[test]

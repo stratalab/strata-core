@@ -7,14 +7,12 @@
 pub const KV: u8 = 0x01;
 /// Event log
 pub const EVENT: u8 = 0x02;
-// 0x03 was State (StateCell removed, never shipped)
-// 0x04 was Trace — reserved, intentionally skipped
 /// Branch
-pub const BRANCH: u8 = 0x05;
+pub const BRANCH: u8 = 0x03;
 /// JSON document
-pub const JSON: u8 = 0x06;
+pub const JSON: u8 = 0x04;
 /// Vector embedding
-pub const VECTOR: u8 = 0x07;
+pub const VECTOR: u8 = 0x05;
 
 /// All valid primitive tags in order
 pub const ALL_TAGS: [u8; 5] = [KV, EVENT, BRANCH, JSON, VECTOR];

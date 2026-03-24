@@ -23,17 +23,17 @@ use serde::{Deserialize, Serialize};
 use strata_core::{BranchId, EntityRef};
 
 // ============================================================================
-// WAL Entry Type Constants (0x70-0x7F range)
+// WAL Entry Type Constants (0x50-0x5F range)
 // ============================================================================
 
 /// WAL entry type for vector collection creation
-pub const VECTOR_COLLECTION_CREATE: u8 = 0x70;
+pub const VECTOR_COLLECTION_CREATE: u8 = 0x50;
 /// WAL entry type for vector collection deletion
-pub const VECTOR_COLLECTION_DELETE: u8 = 0x71;
+pub const VECTOR_COLLECTION_DELETE: u8 = 0x51;
 /// WAL entry type for vector upsert
-pub const VECTOR_UPSERT: u8 = 0x72;
+pub const VECTOR_UPSERT: u8 = 0x52;
 /// WAL entry type for vector deletion
-pub const VECTOR_DELETE: u8 = 0x73;
+pub const VECTOR_DELETE: u8 = 0x53;
 
 // ============================================================================
 // WAL Payload Structs
