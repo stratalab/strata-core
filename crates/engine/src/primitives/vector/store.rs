@@ -1959,6 +1959,17 @@ impl VectorStore {
         Ok(state.backends.get(&cid).map(|b| b.len()).unwrap_or(0))
     }
 
+    /// Get the dimension of an existing system collection, or None if not found.
+    pub fn system_collection_dimension(
+        &self,
+        branch_id: BranchId,
+        collection: &str,
+    ) -> VectorResult<Option<usize>> {
+        Ok(self
+            .get_collection(branch_id, "default", collection)?
+            .map(|v| v.value.config.dimension))
+    }
+
     /// Search a system collection (internal use only)
     pub fn system_search(
         &self,
