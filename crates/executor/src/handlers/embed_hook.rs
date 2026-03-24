@@ -819,6 +819,42 @@ mod tests {
             other => panic!("Expected EmbedStatus, got {:?}", other),
         }
     }
+
+    /// Issue #1535 Bug 3: If the embed model dimension differs from an existing
+    /// shadow collection's dimension, ensure_shadow_collection must NOT cache
+    /// the collection — effectively disabling embedding to prevent mixed-dimension
+    /// vectors in the same collection.
+    #[test]
+    fn test_issue_1535_dimension_mismatch_blocks_shadow_collection() {
+        use strata_core::primitives::VectorConfig;
+
+        let p = setup();
+        let branch_id = BranchId::default();
+        let collection_name = SHADOW_KV;
+
+        // Pre-create the shadow collection with dimension 3 (tiny, for testing).
+        let config = VectorConfig::for_embedding(3);
+        p.vector
+            .create_system_collection(branch_id, collection_name, config)
+            .expect("pre-create shadow collection with dim=3");
+
+        // Now call ensure_shadow_collection. The loaded model (or fallback)
+        // has dimension 384, which differs from the existing collection's dim=3.
+        ensure_shadow_collection(&p, branch_id, collection_name);
+
+        // The collection should NOT be cached because dimensions mismatch.
+        let state = p.db.extension::<AutoEmbedState>().unwrap();
+        let cache_key = format!(
+            "{:?}{}{}",
+            branch_id.as_bytes(),
+            SHADOW_KEY_SEP,
+            collection_name
+        );
+        assert!(
+            !state.contains(&cache_key),
+            "ensure_shadow_collection must NOT cache a collection with mismatched dimension"
+        );
+    }
 }
 
 /// Ensure a shadow collection exists, swallowing AlreadyExists errors.
@@ -870,8 +906,27 @@ fn ensure_shadow_collection(
             state.insert(cache_key);
         }
         Err(strata_engine::vector::VectorError::CollectionAlreadyExists { .. }) => {
-            // Already exists from a previous process run — mark as created
-            state.insert(cache_key);
+            // Already exists from a previous process run — verify dimension matches
+            match p.vector.system_collection_dimension(branch_id, name) {
+                Ok(Some(existing_dim)) if existing_dim != dim => {
+                    tracing::error!(
+                        target: "strata::embed",
+                        collection = name,
+                        existing_dim,
+                        model_dim = dim,
+                        "Shadow collection dimension mismatch: collection has {}-d vectors \
+                         but loaded model produces {}-d embeddings. Embedding disabled for \
+                         this collection. Re-index to fix.",
+                        existing_dim,
+                        dim,
+                    );
+                    // Do NOT cache — this disables embedding for this collection
+                    // until the user re-indexes with the correct model.
+                }
+                _ => {
+                    state.insert(cache_key);
+                }
+            }
         }
         Err(e) => {
             tracing::warn!(
