@@ -134,7 +134,7 @@ impl From<StrataError> for Error {
                 let reason = if let Some(ref src) = source {
                     format!("{}: {}", message, src)
                 } else {
-                    message.clone()
+                    message
                 };
                 let hint = io_hint(&reason);
                 Error::Io { reason, hint }
@@ -167,17 +167,19 @@ pub fn convert_result<T>(result: strata_core::StrataResult<T>) -> crate::Result<
 }
 
 /// Generate an actionable hint for I/O errors based on the error message.
+///
+/// Returns `None` for errors we can't classify — a missing hint is better
+/// than a misleading one.
 fn io_hint(reason: &str) -> Option<String> {
     let lower = reason.to_lowercase();
     if lower.contains("permission denied") {
         Some("Check file permissions on the database directory.".to_string())
     } else if lower.contains("no space") || lower.contains("disk full") {
         Some("Free disk space or move the database to a larger volume.".to_string())
+    } else if lower.contains("not found") || lower.contains("no such file") {
+        Some("Check that the database path exists and is accessible.".to_string())
     } else {
-        Some(
-            "Check that the database directory is accessible and has sufficient disk space."
-                .to_string(),
-        )
+        None
     }
 }
 

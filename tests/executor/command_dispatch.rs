@@ -1258,3 +1258,143 @@ fn kv_list_empty_prefix_with_limit() {
         _ => panic!("Expected KeysPage, got {:?}", output),
     }
 }
+
+// ============================================================================
+// Error Quality Tests (#1550)
+// ============================================================================
+
+#[test]
+fn config_set_rejects_non_numeric_bm25_k1() {
+    let executor = create_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "bm25_k1".into(),
+        value: "not_a_number".into(),
+    });
+    match result {
+        Err(Error::InvalidInput { reason, hint, .. }) => {
+            assert!(reason.contains("bm25_k1"), "reason: {}", reason);
+            assert!(hint.is_some(), "should have hint with typical range");
+        }
+        other => panic!("Expected InvalidInput, got {:?}", other),
+    }
+}
+
+#[test]
+fn config_set_rejects_nan_bm25_k1() {
+    let executor = create_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "bm25_k1".into(),
+        value: "NaN".into(),
+    });
+    match result {
+        Err(Error::InvalidInput { reason, .. }) => {
+            assert!(
+                reason.contains("finite") || reason.contains("greater than 0"),
+                "reason: {}",
+                reason
+            );
+        }
+        other => panic!("Expected InvalidInput for NaN, got {:?}", other),
+    }
+}
+
+#[test]
+fn config_set_rejects_zero_embed_batch_size() {
+    let executor = create_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "embed_batch_size".into(),
+        value: "0".into(),
+    });
+    match result {
+        Err(Error::InvalidInput { reason, .. }) => {
+            assert!(
+                reason.contains("greater than 0"),
+                "reason: {}",
+                reason
+            );
+        }
+        other => panic!("Expected InvalidInput for 0, got {:?}", other),
+    }
+}
+
+#[test]
+fn config_set_accepts_valid_bm25_k1() {
+    let executor = create_executor();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "bm25_k1".into(),
+        value: "1.5".into(),
+    });
+    assert!(result.is_ok(), "Valid bm25_k1 should succeed: {:?}", result);
+}
+
+#[test]
+fn version_conflict_includes_retry_hint() {
+    use strata_core::{EntityRef, StrataError, Version};
+
+    let err = StrataError::version_conflict(
+        EntityRef::kv(strata_core::types::BranchId::from_bytes([0; 16]), "k"),
+        Version::Txn(1),
+        Version::Txn(2),
+    );
+    let converted: Error = err.into();
+    match converted {
+        Error::VersionConflict { hint, .. } => {
+            assert!(hint.is_some(), "VersionConflict should have retry hint");
+            assert!(hint.unwrap().contains("retry"), "hint should mention retry");
+        }
+        _ => panic!("Expected VersionConflict"),
+    }
+}
+
+#[test]
+fn internal_error_includes_bug_report_hint() {
+    use strata_core::StrataError;
+
+    let err = StrataError::internal("test invariant");
+    let converted: Error = err.into();
+    match converted {
+        Error::Internal { hint, .. } => {
+            assert!(hint.is_some(), "Internal should have bug report hint");
+            assert!(
+                hint.unwrap().contains("report"),
+                "hint should mention reporting"
+            );
+        }
+        _ => panic!("Expected Internal"),
+    }
+}
+
+#[test]
+fn error_severity_classification() {
+    use strata_executor::ErrorSeverity;
+
+    // User errors
+    let user_err = Error::KeyNotFound {
+        key: "x".into(),
+        hint: None,
+    };
+    assert_eq!(user_err.severity(), ErrorSeverity::UserError);
+
+    // System errors
+    let io_err = Error::Io {
+        reason: "disk".into(),
+        hint: None,
+    };
+    assert_eq!(io_err.severity(), ErrorSeverity::SystemFailure);
+
+    let ser_err = Error::Serialization {
+        reason: "bad".into(),
+    };
+    assert_eq!(ser_err.severity(), ErrorSeverity::SystemFailure);
+
+    // Internal bugs
+    let bug = Error::Internal {
+        reason: "oops".into(),
+        hint: None,
+    };
+    assert_eq!(bug.severity(), ErrorSeverity::InternalBug);
+}
