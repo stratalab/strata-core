@@ -213,6 +213,21 @@ fn version_next_version_set_version() {
 }
 
 #[test]
+#[should_panic(expected = "version counter overflow")]
+fn test_issue_1718_next_version_overflow_panics() {
+    // M-11: next_version() must detect u64::MAX overflow instead of
+    // silently wrapping to 0, which would corrupt MVCC ordering.
+    // This is consistent with TransactionManager::allocate_version()
+    // which returns Err(CounterOverflow) at u64::MAX.
+    let store = SegmentedStore::new();
+    store.set_version(u64::MAX - 1);
+    // Advances from MAX-1 to MAX — should succeed
+    assert_eq!(store.next_version(), u64::MAX);
+    // Advances from MAX — should panic (overflow)
+    store.next_version();
+}
+
+#[test]
 fn branch_ids_and_clear() {
     let store = SegmentedStore::new();
     seed(&store, kv_key("k"), Value::Int(1), 1);
@@ -1827,7 +1842,7 @@ fn test_issue_1706_apply_writes_atomic_no_partial_visibility() {
     let deletes = vec![kv_key("K2")];
 
     // apply_writes_atomic should install everything BEFORE advancing version.
-    store.apply_writes_atomic(writes, deletes, 10).unwrap();
+    store.apply_writes_atomic(writes, deletes, 10, &[]).unwrap();
 
     // After the atomic call, version should be 10.
     assert_eq!(store.version(), 10);
@@ -1863,7 +1878,7 @@ fn test_issue_1706_version_not_advanced_before_deletes_installed() {
     let writes = vec![(kv_key("B"), Value::Int(200), WriteMode::Append)];
     let deletes = vec![kv_key("A")];
 
-    store.apply_writes_atomic(writes, deletes, 5).unwrap();
+    store.apply_writes_atomic(writes, deletes, 5, &[]).unwrap();
 
     // Version advanced to 5 only after both writes and deletes are in.
     assert_eq!(store.version(), 5);
@@ -1877,17 +1892,17 @@ fn test_issue_1706_version_not_advanced_before_deletes_installed() {
 fn test_issue_1706_apply_writes_atomic_empty() {
     let store = SegmentedStore::new();
     // Both empty — should not advance version.
-    store.apply_writes_atomic(vec![], vec![], 5).unwrap();
+    store.apply_writes_atomic(vec![], vec![], 5, &[]).unwrap();
     assert_eq!(store.version(), 0);
 
     // Only writes, no deletes.
     let writes = vec![(kv_key("X"), Value::Int(1), WriteMode::Append)];
-    store.apply_writes_atomic(writes, vec![], 3).unwrap();
+    store.apply_writes_atomic(writes, vec![], 3, &[]).unwrap();
     assert_eq!(store.version(), 3);
 
     // Only deletes, no writes.
     let deletes = vec![kv_key("X")];
-    store.apply_writes_atomic(vec![], deletes, 7).unwrap();
+    store.apply_writes_atomic(vec![], deletes, 7, &[]).unwrap();
     assert_eq!(store.version(), 7);
     assert!(store.get_versioned(&kv_key("X"), 7).unwrap().is_none());
 }
@@ -3693,7 +3708,7 @@ fn compact_level_ephemeral_returns_none() {
 #[test]
 fn recalculate_targets_empty_db() {
     let level_bytes = [0u64; NUM_LEVELS];
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     // All levels derive from MIN_BASE_BYTES when no non-L0 data exists
     assert_eq!(targets.max_bytes[0], 0); // L0 unused (count-based)
     assert_eq!(targets.max_bytes[1], MIN_BASE_BYTES); // 1MB
@@ -3708,7 +3723,7 @@ fn recalculate_targets_empty_db() {
 fn recalculate_targets_small_db() {
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[1] = 100 << 20; // 100MB in L1
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     // Dynamic: base = 100MB (derived from bottom level L1)
     assert_eq!(targets.max_bytes[0], 0);
     assert_eq!(targets.max_bytes[1], 100 << 20);
@@ -3724,14 +3739,14 @@ fn recalculate_targets_scales_up() {
     let data: u64 = 30 * (1 << 30); // 30 GiB in L3
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[3] = data;
-    let targets = recalculate_level_targets(&level_bytes);
-    // base = 30GiB / 10^2 = ~307MB → clamped to MAX_BASE_BYTES (256MB)
-    assert_eq!(targets.max_bytes[1], MAX_BASE_BYTES);
-    assert_eq!(targets.max_bytes[2], MAX_BASE_BYTES * 10);
-    assert_eq!(targets.max_bytes[3], MAX_BASE_BYTES * 100);
-    assert_eq!(targets.max_bytes[4], MAX_BASE_BYTES * 1_000);
-    assert_eq!(targets.max_bytes[5], MAX_BASE_BYTES * 10_000);
-    assert_eq!(targets.max_bytes[6], MAX_BASE_BYTES * 100_000);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
+    // base = 30GiB / 10^2 = ~307MB → clamped to LEVEL_BASE_BYTES (256MB)
+    assert_eq!(targets.max_bytes[1], LEVEL_BASE_BYTES);
+    assert_eq!(targets.max_bytes[2], LEVEL_BASE_BYTES * 10);
+    assert_eq!(targets.max_bytes[3], LEVEL_BASE_BYTES * 100);
+    assert_eq!(targets.max_bytes[4], LEVEL_BASE_BYTES * 1_000);
+    assert_eq!(targets.max_bytes[5], LEVEL_BASE_BYTES * 10_000);
+    assert_eq!(targets.max_bytes[6], LEVEL_BASE_BYTES * 100_000);
 }
 
 #[test]
@@ -3740,22 +3755,22 @@ fn recalculate_targets_anchor_at_high_level() {
     let data: u64 = 3 * (1u64 << 40); // 3 TiB in L5
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[5] = data;
-    let targets = recalculate_level_targets(&level_bytes);
-    // base = 3TiB / 10^4 = ~322MB → clamped to MAX_BASE_BYTES (256MB)
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
+    // base = 3TiB / 10^4 = ~322MB → clamped to LEVEL_BASE_BYTES (256MB)
     assert_eq!(targets.max_bytes[0], 0);
-    assert_eq!(targets.max_bytes[1], MAX_BASE_BYTES);
-    assert_eq!(targets.max_bytes[2], MAX_BASE_BYTES * 10);
-    assert_eq!(targets.max_bytes[3], MAX_BASE_BYTES * 100);
-    assert_eq!(targets.max_bytes[4], MAX_BASE_BYTES * 1_000);
-    assert_eq!(targets.max_bytes[5], MAX_BASE_BYTES * 10_000);
-    assert_eq!(targets.max_bytes[6], MAX_BASE_BYTES * 100_000);
+    assert_eq!(targets.max_bytes[1], LEVEL_BASE_BYTES);
+    assert_eq!(targets.max_bytes[2], LEVEL_BASE_BYTES * 10);
+    assert_eq!(targets.max_bytes[3], LEVEL_BASE_BYTES * 100);
+    assert_eq!(targets.max_bytes[4], LEVEL_BASE_BYTES * 1_000);
+    assert_eq!(targets.max_bytes[5], LEVEL_BASE_BYTES * 10_000);
+    assert_eq!(targets.max_bytes[6], LEVEL_BASE_BYTES * 100_000);
 }
 
 #[test]
 fn recalculate_targets_tiny_db() {
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[1] = 10 << 20; // 10MB in L1
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     // base = 10MB — within [MIN, MAX], full geometric chain
     assert_eq!(targets.max_bytes[0], 0);
     assert_eq!(targets.max_bytes[1], 10 << 20);
@@ -3770,7 +3785,7 @@ fn recalculate_targets_tiny_db() {
 fn recalculate_targets_sub_minimum() {
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[1] = 512 * 1024; // 512KB in L1
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     // 512KB < MIN_BASE_BYTES → clamped to 1MB, full chain from MIN
     assert_eq!(targets.max_bytes[1], MIN_BASE_BYTES);
     assert_eq!(targets.max_bytes[2], MIN_BASE_BYTES * 10);
@@ -3783,7 +3798,7 @@ fn recalculate_targets_multi_level_data() {
     level_bytes[1] = 200 << 20; // 200MB
     level_bytes[2] = 2 << 30; // 2GB
     level_bytes[3] = 15 << 30; // 15GB — largest non-L0 level
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     // base = 15GB / 10^2 = ~153MB → within [MIN, MAX] range
     let expected_base: u64 = (15u64 << 30) / 100;
     assert_eq!(targets.max_bytes[1], expected_base);
@@ -3800,7 +3815,7 @@ fn recalculate_targets_multi_level_data() {
 fn recalculate_targets_only_l0() {
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[0] = 500 << 20; // 500MB in L0 only
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     // L0 is ignored — no non-L0 data → uses MIN_BASE_BYTES
     assert_eq!(targets.max_bytes[0], 0);
     assert_eq!(targets.max_bytes[1], MIN_BASE_BYTES);
@@ -3811,7 +3826,7 @@ fn recalculate_targets_only_l0() {
 fn recalculate_targets_empty_intermediate() {
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[4] = 100 << 30; // 100GB in L4 only (L1-L3 empty)
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     // base = 100GB / 10^3 = ~102MB
     let expected_base: u64 = (100u64 << 30) / 1_000;
     assert_eq!(targets.max_bytes[1], expected_base);
@@ -3827,10 +3842,10 @@ fn recalculate_targets_data_at_l6() {
     // L6 is the highest level — requires maximum backward divisions (5).
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[6] = 100u64 << 40; // 100 TiB in L6
-    let targets = recalculate_level_targets(&level_bytes);
-    // base = 100TiB / 10^5 = ~1.1GB → clamped to MAX_BASE_BYTES (256MB)
-    assert_eq!(targets.max_bytes[1], MAX_BASE_BYTES);
-    assert_eq!(targets.max_bytes[6], MAX_BASE_BYTES * 100_000);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
+    // base = 100TiB / 10^5 = ~1.1GB → clamped to LEVEL_BASE_BYTES (256MB)
+    assert_eq!(targets.max_bytes[1], LEVEL_BASE_BYTES);
+    assert_eq!(targets.max_bytes[6], LEVEL_BASE_BYTES * 100_000);
 }
 
 #[test]
@@ -3840,9 +3855,9 @@ fn recalculate_targets_data_at_l6_unclamped() {
     let data: u64 = 10u64 * (1u64 << 40); // 10 TiB
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[6] = data;
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     let expected_base = data / 100_000;
-    assert!(expected_base > MIN_BASE_BYTES && expected_base < MAX_BASE_BYTES);
+    assert!(expected_base > MIN_BASE_BYTES && expected_base < LEVEL_BASE_BYTES);
     assert_eq!(targets.max_bytes[1], expected_base);
     assert_eq!(targets.max_bytes[2], expected_base * 10);
     assert_eq!(targets.max_bytes[6], expected_base * 100_000);
@@ -3855,9 +3870,9 @@ fn recalculate_targets_lower_level_dominates() {
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[2] = 50 << 30; // 50GB in L2
     level_bytes[5] = 1 << 30; // 1GB in L5
-    let targets = recalculate_level_targets(&level_bytes);
-    // base = 50GB / 10^1 = 5GB → clamped to MAX_BASE_BYTES (256MB)
-    assert_eq!(targets.max_bytes[1], MAX_BASE_BYTES);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
+    // base = 50GB / 10^1 = 5GB → clamped to LEVEL_BASE_BYTES (256MB)
+    assert_eq!(targets.max_bytes[1], LEVEL_BASE_BYTES);
     // L2 actual (50GB) vs target (2.56GB) → score ~19.5 → aggressive compaction
     assert!(level_bytes[2] as f64 / targets.max_bytes[2] as f64 > 10.0);
 }
@@ -3868,27 +3883,27 @@ fn recalculate_targets_base_exactly_at_min() {
     // Data at L1 = 1MB → base = 1MB = MIN_BASE_BYTES.
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[1] = MIN_BASE_BYTES;
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     assert_eq!(targets.max_bytes[1], MIN_BASE_BYTES);
 }
 
 #[test]
 fn recalculate_targets_base_exactly_at_max() {
-    // Data at L1 = 256MB → base = 256MB = MAX_BASE_BYTES.
+    // Data at L1 = 256MB → base = 256MB = LEVEL_BASE_BYTES.
     let mut level_bytes = [0u64; NUM_LEVELS];
-    level_bytes[1] = MAX_BASE_BYTES;
-    let targets = recalculate_level_targets(&level_bytes);
-    assert_eq!(targets.max_bytes[1], MAX_BASE_BYTES);
-    assert_eq!(targets.max_bytes[2], MAX_BASE_BYTES * 10);
+    level_bytes[1] = LEVEL_BASE_BYTES;
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
+    assert_eq!(targets.max_bytes[1], LEVEL_BASE_BYTES);
+    assert_eq!(targets.max_bytes[2], LEVEL_BASE_BYTES * 10);
 }
 
 #[test]
 fn recalculate_targets_base_just_above_max_clamps() {
-    // Data at L1 = 300MB → base = 300MB > MAX_BASE_BYTES → clamped to 256MB.
+    // Data at L1 = 300MB → base = 300MB > LEVEL_BASE_BYTES → clamped to 256MB.
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[1] = 300 << 20;
-    let targets = recalculate_level_targets(&level_bytes);
-    assert_eq!(targets.max_bytes[1], MAX_BASE_BYTES);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
+    assert_eq!(targets.max_bytes[1], LEVEL_BASE_BYTES);
 }
 
 #[test]
@@ -3897,7 +3912,7 @@ fn recalculate_targets_score_meaningful_for_small_db() {
     // not 0.04 (which is what the old 256MB static target produced).
     let mut level_bytes = [0u64; NUM_LEVELS];
     level_bytes[1] = 10 << 20; // 10MB
-    let targets = recalculate_level_targets(&level_bytes);
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
     let score = level_bytes[1] as f64 / targets.max_bytes[1] as f64;
     assert!(
         (score - 1.0).abs() < 0.01,
@@ -4723,10 +4738,10 @@ fn inherited_layer_get_at_timestamp() {
 
     // Write entries with specific timestamps via recovery API
     store
-        .put_recovery_entry(parent_kv("k"), Value::Int(100), 1, 1000)
+        .put_recovery_entry(parent_kv("k"), Value::Int(100), 1, 1000, 0)
         .unwrap();
     store
-        .put_recovery_entry(parent_kv("k"), Value::Int(200), 2, 2000)
+        .put_recovery_entry(parent_kv("k"), Value::Int(200), 2, 2000, 0)
         .unwrap();
     store.rotate_memtable(&parent_branch());
     store.flush_oldest_frozen(&parent_branch()).unwrap();
@@ -4767,13 +4782,13 @@ fn inherited_layer_scan_prefix_at_timestamp() {
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
 
     store
-        .put_recovery_entry(parent_kv("user:a"), Value::Int(1), 1, 1000)
+        .put_recovery_entry(parent_kv("user:a"), Value::Int(1), 1, 1000, 0)
         .unwrap();
     store
-        .put_recovery_entry(parent_kv("user:b"), Value::Int(2), 2, 2000)
+        .put_recovery_entry(parent_kv("user:b"), Value::Int(2), 2, 2000, 0)
         .unwrap();
     store
-        .put_recovery_entry(parent_kv("user:c"), Value::Int(3), 3, 3000)
+        .put_recovery_entry(parent_kv("user:c"), Value::Int(3), 3, 3000, 0)
         .unwrap();
     store.rotate_memtable(&parent_branch());
     store.flush_oldest_frozen(&parent_branch()).unwrap();
@@ -8716,5 +8731,269 @@ fn test_issue_1720_concurrent_fork_same_dest_concurrent() {
                 );
             }
         }
+    }
+}
+
+// ===== Issue #1740: TTL not preserved through recovery =====
+
+#[test]
+fn test_issue_1740_put_recovery_entry_preserves_ttl() {
+    // Write via put_recovery_entry (simulating WAL replay) with a TTL.
+    // The entry should retain its TTL after recovery, not become permanent.
+    let store = SegmentedStore::new();
+    let key = kv_key("ttl_recovery");
+    let ttl_ms = 3_600_000u64; // 1 hour — won't expire during test
+
+    // Use current wall-clock time so the entry is not expired
+    let now_us = Timestamp::now().as_micros();
+
+    store
+        .put_recovery_entry(key.clone(), Value::Int(42), 1, now_us, ttl_ms)
+        .unwrap();
+
+    // Read the entry via store (filters expired) — should still be alive
+    let result = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
+    assert_eq!(result.value, Value::Int(42));
+
+    // Verify TTL was preserved by checking via the memtable directly
+    let branch = store.branches.get(&branch()).unwrap();
+    let entry = branch.active.get_versioned(&key, u64::MAX).unwrap();
+    assert_eq!(
+        entry.ttl_ms, ttl_ms,
+        "put_recovery_entry must preserve TTL, got ttl_ms={}",
+        entry.ttl_ms
+    );
+}
+
+#[test]
+fn test_issue_1740_apply_recovery_atomic_preserves_ttl() {
+    // apply_recovery_atomic is used by follower refresh and should preserve TTL.
+    let store = SegmentedStore::new();
+    let key = kv_key("ttl_atomic");
+    let ttl_ms = 3_600_000u64; // 1 hour — won't expire during test
+
+    let now_us = Timestamp::now().as_micros();
+
+    let writes = vec![(key.clone(), Value::Int(99))];
+    let put_ttls = vec![ttl_ms];
+    let deletes = vec![];
+
+    store
+        .apply_recovery_atomic(writes, deletes, 1, now_us, &put_ttls)
+        .unwrap();
+
+    // Verify TTL was preserved
+    let branch = store.branches.get(&branch()).unwrap();
+    let entry = branch.active.get_versioned(&key, u64::MAX).unwrap();
+    assert_eq!(
+        entry.ttl_ms, ttl_ms,
+        "apply_recovery_atomic must preserve TTL, got ttl_ms={}",
+        entry.ttl_ms
+    );
+}
+
+// ===== Issue #1721: fork_branch must not copy Materializing status =====
+
+/// Regression test for issue #1721 (COW-M6).
+///
+/// When a source branch has an inherited layer with `Materializing` status,
+/// `fork_branch` must set the child's copy to `Active`. Otherwise the child
+/// can never materialize that layer (the `Materializing` check returns early).
+#[test]
+fn test_issue_1721_fork_resets_materializing_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    let grandparent = BranchId::from_bytes([10; 16]);
+    let gp_ns = Arc::new(Namespace::new(grandparent, "default".to_string()));
+
+    // 1. Seed grandparent with data and flush to segments.
+    for i in 0..10 {
+        let key = Key::new(
+            Arc::clone(&gp_ns),
+            TypeTag::KV,
+            format!("k{}", i).into_bytes(),
+        );
+        seed(&store, key, Value::Int(i as i64), 1);
+    }
+    store.rotate_memtable(&grandparent);
+    store.flush_oldest_frozen(&grandparent).unwrap();
+
+    // 2. Fork grandparent → parent.  Parent inherits grandparent's segments.
+    let parent = BranchId::from_bytes([20; 16]);
+    store
+        .branches
+        .entry(parent)
+        .or_insert_with(BranchState::new);
+    store.fork_branch(&grandparent, &parent).unwrap();
+
+    // 3. Simulate in-progress materialization on the parent's inherited layer.
+    {
+        let mut branch = store.branches.get_mut(&parent).unwrap();
+        assert!(
+            !branch.inherited_layers.is_empty(),
+            "parent should have inherited layers"
+        );
+        branch.inherited_layers[0].status = LayerStatus::Materializing;
+    }
+
+    // 4. Fork parent → child (grandchild).
+    let child = BranchId::from_bytes([30; 16]);
+    store.branches.entry(child).or_insert_with(BranchState::new);
+    store.fork_branch(&parent, &child).unwrap();
+
+    // 5. Verify ALL of child's inherited layers are Active.
+    {
+        let branch = store.branches.get(&child).unwrap();
+        assert!(
+            branch.inherited_layers.len() >= 2,
+            "child should have at least 2 inherited layers"
+        );
+        for (i, layer) in branch.inherited_layers.iter().enumerate() {
+            assert_eq!(
+                layer.status,
+                LayerStatus::Active,
+                "child inherited layer {} should be Active, got {:?}",
+                i,
+                layer.status
+            );
+        }
+    }
+
+    // 6. Verify child can materialize layer[1] (the one that was Materializing in parent).
+    //    Before the fix, materialize_layer returns early with 0 entries because
+    //    it sees Materializing status and assumes materialization is already running.
+    let result = store.materialize_layer(&child, 1).unwrap();
+    assert!(
+        result.entries_materialized > 0,
+        "child must be able to materialize layer that was Materializing in parent"
+    );
+
+    // 7. Verify data is still readable through the child.
+    let child_ns = Arc::new(Namespace::new(child, "default".to_string()));
+    let child_key = Key::new(Arc::clone(&child_ns), TypeTag::KV, b"k0".to_vec());
+    let val = store.get_versioned(&child_key, u64::MAX).unwrap().unwrap();
+    assert_eq!(val.value, Value::Int(0));
+}
+
+/// Issue #1718 M-13: Two concurrent `flush_oldest_frozen` calls for the same
+/// branch must not install duplicate segments from the same frozen memtable.
+#[test]
+fn test_issue_1718_concurrent_flush_no_duplicate_segments() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(SegmentedStore::with_dir(dir.path().to_path_buf(), 0));
+    let b = branch();
+
+    // Write data and rotate to create exactly one frozen memtable.
+    for i in 0..10u64 {
+        store
+            .put_with_version_mode(
+                kv_key(&format!("k{:04}", i)),
+                Value::Int(i as i64),
+                i + 1,
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
+    }
+    store.rotate_memtable(&b);
+    assert_eq!(store.branch_frozen_count(&b), 1);
+
+    // Launch two threads that both try to flush the same frozen memtable.
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let s = Arc::clone(&store);
+            let bar = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                bar.wait();
+                s.flush_oldest_frozen(&branch()).unwrap()
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Exactly ONE segment should be installed (not two duplicates).
+    let seg_count = store.branch_segment_count(&b);
+    assert_eq!(
+        seg_count, 1,
+        "Expected 1 segment from the single frozen memtable, got {} (duplicate detected)",
+        seg_count
+    );
+
+    // The frozen list should be empty (memtable was consumed).
+    assert_eq!(store.branch_frozen_count(&b), 0);
+
+    // All data is readable.
+    for i in 0..10u64 {
+        let result = store
+            .get_versioned(&kv_key(&format!("k{:04}", i)), u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.value, Value::Int(i as i64));
+    }
+}
+
+/// Issue #1718 M-13 stress: Many concurrent flushes must not produce duplicates.
+#[test]
+fn test_issue_1718_concurrent_flush_no_duplicate_segments_stress() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(SegmentedStore::with_dir(dir.path().to_path_buf(), 0));
+    let b = branch();
+
+    // Create 3 frozen memtables.
+    for batch in 0..3u64 {
+        for i in 0..5u64 {
+            let key_idx = batch * 5 + i;
+            store
+                .put_with_version_mode(
+                    kv_key(&format!("k{:04}", key_idx)),
+                    Value::Int(key_idx as i64),
+                    key_idx + 1,
+                    None,
+                    WriteMode::Append,
+                )
+                .unwrap();
+        }
+        store.rotate_memtable(&b);
+    }
+    assert_eq!(store.branch_frozen_count(&b), 3);
+
+    // Launch 8 threads all racing to flush.
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let s = Arc::clone(&store);
+            let bar = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                bar.wait();
+                while s.flush_oldest_frozen(&branch()).unwrap() {}
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Exactly 3 segments (one per frozen memtable), no duplicates.
+    let seg_count = store.branch_segment_count(&b);
+    assert_eq!(
+        seg_count, 3,
+        "Expected 3 segments from 3 frozen memtables, got {} (duplicates detected)",
+        seg_count
+    );
+    assert_eq!(store.branch_frozen_count(&b), 0);
+
+    // All data readable.
+    for i in 0..15u64 {
+        let result = store
+            .get_versioned(&kv_key(&format!("k{:04}", i)), u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.value, Value::Int(i as i64));
     }
 }

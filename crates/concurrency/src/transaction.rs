@@ -483,6 +483,9 @@ pub struct TransactionContext {
     /// adjacency lists where version history wastes memory.
     key_write_modes: HashMap<Key, WriteMode>,
 
+    /// Per-key TTL in milliseconds. Keys not present have no TTL (ttl_ms = 0).
+    pub ttl_map: HashMap<Key, u64>,
+
     /// Allow operations on keys from branches other than `self.branch_id`.
     ///
     /// Default `false` — all keys must match the transaction's branch.
@@ -538,6 +541,7 @@ impl TransactionContext {
             max_write_entries: 0,
             read_only: false,
             key_write_modes: HashMap::new(),
+            ttl_map: HashMap::new(),
             allow_cross_branch: false,
         }
     }
@@ -586,6 +590,7 @@ impl TransactionContext {
             max_write_entries: 0,
             read_only: false,
             key_write_modes: HashMap::new(),
+            ttl_map: HashMap::new(),
             allow_cross_branch: false,
         }
     }
@@ -942,12 +947,34 @@ impl TransactionContext {
         }
         self.check_write_limit(Some(&key))?;
 
+        // Reject if the same key already has a CAS operation (#1739 OCC-M1)
+        if self.cas_set.iter().any(|op| op.key == key) {
+            return Err(StrataError::invalid_input(
+                "Key already has a CAS operation in this transaction; \
+                 mixing put/delete and CAS on the same key is ambiguous",
+            ));
+        }
+
         // Remove from delete_set if previously deleted in this txn
         self.delete_set.remove(&key);
+        // Clear any previous TTL — a plain put() has no TTL
+        self.ttl_map.remove(&key);
 
         // Add to write_set (overwrites any previous write to same key)
         self.write_set.insert(key, value);
         Ok(())
+    }
+
+    /// Buffer a write with a TTL (time-to-live) in milliseconds.
+    ///
+    /// Same as `put()`, but also records a TTL so the entry is serialized
+    /// into the WAL and preserved through recovery. A `ttl_ms` of 0 means
+    /// no TTL (equivalent to `put()`).
+    pub fn put_with_ttl(&mut self, key: Key, value: Value, ttl_ms: u64) -> StrataResult<()> {
+        if ttl_ms > 0 {
+            self.ttl_map.insert(key.clone(), ttl_ms);
+        }
+        self.put(key, value)
     }
 
     /// Buffer a write with a single-version retention hint.
@@ -1001,10 +1028,19 @@ impl TransactionContext {
         }
         self.check_write_limit(Some(&key))?;
 
+        // Reject if the same key already has a CAS operation (#1739 OCC-M1)
+        if self.cas_set.iter().any(|op| op.key == key) {
+            return Err(StrataError::invalid_input(
+                "Key already has a CAS operation in this transaction; \
+                 mixing put/delete and CAS on the same key is ambiguous",
+            ));
+        }
+
         // Remove from write_set if previously written in this txn
         self.write_set.remove(&key);
-        // Clean up any write mode override for this key
+        // Clean up any write mode override and TTL for this key
         self.key_write_modes.remove(&key);
+        self.ttl_map.remove(&key);
 
         // Add to delete_set
         self.delete_set.insert(key);
@@ -1055,6 +1091,14 @@ impl TransactionContext {
         }
         self.check_write_limit(None)?;
 
+        // Reject if the same key already has a put or delete (#1739 OCC-M1)
+        if self.write_set.contains_key(&key) || self.delete_set.contains(&key) {
+            return Err(StrataError::invalid_input(
+                "Key already has a put/delete in this transaction; \
+                 mixing put/delete and CAS on the same key is ambiguous",
+            ));
+        }
+
         self.cas_set.push(CASOperation {
             key,
             expected_version,
@@ -1082,6 +1126,15 @@ impl TransactionContext {
             ));
         }
         self.check_write_limit(None)?;
+
+        // Reject if the same key already has a put or delete (#1739 OCC-M1)
+        if self.write_set.contains_key(&key) || self.delete_set.contains(&key) {
+            return Err(StrataError::invalid_input(
+                "Key already has a put/delete in this transaction; \
+                 mixing put/delete and CAS on the same key is ambiguous",
+            ));
+        }
+
         self.read_from_snapshot(&key)?;
         self.cas_set.push(CASOperation {
             key,
@@ -1513,18 +1566,23 @@ impl TransactionContext {
 
         // Collect puts (write_set + CAS) into a single batch — drain for zero-copy moves.
         let mut writes: Vec<(Key, Value, WriteMode)> = Vec::with_capacity(puts_count + cas_count);
+        let mut put_ttls: Vec<u64> = Vec::with_capacity(puts_count + cas_count);
 
         for (key, value) in self.write_set.drain() {
             let mode = self
                 .key_write_modes
                 .remove(&key)
                 .unwrap_or(WriteMode::Append);
+            let ttl_ms = self.ttl_map.remove(&key).unwrap_or(0);
             writes.push((key, value, mode));
+            put_ttls.push(ttl_ms);
         }
 
         // CAS operations always use Append mode (validation already passed).
         for cas_op in self.cas_set.drain(..) {
+            let ttl_ms = self.ttl_map.remove(&cas_op.key).unwrap_or(0);
             writes.push((cas_op.key, cas_op.new_value, WriteMode::Append));
+            put_ttls.push(ttl_ms);
         }
 
         // Collect deletes into batch
@@ -1532,7 +1590,7 @@ impl TransactionContext {
 
         // Apply all puts and deletes atomically — the global version is advanced
         // only after every entry is installed, preventing partial-state visibility (#1706).
-        store.apply_writes_atomic(writes, deletes, commit_version)?;
+        store.apply_writes_atomic(writes, deletes, commit_version, &put_ttls)?;
 
         Ok(ApplyResult {
             commit_version,
@@ -1540,6 +1598,71 @@ impl TransactionContext {
             deletes_applied: deletes_count,
             cas_applied: cas_count,
         })
+    }
+
+    /// Materialize JSON patches into the write_set as full-document puts.
+    ///
+    /// For each key in `json_writes`, reads the base document from the snapshot
+    /// store, applies all patches in order, serializes the result to msgpack bytes,
+    /// and inserts into `write_set`. After this call, `json_writes` is cleared and
+    /// the existing `TransactionPayload` / `apply_writes` path handles persistence.
+    ///
+    /// Must be called after validation but before building `TransactionPayload`.
+    pub fn materialize_json_writes(&mut self) -> StrataResult<()> {
+        use strata_core::primitives::json::{apply_patches, JsonValue};
+
+        let json_writes = match self.json_writes.take() {
+            Some(w) if !w.is_empty() => w,
+            _ => return Ok(()),
+        };
+
+        // Group patches by key, preserving insertion order.
+        let mut patches_by_key: Vec<(Key, Vec<strata_core::primitives::json::JsonPatch>)> =
+            Vec::new();
+        for entry in json_writes {
+            if let Some((_k, patches)) = patches_by_key.iter_mut().find(|(k, _)| *k == entry.key) {
+                patches.push(entry.patch);
+            } else {
+                patches_by_key.push((entry.key, vec![entry.patch]));
+            }
+        }
+
+        let store = self.store.as_ref().ok_or_else(|| {
+            StrataError::internal("Cannot materialize JSON writes: no snapshot store")
+        })?;
+
+        for (key, patches) in patches_by_key {
+            // Read the base document from the snapshot.
+            let mut doc: JsonValue =
+                if let Some(vv) = store.get_versioned(&key, self.start_version)? {
+                    match &vv.value {
+                        Value::Bytes(b) => rmp_serde::from_slice(b).map_err(|e| {
+                            StrataError::internal(format!(
+                                "Failed to deserialize JSON document for materialization: {}",
+                                e
+                            ))
+                        })?,
+                        _ => JsonValue::object(),
+                    }
+                } else {
+                    JsonValue::object()
+                };
+
+            apply_patches(&mut doc, &patches).map_err(|e| {
+                StrataError::internal(format!("Failed to apply JSON patches: {}", e))
+            })?;
+
+            let doc_bytes = rmp_serde::to_vec(&doc).map_err(|e| {
+                StrataError::internal(format!(
+                    "Failed to serialize materialized JSON document: {}",
+                    e
+                ))
+            })?;
+
+            self.write_set.insert(key, Value::Bytes(doc_bytes));
+        }
+
+        Ok(())
     }
 
     // === Introspection ===
@@ -1649,6 +1772,7 @@ impl TransactionContext {
         self.delete_set.clear();
         self.cas_set.clear();
         self.key_write_modes.clear();
+        self.ttl_map.clear();
 
         // Reclaim memory if a large transaction inflated capacity beyond threshold.
         // Normal workloads (< 4096 entries) keep their allocations intact.
@@ -1664,6 +1788,9 @@ impl TransactionContext {
         }
         if self.key_write_modes.capacity() > SHRINK_THRESHOLD {
             self.key_write_modes.shrink_to(SHRINK_THRESHOLD / 2);
+        }
+        if self.ttl_map.capacity() > SHRINK_THRESHOLD {
+            self.ttl_map.shrink_to(SHRINK_THRESHOLD / 2);
         }
 
         // Clear event state (deallocate, since event ops are rare)

@@ -136,6 +136,14 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for CompactionIt
             }
 
             if commit_id >= self.prune_floor {
+                // #1723: In non-bottommost compaction, above-floor tombstones
+                // must always be emitted to shadow lower-level entries.
+                // They do not count toward max_versions so they don't displace
+                // value versions that active snapshots may need.
+                if !self.is_bottommost && entry.is_tombstone {
+                    return Some((ik, entry));
+                }
+
                 // Above floor: check max_versions limit.
                 // #1697: versions at or above snapshot_floor are protected from
                 // max_versions pruning because an active snapshot may need them.
@@ -638,6 +646,90 @@ mod tests {
         assert_eq!(result[1].0.commit_id(), 8);
         assert!(result[2].1.is_tombstone);
         assert_eq!(result[2].0.commit_id(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // above-floor tombstone vs max_versions tests (#1723)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_issue_1723_above_floor_tombstone_not_dropped_by_max_versions() {
+        // Non-bottommost compaction, max_versions=1.
+        // Key K: value@v7 (above floor), tombstone@v3 (above floor).
+        // Lower level L3 has value@v1 for key K.
+        //
+        // Bug: max_versions=1 emits value@v7 (count=1), then SKIPS
+        // tombstone@v3 because count >= max. After compaction, tombstone
+        // is gone and value@v1 in L3 resurrects.
+        //
+        // Fix: above-floor tombstones in non-bottommost compaction must
+        // always be emitted regardless of max_versions.
+        let items = vec![
+            (InternalKey::encode(&key("k"), 7), entry(70)),
+            (InternalKey::encode(&key("k"), 3), tombstone()),
+        ];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 2) // floor=2, both above
+            .with_max_versions(1)
+            .with_is_bottommost(false)
+            .collect();
+        assert_eq!(
+            result.len(),
+            2,
+            "above-floor tombstone must survive max_versions cap in non-bottommost compaction"
+        );
+        assert_eq!(result[0].0.commit_id(), 7);
+        assert!(result[1].1.is_tombstone);
+        assert_eq!(result[1].0.commit_id(), 3);
+    }
+
+    #[test]
+    fn test_issue_1723_tombstone_does_not_displace_values() {
+        // Non-bottommost, max_versions=2.
+        // Key K: value@v10, tombstone@v7, value@v5, all above floor=2.
+        // The tombstone must be emitted AND must not count against
+        // max_versions — otherwise value@v5 gets displaced.
+        // A reader at max_version=6 should still see value@v5.
+        let items = vec![
+            (InternalKey::encode(&key("k"), 10), entry(100)),
+            (InternalKey::encode(&key("k"), 7), tombstone()),
+            (InternalKey::encode(&key("k"), 5), entry(50)),
+        ];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 2)
+            .with_max_versions(2)
+            .with_is_bottommost(false)
+            .collect();
+        assert_eq!(
+            result.len(),
+            3,
+            "tombstone must not count against max_versions, displacing value@v5"
+        );
+        assert_eq!(result[0].0.commit_id(), 10);
+        assert!(result[1].1.is_tombstone);
+        assert_eq!(result[1].0.commit_id(), 7);
+        assert_eq!(result[2].0.commit_id(), 5);
+    }
+
+    #[test]
+    fn test_issue_1723_bottommost_tombstone_still_respects_max_versions() {
+        // In bottommost compaction, above-floor tombstones CAN be dropped
+        // by max_versions — there are no lower levels to shadow.
+        let items = vec![
+            (InternalKey::encode(&key("k"), 7), entry(70)),
+            (InternalKey::encode(&key("k"), 3), tombstone()),
+        ];
+        let merge = MergeIterator::new(vec![items.into_iter()]);
+        let result: Vec<_> = CompactionIterator::new(merge, 2)
+            .with_max_versions(1)
+            .with_is_bottommost(true)
+            .collect();
+        assert_eq!(
+            result.len(),
+            1,
+            "bottommost compaction can drop above-floor tombstone via max_versions"
+        );
+        assert_eq!(result[0].0.commit_id(), 7);
     }
 
     // -----------------------------------------------------------------------

@@ -18,8 +18,10 @@ use crate::payload::TransactionPayload;
 use crate::TransactionManager;
 use std::path::PathBuf;
 use strata_core::StrataResult;
+use strata_durability::format::WalSegment;
 use strata_durability::wal::WalReader;
 use strata_storage::SegmentedStore;
+use tracing::{info, warn};
 
 /// Coordinates database recovery after crash or restart
 ///
@@ -39,6 +41,8 @@ pub struct RecoveryCoordinator {
     segments_dir: Option<PathBuf>,
     /// Write buffer size in bytes for SegmentedStore (used when segments_dir is set)
     write_buffer_size: usize,
+    /// When true, WAL reader scans past corrupted regions instead of erroring.
+    allow_lossy_recovery: bool,
 }
 
 impl RecoveryCoordinator {
@@ -52,7 +56,14 @@ impl RecoveryCoordinator {
             snapshot_path: None,
             segments_dir: None,
             write_buffer_size: 0,
+            allow_lossy_recovery: false,
         }
+    }
+
+    /// Enable lossy WAL recovery (scan past corrupted regions).
+    pub fn with_lossy_recovery(mut self, allow: bool) -> Self {
+        self.allow_lossy_recovery = allow;
+        self
     }
 
     /// Set snapshot path for checkpoint-based recovery (M3+ feature)
@@ -74,6 +85,56 @@ impl RecoveryCoordinator {
         self.segments_dir = Some(segments_dir);
         self.write_buffer_size = write_buffer_size;
         self
+    }
+
+    /// Truncate partial bytes at the tail of the last WAL segment.
+    ///
+    /// After a crash, the active segment may contain a partially-written record.
+    /// If not removed, WalWriter reopens at EOF (past the partial bytes) and
+    /// appends new records after the garbage. On the next recovery the reader
+    /// stops at the partial record and never reaches the later committed data.
+    fn truncate_partial_tail(&self, reader: &WalReader) {
+        let segments = match reader.list_segments(&self.wal_dir) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let last_seg = match segments.last() {
+            Some(&n) => n,
+            None => return,
+        };
+
+        let (_, valid_end, _, _) = match reader.read_segment(&self.wal_dir, last_seg) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        let seg_path = WalSegment::segment_path(&self.wal_dir, last_seg);
+        let file_len = match std::fs::metadata(&seg_path) {
+            Ok(m) => m.len(),
+            Err(_) => return,
+        };
+
+        if valid_end < file_len {
+            let bytes_truncated = file_len - valid_end;
+            match std::fs::OpenOptions::new().write(true).open(&seg_path) {
+                Ok(file) => {
+                    if let Err(e) = file.set_len(valid_end).and_then(|_| file.sync_all()) {
+                        warn!(target: "strata::recovery",
+                            segment = last_seg, error = %e,
+                            "Failed to truncate partial WAL tail — next restart may re-encounter it");
+                    } else {
+                        info!(target: "strata::recovery",
+                            segment = last_seg, bytes_truncated,
+                            "Truncated partial WAL tail");
+                    }
+                }
+                Err(e) => {
+                    warn!(target: "strata::recovery",
+                        segment = last_seg, error = %e,
+                        "Failed to open WAL segment for truncation");
+                }
+            }
+        }
     }
 
     /// Perform recovery and return initialized components
@@ -109,7 +170,10 @@ impl RecoveryCoordinator {
         // Stream records from segmented WAL one segment at a time.
         // This bounds memory to O(largest_segment) instead of O(total_wal_size),
         // preventing OOM on large databases.
-        let reader = WalReader::new();
+        let mut reader = WalReader::new();
+        if self.allow_lossy_recovery {
+            reader = reader.with_lossy_recovery();
+        }
         let records_iter = reader
             .iter_all(&self.wal_dir)
             .map_err(|e| strata_core::StrataError::storage(format!("WAL read failed: {}", e)))?;
@@ -130,13 +194,15 @@ impl RecoveryCoordinator {
             max_version = max_version.max(payload.version);
 
             // Apply puts — use recovery-specific method to preserve original
-            // commit timestamp instead of generating a new Timestamp::now() (#1619).
-            for (key, value) in &payload.puts {
+            // commit timestamp and TTL (#1619, #1740).
+            for (i, (key, value)) in payload.puts.iter().enumerate() {
+                let ttl_ms = payload.put_ttls.get(i).copied().unwrap_or(0);
                 storage.put_recovery_entry(
                     key.clone(),
                     value.clone(),
                     payload.version,
                     record.timestamp,
+                    ttl_ms,
                 )?;
                 stats.writes_applied += 1;
             }
@@ -149,6 +215,10 @@ impl RecoveryCoordinator {
 
             stats.txns_replayed += 1;
         }
+
+        // Truncate partial WAL tail in the active (last) segment so that
+        // WalWriter::new() reopens at a clean record boundary (#1741).
+        self.truncate_partial_tail(&reader);
 
         stats.final_version = max_version;
         stats.max_txn_id = max_txn_id;
@@ -295,6 +365,7 @@ mod tests {
             version,
             puts,
             deletes,
+            put_ttls: vec![],
         };
         let record = WalRecord::new(
             txn_id,
@@ -1048,6 +1119,111 @@ mod tests {
                 .unwrap();
             assert_eq!(stored.value, Value::Int(i as i64 * 10));
             assert_eq!(stored.version.as_u64(), i);
+        }
+    }
+
+    /// Issue #1741: Partial WAL tail not truncated before reopen.
+    ///
+    /// Scenario: crash leaves partial bytes at the end of the active segment.
+    /// After recovery, WalWriter reopens at EOF (past partial bytes) and
+    /// appends new records. On second recovery, the reader stops at the
+    /// partial record and the later committed records are lost.
+    #[test]
+    fn test_issue_1741_partial_tail_truncated_before_reopen() {
+        use strata_durability::format::WalSegment;
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        // Step 1: Write two valid committed records
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            write_txn(
+                &mut wal,
+                1,
+                branch_id,
+                vec![(
+                    Key::new_kv(ns.clone(), "key_before"),
+                    Value::String("before_crash".into()),
+                )],
+                vec![],
+                1,
+            );
+            write_txn(
+                &mut wal,
+                2,
+                branch_id,
+                vec![(
+                    Key::new_kv(ns.clone(), "key_also_before"),
+                    Value::String("also_before".into()),
+                )],
+                vec![],
+                2,
+            );
+        }
+
+        // Step 2: Simulate crash — append partial garbage bytes to the segment
+        {
+            use std::io::Write;
+            let seg_path = WalSegment::segment_path(&wal_dir, 1);
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&seg_path)
+                .unwrap();
+            // Write partial record: a valid-looking length prefix but incomplete data
+            f.write_all(&[0xFF; 13]).unwrap();
+            f.flush().unwrap();
+        }
+
+        // Step 3: First recovery — should replay the 2 valid records
+        // and truncate the partial tail
+        {
+            let coordinator = RecoveryCoordinator::new(wal_dir.clone());
+            let result = coordinator.recover().unwrap();
+            assert_eq!(result.stats.txns_replayed, 2);
+        }
+
+        // Step 4: Reopen WAL writer (simulates engine restart after recovery)
+        // and write a new committed record
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            write_txn(
+                &mut wal,
+                3,
+                branch_id,
+                vec![(
+                    Key::new_kv(ns.clone(), "key_after"),
+                    Value::String("after_crash".into()),
+                )],
+                vec![],
+                3,
+            );
+        }
+
+        // Step 5: Second recovery — MUST see all 3 records.
+        // Without the fix, the reader stops at the old partial bytes
+        // and never reaches record 3.
+        {
+            let coordinator = RecoveryCoordinator::new(wal_dir.clone());
+            let result = coordinator.recover().unwrap();
+
+            assert_eq!(
+                result.stats.txns_replayed, 3,
+                "Second recovery must see the record written after crash recovery"
+            );
+            assert_eq!(result.stats.final_version, 3);
+
+            // Verify the post-crash record is accessible
+            let key_after = Key::new_kv(ns.clone(), "key_after");
+            let stored = result
+                .storage
+                .get_versioned(&key_after, u64::MAX)
+                .unwrap()
+                .expect("key_after must be visible after second recovery");
+            assert_eq!(stored.value, Value::String("after_crash".into()));
         }
     }
 }

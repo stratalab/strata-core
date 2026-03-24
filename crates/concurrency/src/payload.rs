@@ -29,6 +29,10 @@ pub struct TransactionPayload {
     pub puts: Vec<(Key, Value)>,
     /// Keys to delete (from delete_set)
     pub deletes: Vec<Key>,
+    /// Per-put TTL in milliseconds, parallel to `puts` (0 = no TTL).
+    /// Empty vec means all puts have no TTL (backward compat with old WAL records).
+    #[serde(default)]
+    pub put_ttls: Vec<u64>,
 }
 
 impl TransactionPayload {
@@ -47,15 +51,18 @@ impl TransactionPayload {
     /// CAS operations are included as puts (they have already been validated
     /// at commit time, so recovery just replays the final value).
     pub fn from_transaction(txn: &TransactionContext, version: u64) -> Self {
-        let mut puts: Vec<(Key, Value)> = txn
-            .write_set
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let mut puts: Vec<(Key, Value)> = Vec::new();
+        let mut put_ttls: Vec<u64> = Vec::new();
+
+        for (k, v) in txn.write_set.iter() {
+            puts.push((k.clone(), v.clone()));
+            put_ttls.push(txn.ttl_map.get(k).copied().unwrap_or(0));
+        }
 
         // CAS operations become puts (the new_value was already validated)
         for cas_op in &txn.cas_set {
             puts.push((cas_op.key.clone(), cas_op.new_value.clone()));
+            put_ttls.push(txn.ttl_map.get(&cas_op.key).copied().unwrap_or(0));
         }
 
         let deletes: Vec<Key> = txn.delete_set.iter().cloned().collect();
@@ -64,6 +71,7 @@ impl TransactionPayload {
             version,
             puts,
             deletes,
+            put_ttls,
         }
     }
 }
@@ -94,6 +102,7 @@ mod tests {
             version: 42,
             puts: vec![],
             deletes: vec![],
+            put_ttls: vec![],
         };
         let bytes = payload.to_bytes();
         let decoded = TransactionPayload::from_bytes(&bytes).unwrap();
@@ -116,6 +125,7 @@ mod tests {
                 (key2.clone(), Value::String("hello".to_string())),
             ],
             deletes: vec![key3.clone()],
+            put_ttls: vec![0, 0],
         };
 
         let bytes = payload.to_bytes();
@@ -163,5 +173,59 @@ mod tests {
         // Verify round-trip correctness
         let decoded: Value = rmp_serde::from_slice(&encoded).unwrap();
         assert_eq!(decoded, Value::Bytes(vec![0xFFu8; 256]));
+    }
+
+    /// Issue #1740: TransactionPayload must include per-key TTL so WAL
+    /// replay preserves TTL-bearing entries instead of making them permanent.
+    #[test]
+    fn test_issue_1740_payload_ttl_roundtrip() {
+        let ns = test_ns();
+        let key1 = Key::new_kv(ns.clone(), "ttl_key");
+        let key2 = Key::new_kv(ns, "no_ttl_key");
+
+        let payload = TransactionPayload {
+            version: 10,
+            puts: vec![(key1.clone(), Value::Int(1)), (key2.clone(), Value::Int(2))],
+            deletes: vec![],
+            put_ttls: vec![60_000, 0], // first key has 60s TTL, second has none
+        };
+
+        let bytes = payload.to_bytes();
+        let decoded = TransactionPayload::from_bytes(&bytes).unwrap();
+
+        assert_eq!(decoded.put_ttls.len(), 2);
+        assert_eq!(decoded.put_ttls[0], 60_000);
+        assert_eq!(decoded.put_ttls[1], 0);
+    }
+
+    /// Issue #1740: Old WAL records (without put_ttls) must deserialize
+    /// with an empty put_ttls vec (backward compatibility).
+    #[test]
+    fn test_issue_1740_payload_backward_compat() {
+        // Simulate an old payload without put_ttls by serializing the
+        // old 3-field struct shape.
+        #[derive(serde::Serialize)]
+        struct OldPayload {
+            version: u64,
+            puts: Vec<(Key, Value)>,
+            deletes: Vec<Key>,
+        }
+
+        let ns = test_ns();
+        let old = OldPayload {
+            version: 5,
+            puts: vec![(Key::new_kv(ns, "k"), Value::Int(1))],
+            deletes: vec![],
+        };
+        let bytes = rmp_serde::to_vec(&old).unwrap();
+
+        // Deserialize as the new TransactionPayload — put_ttls should default
+        let decoded = TransactionPayload::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.version, 5);
+        assert_eq!(decoded.puts.len(), 1);
+        assert!(
+            decoded.put_ttls.is_empty(),
+            "Old payloads without put_ttls must deserialize with empty vec"
+        );
     }
 }

@@ -201,6 +201,9 @@ pub trait Storage: Send + Sync {
     /// Apply puts and deletes atomically: all entries are installed before
     /// the global version is advanced.
     ///
+    /// `put_ttls` carries per-put TTL in milliseconds, parallel to `writes`.
+    /// An empty slice means all puts have no TTL (backward compat).
+    ///
     /// Default implementation delegates to `apply_batch` then `delete_batch`.
     /// `SegmentedStore` overrides this to defer the version bump until all
     /// entries are in the memtable, preventing partial-state visibility (#1706).
@@ -209,7 +212,11 @@ pub trait Storage: Send + Sync {
         writes: Vec<(Key, Value, WriteMode)>,
         deletes: Vec<Key>,
         version: u64,
+        put_ttls: &[u64],
     ) -> StrataResult<()> {
+        // Default: ignore put_ttls — implementations that support TTL
+        // should override this method.
+        let _ = put_ttls;
         self.apply_batch(writes, version)?;
         if !deletes.is_empty() {
             self.delete_batch(deletes, version)?;

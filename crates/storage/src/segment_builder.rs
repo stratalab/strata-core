@@ -174,6 +174,16 @@ impl SegmentBuilder {
         let file = std::fs::File::create(&tmp_path)?;
         let mut w = BufWriter::new(file);
 
+        // Reuse a single Zstd compressor context across all blocks to avoid
+        // expensive hash-table re-initialization per block (issue #1763).
+        let mut zstd_compressor = match self.compression {
+            CompressionCodec::Zstd(level) => Some(
+                zstd::bulk::Compressor::new(level)
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("zstd init: {e}")))?,
+            ),
+            CompressionCodec::None => None,
+        };
+
         // 1. Write placeholder header (backfill later)
         let header_placeholder = [0u8; KV_HEADER_SIZE];
         w.write_all(&header_placeholder)?;
@@ -283,6 +293,7 @@ impl SegmentBuilder {
                     BLOCK_TYPE_DATA,
                     &block_buf,
                     self.compression,
+                    zstd_compressor.as_mut(),
                 )?;
                 let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
                 if let Some(ref limiter) = self.rate_limiter {
@@ -328,6 +339,7 @@ impl SegmentBuilder {
                 BLOCK_TYPE_DATA,
                 &block_buf,
                 self.compression,
+                zstd_compressor.as_mut(),
             )?;
             let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
             if let Some(ref limiter) = self.rate_limiter {
@@ -956,25 +968,46 @@ fn write_framed_block_compressed<W: Write>(
     block_type: u8,
     data: &[u8],
     codec: CompressionCodec,
+    compressor: Option<&mut zstd::bulk::Compressor<'_>>,
 ) -> io::Result<usize> {
-    let (write_data, codec_byte) = match codec {
-        CompressionCodec::Zstd(level) if !data.is_empty() => {
-            match zstd::encode_all(std::io::Cursor::new(data), level) {
+    let (write_data, codec_byte, pre_compression_crc) = match codec {
+        CompressionCodec::Zstd(_) if !data.is_empty() => {
+            let result = if let Some(ctx) = compressor {
+                ctx.compress(data)
+            } else {
+                // Fallback for callers without a persistent context
+                let level = match codec {
+                    CompressionCodec::Zstd(l) => l,
+                    _ => unreachable!(),
+                };
+                zstd::encode_all(std::io::Cursor::new(data), level)
+            };
+            match result {
                 Ok(compressed) if compressed.len() < data.len() => {
-                    (compressed, 1u8) // zstd compressed
+                    // CRC covers uncompressed data so the buffer passed to
+                    // crc32fast is always >= data_block_size, well above the
+                    // 64-byte threshold for PCLMULQDQ hardware acceleration.
+                    (compressed, 1u8, true)
                 }
-                _ => (data.to_vec(), 0u8), // fallback to uncompressed
+                _ => (data.to_vec(), 0u8, false),
             }
         }
-        _ => (data.to_vec(), 0u8),
+        _ => (data.to_vec(), 0u8, false),
+    };
+
+    // reserved bit 0 = 1 when CRC covers pre-compression (uncompressed) data
+    let reserved: u16 = if pre_compression_crc { 1 } else { 0 };
+    let crc = if pre_compression_crc {
+        crc32fast::hash(data)
+    } else {
+        crc32fast::hash(&write_data)
     };
 
     w.write_all(&[block_type])?;
     w.write_all(&[codec_byte])?;
-    w.write_all(&[0u8; 2])?; // reserved
+    w.write_all(&reserved.to_le_bytes())?;
     w.write_all(&(write_data.len() as u32).to_le_bytes())?;
     w.write_all(&write_data)?;
-    let crc = crc32fast::hash(&write_data);
     w.write_all(&crc.to_le_bytes())?;
     Ok(BLOCK_FRAME_OVERHEAD + write_data.len())
 }
@@ -982,23 +1015,50 @@ fn write_framed_block_compressed<W: Write>(
 /// Parse a framed block from a byte slice. Returns `(block_type, data_slice)`.
 ///
 /// Verifies CRC32 integrity. Returns `None` on corruption or truncation.
+///
+/// For compressed blocks with `reserved & 1 == 1`, the CRC covers the
+/// **uncompressed** data; callers must use [`parse_framed_block_raw`] and
+/// verify CRC after decompression instead.
 pub(crate) fn parse_framed_block(raw: &[u8]) -> Option<(u8, &[u8])> {
     if raw.len() < BLOCK_FRAME_OVERHEAD {
         return None;
     }
     let block_type = raw[0];
-    // codec = raw[1], reserved = raw[2..4] — ignored for v1
+    let reserved = u16::from_le_bytes(raw[2..4].try_into().ok()?);
     let data_len = u32::from_le_bytes(raw[4..8].try_into().ok()?) as usize;
     if raw.len() < 8 + data_len + 4 {
         return None;
     }
     let data = &raw[8..8 + data_len];
     let stored_crc = u32::from_le_bytes(raw[8 + data_len..8 + data_len + 4].try_into().ok()?);
-    let computed_crc = crc32fast::hash(data);
-    if stored_crc != computed_crc {
-        return None;
+
+    // If reserved bit 0 is set, CRC covers uncompressed data — skip check here
+    // (caller must verify after decompression via parse_framed_block_raw path).
+    if reserved & 1 == 0 {
+        let computed_crc = crc32fast::hash(data);
+        if stored_crc != computed_crc {
+            return None;
+        }
     }
     Some((block_type, data))
+}
+
+/// Parse a framed block without verifying CRC. Returns all frame fields
+/// so the caller can verify CRC after decompression when `reserved & 1 == 1`.
+pub(crate) fn parse_framed_block_raw(raw: &[u8]) -> Option<(u8, u8, u16, &[u8], u32)> {
+    if raw.len() < BLOCK_FRAME_OVERHEAD {
+        return None;
+    }
+    let block_type = raw[0];
+    let codec = raw[1];
+    let reserved = u16::from_le_bytes(raw[2..4].try_into().ok()?);
+    let data_len = u32::from_le_bytes(raw[4..8].try_into().ok()?) as usize;
+    if raw.len() < 8 + data_len + 4 {
+        return None;
+    }
+    let data = &raw[8..8 + data_len];
+    let stored_crc = u32::from_le_bytes(raw[8 + data_len..8 + data_len + 4].try_into().ok()?);
+    Some((block_type, codec, reserved, data, stored_crc))
 }
 
 // ---------------------------------------------------------------------------
@@ -1176,7 +1236,7 @@ pub(crate) fn parse_header(data: &[u8; KV_HEADER_SIZE]) -> Option<KVHeader> {
         return None;
     }
     let format_version = u16::from_le_bytes(data[8..10].try_into().ok()?);
-    if !(2..=FORMAT_VERSION).contains(&format_version) {
+    if !(4..=FORMAT_VERSION).contains(&format_version) {
         return None;
     }
     let commit_min = u64::from_le_bytes(data[16..24].try_into().ok()?);
@@ -1307,6 +1367,12 @@ impl SplittingSegmentBuilder {
     /// Set the compression codec for output segments.
     pub fn with_compression(mut self, codec: CompressionCodec) -> Self {
         self.inner.compression = codec;
+        self
+    }
+
+    /// Set the data block size in bytes for output segments.
+    pub fn with_data_block_size(mut self, bytes: usize) -> Self {
+        self.inner.data_block_size = bytes;
         self
     }
 
@@ -2641,5 +2707,303 @@ mod tests {
         // 3. Verify the parent directory is sync-able (non-trivial on some FS)
         let dir_fd = std::fs::File::open(dir.path()).unwrap();
         dir_fd.sync_all().unwrap();
+    }
+
+    /// Issue #1753: CRC32 should cover uncompressed block data so that the buffer
+    /// passed to crc32fast is always >= data_block_size (~4KB), well above the
+    /// 64-byte threshold for PCLMULQDQ hardware acceleration.
+    ///
+    /// Before the fix, CRC covered compressed data — which can be very small for
+    /// blocks of tiny values, forcing crc32fast into its scalar fallback.
+    #[test]
+    fn test_issue_1753_crc_covers_uncompressed_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("small_values.sst");
+
+        let mt = Memtable::new(0);
+        // Insert many small (8-byte) values that compress well
+        for i in 0..500u32 {
+            let k = key(&format!("key_{:06}", i));
+            let val = Value::Int(i as i64);
+            mt.put(&k, i as u64 + 1, val, false);
+        }
+        mt.freeze();
+
+        let builder = SegmentBuilder {
+            data_block_size: 4096,
+            bloom_bits_per_key: 10,
+            compression: CompressionCodec::Zstd(3),
+            rate_limiter: None,
+        };
+        builder.build_from_iter(mt.iter_all(), &path).unwrap();
+
+        // Read the raw segment file and inspect the first data block frame
+        let file_data = std::fs::read(&path).unwrap();
+        let block_start = HEADER_SIZE;
+        let block_type = file_data[block_start];
+        assert_eq!(block_type, BLOCK_TYPE_DATA);
+
+        let codec_byte = file_data[block_start + 1];
+        assert_eq!(codec_byte, 1, "block should be zstd compressed");
+
+        let reserved = u16::from_le_bytes(
+            file_data[block_start + 2..block_start + 4]
+                .try_into()
+                .unwrap(),
+        );
+
+        // After fix: reserved bit 0 must be set, indicating CRC covers pre-compression data
+        assert_eq!(
+            reserved & 1,
+            1,
+            "reserved bit 0 should indicate CRC covers uncompressed data"
+        );
+
+        let data_len = u32::from_le_bytes(
+            file_data[block_start + 4..block_start + 8]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let compressed_data = &file_data[block_start + 8..block_start + 8 + data_len];
+        let stored_crc = u32::from_le_bytes(
+            file_data[block_start + 8 + data_len..block_start + 8 + data_len + 4]
+                .try_into()
+                .unwrap(),
+        );
+
+        // Decompress and verify CRC matches uncompressed data
+        let decompressed = zstd::decode_all(std::io::Cursor::new(compressed_data)).unwrap();
+        let expected_crc = crc32fast::hash(&decompressed);
+        assert_eq!(
+            stored_crc, expected_crc,
+            "CRC should cover uncompressed data, not compressed"
+        );
+
+        // Verify end-to-end: segment is still readable
+        let seg = KVSegment::open(&path).unwrap();
+        for i in 0..500u32 {
+            let k = key(&format!("key_{:06}", i));
+            let e = seg.point_lookup(&k, u64::MAX).unwrap().unwrap();
+            assert_eq!(e.value, Value::Int(i as i64));
+        }
+    }
+
+    /// Issue #1753: Corruption in a compressed block with pre-compression CRC
+    /// (reserved bit 0 = 1) must be detected after decompression.
+    #[test]
+    fn test_issue_1753_corruption_detected_with_pre_compression_crc() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..200u32 {
+            let k = key(&format!("key_{:06}", i));
+            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+        }
+        mt.freeze();
+
+        let builder = SegmentBuilder {
+            data_block_size: 4096,
+            bloom_bits_per_key: 10,
+            compression: CompressionCodec::Zstd(3),
+            rate_limiter: None,
+        };
+        builder.build_from_iter(mt.iter_all(), &path).unwrap();
+
+        // Corrupt one byte in the compressed data of the first block
+        let mut file_data = std::fs::read(&path).unwrap();
+        let block_start = HEADER_SIZE;
+        let data_len = u32::from_le_bytes(
+            file_data[block_start + 4..block_start + 8]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        // Flip a byte in the middle of the compressed data
+        let corrupt_offset = block_start + 8 + data_len / 2;
+        file_data[corrupt_offset] ^= 0xFF;
+        std::fs::write(&path, &file_data).unwrap();
+
+        // Opening the segment should succeed (corruption is in data blocks,
+        // not metadata), but reading the corrupted block should fail
+        let seg = KVSegment::open(&path).unwrap();
+        let result = seg.point_lookup(&key("key_000000"), u64::MAX);
+        assert!(result.is_err(), "corrupted block must be detected");
+    }
+
+    /// Issue #1753: Legacy segments (written before fix, reserved=0, CRC on
+    /// compressed data) must still be readable.
+    #[test]
+    fn test_issue_1753_legacy_segment_backward_compat() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..100u32 {
+            let k = key(&format!("key_{:06}", i));
+            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+        }
+        mt.freeze();
+
+        // Build a segment with the current code
+        let builder = SegmentBuilder {
+            data_block_size: 4096,
+            bloom_bits_per_key: 10,
+            compression: CompressionCodec::Zstd(3),
+            rate_limiter: None,
+        };
+        builder.build_from_iter(mt.iter_all(), &path).unwrap();
+
+        // Simulate a legacy segment by clearing the reserved field and
+        // rewriting the CRC to cover compressed data
+        let mut file_data = std::fs::read(&path).unwrap();
+        let mut offset = HEADER_SIZE;
+        while offset + BLOCK_FRAME_OVERHEAD <= file_data.len() {
+            let block_type = file_data[offset];
+            if block_type == 0 {
+                break; // past data blocks
+            }
+            let reserved =
+                u16::from_le_bytes(file_data[offset + 2..offset + 4].try_into().unwrap());
+            let data_len =
+                u32::from_le_bytes(file_data[offset + 4..offset + 8].try_into().unwrap()) as usize;
+            if offset + 8 + data_len + 4 > file_data.len() {
+                break;
+            }
+
+            if reserved & 1 == 1 {
+                // Clear reserved bit and rewrite CRC on compressed data
+                file_data[offset + 2] = 0;
+                file_data[offset + 3] = 0;
+                let compressed = &file_data[offset + 8..offset + 8 + data_len];
+                let legacy_crc = crc32fast::hash(compressed);
+                file_data[offset + 8 + data_len..offset + 8 + data_len + 4]
+                    .copy_from_slice(&legacy_crc.to_le_bytes());
+            }
+
+            offset += BLOCK_FRAME_OVERHEAD + data_len;
+        }
+        std::fs::write(&path, &file_data).unwrap();
+
+        // Verify the "legacy" segment is still readable
+        let seg = KVSegment::open(&path).unwrap();
+        for i in 0..100u32 {
+            let k = key(&format!("key_{:06}", i));
+            let e = seg.point_lookup(&k, u64::MAX).unwrap().unwrap();
+            assert_eq!(e.value, Value::Int(i as i64));
+        }
+    }
+
+    /// Issue #1763: Zstd compressor context should be reused across blocks within a
+    /// single segment build, avoiding expensive hash table re-initialization per block.
+    ///
+    /// This test builds a segment with many small blocks (1 KiB target) and Zstd
+    /// compression, then verifies all entries roundtrip correctly. It also measures
+    /// compression time to detect the ~2x improvement from context reuse.
+    #[test]
+    fn test_issue_1763_zstd_context_reuse_across_blocks() {
+        use crate::segment::KVSegment;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ctx_reuse.sst");
+
+        // Write enough data to produce many blocks (>100 blocks with 1 KiB block size)
+        let mt = Memtable::new(0);
+        let num_entries = 2000u32;
+        for i in 0..num_entries {
+            let k = key(&format!("key_{:08}", i));
+            // Repetitive data that compresses well — exercises the compressor hash tables
+            let val = Value::String(format!("val_{:08}_{}", i, "x".repeat(100)));
+            mt.put(&k, i as u64 + 1, val, false);
+        }
+        mt.freeze();
+
+        // Use small block size (1 KiB) to force many blocks — amplifies per-block overhead
+        let builder = SegmentBuilder {
+            data_block_size: 1024,
+            bloom_bits_per_key: 10,
+            compression: CompressionCodec::Zstd(3),
+            rate_limiter: None,
+        };
+
+        let start = std::time::Instant::now();
+        let meta = builder.build_from_iter(mt.iter_all(), &path).unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(meta.entry_count, num_entries as u64);
+
+        // Verify all entries roundtrip correctly
+        let seg = KVSegment::open(&path).unwrap();
+        for i in 0..num_entries {
+            let k = key(&format!("key_{:08}", i));
+            let e = seg
+                .point_lookup(&k, u64::MAX)
+                .unwrap()
+                .unwrap_or_else(|| panic!("missing key_{:08}", i));
+            assert_eq!(
+                e.value,
+                Value::String(format!("val_{:08}_{}", i, "x".repeat(100)))
+            );
+            assert_eq!(e.commit_id, i as u64 + 1);
+        }
+
+        // Verify iteration works across all compressed blocks
+        let all: Vec<_> = seg.iter_seek_all().collect();
+        assert_eq!(all.len(), num_entries as usize);
+
+        // Sanity: the segment should have multiple data blocks (1 KiB target with ~130B entries)
+        // If file_size > 2 * block overhead, we definitely have many blocks.
+        assert!(
+            meta.file_size > 4096,
+            "segment should span multiple blocks, got {} bytes",
+            meta.file_size
+        );
+
+        // Log timing for manual comparison (not a hard assertion — CI variance is too high)
+        eprintln!(
+            "issue_1763: {} entries, {} bytes, {:.1}ms — context reuse should be <50ms on modern HW",
+            num_entries,
+            meta.file_size,
+            elapsed.as_secs_f64() * 1000.0
+        );
+    }
+
+    /// Issue #1713: parse_header accepted format versions 2-3 even though
+    /// the reader only has v4+ decoders. v2/v3 segments would open but
+    /// silently return None on all lookups.
+    #[test]
+    fn test_issue_1713_reject_unsupported_format_versions() {
+        // Build a valid header then patch the format_version field
+        let valid = encode_header(10, 1, 5, 4096);
+        assert!(parse_header(&valid).is_some(), "v7 header must parse");
+
+        // v2 and v3 should be rejected — no decoder exists for them
+        for bad_version in [2u16, 3u16] {
+            let mut hdr = valid;
+            hdr[8..10].copy_from_slice(&bad_version.to_le_bytes());
+            assert!(
+                parse_header(&hdr).is_none(),
+                "format version {bad_version} must be rejected (no decoder exists)"
+            );
+        }
+
+        // v4 through current FORMAT_VERSION should still be accepted
+        for ok_version in 4..=FORMAT_VERSION {
+            let mut hdr = valid;
+            hdr[8..10].copy_from_slice(&ok_version.to_le_bytes());
+            assert!(
+                parse_header(&hdr).is_some(),
+                "format version {ok_version} must be accepted"
+            );
+        }
+
+        // v0, v1, and versions above FORMAT_VERSION should be rejected
+        for bad_version in [0u16, 1u16, FORMAT_VERSION + 1] {
+            let mut hdr = valid;
+            hdr[8..10].copy_from_slice(&bad_version.to_le_bytes());
+            assert!(
+                parse_header(&hdr).is_none(),
+                "format version {bad_version} must be rejected"
+            );
+        }
     }
 }

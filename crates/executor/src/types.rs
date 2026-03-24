@@ -683,6 +683,12 @@ pub struct SearchStatsOutput {
     /// Model name used for re-ranking (when rerank_used is true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rerank_model: Option<String>,
+    /// Number of documents still waiting to be embedded (when auto-embed is active).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_pending: Option<u64>,
+    /// Total number of documents queued for embedding (when auto-embed is active).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_total: Option<u64>,
 }
 
 /// A single sample item from a primitive (key + value for shape discovery).

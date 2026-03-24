@@ -433,7 +433,8 @@ impl Database {
 
         // Recovery — purely read-only (no truncation, no file writes)
         let recovery = RecoveryCoordinator::new(wal_dir.clone())
-            .with_segments(segments_dir, cfg.storage.write_buffer_size);
+            .with_segments(segments_dir, cfg.storage.write_buffer_size)
+            .with_lossy_recovery(cfg.allow_lossy_recovery);
         let result = match recovery.recover() {
             Ok(result) => result,
             Err(e) => {
@@ -468,6 +469,12 @@ impl Database {
         storage.set_max_branches(cfg.storage.max_branches);
         storage.set_max_versions_per_key(cfg.storage.max_versions_per_key);
         storage.set_max_immutable_memtables(cfg.storage.max_immutable_memtables);
+        storage.set_target_file_size(cfg.storage.target_file_size);
+        storage.set_level_base_bytes(cfg.storage.level_base_bytes);
+        storage.set_data_block_size(cfg.storage.data_block_size);
+        storage.set_bloom_bits_per_key(cfg.storage.bloom_bits_per_key);
+
+        let bg_threads = cfg.storage.background_threads.max(1);
 
         // Recover previously flushed segments from disk
         match storage.recover_segments() {
@@ -507,7 +514,7 @@ impl Database {
             config: parking_lot::RwLock::new(cfg),
             flush_shutdown: Arc::new(AtomicBool::new(false)),
             flush_handle: ParkingMutex::new(None), // No flush thread
-            scheduler: Arc::new(BackgroundScheduler::new(4, 4096)),
+            scheduler: Arc::new(BackgroundScheduler::new(bg_threads, 4096)),
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
@@ -549,7 +556,8 @@ impl Database {
         // Use RecoveryCoordinator for proper transaction-aware recovery
         // This reads all WalRecords from the segmented WAL directory
         let recovery = RecoveryCoordinator::new(wal_dir.clone())
-            .with_segments(segments_dir, cfg.storage.write_buffer_size);
+            .with_segments(segments_dir, cfg.storage.write_buffer_size)
+            .with_lossy_recovery(cfg.allow_lossy_recovery);
         let result = match recovery.recover() {
             Ok(result) => result,
             Err(e) => {
@@ -648,6 +656,15 @@ impl Database {
         storage.set_max_branches(cfg.storage.max_branches);
         storage.set_max_versions_per_key(cfg.storage.max_versions_per_key);
         storage.set_max_immutable_memtables(cfg.storage.max_immutable_memtables);
+        storage.set_target_file_size(cfg.storage.target_file_size);
+        storage.set_level_base_bytes(cfg.storage.level_base_bytes);
+        storage.set_data_block_size(cfg.storage.data_block_size);
+        storage.set_bloom_bits_per_key(cfg.storage.bloom_bits_per_key);
+        if cfg.storage.compaction_rate_limit > 0 {
+            storage.set_compaction_rate_limit(cfg.storage.compaction_rate_limit);
+        }
+
+        let bg_threads = cfg.storage.background_threads.max(1);
 
         // Recover previously flushed segments from disk
         match storage.recover_segments() {
@@ -689,7 +706,7 @@ impl Database {
             config: parking_lot::RwLock::new(cfg),
             flush_shutdown,
             flush_handle: ParkingMutex::new(flush_handle),
-            scheduler: Arc::new(BackgroundScheduler::new(4, 4096)),
+            scheduler: Arc::new(BackgroundScheduler::new(bg_threads, 4096)),
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
@@ -753,6 +770,8 @@ impl Database {
         storage.set_max_versions_per_key(cfg.storage.max_versions_per_key);
         storage.set_max_immutable_memtables(cfg.storage.max_immutable_memtables);
 
+        let bg_threads = cfg.storage.background_threads.max(1);
+
         // Create coordinator starting at version 1 (no recovery needed), with write buffer limit
         let mut coordinator = TransactionCoordinator::new(1);
         coordinator.set_max_write_buffer_entries(cfg.storage.max_write_buffer_entries);
@@ -769,7 +788,7 @@ impl Database {
             config: parking_lot::RwLock::new(StrataConfig::default()),
             flush_shutdown: Arc::new(AtomicBool::new(false)),
             flush_handle: ParkingMutex::new(None),
-            scheduler: Arc::new(BackgroundScheduler::new(4, 4096)),
+            scheduler: Arc::new(BackgroundScheduler::new(bg_threads, 4096)),
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
@@ -1242,10 +1261,10 @@ impl Database {
                 }
             }
 
-            // Apply puts and deletes atomically with original WAL timestamp.
-            // Combines #1699 (preserve commit timestamp for time-travel) and
-            // #1707 (defer version bump until all entries installed, preventing
-            // partial-state visibility for concurrent follower readers).
+            // Apply puts and deletes atomically with original WAL timestamp
+            // and TTL. Combines #1699 (preserve commit timestamp for time-travel),
+            // #1707 (defer version bump until all entries installed), and
+            // #1740 (preserve TTL through WAL replay).
             {
                 let writes: Vec<_> = payload
                     .puts
@@ -1258,6 +1277,7 @@ impl Database {
                     deletes,
                     payload.version,
                     record.timestamp,
+                    &payload.put_ttls,
                 )?;
             }
 
@@ -2218,6 +2238,7 @@ impl Database {
     /// db.end_transaction(txn); // Return to pool
     /// ```
     pub fn begin_transaction(&self, branch_id: BranchId) -> StrataResult<TransactionContext> {
+        self.check_accepting()?;
         let txn_id = self.coordinator.next_txn_id()?;
         let snapshot_version = self.storage.version();
         self.coordinator.record_start(txn_id, snapshot_version);
@@ -2407,17 +2428,12 @@ impl Database {
         self.scheduler.drain();
 
         // 3. Wait for in-flight transactions to complete FIRST.
-        //    The flush thread keeps running during this window, providing
-        //    periodic syncs for any transactions that commit during drain.
+        //    Uses wait_for_idle() which polls with SeqCst ordering, ensuring
+        //    visibility of active_count increments from record_start() on all
+        //    architectures (fixes #1738 / 9.2.B).
         let timeout = std::time::Duration::from_secs(30);
-        let start = std::time::Instant::now();
-
-        while self.coordinator.active_count() > 0 && start.elapsed() < timeout {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-
-        let remaining = self.coordinator.active_count();
-        if remaining > 0 {
+        if !self.coordinator.wait_for_idle(timeout) {
+            let remaining = self.coordinator.active_count();
             warn!(
                 target: "strata::db",
                 remaining,
@@ -2545,6 +2561,7 @@ mod tests {
             version,
             puts,
             deletes,
+            put_ttls: vec![],
         };
         // Use version (commit_version) as WAL record ordering key (#1696)
         let record = WalRecord::new(
@@ -4405,5 +4422,215 @@ mod tests {
             vec![1.0, 0.0, 0.0],
             "Embedding values should be preserved in checkpoint",
         );
+    }
+
+    /// Issue #1738 / 9.2.A: begin_transaction() does not check accepting_transactions.
+    /// After shutdown(), manual callers can still start transactions.
+    #[test]
+    fn test_issue_1738_begin_transaction_bypasses_shutdown_gate() {
+        let db = Database::cache().unwrap();
+        let branch_id = BranchId::new();
+        db.shutdown().unwrap();
+
+        // transaction() correctly rejects after shutdown
+        let closure_result = db.transaction(branch_id, |_txn| Ok(()));
+        assert!(
+            closure_result.is_err(),
+            "transaction() should reject after shutdown"
+        );
+
+        // begin_transaction() SHOULD also reject after shutdown
+        let manual_result = db.begin_transaction(branch_id);
+        assert!(
+            manual_result.is_err(),
+            "begin_transaction() must reject after shutdown, but it succeeded"
+        );
+    }
+
+    /// Issue #1738 / 9.2.B: shutdown() polls active_count() with Relaxed ordering
+    /// instead of using wait_for_idle() with SeqCst. This test verifies that the
+    /// shutdown path uses the correct synchronization by checking that it calls
+    /// wait_for_idle (which properly synchronizes with record_start/record_commit).
+    ///
+    /// We verify this indirectly: start a transaction, then shutdown. If shutdown
+    /// uses proper ordering, it will always see the active transaction and wait.
+    #[test]
+    fn test_issue_1738_shutdown_waits_for_active_transactions() {
+        let db = Database::cache().unwrap();
+        let branch_id = BranchId::new();
+
+        // Start a transaction manually (increments active_count)
+        let txn = db.begin_transaction(branch_id).unwrap();
+
+        // Spawn shutdown in background — it should wait for the active transaction
+        let db2 = Arc::clone(&db);
+        let shutdown_handle = std::thread::spawn(move || {
+            db2.shutdown().unwrap();
+        });
+
+        // Give shutdown a moment to start waiting
+        std::thread::sleep(Duration::from_millis(50));
+
+        // End the transaction (decrements active_count)
+        db.end_transaction(txn);
+
+        // Shutdown should complete within a reasonable time
+        shutdown_handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_issue_1733_history_no_duplicates_after_recovery() {
+        // Issue #1733: WAL replay replays ALL records (including already-flushed
+        // ones) into memtables. After segment recovery loads the same data from
+        // disk, get_history() returns duplicate versions.
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("db");
+        let branch_id = BranchId::new();
+
+        // Phase 1: Write data and flush to segments
+        {
+            let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+            let ns = create_test_namespace(branch_id);
+            let key = Key::new_kv(ns, "history_key");
+
+            // Write 3 versions
+            blind_write(&db, key.clone(), Value::Int(1));
+            blind_write(&db, key.clone(), Value::Int(2));
+            blind_write(&db, key.clone(), Value::Int(3));
+
+            // Flush memtable to segment — data is now in BOTH WAL and segment
+            db.storage().rotate_memtable(&branch_id);
+            db.storage().flush_oldest_frozen(&branch_id).unwrap();
+
+            // Verify history has 3 versions before close
+            let history = db.get_history(&key, None, None).unwrap();
+            assert_eq!(history.len(), 3, "pre-close history should have 3 versions");
+        }
+
+        // Clear registry so reopen creates a fresh instance
+        OPEN_DATABASES.lock().clear();
+
+        // Phase 2: Reopen — WAL replays all records, then segments are loaded
+        {
+            let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+            let ns = create_test_namespace(branch_id);
+            let key = Key::new_kv(ns, "history_key");
+
+            let history = db.get_history(&key, None, None).unwrap();
+
+            // BUG: Without dedup, this returns 6 versions (3 from memtable + 3 from segment)
+            assert_eq!(
+                history.len(),
+                3,
+                "get_history() returned {} versions after recovery (expected 3 — duplicates detected)",
+                history.len()
+            );
+
+            // Verify correct values (newest first)
+            assert_eq!(history[0].value, Value::Int(3));
+            assert_eq!(history[1].value, Value::Int(2));
+            assert_eq!(history[2].value, Value::Int(1));
+
+            // Also verify point read returns the correct latest value (no regression)
+            let latest = db.storage().get_versioned(&key, u64::MAX).unwrap();
+            assert!(latest.is_some(), "point read should find the key");
+            assert_eq!(latest.unwrap().value, Value::Int(3));
+        }
+    }
+
+    #[test]
+    fn test_issue_1733_partial_flush_no_duplicates() {
+        // Variant: only some versions are flushed. After recovery, flushed
+        // versions appear in both memtable and segment; unflushed versions
+        // appear only in memtable. History must still have no duplicates.
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("db");
+        let branch_id = BranchId::new();
+
+        {
+            let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+            let ns = create_test_namespace(branch_id);
+            let key = Key::new_kv(ns, "partial_key");
+
+            // Write v1, v2 then flush
+            blind_write(&db, key.clone(), Value::Int(1));
+            blind_write(&db, key.clone(), Value::Int(2));
+            db.storage().rotate_memtable(&branch_id);
+            db.storage().flush_oldest_frozen(&branch_id).unwrap();
+
+            // Write v3 (not flushed — only in WAL)
+            blind_write(&db, key.clone(), Value::Int(3));
+        }
+
+        OPEN_DATABASES.lock().clear();
+
+        {
+            let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+            let ns = create_test_namespace(branch_id);
+            let key = Key::new_kv(ns, "partial_key");
+
+            let history = db.get_history(&key, None, None).unwrap();
+            assert_eq!(
+                history.len(),
+                3,
+                "partial flush: expected 3 versions, got {}",
+                history.len()
+            );
+            assert_eq!(history[0].value, Value::Int(3));
+            assert_eq!(history[1].value, Value::Int(2));
+            assert_eq!(history[2].value, Value::Int(1));
+        }
+    }
+
+    #[test]
+    fn test_issue_1733_tombstone_no_duplicate_after_recovery() {
+        // Variant: a delete (tombstone) was flushed. After recovery, history
+        // must show the tombstone exactly once, not twice.
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("db");
+        let branch_id = BranchId::new();
+
+        {
+            let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+            let ns = create_test_namespace(branch_id);
+            let key = Key::new_kv(ns.clone(), "tomb_key");
+
+            blind_write(&db, key.clone(), Value::Int(1));
+
+            // Delete the key (creates tombstone)
+            db.transaction(branch_id, |txn| {
+                txn.delete(key.clone())?;
+                Ok(())
+            })
+            .unwrap();
+
+            // Flush both versions to segment
+            db.storage().rotate_memtable(&branch_id);
+            db.storage().flush_oldest_frozen(&branch_id).unwrap();
+        }
+
+        OPEN_DATABASES.lock().clear();
+
+        {
+            let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+            let ns = create_test_namespace(branch_id);
+            let key = Key::new_kv(ns, "tomb_key");
+
+            let history = db.get_history(&key, None, None).unwrap();
+            // History includes tombstones: should be [tombstone@v2, put@v1]
+            assert_eq!(
+                history.len(),
+                2,
+                "tombstone dedup: expected 2 versions (tombstone + put), got {}",
+                history.len()
+            );
+
+            // Point read should return None (key is deleted)
+            let latest = db.storage().get_versioned(&key, u64::MAX).unwrap();
+            assert!(
+                latest.is_none(),
+                "deleted key should not be found via point read"
+            );
+        }
     }
 }

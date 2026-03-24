@@ -88,6 +88,11 @@ fn decode_escaped(src: &[u8]) -> Option<(Vec<u8>, usize)> {
 /// The encoding preserves the lexicographic ordering of `Key`:
 /// namespace (branch_id, then space) → type_tag → user_key.
 pub fn encode_typed_key(key: &Key) -> Vec<u8> {
+    assert!(
+        !key.namespace.space.as_bytes().contains(&0x00),
+        "encode_typed_key: space name must not contain NUL bytes (space={:?})",
+        key.namespace.space,
+    );
     let mut buf =
         Vec::with_capacity(16 + key.namespace.space.len() + 1 + 1 + key.user_key.len() + 2);
     // Branch ID: 16 bytes, big-endian UUID
@@ -185,6 +190,11 @@ impl InternalKey {
 
     /// Extract the TypedKeyBytes portion (everything except trailing 8-byte commit_id).
     pub fn typed_key_prefix(&self) -> &[u8] {
+        assert!(
+            self.0.len() >= 8,
+            "InternalKey too short for typed_key_prefix: {} bytes (need ≥8)",
+            self.0.len()
+        );
         &self.0[..self.0.len() - 8]
     }
 
@@ -238,6 +248,11 @@ impl InternalKey {
     /// into the child branch's namespace, so that `MvccIterator` can group
     /// own + inherited entries by the same `typed_key_prefix`.
     pub fn with_rewritten_branch_id(&self, new_branch_id: &BranchId) -> Self {
+        assert!(
+            self.0.len() >= 16,
+            "InternalKey too short for branch rewrite: {} bytes (need ≥16)",
+            self.0.len()
+        );
         let mut bytes = self.0.clone();
         bytes[..16].copy_from_slice(new_branch_id.as_bytes());
         InternalKey(bytes)
@@ -249,17 +264,15 @@ impl InternalKey {
 /// Used by COW branching point lookups to rewrite a child's `typed_key`
 /// into the source branch's namespace for bloom probes and index searches.
 ///
-/// # Panics
-/// Panics if `encoded` is shorter than 16 bytes.
-pub fn rewrite_branch_id_bytes(encoded: &[u8], new_branch_id: &BranchId) -> Vec<u8> {
-    debug_assert!(
-        encoded.len() >= 16,
-        "rewrite_branch_id_bytes: encoded key too short ({} bytes, need ≥16)",
-        encoded.len()
-    );
+/// Returns `None` if `encoded` is shorter than 16 bytes (e.g., corrupt
+/// segment data), instead of panicking.
+pub fn rewrite_branch_id_bytes(encoded: &[u8], new_branch_id: &BranchId) -> Option<Vec<u8>> {
+    if encoded.len() < 16 {
+        return None;
+    }
     let mut rewritten = encoded.to_vec();
     rewritten[..16].copy_from_slice(new_branch_id.as_bytes());
-    rewritten
+    Some(rewritten)
 }
 
 impl Ord for InternalKey {
@@ -591,6 +604,35 @@ mod tests {
         let ik_null = InternalKey::encode(&k_null, 1);
         let ik_one = InternalKey::encode(&k_one, 1);
         assert!(ik_null < ik_one, "\\x00 should sort before \\x01");
+    }
+
+    // ===== Issue #1685: Malformed input handling =====
+
+    #[test]
+    fn test_issue_1685_rewrite_branch_id_returns_none_on_short_input() {
+        // rewrite_branch_id_bytes must return None for input shorter than 16 bytes,
+        // not panic. Corrupt segment data could produce short encoded keys.
+        let branch = BranchId::new();
+        assert!(rewrite_branch_id_bytes(&[1, 2, 3], &branch).is_none());
+        assert!(rewrite_branch_id_bytes(&[], &branch).is_none());
+        assert!(rewrite_branch_id_bytes(&[0u8; 15], &branch).is_none());
+        // Exactly 16 bytes should succeed
+        assert!(rewrite_branch_id_bytes(&[0u8; 16], &branch).is_some());
+        // Normal-length input should succeed
+        assert!(rewrite_branch_id_bytes(&[0u8; 28], &branch).is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "NUL")]
+    fn test_issue_1685_encode_typed_key_rejects_nul_in_space() {
+        // Space names containing NUL bytes break the encoding format because
+        // NUL is the space field terminator. encode_typed_key must reject them.
+        let ns = Arc::new(Namespace {
+            branch_id: BranchId::new(),
+            space: "bad\x00space".to_string(),
+        });
+        let key = Key::new(ns, TypeTag::KV, b"test".to_vec());
+        encode_typed_key(&key);
     }
 
     // ===== Property tests =====

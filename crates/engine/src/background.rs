@@ -140,7 +140,7 @@ impl BackgroundScheduler {
         priority: TaskPriority,
         work: impl FnOnce() + Send + 'static,
     ) -> Result<(), BackpressureError> {
-        // Reject after shutdown — workers have been joined, task would never run
+        // Early reject (non-authoritative — the lock-held check below is the real gate)
         if self.inner.shutdown.load(AtomicOrdering::Acquire) {
             return Err(BackpressureError);
         }
@@ -159,6 +159,12 @@ impl BackgroundScheduler {
 
         {
             let mut queue = self.inner.queue.lock();
+            // Authoritative shutdown check under lock: shutdown() acquires this
+            // same lock before notifying workers and joining them, so if we see
+            // shutdown=false here the workers are guaranteed still alive.
+            if self.inner.shutdown.load(AtomicOrdering::Acquire) {
+                return Err(BackpressureError);
+            }
             queue.push(envelope);
             self.inner.queue_depth.fetch_add(1, AtomicOrdering::Release);
         }
@@ -580,6 +586,65 @@ mod tests {
         scheduler.shutdown();
         scheduler.shutdown();
         scheduler.shutdown();
+    }
+
+    /// Issue #1738 / 9.1.A: submit() checks shutdown BEFORE locking the queue.
+    /// A concurrent shutdown() can set the flag, join workers, and complete between
+    /// the check and the queue push. The task ends up in a dead queue.
+    ///
+    /// This test races submit() against shutdown() and verifies that every task
+    /// whose submit() returned Ok(()) actually executed.
+    #[test]
+    fn test_issue_1738_submit_shutdown_toctou() {
+        for _ in 0..50 {
+            let scheduler = Arc::new(BackgroundScheduler::new(1, 4096));
+            let executed = Arc::new(AtomicUsize::new(0));
+            let submitted = Arc::new(AtomicUsize::new(0));
+
+            // Barrier to synchronize submit and shutdown threads
+            let barrier = Arc::new(Barrier::new(2));
+
+            let s = Arc::clone(&scheduler);
+            let e = Arc::clone(&executed);
+            let sub = Arc::clone(&submitted);
+            let b = Arc::clone(&barrier);
+            let submitter = std::thread::spawn(move || {
+                b.wait();
+                // Try to submit tasks as fast as possible during shutdown
+                for _ in 0..100 {
+                    let e = Arc::clone(&e);
+                    if s.submit(TaskPriority::Normal, move || {
+                        e.fetch_add(1, AtomicOrdering::Relaxed);
+                    })
+                    .is_ok()
+                    {
+                        sub.fetch_add(1, AtomicOrdering::Relaxed);
+                    }
+                }
+            });
+
+            let s2 = Arc::clone(&scheduler);
+            let b2 = Arc::clone(&barrier);
+            let shutdowner = std::thread::spawn(move || {
+                b2.wait();
+                s2.shutdown();
+            });
+
+            submitter.join().unwrap();
+            shutdowner.join().unwrap();
+
+            // Every task whose submit() returned Ok(()) MUST have executed
+            let sub_count = submitted.load(AtomicOrdering::Relaxed);
+            let exec_count = executed.load(AtomicOrdering::Relaxed);
+            assert_eq!(
+                exec_count,
+                sub_count,
+                "Dropped {} tasks that submit() accepted (submitted={}, executed={})",
+                sub_count - exec_count,
+                sub_count,
+                exec_count,
+            );
+        }
     }
 
     #[test]

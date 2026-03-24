@@ -51,20 +51,12 @@ const LEVEL_BASE_BYTES: u64 = 256 << 20;
 /// Size multiplier between adjacent levels.
 const LEVEL_MULTIPLIER: u64 = 10;
 
-/// Maximum cumulative overlap with grandparent (L+2) files before forcing an
-/// output split.  Set to 10 × TARGET_FILE_SIZE (640MB).
-const MAX_GRANDPARENT_OVERLAP: u64 = 10 * TARGET_FILE_SIZE;
-
 /// Maximum inherited layer depth before background materialization is triggered.
 const MAX_INHERITED_LAYERS: usize = 4;
 
 /// Minimum L1 target size for dynamic level sizing (1MB).
 /// Prevents degenerate zero-size targets on tiny embedded datasets.
 const MIN_BASE_BYTES: u64 = 1 << 20;
-
-/// Maximum L1 target size for dynamic level sizing.
-/// Equals LEVEL_BASE_BYTES (256MB) — the static default.
-const MAX_BASE_BYTES: u64 = LEVEL_BASE_BYTES;
 
 /// Monkey-optimal bloom bits per key for a given target level.
 ///
@@ -258,20 +250,23 @@ impl BranchState {
             min_timestamp: AtomicU64::new(u64::MAX),
             max_timestamp: AtomicU64::new(0),
             compact_pointers: vec![None; NUM_LEVELS],
-            level_targets: compaction::recalculate_level_targets(&[0u64; NUM_LEVELS]),
+            level_targets: compaction::recalculate_level_targets(
+                &[0u64; NUM_LEVELS],
+                LEVEL_BASE_BYTES,
+            ),
             inherited_layers: Vec::new(),
         }
     }
 }
 
 /// Recompute cached level targets from the current segment version.
-fn refresh_level_targets(branch: &mut BranchState) {
+fn refresh_level_targets(branch: &mut BranchState, max_base_bytes: u64) {
     let ver = branch.version.load();
     let mut actual_bytes = [0u64; NUM_LEVELS];
     for (level, segs) in ver.levels.iter().enumerate() {
         actual_bytes[level] = segs.iter().map(|s| s.file_size()).sum();
     }
-    branch.level_targets = compaction::recalculate_level_targets(&actual_bytes);
+    branch.level_targets = compaction::recalculate_level_targets(&actual_bytes, max_base_bytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -315,6 +310,15 @@ pub struct SegmentedStore {
     ref_registry: ref_registry::SegmentRefRegistry,
     /// Branches currently being materialized (prevents concurrent materialization #1703).
     materializing_branches: DashMap<BranchId, ()>,
+    /// Target size for a single output segment file. Default: 64 MiB.
+    target_file_size: AtomicU64,
+    /// Target total size for L1. Also used as MAX_BASE_BYTES for dynamic level sizing.
+    /// Default: 256 MiB.
+    level_base_bytes: AtomicU64,
+    /// Data block size in bytes for segment files. Default: 4096 (4 KiB).
+    data_block_size: AtomicUsize,
+    /// Bloom filter bits per key (base value). Default: 10.
+    bloom_bits_per_key: AtomicUsize,
 }
 
 impl SegmentedStore {
@@ -339,6 +343,10 @@ impl SegmentedStore {
             compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
             ref_registry: ref_registry::SegmentRefRegistry::new(),
             materializing_branches: DashMap::new(),
+            target_file_size: AtomicU64::new(TARGET_FILE_SIZE),
+            level_base_bytes: AtomicU64::new(LEVEL_BASE_BYTES),
+            data_block_size: AtomicUsize::new(4096),
+            bloom_bits_per_key: AtomicUsize::new(10),
         }
     }
 
@@ -364,6 +372,10 @@ impl SegmentedStore {
             compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
             ref_registry: ref_registry::SegmentRefRegistry::new(),
             materializing_branches: DashMap::new(),
+            target_file_size: AtomicU64::new(TARGET_FILE_SIZE),
+            level_base_bytes: AtomicU64::new(LEVEL_BASE_BYTES),
+            data_block_size: AtomicUsize::new(4096),
+            bloom_bits_per_key: AtomicUsize::new(10),
         }
     }
 
@@ -389,6 +401,10 @@ impl SegmentedStore {
             compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
             ref_registry: ref_registry::SegmentRefRegistry::new(),
             materializing_branches: DashMap::new(),
+            target_file_size: AtomicU64::new(TARGET_FILE_SIZE),
+            level_base_bytes: AtomicU64::new(LEVEL_BASE_BYTES),
+            data_block_size: AtomicUsize::new(4096),
+            bloom_bits_per_key: AtomicUsize::new(10),
         }
     }
 
@@ -403,14 +419,20 @@ impl SegmentedStore {
     }
 
     /// Increment version and return new value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the version counter is at `u64::MAX`. This is consistent
+    /// with `TransactionManager::allocate_version()` which returns
+    /// `Err(CounterOverflow)` at the same boundary.
     #[inline]
     pub fn next_version(&self) -> u64 {
-        self.version
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
-                Some(v.wrapping_add(1))
-            })
-            .unwrap()
-            .wrapping_add(1)
+        let prev = self
+            .version
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_add(1))
+            .expect("version counter overflow: u64::MAX versions exhausted");
+        // Safe: checked_add succeeded, so prev < u64::MAX and prev + 1 won't overflow.
+        prev + 1
     }
 
     /// Set version (used during recovery).
@@ -430,6 +452,56 @@ impl SegmentedStore {
             self.compaction_rate_limiter.store(Some(std::sync::Arc::new(
                 crate::rate_limiter::RateLimiter::new(bytes_per_sec),
             )));
+        }
+    }
+
+    /// Set the target segment file size in bytes.
+    pub fn set_target_file_size(&self, bytes: u64) {
+        self.target_file_size.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Get the configured target segment file size.
+    pub fn target_file_size(&self) -> u64 {
+        self.target_file_size.load(Ordering::Relaxed)
+    }
+
+    /// Set the L1 target size (level_base_bytes) in bytes.
+    pub fn set_level_base_bytes(&self, bytes: u64) {
+        self.level_base_bytes.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Get the configured L1 target size.
+    pub fn level_base_bytes(&self) -> u64 {
+        self.level_base_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Set the data block size in bytes for new segments.
+    pub fn set_data_block_size(&self, bytes: usize) {
+        self.data_block_size.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Get the configured data block size.
+    pub fn data_block_size(&self) -> usize {
+        self.data_block_size.load(Ordering::Relaxed)
+    }
+
+    /// Set the bloom filter bits per key for new segments.
+    pub fn set_bloom_bits_per_key(&self, bits: usize) {
+        self.bloom_bits_per_key.store(bits, Ordering::Relaxed);
+    }
+
+    /// Get the configured bloom bits per key.
+    pub fn bloom_bits_per_key(&self) -> usize {
+        self.bloom_bits_per_key.load(Ordering::Relaxed)
+    }
+
+    /// Create a `SegmentBuilder` pre-configured with this store's
+    /// `data_block_size` and `bloom_bits_per_key`.
+    fn make_segment_builder(&self) -> SegmentBuilder {
+        SegmentBuilder {
+            data_block_size: self.data_block_size(),
+            bloom_bits_per_key: self.bloom_bits_per_key(),
+            ..SegmentBuilder::default()
         }
     }
 
@@ -727,8 +799,11 @@ impl SegmentedStore {
 
                     let typed_key = ik.typed_key_prefix();
 
-                    // Rewrite branch_id: source → child
-                    let child_typed_key = rewrite_branch_id_bytes(typed_key, child_branch_id);
+                    // Rewrite branch_id: source → child (skip corrupt keys)
+                    let Some(child_typed_key) = rewrite_branch_id_bytes(typed_key, child_branch_id)
+                    else {
+                        continue;
+                    };
 
                     // Shadow detection (cached per logical key)
                     let is_shadowed = if last_shadow_key.as_deref() == Some(&child_typed_key) {
@@ -755,8 +830,12 @@ impl SegmentedStore {
                         continue;
                     }
 
-                    // Rewrite full internal key: source → child
-                    let child_ik_bytes = rewrite_branch_id_bytes(ik.as_bytes(), child_branch_id);
+                    // Rewrite full internal key: source → child (skip corrupt keys)
+                    let Some(child_ik_bytes) =
+                        rewrite_branch_id_bytes(ik.as_bytes(), child_branch_id)
+                    else {
+                        continue;
+                    };
                     let child_ik = InternalKey::from_bytes(child_ik_bytes);
 
                     entries.push((child_ik, segment_entry_to_memtable_entry(se)));
@@ -780,7 +859,7 @@ impl SegmentedStore {
             std::fs::create_dir_all(&branch_dir)?;
 
             let next_id = &self.next_segment_id;
-            let builder = SplittingSegmentBuilder::new(TARGET_FILE_SIZE)
+            let builder = SplittingSegmentBuilder::new(self.target_file_size())
                 .with_compression(crate::segment_builder::CompressionCodec::None);
             let built = builder.build_split(entries.into_iter(), |_split_idx| {
                 let seg_id = next_id.fetch_add(1, Ordering::Relaxed);
@@ -831,7 +910,7 @@ impl SegmentedStore {
                 branch.inherited_layers.remove(idx);
             }
 
-            refresh_level_targets(&mut branch);
+            refresh_level_targets(&mut branch, self.level_base_bytes());
         }
 
         // 2f. Cleanup
@@ -900,7 +979,10 @@ impl SegmentedStore {
         fork_version: u64,
     ) -> bool {
         // Rewrite typed_key from child → source namespace
-        let src_typed_key = rewrite_branch_id_bytes(child_typed_key, &source_branch_id);
+        let Some(src_typed_key) = rewrite_branch_id_bytes(child_typed_key, &source_branch_id)
+        else {
+            return false; // Corrupt key can't exist
+        };
         let src_seek_ik = InternalKey::from_typed_key_bytes(&src_typed_key, u64::MAX);
         let src_seek_bytes = src_seek_ik.as_bytes();
 
@@ -999,7 +1081,8 @@ impl SegmentedStore {
                     let branch_dir = segments_dir.join(&branch_hex);
                     std::fs::create_dir_all(&branch_dir)?;
                     let seg_path = branch_dir.join(format!("{}.sst", seg_id));
-                    let builder = SegmentBuilder::default()
+                    let builder = self
+                        .make_segment_builder()
                         .with_compression(crate::segment_builder::CompressionCodec::None);
                     builder.build_from_iter(mt.iter_all(), &seg_path)?;
                     let segment = KVSegment::open(&seg_path)?;
@@ -1028,7 +1111,7 @@ impl SegmentedStore {
                     source_manifest_dirty = true;
                 }
                 if source_manifest_dirty {
-                    refresh_level_targets(&mut source);
+                    refresh_level_targets(&mut source, self.level_base_bytes());
                 }
             }
 
@@ -1045,7 +1128,10 @@ impl SegmentedStore {
                     source_branch_id: l.source_branch_id,
                     fork_version: l.fork_version,
                     segments: Arc::clone(&l.segments),
-                    status: l.status,
+                    // Always reset to Active: the child has not started any
+                    // materialization.  Copying Materializing would permanently
+                    // block the child from materializing this layer (#1721).
+                    status: LayerStatus::Active,
                 })
                 .collect();
 
@@ -1560,6 +1646,7 @@ impl SegmentedStore {
         value: Value,
         version: u64,
         timestamp_micros: u64,
+        ttl_ms: u64,
     ) -> StrataResult<()> {
         let branch_id = key.namespace.branch_id;
 
@@ -1572,7 +1659,7 @@ impl SegmentedStore {
             value,
             is_tombstone: false,
             timestamp: Timestamp::from_micros(timestamp_micros),
-            ttl_ms: 0,
+            ttl_ms,
         };
         let ts = entry.timestamp.as_micros();
         branch.active.put_entry(&key, version, entry);
@@ -1625,6 +1712,7 @@ impl SegmentedStore {
         deletes: Vec<Key>,
         version: u64,
         timestamp_micros: u64,
+        put_ttls: &[u64],
     ) -> StrataResult<()> {
         if writes.is_empty() && deletes.is_empty() {
             return Ok(());
@@ -1634,13 +1722,14 @@ impl SegmentedStore {
         let ts = timestamp.as_micros();
 
         // Group puts by branch.
-        let mut puts_by_branch: std::collections::HashMap<BranchId, Vec<(Key, Value)>> =
+        let mut puts_by_branch: std::collections::HashMap<BranchId, Vec<(Key, Value, u64)>> =
             std::collections::HashMap::new();
-        for (key, value) in writes {
+        for (i, (key, value)) in writes.into_iter().enumerate() {
+            let ttl_ms = put_ttls.get(i).copied().unwrap_or(0);
             puts_by_branch
                 .entry(key.namespace.branch_id)
                 .or_default()
-                .push((key, value));
+                .push((key, value, ttl_ms));
         }
 
         // Group deletes by branch.
@@ -1659,12 +1748,12 @@ impl SegmentedStore {
                 .branches
                 .entry(branch_id)
                 .or_insert_with(BranchState::new);
-            for (key, value) in entries {
+            for (key, value, ttl_ms) in entries {
                 let entry = MemtableEntry {
                     value,
                     is_tombstone: false,
                     timestamp,
-                    ttl_ms: 0,
+                    ttl_ms,
                 };
                 branch.active.put_entry(&key, version, entry);
             }
@@ -1844,7 +1933,8 @@ impl SegmentedStore {
         let branch_dir = segments_dir.join(&branch_hex);
         std::fs::create_dir_all(&branch_dir)?;
         let seg_path = branch_dir.join(format!("{}.sst", seg_id));
-        let builder = SegmentBuilder::default()
+        let builder = self
+            .make_segment_builder()
             .with_compression(crate::segment_builder::CompressionCodec::None);
         builder.build_from_iter(frozen_mt.iter_all(), &seg_path)?;
 
@@ -1858,27 +1948,40 @@ impl SegmentedStore {
             .branches
             .entry(*branch_id)
             .or_insert_with(BranchState::new);
-        if let Some(last) = branch.frozen.last() {
+        let popped = if let Some(last) = branch.frozen.last() {
             if last.id() == frozen_mt.id() {
                 branch.frozen.pop();
                 self.total_frozen_count.fetch_sub(1, Ordering::Relaxed);
+                true
+            } else {
+                false
             }
-        }
-        // Build new version with the new segment prepended (newest first).
-        let old_ver = branch.version.load();
-        let mut new_l0 = Vec::with_capacity(old_ver.l0_segments().len() + 1);
-        new_l0.push(Arc::new(segment));
-        new_l0.extend(old_ver.l0_segments().iter().cloned());
-        let mut new_levels = old_ver.levels.clone();
-        new_levels[0] = new_l0;
-        branch
-            .version
-            .store(Arc::new(SegmentVersion { levels: new_levels }));
-        refresh_level_targets(&mut branch);
+        } else {
+            false
+        };
 
-        // Persist level assignments
-        drop(branch);
-        self.write_branch_manifest(branch_id);
+        if popped {
+            // Build new version with the new segment prepended (newest first).
+            let old_ver = branch.version.load();
+            let mut new_l0 = Vec::with_capacity(old_ver.l0_segments().len() + 1);
+            new_l0.push(Arc::new(segment));
+            new_l0.extend(old_ver.l0_segments().iter().cloned());
+            let mut new_levels = old_ver.levels.clone();
+            new_levels[0] = new_l0;
+            branch
+                .version
+                .store(Arc::new(SegmentVersion { levels: new_levels }));
+            refresh_level_targets(&mut branch, self.level_base_bytes());
+
+            // Persist level assignments
+            drop(branch);
+            self.write_branch_manifest(branch_id);
+        } else {
+            // Another thread already flushed this memtable; discard the
+            // duplicate segment file we just built.
+            drop(branch);
+            let _ = std::fs::remove_file(&seg_path);
+        }
 
         Ok(true)
     }
@@ -2152,7 +2255,7 @@ impl SegmentedStore {
             branch
                 .version
                 .store(Arc::new(SegmentVersion { levels: new_levels }));
-            refresh_level_targets(&mut branch);
+            refresh_level_targets(&mut branch, self.level_base_bytes());
 
             // Collect inherited layer info for second pass (deferred resolution).
             if let Some(manifest) = manifest {
@@ -2408,7 +2511,10 @@ impl SegmentedStore {
             }
             let effective_version = max_version.min(layer.fork_version);
             // Rewrite typed_key: child branch_id → source branch_id
-            let src_typed_key = rewrite_branch_id_bytes(&typed_key, &layer.source_branch_id);
+            let Some(src_typed_key) = rewrite_branch_id_bytes(&typed_key, &layer.source_branch_id)
+            else {
+                continue; // Skip layer if key is corrupt
+            };
             let src_seek_ik = InternalKey::from_typed_key_bytes(&src_typed_key, u64::MAX);
             let src_seek_bytes = src_seek_ik.as_bytes();
 
@@ -2486,8 +2592,11 @@ impl SegmentedStore {
             }
         }
 
-        // Sort descending by commit_id (newest first)
+        // Sort descending by commit_id (newest first) and deduplicate.
+        // After recovery, the same (key, commit_id) may exist in both memtable
+        // (from WAL replay) and segments (from disk), producing duplicates (#1733).
         all_versions.sort_by(|a, b| b.0.cmp(&a.0));
+        all_versions.dedup_by_key(|entry| entry.0);
         all_versions
     }
 
@@ -2953,6 +3062,7 @@ impl Storage for SegmentedStore {
         writes: Vec<(Key, Value, WriteMode)>,
         deletes: Vec<Key>,
         version: u64,
+        put_ttls: &[u64],
     ) -> StrataResult<()> {
         if writes.is_empty() && deletes.is_empty() {
             return Ok(());
@@ -2960,13 +3070,14 @@ impl Storage for SegmentedStore {
 
         // Group puts and deletes by branch — acquire each DashMap guard once
         // per branch instead of per entry.
-        let mut puts_by_branch: std::collections::HashMap<BranchId, Vec<(Key, Value)>> =
+        let mut puts_by_branch: std::collections::HashMap<BranchId, Vec<(Key, Value, u64)>> =
             std::collections::HashMap::new();
-        for (key, value, _mode) in writes {
+        for (i, (key, value, _mode)) in writes.into_iter().enumerate() {
+            let ttl_ms = put_ttls.get(i).copied().unwrap_or(0);
             puts_by_branch
                 .entry(key.namespace.branch_id)
                 .or_default()
-                .push((key, value));
+                .push((key, value, ttl_ms));
         }
         let mut deletes_by_branch: std::collections::HashMap<BranchId, Vec<Key>> =
             std::collections::HashMap::new();
@@ -2986,12 +3097,12 @@ impl Storage for SegmentedStore {
                 .branches
                 .entry(branch_id)
                 .or_insert_with(BranchState::new);
-            for (key, value) in entries {
+            for (key, value, ttl_ms) in entries {
                 let entry = MemtableEntry {
                     value,
                     is_tombstone: false,
                     timestamp,
-                    ttl_ms: 0,
+                    ttl_ms,
                 };
                 branch.active.put_entry(&key, version, entry);
             }
