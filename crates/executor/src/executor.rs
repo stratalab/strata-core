@@ -76,6 +76,28 @@ impl Executor {
     /// Create a new executor with an explicit access mode.
     pub fn new_with_mode(db: Arc<Database>, access_mode: AccessMode) -> Self {
         let primitives = Arc::new(Primitives::new(db));
+
+        // Log a startup hint when auto_embed is on but the model isn't downloaded yet.
+        #[cfg(feature = "embed")]
+        if primitives.db.auto_embed_enabled() {
+            let model_name = primitives.db.embed_model();
+            let registry = strata_intelligence::ModelRegistry::new();
+            // Only log if the model is known (in catalog) but not yet downloaded.
+            // If the name is invalid, resolve() will surface a clear error on
+            // first embed attempt — no need for a misleading startup hint.
+            let is_known = registry.list_available().iter().any(|m| {
+                m.name.eq_ignore_ascii_case(&model_name)
+            });
+            if is_known && registry.resolve(&model_name).is_err() {
+                tracing::info!(
+                    model = %model_name,
+                    "auto_embed is enabled but model is not downloaded \u{2014} \
+                     it will be fetched automatically on first write, or run: \
+                     strata models pull {model_name}"
+                );
+            }
+        }
+
         let state = Arc::new(EmbedRefreshState {
             mu: std::sync::Mutex::new(false),
             cond: std::sync::Condvar::new(),

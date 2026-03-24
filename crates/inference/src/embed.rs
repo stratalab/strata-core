@@ -70,11 +70,29 @@ impl EmbeddingEngine {
     /// Load an embedding engine by model name from the registry.
     ///
     /// Resolves the name (e.g., `"miniLM"`) to a local GGUF file path,
-    /// then loads the model.
+    /// automatically downloading from HuggingFace if the model is not
+    /// present locally. On load failure, checks for corrupted files
+    /// (size mismatch vs catalog) and deletes them so the next attempt
+    /// can re-download a fresh copy.
     pub fn from_registry(name: &str) -> Result<Self, InferenceError> {
         let registry = crate::registry::ModelRegistry::new();
+
+        #[cfg(feature = "download")]
+        let path = registry.resolve_or_pull(name)?;
+
+        #[cfg(not(feature = "download"))]
         let path = registry.resolve(name)?;
-        Self::from_gguf(path)
+
+        match Self::from_gguf(&path) {
+            Ok(engine) => Ok(engine),
+            Err(e) => {
+                // If loading failed, the file may be corrupted/truncated.
+                // Delete it if size doesn't match catalog so next retry
+                // can re-download a fresh copy.
+                registry.check_and_clean_corrupt(name, &path);
+                Err(e)
+            }
+        }
     }
 
     /// Produce an L2-normalized embedding vector for the given text.
@@ -309,6 +327,15 @@ impl EmbeddingEngine {
     /// Returns 0 if the internal Mutex is poisoned.
     pub fn vocab_size(&self) -> usize {
         self.ctx.lock().map(|ctx| ctx.vocab_size).unwrap_or(0)
+    }
+
+    /// Check whether the internal llama.cpp context is healthy.
+    ///
+    /// Returns `false` if the internal `Mutex` is poisoned (a thread panicked
+    /// while holding the lock). A poisoned context should be discarded and
+    /// the model reloaded fresh, as the llama.cpp state may be inconsistent.
+    pub fn is_healthy(&self) -> bool {
+        !self.ctx.is_poisoned()
     }
 }
 
@@ -582,6 +609,20 @@ mod tests {
         // Here we just verify the trait bound is satisfied.
         fn assert_debug<T: std::fmt::Debug>() {}
         assert_debug::<EmbeddingEngine>();
+    }
+
+    // -----------------------------------------------------------------------
+    // is_healthy() compile-time check
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn is_healthy_method_exists() {
+        // Compile-time check: is_healthy exists and returns bool.
+        // Can't construct an engine without libllama, so just verify
+        // the method signature compiles.
+        fn _check(e: &EmbeddingEngine) -> bool {
+            e.is_healthy()
+        }
     }
 
     // -----------------------------------------------------------------------

@@ -197,6 +197,95 @@ impl ModelRegistry {
         )))
     }
 
+    /// Resolve a model name to a local path, downloading if necessary.
+    ///
+    /// Tries local resolution first. If the model is in the catalog but not
+    /// downloaded, automatically pulls it from HuggingFace with an INFO log
+    /// so users know why the first operation is slow.
+    #[cfg(feature = "download")]
+    pub fn resolve_or_pull(&self, name: &str) -> Result<PathBuf, InferenceError> {
+        // Fast path: already on disk
+        if let Ok(path) = self.resolve(name) {
+            return Ok(path);
+        }
+
+        // Verify the model is in the catalog before attempting download.
+        // This propagates "Unknown model" / "Unknown quant" errors immediately.
+        let (entry, quant) = self.parse_name(name)?;
+        let quant_name = quant.unwrap_or(entry.default_quant);
+        let variant = entry
+            .variants
+            .iter()
+            .find(|v| v.name.eq_ignore_ascii_case(quant_name))
+            .ok_or_else(|| {
+                let available: Vec<&str> = entry.variants.iter().map(|v| v.name).collect();
+                InferenceError::Registry(format!(
+                    "Unknown quant '{}' for model '{}'. Available: {}",
+                    quant_name,
+                    entry.name,
+                    available.join(", ")
+                ))
+            })?;
+
+        let size_display = format_size(variant.size_bytes);
+        tracing::info!(
+            model = entry.name,
+            size = %size_display,
+            "Downloading embedding model from HuggingFace \u{2014} this only happens once"
+        );
+
+        self.pull(name)
+    }
+
+    /// Check whether a model file appears corrupted (size mismatch vs catalog).
+    ///
+    /// If the file exists but its size differs from the catalog expectation by
+    /// more than 10%, the file is deleted so the next load attempt can
+    /// re-download a fresh copy.
+    pub fn check_and_clean_corrupt(&self, name: &str, path: &Path) {
+        let (entry, quant) = match self.parse_name(name) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let quant_name = quant.unwrap_or(entry.default_quant);
+        let variant = match entry
+            .variants
+            .iter()
+            .find(|v| v.name.eq_ignore_ascii_case(quant_name))
+        {
+            Some(v) => v,
+            None => return,
+        };
+
+        let expected = variant.size_bytes;
+        if expected == 0 {
+            return;
+        }
+
+        let actual = match std::fs::metadata(path) {
+            Ok(m) => m.len(),
+            Err(_) => return,
+        };
+
+        let ratio = actual as f64 / expected as f64;
+        if !(0.9..=1.1).contains(&ratio) {
+            tracing::warn!(
+                model = name,
+                expected_bytes = expected,
+                actual_bytes = actual,
+                "Model file appears corrupted (size mismatch) \u{2014} deleting for re-download"
+            );
+            if let Err(e) = std::fs::remove_file(path) {
+                tracing::warn!(
+                    model = name,
+                    path = %path.display(),
+                    error = %e,
+                    "Failed to delete corrupted model file"
+                );
+            }
+        }
+    }
+
     /// Download a model and return its local path.
     #[cfg(feature = "download")]
     pub fn pull(&self, name: &str) -> Result<PathBuf, InferenceError> {
@@ -1016,5 +1105,81 @@ mod tests {
         let path = registry.resolve("miniLM:f16").unwrap();
         assert!(path.exists());
         assert_eq!(path.file_name().unwrap(), variant.hf_file);
+    }
+
+    // ===== check_and_clean_corrupt() tests =====
+
+    #[test]
+    fn check_corrupt_deletes_undersized_file() {
+        let (dir, registry) = test_registry();
+
+        let entry = catalog::find_entry("miniLM").unwrap();
+        let variant = &entry.variants[0];
+        let path = dir.path().join(variant.hf_file);
+        // Write a file far smaller than expected (~45MB)
+        std::fs::write(&path, b"tiny").unwrap();
+        assert!(path.exists());
+
+        registry.check_and_clean_corrupt("miniLM", &path);
+        assert!(
+            !path.exists(),
+            "undersized file should be deleted as corrupted"
+        );
+    }
+
+    #[test]
+    fn check_corrupt_keeps_correctly_sized_file() {
+        let (dir, registry) = test_registry();
+
+        let entry = catalog::find_entry("miniLM").unwrap();
+        let variant = &entry.variants[0];
+        let path = dir.path().join(variant.hf_file);
+        // Write a file within 10% of expected size
+        let fake_data = vec![0u8; variant.size_bytes as usize];
+        std::fs::write(&path, &fake_data).unwrap();
+        assert!(path.exists());
+
+        registry.check_and_clean_corrupt("miniLM", &path);
+        assert!(
+            path.exists(),
+            "correctly-sized file should not be deleted"
+        );
+    }
+
+    #[test]
+    fn check_corrupt_noop_for_unknown_model() {
+        let (dir, registry) = test_registry();
+
+        let path = dir.path().join("fake.gguf");
+        std::fs::write(&path, b"data").unwrap();
+
+        // Should not panic or delete the file
+        registry.check_and_clean_corrupt("nonexistent-model", &path);
+        assert!(path.exists(), "unknown model should be a no-op");
+    }
+
+    #[test]
+    fn check_corrupt_noop_for_missing_file() {
+        let (dir, registry) = test_registry();
+
+        let path = dir.path().join("no-such-file.gguf");
+        // Should not panic when file doesn't exist
+        registry.check_and_clean_corrupt("miniLM", &path);
+    }
+
+    #[test]
+    fn check_corrupt_deletes_zero_length_file() {
+        let (dir, registry) = test_registry();
+
+        let entry = catalog::find_entry("miniLM").unwrap();
+        let variant = &entry.variants[0];
+        let path = dir.path().join(variant.hf_file);
+        std::fs::write(&path, b"").unwrap();
+
+        registry.check_and_clean_corrupt("miniLM", &path);
+        assert!(
+            !path.exists(),
+            "zero-length file should be deleted as corrupted"
+        );
     }
 }

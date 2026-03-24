@@ -50,11 +50,24 @@ impl EmbedModelState {
         _model_dir: &std::path::Path,
         model_name: &str,
     ) -> Result<Arc<EmbeddingEngine>, String> {
-        // Fast path: engine already loaded.
+        // Fast path: engine already loaded and healthy.
         {
-            let guard = self.engine.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = self.engine.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref eng) = *guard {
-                return Ok(Arc::clone(eng));
+                if eng.is_healthy() {
+                    return Ok(Arc::clone(eng));
+                }
+                // Internal llama.cpp context is poisoned — discard and reload.
+                tracing::warn!(
+                    target: "strata::embed",
+                    "Embedding engine context poisoned (likely a prior panic) \u{2014} reloading model"
+                );
+                *guard = None;
+                // Also clear retry tracking so the reload isn't blocked by
+                // stale error state from a previous load cycle.
+                drop(guard);
+                let mut err_guard = self.load_error.lock().unwrap_or_else(|e| e.into_inner());
+                *err_guard = None;
             }
         }
 
@@ -398,5 +411,57 @@ mod tests {
         let single: Vec<Vec<f32>> = vec![vec![1.0]];
         let expected_dim = single[0].len();
         assert!(single.iter().all(|v| v.len() == expected_dim));
+    }
+
+    #[test]
+    fn test_poison_recovery_clears_error_state() {
+        // Verify that clearing engine + load_error (as the poison recovery
+        // path does) allows fresh retries even after MAX_RETRIES was exhausted.
+        // Uses a bogus model name that will never resolve, so this test
+        // works regardless of which models are installed locally.
+        let state = EmbedModelState::default();
+        let bogus_model = "nonexistent-test-model-for-poison-recovery";
+
+        // Exhaust retries with a model name that definitely doesn't exist.
+        for _ in 0..MAX_RETRIES {
+            let _ = state.get_or_load(Path::new("/nonexistent"), bogus_model);
+        }
+
+        // Confirm retries are exhausted — returns cached error.
+        let r = state.get_or_load(Path::new("/nonexistent"), bogus_model);
+        assert!(r.is_err(), "retries should be exhausted");
+        let cached_err = r.unwrap_err();
+
+        // Simulate what happens after poison recovery:
+        // engine is set to None and load_error is cleared.
+        {
+            let mut guard = state.engine.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = None;
+        }
+        {
+            let mut err_guard = state.load_error.lock().unwrap_or_else(|e| e.into_inner());
+            *err_guard = None;
+        }
+
+        // Should be able to retry now (not blocked by stale error state).
+        let r = state.get_or_load(Path::new("/nonexistent"), bogus_model);
+        assert!(r.is_err(), "bogus model should still fail");
+        let fresh_err = r.unwrap_err();
+
+        // Verify the retry counter was reset (attempt count should be 1, not MAX_RETRIES).
+        let err_guard = state.load_error.lock().unwrap_or_else(|e| e.into_inner());
+        let (_, attempts) = err_guard.as_ref().expect("should have error after fresh attempt");
+        assert_eq!(
+            *attempts, 1,
+            "attempt count should be 1 after poison recovery cleared state, got {}",
+            attempts
+        );
+        assert!(
+            fresh_err.contains(bogus_model),
+            "error should mention model name: {}",
+            fresh_err
+        );
+        // Error messages should be the same (same failure), confirming a fresh attempt.
+        assert_eq!(cached_err, fresh_err, "same model → same error message");
     }
 }
