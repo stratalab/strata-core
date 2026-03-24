@@ -9217,3 +9217,59 @@ fn test_issue_1694_materialize_shadow_detection_ignores_frozen_memtable() {
         .unwrap();
     assert_eq!(val_x.value, Value::Int(777), "child's frozen write wins");
 }
+
+/// Issue #1734: apply_recovery_atomic must NOT bump the visible storage version.
+///
+/// The follower refresh path calls apply_recovery_atomic to install KV entries,
+/// then updates secondary indexes (BM25/HNSW), and only THEN should the version
+/// advance. If the version advances inside apply_recovery_atomic, a concurrent
+/// reader on the follower can see committed vectors via KV get() but miss them
+/// in search() because the HNSW backend hasn't been updated yet.
+#[test]
+fn test_issue_1734_apply_recovery_atomic_does_not_bump_version() {
+    let store = SegmentedStore::new();
+
+    // Seed an initial entry so the store has version 1
+    seed(&store, kv_key("existing"), Value::Int(1), 1);
+    assert_eq!(
+        store.version(),
+        1,
+        "precondition: version should be 1 after seed"
+    );
+
+    // apply_recovery_atomic installs entries at version 5.
+    // CORRECT BEHAVIOR: the storage version should remain at 1 (caller bumps later).
+    let writes = vec![(kv_key("new_key"), Value::String("hello".into()))];
+    store
+        .apply_recovery_atomic(writes, vec![], 5, 1_000_000, &[0])
+        .unwrap();
+
+    assert_eq!(
+        store.version(),
+        1,
+        "apply_recovery_atomic must NOT advance the visible version; \
+         the caller (refresh) is responsible for bumping it after secondary indexes are updated"
+    );
+
+    // The entry IS in the memtable but should be invisible at the current version (1)
+    let invisible = store
+        .get_versioned(&kv_key("new_key"), store.version())
+        .unwrap();
+    assert!(
+        invisible.is_none(),
+        "entry at version 5 should be invisible when storage version is 1"
+    );
+
+    // After the caller bumps the version, the entry becomes visible
+    store.advance_version(5);
+    assert_eq!(store.version(), 5);
+
+    let visible = store
+        .get_versioned(&kv_key("new_key"), store.version())
+        .unwrap();
+    assert!(
+        visible.is_some(),
+        "entry should be visible after advance_version(5)"
+    );
+    assert_eq!(visible.unwrap().value, Value::String("hello".into()));
+}

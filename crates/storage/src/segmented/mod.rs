@@ -440,6 +440,15 @@ impl SegmentedStore {
         self.version.store(version, Ordering::Release);
     }
 
+    /// Monotonically advance the visible storage version.
+    ///
+    /// Used by the follower refresh path to bump version AFTER secondary
+    /// indexes (BM25/HNSW) have been updated, ensuring readers never see
+    /// KV data before the corresponding index entries exist (Issue #1734).
+    pub fn advance_version(&self, version: u64) {
+        self.version.fetch_max(version, Ordering::AcqRel);
+    }
+
     /// Set (or clear) the compaction I/O rate limit.
     ///
     /// When `bytes_per_sec > 0`, compaction reads and writes are throttled to
@@ -1799,8 +1808,10 @@ impl SegmentedStore {
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
-        // Advance version only after ALL entries are installed.
-        self.version.fetch_max(version, Ordering::AcqRel);
+        // Version is NOT advanced here. The caller (Database::refresh) is
+        // responsible for calling advance_version() AFTER secondary indexes
+        // (BM25/HNSW) have been updated, so readers never observe KV data
+        // without corresponding index entries (Issue #1734).
         Ok(())
     }
 
