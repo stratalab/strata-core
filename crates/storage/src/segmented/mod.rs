@@ -419,14 +419,20 @@ impl SegmentedStore {
     }
 
     /// Increment version and return new value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the version counter is at `u64::MAX`. This is consistent
+    /// with `TransactionManager::allocate_version()` which returns
+    /// `Err(CounterOverflow)` at the same boundary.
     #[inline]
     pub fn next_version(&self) -> u64 {
-        self.version
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
-                Some(v.wrapping_add(1))
-            })
-            .unwrap()
-            .wrapping_add(1)
+        let prev = self
+            .version
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_add(1))
+            .expect("version counter overflow: u64::MAX versions exhausted");
+        // Safe: checked_add succeeded, so prev < u64::MAX and prev + 1 won't overflow.
+        prev + 1
     }
 
     /// Set version (used during recovery).

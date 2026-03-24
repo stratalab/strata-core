@@ -213,6 +213,21 @@ fn version_next_version_set_version() {
 }
 
 #[test]
+#[should_panic(expected = "version counter overflow")]
+fn test_issue_1718_next_version_overflow_panics() {
+    // M-11: next_version() must detect u64::MAX overflow instead of
+    // silently wrapping to 0, which would corrupt MVCC ordering.
+    // This is consistent with TransactionManager::allocate_version()
+    // which returns Err(CounterOverflow) at u64::MAX.
+    let store = SegmentedStore::new();
+    store.set_version(u64::MAX - 1);
+    // Advances from MAX-1 to MAX — should succeed
+    assert_eq!(store.next_version(), u64::MAX);
+    // Advances from MAX — should panic (overflow)
+    store.next_version();
+}
+
+#[test]
 fn branch_ids_and_clear() {
     let store = SegmentedStore::new();
     seed(&store, kv_key("k"), Value::Int(1), 1);
