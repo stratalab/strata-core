@@ -389,6 +389,7 @@ fn ttl_expiration_at_read_time() {
         is_tombstone: false,
         timestamp: Timestamp::from_micros(0), // ancient
         ttl_ms: 1,                            // 1ms TTL — definitely expired
+        raw_value: None,
     };
     branch.active.put_entry(&key, 1, entry);
     drop(branch);
@@ -7043,6 +7044,7 @@ fn recovery_skips_orphan_sst_not_in_manifest() {
         is_tombstone: false,
         timestamp: strata_core::Timestamp::from(0u64),
         ttl_ms: 0,
+        raw_value: None,
     };
     let builder = crate::segment_builder::SegmentBuilder::default();
     builder
@@ -8176,6 +8178,7 @@ fn seed_with_timestamp_and_ttl(
         is_tombstone: false,
         timestamp,
         ttl_ms,
+        raw_value: None,
     };
     branch.active.put_entry(&key, version, entry);
 }

@@ -293,6 +293,7 @@ mod tests {
             is_tombstone: false,
             timestamp: Timestamp::now(),
             ttl_ms: 0,
+            raw_value: None,
         }
     }
 
@@ -302,6 +303,7 @@ mod tests {
             is_tombstone: true,
             timestamp: Timestamp::now(),
             ttl_ms: 0,
+            raw_value: None,
         }
     }
 
@@ -882,6 +884,7 @@ mod tests {
             // 1 second after epoch with 1ms TTL → always expired
             timestamp: Timestamp::from_micros(1_000_000),
             ttl_ms: 1,
+            raw_value: None,
         }
     }
 

@@ -37,6 +37,10 @@ pub struct MemtableEntry {
     pub timestamp: Timestamp,
     /// Time-to-live in milliseconds (0 = no TTL).
     pub ttl_ms: u64,
+    /// Pre-encoded bincode value bytes for zero-copy compaction passthrough.
+    /// When set, `encode_entry_v4` uses these directly instead of
+    /// re-serializing `value`, eliminating the deserialize→serialize round-trip.
+    pub(crate) raw_value: Option<Vec<u8>>,
 }
 
 impl MemtableEntry {
@@ -140,6 +144,7 @@ impl Memtable {
                 is_tombstone,
                 timestamp: Timestamp::now(),
                 ttl_ms: 0,
+                raw_value: None,
             },
         );
     }

@@ -1660,6 +1660,7 @@ impl SegmentedStore {
             is_tombstone: false,
             timestamp: Timestamp::from_micros(timestamp_micros),
             ttl_ms,
+            raw_value: None,
         };
         let ts = entry.timestamp.as_micros();
         branch.active.put_entry(&key, version, entry);
@@ -1691,6 +1692,7 @@ impl SegmentedStore {
             is_tombstone: true,
             timestamp: Timestamp::from_micros(timestamp_micros),
             ttl_ms: 0,
+            raw_value: None,
         };
         let ts = entry.timestamp.as_micros();
         branch.active.put_entry(key, version, entry);
@@ -1754,6 +1756,7 @@ impl SegmentedStore {
                     is_tombstone: false,
                     timestamp,
                     ttl_ms,
+                    raw_value: None,
                 };
                 branch.active.put_entry(&key, version, entry);
             }
@@ -1774,6 +1777,7 @@ impl SegmentedStore {
                     is_tombstone: true,
                     timestamp,
                     ttl_ms: 0,
+                    raw_value: None,
                 };
                 branch.active.put_entry(&key, version, entry);
             }
@@ -2929,6 +2933,7 @@ impl Storage for SegmentedStore {
             is_tombstone: false,
             timestamp: Timestamp::now(),
             ttl_ms,
+            raw_value: None,
         };
         let ts = entry.timestamp.as_micros();
         branch.active.put_entry(&key, version, entry);
@@ -2958,6 +2963,7 @@ impl Storage for SegmentedStore {
             is_tombstone: true,
             timestamp: Timestamp::now(),
             ttl_ms: 0,
+            raw_value: None,
         };
         let ts = entry.timestamp.as_micros();
         branch.active.put_entry(key, version, entry);
@@ -3004,6 +3010,7 @@ impl Storage for SegmentedStore {
                     is_tombstone: false,
                     timestamp,
                     ttl_ms: 0,
+                    raw_value: None,
                 };
                 branch.active.put_entry(&key, version, entry);
             }
@@ -3044,6 +3051,7 @@ impl Storage for SegmentedStore {
                     is_tombstone: true,
                     timestamp,
                     ttl_ms: 0,
+                    raw_value: None,
                 };
                 branch.active.put_entry(&key, version, entry);
             }
@@ -3103,6 +3111,7 @@ impl Storage for SegmentedStore {
                     is_tombstone: false,
                     timestamp,
                     ttl_ms,
+                    raw_value: None,
                 };
                 branch.active.put_entry(&key, version, entry);
             }
@@ -3123,6 +3132,7 @@ impl Storage for SegmentedStore {
                     is_tombstone: true,
                     timestamp,
                     ttl_ms: 0,
+                    raw_value: None,
                 };
                 branch.active.put_entry(&key, version, entry);
             }
@@ -3237,12 +3247,13 @@ fn point_lookup_level_preencoded(
 }
 
 /// Convert a `SegmentEntry` into a `MemtableEntry` for the merge path.
-fn segment_entry_to_memtable_entry(se: SegmentEntry) -> MemtableEntry {
+pub(crate) fn segment_entry_to_memtable_entry(se: SegmentEntry) -> MemtableEntry {
     MemtableEntry {
         value: se.value,
         is_tombstone: se.is_tombstone,
         timestamp: Timestamp::from_micros(se.timestamp),
         ttl_ms: se.ttl_ms,
+        raw_value: se.raw_value,
     }
 }
 

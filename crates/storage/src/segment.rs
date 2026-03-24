@@ -21,10 +21,11 @@ use crate::block_cache::{self, Priority};
 use crate::bloom::BloomFilter;
 use crate::key_encoding::{encode_typed_key, encode_typed_key_prefix, InternalKey};
 use crate::segment_builder::{
-    decode_entry_header_ref_v4, decode_entry_header_v4, decode_entry_v4, decode_entry_value,
-    parse_filter_index, parse_footer, parse_framed_block, parse_framed_block_raw, parse_header,
-    parse_index_block, parse_properties_block, EntryHeader, FilterIndexEntry, Footer, IndexEntry,
-    KVHeader, PropertiesBlock, FOOTER_SZ, FRAME_OVERHEAD, HEADER_SIZE, IDX_TYPE_PARTITIONED,
+    decode_entry_header_ref_v4, decode_entry_header_v4, decode_entry_v4, decode_entry_v4_raw,
+    decode_entry_value, parse_filter_index, parse_footer, parse_framed_block,
+    parse_framed_block_raw, parse_header, parse_index_block, parse_properties_block, EntryHeader,
+    FilterIndexEntry, Footer, IndexEntry, KVHeader, PropertiesBlock, FOOTER_SZ, FRAME_OVERHEAD,
+    HEADER_SIZE, IDX_TYPE_PARTITIONED,
 };
 use strata_core::error::StrataError;
 use strata_core::types::Key;
@@ -52,6 +53,10 @@ pub struct SegmentEntry {
     pub timestamp: u64,
     /// TTL in milliseconds (0 = no TTL, 0 for v1 segments).
     pub ttl_ms: u64,
+    /// Pre-encoded bincode value bytes for zero-copy compaction passthrough.
+    /// When set, `encode_entry_v4` uses these directly instead of
+    /// re-serializing `value`, eliminating the deserialize→serialize round-trip.
+    pub(crate) raw_value: Option<Vec<u8>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -723,6 +728,7 @@ impl KVSegment {
                     commit_id,
                     timestamp: header.timestamp,
                     ttl_ms: header.ttl_ms,
+                    raw_value: None,
                 });
             }
         }
@@ -984,6 +990,7 @@ impl<'a> Iterator for SegmentIter<'a> {
                             commit_id,
                             timestamp,
                             ttl_ms,
+                            raw_value: None,
                         },
                     ));
                 }
@@ -1020,6 +1027,9 @@ pub struct OwnedSegmentIter {
     prev_key: Vec<u8>,
     /// Monotonically increasing global block counter (for ThrottledSegmentIter).
     global_block_idx: usize,
+    /// When true, carry pre-encoded bincode bytes instead of deserializing
+    /// values. Used for zero-copy compaction passthrough (#1765).
+    raw_values: bool,
     /// Set to true if iteration was stopped by a corruption error (#1677).
     corruption_detected: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
@@ -1048,8 +1058,17 @@ impl OwnedSegmentIter {
             done,
             prev_key: Vec::new(),
             global_block_idx: 0,
+            raw_values: false,
             corruption_detected: None,
         }
+    }
+
+    /// Enable raw value mode: carry pre-encoded bincode bytes instead of
+    /// deserializing values. Eliminates the deserialize→serialize round-trip
+    /// during compaction (#1765).
+    pub fn with_raw_values(mut self) -> Self {
+        self.raw_values = true;
+        self
     }
 
     /// Attach a shared corruption flag that will be set if a data block
@@ -1132,6 +1151,35 @@ impl Iterator for OwnedSegmentIter {
                 continue;
             }
 
+            if self.raw_values {
+                // Raw mode: skip bincode deserialization, carry raw bytes (#1765)
+                let result = decode_entry_v4_raw(
+                    &data[self.block_offset..self.block_data_end],
+                    &mut self.prev_key,
+                );
+                match result {
+                    Some((ik, is_tomb, raw_val, timestamp, ttl_ms, consumed)) => {
+                        self.block_offset += consumed;
+                        let commit_id = ik.commit_id();
+                        return Some((
+                            ik,
+                            SegmentEntry {
+                                value: Value::Null,
+                                is_tombstone: is_tomb,
+                                commit_id,
+                                timestamp,
+                                ttl_ms,
+                                raw_value: raw_val,
+                            },
+                        ));
+                    }
+                    None => {
+                        self.done = true;
+                        return None;
+                    }
+                }
+            }
+
             let result = decode_entry_v4(
                 &data[self.block_offset..self.block_data_end],
                 &mut self.prev_key,
@@ -1149,6 +1197,7 @@ impl Iterator for OwnedSegmentIter {
                             commit_id,
                             timestamp,
                             ttl_ms,
+                            raw_value: None,
                         },
                     ));
                 }
@@ -1780,6 +1829,7 @@ mod tests {
                 is_tombstone: false,
                 timestamp: ts,
                 ttl_ms: 30_000,
+                raw_value: None,
             },
         );
         mt.put_entry(
@@ -1790,6 +1840,7 @@ mod tests {
                 is_tombstone: true,
                 timestamp: strata_core::Timestamp::from_micros(555),
                 ttl_ms: 10_000,
+                raw_value: None,
             },
         );
         mt.freeze();
@@ -1824,6 +1875,7 @@ mod tests {
                 is_tombstone: false,
                 timestamp: strata_core::Timestamp::from_micros(100_000),
                 ttl_ms: 5_000,
+                raw_value: None,
             },
         );
         mt.put_entry(
@@ -1834,6 +1886,7 @@ mod tests {
                 is_tombstone: false,
                 timestamp: strata_core::Timestamp::from_micros(200_000),
                 ttl_ms: 0,
+                raw_value: None,
             },
         );
         mt.freeze();
@@ -2288,6 +2341,7 @@ mod tests {
                 is_tombstone: se.is_tombstone,
                 timestamp: strata_core::Timestamp::from_micros(se.timestamp),
                 ttl_ms: se.ttl_ms,
+                raw_value: None,
             };
             (ik.clone(), me)
         });
@@ -3493,5 +3547,228 @@ mod tests {
             fps,
             probes,
         );
+    }
+
+    /// Issue #1765: OwnedSegmentIter with raw_values mode should carry
+    /// pre-encoded bincode bytes through the entry, and a compaction
+    /// round-trip using those raw bytes should produce identical values.
+    #[test]
+    fn test_issue_1765_compaction_raw_value_passthrough() {
+        use crate::memtable::MemtableEntry;
+        use crate::segment_builder::SegmentBuilder;
+        use std::collections::HashMap;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src_path = dir.path().join("src.sst");
+        let dst_path = dir.path().join("dst.sst");
+
+        // Build a segment with diverse value types
+        let mt = Memtable::new(0);
+        let ts = strata_core::Timestamp::from_micros(1_000_000);
+        mt.put_entry(
+            &kv_key("k_int"),
+            1,
+            MemtableEntry {
+                value: Value::Int(42),
+                is_tombstone: false,
+                timestamp: ts,
+                ttl_ms: 0,
+                raw_value: None,
+            },
+        );
+        mt.put_entry(
+            &kv_key("k_str"),
+            2,
+            MemtableEntry {
+                value: Value::String("hello world".to_string()),
+                is_tombstone: false,
+                timestamp: ts,
+                ttl_ms: 0,
+                raw_value: None,
+            },
+        );
+        mt.put_entry(
+            &kv_key("k_bytes"),
+            3,
+            MemtableEntry {
+                value: Value::Bytes([0xDE, 0xAD, 0xBE, 0xEF, 0xFF].repeat(50)),
+                is_tombstone: false,
+                timestamp: ts,
+                ttl_ms: 0,
+                raw_value: None,
+            },
+        );
+        mt.put_entry(
+            &kv_key("k_tomb"),
+            4,
+            MemtableEntry {
+                value: Value::Null,
+                is_tombstone: true,
+                timestamp: ts,
+                ttl_ms: 0,
+                raw_value: None,
+            },
+        );
+        mt.put_entry(
+            &kv_key("k_obj"),
+            5,
+            MemtableEntry {
+                value: Value::object({
+                    let mut m = HashMap::new();
+                    m.insert("nested".to_string(), Value::Int(99));
+                    m
+                }),
+                is_tombstone: false,
+                timestamp: ts,
+                ttl_ms: 0,
+                raw_value: None,
+            },
+        );
+        // Edge case: non-tombstone Value::Null (user stored null)
+        mt.put_entry(
+            &kv_key("k_null"),
+            6,
+            MemtableEntry {
+                value: Value::Null,
+                is_tombstone: false,
+                timestamp: ts,
+                ttl_ms: 0,
+                raw_value: None,
+            },
+        );
+        // Edge case: empty Bytes
+        mt.put_entry(
+            &kv_key("k_empty_bytes"),
+            7,
+            MemtableEntry {
+                value: Value::Bytes(vec![]),
+                is_tombstone: false,
+                timestamp: ts,
+                ttl_ms: 0,
+                raw_value: None,
+            },
+        );
+        // Edge case: entry with TTL (must be preserved through raw path)
+        mt.put_entry(
+            &kv_key("k_ttl"),
+            8,
+            MemtableEntry {
+                value: Value::Int(99),
+                is_tombstone: false,
+                timestamp: strata_core::Timestamp::from_micros(2_000_000),
+                ttl_ms: 30_000,
+                raw_value: None,
+            },
+        );
+        mt.freeze();
+
+        let builder = SegmentBuilder::default();
+        builder.build_from_iter(mt.iter_all(), &src_path).unwrap();
+
+        // Read entries via OwnedSegmentIter with raw values enabled
+        let seg = Arc::new(KVSegment::open(&src_path).unwrap());
+        let iter = OwnedSegmentIter::new(Arc::clone(&seg)).with_raw_values();
+        let entries: Vec<_> = iter.collect();
+
+        assert_eq!(entries.len(), 8);
+
+        // Non-tombstone entries must have raw_value set
+        for (ik, se) in &entries {
+            if se.is_tombstone {
+                assert!(
+                    se.raw_value.is_none(),
+                    "tombstone should not have raw_value"
+                );
+            } else {
+                assert!(
+                    se.raw_value.is_some(),
+                    "non-tombstone entry {:?} should have raw_value set",
+                    ik.typed_key_prefix(),
+                );
+            }
+        }
+
+        // Build new segment from raw entries (simulating compaction passthrough)
+        let raw_iter = entries
+            .into_iter()
+            .map(|(ik, se)| (ik, crate::segmented::segment_entry_to_memtable_entry(se)));
+        builder.build_from_iter(raw_iter, &dst_path).unwrap();
+
+        // Verify output segment has identical values
+        let dst_seg = KVSegment::open(&dst_path).unwrap();
+        let e = dst_seg
+            .point_lookup(&kv_key("k_int"), u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(e.value, Value::Int(42));
+
+        let e = dst_seg
+            .point_lookup(&kv_key("k_str"), u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(e.value, Value::String("hello world".to_string()));
+
+        let e = dst_seg
+            .point_lookup(&kv_key("k_bytes"), u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            e.value,
+            Value::Bytes([0xDE, 0xAD, 0xBE, 0xEF, 0xFF].repeat(50))
+        );
+
+        let e = dst_seg
+            .point_lookup(&kv_key("k_tomb"), u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert!(e.is_tombstone);
+
+        let e = dst_seg
+            .point_lookup(&kv_key("k_obj"), u64::MAX)
+            .unwrap()
+            .unwrap();
+        let obj = e.value.as_object().unwrap();
+        assert_eq!(obj.get("nested"), Some(&Value::Int(99)));
+
+        // Edge case: non-tombstone Null preserved
+        let e = dst_seg
+            .point_lookup(&kv_key("k_null"), u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(e.value, Value::Null);
+        assert!(!e.is_tombstone);
+
+        // Edge case: empty Bytes preserved
+        let e = dst_seg
+            .point_lookup(&kv_key("k_empty_bytes"), u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(e.value, Value::Bytes(vec![]));
+
+        // Edge case: TTL and timestamp preserved through raw path
+        let e = dst_seg
+            .point_lookup(&kv_key("k_ttl"), u64::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(e.value, Value::Int(99));
+        assert_eq!(e.timestamp, 2_000_000);
+        assert_eq!(e.ttl_ms, 30_000);
+
+        // Verify raw bytes match what bincode::serialize would produce
+        let src_entries: Vec<_> = OwnedSegmentIter::new(Arc::clone(&seg)).collect();
+        let raw_entries: Vec<_> = OwnedSegmentIter::new(Arc::clone(&seg))
+            .with_raw_values()
+            .collect();
+
+        for ((_, normal), (_, raw)) in src_entries.iter().zip(raw_entries.iter()) {
+            if !normal.is_tombstone {
+                let expected_bytes = bincode::serialize(&normal.value).unwrap();
+                assert_eq!(
+                    raw.raw_value.as_ref().unwrap(),
+                    &expected_bytes,
+                    "raw_value bytes must match bincode::serialize output"
+                );
+            }
+        }
     }
 }
