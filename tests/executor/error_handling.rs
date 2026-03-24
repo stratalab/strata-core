@@ -90,7 +90,9 @@ fn vector_wrong_dimension_fails() {
     });
 
     match result {
-        Err(Error::DimensionMismatch { expected, actual }) => {
+        Err(Error::DimensionMismatch {
+            expected, actual, ..
+        }) => {
             assert_eq!(expected, 4);
             assert_eq!(actual, 2);
         }
@@ -195,7 +197,7 @@ fn transaction_already_active_error() {
     });
 
     match result {
-        Err(Error::TransactionAlreadyActive) => {}
+        Err(Error::TransactionAlreadyActive { .. }) => {}
         Err(e) => panic!("Expected TransactionAlreadyActive, got {:?}", e),
         Ok(_) => panic!("Expected error"),
     }
@@ -208,7 +210,7 @@ fn transaction_not_active_commit_error() {
     let result = session.execute(Command::TxnCommit);
 
     match result {
-        Err(Error::TransactionNotActive) => {}
+        Err(Error::TransactionNotActive { .. }) => {}
         Err(e) => panic!("Expected TransactionNotActive, got {:?}", e),
         Ok(_) => panic!("Expected error"),
     }
@@ -221,7 +223,7 @@ fn transaction_not_active_rollback_error() {
     let result = session.execute(Command::TxnRollback);
 
     match result {
-        Err(Error::TransactionNotActive) => {}
+        Err(Error::TransactionNotActive { .. }) => {}
         Err(e) => panic!("Expected TransactionNotActive, got {:?}", e),
         Ok(_) => panic!("Expected error"),
     }
@@ -279,16 +281,139 @@ fn json_get_nonexistent_returns_none() {
 
 #[test]
 fn error_is_serializable() {
-    let error = Error::TransactionAlreadyActive;
+    let error = Error::TransactionAlreadyActive { hint: None };
     let json = serde_json::to_string(&error).unwrap();
     assert!(!json.is_empty());
 }
 
 #[test]
 fn error_display() {
-    let error = Error::TransactionAlreadyActive;
+    let error = Error::TransactionAlreadyActive { hint: None };
     let msg = error.to_string();
     assert!(!msg.is_empty());
+}
+
+// ============================================================================
+// Hint Enrichment (Issue #1544)
+// ============================================================================
+
+#[test]
+fn kv_not_found_enrichment_tested_in_unit_tests() {
+    // KV get/getv return None for missing keys rather than KeyNotFound.
+    // The KeyNotFound enrichment handles edge cases (e.g. storage-layer errors).
+    // The fuzzy matching logic is verified in unit tests (suggest.rs).
+    // Here we verify the basic contract: missing key returns None, not error.
+    let executor = create_executor();
+
+    executor
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "greeting".into(),
+            value: Value::String("hello".into()),
+        })
+        .unwrap();
+
+    let result = executor
+        .execute(Command::KvGet {
+            branch: None,
+            space: None,
+            key: "greting".into(),
+            as_of: None,
+        })
+        .unwrap();
+
+    // Missing keys return None (not KeyNotFound error)
+    match result {
+        Output::MaybeVersioned(None) => {}
+        other => panic!("Expected MaybeVersioned(None), got {:?}", other),
+    }
+}
+
+#[test]
+fn dimension_mismatch_includes_collection_context() {
+    let executor = create_executor();
+
+    // Create collection with 4 dimensions
+    executor
+        .execute(Command::VectorCreateCollection {
+            branch: None,
+            space: None,
+            collection: "embeddings".into(),
+            dimension: 4,
+            metric: DistanceMetric::Cosine,
+        })
+        .unwrap();
+
+    // Insert with wrong dimension
+    let result = executor.execute(Command::VectorUpsert {
+        branch: None,
+        space: None,
+        collection: "embeddings".into(),
+        key: "v1".into(),
+        vector: vec![1.0, 0.0],
+        metadata: None,
+    });
+
+    match result {
+        Err(Error::DimensionMismatch { hint, .. }) => {
+            let hint = hint.expect("should have a hint");
+            assert!(
+                hint.contains("embeddings"),
+                "hint should name the collection, got: {}",
+                hint
+            );
+        }
+        other => panic!("Expected DimensionMismatch with hint, got {:?}", other),
+    }
+}
+
+#[test]
+fn transaction_already_active_has_hint() {
+    let mut session = create_session();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    let result = session.execute(Command::TxnBegin {
+        branch: None,
+        options: None,
+    });
+
+    match result {
+        Err(Error::TransactionAlreadyActive { hint }) => {
+            let hint = hint.expect("should have a hint");
+            assert!(
+                hint.contains("Commit or rollback"),
+                "hint should guide user, got: {}",
+                hint
+            );
+        }
+        other => panic!("Expected TransactionAlreadyActive with hint, got {:?}", other),
+    }
+}
+
+#[test]
+fn transaction_not_active_has_hint() {
+    let mut session = create_session();
+
+    let result = session.execute(Command::TxnCommit);
+
+    match result {
+        Err(Error::TransactionNotActive { hint }) => {
+            let hint = hint.expect("should have a hint");
+            assert!(
+                hint.contains("begin"),
+                "hint should suggest 'begin', got: {}",
+                hint
+            );
+        }
+        other => panic!("Expected TransactionNotActive with hint, got {:?}", other),
+    }
 }
 
 // ============================================================================

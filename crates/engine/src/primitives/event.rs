@@ -532,6 +532,24 @@ impl EventLog {
         })
     }
 
+    /// List all known event types in the stream.
+    ///
+    /// Returns the event type names from the stream metadata.
+    /// Returns an empty Vec if no events have been appended.
+    pub fn list_types(&self, branch_id: &BranchId, space: &str) -> StrataResult<Vec<String>> {
+        self.db.transaction(*branch_id, |txn| {
+            let ns = self.namespace_for(branch_id, space);
+            let meta_key = Key::new_event_meta(ns);
+
+            let meta: EventLogMeta = match txn.get(&meta_key)? {
+                Some(v) => from_stored_value(&v).unwrap_or_else(|_| EventLogMeta::default()),
+                None => return Ok(Vec::new()),
+            };
+
+            Ok(meta.streams.keys().cloned().collect())
+        })
+    }
+
     // ========== Query by Type ==========
 
     /// Read events filtered by type

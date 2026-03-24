@@ -12,7 +12,7 @@ use crate::bridge::{
 };
 use crate::convert::convert_result;
 use crate::types::{BatchGetItemResult, BatchItemResult, BranchId, VersionedValue};
-use crate::{Error, Output, Result};
+use crate::{Output, Result};
 
 use super::require_branch_exists;
 
@@ -25,16 +25,8 @@ pub fn json_getv(
 ) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;
     convert_result(validate_key(&key))?;
-    let result = convert_result(p.json.getv(&branch_id, &space, &key)).map_err(|e| match e {
-        Error::DocumentNotFound { key: k, hint: None } => Error::DocumentNotFound {
-            key: k,
-            hint: Some(format!(
-                "On branch '{}', space '{}'. Use json_list to see available documents.",
-                branch.as_str(),
-                space
-            )),
-        },
-        other => other,
+    let result = convert_result(p.json.getv(&branch_id, &space, &key)).map_err(|e| {
+        enrich_json_error(p, &branch_id, &space, e)
     })?;
     let mapped = result
         .map(|history| {
@@ -111,17 +103,7 @@ pub fn json_get(
     let json_path = convert_result(parse_path(&path))?;
 
     let result = convert_result(p.json.get_versioned(&branch_id, &space, &key, &json_path))
-        .map_err(|e| match e {
-            Error::DocumentNotFound { key: k, hint: None } => Error::DocumentNotFound {
-                key: k,
-                hint: Some(format!(
-                    "On branch '{}', space '{}'. Use json_list to see available documents.",
-                    branch.as_str(),
-                    space
-                )),
-            },
-            other => other,
-        })?;
+        .map_err(|e| enrich_json_error(p, &branch_id, &space, e))?;
     match result {
         Some(versioned) => {
             let value = convert_result(json_to_value(versioned.value))?;
@@ -152,17 +134,7 @@ pub fn json_get_at(
         p.json
             .get_at(&branch_id, &space, &key, &json_path, as_of_ts),
     )
-    .map_err(|e| match e {
-        Error::DocumentNotFound { key: k, hint: None } => Error::DocumentNotFound {
-            key: k,
-            hint: Some(format!(
-                "On branch '{}', space '{}'. Use json_list to see available documents.",
-                branch.as_str(),
-                space
-            )),
-        },
-        other => other,
-    })?;
+    .map_err(|e| enrich_json_error(p, &branch_id, &space, e))?;
     match result {
         Some(json_val) => {
             let value = convert_result(json_to_value(json_val))?;
@@ -602,6 +574,32 @@ pub fn json_sample(
         total_count: total,
         items,
     })
+}
+
+/// Maximum number of document keys to scan for fuzzy matching suggestions.
+const MAX_FUZZY_CANDIDATES: usize = 100;
+
+/// Enrich a JSON error with fuzzy-match suggestions for document-not-found errors.
+fn enrich_json_error(
+    p: &Arc<Primitives>,
+    branch_id: &strata_core::types::BranchId,
+    space: &str,
+    err: crate::Error,
+) -> crate::Error {
+    match err {
+        crate::Error::DocumentNotFound { key, hint: None } => {
+            // Use paginated list to get up to MAX_FUZZY_CANDIDATES document keys
+            let candidates = p
+                .json
+                .list(branch_id, space, None, None, MAX_FUZZY_CANDIDATES)
+                .ok()
+                .map(|r| r.doc_ids)
+                .unwrap_or_default();
+            let hint = crate::suggest::format_hint("documents", &candidates, &key, 2);
+            crate::Error::DocumentNotFound { key, hint }
+        }
+        other => other,
+    }
 }
 
 /// Best-effort: read back the full JSON document and embed its complete text.

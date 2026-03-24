@@ -26,16 +26,8 @@ pub fn kv_getv(
 ) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;
     convert_result(validate_key(&key))?;
-    let result = convert_result(p.kv.getv(&branch_id, &space, &key)).map_err(|e| match e {
-        Error::KeyNotFound { key: k, hint: None } => Error::KeyNotFound {
-            key: k,
-            hint: Some(format!(
-                "On branch '{}', space '{}'. Use kv_list to see available keys.",
-                branch.as_str(),
-                space
-            )),
-        },
-        other => other,
+    let result = convert_result(p.kv.getv(&branch_id, &space, &key)).map_err(|e| {
+        enrich_kv_error(p, &branch_id, &space, e)
     })?;
     let mapped = result.map(|history| {
         history
@@ -93,16 +85,8 @@ pub fn kv_get(p: &Arc<Primitives>, branch: BranchId, space: String, key: String)
     let branch_id = to_core_branch_id(&branch)?;
     convert_result(validate_key(&key))?;
     let result =
-        convert_result(p.kv.get_versioned(&branch_id, &space, &key)).map_err(|e| match e {
-            Error::KeyNotFound { key: k, hint: None } => Error::KeyNotFound {
-                key: k,
-                hint: Some(format!(
-                    "On branch '{}', space '{}'. Use kv_list to see available keys.",
-                    branch.as_str(),
-                    space
-                )),
-            },
-            other => other,
+        convert_result(p.kv.get_versioned(&branch_id, &space, &key)).map_err(|e| {
+            enrich_kv_error(p, &branch_id, &space, e)
         })?;
     Ok(Output::MaybeVersioned(result.map(to_versioned_value)))
 }
@@ -118,16 +102,8 @@ pub fn kv_get_at(
     let branch_id = to_core_branch_id(&branch)?;
     convert_result(validate_key(&key))?;
     let result =
-        convert_result(p.kv.get_at(&branch_id, &space, &key, as_of_ts)).map_err(|e| match e {
-            Error::KeyNotFound { key: k, hint: None } => Error::KeyNotFound {
-                key: k,
-                hint: Some(format!(
-                    "On branch '{}', space '{}'. Use kv_list to see available keys.",
-                    branch.as_str(),
-                    space
-                )),
-            },
-            other => other,
+        convert_result(p.kv.get_at(&branch_id, &space, &key, as_of_ts)).map_err(|e| {
+            enrich_kv_error(p, &branch_id, &space, e)
         })?;
     Ok(Output::Maybe(result))
 }
@@ -341,6 +317,40 @@ pub fn kv_sample(
         total_count: total,
         items,
     })
+}
+
+/// Maximum number of keys to scan for fuzzy matching suggestions.
+const MAX_FUZZY_CANDIDATES: usize = 100;
+
+/// Enrich a KV error with fuzzy-match suggestions for key-not-found errors.
+///
+/// Uses the first character of the key as a prefix filter to avoid a full
+/// key scan on spaces with many keys. The KV list primitive has no limit
+/// parameter, so prefix narrowing is the main safeguard.
+fn enrich_kv_error(
+    p: &Arc<Primitives>,
+    branch_id: &strata_core::types::BranchId,
+    space: &str,
+    err: Error,
+) -> Error {
+    match err {
+        Error::KeyNotFound { key, hint: None } => {
+            // Use first-char prefix to avoid scanning millions of keys.
+            // This misses typos that change the first character, but those
+            // are rare compared to mid-key typos.
+            let prefix = key.chars().next().map(|c| c.to_string());
+            let candidates = p
+                .kv
+                .list(branch_id, space, prefix.as_deref())
+                .unwrap_or_default()
+                .into_iter()
+                .take(MAX_FUZZY_CANDIDATES)
+                .collect::<Vec<_>>();
+            let hint = crate::suggest::format_hint("keys", &candidates, &key, 2);
+            Error::KeyNotFound { key, hint }
+        }
+        other => other,
+    }
 }
 
 /// Handle KvList with as_of timestamp (time-travel read).

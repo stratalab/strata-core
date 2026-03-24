@@ -219,4 +219,127 @@ mod tests {
         let msg = err.to_string();
         assert_eq!(msg, "branch not found: test");
     }
+
+    // ===== Tests for new hint fields added in #1544 =====
+
+    #[test]
+    fn dimension_mismatch_display_with_hint() {
+        let err = crate::Error::DimensionMismatch {
+            expected: 384,
+            actual: 768,
+            hint: Some("Collection \"embeddings\" uses MiniLM (384-dim). Your vector appears to be 768-dim (BERT/MPNet).".into()),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("expected 384, got 768"), "msg = {}", msg);
+        assert!(msg.contains("MiniLM"), "msg = {}", msg);
+        assert!(msg.contains("BERT/MPNet"), "msg = {}", msg);
+    }
+
+    #[test]
+    fn dimension_mismatch_display_without_hint() {
+        let err = crate::Error::DimensionMismatch {
+            expected: 384,
+            actual: 768,
+            hint: None,
+        };
+        let msg = err.to_string();
+        assert_eq!(msg, "dimension mismatch: expected 384, got 768");
+    }
+
+    #[test]
+    fn dimension_mismatch_serde_roundtrip() {
+        let err = crate::Error::DimensionMismatch {
+            expected: 384,
+            actual: 768,
+            hint: Some("test hint".into()),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let roundtrip: crate::Error = serde_json::from_str(&json).unwrap();
+        assert_eq!(err, roundtrip);
+    }
+
+    #[test]
+    fn dimension_mismatch_serde_backward_compat() {
+        // Old format without hint field
+        let json = r#"{"DimensionMismatch":{"expected":384,"actual":768}}"#;
+        let err: crate::Error = serde_json::from_str(json).unwrap();
+        match err {
+            crate::Error::DimensionMismatch {
+                expected,
+                actual,
+                hint,
+            } => {
+                assert_eq!(expected, 384);
+                assert_eq!(actual, 768);
+                assert_eq!(hint, None);
+            }
+            other => panic!("Expected DimensionMismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn transaction_not_active_display_with_hint() {
+        let err = crate::Error::TransactionNotActive {
+            hint: Some("Start one with: begin".into()),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("no active transaction"), "msg = {}", msg);
+        assert!(msg.contains("Start one with: begin"), "msg = {}", msg);
+    }
+
+    #[test]
+    fn transaction_already_active_display_with_hint() {
+        let err = crate::Error::TransactionAlreadyActive {
+            hint: Some("Commit or rollback before starting a new one.".into()),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("transaction already active"), "msg = {}", msg);
+        assert!(msg.contains("Commit or rollback"), "msg = {}", msg);
+    }
+
+    #[test]
+    fn transaction_conflict_display_with_hint() {
+        let err = crate::Error::TransactionConflict {
+            reason: "key conflict".into(),
+            hint: Some("Another write modified this key. Retry your transaction.".into()),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("key conflict"), "msg = {}", msg);
+        assert!(msg.contains("Retry your transaction"), "msg = {}", msg);
+    }
+
+    #[test]
+    fn transaction_conflict_serde_backward_compat() {
+        // Old format without hint field
+        let json = r#"{"TransactionConflict":{"reason":"conflict"}}"#;
+        let err: crate::Error = serde_json::from_str(json).unwrap();
+        match err {
+            crate::Error::TransactionConflict { reason, hint } => {
+                assert_eq!(reason, "conflict");
+                assert_eq!(hint, None);
+            }
+            other => panic!("Expected TransactionConflict, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn transaction_not_active_serde_format_change() {
+        // TransactionNotActive changed from unit variant to struct variant.
+        // New format serializes as an object:
+        let err = crate::Error::TransactionNotActive { hint: None };
+        let json = serde_json::to_string(&err).unwrap();
+        // With hint: None and skip_serializing_if, serializes as {"TransactionNotActive":{}}
+        assert!(
+            json.contains("TransactionNotActive"),
+            "json = {}",
+            json
+        );
+        let roundtrip: crate::Error = serde_json::from_str(&json).unwrap();
+        assert_eq!(err, roundtrip);
+
+        // NOTE: The old unit variant format "TransactionNotActive" (bare string)
+        // is NOT compatible with the new struct variant. This is a known breaking
+        // change in the serialized format. Since server and client share the same
+        // binary, this is acceptable.
+    }
 }

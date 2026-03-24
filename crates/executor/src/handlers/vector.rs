@@ -52,6 +52,53 @@ fn to_versioned_vector_data(
     })
 }
 
+/// Enrich a DimensionMismatch error with collection context.
+///
+/// Identifies well-known embedding model dimensions and adds the collection name.
+fn enrich_dimension_error(collection: &str, err: crate::Error) -> crate::Error {
+    match err {
+        crate::Error::DimensionMismatch {
+            expected,
+            actual,
+            hint: None,
+        } => {
+            let model_hint = match expected {
+                384 => "MiniLM (384-dim)",
+                768 => "BERT/MPNet (768-dim)",
+                1024 => "Large (1024-dim)",
+                1536 => "OpenAI ada-002 (1536-dim)",
+                3072 => "OpenAI text-embedding-3-large (3072-dim)",
+                _ => "",
+            };
+            let actual_model = match actual {
+                384 => " (MiniLM)",
+                768 => " (BERT/MPNet)",
+                1024 => " (Large)",
+                1536 => " (OpenAI ada-002)",
+                3072 => " (OpenAI text-embedding-3-large)",
+                _ => "",
+            };
+            let hint = if model_hint.is_empty() {
+                format!(
+                    "Collection \"{}\" expects {}-dim vectors. Your vector is {}-dim{}.",
+                    collection, expected, actual, actual_model
+                )
+            } else {
+                format!(
+                    "Collection \"{}\" uses {}. Your vector appears to be {}-dim{}.",
+                    collection, model_hint, actual, actual_model
+                )
+            };
+            crate::Error::DimensionMismatch {
+                expected,
+                actual,
+                hint: Some(hint),
+            }
+        }
+        other => other,
+    }
+}
+
 /// Convert engine `VectorMatch` metadata to executor `VectorMatch`.
 fn to_vector_match(m: strata_engine::VectorMatch) -> Result<VectorMatch> {
     let metadata = m
@@ -93,7 +140,8 @@ pub fn vector_upsert(
         p.vector
             .insert(branch_id, &space, &collection, &key, &vector, json_metadata),
         branch_id,
-    )?;
+    )
+    .map_err(|e| enrich_dimension_error(&collection, e))?;
     Ok(Output::VectorWriteResult {
         collection,
         key,
@@ -216,7 +264,8 @@ pub fn vector_search(
             engine_filter,
         ),
         branch_id,
-    )?;
+    )
+    .map_err(|e| enrich_dimension_error(&collection, e))?;
 
     let results: Result<Vec<VectorMatch>> = matches.into_iter().map(to_vector_match).collect();
     Ok(Output::VectorMatches(results?))
@@ -366,7 +415,8 @@ pub fn vector_batch_upsert(
         p.vector
             .batch_insert(branch_id, &space, &collection, engine_entries),
         branch_id,
-    )?;
+    )
+    .map_err(|e| enrich_dimension_error(&collection, e))?;
 
     let version_nums: Vec<u64> = versions.iter().map(extract_version).collect();
     Ok(Output::Versions(version_nums))
@@ -400,7 +450,8 @@ pub fn vector_search_at(
             as_of_ts,
         ),
         branch_id,
-    )?;
+    )
+    .map_err(|e| enrich_dimension_error(&collection, e))?;
 
     let results: Result<Vec<VectorMatch>> = matches.into_iter().map(to_vector_match).collect();
     Ok(Output::VectorMatches(results?))
