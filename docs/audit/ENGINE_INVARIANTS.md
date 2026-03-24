@@ -142,13 +142,16 @@ The dynamic level target computation (based on RocksDB's `CalculateBaseBytes`) M
 1. Find the largest non-empty non-L0 level
 2. Compute base = bottom_bytes / multiplier^(bottom_level - 1)
 3. Clamp base between MIN_BASE_BYTES and MAX_BASE_BYTES
-4. Forward-compute all targets with saturation
+4. If unclamped base < MIN_BASE_BYTES, raise base_level until base ≥ MIN_BASE_BYTES;
+   levels below base_level get MAX_BASE_BYTES as a passive lower-bound clamp
+5. Forward-compute targets from base_level with saturation
 
 Targets MUST be refreshed after every compaction and flush.
 
 **Audit**: Find the level target computation function. Step through the algorithm with concrete numbers.
 Verify it handles: empty database (all levels empty), single-level spike (L3 has 10GB, others empty),
-very small databases (< MIN_BASE_BYTES total). Verify refresh is called after every segment version swap.
+very small databases (< MIN_BASE_BYTES total), data concentrated in deep levels (tiny unclamped base).
+Verify refresh is called after every segment version swap.
 
 ### CMP-006: Concurrent compaction and flush safety
 

@@ -18,13 +18,17 @@ pub(super) struct LevelTargets {
 
 /// Compute adaptive per-level byte targets from actual level sizes.
 ///
-/// Algorithm (RocksDB `CalculateBaseBytes`):
+/// Algorithm (RocksDB `CalculateBaseBytes` with dynamic base_level):
 /// 1. Find the largest non-empty non-L0 level (the "bottom" level).
-/// 2. Compute base (L1 target) = bottom_bytes / multiplier^(bottom_level - 1).
-/// 3. Clamp base between MIN_BASE_BYTES (1MB) and `max_base` (configurable, default 256MB).
-/// 4. Forward-compute all targets: target[i] = base * multiplier^(i-1).
+/// 2. Compute unclamped base = bottom_bytes / multiplier^(bottom_level - 1).
+/// 3. If unclamped base ≥ MIN_BASE_BYTES, use base_level = 1 and clamp base
+///    to [MIN_BASE_BYTES, `max_base`].
+/// 4. Otherwise, raise base_level until the base ≥ MIN_BASE_BYTES. Levels
+///    below base_level get `max_base` as a passive lower-bound clamp,
+///    preventing pathological "hourglass" shapes with tiny intermediate targets.
+/// 5. Forward-compute targets from base_level: target[i] = base * multiplier^(i - base_level).
 ///
-/// For empty databases (no non-L0 data), uses MIN_BASE_BYTES as base.
+/// For empty databases (no non-L0 data), uses MIN_BASE_BYTES as base from L1.
 pub(super) fn recalculate_level_targets(
     level_bytes: &[u64; NUM_LEVELS],
     max_base: u64,
@@ -43,27 +47,54 @@ pub(super) fn recalculate_level_targets(
         }
     }
 
-    // 2. Compute base
-    let base = if bottom_level == 0 {
-        MIN_BASE_BYTES
-    } else {
-        let mut b = bottom_bytes;
-        for _ in 1..bottom_level {
-            b /= LEVEL_MULTIPLIER;
+    if bottom_level == 0 {
+        // No non-L0 data — forward-compute from MIN_BASE_BYTES at L1.
+        let mut target = MIN_BASE_BYTES;
+        for slot in max_bytes.iter_mut().skip(1) {
+            *slot = target;
+            target = target.saturating_mul(LEVEL_MULTIPLIER);
         }
-        b.clamp(MIN_BASE_BYTES, max_base)
+        return LevelTargets { max_bytes };
+    }
+
+    // 2. Compute unclamped base (what L1 target would be without clamping)
+    let mut unclamped_base = bottom_bytes;
+    for _ in 1..bottom_level {
+        unclamped_base /= LEVEL_MULTIPLIER;
+    }
+
+    // 3. Determine dynamic base_level
+    let (base_level, base) = if unclamped_base >= MIN_BASE_BYTES {
+        // Base is large enough — use L1 as base_level (no inactive levels)
+        (1, unclamped_base.clamp(MIN_BASE_BYTES, max_base))
+    } else {
+        // Base too small — raise base_level until base ≥ MIN_BASE_BYTES
+        let mut bl = 1;
+        let mut b = unclamped_base;
+        while b < MIN_BASE_BYTES && bl < bottom_level {
+            b = b.saturating_mul(LEVEL_MULTIPLIER);
+            bl += 1;
+        }
+        (bl, b.clamp(MIN_BASE_BYTES, max_base))
     };
 
-    // 3. Forward-compute all targets
+    // 4. Lower-bound clamp: levels below base_level get passive max_base
+    for slot in max_bytes.iter_mut().take(base_level).skip(1) {
+        *slot = max_base;
+    }
+
+    // 5. Forward-compute targets from base_level
     let mut target = base;
-    for slot in max_bytes.iter_mut().skip(1) {
+    for slot in max_bytes.iter_mut().skip(base_level) {
         *slot = target;
         target = target.saturating_mul(LEVEL_MULTIPLIER);
     }
 
     LevelTargets { max_bytes }
 }
-
+///
+/// Checks if the segment is shared (referenced by child branches via COW
+/// inherited layers). Shared segments are skipped — their files are only
 impl SegmentedStore {
     /// Delete a segment file if it is not referenced by any inherited layer.
     ///
