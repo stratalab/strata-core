@@ -152,6 +152,9 @@ impl TransactionCoordinator {
         // Register in active_count BEFORE creating the snapshot so that a
         // concurrent drain (active_count → 0) cannot set gc_safe_version
         // past our about-to-be-created snapshot version.
+        //
+        // Relaxed: these are observational counters — the GC-critical
+        // synchronization is on the fetch_sub(AcqRel) in record_commit/abort.
         self.active_count.fetch_add(1, Ordering::Relaxed);
         self.total_started.fetch_add(1, Ordering::Relaxed);
 
@@ -259,6 +262,7 @@ impl TransactionCoordinator {
     /// * `_txn_id` - Unique transaction ID (unused, kept for API compat)
     /// * `_start_version` - Snapshot version at transaction start (unused)
     pub fn record_start(&self, _txn_id: u64, _start_version: u64) {
+        // Relaxed: observational counters only (see struct-level doc).
         self.active_count.fetch_add(1, Ordering::Relaxed);
         self.total_started.fetch_add(1, Ordering::Relaxed);
     }
@@ -285,6 +289,9 @@ impl TransactionCoordinator {
         // (record_start always precedes record_commit), so debug-assert.
         let prev = self.active_count.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(prev > 0, "active_count underflow in record_commit");
+        // Relaxed: observational counter only — does not gate GC or any
+        // other correctness decision. The AcqRel on active_count above is
+        // the critical synchronization point.
         self.total_committed.fetch_add(1, Ordering::Relaxed);
         if prev == 1 {
             // All transactions drained — advance GC safe point
@@ -312,6 +319,7 @@ impl TransactionCoordinator {
         // (record_start always precedes record_abort), so debug-assert.
         let prev = self.active_count.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(prev > 0, "active_count underflow in record_abort");
+        // Relaxed: observational counter only (same rationale as total_committed).
         self.total_aborted.fetch_add(1, Ordering::Relaxed);
         if prev == 1 {
             // All transactions drained — advance GC safe point
@@ -402,7 +410,18 @@ impl TransactionCoordinator {
     /// Get transaction metrics
     ///
     /// Returns current snapshot of transaction statistics.
+    ///
+    /// # Memory ordering
+    ///
+    /// All loads use `Relaxed` ordering. Since these counters are independent
+    /// (no counter gates another), `Acquire` would not improve cross-counter
+    /// consistency — the loads still happen at different instants, so a
+    /// snapshot can transiently show e.g. `total_committed > total_started`.
+    /// A perfectly consistent snapshot would require a mutex, which is
+    /// unnecessary overhead for observational metrics. On x86, `Relaxed`
+    /// and `Acquire` loads compile to the same `MOV` instruction anyway.
     pub fn metrics(&self) -> TransactionMetrics {
+        // Relaxed: purely observational, no synchronization role (see struct-level doc).
         let started = self.total_started.load(Ordering::Relaxed);
         let committed = self.total_committed.load(Ordering::Relaxed);
 

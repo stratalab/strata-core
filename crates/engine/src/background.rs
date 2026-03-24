@@ -76,6 +76,21 @@ impl PartialOrd for TaskEnvelope {
     }
 }
 
+/// # Memory Ordering
+///
+/// The metric counters (`queue_depth`, `active_tasks`, `tasks_completed`) use
+/// mixed ordering depending on their role:
+///
+/// - `queue_depth` / `active_tasks` use `Release` on writes and `Acquire` on
+///   correctness-critical reads (backpressure check, drain wait) because they
+///   gate control flow decisions. The `stats()` snapshot reads them with
+///   `Relaxed` since approximate values are acceptable for monitoring.
+/// - `tasks_completed` uses `Relaxed` everywhere — it is purely observational
+///   and never gates any decision.
+/// - `active_tasks.fetch_sub` uses `AcqRel` in the drop guard because the
+///   preceding value determines whether to wake drain waiters.
+/// - `sequence` uses `Relaxed` — uniqueness is guaranteed by fetch_add
+///   atomicity; no ordering relationship is needed.
 struct SchedulerInner {
     queue: ParkingMutex<BinaryHeap<TaskEnvelope>>,
     work_ready: parking_lot::Condvar,
@@ -209,6 +224,13 @@ impl BackgroundScheduler {
     }
 
     /// Return a snapshot of scheduler metrics.
+    ///
+    /// All loads use `Relaxed` ordering. These counters are independent — no
+    /// counter gates another — so `Acquire` would not improve cross-counter
+    /// consistency. A snapshot may transiently show e.g. `active_tasks > 0`
+    /// with `queue_depth == 0`, which is normal during task execution.
+    /// Perfectly consistent snapshots would require a mutex, which is
+    /// unnecessary overhead for observational metrics.
     pub fn stats(&self) -> SchedulerStats {
         SchedulerStats {
             queue_depth: self.inner.queue_depth.load(AtomicOrdering::Relaxed),
@@ -230,7 +252,9 @@ struct ActiveTaskGuard<'a> {
 
 impl<'a> Drop for ActiveTaskGuard<'a> {
     fn drop(&mut self) {
+        // AcqRel: the previous value gates the drain-wakeup decision below.
         let prev_active = self.inner.active_tasks.fetch_sub(1, AtomicOrdering::AcqRel);
+        // Relaxed: purely observational counter — does not gate any decision.
         self.inner
             .tasks_completed
             .fetch_add(1, AtomicOrdering::Relaxed);
