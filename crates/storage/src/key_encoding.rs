@@ -454,7 +454,6 @@ mod tests {
         for tag in [
             TypeTag::KV,
             TypeTag::Event,
-            TypeTag::State,
             TypeTag::Branch,
             TypeTag::Space,
             TypeTag::Vector,
@@ -661,7 +660,6 @@ mod tests {
             prop_oneof![
                 Just(TypeTag::KV),
                 Just(TypeTag::Event),
-                Just(TypeTag::State),
                 Just(TypeTag::Branch),
                 Just(TypeTag::Space),
                 Just(TypeTag::Vector),

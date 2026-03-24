@@ -99,7 +99,11 @@ fn detect_storage() -> StorageKind {
                 }
             }
             // Check rotational flag on first sd/vd device
-            for entry in std::fs::read_dir("/sys/block").into_iter().flatten().flatten() {
+            for entry in std::fs::read_dir("/sys/block")
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.starts_with("sd") || name.starts_with("vd") {
                     let rotational = entry.path().join("queue/rotational");
@@ -247,11 +251,7 @@ fn expand_tilde(path: &str) -> PathBuf {
 // =========================================================================
 
 #[cfg(feature = "embed")]
-fn offer_model_downloads(
-    config_path: &Path,
-    hw: &HardwareInfo,
-    non_interactive: bool,
-) {
+fn offer_model_downloads(config_path: &Path, hw: &HardwareInfo, non_interactive: bool) {
     use strata_intelligence::ModelRegistry;
 
     let registry = ModelRegistry::new();
@@ -292,7 +292,9 @@ fn offer_model_downloads(
     }
 
     eprintln!();
-    eprintln!("  Strata can run a local LLM for RAG and text generation \u{2014} no API keys needed.");
+    eprintln!(
+        "  Strata can run a local LLM for RAG and text generation \u{2014} no API keys needed."
+    );
 
     // Build list of generation models that fit in RAM budget (size < ram/2)
     let budget = hw.ram_bytes / 2;
@@ -313,10 +315,7 @@ fn offer_model_downloads(
     // Check if any are already downloaded
     let already_local: Vec<_> = candidates.iter().filter(|m| m.is_local).collect();
     if !already_local.is_empty() {
-        eprintln!(
-            "  \u{2713} {} already downloaded",
-            already_local[0].name
-        );
+        eprintln!("  \u{2713} {} already downloaded", already_local[0].name);
         return;
     }
 
@@ -409,11 +408,12 @@ fn seed_minimal_data(db: &Strata) {
     let _ = db.json_set("user:1", "$", Value::Object(Box::new(user_map)));
 
     let mut event_map = HashMap::new();
-    event_map.insert("action".to_string(), Value::String("database_created".into()));
+    event_map.insert(
+        "action".to_string(),
+        Value::String("database_created".into()),
+    );
     let event_payload = Value::Object(Box::new(event_map));
     let _ = db.event_append("system.init", event_payload);
-
-    let _ = db.state_set("app:theme", Value::String("dark".into()));
 }
 
 const SAMPLE_DATASET_URL: &str =
@@ -438,19 +438,23 @@ fn offer_sample_dataset(db: &Strata, non_interactive: bool) {
 
     // Try to download the sample dataset
     match download_sample_dataset() {
-        Ok(content) => {
-            match load_sample_json(db, &content) {
-                Ok(count) => {
-                    eprintln!("  \u{2713} Loaded {} sample records", count);
-                }
-                Err(e) => {
-                    eprintln!("  \u{2139} Could not parse dataset: {}. Loading minimal data.", e);
-                    seed_minimal_data(db);
-                }
+        Ok(content) => match load_sample_json(db, &content) {
+            Ok(count) => {
+                eprintln!("  \u{2713} Loaded {} sample records", count);
             }
-        }
+            Err(e) => {
+                eprintln!(
+                    "  \u{2139} Could not parse dataset: {}. Loading minimal data.",
+                    e
+                );
+                seed_minimal_data(db);
+            }
+        },
         Err(e) => {
-            eprintln!("  \u{2139} Could not download dataset: {}. Loading minimal data.", e);
+            eprintln!(
+                "  \u{2139} Could not download dataset: {}. Loading minimal data.",
+                e
+            );
             seed_minimal_data(db);
         }
     }
@@ -482,12 +486,12 @@ fn download_sample_dataset() -> Result<String, String> {
 }
 
 /// Load a JSON array of records into the database.
-/// Expected format: [{"type": "kv"|"json"|"event"|"state", "key": "...", "value": ...}, ...]
+/// Expected format: [{"type": "kv"|"json"|"event", "key": "...", "value": ...}, ...]
 fn load_sample_json(db: &Strata, content: &str) -> Result<usize, String> {
     use strata_executor::Value;
 
-    let parsed: Value = serde_json::from_str(content)
-        .map_err(|e| format!("JSON parse error: {}", e))?;
+    let parsed: Value =
+        serde_json::from_str(content).map_err(|e| format!("JSON parse error: {}", e))?;
 
     let records = match &parsed {
         Value::Array(arr) => arr.as_ref(),
@@ -523,12 +527,6 @@ fn load_sample_json(db: &Strata, content: &str) -> Result<usize, String> {
                     let event_type = key.unwrap_or("sample");
                     if let Some(v) = obj.get("value") {
                         let _ = db.event_append(event_type, v.clone());
-                        count += 1;
-                    }
-                }
-                (Some("state"), Some(k)) => {
-                    if let Some(v) = obj.get("value") {
-                        let _ = db.state_set(k, v.clone());
                         count += 1;
                     }
                 }

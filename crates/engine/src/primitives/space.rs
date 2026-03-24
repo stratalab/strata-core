@@ -105,7 +105,7 @@ impl SpaceIndex {
 
     /// Check if a space has any data.
     ///
-    /// **Note:** This is O(N) — scans all data TypeTags (KV, Event, State,
+    /// **Note:** This is O(N) — scans all data TypeTags (KV, Event,
     /// Json, Vector, VectorConfig) in the space's namespace. Not a cheap check.
     pub fn is_empty(&self, branch_id: BranchId, space: &str) -> StrataResult<bool> {
         self.db.transaction(branch_id, |txn| {
@@ -114,7 +114,6 @@ impl SpaceIndex {
             for type_tag in [
                 TypeTag::KV,
                 TypeTag::Event,
-                TypeTag::State,
                 TypeTag::Json,
                 TypeTag::Vector,
                 TypeTag::VectorConfig,

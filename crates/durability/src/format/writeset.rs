@@ -297,11 +297,6 @@ impl Writeset {
                 bytes.extend_from_slice(branch_id.as_bytes());
                 bytes.extend_from_slice(&sequence.to_le_bytes());
             }
-            EntityRef::State { branch_id, name } => {
-                bytes.push(primitive_tags::STATE);
-                bytes.extend_from_slice(branch_id.as_bytes());
-                Self::write_string(bytes, name);
-            }
             EntityRef::Branch { branch_id } => {
                 bytes.push(primitive_tags::BRANCH);
                 bytes.extend_from_slice(branch_id.as_bytes());
@@ -362,10 +357,9 @@ impl Writeset {
                     cursor,
                 ))
             }
-            primitive_tags::STATE => {
-                let (name, consumed) = Self::read_string(&bytes[cursor..])?;
-                cursor += consumed;
-                Ok((EntityRef::State { branch_id, name }, cursor))
+            0x03 => {
+                // StateCell was removed — tag 0x03 is no longer supported
+                Err(WritesetError::InvalidEntityRef)
             }
             0x04 => {
                 // TraceStore was removed — tag 0x04 is no longer supported
@@ -495,7 +489,7 @@ mod tests {
     #[test]
     fn test_writeset_delete() {
         let branch_id = test_branch_id();
-        let entity_ref = EntityRef::state(branch_id, "my-state");
+        let entity_ref = EntityRef::kv(branch_id, "my-key");
 
         let mut ws = Writeset::new();
         ws.delete(entity_ref.clone());
@@ -564,7 +558,6 @@ mod tests {
         let refs = vec![
             EntityRef::kv(branch_id, "key"),
             EntityRef::event(branch_id, 42),
-            EntityRef::state(branch_id, "state"),
             EntityRef::branch(branch_id),
             EntityRef::json(branch_id, "test-doc"),
             EntityRef::vector(branch_id, "collection", "vec-key"),
@@ -613,7 +606,6 @@ mod tests {
 
         let mut ws = Writeset::new();
         ws.put(EntityRef::kv(branch_id, "键值对"), vec![1], 1);
-        ws.put(EntityRef::state(branch_id, "状态🎉"), vec![2], 2);
         ws.put(
             EntityRef::vector(branch_id, "коллекция", "κλειδί"),
             vec![3],

@@ -4,5 +4,4 @@ mod branchindex;
 mod eventlog;
 mod jsonstore;
 mod kv;
-mod statecell;
 mod vectorstore;

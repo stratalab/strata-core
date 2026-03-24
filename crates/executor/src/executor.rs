@@ -85,9 +85,10 @@ impl Executor {
             // Only log if the model is known (in catalog) but not yet downloaded.
             // If the name is invalid, resolve() will surface a clear error on
             // first embed attempt — no need for a misleading startup hint.
-            let is_known = registry.list_available().iter().any(|m| {
-                m.name.eq_ignore_ascii_case(&model_name)
-            });
+            let is_known = registry
+                .list_available()
+                .iter()
+                .any(|m| m.name.eq_ignore_ascii_case(&model_name));
             if is_known && registry.resolve(&model_name).is_err() {
                 tracing::info!(
                     model = %model_name,
@@ -632,139 +633,6 @@ impl Executor {
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::event::event_len(&self.primitives, branch, space)
-            }
-
-            // State commands (4 MVP)
-            Command::StateBatchSet {
-                branch,
-                space,
-                entries,
-            } => {
-                let branch = branch.ok_or(Error::InvalidInput {
-                    reason: "Branch must be specified or resolved to default".into(),
-                    hint: None,
-                })?;
-                let space = space.unwrap_or_else(|| "default".to_string());
-                self.ensure_space_registered(&branch, &space)?;
-                crate::handlers::state::state_batch_set(&self.primitives, branch, space, entries)
-            }
-            Command::StateSet {
-                branch,
-                space,
-                cell,
-                value,
-            } => {
-                let branch = branch.ok_or(Error::InvalidInput {
-                    reason: "Branch must be specified or resolved to default".into(),
-                    hint: None,
-                })?;
-                let space = space.unwrap_or_else(|| "default".to_string());
-                self.ensure_space_registered(&branch, &space)?;
-                crate::handlers::state::state_set(&self.primitives, branch, space, cell, value)
-            }
-            Command::StateGet {
-                branch,
-                space,
-                cell,
-                as_of,
-            } => {
-                let branch = branch.ok_or(Error::InvalidInput {
-                    reason: "Branch must be specified or resolved to default".into(),
-                    hint: None,
-                })?;
-                let space = space.unwrap_or_else(|| "default".to_string());
-                if let Some(ts) = as_of {
-                    crate::handlers::state::state_get_at(&self.primitives, branch, space, cell, ts)
-                } else {
-                    crate::handlers::state::state_get(&self.primitives, branch, space, cell)
-                }
-            }
-            // Note: as_of is intentionally ignored for getv — version history
-            // always returns all versions, not a point-in-time snapshot.
-            Command::StateGetv {
-                branch,
-                space,
-                cell,
-                as_of: _,
-            } => {
-                let branch = branch.ok_or(Error::InvalidInput {
-                    reason: "Branch must be specified or resolved to default".into(),
-                    hint: None,
-                })?;
-                let space = space.unwrap_or_else(|| "default".to_string());
-                crate::handlers::state::state_getv(&self.primitives, branch, space, cell)
-            }
-            Command::StateCas {
-                branch,
-                space,
-                cell,
-                expected_counter,
-                value,
-            } => {
-                let branch = branch.ok_or(Error::InvalidInput {
-                    reason: "Branch must be specified or resolved to default".into(),
-                    hint: None,
-                })?;
-                let space = space.unwrap_or_else(|| "default".to_string());
-                self.ensure_space_registered(&branch, &space)?;
-                crate::handlers::state::state_cas(
-                    &self.primitives,
-                    branch,
-                    space,
-                    cell,
-                    expected_counter,
-                    value,
-                )
-            }
-            Command::StateInit {
-                branch,
-                space,
-                cell,
-                value,
-            } => {
-                let branch = branch.ok_or(Error::InvalidInput {
-                    reason: "Branch must be specified or resolved to default".into(),
-                    hint: None,
-                })?;
-                let space = space.unwrap_or_else(|| "default".to_string());
-                self.ensure_space_registered(&branch, &space)?;
-                crate::handlers::state::state_init(&self.primitives, branch, space, cell, value)
-            }
-            Command::StateDelete {
-                branch,
-                space,
-                cell,
-            } => {
-                let branch = branch.ok_or(Error::InvalidInput {
-                    reason: "Branch must be specified or resolved to default".into(),
-                    hint: None,
-                })?;
-                let space = space.unwrap_or_else(|| "default".to_string());
-                self.ensure_space_registered(&branch, &space)?;
-                crate::handlers::state::state_delete(&self.primitives, branch, space, cell)
-            }
-            Command::StateList {
-                branch,
-                space,
-                prefix,
-                as_of,
-            } => {
-                let branch = branch.ok_or(Error::InvalidInput {
-                    reason: "Branch must be specified or resolved to default".into(),
-                    hint: None,
-                })?;
-                let space = space.unwrap_or_else(|| "default".to_string());
-                if let Some(ts) = as_of {
-                    crate::handlers::state::state_list_at(
-                        &self.primitives,
-                        branch,
-                        space,
-                        prefix,
-                        ts,
-                    )
-                } else {
-                    crate::handlers::state::state_list(&self.primitives, branch, space, prefix)
-                }
             }
 
             // Vector commands

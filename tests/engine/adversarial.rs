@@ -21,7 +21,7 @@ fn event_payload(data: Value) -> Value {
 // ============================================================================
 
 /// Verifies that a failed transaction doesn't leave partial writes across primitives.
-/// This is the engine's core responsibility: all-or-nothing across KV, EventLog, StateCell.
+/// This is the engine's core responsibility: all-or-nothing across KV, EventLog, JSON.
 #[test]
 fn cross_primitive_rollback_leaves_no_trace() {
     let test_db = TestDb::new();
@@ -29,16 +29,12 @@ fn cross_primitive_rollback_leaves_no_trace() {
 
     let kv = test_db.kv();
     let event = test_db.event();
-    let state = test_db.state();
 
     // Pre-populate with known values
     kv.put(&branch_id, "default", "existing_key", Value::Int(100))
         .unwrap();
-    state
-        .init(&branch_id, "default", "existing_cell", Value::Int(200))
-        .unwrap();
 
-    // Attempt a transaction that touches all primitives then fails
+    // Attempt a transaction that touches multiple primitives then fails
     let result: Result<(), _> = test_db.db.transaction(branch_id, |txn| {
         // Write to KV
         txn.kv_put("new_key", Value::Int(1))?;
@@ -46,9 +42,6 @@ fn cross_primitive_rollback_leaves_no_trace() {
 
         // Write to EventLog
         txn.event_append("test_event", event_payload(Value::Int(2)))?;
-
-        // Write to StateCell (via set, which doesn't require existing cell)
-        // Note: We can't easily use StateCell in transaction context without extension trait
 
         // Force abort
         Err(strata_core::StrataError::invalid_input("forced abort"))
@@ -77,16 +70,6 @@ fn cross_primitive_rollback_leaves_no_trace() {
         event.len(&branch_id, "default").unwrap(),
         0,
         "EventLog should be empty after rollback"
-    );
-
-    // - existing_cell should be unchanged
-    assert_eq!(
-        state
-            .get(&branch_id, "default", "existing_cell")
-            .unwrap()
-            .unwrap(),
-        Value::Int(200),
-        "existing_cell should retain original value after rollback"
     );
 }
 
@@ -361,17 +344,13 @@ fn primitive_error_propagates() {
     let test_db = TestDb::new();
     let branch_id = test_db.branch_id;
 
-    // Try to CAS on non-existent cell - should fail
-    let state = test_db.state();
-    let result = state.cas(
-        &branch_id,
-        "default",
-        "nonexistent",
-        Version::from(1u64),
-        Value::Int(1),
+    // Try to get a non-existent key - should return None
+    let kv = test_db.kv();
+    let result = kv.get(&branch_id, "default", "nonexistent").unwrap();
+    assert!(
+        result.is_none(),
+        "Get on non-existent key should return None"
     );
-
-    assert!(result.is_err(), "CAS on non-existent cell should fail");
 }
 
 /// Transaction errors should not leave database in inconsistent state.
@@ -405,31 +384,21 @@ fn transaction_error_recovery() {
 // ============================================================================
 
 /// Versions should be monotonically increasing for writes to same key.
-/// Uses StateCell which returns Versioned values, since KVStore::get() returns plain Value.
 #[test]
 fn versions_monotonically_increase() {
     let test_db = TestDb::new();
     let branch_id = test_db.branch_id;
 
-    let state = test_db.state();
+    let kv = test_db.kv();
 
-    state
-        .init(&branch_id, "default", "key", Value::Int(0))
-        .unwrap();
+    kv.put(&branch_id, "default", "key", Value::Int(0)).unwrap();
 
     let mut last_version = 0u64;
-    for i in 1..=10 {
-        let current = state.getv(&branch_id, "default", "key").unwrap().unwrap();
+    for i in 1..=10i64 {
+        let current = kv.getv(&branch_id, "default", "key").unwrap().unwrap();
         let current_version = current.version().as_u64();
-        state
-            .cas(
-                &branch_id,
-                "default",
-                "key",
-                current.version(),
-                Value::Int(i),
-            )
-            .unwrap();
+
+        kv.put(&branch_id, "default", "key", Value::Int(i)).unwrap();
 
         assert!(
             current_version >= last_version,
@@ -465,40 +434,6 @@ fn eventlog_sequence_monotonic() {
         }
         last_seq = seq_u64;
     }
-}
-
-/// StateCell CAS should respect version ordering.
-#[test]
-fn statecell_cas_version_ordering() {
-    let test_db = TestDb::new();
-    let branch_id = test_db.branch_id;
-    let state = test_db.state();
-
-    state
-        .init(&branch_id, "default", "cell", Value::Int(0))
-        .unwrap();
-
-    // Get initial version
-    let v1 = state
-        .getv(&branch_id, "default", "cell")
-        .unwrap()
-        .unwrap()
-        .version();
-
-    // CAS should work with current version
-    state
-        .cas(&branch_id, "default", "cell", v1, Value::Int(1))
-        .unwrap();
-
-    // CAS with old version should fail
-    let result = state.cas(&branch_id, "default", "cell", v1, Value::Int(2));
-    assert!(result.is_err(), "CAS with stale version should fail");
-
-    // Value should be 1 (from successful CAS), not 2
-    assert_eq!(
-        state.get(&branch_id, "default", "cell").unwrap().unwrap(),
-        Value::Int(1)
-    );
 }
 
 // ============================================================================

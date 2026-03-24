@@ -102,23 +102,6 @@ mod invariant_1_addressable {
     }
 
     #[test]
-    fn state_has_stable_entity_ref() {
-        let (db, branch_id) = setup();
-        let state = StateCell::new(db);
-
-        state
-            .init(&branch_id, "default", "my-cell", Value::Int(0))
-            .unwrap();
-
-        let entity_ref = EntityRef::state(branch_id, "my-cell");
-
-        assert_eq!(entity_ref.branch_id(), branch_id);
-        assert_eq!(entity_ref.primitive_type(), PrimitiveType::State);
-        assert_eq!(entity_ref.state_name(), Some("my-cell"));
-        assert!(entity_ref.is_state());
-    }
-
-    #[test]
     fn json_has_stable_entity_ref() {
         let (db, branch_id) = setup();
         let json = JsonStore::new(db);
@@ -253,52 +236,6 @@ mod invariant_2_versioned {
         // Event versions are sequential
         assert_eq!(v0, Version::Sequence(0));
         assert_eq!(v1, Version::Sequence(1));
-    }
-
-    // --- StateCell ---
-    #[test]
-    fn state_get_returns_versioned() {
-        let (db, branch_id) = setup();
-        let state = StateCell::new(db);
-
-        state
-            .init(&branch_id, "default", "cell", Value::Int(42))
-            .unwrap();
-
-        let value = state.get(&branch_id, "default", "cell").unwrap().unwrap();
-        assert!(matches!(value, Value::Int(42)));
-    }
-
-    #[test]
-    fn state_init_returns_versioned() {
-        let (db, branch_id) = setup();
-        let state = StateCell::new(db);
-
-        let versioned = state
-            .init(&branch_id, "default", "cell", Value::Int(0))
-            .unwrap();
-        // init returns Version with initial counter
-        assert_eq!(versioned, Version::counter(1));
-    }
-
-    #[test]
-    fn state_set_returns_versioned() {
-        let (db, branch_id) = setup();
-        let state = StateCell::new(db);
-
-        state
-            .init(&branch_id, "default", "cell", Value::Int(0))
-            .unwrap();
-
-        let v1 = state
-            .set(&branch_id, "default", "cell", Value::Int(1))
-            .unwrap();
-        let v2 = state
-            .set(&branch_id, "default", "cell", Value::Int(2))
-            .unwrap();
-
-        // Versions are monotonic
-        assert!(v2 > v1);
     }
 
     // --- JsonStore ---
@@ -462,20 +399,6 @@ mod invariant_3_transactional {
     }
 
     #[test]
-    fn state_participates_in_transaction() {
-        let (db, branch_id) = setup();
-
-        db.transaction(branch_id, |txn| {
-            txn.state_set("cell", Value::Int(42))?;
-            Ok(())
-        })
-        .unwrap();
-
-        let state = StateCell::new(db);
-        assert!(state.get(&branch_id, "default", "cell").unwrap().is_some());
-    }
-
-    #[test]
     fn json_participates_in_transaction() {
         let (db, branch_id) = setup();
         let doc_id = "test-doc";
@@ -498,7 +421,6 @@ mod invariant_3_transactional {
         db.transaction(branch_id, |txn| {
             txn.kv_put("key", Value::Int(42))?;
             txn.event_append("test-event", string_payload("payload"))?;
-            txn.state_set("cell", Value::Int(100))?;
             Ok(())
         })
         .unwrap();
@@ -507,11 +429,8 @@ mod invariant_3_transactional {
         let kv = KVStore::new(db.clone());
         assert!(kv.get(&branch_id, "default", "key").unwrap().is_some());
 
-        let events = EventLog::new(db.clone());
+        let events = EventLog::new(db);
         assert!(events.get(&branch_id, "default", 0).unwrap().is_some());
-
-        let state = StateCell::new(db);
-        assert!(state.get(&branch_id, "default", "cell").unwrap().is_some());
     }
 
     #[test]
@@ -595,29 +514,6 @@ mod invariant_4_lifecycle {
         // Both events exist
         assert!(events.get(&branch_id, "default", 0).unwrap().is_some());
         assert!(events.get(&branch_id, "default", 1).unwrap().is_some());
-    }
-
-    #[test]
-    fn state_full_lifecycle() {
-        let (db, branch_id) = setup();
-        let state = StateCell::new(db);
-
-        // Create (init)
-        state
-            .init(&branch_id, "default", "cell", Value::Int(1))
-            .unwrap();
-
-        // Exist - use read() to check existence
-        assert!(state.get(&branch_id, "default", "cell").unwrap().is_some());
-
-        // Evolve (set)
-        state
-            .set(&branch_id, "default", "cell", Value::Int(2))
-            .unwrap();
-        let s = state.get(&branch_id, "default", "cell").unwrap().unwrap();
-        assert!(matches!(s, Value::Int(2)));
-
-        // Note: delete() removed in MVP simplification - StateCell values persist
     }
 
     #[test]
@@ -768,26 +664,6 @@ mod invariant_5_branch_scoped {
     }
 
     #[test]
-    fn state_isolated_between_branches() {
-        let (db, branch1) = setup();
-        let branch2 = BranchId::new();
-        let state = StateCell::new(db);
-
-        state
-            .init(&branch1, "default", "cell", Value::Int(1))
-            .unwrap();
-        state
-            .init(&branch2, "default", "cell", Value::Int(2))
-            .unwrap();
-
-        let s1 = state.get(&branch1, "default", "cell").unwrap().unwrap();
-        let s2 = state.get(&branch2, "default", "cell").unwrap().unwrap();
-
-        assert!(matches!(s1, Value::Int(1)));
-        assert!(matches!(s2, Value::Int(2)));
-    }
-
-    #[test]
     fn json_isolated_between_branches() {
         let (db, branch1) = setup();
         let branch2 = BranchId::new();
@@ -864,12 +740,6 @@ mod invariant_5_branch_scoped {
             .unwrap();
         events.get(&branch_id, "default", 0).unwrap();
 
-        let state = StateCell::new(db.clone());
-        state
-            .init(&branch_id, "default", "s", Value::Int(1))
-            .unwrap();
-        state.get(&branch_id, "default", "s").unwrap();
-
         // There is NO global/ambient branch context - branch_id is always explicit
     }
 }
@@ -909,21 +779,6 @@ mod invariant_6_introspectable {
 
         // Now exists
         assert!(events.get(&branch_id, "default", 0).unwrap().is_some());
-    }
-
-    #[test]
-    fn state_has_exists_check() {
-        let (db, branch_id) = setup();
-        let state = StateCell::new(db);
-
-        // Use read().is_some() to check existence (exists() removed in MVP)
-        assert!(state.get(&branch_id, "default", "cell").unwrap().is_none());
-
-        state
-            .init(&branch_id, "default", "cell", Value::Int(1))
-            .unwrap();
-
-        assert!(state.get(&branch_id, "default", "cell").unwrap().is_some());
     }
 
     #[test]
@@ -1043,34 +898,6 @@ mod invariant_7_read_write {
     }
 
     #[test]
-    fn state_set_is_write_read_is_read() {
-        let (db, branch_id) = setup();
-        let state = StateCell::new(db);
-
-        state
-            .init(&branch_id, "default", "cell", Value::Int(0))
-            .unwrap();
-
-        // set is write
-        let v1 = state
-            .set(&branch_id, "default", "cell", Value::Int(1))
-            .unwrap();
-        let v2 = state
-            .set(&branch_id, "default", "cell", Value::Int(2))
-            .unwrap();
-
-        assert!(v2 > v1); // Versions increase
-
-        // read is read
-        let s1 = state.get(&branch_id, "default", "cell").unwrap().unwrap();
-        let s2 = state.get(&branch_id, "default", "cell").unwrap().unwrap();
-
-        // Same value
-        assert!(matches!(s1, Value::Int(2)));
-        assert!(matches!(s2, Value::Int(2)));
-    }
-
-    #[test]
     fn transaction_read_your_writes() {
         let (db, branch_id) = setup();
 
@@ -1103,13 +930,6 @@ mod invariant_7_read_write {
             .append(&branch_id, "default", "e", empty_payload())
             .unwrap(); // write
         let _ = events.get(&branch_id, "default", 0).unwrap(); // read
-
-        // State
-        let state = StateCell::new(db.clone());
-        let _ = state
-            .init(&branch_id, "default", "s", Value::Int(1))
-            .unwrap(); // write
-        let _ = state.get(&branch_id, "default", "s").unwrap(); // read
 
         // Json
         let json = JsonStore::new(db.clone());
@@ -1176,25 +996,6 @@ mod version_monotonicity {
     }
 
     #[test]
-    fn state_versions_are_monotonic() {
-        let (db, branch_id) = setup();
-        let state = StateCell::new(db);
-
-        state
-            .init(&branch_id, "default", "cell", Value::Int(0))
-            .unwrap();
-
-        let mut last_version = Version::counter(1);
-        for i in 1..10 {
-            let versioned = state
-                .set(&branch_id, "default", "cell", Value::Int(i as i64))
-                .unwrap();
-            assert!(versioned.as_u64() > last_version.as_u64());
-            last_version = versioned;
-        }
-    }
-
-    #[test]
     fn json_versions_are_monotonic() {
         let (db, branch_id) = setup();
         let json = JsonStore::new(db);
@@ -1233,9 +1034,9 @@ mod version_monotonicity {
 #[test]
 fn conformance_matrix_coverage() {
     // This test documents the conformance matrix
-    // 6 primitives × 7 invariants = 42 conformance checks
+    // 5 primitives × 7 invariants = 35 conformance checks
 
-    let primitives = ["KV", "Event", "State", "Branch", "Json", "Vector"];
+    let primitives = ["KV", "Event", "Branch", "Json", "Vector"];
 
     let invariants = [
         "1. Addressable",

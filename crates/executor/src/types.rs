@@ -239,15 +239,6 @@ pub struct BatchEventEntry {
     pub payload: Value,
 }
 
-/// Entry for batch state set operations.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BatchStateEntry {
-    /// Cell name.
-    pub cell: String,
-    /// Value to store.
-    pub value: Value,
-}
-
 /// Entry for batch JSON set operations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BatchJsonEntry {
@@ -433,8 +424,6 @@ pub struct PrimitiveSummary {
     pub json: CountSummary,
     /// Event log summary.
     pub events: CountSummary,
-    /// State cell summary.
-    pub state: StateSummary,
     /// Vector store summary.
     pub vector: VectorSummary,
     /// Graph store summary.
@@ -446,15 +435,6 @@ pub struct PrimitiveSummary {
 pub struct CountSummary {
     /// Number of entries.
     pub count: u64,
-}
-
-/// State cell summary with cell names.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StateSummary {
-    /// Number of state cells.
-    pub count: u64,
-    /// Names of all state cells.
-    pub cells: Vec<String>,
 }
 
 /// Vector store summary.
@@ -821,8 +801,6 @@ pub enum ExportPrimitive {
     Kv,
     /// JSON document store.
     Json,
-    /// State cells.
-    State,
     /// Event log.
     Events,
 }
@@ -833,7 +811,6 @@ impl ExportPrimitive {
         match self {
             ExportPrimitive::Kv => "kv",
             ExportPrimitive::Json => "json",
-            ExportPrimitive::State => "state",
             ExportPrimitive::Events => "events",
         }
     }

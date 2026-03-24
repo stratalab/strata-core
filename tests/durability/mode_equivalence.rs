@@ -66,24 +66,6 @@ fn event_operations_equivalent_across_modes() {
 }
 
 #[test]
-fn statecell_cas_equivalent_across_modes() {
-    test_across_modes("statecell_cas", |db| {
-        let branch_id = BranchId::new();
-        let state = StateCell::new(db);
-
-        let v = state
-            .init(&branch_id, "default", "counter", Value::Int(0))
-            .unwrap();
-        state
-            .cas(&branch_id, "default", "counter", v, Value::Int(1))
-            .unwrap();
-
-        let val = state.get(&branch_id, "default", "counter").unwrap();
-        val.map(|v| format!("{:?}", v))
-    });
-}
-
-#[test]
 fn overwrite_semantics_equivalent_across_modes() {
     test_across_modes("overwrite", |db| {
         let branch_id = BranchId::new();

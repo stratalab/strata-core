@@ -393,7 +393,10 @@ fn transaction_already_active_has_hint() {
                 hint
             );
         }
-        other => panic!("Expected TransactionAlreadyActive with hint, got {:?}", other),
+        other => panic!(
+            "Expected TransactionAlreadyActive with hint, got {:?}",
+            other
+        ),
     }
 }
 
@@ -452,27 +455,4 @@ fn concurrent_sessions_independent_transactions() {
 
     assert!(!session1.in_transaction());
     assert!(!session2.in_transaction());
-}
-
-// ============================================================================
-// State Errors
-// ============================================================================
-
-#[test]
-fn state_get_nonexistent_returns_none() {
-    let executor = create_executor();
-
-    let result = executor
-        .execute(Command::StateGet {
-            branch: None,
-            space: None,
-            cell: "nonexistent".into(),
-            as_of: None,
-        })
-        .unwrap();
-
-    match result {
-        Output::MaybeVersioned(None) | Output::Maybe(None) => {}
-        _ => panic!("Expected None for nonexistent cell"),
-    }
 }

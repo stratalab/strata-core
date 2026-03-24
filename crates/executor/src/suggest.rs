@@ -329,11 +329,7 @@ mod tests {
         let err = crate::Error::TransactionNotActive { hint: None };
         let json = serde_json::to_string(&err).unwrap();
         // With hint: None and skip_serializing_if, serializes as {"TransactionNotActive":{}}
-        assert!(
-            json.contains("TransactionNotActive"),
-            "json = {}",
-            json
-        );
+        assert!(json.contains("TransactionNotActive"), "json = {}", json);
         let roundtrip: crate::Error = serde_json::from_str(&json).unwrap();
         assert_eq!(err, roundtrip);
 

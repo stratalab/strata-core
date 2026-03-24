@@ -9,7 +9,7 @@
 //! 2. When `Database::open()` runs, it calls all registered recovery participants
 //! 3. The search recovery function either:
 //!    - **Fast path**: Loads manifest + mmap'd sealed segments (sub-second)
-//!    - **Slow path**: Scans all KV/State/Event entries, indexes them, and
+//!    - **Slow path**: Scans all KV/Event entries, indexes them, and
 //!      freezes to disk for the next open
 //! 4. Enables the index for search operations
 //!
@@ -96,7 +96,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
     }
 
     // ---------------------------------------------------------------
-    // Slow path: rebuild from KV/State/Event entries
+    // Slow path: rebuild from KV/Event entries
     // ---------------------------------------------------------------
     // Enable the index before scanning so that index_document() calls
     // are not silently dropped by the is_enabled() guard.
@@ -131,23 +131,6 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                 branch_id,
                 key: user_key,
             };
-            index.index_document(&entity_ref, &text, None);
-            docs_indexed += 1;
-        }
-
-        // --- State entries ---
-        for (key, vv) in db.storage().list_by_type(&branch_id, TypeTag::State) {
-            let text = match extract_indexable_text(&vv.value) {
-                Some(t) => t,
-                None => continue,
-            };
-
-            let name = match key.user_key_string() {
-                Some(n) => n,
-                None => continue,
-            };
-
-            let entity_ref = crate::search::EntityRef::State { branch_id, name };
             index.index_document(&entity_ref, &text, None);
             docs_indexed += 1;
         }

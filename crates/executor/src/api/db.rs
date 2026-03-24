@@ -50,6 +50,7 @@ impl Strata {
             Output::Metrics(m) => Ok(m),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for Metrics".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }

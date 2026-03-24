@@ -260,27 +260,13 @@ fn atomicity_on_operation_failure() {
     let branch_id = test_db.branch_id;
 
     let kv = test_db.kv();
-    let state = test_db.state();
 
-    // Setup: existing key and cell
+    // Setup: existing key
     kv.put(&branch_id, "default", "existing", Value::Int(100))
         .unwrap();
-    state
-        .init(&branch_id, "default", "cell", Value::Int(200))
-        .unwrap();
-    let version = state
-        .getv(&branch_id, "default", "cell")
-        .unwrap()
-        .unwrap()
-        .version();
 
-    // First, modify cell outside transaction to make CAS fail
-    state
-        .cas(&branch_id, "default", "cell", version, Value::Int(201))
-        .unwrap();
-
-    // Now try a transaction that writes to KV then does a CAS with stale version
-    // The CAS should fail, rolling back the KV write
+    // Try a transaction that writes to KV then fails
+    // The failure should roll back the KV write
     let result: Result<(), _> = test_db.db.transaction(branch_id, |txn| {
         // This write should be rolled back
         txn.kv_put("new_key", Value::Int(999))?;

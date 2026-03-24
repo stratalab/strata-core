@@ -49,10 +49,10 @@ fn branch_data_is_isolated() {
         .unwrap();
 
     executor
-        .execute(Command::StateSet {
+        .execute(Command::KvPut {
             branch: Some(branch_a.clone()),
             space: None,
-            cell: "state".into(),
+            key: "state_key".into(),
             value: Value::Int(42),
         })
         .unwrap();
@@ -72,16 +72,16 @@ fn branch_data_is_isolated() {
     );
 
     let output = executor
-        .execute(Command::StateGet {
+        .execute(Command::KvGet {
             branch: Some(branch_b.clone()),
             space: None,
-            cell: "state".into(),
+            key: "state_key".into(),
             as_of: None,
         })
         .unwrap();
     assert!(
         matches!(output, Output::MaybeVersioned(None) | Output::Maybe(None)),
-        "Branch B should not see Branch A's state data"
+        "Branch B should not see Branch A's KV data (state_key)"
     );
 
     // Branch A should still see its own data
@@ -138,15 +138,6 @@ fn branch_delete_removes_all_data() {
             space: None,
             key: "key2".into(),
             value: Value::Int(123),
-        })
-        .unwrap();
-
-    executor
-        .execute(Command::StateSet {
-            branch: Some(branch_id.clone()),
-            space: None,
-            cell: "cell1".into(),
-            value: Value::Bool(true),
         })
         .unwrap();
 

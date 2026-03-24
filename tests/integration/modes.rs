@@ -47,7 +47,6 @@ fn cache_all_primitives() {
     let branch_id = BranchId::new();
 
     let kv = KVStore::new(db.clone());
-    let state = StateCell::new(db.clone());
     let event = EventLog::new(db.clone());
     let json = JsonStore::new(db.clone());
     let vector = VectorStore::new(db.clone());
@@ -57,15 +56,6 @@ fn cache_all_primitives() {
     assert_eq!(
         kv.get(&branch_id, "default", "k").unwrap(),
         Some(Value::Int(1))
-    );
-
-    // State
-    state
-        .init(&branch_id, "default", "s", Value::Int(2))
-        .unwrap();
-    assert_eq!(
-        state.get(&branch_id, "default", "s").unwrap().unwrap(),
-        Value::Int(2)
     );
 
     // Event
@@ -211,11 +201,6 @@ fn always_mode_all_primitives_survive_reopen() {
         )
         .unwrap();
 
-        let state = StateCell::new(db.clone());
-        state
-            .init(&branch_id, "default", "state_cell", Value::Int(42))
-            .unwrap();
-
         let event = EventLog::new(db.clone());
         event
             .append(&branch_id, "default", "audit", int_payload(123))
@@ -247,15 +232,6 @@ fn always_mode_all_primitives_survive_reopen() {
         assert_eq!(
             kv.get(&branch_id, "default", "kv_key").unwrap(),
             Some(Value::String("kv_val".into()))
-        );
-
-        let state = StateCell::new(db.clone());
-        assert_eq!(
-            state
-                .get(&branch_id, "default", "state_cell")
-                .unwrap()
-                .unwrap(),
-            Value::Int(42)
         );
 
         let event = EventLog::new(db.clone());

@@ -3,7 +3,6 @@
 //! Provides high-level primitives as stateless facades over the Database engine:
 //! - **KVStore**: General-purpose key-value storage
 //! - **EventLog**: Immutable append-only event stream with causal hash chaining
-//! - **StateCell**: CAS-based versioned cells for coordination
 //! - **BranchIndex**: Branch lifecycle management
 //! - **JsonStore**: JSON document storage with path-based operations
 //! - **VectorStore**: Vector storage with similarity search and collection management
@@ -34,7 +33,6 @@
 //! db.transaction(branch_id, |txn| {
 //!     txn.kv_put("key", value)?;
 //!     txn.event_append("type", payload)?;
-//!     txn.state_cas("cell", version, new_value)?;
 //!     Ok(())
 //! })?;
 //! ```
@@ -45,17 +43,15 @@ pub mod extensions;
 pub mod json;
 pub mod kv;
 pub mod space;
-pub mod state;
 pub mod vector;
 
 // Re-exports - primitives are exported as they're implemented
-pub use branch::{BranchHandle, EventHandle, JsonHandle, KvHandle, StateHandle};
+pub use branch::{BranchHandle, EventHandle, JsonHandle, KvHandle};
 pub use branch::{BranchIndex, BranchMetadata, BranchStatus};
 pub use event::{Event, EventLog};
 pub use json::{JsonDoc, JsonStore};
 pub use kv::KVStore;
 pub use space::SpaceIndex;
-pub use state::{State, StateCell};
 pub use vector::{
     register_vector_recovery, validate_collection_name, validate_vector_key, BruteForceBackend,
     CollectionId, CollectionInfo, CollectionRecord, DistanceMetric, FilterCondition, FilterOp,

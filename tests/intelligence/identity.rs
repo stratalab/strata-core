@@ -210,12 +210,6 @@ fn test_tier6_primitive_type_correct() {
     };
     assert_eq!(event_ref.primitive_type(), PrimitiveType::Event);
 
-    let state_ref = DocRef::State {
-        branch_id: branch_id.clone(),
-        name: "cell".to_string(),
-    };
-    assert_eq!(state_ref.primitive_type(), PrimitiveType::State);
-
     let branch_ref = DocRef::Run {
         branch_id: branch_id.clone(),
     };

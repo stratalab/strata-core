@@ -71,7 +71,6 @@ pub fn search(
                 "kv" => Some(PrimitiveType::Kv),
                 "json" => Some(PrimitiveType::Json),
                 "event" => Some(PrimitiveType::Event),
-                "state" => Some(PrimitiveType::State),
                 "branch" => Some(PrimitiveType::Branch),
                 "vector" => Some(PrimitiveType::Vector),
                 _ => None,
@@ -398,7 +397,6 @@ fn format_entity_ref(doc_ref: &strata_engine::search::EntityRef) -> (String, Str
         strata_engine::search::EntityRef::Event { sequence, .. } => {
             (format!("seq:{}", sequence), "event".to_string())
         }
-        strata_engine::search::EntityRef::State { name, .. } => (name.clone(), "state".to_string()),
         strata_engine::search::EntityRef::Branch { branch_id } => {
             let uuid = uuid::Uuid::from_bytes(*branch_id.as_bytes());
             (uuid.to_string(), "branch".to_string())

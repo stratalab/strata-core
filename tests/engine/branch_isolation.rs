@@ -179,89 +179,6 @@ fn eventlog_independent_per_branch() {
 }
 
 // ============================================================================
-// StateCell Isolation
-// ============================================================================
-
-#[test]
-fn statecell_branches_are_isolated() {
-    let test_db = TestDb::new();
-    let state = test_db.state();
-
-    let branch_a = BranchId::new();
-    let branch_b = BranchId::new();
-
-    // Same cell name, different branches
-    state
-        .init(&branch_a, "default", "cell", Value::Int(1))
-        .unwrap();
-    state
-        .init(&branch_b, "default", "cell", Value::Int(2))
-        .unwrap();
-
-    assert_eq!(
-        state.get(&branch_a, "default", "cell").unwrap().unwrap(),
-        Value::Int(1)
-    );
-    assert_eq!(
-        state.get(&branch_b, "default", "cell").unwrap().unwrap(),
-        Value::Int(2)
-    );
-}
-
-#[test]
-fn statecell_cas_isolated() {
-    let test_db = TestDb::new();
-    let state = test_db.state();
-
-    let branch_a = BranchId::new();
-    let branch_b = BranchId::new();
-
-    state
-        .init(&branch_a, "default", "cell", Value::Int(0))
-        .unwrap();
-    state
-        .init(&branch_b, "default", "cell", Value::Int(0))
-        .unwrap();
-
-    let version_a = state
-        .getv(&branch_a, "default", "cell")
-        .unwrap()
-        .unwrap()
-        .version();
-    let version_b = state
-        .getv(&branch_b, "default", "cell")
-        .unwrap()
-        .unwrap()
-        .version();
-
-    // CAS on branch A
-    state
-        .cas(&branch_a, "default", "cell", version_a, Value::Int(100))
-        .unwrap();
-
-    // Branch B unchanged
-    assert_eq!(
-        state.get(&branch_b, "default", "cell").unwrap().unwrap(),
-        Value::Int(0)
-    );
-
-    // CAS on branch B still works with its original version
-    state
-        .cas(&branch_b, "default", "cell", version_b, Value::Int(200))
-        .unwrap();
-
-    // Both have their own values
-    assert_eq!(
-        state.get(&branch_a, "default", "cell").unwrap().unwrap(),
-        Value::Int(100)
-    );
-    assert_eq!(
-        state.get(&branch_b, "default", "cell").unwrap().unwrap(),
-        Value::Int(200)
-    );
-}
-
-// ============================================================================
 // JsonStore Isolation
 // ============================================================================
 
@@ -444,10 +361,6 @@ fn all_primitives_isolated_by_branch() {
         .append(&branch_a, "default", "type", event_payload(Value::Int(1)))
         .unwrap();
     prims
-        .state
-        .init(&branch_a, "default", "cell", Value::Int(1))
-        .unwrap();
-    prims
         .json
         .create(
             &branch_a,
@@ -460,11 +373,6 @@ fn all_primitives_isolated_by_branch() {
     // Branch B should see nothing
     assert!(prims.kv.get(&branch_b, "default", "key").unwrap().is_none());
     assert_eq!(prims.event.len(&branch_b, "default").unwrap(), 0);
-    assert!(prims
-        .state
-        .get(&branch_b, "default", "cell")
-        .unwrap()
-        .is_none());
     assert!(!prims.json.exists(&branch_b, "default", "doc").unwrap());
 }
 

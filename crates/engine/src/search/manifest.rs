@@ -163,16 +163,11 @@ mod tests {
                     branch_id,
                     key: "key2".to_string(),
                 },
-                EntityRef::State {
-                    branch_id,
-                    name: "state1".to_string(),
-                },
             ],
-            doc_lengths: vec![Some(10), Some(20), Some(15)],
+            doc_lengths: vec![Some(10), Some(20)],
             doc_terms: vec![
                 Some(vec!["key1".to_string(), "value1".to_string()]),
                 Some(vec!["key2".to_string()]),
-                Some(vec!["state1".to_string(), "data".to_string()]),
             ],
         }
     }
@@ -193,9 +188,9 @@ mod tests {
         assert_eq!(loaded.segments[0].segment_id, 0);
         assert_eq!(loaded.segments[1].tombstones.len(), 2);
         assert!(loaded.segments[1].tombstones.contains(&42));
-        assert_eq!(loaded.doc_id_map.len(), 3);
-        assert_eq!(loaded.doc_lengths, vec![Some(10), Some(20), Some(15)]);
-        assert_eq!(loaded.doc_terms.len(), 3);
+        assert_eq!(loaded.doc_id_map.len(), 2);
+        assert_eq!(loaded.doc_lengths, vec![Some(10), Some(20)]);
+        assert_eq!(loaded.doc_terms.len(), 2);
         assert_eq!(
             loaded.doc_terms[0],
             Some(vec!["key1".to_string(), "value1".to_string()])

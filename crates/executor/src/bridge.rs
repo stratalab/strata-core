@@ -3,7 +3,7 @@
 //! This module replaces the `strata-api` SubstrateImpl dependency with direct
 //! engine primitive access. It provides:
 //!
-//! - [`Primitives`]: Holds all 6 engine primitives + database reference
+//! - [`Primitives`]: Holds engine primitives + database reference
 //! - [`to_core_branch_id`]: Converts executor's string-based BranchId to core BranchId
 //! - Validation helpers: Key, stream, event payload, collection name validation
 //! - Type conversion helpers: Value ↔ JsonValue, DistanceMetric, etc.
@@ -16,8 +16,7 @@ use strata_core::{StrataError, StrataResult, Value};
 use strata_engine::{
     BranchIndex as PrimitiveBranchIndex, Database, EventLog as PrimitiveEventLog, GraphStore,
     JsonStore as PrimitiveJsonStore, KVStore as PrimitiveKVStore,
-    SpaceIndex as PrimitiveSpaceIndex, StateCell as PrimitiveStateCell,
-    VectorStore as PrimitiveVectorStore,
+    SpaceIndex as PrimitiveSpaceIndex, VectorStore as PrimitiveVectorStore,
 };
 
 use crate::types::BranchId;
@@ -29,7 +28,7 @@ use crate::types::BranchId;
 /// Direct access to all engine primitives.
 ///
 /// Replaces `SubstrateImpl` from `strata-api`. Holds references to the database
-/// and all 6 primitive stores, enabling direct engine calls without the API layer.
+/// and all engine primitive stores, enabling direct engine calls without the API layer.
 #[derive(Clone)]
 pub struct Primitives {
     /// The underlying database
@@ -40,8 +39,6 @@ pub struct Primitives {
     pub json: PrimitiveJsonStore,
     /// Event primitive
     pub event: PrimitiveEventLog,
-    /// State primitive
-    pub state: PrimitiveStateCell,
     /// Branch primitive
     pub branch: PrimitiveBranchIndex,
     /// Vector primitive
@@ -61,7 +58,6 @@ impl Primitives {
             kv: PrimitiveKVStore::new(db.clone()),
             json: PrimitiveJsonStore::new(db.clone()),
             event: PrimitiveEventLog::new(db.clone()),
-            state: PrimitiveStateCell::new(db.clone()),
             branch: PrimitiveBranchIndex::new(db.clone()),
             vector: PrimitiveVectorStore::new(db.clone()),
             space: PrimitiveSpaceIndex::new(db.clone()),

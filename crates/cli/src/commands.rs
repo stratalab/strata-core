@@ -79,7 +79,6 @@ pub fn build_cli() -> Command {
         .subcommand(build_kv())
         .subcommand(build_json())
         .subcommand(build_event())
-        .subcommand(build_state())
         .subcommand(build_vector())
         .subcommand(build_branch())
         .subcommand(build_space())
@@ -117,7 +116,6 @@ pub fn build_repl_cmd() -> Command {
         .subcommand(build_kv())
         .subcommand(build_json())
         .subcommand(build_event())
-        .subcommand(build_state())
         .subcommand(build_vector())
         .subcommand(build_branch())
         .subcommand(build_space())
@@ -376,90 +374,6 @@ fn build_event() -> Command {
                 ),
         )
         .subcommand(Command::new("len").about("Get total event count"))
-}
-
-// =========================================================================
-// State
-// =========================================================================
-
-fn build_state() -> Command {
-    Command::new("state")
-        .about("State cell operations")
-        .subcommand_required(true)
-        .subcommand(
-            Command::new("set")
-                .about("Set a state cell value")
-                .arg(Arg::new("cell").required(true).help("Cell name"))
-                .arg(
-                    Arg::new("value")
-                        .required_unless_present("file")
-                        .help("Value"),
-                )
-                .arg(
-                    Arg::new("file")
-                        .long("file")
-                        .short('f')
-                        .value_name("PATH")
-                        .help("Read value from file ('-' for stdin)"),
-                ),
-        )
-        .subcommand(
-            Command::new("get")
-                .about("Get a state cell value")
-                .arg(Arg::new("cell").required(true).help("Cell name"))
-                .arg(
-                    Arg::new("with-version")
-                        .long("with-version")
-                        .short('v')
-                        .action(clap::ArgAction::SetTrue)
-                        .help("Include version and timestamp in output"),
-                ),
-        )
-        .subcommand(
-            Command::new("del")
-                .about("Delete a state cell")
-                .arg(Arg::new("cell").required(true).help("Cell name")),
-        )
-        .subcommand(
-            Command::new("init")
-                .about("Initialize a state cell (only if not exists)")
-                .arg(Arg::new("cell").required(true).help("Cell name"))
-                .arg(Arg::new("value").required(true).help("Initial value")),
-        )
-        .subcommand(
-            Command::new("cas")
-                .about("Compare-and-swap on a state cell")
-                .arg(Arg::new("cell").required(true).help("Cell name"))
-                .arg(
-                    Arg::new("expected")
-                        .required(true)
-                        .help("Expected version (or 'none' for unset)"),
-                )
-                .arg(Arg::new("value").required(true).help("New value")),
-        )
-        .subcommand(
-            Command::new("list")
-                .about("List state cells")
-                .arg(
-                    Arg::new("prefix")
-                        .long("prefix")
-                        .short('p')
-                        .value_name("PREFIX")
-                        .help("Cell name prefix filter"),
-                )
-                .arg(
-                    Arg::new("all")
-                        .long("all")
-                        .short('a')
-                        .action(clap::ArgAction::SetTrue)
-                        .help("Fetch all cells (automatic pagination)"),
-                ),
-        )
-        .subcommand(
-            Command::new("history")
-                .about("Get version history for a cell")
-                .arg(Arg::new("cell").required(true).help("Cell name")),
-        )
 }
 
 // =========================================================================

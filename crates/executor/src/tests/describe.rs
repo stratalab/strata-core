@@ -38,8 +38,6 @@ fn describe_empty_database() {
             assert_eq!(d.primitives.kv.count, 0);
             assert_eq!(d.primitives.json.count, 0);
             assert_eq!(d.primitives.events.count, 0);
-            assert_eq!(d.primitives.state.count, 0);
-            assert!(d.primitives.state.cells.is_empty());
             assert!(d.primitives.vector.collections.is_empty());
             assert!(d.primitives.graph.graphs.is_empty());
             // Default config values
@@ -186,42 +184,6 @@ fn describe_counts_events() {
     match result {
         Output::Described(d) => {
             assert_eq!(d.primitives.events.count, 4);
-        }
-        other => panic!("Expected Described, got {:?}", other),
-    }
-}
-
-// =============================================================================
-// State cells
-// =============================================================================
-
-#[test]
-fn describe_lists_state_cells() {
-    let executor = create_test_executor();
-
-    for cell in ["status", "counter", "last_sync"] {
-        executor
-            .execute(Command::StateSet {
-                branch: Some(BranchId::default()),
-                space: None,
-                cell: cell.into(),
-                value: strata_core::Value::Int(0),
-            })
-            .unwrap();
-    }
-
-    let result = executor
-        .execute(Command::Describe {
-            branch: Some(BranchId::default()),
-        })
-        .unwrap();
-
-    match result {
-        Output::Described(d) => {
-            assert_eq!(d.primitives.state.count, 3);
-            let mut cells = d.primitives.state.cells.clone();
-            cells.sort();
-            assert_eq!(cells, vec!["counter", "last_sync", "status"]);
         }
         other => panic!("Expected Described, got {:?}", other),
     }
@@ -717,16 +679,6 @@ fn describe_with_all_primitives() {
         })
         .unwrap();
 
-    // State
-    executor
-        .execute(Command::StateSet {
-            branch: Some(BranchId::default()),
-            space: None,
-            cell: "status".into(),
-            value: strata_core::Value::String("ok".into()),
-        })
-        .unwrap();
-
     // Vector
     executor
         .execute(Command::VectorCreateCollection {
@@ -768,8 +720,6 @@ fn describe_with_all_primitives() {
             assert_eq!(d.primitives.kv.count, 1);
             assert_eq!(d.primitives.json.count, 1);
             assert_eq!(d.primitives.events.count, 1);
-            assert_eq!(d.primitives.state.count, 1);
-            assert_eq!(d.primitives.state.cells, vec!["status"]);
             assert_eq!(d.primitives.vector.collections.len(), 1);
             assert_eq!(
                 d.primitives.vector.collections[0].metric,

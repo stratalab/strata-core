@@ -103,13 +103,6 @@ impl CheckpointCoordinator {
             ));
         }
 
-        if let Some(states) = data.states {
-            sections.push(SnapshotSection::new(
-                primitive_tags::STATE,
-                self.serializer.serialize_states(&states),
-            ));
-        }
-
         if let Some(runs) = data.branches {
             sections.push(SnapshotSection::new(
                 primitive_tags::BRANCH,
@@ -168,8 +161,6 @@ pub struct CheckpointData {
     pub kv: Option<Vec<crate::format::primitives::KvSnapshotEntry>>,
     /// Event primitive entries
     pub events: Option<Vec<crate::format::primitives::EventSnapshotEntry>>,
-    /// State primitive entries
-    pub states: Option<Vec<crate::format::primitives::StateSnapshotEntry>>,
     /// Branch primitive entries
     pub branches: Option<Vec<crate::format::primitives::BranchSnapshotEntry>>,
     /// JSON primitive entries
@@ -196,15 +187,6 @@ impl CheckpointData {
         entries: Vec<crate::format::primitives::EventSnapshotEntry>,
     ) -> Self {
         self.events = Some(entries);
-        self
-    }
-
-    /// Set State entries
-    pub fn with_states(
-        mut self,
-        entries: Vec<crate::format::primitives::StateSnapshotEntry>,
-    ) -> Self {
-        self.states = Some(entries);
         self
     }
 

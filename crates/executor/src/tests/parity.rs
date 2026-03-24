@@ -282,63 +282,6 @@ fn test_event_append_get_by_type_parity() {
 }
 
 // =============================================================================
-// State Parity Tests
-// =============================================================================
-
-#[test]
-fn test_state_set_get_parity() {
-    let (executor, p) = create_test_environment();
-    let branch_id = strata_core::types::BranchId::from_bytes([0u8; 16]);
-
-    // Set via executor
-    let result = executor.execute(Command::StateSet {
-        branch: None,
-        space: None,
-        cell: "cell1".to_string(),
-        value: Value::Int(100),
-    });
-
-    let counter1 = match result {
-        Ok(Output::WriteResult { key, version }) => {
-            assert_eq!(key, "cell1");
-            version
-        }
-        _ => panic!("Expected WriteResult output"),
-    };
-
-    // Get via direct primitive
-    let direct_get = p.state.get(&branch_id, "default", "cell1").unwrap();
-    assert!(direct_get.is_some());
-    assert_eq!(direct_get.unwrap(), Value::Int(100));
-
-    // Set via direct primitive
-    let versioned2 = p
-        .state
-        .set(&branch_id, "default", "cell2", Value::Int(200))
-        .unwrap();
-
-    // Both should have counter 1 (first write to each cell)
-    assert_eq!(counter1, 1);
-    assert_eq!(bridge::extract_version(&versioned2), 1);
-
-    // Get cell2 via executor
-    let exec_get = executor.execute(Command::StateGet {
-        branch: None,
-        space: None,
-        cell: "cell2".to_string(),
-        as_of: None,
-    });
-
-    match exec_get {
-        Ok(Output::MaybeVersioned(Some(vv))) => {
-            let v = vv.value;
-            assert_eq!(v, Value::Int(200));
-        }
-        _ => panic!("Expected Maybe output"),
-    }
-}
-
-// =============================================================================
 // Vector Parity Tests
 // =============================================================================
 

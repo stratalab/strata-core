@@ -119,68 +119,34 @@ fn atomicity_cross_primitive() {
 #[test]
 fn consistency_invariants_maintained() {
     let test_db = TestDb::new();
-    let state = test_db.state();
+    let kv = test_db.kv();
     let branch_id = test_db.branch_id;
 
     // Initialize counter to 0
-    state
-        .init(&branch_id, "default", "counter", Value::Int(0))
+    kv.put(&branch_id, "default", "counter", Value::Int(0))
         .unwrap();
 
-    // Increment counter using read + cas (ensures atomic read-modify-write)
+    // Increment counter using transactions with OCC retry
     for _ in 0..10 {
-        let current = state
-            .getv(&branch_id, "default", "counter")
-            .unwrap()
-            .unwrap();
-        let version = current.version();
-        if let Value::Int(n) = current.value() {
-            state
-                .cas(&branch_id, "default", "counter", version, Value::Int(n + 1))
-                .unwrap();
-        } else {
-            panic!("not an int");
+        loop {
+            let result = test_db.db.transaction(branch_id, |txn| {
+                let current = txn.kv_get("counter")?.expect("counter must exist");
+                let n = match current {
+                    Value::Int(v) => v,
+                    _ => panic!("counter must be Int"),
+                };
+                txn.kv_put("counter", Value::Int(n + 1))?;
+                Ok(())
+            });
+            if result.is_ok() {
+                break;
+            }
         }
     }
 
     // Counter should be exactly 10
-    let result = state
-        .get(&branch_id, "default", "counter")
-        .unwrap()
-        .unwrap();
+    let result = kv.get(&branch_id, "default", "counter").unwrap().unwrap();
     assert_eq!(result, Value::Int(10));
-}
-
-#[test]
-fn consistency_cas_prevents_invalid_state() {
-    let test_db = TestDb::new();
-    let state = test_db.state();
-    let branch_id = test_db.branch_id;
-
-    state
-        .init(&branch_id, "default", "balance", Value::Int(100))
-        .unwrap();
-    let version = state
-        .getv(&branch_id, "default", "balance")
-        .unwrap()
-        .unwrap()
-        .version();
-
-    // First CAS succeeds
-    state
-        .cas(&branch_id, "default", "balance", version, Value::Int(90))
-        .unwrap();
-
-    // Second CAS with stale version fails (same version, now stale)
-    let result = state.cas(&branch_id, "default", "balance", version, Value::Int(80));
-    assert!(result.is_err());
-
-    // Balance should be 90, not 80
-    let balance = state
-        .get(&branch_id, "default", "balance")
-        .unwrap()
-        .unwrap();
-    assert_eq!(balance, Value::Int(90));
 }
 
 // ============================================================================
@@ -367,61 +333,40 @@ fn durability_multiple_commits_persist() {
 #[test]
 fn acid_transfer_between_accounts() {
     let test_db = TestDb::new();
-    let state = test_db.state();
+    let kv = test_db.kv();
     let branch_id = test_db.branch_id;
 
     // Initialize accounts
-    state
-        .init(&branch_id, "default", "account_a", Value::Int(100))
+    kv.put(&branch_id, "default", "account_a", Value::Int(100))
         .unwrap();
-    state
-        .init(&branch_id, "default", "account_b", Value::Int(100))
+    kv.put(&branch_id, "default", "account_b", Value::Int(100))
         .unwrap();
 
-    // Transfer 30 from A to B using readv + cas
-    let a_val = state
-        .getv(&branch_id, "default", "account_a")
-        .unwrap()
-        .unwrap();
-    let b_val = state
-        .getv(&branch_id, "default", "account_b")
-        .unwrap()
-        .unwrap();
+    // Transfer 30 from A to B using a transaction
+    test_db
+        .db
+        .transaction(branch_id, |txn| {
+            let a_val = txn.kv_get("account_a")?.expect("account_a must exist");
+            let b_val = txn.kv_get("account_b")?.expect("account_b must exist");
 
-    if let (Value::Int(a), Value::Int(b)) = (a_val.value(), b_val.value()) {
-        state
-            .cas(
-                &branch_id,
-                "default",
-                "account_a",
-                a_val.version(),
-                Value::Int(a - 30),
-            )
-            .unwrap();
-        let b_val2 = state
-            .getv(&branch_id, "default", "account_b")
-            .unwrap()
-            .unwrap();
-        state
-            .cas(
-                &branch_id,
-                "default",
-                "account_b",
-                b_val2.version(),
-                Value::Int(b + 30),
-            )
-            .unwrap();
-    }
+            let a = match a_val {
+                Value::Int(v) => v,
+                _ => panic!("account_a must be Int"),
+            };
+            let b = match b_val {
+                Value::Int(v) => v,
+                _ => panic!("account_b must be Int"),
+            };
+
+            txn.kv_put("account_a", Value::Int(a - 30))?;
+            txn.kv_put("account_b", Value::Int(b + 30))?;
+            Ok(())
+        })
+        .unwrap();
 
     // Verify balances
-    let a = state
-        .get(&branch_id, "default", "account_a")
-        .unwrap()
-        .unwrap();
-    let b = state
-        .get(&branch_id, "default", "account_b")
-        .unwrap()
-        .unwrap();
+    let a = kv.get(&branch_id, "default", "account_a").unwrap().unwrap();
+    let b = kv.get(&branch_id, "default", "account_b").unwrap().unwrap();
 
     assert_eq!(a, Value::Int(70));
     assert_eq!(b, Value::Int(130));

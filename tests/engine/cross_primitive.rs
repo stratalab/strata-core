@@ -4,7 +4,7 @@
 
 use crate::common::*;
 use std::collections::HashMap;
-use strata_engine::{EventLogExt, KVStoreExt, StateCellExt};
+use strata_engine::{EventLogExt, KVStoreExt};
 
 /// Helper to create an event payload object
 fn event_payload(data: Value) -> Value {
@@ -43,49 +43,9 @@ fn kv_and_eventlog_atomic() {
 }
 
 #[test]
-fn kv_and_statecell_atomic() {
+fn kv_and_eventlog_two_primitives_atomic() {
     let test_db = TestDb::new();
     let branch_id = test_db.branch_id;
-    let state = test_db.state();
-
-    // Init state first
-    state
-        .init(
-            &branch_id,
-            "default",
-            "status",
-            Value::String("pending".into()),
-        )
-        .unwrap();
-
-    test_db
-        .db
-        .transaction(branch_id, |txn| {
-            txn.kv_put("processed_at", Value::Int(1234567890))?;
-            txn.state_set("status", Value::String("completed".into()))?;
-            Ok(())
-        })
-        .unwrap();
-
-    let kv = test_db.kv();
-    assert_eq!(
-        kv.get(&branch_id, "default", "processed_at").unwrap(),
-        Some(Value::Int(1234567890))
-    );
-
-    let current = state.get(&branch_id, "default", "status").unwrap().unwrap();
-    assert_eq!(current, Value::String("completed".into()));
-}
-
-#[test]
-fn three_primitives_atomic() {
-    let test_db = TestDb::new();
-    let branch_id = test_db.branch_id;
-    let state = test_db.state();
-
-    state
-        .init(&branch_id, "default", "counter", Value::Int(0))
-        .unwrap();
 
     test_db
         .db
@@ -95,9 +55,6 @@ fn three_primitives_atomic() {
 
             // Event
             txn.event_append("log", event_payload(Value::String("action".into())))?;
-
-            // State
-            txn.state_set("counter", Value::Int(1))?;
 
             Ok(())
         })
@@ -111,12 +68,6 @@ fn three_primitives_atomic() {
         Some(Value::String("value".into()))
     );
     assert_eq!(event.len(&branch_id, "default").unwrap(), 1);
-
-    let counter = state
-        .get(&branch_id, "default", "counter")
-        .unwrap()
-        .unwrap();
-    assert_eq!(counter, Value::Int(1));
 }
 
 // ============================================================================
@@ -215,23 +166,22 @@ fn read_from_one_write_to_another() {
     let test_db = TestDb::new();
     let branch_id = test_db.branch_id;
     let kv = test_db.kv();
-    let state = test_db.state();
 
     // Source data
     kv.put(&branch_id, "default", "source", Value::Int(42))
         .unwrap();
 
-    // Copy to state cell using transaction
+    // Read from KV and write back to a different key using transaction
     test_db
         .db
         .transaction(branch_id, |txn| {
             let val = txn.kv_get("source")?.unwrap();
-            txn.state_set("copied", val)?;
+            txn.kv_put("copied", val)?;
             Ok(())
         })
         .unwrap();
 
-    let copied = state.get(&branch_id, "default", "copied").unwrap().unwrap();
+    let copied = kv.get(&branch_id, "default", "copied").unwrap().unwrap();
     assert_eq!(copied, Value::Int(42));
 }
 
@@ -260,16 +210,12 @@ fn saga_pattern_all_steps_complete() {
                 event_payload(Value::String("order:1 created".into())),
             )?;
 
-            // Step 4: Update status via state_set
-            txn.state_set("order:1:status", Value::String("processing".into()))?;
-
             Ok(())
         })
         .unwrap();
 
     let kv = test_db.kv();
     let event = test_db.event();
-    let state = test_db.state();
 
     assert_eq!(
         kv.get(&branch_id, "default", "order:1").unwrap(),
@@ -280,13 +226,6 @@ fn saga_pattern_all_steps_complete() {
         Some(Value::Int(99))
     );
     assert_eq!(event.len(&branch_id, "default").unwrap(), 1);
-    assert_eq!(
-        state
-            .get(&branch_id, "default", "order:1:status")
-            .unwrap()
-            .unwrap(),
-        Value::String("processing".into())
-    );
 }
 
 // ============================================================================

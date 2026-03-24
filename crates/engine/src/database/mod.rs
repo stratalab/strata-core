@@ -22,9 +22,7 @@
 pub mod config;
 mod registry;
 
-pub use config::{
-    ModelConfig, StorageConfig, StrataConfig, SHADOW_EVENT, SHADOW_JSON, SHADOW_KV, SHADOW_STATE,
-};
+pub use config::{ModelConfig, StorageConfig, StrataConfig, SHADOW_EVENT, SHADOW_JSON, SHADOW_KV};
 pub use registry::OPEN_DATABASES;
 
 use crate::background::BackgroundScheduler;
@@ -47,7 +45,7 @@ use strata_durability::codec::IdentityCodec;
 use strata_durability::wal::{DurabilityMode, WalConfig, WalWriter};
 use strata_durability::{
     BranchSnapshotEntry, EventSnapshotEntry, JsonSnapshotEntry, KvSnapshotEntry,
-    StateSnapshotEntry, VectorCollectionSnapshotEntry, VectorSnapshotEntry,
+    VectorCollectionSnapshotEntry, VectorSnapshotEntry,
 };
 use strata_durability::{
     CheckpointCoordinator, CheckpointData, CheckpointError, CompactionError, ManifestError,
@@ -1730,15 +1728,6 @@ impl Database {
                                 }
                             }
                         }
-                        TypeTag::State => {
-                            if let Some(text) = crate::search::extract_indexable_text(value) {
-                                if let Some(name) = key.user_key_string() {
-                                    let entity_ref =
-                                        strata_core::EntityRef::State { branch_id, name };
-                                    index.index_document(&entity_ref, &text, None);
-                                }
-                            }
-                        }
                         TypeTag::Event => {
                             if *key.user_key == *b"__meta__"
                                 || key.user_key.starts_with(b"__tidx__")
@@ -1771,12 +1760,6 @@ impl Database {
                                     branch_id,
                                     key: user_key,
                                 };
-                                index.remove_document(&entity_ref);
-                            }
-                        }
-                        TypeTag::State => {
-                            if let Some(name) = key.user_key_string() {
-                                let entity_ref = strata_core::EntityRef::State { branch_id, name };
                                 index.remove_document(&entity_ref);
                             }
                         }
@@ -2097,11 +2080,9 @@ impl Database {
     fn collect_checkpoint_data(&self) -> CheckpointData {
         use crate::primitives::branch::BranchMetadata;
         use crate::primitives::vector::types::VectorRecord;
-        use strata_core::primitives::State;
 
         let mut kv_entries = Vec::new();
         let mut event_entries = Vec::new();
-        let mut state_entries = Vec::new();
         let mut branch_entries = Vec::new();
         let mut json_entries = Vec::new();
         let mut vector_collections = Vec::new();
@@ -2133,25 +2114,6 @@ impl Database {
                 event_entries.push(EventSnapshotEntry {
                     sequence,
                     payload,
-                    timestamp: vv.timestamp.as_micros(),
-                });
-            }
-
-            // State entries
-            for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::State) {
-                let value_bytes = serde_json::to_vec(&vv.value).unwrap_or_default();
-                // Extract the embedded Counter version from the State struct,
-                // not the Txn version from storage.
-                let counter = match &vv.value {
-                    strata_core::value::Value::String(s) => serde_json::from_str::<State>(s)
-                        .map(|state| state.version.as_u64())
-                        .unwrap_or(vv.version.as_u64()),
-                    _ => vv.version.as_u64(),
-                };
-                state_entries.push(StateSnapshotEntry {
-                    name: key.user_key_string().unwrap_or_default(),
-                    value: value_bytes,
-                    counter,
                     timestamp: vv.timestamp.as_micros(),
                 });
             }
@@ -2251,9 +2213,6 @@ impl Database {
         }
         if !event_entries.is_empty() {
             data = data.with_events(event_entries);
-        }
-        if !state_entries.is_empty() {
-            data = data.with_states(state_entries);
         }
         if !branch_entries.is_empty() {
             data = data.with_branches(branch_entries);
@@ -2963,7 +2922,6 @@ impl Drop for Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::primitives::extensions::StateCellExt;
     use std::sync::Arc;
     use std::time::Duration;
     use strata_concurrency::TransactionPayload;
@@ -4792,40 +4750,6 @@ mod tests {
         assert!(
             branch_entry.created_at > 0,
             "Branch created_at should be non-zero",
-        );
-    }
-
-    #[test]
-    fn test_issue_1732_checkpoint_data_state_counter() {
-        // Issue #1732: collect_checkpoint_data() records the Txn storage version
-        // for state entries instead of the embedded State Counter version.
-        let temp_dir = TempDir::new().unwrap();
-        let db = Database::open(temp_dir.path().join("db")).unwrap();
-
-        let branch_id = BranchId::new();
-
-        // Set a state value 3 times to get counter = 3
-        for _ in 0..3 {
-            db.transaction(branch_id, |txn| {
-                txn.state_set("my_counter", Value::Int(42))?;
-                Ok(())
-            })
-            .unwrap();
-        }
-
-        let data = db.collect_checkpoint_data();
-        let state_entries = data.states.expect("should have state entries");
-        assert!(!state_entries.is_empty());
-
-        let entry = state_entries
-            .iter()
-            .find(|s| s.name == "my_counter")
-            .expect("should find my_counter");
-        // The counter should be 3 (the embedded State Counter), not the Txn version
-        assert_eq!(
-            entry.counter, 3,
-            "State counter should be 3 (Counter domain), got {} (likely Txn version)",
-            entry.counter,
         );
     }
 

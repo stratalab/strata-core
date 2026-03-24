@@ -20,8 +20,6 @@ pub const SHADOW_KV: &str = "_system_embed_kv";
 pub const SHADOW_JSON: &str = "_system_embed_json";
 /// Shadow vector collection name for event log auto-embeddings.
 pub const SHADOW_EVENT: &str = "_system_embed_event";
-/// Shadow vector collection name for state cell auto-embeddings.
-pub const SHADOW_STATE: &str = "_system_embed_state";
 
 /// Config file name placed in the database data directory.
 pub const CONFIG_FILE_NAME: &str = "strata.toml";

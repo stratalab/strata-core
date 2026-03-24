@@ -36,7 +36,7 @@ pub use manifest::{
 };
 pub use primitives::{
     BranchSnapshotEntry, EventSnapshotEntry, JsonSnapshotEntry, KvSnapshotEntry,
-    PrimitiveSerializeError, SnapshotSerializer, StateSnapshotEntry, VectorCollectionSnapshotEntry,
+    PrimitiveSerializeError, SnapshotSerializer, VectorCollectionSnapshotEntry,
     VectorSnapshotEntry,
 };
 pub use segment_meta::{

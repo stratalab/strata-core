@@ -138,20 +138,6 @@ fn kv_list_with_prefix() {
 }
 
 // ============================================================================
-// State Operations
-// ============================================================================
-
-#[test]
-fn state_set_and_read() {
-    let db = create_strata();
-
-    db.state_set("cell", Value::String("state".into())).unwrap();
-    let value = db.state_get("cell").unwrap();
-    assert!(value.is_some());
-    assert_eq!(value.unwrap(), Value::String("state".into()));
-}
-
-// ============================================================================
 // Event Operations
 // ============================================================================
 
@@ -345,10 +331,6 @@ fn use_all_primitives() {
     db.kv_put("config", Value::String("enabled".into()))
         .unwrap();
 
-    // State
-    db.state_set("status", Value::String("running".into()))
-        .unwrap();
-
     // Event
     db.event_append(
         "audit",
@@ -379,10 +361,6 @@ fn use_all_primitives() {
     assert_eq!(
         db.kv_get("config").unwrap(),
         Some(Value::String("enabled".into()))
-    );
-    assert_eq!(
-        db.state_get("status").unwrap().unwrap(),
-        Value::String("running".into())
     );
     assert_eq!(db.event_len().unwrap(), 1);
     let collections = db.vector_list_collections().unwrap();

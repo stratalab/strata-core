@@ -1,7 +1,7 @@
 //! Internal API for the `_system_` branch.
 //!
 //! Access via `db.system_branch()`. Provides the same primitives (KV, JSON,
-//! state, events) routed to the `_system_` branch, bypassing the user-facing
+//! events) routed to the `_system_` branch, bypassing the user-facing
 //! guard that normally rejects access to reserved branches.
 //!
 //! This is a capability-based design: having the handle *is* the authorization.
@@ -162,43 +162,6 @@ impl<'a> SystemBranch<'a> {
             Output::Uint(count) => Ok(count),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for JsonDelete".into(),
-                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-            }),
-        }
-    }
-
-    // =========================================================================
-    // State Operations
-    // =========================================================================
-
-    /// Set a state cell in the system branch.
-    pub fn state_set(&self, cell: &str, value: impl Into<Value>) -> Result<u64> {
-        match self.backend.execute_internal(Command::StateSet {
-            branch: self.branch_id(),
-            space: self.space_id(),
-            cell: cell.to_string(),
-            value: value.into(),
-        })? {
-            Output::WriteResult { version, .. } => Ok(version),
-            _ => Err(Error::Internal {
-                reason: "Unexpected output for StateSet".into(),
-                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-            }),
-        }
-    }
-
-    /// Get a state cell from the system branch.
-    pub fn state_get(&self, cell: &str) -> Result<Option<Value>> {
-        match self.backend.execute_internal(Command::StateGet {
-            branch: self.branch_id(),
-            space: self.space_id(),
-            cell: cell.to_string(),
-            as_of: None,
-        })? {
-            Output::MaybeVersioned(v) => Ok(v.map(|vv| vv.value)),
-            Output::Maybe(v) => Ok(v),
-            _ => Err(Error::Internal {
-                reason: "Unexpected output for StateGet".into(),
                 hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }

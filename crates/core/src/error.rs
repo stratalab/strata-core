@@ -530,7 +530,7 @@ pub enum StrataError {
     /// # use strata_core::{StrataError, EntityRef, BranchId, Version};
     /// # let branch_id = BranchId::new();
     /// StrataError::version_conflict(
-    ///     EntityRef::state(branch_id, "counter"),
+    ///     EntityRef::kv(branch_id, "counter"),
     ///     Version::Counter(5),  // expected
     ///     Version::Counter(6),  // actual
     /// );
@@ -885,7 +885,7 @@ impl StrataError {
     /// # use strata_core::{StrataError, EntityRef, BranchId, Version};
     /// # let branch_id = BranchId::new();
     /// StrataError::version_conflict(
-    ///     EntityRef::state(branch_id, "counter"),
+    ///     EntityRef::kv(branch_id, "counter"),
     ///     Version::Counter(5),
     ///     Version::Counter(6),
     /// );
@@ -1675,7 +1675,7 @@ mod strata_error_tests {
     fn test_version_conflict_constructor() {
         let branch_id = BranchId::new();
         let e = StrataError::version_conflict(
-            EntityRef::state(branch_id, "counter"),
+            EntityRef::kv(branch_id, "counter"),
             Version::Counter(5),
             Version::Counter(6),
         );
@@ -1969,7 +1969,7 @@ mod strata_error_tests {
     fn test_error_display_version_conflict() {
         let branch_id = BranchId::new();
         let e = StrataError::version_conflict(
-            EntityRef::state(branch_id, "counter"),
+            EntityRef::kv(branch_id, "counter"),
             Version::Counter(5),
             Version::Counter(6),
         );

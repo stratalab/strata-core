@@ -297,20 +297,15 @@ mod tests {
 
         let kv_key = Key::new_kv(ns.clone(), "data");
         let event_key = Key::new_event(ns.clone(), 1);
-        let state_key = Key::new_state(ns.clone(), "test-state");
-
         index.insert(TypeTag::KV, kv_key.clone());
         index.insert(TypeTag::Event, event_key.clone());
-        index.insert(TypeTag::State, state_key.clone());
 
         // Verify each type has its own key
         assert_eq!(index.get(&TypeTag::KV).unwrap().len(), 1);
         assert_eq!(index.get(&TypeTag::Event).unwrap().len(), 1);
-        assert_eq!(index.get(&TypeTag::State).unwrap().len(), 1);
         assert!(index.get(&TypeTag::KV).unwrap().contains(&kv_key));
         assert!(index.get(&TypeTag::Event).unwrap().contains(&event_key));
-        assert!(index.get(&TypeTag::State).unwrap().contains(&state_key));
-        assert_eq!(index.len(), 3);
+        assert_eq!(index.len(), 2);
     }
 
     #[test]

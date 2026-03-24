@@ -117,9 +117,6 @@ pub use primitives::{
     Searchable,
     SimpleScorer,
     SpaceIndex,
-    State,
-    StateCell,
-    StateCellExt,
     StorageDtype,
     VectorBackendState,
     // Vector types

@@ -509,7 +509,6 @@ mod tests {
         assert!(req2.includes_primitive(PrimitiveType::Kv));
         assert!(req2.includes_primitive(PrimitiveType::Json));
         assert!(!req2.includes_primitive(PrimitiveType::Event));
-        assert!(!req2.includes_primitive(PrimitiveType::State));
     }
 
     // ========================================

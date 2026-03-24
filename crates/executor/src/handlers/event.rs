@@ -267,10 +267,7 @@ fn enrich_event_error(
     err: crate::Error,
 ) -> crate::Error {
     match err {
-        crate::Error::StreamNotFound {
-            stream,
-            hint: None,
-        } => {
+        crate::Error::StreamNotFound { stream, hint: None } => {
             let candidates = p.event.list_types(branch_id, space).unwrap_or_default();
             let hint = crate::suggest::format_hint("event types", &candidates, &stream, 2);
             crate::Error::StreamNotFound { stream, hint }

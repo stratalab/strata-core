@@ -118,42 +118,6 @@ fn test_kv_write_read_determinism() {
     }
 }
 
-#[test]
-fn test_state_write_read_determinism() {
-    let executor = create_test_executor();
-
-    // Write a value
-    executor
-        .execute(Command::StateSet {
-            branch: Some(BranchId::from("default")),
-            space: None,
-            cell: "counter".to_string(),
-            value: Value::Int(42),
-        })
-        .unwrap();
-
-    // Read it multiple times - should always get same result
-    let results: Vec<_> = (0..5)
-        .map(|_| {
-            executor.execute(Command::StateGet {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                cell: "counter".to_string(),
-                as_of: None,
-            })
-        })
-        .collect();
-
-    for result in &results {
-        match result {
-            Ok(Output::MaybeVersioned(Some(vv))) => {
-                assert_eq!(vv.value, Value::Int(42));
-            }
-            _ => panic!("Expected Maybe(Some) after write"),
-        }
-    }
-}
-
 // =============================================================================
 // Error Determinism Tests
 // =============================================================================

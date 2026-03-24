@@ -8,7 +8,6 @@
 //! Different primitives have different key structures:
 //! - KV: namespace + user_key
 //! - EventLog: namespace + sequence
-//! - StateCell: namespace + cell_name
 //! - etc.
 //!
 //! EntityRef provides a **uniform way to reference any entity**.
@@ -68,14 +67,6 @@ pub enum EntityRef {
         sequence: u64,
     },
 
-    /// Reference to a state cell
-    State {
-        /// Branch scope
-        branch_id: BranchId,
-        /// Cell name (user-defined)
-        name: String,
-    },
-
     /// Reference to a branch's metadata
     Branch {
         /// The branch being referenced (also the scope)
@@ -119,13 +110,6 @@ impl EntityRef {
             branch_id,
             sequence,
         }
-    }
-
-    /// Create a state cell entity reference
-    pub fn state(branch_id: BranchId, name: impl Into<String>) -> Self {
-        let name = name.into();
-        debug_assert!(!name.is_empty(), "EntityRef::state name must not be empty");
-        EntityRef::State { branch_id, name }
     }
 
     /// Create a branch entity reference
@@ -174,7 +158,6 @@ impl EntityRef {
         match self {
             EntityRef::Kv { branch_id, .. } => *branch_id,
             EntityRef::Event { branch_id, .. } => *branch_id,
-            EntityRef::State { branch_id, .. } => *branch_id,
             EntityRef::Branch { branch_id } => *branch_id,
             EntityRef::Json { branch_id, .. } => *branch_id,
             EntityRef::Vector { branch_id, .. } => *branch_id,
@@ -186,7 +169,6 @@ impl EntityRef {
         match self {
             EntityRef::Kv { .. } => PrimitiveType::Kv,
             EntityRef::Event { .. } => PrimitiveType::Event,
-            EntityRef::State { .. } => PrimitiveType::State,
             EntityRef::Branch { .. } => PrimitiveType::Branch,
             EntityRef::Json { .. } => PrimitiveType::Json,
             EntityRef::Vector { .. } => PrimitiveType::Vector,
@@ -205,11 +187,6 @@ impl EntityRef {
     /// Check if this is an event reference
     pub fn is_event(&self) -> bool {
         matches!(self, EntityRef::Event { .. })
-    }
-
-    /// Check if this is a state reference
-    pub fn is_state(&self) -> bool {
-        matches!(self, EntityRef::State { .. })
     }
 
     /// Check if this is a branch reference
@@ -247,14 +224,6 @@ impl EntityRef {
         }
     }
 
-    /// Get the state cell name if this is a state reference
-    pub fn state_name(&self) -> Option<&str> {
-        match self {
-            EntityRef::State { name, .. } => Some(name),
-            _ => None,
-        }
-    }
-
     /// Get the JSON doc ID if this is a JSON reference
     pub fn json_doc_id(&self) -> Option<&str> {
         match self {
@@ -285,9 +254,6 @@ impl std::fmt::Display for EntityRef {
                 sequence,
             } => {
                 write!(f, "event://{}/{}", branch_id, sequence)
-            }
-            EntityRef::State { branch_id, name } => {
-                write!(f, "state://{}/{}", branch_id, name)
             }
             EntityRef::Branch { branch_id } => {
                 write!(f, "branch://{}", branch_id)
@@ -338,17 +304,6 @@ mod tests {
     }
 
     #[test]
-    fn test_entity_ref_state() {
-        let branch_id = BranchId::new();
-        let ref_ = EntityRef::state(branch_id, "cell-name");
-
-        assert!(ref_.is_state());
-        assert_eq!(ref_.branch_id(), branch_id);
-        assert_eq!(ref_.primitive_type(), PrimitiveType::State);
-        assert_eq!(ref_.state_name(), Some("cell-name"));
-    }
-
-    #[test]
     fn test_entity_ref_branch() {
         let branch_id = BranchId::new();
         let ref_ = EntityRef::branch(branch_id);
@@ -390,9 +345,6 @@ mod tests {
 
         let event = EntityRef::event(branch_id, 42);
         assert!(format!("{}", event).starts_with("event://"));
-
-        let state = EntityRef::state(branch_id, "cell");
-        assert!(format!("{}", state).starts_with("state://"));
 
         let branch_ref = EntityRef::branch(branch_id);
         assert!(format!("{}", branch_ref).starts_with("branch://"));
@@ -436,7 +388,6 @@ mod tests {
         let refs = vec![
             EntityRef::kv(branch_id, "key"),
             EntityRef::event(branch_id, 42),
-            EntityRef::state(branch_id, "cell"),
             EntityRef::branch(branch_id),
             EntityRef::json(branch_id, "test-doc"),
             EntityRef::vector(branch_id, "col", "key"),
@@ -456,7 +407,6 @@ mod tests {
 
         // Wrong extractors should return None
         assert!(kv_ref.event_sequence().is_none());
-        assert!(kv_ref.state_name().is_none());
         assert!(kv_ref.json_doc_id().is_none());
         assert!(kv_ref.vector_location().is_none());
     }
@@ -469,15 +419,14 @@ mod tests {
         let refs = [
             EntityRef::kv(branch_id, "k"),
             EntityRef::event(branch_id, 0),
-            EntityRef::state(branch_id, "s"),
             EntityRef::branch(branch_id),
             EntityRef::json(branch_id, "j"),
             EntityRef::vector(branch_id, "c", "k"),
         ];
 
-        // Verify they map to all 6 primitive types
+        // Verify they map to all 5 primitive types
         let types: std::collections::HashSet<_> = refs.iter().map(|r| r.primitive_type()).collect();
-        assert_eq!(types.len(), 6);
+        assert_eq!(types.len(), 5);
     }
 
     #[test]
@@ -494,7 +443,6 @@ mod tests {
         let refs = vec![
             EntityRef::kv(branch_id, "k"),
             EntityRef::event(branch_id, 0),
-            EntityRef::state(branch_id, "s"),
             EntityRef::branch(branch_id),
             EntityRef::json(branch_id, "j"),
             EntityRef::vector(branch_id, "c", "k"),
@@ -504,7 +452,6 @@ mod tests {
             let checks = [
                 r.is_kv(),
                 r.is_event(),
-                r.is_state(),
                 r.is_branch(),
                 r.is_json(),
                 r.is_vector(),
@@ -535,9 +482,6 @@ mod tests {
         let kv = EntityRef::kv(branch_id, "");
         assert_eq!(kv.kv_key(), Some(""));
 
-        let state = EntityRef::state(branch_id, "");
-        assert_eq!(state.state_name(), Some(""));
-
         let json = EntityRef::json(branch_id, "");
         assert_eq!(json.json_doc_id(), Some(""));
     }
@@ -548,14 +492,6 @@ mod tests {
     fn test_entity_ref_empty_kv_key_debug_panics() {
         let branch_id = BranchId::new();
         let _kv = EntityRef::kv(branch_id, "");
-    }
-
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(expected = "EntityRef::state name must not be empty")]
-    fn test_entity_ref_empty_state_name_debug_panics() {
-        let branch_id = BranchId::new();
-        let _state = EntityRef::state(branch_id, "");
     }
 
     #[cfg(debug_assertions)]
@@ -596,11 +532,8 @@ mod tests {
         let branch_id = BranchId::new();
         // Even with same branch_id and key-like values, different types are never equal
         let kv = EntityRef::kv(branch_id, "name");
-        let state = EntityRef::state(branch_id, "name");
         let json = EntityRef::json(branch_id, "name");
-        assert_ne!(kv, state);
         assert_ne!(kv, json);
-        assert_ne!(state, json);
     }
 
     #[test]

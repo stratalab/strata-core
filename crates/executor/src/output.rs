@@ -109,23 +109,6 @@ pub enum Output {
         deleted: bool,
     },
 
-    /// State CAS result — on success: version; on conflict: current value for retry
-    StateCasResult {
-        /// Cell name.
-        cell: String,
-        /// Whether the CAS operation succeeded.
-        success: bool,
-        /// Version number on success.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        version: Option<u64>,
-        /// Current value on conflict (for retry).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        current_value: Option<Value>,
-        /// Current version on conflict (for retry).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        current_version: Option<u64>,
-    },
-
     // ==================== Scan Results ====================
     /// Paginated key list with has_more indicator
     KeysPage {
@@ -316,8 +299,6 @@ pub enum Output {
         json_queued: u64,
         /// Events queued for re-embedding
         event_queued: u64,
-        /// State cells queued for re-embedding
-        state_queued: u64,
         /// New embedding dimension
         new_dimension: usize,
     },

@@ -2040,16 +2040,16 @@ fn list_by_type_filters_correctly() {
     let store = SegmentedStore::new();
     let b = branch();
     seed(&store, kv_key("k1"), Value::Int(1), 1);
-    let state_key = Key::new(ns(), TypeTag::State, "s1".as_bytes().to_vec());
-    seed(&store, state_key, Value::Int(2), 2);
+    let json_key = Key::new(ns(), TypeTag::Json, "d1".as_bytes().to_vec());
+    seed(&store, json_key, Value::Int(2), 2);
 
     let kv_entries = store.list_by_type(&b, TypeTag::KV);
     assert_eq!(kv_entries.len(), 1);
     assert_eq!(kv_entries[0].1.value, Value::Int(1));
 
-    let state_entries = store.list_by_type(&b, TypeTag::State);
-    assert_eq!(state_entries.len(), 1);
-    assert_eq!(state_entries[0].1.value, Value::Int(2));
+    let json_entries = store.list_by_type(&b, TypeTag::Json);
+    assert_eq!(json_entries.len(), 1);
+    assert_eq!(json_entries[0].1.value, Value::Int(2));
 }
 
 #[test]
@@ -5073,7 +5073,7 @@ fn inherited_layer_custom_space() {
 
 #[test]
 fn inherited_layer_non_kv_type_tags() {
-    // Verify inherited layers work for State and Event type tags, not just KV.
+    // Verify inherited layers work for Json and Event type tags, not just KV.
     let parent = parent_branch();
     let child = child_branch();
     let p_ns = Arc::new(Namespace::new(parent, "default".to_string()));
@@ -5082,10 +5082,10 @@ fn inherited_layer_non_kv_type_tags() {
     let dir = tempfile::tempdir().unwrap();
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
 
-    // Write a State entry and an Event entry to parent
+    // Write a Json entry and an Event entry to parent
     store
         .put_with_version_mode(
-            Key::new(p_ns.clone(), TypeTag::State, b"cell1".to_vec()),
+            Key::new(p_ns.clone(), TypeTag::Json, b"doc1".to_vec()),
             Value::Int(100),
             1,
             None,
@@ -5106,10 +5106,10 @@ fn inherited_layer_non_kv_type_tags() {
 
     attach_inherited_layer(&store, parent, child, 10);
 
-    // Child sees the State entry
+    // Child sees the Json entry
     let result = store
         .get_versioned(
-            &Key::new(c_ns.clone(), TypeTag::State, b"cell1".to_vec()),
+            &Key::new(c_ns.clone(), TypeTag::Json, b"doc1".to_vec()),
             u64::MAX,
         )
         .unwrap()
@@ -5126,9 +5126,9 @@ fn inherited_layer_non_kv_type_tags() {
         .unwrap();
     assert_eq!(result.value, Value::Int(200));
 
-    // KV lookup should NOT find State/Event entries
+    // KV lookup should NOT find Json/Event entries
     assert!(store
-        .get_versioned(&child_kv("cell1"), u64::MAX)
+        .get_versioned(&child_kv("doc1"), u64::MAX)
         .unwrap()
         .is_none());
 }

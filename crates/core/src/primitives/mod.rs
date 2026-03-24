@@ -13,7 +13,6 @@
 
 pub mod event;
 pub mod json;
-pub mod state;
 pub mod vector;
 
 // Re-export all types at module level
@@ -23,7 +22,6 @@ pub use json::{
     JsonLimitError, JsonPatch, JsonPath, JsonPathError, JsonValue, PathParseError, PathSegment,
     MAX_ARRAY_SIZE, MAX_DOCUMENT_SIZE, MAX_NESTING_DEPTH, MAX_PATH_LENGTH,
 };
-pub use state::State;
 pub use vector::{
     CollectionId, CollectionInfo, DistanceMetric, FilterCondition, FilterOp, JsonScalar,
     MetadataFilter, StorageDtype, VectorConfig, VectorEntry, VectorId, VectorMatch,

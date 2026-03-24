@@ -7,8 +7,7 @@
 pub const KV: u8 = 0x01;
 /// Event log
 pub const EVENT: u8 = 0x02;
-/// State cell
-pub const STATE: u8 = 0x03;
+// 0x03 was State (StateCell removed, never shipped)
 // 0x04 was Trace — reserved, intentionally skipped
 /// Branch
 pub const BRANCH: u8 = 0x05;
@@ -18,14 +17,13 @@ pub const JSON: u8 = 0x06;
 pub const VECTOR: u8 = 0x07;
 
 /// All valid primitive tags in order
-pub const ALL_TAGS: [u8; 6] = [KV, EVENT, STATE, BRANCH, JSON, VECTOR];
+pub const ALL_TAGS: [u8; 5] = [KV, EVENT, BRANCH, JSON, VECTOR];
 
 /// Get the tag name for display
 pub fn tag_name(tag: u8) -> &'static str {
     match tag {
         KV => "KV",
         EVENT => "Event",
-        STATE => "State",
         BRANCH => "Branch",
         JSON => "Json",
         VECTOR => "Vector",
@@ -50,7 +48,6 @@ mod tests {
     fn tag_names() {
         assert_eq!(tag_name(KV), "KV");
         assert_eq!(tag_name(EVENT), "Event");
-        assert_eq!(tag_name(STATE), "State");
         assert_eq!(tag_name(BRANCH), "Branch");
         assert_eq!(tag_name(JSON), "Json");
         assert_eq!(tag_name(VECTOR), "Vector");
@@ -59,7 +56,7 @@ mod tests {
 
     #[test]
     fn all_tags_complete() {
-        assert_eq!(ALL_TAGS.len(), 6);
-        assert_eq!(ALL_TAGS, [KV, EVENT, STATE, BRANCH, JSON, VECTOR]);
+        assert_eq!(ALL_TAGS.len(), 5);
+        assert_eq!(ALL_TAGS, [KV, EVENT, BRANCH, JSON, VECTOR]);
     }
 }

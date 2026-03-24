@@ -8,7 +8,7 @@
 //! - Value: Unified value enum for all data types
 //! - Error: Error type hierarchy
 //! - Traits: Core trait definitions (Storage)
-//! - Primitive types: Event, State, JSON, Vector types (in `primitives` module)
+//! - Primitive types: Event, JSON, Vector types (in `primitives` module)
 //! - Contract types: EntityRef, Versioned<T>, Version, Timestamp, PrimitiveType, BranchName
 
 #![warn(missing_docs)]
@@ -20,7 +20,7 @@ pub mod contract; // contract types
 pub mod error;
 pub mod instrumentation; // Performance tracing (feature-gated)
 pub mod limits; // Size limits for keys, values, and vectors
-pub mod primitives; // primitive types (Event, State, Vector, JSON types)
+pub mod primitives; // primitive types (Event, Vector, JSON types)
 pub mod traits;
 pub mod types;
 pub mod value;
@@ -66,8 +66,6 @@ pub use primitives::{
     MetadataFilter,
     PathParseError,
     PathSegment,
-    // State types
-    State,
     StorageDtype,
     VectorConfig,
     VectorEntry,

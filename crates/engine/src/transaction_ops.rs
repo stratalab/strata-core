@@ -22,14 +22,11 @@
 //!     // Write to Event
 //!     let event_version = txn.event_append("config_read", json!({}))?;
 //!
-//!     // Update State
-//!     txn.state_set("last_event", Value::from(event_version.as_u64()))?;
-//!
 //!     Ok(())
 //! })?;
 //! ```
 
-use strata_core::{Event, JsonPath, JsonValue, State, StrataError, Value, Version, Versioned};
+use strata_core::{Event, JsonPath, JsonValue, StrataError, Value, Version, Versioned};
 
 /// Operations available within a transaction
 ///
@@ -41,7 +38,6 @@ use strata_core::{Event, JsonPath, JsonValue, State, StrataError, Value, Version
 ///
 /// - **KV**: key-value get, put, delete, exists, list
 /// - **Event**: append-only event log with hash chaining
-/// - **State**: compare-and-swap state cells (init, get, cas)
 /// - **JSON**: document operations with path-based access
 ///
 /// ## Not Supported in Transactions
@@ -88,24 +84,6 @@ pub trait TransactionOps {
     fn event_len(&mut self) -> Result<u64, StrataError>;
 
     // =========================================================================
-    // State Operations (4 MVP)
-    // =========================================================================
-
-    /// Read a state cell
-    fn state_get(&mut self, name: &str) -> Result<Option<Versioned<State>>, StrataError>;
-
-    /// Initialize a state cell (fails if exists)
-    fn state_init(&mut self, name: &str, value: Value) -> Result<Version, StrataError>;
-
-    /// Compare-and-swap a state cell
-    fn state_cas(
-        &mut self,
-        name: &str,
-        expected_version: Version,
-        value: Value,
-    ) -> Result<Version, StrataError>;
-
-    // =========================================================================
     // Json Operations (Phase 4)
     // =========================================================================
 
@@ -143,11 +121,10 @@ mod tests {
 
     /// Mock implementation of TransactionOps for testing trait properties
     ///
-    /// Implements KV, Event, State, and JSON operations.
+    /// Implements KV, Event, and JSON operations.
     /// Vector and Branch return proper errors (matching real Transaction behavior).
     struct MockTransactionOps {
         kv_data: std::collections::HashMap<String, Value>,
-        state_data: std::collections::HashMap<String, State>,
         json_data: std::collections::HashMap<String, JsonValue>,
         event_count: u64,
     }
@@ -156,7 +133,6 @@ mod tests {
         fn new() -> Self {
             Self {
                 kv_data: std::collections::HashMap::new(),
-                state_data: std::collections::HashMap::new(),
                 json_data: std::collections::HashMap::new(),
                 event_count: 0,
             }
@@ -220,52 +196,6 @@ mod tests {
 
         fn event_len(&mut self) -> Result<u64, StrataError> {
             Ok(self.event_count)
-        }
-
-        fn state_get(&mut self, name: &str) -> Result<Option<Versioned<State>>, StrataError> {
-            Ok(self
-                .state_data
-                .get(name)
-                .map(|s| Versioned::new(s.clone(), s.version)))
-        }
-
-        fn state_init(&mut self, name: &str, value: Value) -> Result<Version, StrataError> {
-            if self.state_data.contains_key(name) {
-                return Err(StrataError::invalid_input(format!(
-                    "state '{}' already exists",
-                    name
-                )));
-            }
-            let state = State::new(value);
-            let version = state.version;
-            self.state_data.insert(name.to_string(), state);
-            Ok(version)
-        }
-
-        fn state_cas(
-            &mut self,
-            name: &str,
-            expected: Version,
-            value: Value,
-        ) -> Result<Version, StrataError> {
-            let current = self
-                .state_data
-                .get(name)
-                .ok_or_else(|| StrataError::Internal {
-                    message: format!("state '{}' not found", name),
-                })?;
-            if current.version != expected {
-                return Err(StrataError::Internal {
-                    message: format!(
-                        "version conflict: expected {:?}, got {:?}",
-                        expected, current.version
-                    ),
-                });
-            }
-            let new_version = expected.increment();
-            let new_state = State::with_version(value, new_version);
-            self.state_data.insert(name.to_string(), new_state);
-            Ok(new_version)
         }
 
         fn json_create(&mut self, doc_id: &str, value: JsonValue) -> Result<Version, StrataError> {
@@ -416,56 +346,6 @@ mod tests {
         let user_keys = ops.kv_list(Some("user:")).unwrap();
         assert_eq!(user_keys.len(), 2);
         assert!(user_keys.iter().all(|k| k.starts_with("user:")));
-    }
-
-    // ========== State Operations Through Trait Object ==========
-
-    #[test]
-    fn test_state_init_and_get_through_trait_object() {
-        let mut ops: Box<dyn TransactionOps> = Box::new(MockTransactionOps::new());
-
-        // Initialize state
-        let version = ops.state_init("counter", Value::Int(0)).unwrap();
-        assert_eq!(version, Version::counter(1));
-
-        // Read state back
-        let result = ops.state_get("counter").unwrap();
-        assert!(result.is_some());
-        let versioned = result.unwrap();
-        assert_eq!(versioned.value.value, Value::Int(0));
-        assert_eq!(versioned.value.version, Version::counter(1));
-    }
-
-    #[test]
-    fn test_state_cas_through_trait_object() {
-        let mut ops: Box<dyn TransactionOps> = Box::new(MockTransactionOps::new());
-
-        ops.state_init("counter", Value::Int(0)).unwrap();
-        let new_version = ops
-            .state_cas("counter", Version::counter(1), Value::Int(42))
-            .unwrap();
-        assert_eq!(new_version, Version::counter(2));
-
-        let result = ops.state_get("counter").unwrap().unwrap();
-        assert_eq!(result.value.value, Value::Int(42));
-    }
-
-    #[test]
-    fn test_state_cas_version_mismatch_returns_error() {
-        let mut ops: Box<dyn TransactionOps> = Box::new(MockTransactionOps::new());
-
-        ops.state_init("counter", Value::Int(0)).unwrap();
-        let result = ops.state_cas("counter", Version::counter(99), Value::Int(1));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_state_init_duplicate_returns_error() {
-        let mut ops: Box<dyn TransactionOps> = Box::new(MockTransactionOps::new());
-
-        ops.state_init("counter", Value::Int(0)).unwrap();
-        let result = ops.state_init("counter", Value::Int(1));
-        assert!(result.is_err());
     }
 
     // ========== JSON Operations Through Trait Object ==========

@@ -5,13 +5,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use strata_core::contract::Version;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_engine::database::config::StorageConfig;
 use strata_engine::Database;
 use strata_engine::StrataConfig;
-use strata_engine::{BranchIndex, EventLog, KVStore, StateCell};
+use strata_engine::{BranchIndex, EventLog, KVStore};
 use tempfile::TempDir;
 
 /// Helper to create an empty object payload for EventLog
@@ -112,60 +111,6 @@ fn test_event_log_isolation() {
     assert_eq!(event_log.len(&branch2, "default").unwrap(), 1); // Still 1
 }
 
-/// Test StateCell isolation - same cell name in different branches are independent
-#[test]
-fn test_state_cell_isolation() {
-    let (db, _temp) = setup();
-    let state_cell = StateCell::new(db.clone());
-
-    let branch1 = BranchId::new();
-    let branch2 = BranchId::new();
-
-    // Same cell name, different branches
-    state_cell
-        .init(&branch1, "default", "counter", Value::Int(0))
-        .unwrap();
-    state_cell
-        .init(&branch2, "default", "counter", Value::Int(100))
-        .unwrap();
-
-    // Each branch sees its own value
-    let state1 = state_cell
-        .get(&branch1, "default", "counter")
-        .unwrap()
-        .unwrap();
-    let state2 = state_cell
-        .get(&branch2, "default", "counter")
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(state1, Value::Int(0));
-    assert_eq!(state2, Value::Int(100));
-
-    // CAS on branch1 doesn't affect branch2
-    state_cell
-        .cas(
-            &branch1,
-            "default",
-            "counter",
-            Version::counter(1),
-            Value::Int(10),
-        )
-        .unwrap();
-
-    let state1 = state_cell
-        .get(&branch1, "default", "counter")
-        .unwrap()
-        .unwrap();
-    let state2 = state_cell
-        .get(&branch2, "default", "counter")
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(state1, Value::Int(10));
-    assert_eq!(state2, Value::Int(100)); // Unchanged
-}
-
 /// Test that queries in one branch context NEVER return data from another branch
 #[test]
 fn test_cross_branch_query_isolation() {
@@ -177,7 +122,6 @@ fn test_cross_branch_query_isolation() {
     // Create extensive data in both branches
     let kv = KVStore::new(db.clone());
     let event_log = EventLog::new(db.clone());
-    let state_cell = StateCell::new(db.clone());
 
     // Branch1 data
     for i in 0..10 {
@@ -187,14 +131,6 @@ fn test_cross_branch_query_isolation() {
             .append(&branch1, "default", "event", int_payload(i))
             .unwrap();
     }
-    state_cell
-        .init(
-            &branch1,
-            "default",
-            "state",
-            Value::String("branch1".into()),
-        )
-        .unwrap();
 
     // Branch2 data
     for i in 0..5 {
@@ -209,14 +145,6 @@ fn test_cross_branch_query_isolation() {
             .append(&branch2, "default", "event", int_payload(i + 100))
             .unwrap();
     }
-    state_cell
-        .init(
-            &branch2,
-            "default",
-            "state",
-            Value::String("branch2".into()),
-        )
-        .unwrap();
 
     // Verify counts are isolated
     assert_eq!(kv.list(&branch1, "default", None).unwrap().len(), 10);
@@ -234,24 +162,6 @@ fn test_cross_branch_query_isolation() {
         kv.get(&branch2, "default", "key0").unwrap(),
         Some(Value::Int(100))
     );
-
-    // Branch1 cannot see branch2's keys that don't exist in branch1
-    // (branch2 only has key0-key4, branch1 has key0-key9)
-    // Actually both have overlapping key names, but different values
-    assert_eq!(
-        state_cell
-            .get(&branch1, "default", "state")
-            .unwrap()
-            .unwrap(),
-        Value::String("branch1".into())
-    );
-    assert_eq!(
-        state_cell
-            .get(&branch2, "default", "state")
-            .unwrap()
-            .unwrap(),
-        Value::String("branch2".into())
-    );
 }
 
 /// Test that deleting a branch only affects that branch's data
@@ -262,7 +172,6 @@ fn test_branch_delete_isolation() {
     let branch_index = BranchIndex::new(db.clone());
     let kv = KVStore::new(db.clone());
     let event_log = EventLog::new(db.clone());
-    let state_cell = StateCell::new(db.clone());
 
     // Create two branches via BranchIndex
     let meta1 = branch_index.create_branch("branch1").unwrap();
@@ -282,13 +191,6 @@ fn test_branch_delete_isolation() {
         .append(&branch2, "default", "event", empty_payload())
         .unwrap();
 
-    state_cell
-        .init(&branch1, "default", "cell", Value::Int(10))
-        .unwrap();
-    state_cell
-        .init(&branch2, "default", "cell", Value::Int(20))
-        .unwrap();
-
     // Verify both branches have data
     assert!(kv.get(&branch1, "default", "key").unwrap().is_some());
     assert!(kv.get(&branch2, "default", "key").unwrap().is_some());
@@ -299,10 +201,6 @@ fn test_branch_delete_isolation() {
     // branch1 data is GONE
     assert!(kv.get(&branch1, "default", "key").unwrap().is_none());
     assert_eq!(event_log.len(&branch1, "default").unwrap(), 0);
-    assert!(state_cell
-        .get(&branch1, "default", "cell")
-        .unwrap()
-        .is_none());
 
     // branch2 data is UNTOUCHED
     assert_eq!(
@@ -310,10 +208,6 @@ fn test_branch_delete_isolation() {
         Some(Value::Int(2))
     );
     assert_eq!(event_log.len(&branch2, "default").unwrap(), 1);
-    assert!(state_cell
-        .get(&branch2, "default", "cell")
-        .unwrap()
-        .is_some());
 }
 
 /// Test that many concurrent branches remain isolated
@@ -341,58 +235,6 @@ fn test_many_branches_isolation() {
         let keys = kv.list(branch_id, "default", None).unwrap();
         assert_eq!(keys.len(), 2);
     }
-}
-
-/// Test StateCell CAS isolation - version conflicts don't cross branches
-#[test]
-fn test_state_cell_cas_isolation() {
-    let (db, _temp) = setup();
-    let state_cell = StateCell::new(db.clone());
-
-    let branch1 = BranchId::new();
-    let branch2 = BranchId::new();
-
-    // Both init same cell name
-    state_cell
-        .init(&branch1, "default", "cell", Value::Int(0))
-        .unwrap();
-    state_cell
-        .init(&branch2, "default", "cell", Value::Int(0))
-        .unwrap();
-
-    // CAS on branch1 with version 1
-    state_cell
-        .cas(
-            &branch1,
-            "default",
-            "cell",
-            Version::counter(1),
-            Value::Int(10),
-        )
-        .unwrap();
-
-    // CAS on branch2 with version 1 should ALSO succeed (independent versions)
-    let result = state_cell.cas(
-        &branch2,
-        "default",
-        "cell",
-        Version::counter(1),
-        Value::Int(20),
-    );
-    assert!(result.is_ok());
-
-    // Both have been updated
-    let s1 = state_cell
-        .get(&branch1, "default", "cell")
-        .unwrap()
-        .unwrap();
-    let s2 = state_cell
-        .get(&branch2, "default", "cell")
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(s1, Value::Int(10));
-    assert_eq!(s2, Value::Int(20));
 }
 
 /// Test EventLog chain isolation - chains are independent per branch

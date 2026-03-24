@@ -97,118 +97,6 @@ mod kv_single {
     }
 }
 
-mod state_single {
-    use super::*;
-
-    #[test]
-    fn init_and_read() {
-        let db = create_test_db();
-        let branch_id = BranchId::new();
-        let state = StateCell::new(db);
-
-        state
-            .init(&branch_id, "default", "counter", Value::Int(0))
-            .unwrap();
-        let val = state
-            .get(&branch_id, "default", "counter")
-            .unwrap()
-            .unwrap();
-        assert_eq!(val, Value::Int(0));
-    }
-
-    #[test]
-    fn set_updates_value() {
-        let db = create_test_db();
-        let branch_id = BranchId::new();
-        let state = StateCell::new(db);
-
-        state
-            .init(&branch_id, "default", "counter", Value::Int(0))
-            .unwrap();
-        state
-            .set(&branch_id, "default", "counter", Value::Int(1))
-            .unwrap();
-        state
-            .set(&branch_id, "default", "counter", Value::Int(2))
-            .unwrap();
-
-        let val = state
-            .get(&branch_id, "default", "counter")
-            .unwrap()
-            .unwrap();
-        assert_eq!(val, Value::Int(2));
-    }
-
-    #[test]
-    fn cas_with_correct_version_succeeds() {
-        let db = create_test_db();
-        let branch_id = BranchId::new();
-        let state = StateCell::new(db);
-
-        state
-            .init(&branch_id, "default", "counter", Value::Int(0))
-            .unwrap();
-        let current = state
-            .getv(&branch_id, "default", "counter")
-            .unwrap()
-            .unwrap();
-
-        state
-            .cas(
-                &branch_id,
-                "default",
-                "counter",
-                current.version(),
-                Value::Int(1),
-            )
-            .unwrap();
-
-        let updated = state
-            .get(&branch_id, "default", "counter")
-            .unwrap()
-            .unwrap();
-        assert_eq!(updated, Value::Int(1));
-    }
-
-    #[test]
-    fn cas_with_stale_version_fails() {
-        let db = create_test_db();
-        let branch_id = BranchId::new();
-        let state = StateCell::new(db);
-
-        state
-            .init(&branch_id, "default", "counter", Value::Int(0))
-            .unwrap();
-        let current = state
-            .getv(&branch_id, "default", "counter")
-            .unwrap()
-            .unwrap();
-        let stale_version = current.version();
-
-        // Update through another path
-        state
-            .set(&branch_id, "default", "counter", Value::Int(1))
-            .unwrap();
-
-        // CAS with stale version should fail
-        let result = state.cas(
-            &branch_id,
-            "default",
-            "counter",
-            stale_version,
-            Value::Int(99),
-        );
-        assert!(result.is_err());
-
-        // Value should remain at 1
-        let final_val = state
-            .get(&branch_id, "default", "counter")
-            .unwrap()
-            .unwrap();
-        assert_eq!(final_val, Value::Int(1));
-    }
-}
-
 mod event_single {
     use super::*;
 
@@ -486,7 +374,7 @@ mod vector_single {
 // ============================================================================
 
 #[test]
-fn all_six_primitives_together() {
+fn all_five_primitives_together() {
     let test_db = TestDb::new();
     let branch_id = test_db.branch_id;
     let p = test_db.all_primitives();
@@ -499,16 +387,6 @@ fn all_six_primitives_together() {
         Value::String("enabled".into()),
     )
     .unwrap();
-
-    // State
-    p.state
-        .init(
-            &branch_id,
-            "default",
-            "status",
-            Value::String("running".into()),
-        )
-        .unwrap();
 
     // Event
     p.event
@@ -547,13 +425,6 @@ fn all_six_primitives_together() {
         p.kv.get(&branch_id, "default", "config").unwrap(),
         Some(Value::String("enabled".into()))
     );
-    assert_eq!(
-        p.state
-            .get(&branch_id, "default", "status")
-            .unwrap()
-            .unwrap(),
-        Value::String("running".into())
-    );
     assert!(p.event.len(&branch_id, "default").unwrap() > 0);
     assert_eq!(
         p.json
@@ -588,14 +459,13 @@ fn cross_primitive_workflow_agent_memory() {
         Value::String("assistant".into()),
     )
     .unwrap();
-    p.state
-        .init(
-            &branch_id,
-            "default",
-            "agent:status",
-            Value::String("initializing".into()),
-        )
-        .unwrap();
+    p.kv.put(
+        &branch_id,
+        "default",
+        "agent:status",
+        Value::String("initializing".into()),
+    )
+    .unwrap();
     p.event
         .append(
             &branch_id,
@@ -655,14 +525,13 @@ fn cross_primitive_workflow_agent_memory() {
     }
 
     // Update status
-    p.state
-        .set(
-            &branch_id,
-            "default",
-            "agent:status",
-            Value::String("completed".into()),
-        )
-        .unwrap();
+    p.kv.put(
+        &branch_id,
+        "default",
+        "agent:status",
+        Value::String("completed".into()),
+    )
+    .unwrap();
     p.event
         .append(
             &branch_id,
@@ -673,11 +542,10 @@ fn cross_primitive_workflow_agent_memory() {
         .unwrap();
 
     // Verify final state
-    let status = p
-        .state
-        .get(&branch_id, "default", "agent:status")
-        .unwrap()
-        .unwrap();
+    let status =
+        p.kv.get(&branch_id, "default", "agent:status")
+            .unwrap()
+            .unwrap();
     assert_eq!(status, Value::String("completed".into()));
 
     assert_eq!(
@@ -715,14 +583,6 @@ fn delete_in_one_primitive_doesnt_affect_others() {
     // Use same name across primitives
     p.kv.put(&branch_id, "default", "shared", Value::String("kv".into()))
         .unwrap();
-    p.state
-        .init(
-            &branch_id,
-            "default",
-            "shared",
-            Value::String("state".into()),
-        )
-        .unwrap();
     p.json
         .create(
             &branch_id,
@@ -735,15 +595,8 @@ fn delete_in_one_primitive_doesnt_affect_others() {
     // Delete only from KV
     p.kv.delete(&branch_id, "default", "shared").unwrap();
 
-    // Verify KV deleted but others remain
+    // Verify KV deleted but JSON remains
     assert!(p.kv.get(&branch_id, "default", "shared").unwrap().is_none());
-    assert_eq!(
-        p.state
-            .get(&branch_id, "default", "shared")
-            .unwrap()
-            .unwrap(),
-        Value::String("state".into())
-    );
     assert_eq!(
         p.json
             .get(&branch_id, "default", "shared", &root())
