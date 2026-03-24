@@ -469,7 +469,10 @@ pub fn reindex_embeddings(
             reason: "Embedding model not loaded — cannot determine dimension".into(),
         })?;
 
-    // 2. Delete all shadow collections for this branch
+    // 2. Flush any pending embeds from the old model BEFORE deleting collections
+    flush_embed_buffer(p);
+
+    // 3. Delete all shadow collections for this branch
     let shadow_names: &[&str] = &[SHADOW_KV, SHADOW_JSON, SHADOW_EVENT, SHADOW_STATE];
     for name in shadow_names {
         if let Err(e) = p.vector.delete_system_collection(branch_id, name) {
@@ -482,14 +485,11 @@ pub fn reindex_embeddings(
         }
     }
 
-    // 3. Clear AutoEmbedState cache for this branch
+    // 4. Clear AutoEmbedState cache for this branch
     if let Ok(state) = p.db.extension::<AutoEmbedState>() {
         let branch_prefix = format!("{:?}{}", branch_id.as_bytes(), SHADOW_KEY_SEP);
         state.remove_branch(&branch_prefix);
     }
-
-    // 4. Flush any pending embeds from the old model
-    flush_embed_buffer(p);
 
     // 5. Enumerate all data across all spaces and queue for re-embedding
     let spaces = p
@@ -578,9 +578,9 @@ pub fn reindex_embeddings(
             }
         }
 
-        // Events
+        // Events (sequences are 0-based)
         if let Ok(len) = p.event.len(&branch_id, space) {
-            for seq in 1..=len {
+            for seq in 0..len {
                 if let Ok(Some(versioned_event)) = p.event.get(&branch_id, space, seq) {
                     let payload = strata_core::Value::String(
                         serde_json::to_string(&versioned_event.value.payload).unwrap_or_default(),
