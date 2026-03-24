@@ -22,6 +22,7 @@ impl Strata {
             Output::EventAppendResult { sequence, .. } => Ok(sequence),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for EventAppend".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -37,6 +38,7 @@ impl Strata {
             Output::MaybeVersioned(v) => Ok(v),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for EventGet".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -54,6 +56,7 @@ impl Strata {
             Output::VersionedValues(events) => Ok(events),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for EventGetByType".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -67,6 +70,7 @@ impl Strata {
             Output::Uint(len) => Ok(len),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for EventLen".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -92,6 +96,7 @@ impl Strata {
             Output::MaybeVersioned(v) => Ok(v),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for EventGet".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -115,6 +120,7 @@ impl Strata {
             Output::BatchResults(results) => Ok(results),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for EventBatchAppend".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -142,6 +148,7 @@ impl Strata {
             Output::VersionedValues(events) => Ok(events),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for EventGetByType".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }

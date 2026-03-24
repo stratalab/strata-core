@@ -31,6 +31,7 @@ impl Strata {
             Output::Generated(result) => Ok(result),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for Generate".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -63,6 +64,7 @@ impl Strata {
             Output::Generated(result) => Ok(result),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for Generate".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -82,6 +84,7 @@ impl Strata {
             Output::TokenIds(result) => Ok(result),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for Tokenize".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -95,6 +98,7 @@ impl Strata {
             Output::Text(text) => Ok(text),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for Detokenize".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -109,6 +113,7 @@ impl Strata {
             Output::Bool(was_loaded) => Ok(was_loaded),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GenerateUnload".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -123,6 +128,7 @@ impl Strata {
             Output::ModelsList(models) => Ok(models),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for ModelsList".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -137,6 +143,7 @@ impl Strata {
             Output::ModelsPulled { name, path } => Ok((name, path)),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for ModelsPull".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -147,6 +154,7 @@ impl Strata {
             Output::ModelsList(models) => Ok(models),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for ModelsLocal".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }

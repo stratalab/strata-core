@@ -191,12 +191,21 @@ impl StateCell {
         let versions: Vec<Versioned<Value>> = history
             .iter()
             .filter_map(|vv| {
-                let state: State = from_stored_value(&vv.value).ok()?;
-                Some(Versioned::with_timestamp(
-                    state.value,
-                    state.version,
-                    vv.timestamp,
-                ))
+                match from_stored_value::<State>(&vv.value) {
+                    Ok(state) => Some(Versioned::with_timestamp(
+                        state.value,
+                        state.version,
+                        vv.timestamp,
+                    )),
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "strata::state",
+                            error = %e,
+                            "Skipping corrupt state entry in version history"
+                        );
+                        None
+                    }
+                }
             })
             .collect();
         Ok(VersionedHistory::new(versions))

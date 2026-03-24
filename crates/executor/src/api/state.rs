@@ -19,6 +19,7 @@ impl Strata {
             Output::WriteResult { version, .. } => Ok(version),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for StateSet".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -35,6 +36,7 @@ impl Strata {
             Output::Maybe(v) => Ok(v),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for StateGet".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -53,6 +55,7 @@ impl Strata {
             Output::VersionHistory(h) => Ok(h),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for StateGetv".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -82,6 +85,7 @@ impl Strata {
             }
             _ => Err(Error::Internal {
                 reason: "Unexpected output for StateCas".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -97,6 +101,7 @@ impl Strata {
             Output::WriteResult { version, .. } => Ok(version),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for StateInit".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -113,6 +118,7 @@ impl Strata {
             Output::DeleteResult { deleted, .. } => Ok(deleted),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for StateDelete".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -130,6 +136,7 @@ impl Strata {
             Output::Keys(keys) => Ok(keys),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for StateList".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -152,6 +159,7 @@ impl Strata {
             Output::Maybe(v) => Ok(v),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for StateGet".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -173,6 +181,7 @@ impl Strata {
             Output::Keys(keys) => Ok(keys),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for StateList".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -196,6 +205,7 @@ impl Strata {
             Output::BatchResults(results) => Ok(results),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for StateBatchSet".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }

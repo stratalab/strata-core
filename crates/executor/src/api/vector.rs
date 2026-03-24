@@ -28,6 +28,7 @@ impl Strata {
             Output::Version(v) => Ok(v),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for VectorCreateCollection".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -42,6 +43,7 @@ impl Strata {
             Output::Bool(dropped) => Ok(dropped),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for VectorDeleteCollection".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -55,6 +57,7 @@ impl Strata {
             Output::VectorCollectionList(infos) => Ok(infos),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for VectorListCollections".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -78,6 +81,7 @@ impl Strata {
             Output::VectorWriteResult { version, .. } => Ok(version),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for VectorUpsert".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -94,6 +98,7 @@ impl Strata {
             Output::VectorData(data) => Ok(data),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for VectorGet".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -109,6 +114,7 @@ impl Strata {
             Output::VectorDeleteResult { deleted, .. } => Ok(deleted),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for VectorDelete".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -122,9 +128,11 @@ impl Strata {
         })? {
             Output::VectorCollectionList(mut infos) => infos.pop().ok_or(Error::Internal {
                 reason: "Empty response for VectorCollectionStats".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for VectorCollectionStats".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -144,6 +152,7 @@ impl Strata {
             Output::Versions(versions) => Ok(versions),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for VectorBatchUpsert".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -168,6 +177,7 @@ impl Strata {
             Output::VectorMatches(matches) => Ok(matches),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for VectorSearch".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -195,6 +205,7 @@ impl Strata {
             Output::VectorMatches(matches) => Ok(matches),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for VectorSearch".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -218,6 +229,7 @@ impl Strata {
             Output::VectorData(data) => Ok(data),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for VectorGet".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }

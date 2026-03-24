@@ -6,7 +6,7 @@
 //! - **Raw** (`--raw`): Bare values, no quotes, no type prefixes
 
 use strata_executor::{
-    BranchDiffResult, Error, ForkInfo, MergeInfo, Output, Value, VersionedValue,
+    BranchDiffResult, Error, ErrorSeverity, ForkInfo, MergeInfo, Output, Value, VersionedValue,
 };
 
 /// Output formatting mode.
@@ -27,14 +27,34 @@ pub fn format_output(output: &Output, mode: OutputMode) -> String {
 }
 
 /// Format an error.
+///
+/// In Human mode, errors are prefixed by severity:
+/// - `(error)` for user errors (wrong input, missing entity)
+/// - `(system error)` for infrastructure failures (I/O, serialization)
+/// - `(internal bug)` for invariant violations
 pub fn format_error(err: &Error, mode: OutputMode) -> String {
     match mode {
-        OutputMode::Json => serde_json::to_string_pretty(&serde_json::json!({
-            "error": format!("{}", err)
-        }))
-        .unwrap_or_else(|_| format!("{{\"error\": \"{}\"}}", err)),
+        OutputMode::Json => {
+            let severity = match err.severity() {
+                ErrorSeverity::UserError => "user_error",
+                ErrorSeverity::SystemFailure => "system_error",
+                ErrorSeverity::InternalBug => "internal_bug",
+            };
+            serde_json::to_string_pretty(&serde_json::json!({
+                "error": format!("{}", err),
+                "severity": severity
+            }))
+            .unwrap_or_else(|_| format!("{{\"error\": \"{}\"}}", err))
+        }
         OutputMode::Raw => format!("{}", err),
-        OutputMode::Human => format!("(error) {}", err),
+        OutputMode::Human => {
+            let prefix = match err.severity() {
+                ErrorSeverity::UserError => "(error)",
+                ErrorSeverity::SystemFailure => "(system error)",
+                ErrorSeverity::InternalBug => "(internal bug)",
+            };
+            format!("{} {}", prefix, err)
+        }
     }
 }
 
