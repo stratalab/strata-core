@@ -469,7 +469,7 @@ impl TransactionCoordinator {
 /// Transaction metrics
 ///
 /// Provides statistics about transaction lifecycle.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TransactionMetrics {
     /// Number of currently active transactions
     pub active_count: u64,

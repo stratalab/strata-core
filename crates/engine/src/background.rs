@@ -35,6 +35,7 @@ impl std::fmt::Display for BackpressureError {
 impl std::error::Error for BackpressureError {}
 
 /// Scheduler metrics snapshot.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SchedulerStats {
     /// Number of tasks waiting in the queue.
     pub queue_depth: usize,
