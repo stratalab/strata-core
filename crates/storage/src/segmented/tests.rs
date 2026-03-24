@@ -3923,6 +3923,138 @@ fn recalculate_targets_score_meaningful_for_small_db() {
 }
 
 #[test]
+fn test_issue_1683_dynamic_base_level_deep_small_data() {
+    // Bug: when data is concentrated in a deep level at a small size,
+    // the algorithm divides by multiplier^(level-1) producing a tiny base
+    // that clamps to MIN_BASE_BYTES. This gives L1 a target of just 1MB,
+    // causing any 2MB flush to trigger unnecessary compaction cascading
+    // through empty intermediate levels.
+    //
+    // Fix: raise base_level dynamically so levels below it get passive
+    // LEVEL_BASE_BYTES targets, preventing the cascading.
+    let mut level_bytes = [0u64; NUM_LEVELS];
+    level_bytes[4] = 5 << 20; // 5MB in L4
+
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
+
+    // Without dynamic base_level: base = 5MB / 10^3 = 5KB → clamped to 1MB.
+    // L1 target = 1MB — trivially exceeded by any normal flush.
+    //
+    // With the fix: base_level raised to L4.
+    // L1-L3 get passive LEVEL_BASE_BYTES (256MB) targets.
+    assert_eq!(
+        targets.max_bytes[1], LEVEL_BASE_BYTES,
+        "L1 should have passive LEVEL_BASE_BYTES target when base_level > 1"
+    );
+    assert_eq!(
+        targets.max_bytes[2], LEVEL_BASE_BYTES,
+        "L2 should have passive LEVEL_BASE_BYTES target"
+    );
+    assert_eq!(
+        targets.max_bytes[3], LEVEL_BASE_BYTES,
+        "L3 should have passive LEVEL_BASE_BYTES target"
+    );
+
+    // L4 is the base_level — its target is derived from bottom_bytes via
+    // integer division and multiplication (5MB / 10^3 * 10^3), which may
+    // truncate slightly.
+    let expected_base: u64 = {
+        let mut b = 5u64 << 20;
+        for _ in 1..4 {
+            b /= LEVEL_MULTIPLIER;
+        }
+        for _ in 1..4 {
+            b = b.saturating_mul(LEVEL_MULTIPLIER);
+        }
+        b
+    };
+    assert_eq!(targets.max_bytes[4], expected_base);
+
+    // L5-L6 continue geometric progression from base_level
+    assert_eq!(targets.max_bytes[5], expected_base * 10);
+    assert_eq!(targets.max_bytes[6], expected_base * 100);
+}
+
+#[test]
+fn test_issue_1683_deep_level_small_data_l6() {
+    // Same issue but with data at L6 (maximum backward divisions).
+    // 500MB in L6: base = 500MB / 10^5 = 5242 → below MIN_BASE_BYTES.
+    // Multiply up: 5242 → 52420 → 524200 → 5242000 (bl=4).
+    let mut level_bytes = [0u64; NUM_LEVELS];
+    level_bytes[6] = 500 << 20; // 500MB in L6
+
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
+
+    let expected_base: u64 = {
+        let mut b = 500u64 << 20;
+        for _ in 1..6 {
+            b /= LEVEL_MULTIPLIER;
+        }
+        // multiply back up until >= MIN_BASE_BYTES
+        while b < MIN_BASE_BYTES {
+            b = b.saturating_mul(LEVEL_MULTIPLIER);
+        }
+        b
+    };
+
+    // L1-L3 get passive LEVEL_BASE_BYTES targets (below base_level=4).
+    for level in 1..=3 {
+        assert_eq!(
+            targets.max_bytes[level], LEVEL_BASE_BYTES,
+            "L{level} should have passive LEVEL_BASE_BYTES target"
+        );
+    }
+
+    // L4 is the base_level with the data-derived target.
+    assert_eq!(targets.max_bytes[4], expected_base);
+    assert_eq!(targets.max_bytes[5], expected_base * 10);
+    assert_eq!(targets.max_bytes[6], expected_base * 100);
+}
+
+#[test]
+fn test_issue_1683_transition_empty_to_populated() {
+    // During transitions from empty to populated states, data may
+    // land in a deep level while shallow levels are empty. The
+    // shallow levels should not get tiny targets.
+    let mut level_bytes = [0u64; NUM_LEVELS];
+    level_bytes[5] = 1 << 30; // 1GB in L5
+
+    let targets = recalculate_level_targets(&level_bytes, LEVEL_BASE_BYTES);
+
+    // base = 1GB / 10^4 = 107374 (~100KB) → below MIN_BASE_BYTES.
+    // Multiply up: 107374 → 1073740 (bl=2). base_level = 2.
+    let expected_base: u64 = {
+        let mut b = 1u64 << 30;
+        for _ in 1..5 {
+            b /= LEVEL_MULTIPLIER;
+        }
+        for _ in 1..2 {
+            b = b.saturating_mul(LEVEL_MULTIPLIER);
+        }
+        b
+    };
+
+    // L1 gets passive LEVEL_BASE_BYTES target, not tiny 1MB.
+    assert_eq!(
+        targets.max_bytes[1], LEVEL_BASE_BYTES,
+        "L1 should have passive LEVEL_BASE_BYTES target during empty→populated transition"
+    );
+
+    // L2 is the base_level with the data-derived target.
+    assert_eq!(targets.max_bytes[2], expected_base);
+    assert_eq!(targets.max_bytes[3], expected_base * 10);
+    assert_eq!(targets.max_bytes[4], expected_base * 100);
+    assert_eq!(targets.max_bytes[5], expected_base * 1_000);
+    assert_eq!(targets.max_bytes[6], expected_base * 10_000);
+
+    // L5 target should not exceed actual data size
+    assert!(
+        targets.max_bytes[5] <= 1 << 30,
+        "L5 target should not exceed actual data size"
+    );
+}
+
+#[test]
 fn compute_scores_l0_count() {
     let dir = tempfile::tempdir().unwrap();
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
