@@ -84,16 +84,6 @@ pub enum Error {
         hint: Option<String>,
     },
 
-    /// State cell not found
-    #[error("cell not found: {cell}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
-    CellNotFound {
-        /// The missing cell name.
-        cell: String,
-        /// Optional actionable hint.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        hint: Option<String>,
-    },
-
     /// JSON document not found
     #[error("document not found: {key}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
     DocumentNotFound {
