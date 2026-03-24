@@ -30,6 +30,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphCreate".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -43,6 +44,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphDelete".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -55,6 +57,7 @@ impl Strata {
             Output::Keys(names) => Ok(names),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphList".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -68,6 +71,7 @@ impl Strata {
             Output::Maybe(v) => Ok(v),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphGetMeta".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -109,6 +113,7 @@ impl Strata {
             Output::GraphWriteResult { .. } => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphAddNode".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -123,6 +128,7 @@ impl Strata {
             Output::Maybe(v) => Ok(v),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphGetNode".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -137,6 +143,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphRemoveNode".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -150,6 +157,7 @@ impl Strata {
             Output::Keys(ids) => Ok(ids),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphListNodes".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -172,6 +180,7 @@ impl Strata {
             Output::GraphPage { items, next_cursor } => Ok((items, next_cursor)),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphListNodesPaginated".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -202,6 +211,7 @@ impl Strata {
             Output::GraphEdgeWriteResult { .. } => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphAddEdge".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -224,6 +234,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphRemoveEdge".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -282,6 +293,7 @@ impl Strata {
             } => Ok((nodes_inserted, edges_inserted)),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphBulkInsert".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -312,6 +324,7 @@ impl Strata {
             } => Ok((nodes_inserted, edges_inserted)),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphBulkInsert".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -340,6 +353,7 @@ impl Strata {
             Output::GraphNeighbors(hits) => Ok(hits),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphNeighbors".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -366,6 +380,7 @@ impl Strata {
             Output::GraphBfs(result) => Ok(result),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphBfs".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -386,6 +401,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphDefineObjectType".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -400,6 +416,7 @@ impl Strata {
             Output::Maybe(v) => Ok(v),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphGetObjectType".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -413,6 +430,7 @@ impl Strata {
             Output::Keys(names) => Ok(names),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphListObjectTypes".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -427,6 +445,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphDeleteObjectType".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -443,6 +462,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphDefineLinkType".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -457,6 +477,7 @@ impl Strata {
             Output::Maybe(v) => Ok(v),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphGetLinkType".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -470,6 +491,7 @@ impl Strata {
             Output::Keys(names) => Ok(names),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphListLinkTypes".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -484,6 +506,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphDeleteLinkType".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -497,6 +520,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphFreezeOntology".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -510,6 +534,7 @@ impl Strata {
             Output::Maybe(v) => Ok(v),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphOntologyStatus".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -525,6 +550,7 @@ impl Strata {
             Output::Maybe(v) => Ok(v),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphOntologySummary".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -538,6 +564,7 @@ impl Strata {
             Output::Keys(names) => Ok(names),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphListOntologyTypes".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -552,6 +579,7 @@ impl Strata {
             Output::Keys(ids) => Ok(ids),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphNodesByType".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -576,6 +604,7 @@ impl Strata {
             Output::GraphGroupSummary(r) => Ok(r),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphWcc".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -600,6 +629,7 @@ impl Strata {
             Output::GraphGroupSummary(r) => Ok(r),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphCdlp".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -626,6 +656,7 @@ impl Strata {
             Output::GraphScoreSummary(r) => Ok(r),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphPagerank".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -646,6 +677,7 @@ impl Strata {
             Output::GraphScoreSummary(r) => Ok(r),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphLcc".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -670,6 +702,7 @@ impl Strata {
             Output::GraphScoreSummary(r) => Ok(r),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphSssp".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }

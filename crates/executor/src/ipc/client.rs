@@ -46,19 +46,23 @@ impl IpcClient {
 
         let payload = protocol::encode(&request).map_err(|e| crate::Error::Internal {
             reason: format!("IPC encode error: {}", e),
+            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
         })?;
 
         wire::write_frame(&mut self.writer, &payload).map_err(|e| crate::Error::Io {
             reason: format!("IPC write error: {}", e),
+            hint: None,
         })?;
 
         let response_frame = wire::read_frame(&mut self.reader).map_err(|e| crate::Error::Io {
             reason: format!("IPC read error: {}", e),
+            hint: None,
         })?;
 
         let response: Response =
             protocol::decode(&response_frame).map_err(|e| crate::Error::Internal {
                 reason: format!("IPC decode error: {}", e),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             })?;
 
         if response.id != request.id {
@@ -67,6 +71,7 @@ impl IpcClient {
                     "IPC response ID mismatch: expected {}, got {}",
                     request.id, response.id
                 ),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             });
         }
 

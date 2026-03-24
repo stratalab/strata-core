@@ -116,12 +116,15 @@ pub enum Error {
 
     // ==================== Type Errors ====================
     /// Wrong type for operation
-    #[error("wrong type: expected {expected}, got {actual}")]
+    #[error("wrong type: expected {expected}, got {actual}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
     WrongType {
         /// Expected type name.
         expected: String,
         /// Actual type name.
         actual: String,
+        /// Optional actionable hint (e.g. "Key 'x' is a Counter. Use INCR/DECR.").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
     },
 
     // ==================== Validation Errors ====================
@@ -151,7 +154,7 @@ pub enum Error {
 
     // ==================== Concurrency Errors ====================
     /// Version conflict (CAS failure)
-    #[error("version conflict: expected {expected_type}:{expected}, got {actual_type}:{actual}")]
+    #[error("version conflict: expected {expected_type}:{expected}, got {actual_type}:{actual}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
     VersionConflict {
         /// Expected version number.
         expected: u64,
@@ -161,6 +164,9 @@ pub enum Error {
         expected_type: String,
         /// Actual version type label.
         actual_type: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
     },
 
     /// State transition failed (expected value mismatch)
@@ -181,10 +187,13 @@ pub enum Error {
 
     // ==================== State Errors ====================
     /// Branch is closed
-    #[error("branch closed: {branch}")]
+    #[error("branch closed: {branch}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
     BranchClosed {
         /// The closed branch identifier.
         branch: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
     },
 
     /// Branch already exists
@@ -277,10 +286,13 @@ pub enum Error {
 
     // ==================== System Errors ====================
     /// I/O error
-    #[error("I/O error: {reason}")]
+    #[error("I/O error: {reason}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
     Io {
         /// I/O error details.
         reason: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
     },
 
     /// Serialization error
@@ -291,10 +303,13 @@ pub enum Error {
     },
 
     /// Internal error (bug or invariant violation)
-    #[error("internal error: {reason}")]
+    #[error("internal error: {reason}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
     Internal {
         /// Internal error details.
         reason: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
     },
 
     /// Feature not yet implemented
@@ -314,4 +329,26 @@ pub enum Error {
         /// The oldest available timestamp.
         oldest_available_ts: u64,
     },
+}
+
+/// Error severity classification for CLI output formatting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorSeverity {
+    /// User made a mistake (wrong input, missing entity, wrong type).
+    UserError,
+    /// System failure (I/O, storage, transient conflict).
+    SystemFailure,
+    /// Internal bug (invariant violation).
+    InternalBug,
+}
+
+impl Error {
+    /// Classify this error by severity.
+    pub fn severity(&self) -> ErrorSeverity {
+        match self {
+            Error::Io { .. } | Error::Serialization { .. } => ErrorSeverity::SystemFailure,
+            Error::Internal { .. } => ErrorSeverity::InternalBug,
+            _ => ErrorSeverity::UserError,
+        }
+    }
 }

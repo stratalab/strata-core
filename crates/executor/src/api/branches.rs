@@ -59,6 +59,7 @@ impl<'a> Branches<'a> {
             }
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchList".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -71,6 +72,7 @@ impl<'a> Branches<'a> {
             Output::Bool(exists) => Ok(exists),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchExists".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -84,6 +86,7 @@ impl<'a> Branches<'a> {
             Output::BranchWithVersion { .. } => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchCreate".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -102,6 +105,7 @@ impl<'a> Branches<'a> {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchDelete".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -117,6 +121,7 @@ impl<'a> Branches<'a> {
             Output::BranchForked(info) => Ok(info),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchFork".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -138,6 +143,7 @@ impl<'a> Branches<'a> {
             Output::BranchForked(info) => Ok(info),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchFork".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -154,6 +160,7 @@ impl<'a> Branches<'a> {
             Output::BranchDiff(result) => Ok(result),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchDiff".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -182,6 +189,7 @@ impl<'a> Branches<'a> {
             Output::BranchDiff(result) => Ok(result),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchDiff".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -198,6 +206,7 @@ impl<'a> Branches<'a> {
             Output::BranchMerged(info) => Ok(info),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchMerge".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -221,6 +230,7 @@ impl<'a> Branches<'a> {
             Output::BranchMerged(info) => Ok(info),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchMerge".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }

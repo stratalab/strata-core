@@ -1834,11 +1834,19 @@ impl Database {
                     let vid = VectorId::new(record.vector_id);
 
                     if let Some(mut backend) = vs.backends.get_mut(&cid) {
-                        let _ = backend.insert_with_timestamp(
+                        if let Err(e) = backend.insert_with_timestamp(
                             vid,
                             &record.embedding,
                             record.created_at,
-                        );
+                        ) {
+                            tracing::warn!(
+                                target: "strata::refresh",
+                                collection = collection,
+                                vector_key = vector_key,
+                                error = %e,
+                                "Vector insert failed during refresh"
+                            );
+                        }
                         backend.set_inline_meta(
                             vid,
                             crate::primitives::vector::types::InlineMeta {
@@ -1874,7 +1882,14 @@ impl Database {
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_micros() as u64)
                             .unwrap_or(0);
-                        let _ = backend.delete_with_timestamp(vid, now);
+                        if let Err(e) = backend.delete_with_timestamp(vid, now) {
+                            tracing::warn!(
+                                target: "strata::refresh",
+                                collection = collection,
+                                error = %e,
+                                "Vector delete failed during refresh"
+                            );
+                        }
                         backend.remove_inline_meta(vid);
                     }
                 }
@@ -2917,7 +2932,10 @@ impl Drop for Database {
         // Skip flush/freeze if shutdown() already completed them.
         if !self.shutdown_complete.load(Ordering::Acquire) && !self.follower {
             // Final flush to persist any remaining data
-            let _ = self.flush();
+            if let Err(e) = self.flush() {
+                tracing::error!(target: "strata::db", error = %e,
+                    "Final flush on drop failed — data may not be durable");
+            }
 
             // Freeze vector heaps to mmap so lite KV records can recover
             if let Err(e) = self.freeze_vector_heaps() {

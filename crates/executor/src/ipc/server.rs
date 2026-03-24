@@ -246,6 +246,7 @@ impl IpcServer {
                     tracing::error!("IPC handler panicked: {}", msg);
                     Err(crate::Error::Internal {
                         reason: format!("Server handler panicked: {}", msg),
+                        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
                     })
                 }
             };

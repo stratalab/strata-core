@@ -16,6 +16,7 @@ impl Strata {
             Output::SpaceList(spaces) => Ok(spaces),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for SpaceList".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -29,6 +30,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for SpaceCreate".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -45,6 +47,7 @@ impl Strata {
             Output::Unit => Ok(()),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for SpaceDelete".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
@@ -58,6 +61,7 @@ impl Strata {
             Output::Bool(exists) => Ok(exists),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for SpaceExists".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }

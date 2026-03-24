@@ -13,7 +13,7 @@ use crate::wal::config::WalConfig;
 use crate::wal::reader::WalReader;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// WAL disk usage summary.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -149,8 +149,9 @@ impl WalWriter {
                 // Try to open existing segment for appending
                 match WalSegment::open_append(&wal_dir, num) {
                     Ok(seg) => (seg, num, true),
-                    Err(_) => {
-                        // Segment might be corrupted or closed, create new one
+                    Err(e) => {
+                        warn!(target: "strata::wal", segment = num, error = %e,
+                            "Failed to reopen WAL segment, creating new segment");
                         let new_num = num + 1;
                         let seg = WalSegment::create(&wal_dir, new_num, database_uuid)?;
                         (seg, new_num, false)
@@ -653,8 +654,9 @@ impl WalWriter {
                         self.current_segment_meta =
                             Self::rebuild_meta_for_segment(&self.wal_dir, num);
                     }
-                    Err(_) => {
-                        // If we can't open it, create a new one after it
+                    Err(e) => {
+                        warn!(target: "strata::wal", segment = num, error = %e,
+                            "Failed to reopen WAL segment, creating new segment");
                         let new_num = num + 1;
                         let seg = WalSegment::create(&self.wal_dir, new_num, self.database_uuid)?;
                         self.segment = Some(seg);
@@ -734,9 +736,8 @@ impl Drop for WalWriter {
         if self.has_unsynced_data {
             if let Some(ref mut segment) = self.segment {
                 if let Err(e) = segment.sync() {
-                    eprintln!(
-                        "strata::wal: WAL sync on drop failed: {e} — data may not be durable"
-                    );
+                    error!(target: "strata::wal", error = %e,
+                        "WAL sync on drop failed — data may not be durable");
                 }
             }
         }

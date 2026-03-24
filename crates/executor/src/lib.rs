@@ -78,7 +78,7 @@ pub use api::{
     DiffSummary, ForkInfo, MergeInfo, MergeStrategy, SpaceDiff, Strata, SystemBranch,
 };
 pub use command::Command;
-pub use error::Error;
+pub use error::{Error, ErrorSeverity};
 pub use executor::Executor;
 pub use ipc::IpcServer;
 pub use output::{EmbedStatusInfo, Output};

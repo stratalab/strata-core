@@ -240,6 +240,7 @@ pub fn branch_fork(
         strata_engine::branch_ops::fork_branch(&p.db, &source, &destination).map_err(|e| {
             Error::Internal {
                 reason: e.to_string(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }
         })?;
 
@@ -285,6 +286,7 @@ pub fn branch_diff(
         strata_engine::branch_ops::diff_branches_with_options(&p.db, &branch_a, &branch_b, options)
             .map_err(|e| Error::Internal {
                 reason: e.to_string(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             })?;
     Ok(Output::BranchDiff(result))
 }
@@ -307,6 +309,7 @@ pub fn branch_merge(
     let info = strata_engine::branch_ops::merge_branches(&p.db, &source, &target, strategy)
         .map_err(|e| Error::Internal {
             reason: e.to_string(),
+            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
         })?;
 
     // Best-effort: record merge in the DAG
@@ -340,6 +343,7 @@ pub fn branch_export(p: &Arc<Primitives>, branch_id: String, path: String) -> Re
         strata_engine::bundle::export_branch(&p.db, &branch_id, export_path).map_err(|e| {
             Error::Io {
                 reason: format!("Export failed: {}", e),
+                hint: None,
             }
         })?;
 
@@ -356,6 +360,7 @@ pub fn branch_import(p: &Arc<Primitives>, path: String) -> Result<Output> {
     let import_path = std::path::Path::new(&path);
     let info = strata_engine::bundle::import_branch(&p.db, import_path).map_err(|e| Error::Io {
         reason: format!("Import failed: {}", e),
+        hint: None,
     })?;
 
     // Best-effort: record imported branch in the DAG
@@ -375,6 +380,7 @@ pub fn branch_bundle_validate(path: String) -> Result<Output> {
     let validate_path = std::path::Path::new(&path);
     let info = strata_engine::bundle::validate_bundle(validate_path).map_err(|e| Error::Io {
         reason: format!("Validation failed: {}", e),
+        hint: None,
     })?;
 
     Ok(Output::BundleValidated(
