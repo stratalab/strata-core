@@ -587,10 +587,11 @@ impl SegmentedStore {
         let start_id = next_id.load(Ordering::Relaxed);
         let bloom_bits = super::bloom_bits_for_level(1, self.bloom_bits_per_key());
         let compression = super::compression_for_level(1);
-        let mut splitting_builder = crate::segment_builder::SplittingSegmentBuilder::default()
-            .with_bloom_bits(bloom_bits)
-            .with_compression(compression)
-            .with_data_block_size(self.data_block_size());
+        let mut splitting_builder =
+            crate::segment_builder::SplittingSegmentBuilder::new(self.target_file_size())
+                .with_bloom_bits(bloom_bits)
+                .with_compression(compression)
+                .with_data_block_size(self.data_block_size());
         if let Some(ref l) = limiter {
             splitting_builder = splitting_builder.with_rate_limiter(Arc::clone(l));
         }
@@ -845,10 +846,11 @@ impl SegmentedStore {
         let start_id = next_id.load(Ordering::Relaxed);
         let bloom_bits = super::bloom_bits_for_level(level + 1, self.bloom_bits_per_key());
         let compression = super::compression_for_level(level + 1);
-        let mut splitting_builder = crate::segment_builder::SplittingSegmentBuilder::default()
-            .with_bloom_bits(bloom_bits)
-            .with_compression(compression)
-            .with_data_block_size(self.data_block_size());
+        let mut splitting_builder =
+            crate::segment_builder::SplittingSegmentBuilder::new(self.target_file_size())
+                .with_bloom_bits(bloom_bits)
+                .with_compression(compression)
+                .with_data_block_size(self.data_block_size());
         if let Some(ref l) = limiter {
             splitting_builder = splitting_builder.with_rate_limiter(Arc::clone(l));
         }
