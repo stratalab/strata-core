@@ -243,6 +243,14 @@ impl Executor {
                 let info = crate::handlers::embed_hook::embed_status(&self.primitives);
                 Ok(Output::EmbedStatus(info))
             }
+            Command::ReindexEmbeddings { branch } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let branch_id = crate::bridge::to_core_branch_id(&branch)?;
+                crate::handlers::embed_hook::reindex_embeddings(&self.primitives, branch_id)
+            }
             Command::ConfigGet => crate::handlers::config::config_get(&self.primitives),
             Command::ConfigureSet { key, value } => {
                 crate::handlers::config::configure_set(&self.primitives, key, value)

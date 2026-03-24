@@ -1959,6 +1959,32 @@ impl VectorStore {
         Ok(state.backends.get(&cid).map(|b| b.len()).unwrap_or(0))
     }
 
+    /// Delete a system collection (idempotent — returns Ok if it doesn't exist).
+    pub fn delete_system_collection(&self, branch_id: BranchId, name: &str) -> VectorResult<()> {
+        use crate::primitives::vector::collection::validate_system_collection_name;
+        validate_system_collection_name(name)?;
+
+        if !self.collection_exists(branch_id, "default", name)? {
+            return Ok(());
+        }
+
+        self.delete_all_vectors(branch_id, "default", name)?;
+
+        let config_key = Key::new_vector_config(self.namespace_for(branch_id, "default"), name);
+        self.db
+            .transaction(branch_id, |txn| txn.delete(config_key.clone()))
+            .map_err(|e| VectorError::Storage(e.to_string()))?;
+
+        {
+            let state = self.state()?;
+            let collection_id = CollectionId::new(branch_id, name);
+            state.backends.remove(&collection_id);
+        }
+
+        info!(target: "strata::vector", collection = name, "System collection deleted");
+        Ok(())
+    }
+
     /// Get the dimension of an existing system collection, or None if not found.
     pub fn system_collection_dimension(
         &self,
