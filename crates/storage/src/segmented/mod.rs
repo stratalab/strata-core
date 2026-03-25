@@ -157,6 +157,20 @@ pub struct VersionedEntry {
     pub commit_id: u64,
 }
 
+/// Entry from a branch's own sources (excluding inherited layers).
+/// Used by COW-aware diff to identify writes since fork.
+#[derive(Debug, Clone)]
+pub struct OwnEntry {
+    /// The decoded user key.
+    pub key: Key,
+    /// The stored value (empty for tombstones).
+    pub value: Value,
+    /// Whether this entry is a deletion tombstone.
+    pub is_tombstone: bool,
+    /// The MVCC commit version that wrote this entry.
+    pub commit_id: u64,
+}
+
 // ---------------------------------------------------------------------------
 // SegmentVersion
 // ---------------------------------------------------------------------------
@@ -1418,6 +1432,73 @@ impl SegmentedStore {
             .into_iter()
             .filter(|(key, _)| key.type_tag == type_tag)
             .collect()
+    }
+
+    /// List entries from a branch's own sources only (active memtable, frozen
+    /// memtables, and own on-disk segments). **Excludes inherited layers.**
+    ///
+    /// When `min_commit_id` is `Some(v)`, only entries with `commit_id > v` are
+    /// returned (for scanning parent's post-fork writes). When `None`, all own
+    /// entries are returned (for scanning child's writes since fork).
+    ///
+    /// Unlike `list_by_type()`, this method preserves tombstones (needed for
+    /// COW-aware diff to detect deletions) and does NOT filter expired entries.
+    /// Returns MVCC-deduplicated entries (latest version per logical key).
+    pub fn list_own_entries(
+        &self,
+        branch_id: &BranchId,
+        min_commit_id: Option<u64>,
+    ) -> Vec<OwnEntry> {
+        let branch = match self.branches.get(branch_id) {
+            Some(b) => b,
+            None => return Vec::new(),
+        };
+
+        let mut sources: Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> = Vec::new();
+
+        // Active memtable
+        let active_entries: Vec<_> = branch.active.iter_all().collect();
+        sources.push(Box::new(active_entries.into_iter()));
+
+        // Frozen memtables (newest first)
+        for frozen in &branch.frozen {
+            let entries: Vec<_> = frozen.iter_all().collect();
+            sources.push(Box::new(entries.into_iter()));
+        }
+
+        // On-disk segments — all levels (own segments only, NO inherited layers)
+        let ver = branch.version.load();
+        for level in &ver.levels {
+            for seg in level {
+                let entries: Vec<_> = seg
+                    .iter_seek_all()
+                    .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
+                    .collect();
+                sources.push(Box::new(entries.into_iter()));
+            }
+        }
+
+        // NOTE: inherited layers intentionally excluded — this is the whole point.
+
+        let merge = MergeIterator::new(sources);
+        let mvcc = MvccIterator::new(merge, u64::MAX);
+
+        mvcc.filter_map(|(ik, entry)| {
+            let (key, commit_id) = ik.decode()?;
+            // Apply min_commit_id filter if set
+            if let Some(min) = min_commit_id {
+                if commit_id <= min {
+                    return None;
+                }
+            }
+            Some(OwnEntry {
+                key,
+                value: entry.value.clone(),
+                is_tombstone: entry.is_tombstone,
+                commit_id,
+            })
+        })
+        .collect()
     }
 
     /// List entries filtered by type tag at a specific MVCC version, preserving tombstones.
