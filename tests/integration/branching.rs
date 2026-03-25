@@ -1503,3 +1503,99 @@ fn test_issue_1695_fork_disjoint_changes_merge() {
         "child-only change must be applied to parent by merge"
     );
 }
+
+/// COW-aware diff correctness oracle: set up a complex scenario with adds,
+/// modifies, deletes on both parent and child after fork, then verify the
+/// COW fast-path diff produces correct results by checking each entry.
+#[test]
+fn cow_diff_matches_expected_complex() {
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+
+    // 1. Parent with 5 keys
+    branch_index.create_branch("parent").unwrap();
+    let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
+    kv.put(&parent_id, "default", "shared", Value::Int(1))
+        .unwrap();
+    kv.put(&parent_id, "default", "child_mod", Value::Int(2))
+        .unwrap();
+    kv.put(&parent_id, "default", "child_del", Value::Int(3))
+        .unwrap();
+    kv.put(&parent_id, "default", "parent_mod", Value::Int(4))
+        .unwrap();
+    kv.put(&parent_id, "default", "both_mod", Value::Int(5))
+        .unwrap();
+
+    // 2. Fork
+    branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+    let child_id = strata_engine::primitives::branch::resolve_branch_name("child");
+
+    // 3. Child: modify, delete, add
+    kv.put(&child_id, "default", "child_mod", Value::Int(20))
+        .unwrap();
+    kv.delete(&child_id, "default", "child_del").unwrap();
+    kv.put(&child_id, "default", "child_new", Value::Int(100))
+        .unwrap();
+    kv.put(&child_id, "default", "both_mod", Value::Int(50))
+        .unwrap();
+
+    // 4. Parent: modify after fork
+    kv.put(&parent_id, "default", "parent_mod", Value::Int(40))
+        .unwrap();
+    kv.put(&parent_id, "default", "both_mod", Value::Int(55))
+        .unwrap();
+    kv.put(&parent_id, "default", "parent_new", Value::Int(200))
+        .unwrap();
+
+    // 5. Diff parent → child
+    let diff = branch_ops::diff_branches(&test_db.db, "parent", "child").unwrap();
+
+    // Collect into maps for easy assertion
+    let space = diff.spaces.iter().find(|s| s.space == "default").unwrap();
+
+    let added_keys: std::collections::HashSet<&str> =
+        space.added.iter().map(|e| e.key.as_str()).collect();
+    let removed_keys: std::collections::HashSet<&str> =
+        space.removed.iter().map(|e| e.key.as_str()).collect();
+    let modified_keys: std::collections::HashSet<&str> =
+        space.modified.iter().map(|e| e.key.as_str()).collect();
+
+    // child_new: only in child → added
+    assert!(
+        added_keys.contains("child_new"),
+        "child_new should be added"
+    );
+    // parent_new: only in parent → removed (in A=parent, not in B=child)
+    assert!(
+        removed_keys.contains("parent_new"),
+        "parent_new should be removed (in parent, not child)"
+    );
+    // child_del: in parent, deleted in child → removed
+    assert!(
+        removed_keys.contains("child_del"),
+        "child_del should be removed"
+    );
+    // child_mod: different values → modified
+    assert!(
+        modified_keys.contains("child_mod"),
+        "child_mod should be modified"
+    );
+    // parent_mod: parent changed, child has old value → modified
+    assert!(
+        modified_keys.contains("parent_mod"),
+        "parent_mod should be modified"
+    );
+    // both_mod: both changed to different values → modified
+    assert!(
+        modified_keys.contains("both_mod"),
+        "both_mod should be modified"
+    );
+    // shared: unchanged on both sides → NOT in diff
+    assert!(!added_keys.contains("shared"), "shared should not appear");
+    assert!(!removed_keys.contains("shared"), "shared should not appear");
+    assert!(
+        !modified_keys.contains("shared"),
+        "shared should not appear"
+    );
+}

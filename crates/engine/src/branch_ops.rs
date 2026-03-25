@@ -404,13 +404,34 @@ pub fn diff_branches_with_options(
     branch_b: &str,
     options: DiffOptions,
 ) -> StrataResult<BranchDiffResult> {
-    let space_index = SpaceIndex::new(db.clone());
-
     // 1. Verify both branches exist and resolve IDs
     let id_a = resolve_and_verify(db, branch_a)?;
     let id_b = resolve_and_verify(db, branch_b)?;
 
+    let storage = db.storage();
+
+    // COW fast path: if one branch is a direct child of the other and no
+    // as_of timestamp, use O(W) diff instead of O(N) full scan.
+    // Checked early to avoid the O(spaces) space listing below.
+    if options.as_of.is_none() {
+        if let Some((parent, fv)) = storage.get_fork_info(&id_b) {
+            if parent == id_a {
+                return cow_diff_branches(
+                    db, id_a, id_b, id_b, id_a, fv, branch_a, branch_b, &options,
+                );
+            }
+        }
+        if let Some((parent, fv)) = storage.get_fork_info(&id_a) {
+            if parent == id_b {
+                return cow_diff_branches(
+                    db, id_a, id_b, id_a, id_b, fv, branch_a, branch_b, &options,
+                );
+            }
+        }
+    }
+
     // 2. List spaces in both branches
+    let space_index = SpaceIndex::new(db.clone());
     let spaces_a: HashSet<String> = space_index.list(id_a)?.into_iter().collect();
     let spaces_b: HashSet<String> = space_index.list(id_b)?.into_iter().collect();
 
@@ -446,7 +467,6 @@ pub fn diff_branches_with_options(
         None => DATA_TYPE_TAGS.to_vec(),
     };
 
-    let storage = db.storage();
     let mut space_diffs = Vec::new();
     let mut total_added = 0usize;
     let mut total_removed = 0usize;
@@ -564,6 +584,172 @@ pub fn diff_branches_with_options(
     Ok(BranchDiffResult {
         branch_a: branch_a.to_string(),
         branch_b: branch_b.to_string(),
+        spaces: space_diffs,
+        summary: DiffSummary {
+            total_added,
+            total_removed,
+            total_modified,
+            spaces_only_in_a,
+            spaces_only_in_b,
+        },
+    })
+}
+
+// =============================================================================
+// COW-Aware Diff (O(W) fast path for parent-child branches)
+// =============================================================================
+
+/// COW-aware diff: O(W) where W = writes since fork.
+///
+/// Only called when one branch is a direct child of the other (detected via
+/// `get_fork_info`) and no `as_of` timestamp is specified.
+///
+/// Algorithm:
+/// 1. Scan the child's own entries (memtable + own segments, no inherited layers).
+/// 2. Scan the parent's entries written after fork_version.
+/// 3. For each changed key, point-lookup both branches for the current visible value.
+/// 4. Classify as added/removed/modified using the same logic as the full-scan diff.
+#[allow(clippy::too_many_arguments)]
+fn cow_diff_branches(
+    db: &Arc<Database>,
+    id_a: BranchId,
+    id_b: BranchId,
+    child_id: BranchId,
+    parent_id: BranchId,
+    fork_version: u64,
+    branch_a_name: &str,
+    branch_b_name: &str,
+    options: &DiffOptions,
+) -> StrataResult<BranchDiffResult> {
+    let space_index = SpaceIndex::new(db.clone());
+    let storage = db.storage();
+
+    // 1. Space listing and filtering (same as full-scan path)
+    let spaces_a: HashSet<String> = space_index.list(id_a)?.into_iter().collect();
+    let spaces_b: HashSet<String> = space_index.list(id_b)?.into_iter().collect();
+
+    let space_filter: Option<HashSet<String>> = options
+        .filter
+        .as_ref()
+        .and_then(|f| f.spaces.as_ref())
+        .map(|s| s.iter().cloned().collect());
+
+    let mut spaces_only_in_a: Vec<String> = spaces_a.difference(&spaces_b).cloned().collect();
+    let mut spaces_only_in_b: Vec<String> = spaces_b.difference(&spaces_a).cloned().collect();
+
+    if let Some(ref allowed) = space_filter {
+        spaces_only_in_a.retain(|s| allowed.contains(s));
+        spaces_only_in_b.retain(|s| allowed.contains(s));
+    }
+
+    // 2. Determine which TypeTags to scan
+    let type_tags: HashSet<TypeTag> =
+        match options.filter.as_ref().and_then(|f| f.primitives.as_ref()) {
+            Some(prims) => prims
+                .iter()
+                .flat_map(|p| primitive_to_type_tags(*p))
+                .collect(),
+            None => DATA_TYPE_TAGS.iter().copied().collect(),
+        };
+
+    // 3. Scan only changed entries (child's own + parent's post-fork)
+    let child_own = storage.list_own_entries(&child_id, None);
+    let parent_post_fork = storage.list_own_entries(&parent_id, Some(fork_version));
+
+    // 4. Build the set of potentially changed keys, applying filters
+    let mut changed_keys: HashSet<(String, Vec<u8>, TypeTag)> = HashSet::new();
+
+    for entry in child_own.iter().chain(parent_post_fork.iter()) {
+        if !type_tags.contains(&entry.key.type_tag) {
+            continue;
+        }
+        if let Some(ref allowed) = space_filter {
+            if !allowed.contains(&entry.key.namespace.space) {
+                continue;
+            }
+        }
+        changed_keys.insert((
+            entry.key.namespace.space.clone(),
+            entry.key.user_key.to_vec(),
+            entry.key.type_tag,
+        ));
+    }
+
+    // 5. Point-lookup both branches for each changed key and classify
+    // (added, removed, modified) per space
+    type SpaceBuckets = (
+        Vec<BranchDiffEntry>,
+        Vec<BranchDiffEntry>,
+        Vec<BranchDiffEntry>,
+    );
+    let mut space_diffs_map: HashMap<String, SpaceBuckets> = HashMap::new();
+
+    // Cache Arc<Namespace> per (branch_id, space) to avoid repeated allocation
+    let mut ns_cache: HashMap<(BranchId, String), Arc<Namespace>> = HashMap::new();
+
+    for (space, user_key, type_tag) in &changed_keys {
+        let ns_a = ns_cache
+            .entry((id_a, space.clone()))
+            .or_insert_with(|| Arc::new(Namespace::for_branch_space(id_a, space)))
+            .clone();
+        let key_a = Key::new(ns_a, *type_tag, user_key.clone());
+        let val_a = storage.get_value_direct(&key_a)?;
+
+        let ns_b = ns_cache
+            .entry((id_b, space.clone()))
+            .or_insert_with(|| Arc::new(Namespace::for_branch_space(id_b, space)))
+            .clone();
+        let key_b = Key::new(ns_b, *type_tag, user_key.clone());
+        let val_b = storage.get_value_direct(&key_b)?;
+
+        let diff_entry = match (&val_a, &val_b) {
+            (None, None) => continue,
+            (Some(a), Some(b)) if a == b => continue,
+            _ => BranchDiffEntry {
+                key: format_user_key(user_key),
+                raw_key: user_key.clone(),
+                primitive: type_tag_to_primitive(*type_tag),
+                type_tag: *type_tag,
+                space: space.clone(),
+                value_a: val_a.clone(),
+                value_b: val_b.clone(),
+            },
+        };
+
+        let (added, removed, modified) = space_diffs_map.entry(space.clone()).or_default();
+
+        match (&diff_entry.value_a, &diff_entry.value_b) {
+            (Some(_), None) => removed.push(diff_entry),
+            (None, Some(_)) => added.push(diff_entry),
+            (Some(_), Some(_)) => modified.push(diff_entry),
+            _ => unreachable!(),
+        }
+    }
+
+    // 6. Assemble result
+    let mut total_added = 0usize;
+    let mut total_removed = 0usize;
+    let mut total_modified = 0usize;
+    let mut space_diffs = Vec::new();
+
+    for (space, (added, removed, modified)) in space_diffs_map {
+        total_added += added.len();
+        total_removed += removed.len();
+        total_modified += modified.len();
+
+        if !added.is_empty() || !removed.is_empty() || !modified.is_empty() {
+            space_diffs.push(SpaceDiff {
+                space,
+                added,
+                removed,
+                modified,
+            });
+        }
+    }
+
+    Ok(BranchDiffResult {
+        branch_a: branch_a_name.to_string(),
+        branch_b: branch_b_name.to_string(),
         spaces: space_diffs,
         summary: DiffSummary {
             total_added,
@@ -4113,5 +4299,246 @@ mod tests {
         .unwrap();
         assert_eq!(info.keys_applied, 0);
         assert!(info.cherry_pick_version.is_none());
+    }
+
+    // =========================================================================
+    // COW-Aware Diff Tests
+    // =========================================================================
+
+    #[test]
+    fn test_cow_diff_child_adds_key() {
+        let (_temp, db) = setup_with_branch("parent");
+        write_kv(&db, "parent", "default", "existing", Value::Int(1));
+        fork_branch(&db, "parent", "child").unwrap();
+        write_kv(&db, "child", "default", "new_key", Value::Int(42));
+
+        let diff = diff_branches(&db, "parent", "child").unwrap();
+        assert_eq!(diff.summary.total_added, 1);
+        assert_eq!(diff.summary.total_removed, 0);
+        assert_eq!(diff.summary.total_modified, 0);
+
+        let space = &diff.spaces[0];
+        assert_eq!(space.added[0].key, "new_key");
+        assert!(space.added[0].value_a.is_none());
+        assert_eq!(space.added[0].value_b, Some(Value::Int(42)));
+    }
+
+    #[test]
+    fn test_cow_diff_child_modifies_key() {
+        let (_temp, db) = setup_with_branch("parent");
+        write_kv(&db, "parent", "default", "k", Value::Int(1));
+        fork_branch(&db, "parent", "child").unwrap();
+        write_kv(&db, "child", "default", "k", Value::Int(2));
+
+        let diff = diff_branches(&db, "parent", "child").unwrap();
+        assert_eq!(diff.summary.total_modified, 1);
+        assert_eq!(diff.summary.total_added, 0);
+        assert_eq!(diff.summary.total_removed, 0);
+
+        let space = &diff.spaces[0];
+        assert_eq!(space.modified[0].key, "k");
+        assert_eq!(space.modified[0].value_a, Some(Value::Int(1)));
+        assert_eq!(space.modified[0].value_b, Some(Value::Int(2)));
+    }
+
+    #[test]
+    fn test_cow_diff_child_deletes_key() {
+        let (_temp, db) = setup_with_branch("parent");
+        write_kv(&db, "parent", "default", "k", Value::Int(1));
+        fork_branch(&db, "parent", "child").unwrap();
+        delete_kv(&db, "child", "default", "k");
+
+        let diff = diff_branches(&db, "parent", "child").unwrap();
+        assert_eq!(diff.summary.total_removed, 1);
+        assert_eq!(diff.summary.total_added, 0);
+        assert_eq!(diff.summary.total_modified, 0);
+
+        let space = &diff.spaces[0];
+        assert_eq!(space.removed[0].key, "k");
+        assert_eq!(space.removed[0].value_a, Some(Value::Int(1)));
+        assert!(space.removed[0].value_b.is_none());
+    }
+
+    #[test]
+    fn test_cow_diff_parent_modifies_after_fork() {
+        let (_temp, db) = setup_with_branch("parent");
+        write_kv(&db, "parent", "default", "k", Value::Int(1));
+        fork_branch(&db, "parent", "child").unwrap();
+        // Parent modifies after fork
+        write_kv(&db, "parent", "default", "k", Value::Int(99));
+
+        let diff = diff_branches(&db, "parent", "child").unwrap();
+        assert_eq!(diff.summary.total_modified, 1);
+
+        let space = &diff.spaces[0];
+        assert_eq!(space.modified[0].value_a, Some(Value::Int(99))); // parent's new value
+        assert_eq!(space.modified[0].value_b, Some(Value::Int(1))); // child still has old
+    }
+
+    #[test]
+    fn test_cow_diff_both_modify_same_key() {
+        let (_temp, db) = setup_with_branch("parent");
+        write_kv(&db, "parent", "default", "k", Value::Int(1));
+        fork_branch(&db, "parent", "child").unwrap();
+        write_kv(&db, "parent", "default", "k", Value::Int(10));
+        write_kv(&db, "child", "default", "k", Value::Int(20));
+
+        let diff = diff_branches(&db, "parent", "child").unwrap();
+        assert_eq!(diff.summary.total_modified, 1);
+
+        let space = &diff.spaces[0];
+        assert_eq!(space.modified[0].value_a, Some(Value::Int(10)));
+        assert_eq!(space.modified[0].value_b, Some(Value::Int(20)));
+    }
+
+    #[test]
+    fn test_cow_diff_child_writes_same_value() {
+        let (_temp, db) = setup_with_branch("parent");
+        write_kv(&db, "parent", "default", "k", Value::Int(1));
+        fork_branch(&db, "parent", "child").unwrap();
+        // Child writes same value — should NOT appear in diff
+        write_kv(&db, "child", "default", "k", Value::Int(1));
+
+        let diff = diff_branches(&db, "parent", "child").unwrap();
+        assert_eq!(diff.summary.total_added, 0);
+        assert_eq!(diff.summary.total_removed, 0);
+        assert_eq!(diff.summary.total_modified, 0);
+    }
+
+    #[test]
+    fn test_cow_diff_child_deletes_nonexistent() {
+        let (_temp, db) = setup_with_branch("parent");
+        // Parent must have at least one key for fork to succeed
+        write_kv(&db, "parent", "default", "exists", Value::Int(1));
+        fork_branch(&db, "parent", "child").unwrap();
+        // Child deletes a key that doesn't exist in parent — should NOT appear
+        delete_kv(&db, "child", "default", "phantom");
+
+        let diff = diff_branches(&db, "parent", "child").unwrap();
+        assert_eq!(diff.summary.total_added, 0);
+        assert_eq!(diff.summary.total_removed, 0);
+        assert_eq!(diff.summary.total_modified, 0);
+    }
+
+    #[test]
+    fn test_cow_diff_directionality() {
+        let (_temp, db) = setup_with_branch("parent");
+        write_kv(&db, "parent", "default", "k", Value::Int(1));
+        fork_branch(&db, "parent", "child").unwrap();
+        write_kv(&db, "child", "default", "new", Value::Int(2));
+
+        // diff(parent, child): "new" is added (in child/b, not parent/a)
+        let diff_pc = diff_branches(&db, "parent", "child").unwrap();
+        assert_eq!(diff_pc.summary.total_added, 1);
+        assert_eq!(diff_pc.summary.total_removed, 0);
+
+        // diff(child, parent): "new" is removed (in child/a, not parent/b)
+        let diff_cp = diff_branches(&db, "child", "parent").unwrap();
+        assert_eq!(diff_cp.summary.total_added, 0);
+        assert_eq!(diff_cp.summary.total_removed, 1);
+    }
+
+    #[test]
+    fn test_cow_diff_with_space_filter() {
+        let (_temp, db) = setup_with_branch("parent");
+        write_kv(&db, "parent", "default", "k1", Value::Int(1));
+        write_kv(&db, "parent", "other", "k2", Value::Int(2));
+        fork_branch(&db, "parent", "child").unwrap();
+        write_kv(&db, "child", "default", "k1", Value::Int(10));
+        write_kv(&db, "child", "other", "k2", Value::Int(20));
+
+        // Filter to "default" space only
+        let diff = diff_branches_with_options(
+            &db,
+            "parent",
+            "child",
+            DiffOptions {
+                filter: Some(DiffFilter {
+                    primitives: None,
+                    spaces: Some(vec!["default".to_string()]),
+                }),
+                as_of: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(diff.summary.total_modified, 1);
+        assert_eq!(diff.spaces.len(), 1);
+        assert_eq!(diff.spaces[0].space, "default");
+    }
+
+    #[test]
+    fn test_cow_diff_with_primitive_filter() {
+        let (_temp, db) = setup_with_branch("parent");
+        write_kv(&db, "parent", "default", "kv_key", Value::Int(1));
+        fork_branch(&db, "parent", "child").unwrap();
+        write_kv(&db, "child", "default", "kv_key", Value::Int(2));
+
+        // Filter to KV only
+        let diff = diff_branches_with_options(
+            &db,
+            "parent",
+            "child",
+            DiffOptions {
+                filter: Some(DiffFilter {
+                    primitives: Some(vec![PrimitiveType::Kv]),
+                    spaces: None,
+                }),
+                as_of: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(diff.summary.total_modified, 1);
+    }
+
+    #[test]
+    fn test_cow_diff_as_of_falls_back() {
+        // When as_of is set, COW fast path should not be used (falls back to full scan).
+        // Verify correctness by checking the result matches expectations.
+        let (_temp, db) = setup_with_branch("parent");
+        write_kv(&db, "parent", "default", "k", Value::Int(1));
+        fork_branch(&db, "parent", "child").unwrap();
+        write_kv(&db, "child", "default", "k", Value::Int(2));
+
+        // With as_of=0 (before any writes), diff should be empty
+        let diff = diff_branches_with_options(
+            &db,
+            "parent",
+            "child",
+            DiffOptions {
+                filter: None,
+                as_of: Some(0),
+            },
+        )
+        .unwrap();
+        assert_eq!(diff.summary.total_modified, 0);
+        assert_eq!(diff.summary.total_added, 0);
+        assert_eq!(diff.summary.total_removed, 0);
+    }
+
+    #[test]
+    fn test_cow_diff_no_changes() {
+        let (_temp, db) = setup_with_branch("parent");
+        write_kv(&db, "parent", "default", "k", Value::Int(1));
+        fork_branch(&db, "parent", "child").unwrap();
+        // No changes on child — diff should be empty
+        let diff = diff_branches(&db, "parent", "child").unwrap();
+        assert_eq!(diff.summary.total_added, 0);
+        assert_eq!(diff.summary.total_removed, 0);
+        assert_eq!(diff.summary.total_modified, 0);
+    }
+
+    #[test]
+    fn test_cow_diff_both_delete_same_key() {
+        // Both branches delete the same key after fork → (None, None) → no diff
+        let (_temp, db) = setup_with_branch("parent");
+        write_kv(&db, "parent", "default", "k", Value::Int(1));
+        fork_branch(&db, "parent", "child").unwrap();
+        delete_kv(&db, "child", "default", "k");
+        delete_kv(&db, "parent", "default", "k");
+
+        let diff = diff_branches(&db, "parent", "child").unwrap();
+        assert_eq!(diff.summary.total_added, 0);
+        assert_eq!(diff.summary.total_removed, 0);
+        assert_eq!(diff.summary.total_modified, 0);
     }
 }

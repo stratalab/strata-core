@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 
 // ===== COW Branching Foundation Tests (Epic A) =====
 
@@ -1260,4 +1261,103 @@ fn fork_double_fork_same_dest_rejected() {
             id
         );
     }
+}
+
+// ===== list_own_entries tests (COW-aware diff support) =====
+
+#[test]
+fn list_own_entries_excludes_inherited() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 64 * 1024);
+    let pid = parent_branch();
+    let cid = child_branch();
+
+    // Write keys on parent
+    seed(&store, parent_kv("alpha"), Value::Int(1), 1);
+    seed(&store, parent_kv("beta"), Value::Int(2), 2);
+    store.rotate_memtable(&pid);
+    store.flush_oldest_frozen(&pid).unwrap();
+
+    // Fork child from parent at version 2
+    attach_inherited_layer(&store, pid, cid, 2);
+
+    // Write one key on the child
+    seed(&store, child_kv("gamma"), Value::Int(3), 3);
+
+    // list_own_entries on child should return ONLY gamma (not alpha/beta)
+    let own = store.list_own_entries(&cid, None);
+    assert_eq!(own.len(), 1);
+    assert_eq!(std::str::from_utf8(&own[0].key.user_key).unwrap(), "gamma");
+    assert_eq!(own[0].value, Value::Int(3));
+    assert!(!own[0].is_tombstone);
+}
+
+#[test]
+fn list_own_entries_includes_tombstones() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 64 * 1024);
+    let pid = parent_branch();
+    let cid = child_branch();
+
+    // Parent has key "alpha"
+    seed(&store, parent_kv("alpha"), Value::Int(1), 1);
+    store.rotate_memtable(&pid);
+    store.flush_oldest_frozen(&pid).unwrap();
+
+    // Fork child
+    attach_inherited_layer(&store, pid, cid, 1);
+
+    // Child deletes "alpha" (writes tombstone)
+    store.delete_with_version(&child_kv("alpha"), 2).unwrap();
+
+    // list_own_entries should include the tombstone
+    let own = store.list_own_entries(&cid, None);
+    assert_eq!(own.len(), 1);
+    assert_eq!(std::str::from_utf8(&own[0].key.user_key).unwrap(), "alpha");
+    assert!(own[0].is_tombstone);
+}
+
+#[test]
+fn list_own_entries_since_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 64 * 1024);
+    let pid = parent_branch();
+
+    // Parent writes before fork
+    seed(&store, parent_kv("pre_fork"), Value::Int(1), 1);
+    seed(&store, parent_kv("at_fork"), Value::Int(2), 2);
+
+    // Parent writes after fork
+    seed(&store, parent_kv("post_fork"), Value::Int(3), 3);
+    seed(&store, parent_kv("post_fork_2"), Value::Int(4), 4);
+
+    // list_own_entries with min_commit_id=2 should return only post-fork entries
+    let own = store.list_own_entries(&pid, Some(2));
+    assert_eq!(own.len(), 2);
+    let keys: HashSet<String> = own
+        .iter()
+        .map(|e| std::str::from_utf8(&e.key.user_key).unwrap().to_string())
+        .collect();
+    assert!(keys.contains("post_fork"));
+    assert!(keys.contains("post_fork_2"));
+    assert!(!keys.contains("pre_fork"));
+    assert!(!keys.contains("at_fork"));
+}
+
+#[test]
+fn list_own_entries_mvcc_dedup() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 64 * 1024);
+    let pid = parent_branch();
+
+    // Write same key multiple times at different versions
+    seed(&store, parent_kv("key"), Value::Int(1), 1);
+    seed(&store, parent_kv("key"), Value::Int(2), 2);
+    seed(&store, parent_kv("key"), Value::Int(3), 3);
+
+    // list_own_entries should return only the latest version
+    let own = store.list_own_entries(&pid, None);
+    assert_eq!(own.len(), 1);
+    assert_eq!(own[0].value, Value::Int(3));
+    assert_eq!(own[0].commit_id, 3);
 }
