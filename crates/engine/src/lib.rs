@@ -61,53 +61,38 @@ pub use search::{SearchBudget, SearchHit, SearchMode, SearchRequest, SearchRespo
 pub use branch_ops::MaterializeInfo;
 
 // Re-export search recovery registration and subsystem implementations
-pub use primitives::vector::VectorSubsystem;
 pub use search::register_search_recovery;
 pub use search::SearchSubsystem;
 
-// Re-export submodules for `strata_engine::vector::*` and `strata_engine::extensions::*` access
+// Re-export submodules for `strata_engine::extensions::*` access
 pub use primitives::extensions;
-pub use primitives::vector;
+
+// Re-export refresh hook trait for secondary index subsystems
+pub use database::refresh::{RefreshHook, RefreshHooks};
 
 // Re-export primitive types at crate root for convenience
 pub use primitives::{
     build_search_response,
     build_search_response_with_index,
     build_search_response_with_scorer,
-    // Recovery
-    register_vector_recovery,
-    validate_collection_name,
-    validate_vector_key,
     BM25LiteScorer,
     // Handles
     BranchHandle,
     BranchIndex,
     BranchMetadata,
     BranchStatus,
-    BruteForceBackend,
-    CollectionId,
-    CollectionInfo,
-    CollectionRecord,
-    DistanceMetric,
     Event,
     EventLog,
     EventLogExt,
-    FilterCondition,
-    FilterOp,
-    HnswBackend,
-    HnswConfig,
-    IndexBackendFactory,
     // Index
     InvertedIndex,
     JsonDoc,
-    JsonScalar,
     JsonStore,
     JsonStoreExt,
     // Primitives
     KVStore,
     // Extension traits
     KVStoreExt,
-    MetadataFilter,
     PostingEntry,
     PostingList,
     Scorer,
@@ -118,21 +103,6 @@ pub use primitives::{
     Searchable,
     SimpleScorer,
     SpaceIndex,
-    StorageDtype,
-    VectorBackendState,
-    // Vector types
-    VectorConfig,
-    VectorConfigSerde,
-    VectorEntry,
-    VectorError,
-    VectorHeap,
-    VectorId,
-    VectorIndexBackend,
-    VectorMatch,
-    VectorMatchWithSource,
-    VectorRecord,
-    VectorResult,
-    VectorStore,
     VectorStoreExt,
 };
 

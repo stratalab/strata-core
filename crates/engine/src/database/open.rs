@@ -165,19 +165,16 @@ impl Database {
         registry.insert(canonical_path, Arc::downgrade(&db));
         drop(registry);
 
-        // Register and run recovery for vector and search subsystems.
+        // Register and run recovery for search subsystem.
+        // Vector recovery is now handled by strata-vector (caller must register).
         // Also sets subsystems on the Database for freeze-on-drop.
-        crate::primitives::vector::register_vector_recovery();
         crate::search::register_search_recovery();
         crate::recovery::recover_all_participants(&db)?;
         let index = db.extension::<crate::search::InvertedIndex>()?;
         if !index.is_enabled() {
             index.enable();
         }
-        db.set_subsystems(vec![
-            Box::new(crate::primitives::vector::VectorSubsystem),
-            Box::new(crate::search::SearchSubsystem),
-        ]);
+        db.set_subsystems(vec![Box::new(crate::search::SearchSubsystem)]);
 
         Ok(db)
     }
@@ -312,17 +309,13 @@ impl Database {
             subsystems: parking_lot::RwLock::new(Vec::new()),
         });
 
-        crate::primitives::vector::register_vector_recovery();
         crate::search::register_search_recovery();
         crate::recovery::recover_all_participants(&db)?;
         let index = db.extension::<crate::search::InvertedIndex>()?;
         if !index.is_enabled() {
             index.enable();
         }
-        db.set_subsystems(vec![
-            Box::new(crate::primitives::vector::VectorSubsystem),
-            Box::new(crate::search::SearchSubsystem),
-        ]);
+        db.set_subsystems(vec![Box::new(crate::search::SearchSubsystem)]);
 
         Ok(db)
     }

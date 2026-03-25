@@ -31,7 +31,7 @@
 //!
 //! 3. **Embedding Format**: Raw f32 LE for efficiency. No compression currently.
 
-use crate::primitives::vector::{
+use crate::{
     CollectionId, DistanceMetric, IndexBackendFactory, StorageDtype, VectorConfig, VectorError,
     VectorId, VectorRecord, VectorResult, VectorStore,
 };
@@ -287,7 +287,7 @@ impl VectorStore {
 
             // Restore collection configuration in KV
             // Use "default" space for snapshot deserialization (backwards compat)
-            let collection_record = crate::primitives::vector::CollectionRecord::new(&config);
+            let collection_record = crate::CollectionRecord::new(&config);
             let config_key = strata_core::types::Key::new_vector_config(
                 std::sync::Arc::new(strata_core::types::Namespace::for_branch_space(
                     header.branch_id,
@@ -304,11 +304,9 @@ impl VectorStore {
 
             // Create backend using factory based on snapshot index_type
             let factory = match header.index_type {
-                1 => {
-                    IndexBackendFactory::Hnsw(crate::primitives::vector::hnsw::HnswConfig::default())
-                }
+                1 => IndexBackendFactory::Hnsw(crate::hnsw::HnswConfig::default()),
                 2 => IndexBackendFactory::SegmentedHnsw(
-                    crate::primitives::vector::segmented::SegmentedHnswConfig::default(),
+                    crate::segmented::SegmentedHnswConfig::default(),
                 ),
                 _ => IndexBackendFactory::default(),
             };
@@ -408,10 +406,10 @@ impl VectorStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::Database;
-    use crate::primitives::vector::VectorStore;
+    use crate::VectorStore;
     use std::io::Cursor;
     use std::sync::Arc;
+    use strata_engine::Database;
     use tempfile::TempDir;
 
     fn setup() -> (TempDir, Arc<Database>, VectorStore) {

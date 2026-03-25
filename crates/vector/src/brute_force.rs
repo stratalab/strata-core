@@ -8,10 +8,10 @@
 
 use std::cmp::Ordering;
 
-use crate::primitives::vector::backend::VectorIndexBackend;
-use crate::primitives::vector::distance::compute_similarity;
-use crate::primitives::vector::types::InlineMeta;
-use crate::primitives::vector::{DistanceMetric, VectorConfig, VectorError, VectorHeap, VectorId};
+use crate::backend::VectorIndexBackend;
+use crate::distance::compute_similarity;
+use crate::types::InlineMeta;
+use crate::{DistanceMetric, VectorConfig, VectorError, VectorHeap, VectorId};
 
 /// Brute-force vector search backend
 ///

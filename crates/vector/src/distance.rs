@@ -12,7 +12,7 @@
 //! - **x86_64**: AVX2 with runtime `is_x86_feature_detected!` fallback to scalar.
 //! - **Other targets**: Scalar fallback.
 
-use crate::primitives::vector::DistanceMetric;
+use crate::DistanceMetric;
 
 // ============================================================================
 // Prefetch hint (hides DRAM latency for embedding fetches)

@@ -142,10 +142,12 @@ impl Database {
         let search_index = self.extension::<crate::search::InvertedIndex>().ok();
         let search_enabled = search_index.as_ref().is_some_and(|idx| idx.is_enabled());
 
-        // Get vector backend state (if available) for incremental updates
-        let vector_state = self
-            .extension::<crate::primitives::vector::store::VectorBackendState>()
-            .ok();
+        // Get refresh hooks (vector, etc.) for incremental updates
+        let refresh_hooks = self
+            .extension::<super::refresh::RefreshHooks>()
+            .ok()
+            .map(|h| h.hooks())
+            .unwrap_or_default();
 
         for record in &records {
             max_txn_id = max_txn_id.max(record.txn_id);
@@ -160,29 +162,11 @@ impl Database {
 
             max_version = max_version.max(payload.version);
 
-            // Pre-read vector records for deletes (must happen before storage mutations)
-            let mut vector_delete_pre_reads: Vec<(
-                Key,
-                crate::primitives::vector::types::VectorRecord,
-            )> = Vec::new();
-            if vector_state.is_some() {
-                for key in &payload.deletes {
-                    if key.type_tag == TypeTag::Vector {
-                        use strata_core::traits::Storage;
-                        if let Ok(Some(vv)) = self.storage.get_versioned(key, u64::MAX) {
-                            if let strata_core::value::Value::Bytes(ref bytes) = vv.value {
-                                if let Ok(record) =
-                                    crate::primitives::vector::types::VectorRecord::from_bytes(
-                                        bytes,
-                                    )
-                                {
-                                    vector_delete_pre_reads.push((key.clone(), record));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            // Pre-read state for delete hooks (must happen before storage mutations)
+            let hook_pre_reads: Vec<Vec<(Key, Vec<u8>)>> = refresh_hooks
+                .iter()
+                .map(|hook| hook.pre_delete_read(self, &payload.deletes))
+                .collect();
 
             // Apply puts and deletes atomically with original WAL timestamp
             // and TTL. Combines #1699 (preserve commit timestamp for time-travel),
@@ -281,94 +265,14 @@ impl Database {
                 }
             }
 
-            // --- Update vector backends ---
-            if let Some(ref vs) = vector_state {
-                use strata_core::primitives::vector::{CollectionId, VectorId};
-
-                // Vector puts: insert into backend
-                for (key, value) in &payload.puts {
-                    if key.type_tag != TypeTag::Vector {
-                        continue;
-                    }
-                    let bytes = match value {
-                        strata_core::value::Value::Bytes(b) => b,
-                        _ => continue,
-                    };
-                    let record =
-                        match crate::primitives::vector::types::VectorRecord::from_bytes(bytes) {
-                            Ok(r) => r,
-                            Err(_) => continue,
-                        };
-                    let user_key_str = match key.user_key_string() {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    let (collection, vector_key) = match user_key_str.split_once('/') {
-                        Some(pair) => pair,
-                        None => continue,
-                    };
-                    let branch_id = key.namespace.branch_id;
-                    let cid = CollectionId::new(branch_id, collection);
-                    let vid = VectorId::new(record.vector_id);
-
-                    if let Some(mut backend) = vs.backends.get_mut(&cid) {
-                        if let Err(e) =
-                            backend.insert_with_timestamp(vid, &record.embedding, record.created_at)
-                        {
-                            tracing::warn!(
-                                target: "strata::refresh",
-                                collection = collection,
-                                vector_key = vector_key,
-                                error = %e,
-                                "Vector insert failed during refresh"
-                            );
-                        }
-                        backend.set_inline_meta(
-                            vid,
-                            crate::primitives::vector::types::InlineMeta {
-                                key: vector_key.to_string(),
-                                source_ref: record.source_ref.clone(),
-                            },
-                        );
-                    } else {
-                        tracing::debug!(
-                            target: "strata::refresh",
-                            collection = collection,
-                            "Skipping vector insert for unknown collection (will be picked up on restart)"
-                        );
-                    }
-                }
-
-                // Vector deletes: remove from backend using pre-reads
-                for (key, record) in &vector_delete_pre_reads {
-                    let user_key_str = match key.user_key_string() {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    let collection = match user_key_str.split_once('/') {
-                        Some((coll, _)) => coll,
-                        None => continue,
-                    };
-                    let branch_id = key.namespace.branch_id;
-                    let cid = CollectionId::new(branch_id, collection);
-                    let vid = VectorId::new(record.vector_id);
-
-                    if let Some(mut backend) = vs.backends.get_mut(&cid) {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_micros() as u64)
-                            .unwrap_or(0);
-                        if let Err(e) = backend.delete_with_timestamp(vid, now) {
-                            tracing::warn!(
-                                target: "strata::refresh",
-                                collection = collection,
-                                error = %e,
-                                "Vector delete failed during refresh"
-                            );
-                        }
-                        backend.remove_inline_meta(vid);
-                    }
-                }
+            // --- Update refresh hooks (vector backends, etc.) ---
+            let puts_slice: Vec<(Key, strata_core::value::Value)> = payload
+                .puts
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            for (hook, pre_reads) in refresh_hooks.iter().zip(hook_pre_reads.iter()) {
+                hook.apply_refresh(&puts_slice, pre_reads);
             }
 
             // Issue #1734: Advance visible version AFTER secondary indexes are
@@ -400,34 +304,12 @@ impl Database {
     /// With lite KV records (embedding stripped), the mmap cache is required
     /// for the next recovery to reconstruct embeddings. This is called during
     /// shutdown and drop.
-    pub(crate) fn freeze_vector_heaps(&self) -> StrataResult<()> {
-        use crate::primitives::vector::VectorBackendState;
-
-        let data_dir = self.data_dir();
-        if data_dir.as_os_str().is_empty() {
-            return Ok(()); // Ephemeral database — no mmap
-        }
-
-        let state = match self.extension::<VectorBackendState>() {
-            Ok(s) => s,
-            Err(_) => return Ok(()), // No vector state registered
-        };
-
-        for entry in state.backends.iter() {
-            let (cid, backend) = (entry.key(), entry.value());
-            let branch_hex = format!("{:032x}", u128::from_be_bytes(*cid.branch_id.as_bytes()));
-            let vec_path = data_dir
-                .join("vectors")
-                .join(&branch_hex)
-                .join(format!("{}.vec", cid.name));
-            backend.freeze_heap_to_disk(&vec_path)?;
-
-            // Also freeze graphs
-            let gdir = data_dir
-                .join("vectors")
-                .join(&branch_hex)
-                .join(format!("{}_graphs", cid.name));
-            backend.freeze_graphs_to_disk(&gdir)?;
+    /// Freeze all registered refresh hooks' state to disk.
+    pub fn freeze_vector_heaps(&self) -> StrataResult<()> {
+        if let Ok(hooks) = self.extension::<super::refresh::RefreshHooks>() {
+            for hook in hooks.hooks() {
+                hook.freeze_to_disk(self)?;
+            }
         }
         Ok(())
     }

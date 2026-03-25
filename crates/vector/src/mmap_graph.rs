@@ -45,12 +45,10 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 
-use crate::primitives::vector::error::VectorError;
-use crate::primitives::vector::hnsw::{
-    CompactHnswGraph, CompactHnswNode, HnswConfig, NeighborData,
-};
-use crate::primitives::vector::types::VectorId;
-use crate::primitives::vector::VectorConfig;
+use crate::error::VectorError;
+use crate::hnsw::{CompactHnswGraph, CompactHnswNode, HnswConfig, NeighborData};
+use crate::types::VectorId;
+use crate::VectorConfig;
 
 const MAGIC: &[u8; 4] = b"SHGR";
 const VERSION: u32 = 1;
@@ -335,17 +333,17 @@ pub(crate) fn open_graph_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::primitives::vector::DistanceMetric;
+    use crate::DistanceMetric;
     use tempfile::TempDir;
 
     fn make_test_graph() -> CompactHnswGraph {
-        use crate::primitives::vector::hnsw::HnswGraph;
+        use crate::hnsw::HnswGraph;
 
         let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
         let mut graph = HnswGraph::new(&config, HnswConfig::default());
 
         // Build a small heap for distance computation
-        let mut heap = crate::primitives::vector::heap::VectorHeap::new(config.clone());
+        let mut heap = crate::heap::VectorHeap::new(config.clone());
         heap.upsert(VectorId::new(1), &[1.0, 0.0, 0.0]).unwrap();
         heap.upsert(VectorId::new(2), &[0.0, 1.0, 0.0]).unwrap();
         heap.upsert(VectorId::new(3), &[0.0, 0.0, 1.0]).unwrap();
@@ -405,7 +403,7 @@ mod tests {
 
         // Build heap for search
         let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
-        let mut heap = crate::primitives::vector::heap::VectorHeap::new(config.clone());
+        let mut heap = crate::heap::VectorHeap::new(config.clone());
         heap.upsert(VectorId::new(1), &[1.0, 0.0, 0.0]).unwrap();
         heap.upsert(VectorId::new(2), &[0.0, 1.0, 0.0]).unwrap();
         heap.upsert(VectorId::new(3), &[0.0, 0.0, 1.0]).unwrap();
@@ -484,7 +482,7 @@ mod tests {
         assert!(!loaded.contains(VectorId::new(3)));
 
         // Search with heap should exclude deleted nodes
-        let mut heap = crate::primitives::vector::heap::VectorHeap::new(config);
+        let mut heap = crate::heap::VectorHeap::new(config);
         heap.upsert(VectorId::new(1), &[1.0, 0.0, 0.0]).unwrap();
         heap.upsert(VectorId::new(2), &[0.0, 1.0, 0.0]).unwrap();
         heap.upsert(VectorId::new(3), &[0.0, 0.0, 1.0]).unwrap();
@@ -638,7 +636,7 @@ mod tests {
         assert!(loaded.is_neighbor_data_mmap());
 
         // Search should find the single node
-        let mut heap = crate::primitives::vector::heap::VectorHeap::new(config);
+        let mut heap = crate::heap::VectorHeap::new(config);
         heap.upsert(VectorId::new(42), &[1.0, 0.0, 0.0]).unwrap();
         let results = loaded.search_with_heap(&[1.0, 0.0, 0.0], 10, &heap);
         assert_eq!(results.len(), 1);

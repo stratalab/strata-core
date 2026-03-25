@@ -27,11 +27,11 @@ use std::cell::RefCell;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
-use crate::primitives::vector::backend::VectorIndexBackend;
-use crate::primitives::vector::distance::{compute_similarity, compute_similarity_cached};
-use crate::primitives::vector::heap::VectorHeap;
-use crate::primitives::vector::types::InlineMeta;
-use crate::primitives::vector::{DistanceMetric, VectorConfig, VectorError, VectorId};
+use crate::backend::VectorIndexBackend;
+use crate::distance::{compute_similarity, compute_similarity_cached};
+use crate::heap::VectorHeap;
+use crate::types::InlineMeta;
+use crate::{DistanceMetric, VectorConfig, VectorError, VectorId};
 
 /// HNSW configuration parameters
 #[derive(Debug, Clone)]
@@ -104,7 +104,7 @@ impl HnswNode {
     /// Nodes with created_at == 0 are treated as always-existing (legacy nodes).
     fn is_alive_at(&self, as_of_ts: u64) -> bool {
         (self.created_at == 0 || self.created_at <= as_of_ts)
-            && self.deleted_at.map_or(true, |d| d > as_of_ts)
+            && self.deleted_at.is_none_or(|d| d > as_of_ts)
     }
 }
 
@@ -1320,7 +1320,7 @@ impl CompactHnswGraph {
     fn is_alive_at(&self, id: VectorId, as_of_ts: u64) -> bool {
         self.get_node(id).is_some_and(|n| {
             (n.created_at == 0 || n.created_at <= as_of_ts)
-                && n.deleted_at.map_or(true, |d| d > as_of_ts)
+                && n.deleted_at.is_none_or(|d| d > as_of_ts)
         })
     }
 
@@ -1909,7 +1909,7 @@ impl VectorIndexBackend for HnswBackend {
         self.heap.freeze_to_disk(path)
     }
 
-    fn replace_heap(&mut self, heap: crate::primitives::vector::VectorHeap) {
+    fn replace_heap(&mut self, heap: crate::VectorHeap) {
         self.heap = heap;
     }
 
@@ -2072,7 +2072,7 @@ mod tests {
 
     #[test]
     fn test_hnsw_vs_brute_force_recall() {
-        use crate::primitives::vector::brute_force::BruteForceBackend;
+        use crate::brute_force::BruteForceBackend;
 
         let dim = 32;
         let n = 200;
@@ -2272,7 +2272,7 @@ mod tests {
     #[test]
     fn test_hnsw_multi_query_recall() {
         // Rigorous recall test: 500 vectors, 20 random queries, average recall >= 0.95
-        use crate::primitives::vector::brute_force::BruteForceBackend;
+        use crate::brute_force::BruteForceBackend;
 
         let dim = 64;
         let n = 500;
@@ -2888,7 +2888,7 @@ mod profiling_tests {
     #[test]
     #[ignore] // profiling test — run explicitly with `cargo test -- --ignored`
     fn profile_norm_cache_vs_recompute() {
-        use crate::primitives::vector::distance::cosine_similarity_with_norms;
+        use crate::distance::cosine_similarity_with_norms;
 
         let n = 10_000;
         let dim = 128;

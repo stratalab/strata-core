@@ -29,10 +29,9 @@ use strata_core::contract::Version;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_engine::Database;
-use strata_engine::{
-    EventLog, KVStore, VectorStore,
-    vector::{DistanceMetric, VectorConfig},
-};
+use strata_engine::{EventLog, KVStore};
+use strata_core::primitives::vector::{DistanceMetric, VectorConfig};
+// VectorStore is in strata-vector; see root integration tests
 use tempfile::TempDir;
 
 // ============================================================================

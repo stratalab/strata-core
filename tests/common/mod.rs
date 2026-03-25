@@ -17,8 +17,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 pub use strata_core::{BranchId, JsonPath, JsonValue, Value, Version};
 pub use strata_engine::{
-    register_search_recovery, register_vector_recovery, BranchIndex, Database, DistanceMetric,
-    EventLog, JsonStore, KVStore, StorageDtype, StrataConfig, VectorConfig, VectorStore,
+    register_search_recovery, BranchIndex, Database, EventLog, JsonStore, KVStore, StrataConfig,
+};
+pub use strata_vector::{
+    register_vector_recovery, DistanceMetric, StorageDtype, VectorConfig, VectorStore,
 };
 use tempfile::TempDir;
 
@@ -737,7 +739,7 @@ impl CapturedState {
 /// Captured state of a vector collection for comparison.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapturedVectorState {
-    pub vectors: BTreeMap<String, (strata_engine::VectorId, Vec<f32>, Option<serde_json::Value>)>,
+    pub vectors: BTreeMap<String, (strata_vector::VectorId, Vec<f32>, Option<serde_json::Value>)>,
     pub count: usize,
     pub max_id: u64,
 }

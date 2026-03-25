@@ -43,6 +43,7 @@ tempfile = { workspace = true }
 criterion = "0.5"
 serde_json = { workspace = true }
 tracing-subscriber = { workspace = true }
+strata-vector = { path = "../vector" }
 
 [[bench]]
 name = "transaction_benchmarks"

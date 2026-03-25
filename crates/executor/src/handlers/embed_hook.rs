@@ -1110,7 +1110,7 @@ fn ensure_shadow_collection(
             tracing::info!(target: "strata::embed", collection = name, "Created shadow embedding collection");
             state.insert(cache_key);
         }
-        Err(strata_engine::vector::VectorError::CollectionAlreadyExists { .. }) => {
+        Err(strata_vector::VectorError::CollectionAlreadyExists { .. }) => {
             // Already exists from a previous process run — verify dimension matches
             match p.vector.system_collection_dimension(branch_id, name) {
                 Ok(Some(existing_dim)) if existing_dim != dim => {

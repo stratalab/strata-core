@@ -5,7 +5,8 @@
 //! - **EventLog**: Immutable append-only event stream with causal hash chaining
 //! - **BranchIndex**: Branch lifecycle management
 //! - **JsonStore**: JSON document storage with path-based operations
-//! - **VectorStore**: Vector storage with similarity search and collection management
+//!
+//! Vector storage is provided by the `strata-vector` crate.
 //!
 //! ## Design Principle: Stateless Facades
 //!
@@ -43,7 +44,6 @@ pub mod extensions;
 pub mod json;
 pub mod kv;
 pub mod space;
-pub mod vector;
 
 // Re-exports - primitives are exported as they're implemented
 pub use branch::{BranchHandle, EventHandle, JsonHandle, KvHandle};
@@ -52,14 +52,6 @@ pub use event::{Event, EventLog};
 pub use json::{JsonDoc, JsonStore};
 pub use kv::KVStore;
 pub use space::SpaceIndex;
-pub use vector::{
-    register_vector_recovery, validate_collection_name, validate_vector_key, BruteForceBackend,
-    CollectionId, CollectionInfo, CollectionRecord, DistanceMetric, FilterCondition, FilterOp,
-    HnswBackend, HnswConfig, IndexBackendFactory, JsonScalar, MetadataFilter, StorageDtype,
-    VectorBackendState, VectorConfig, VectorConfigSerde, VectorEntry, VectorError, VectorHeap,
-    VectorId, VectorIndexBackend, VectorMatch, VectorMatchWithSource, VectorRecord, VectorResult,
-    VectorStore,
-};
 
 // Re-export search types for convenience (from search module)
 pub use crate::search::{

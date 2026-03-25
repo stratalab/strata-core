@@ -195,7 +195,27 @@ impl Database {
     /// Collect all primitive data from storage for checkpointing.
     pub(super) fn collect_checkpoint_data(&self) -> CheckpointData {
         use crate::primitives::branch::BranchMetadata;
-        use crate::primitives::vector::types::VectorRecord;
+
+        /// Lightweight deserialization shim for vector records in checkpoint.
+        /// The full `VectorRecord` type lives in strata-vector.
+        #[allow(dead_code)]
+        #[derive(serde::Deserialize)]
+        struct VectorRecord {
+            vector_id: u64,
+            #[serde(default)]
+            embedding: Vec<f32>,
+            metadata: Option<serde_json::Value>,
+            version: u64,
+            created_at: u64,
+            updated_at: u64,
+            #[serde(default)]
+            source_ref: Option<strata_core::EntityRef>,
+        }
+        impl VectorRecord {
+            fn from_bytes(data: &[u8]) -> Result<Self, rmp_serde::decode::Error> {
+                rmp_serde::from_slice(data)
+            }
+        }
 
         let mut kv_entries = Vec::new();
         let mut event_entries = Vec::new();

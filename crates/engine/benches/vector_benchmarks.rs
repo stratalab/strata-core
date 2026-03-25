@@ -10,9 +10,9 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::collections::HashSet;
 use strata_core::primitives::vector::{DistanceMetric, VectorConfig, VectorId};
-use strata_engine::primitives::vector::backend::VectorIndexBackend;
-use strata_engine::primitives::vector::hnsw::HnswConfig;
-use strata_engine::primitives::vector::segmented::{SegmentedHnswBackend, SegmentedHnswConfig};
+use strata_vector::backend::VectorIndexBackend;
+use strata_vector::hnsw::HnswConfig;
+use strata_vector::segmented::{SegmentedHnswBackend, SegmentedHnswConfig};
 
 /// Deterministic pseudo-random embedding generator
 fn make_embedding(dim: usize, seed: usize) -> Vec<f32> {
@@ -54,7 +54,7 @@ fn brute_force_search(
     query: &[f32],
     k: usize,
 ) -> Vec<(VectorId, f32)> {
-    use strata_engine::primitives::vector::brute_force::BruteForceBackend;
+    use strata_vector::brute_force::BruteForceBackend;
 
     let config = backend.config();
     let mut bf = BruteForceBackend::new(&config);
