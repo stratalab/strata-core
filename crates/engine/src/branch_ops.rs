@@ -161,6 +161,47 @@ pub struct MergeInfo {
     pub merge_version: Option<u64>,
 }
 
+/// Result of three-way diff for a single key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThreeWayDiffEntry {
+    /// User key (UTF-8 or hex-encoded for binary keys)
+    pub key: String,
+    /// Raw user key bytes (for programmatic access, preserves binary keys)
+    pub raw_key: Vec<u8>,
+    /// Space this entry belongs to
+    pub space: String,
+    /// Primitive type of this entry
+    pub primitive: PrimitiveType,
+    /// Storage-level type tag
+    pub type_tag: TypeTag,
+    /// Classification of the change
+    pub change: ThreeWayChange,
+}
+
+/// Full three-way diff result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThreeWayDiffResult {
+    /// Source branch name
+    pub source: String,
+    /// Target branch name
+    pub target: String,
+    /// Merge base branch name
+    pub merge_base_branch: String,
+    /// Merge base version
+    pub merge_base_version: u64,
+    /// Entries that differ (excludes Unchanged)
+    pub entries: Vec<ThreeWayDiffEntry>,
+}
+
+/// Merge base information.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MergeBaseInfo {
+    /// Branch name at the merge base
+    pub branch: String,
+    /// MVCC version at the merge base
+    pub version: u64,
+}
+
 /// Options for filtering and time-scoping a branch diff.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DiffOptions {
@@ -548,30 +589,40 @@ struct MergeBase {
 }
 
 /// Classification of a key in a three-way merge.
-#[derive(Debug, Clone, PartialEq)]
-enum ThreeWayChange {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ThreeWayChange {
     /// Key unchanged on both sides. No action.
     Unchanged,
     /// Key only changed on source side. Apply source value to target.
-    SourceChanged { value: Value },
+    SourceChanged {
+        /// The source branch's new value.
+        value: Value,
+    },
     /// Key only changed on target side. No action.
     TargetChanged,
     /// Key changed on both sides to the same value. No action.
     BothChangedSame,
     /// Key changed on both sides to different values. Conflict.
     Conflict {
+        /// Value on the source branch.
         source_value: Value,
+        /// Value on the target branch.
         target_value: Value,
     },
     /// Key added on source only. Apply.
-    SourceAdded { value: Value },
+    SourceAdded {
+        /// The source branch's value.
+        value: Value,
+    },
     /// Key added on target only. No action.
     TargetAdded,
     /// Key added on both sides with same value. No action.
     BothAddedSame,
     /// Key added on both sides with different values. Conflict.
     BothAddedDifferent {
+        /// Value on the source branch.
         source_value: Value,
+        /// Value on the target branch.
         target_value: Value,
     },
     /// Key deleted on source, unchanged on target. Delete on target.
@@ -581,9 +632,15 @@ enum ThreeWayChange {
     /// Key deleted on both sides. No action.
     BothDeleted,
     /// Key deleted on source, modified on target. Conflict.
-    DeleteModifyConflict { target_value: Value },
+    DeleteModifyConflict {
+        /// Value on the target branch (source deleted it).
+        target_value: Value,
+    },
     /// Key modified on source, deleted on target. Conflict.
-    ModifyDeleteConflict { source_value: Value },
+    ModifyDeleteConflict {
+        /// Value on the source branch (target deleted it).
+        source_value: Value,
+    },
 }
 
 /// Classify a single key's change across ancestor, source, and target.
@@ -1060,6 +1117,215 @@ pub fn merge_branches(
 }
 
 // =============================================================================
+// Three-Way Diff (public entry point)
+// =============================================================================
+
+/// Compute the three-way diff between source and target branches.
+///
+/// Returns the raw classification for each key (14-case decision matrix)
+/// without applying any merge strategy. This is useful for inspection
+/// before deciding to merge.
+///
+/// The `merge_base_override` parameter is populated by the executor from DAG data,
+/// covering repeated merges and materialized branches where storage-level fork
+/// info is no longer available.
+///
+/// # Errors
+///
+/// - Either branch does not exist
+/// - No fork or merge relationship between branches
+pub fn diff_three_way(
+    db: &Arc<Database>,
+    source: &str,
+    target: &str,
+    merge_base_override: Option<(BranchId, u64)>,
+) -> StrataResult<ThreeWayDiffResult> {
+    let source_id = resolve_and_verify(db, source)?;
+    let target_id = resolve_and_verify(db, target)?;
+
+    // Compute merge base
+    let merge_base = compute_merge_base(db, source_id, target_id, merge_base_override);
+
+    let merge_base = match merge_base {
+        Some(mb) => mb,
+        None => {
+            return Err(StrataError::invalid_input(format!(
+                "Cannot compute three-way diff between '{}' and '{}': no fork or merge relationship found. \
+                 Branches must be related by fork or a previous merge.",
+                source, target
+            )));
+        }
+    };
+
+    // Resolve merge base branch_id back to a name.
+    // The merge base comes from either source_id or target_id (via compute_merge_base).
+    let merge_base_branch_name = if merge_base.branch_id == source_id {
+        source.to_string()
+    } else if merge_base.branch_id == target_id {
+        target.to_string()
+    } else {
+        // Fallback: try to find the branch name from the branch index
+        let branch_index = BranchIndex::new(db.clone());
+        let mut found_name = format!("{:?}", merge_base.branch_id);
+        if let Ok(names) = branch_index.list_branches() {
+            for name in names {
+                if resolve_branch_name(&name) == merge_base.branch_id {
+                    found_name = name;
+                    break;
+                }
+            }
+        }
+        found_name
+    };
+
+    // Collect spaces from both branches
+    let space_index = SpaceIndex::new(db.clone());
+    let source_spaces: HashSet<String> = space_index.list(source_id)?.into_iter().collect();
+    let target_spaces: HashSet<String> = space_index.list(target_id)?.into_iter().collect();
+    let all_spaces: Vec<String> = source_spaces.union(&target_spaces).cloned().collect();
+
+    let storage = db.storage();
+    let mut entries = Vec::new();
+
+    for space in &all_spaces {
+        for &type_tag in &DATA_TYPE_TAGS {
+            // 1. Ancestor state (at merge base version, WITH tombstones)
+            let ancestor_entries = storage.list_by_type_at_version(
+                &merge_base.branch_id,
+                type_tag,
+                merge_base.version,
+            );
+
+            // 2. Source current state (live keys only)
+            let source_entries = storage.list_by_type(&source_id, type_tag);
+
+            // 3. Target current state (live keys only)
+            let target_entries = storage.list_by_type(&target_id, type_tag);
+
+            // Build lookup maps
+            let mut ancestor_map: HashMap<Vec<u8>, Option<Value>> = HashMap::new();
+            for entry in &ancestor_entries {
+                if entry.key.namespace.space == *space {
+                    if entry.is_tombstone {
+                        ancestor_map.insert(entry.key.user_key.to_vec(), None);
+                    } else {
+                        ancestor_map.insert(entry.key.user_key.to_vec(), Some(entry.value.clone()));
+                    }
+                }
+            }
+
+            let mut source_map: HashMap<Vec<u8>, Value> = HashMap::new();
+            for (key, vv) in &source_entries {
+                if key.namespace.space == *space {
+                    source_map.insert(key.user_key.to_vec(), vv.value.clone());
+                }
+            }
+
+            let mut target_map: HashMap<Vec<u8>, Value> = HashMap::new();
+            for (key, vv) in &target_entries {
+                if key.namespace.space == *space {
+                    target_map.insert(key.user_key.to_vec(), vv.value.clone());
+                }
+            }
+
+            // Union all keys
+            let mut all_keys: HashSet<Vec<u8>> = HashSet::new();
+            for k in ancestor_map.keys() {
+                all_keys.insert(k.clone());
+            }
+            for k in source_map.keys() {
+                all_keys.insert(k.clone());
+            }
+            for k in target_map.keys() {
+                all_keys.insert(k.clone());
+            }
+
+            // Classify each key
+            for user_key in &all_keys {
+                let ancestor_val = ancestor_map.get(user_key).and_then(|opt| opt.as_ref());
+                let source_val = source_map.get(user_key);
+                let target_val = target_map.get(user_key);
+
+                let change = classify_change(ancestor_val, source_val, target_val);
+
+                // Only include non-Unchanged entries
+                if change != ThreeWayChange::Unchanged {
+                    entries.push(ThreeWayDiffEntry {
+                        key: format_user_key(user_key),
+                        raw_key: user_key.clone(),
+                        space: space.clone(),
+                        primitive: type_tag_to_primitive(type_tag),
+                        type_tag,
+                        change,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(ThreeWayDiffResult {
+        source: source.to_string(),
+        target: target.to_string(),
+        merge_base_branch: merge_base_branch_name,
+        merge_base_version: merge_base.version,
+        entries,
+    })
+}
+
+/// Get the merge base for two branches.
+///
+/// Returns `None` if the branches have no fork or merge relationship.
+///
+/// The `merge_base_override` parameter is populated by the executor from DAG data,
+/// covering repeated merges and materialized branches where storage-level fork
+/// info is no longer available.
+///
+/// # Errors
+///
+/// - Either branch does not exist
+pub fn get_merge_base(
+    db: &Arc<Database>,
+    source: &str,
+    target: &str,
+    merge_base_override: Option<(BranchId, u64)>,
+) -> StrataResult<Option<MergeBaseInfo>> {
+    let source_id = resolve_and_verify(db, source)?;
+    let target_id = resolve_and_verify(db, target)?;
+
+    let merge_base = compute_merge_base(db, source_id, target_id, merge_base_override);
+
+    match merge_base {
+        None => Ok(None),
+        Some(mb) => {
+            // Resolve merge base branch_id back to a name
+            let branch_name = if mb.branch_id == source_id {
+                source.to_string()
+            } else if mb.branch_id == target_id {
+                target.to_string()
+            } else {
+                // Fallback: scan branch index
+                let branch_index = BranchIndex::new(db.clone());
+                let mut found_name = format!("{:?}", mb.branch_id);
+                if let Ok(names) = branch_index.list_branches() {
+                    for name in names {
+                        if resolve_branch_name(&name) == mb.branch_id {
+                            found_name = name;
+                            break;
+                        }
+                    }
+                }
+                found_name
+            };
+
+            Ok(Some(MergeBaseInfo {
+                branch: branch_name,
+                version: mb.version,
+            }))
+        }
+    }
+}
+
+// =============================================================================
 // Materialize
 // =============================================================================
 
@@ -1146,6 +1412,735 @@ pub fn materialize_branch(db: &Arc<Database>, branch_name: &str) -> StrataResult
         entries_materialized: total_entries,
         segments_created: total_segments,
         layers_collapsed,
+    })
+}
+
+// =============================================================================
+// Tags
+// =============================================================================
+
+/// A named version bookmark on a branch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TagInfo {
+    /// Tag name (e.g. "v1.0")
+    pub name: String,
+    /// Branch this tag belongs to
+    pub branch: String,
+    /// MVCC version this tag points to
+    pub version: u64,
+    /// Optional human-readable message
+    pub message: Option<String>,
+    /// Timestamp in microseconds since epoch
+    pub timestamp: u64,
+    /// Optional creator identifier
+    pub creator: Option<String>,
+}
+
+/// Create a tag on a branch at a specific version.
+///
+/// If `version` is `None`, tags the current database version.
+///
+/// # Errors
+///
+/// - Branch does not exist
+/// - Serialization failure (internal)
+pub fn create_tag(
+    db: &Arc<Database>,
+    branch: &str,
+    name: &str,
+    version: Option<u64>,
+    message: Option<&str>,
+    creator: Option<&str>,
+) -> StrataResult<TagInfo> {
+    resolve_and_verify(db, branch)?;
+
+    if branch.contains(':') {
+        return Err(StrataError::invalid_input("Branch name cannot contain ':'"));
+    }
+    if name.contains(':') {
+        return Err(StrataError::invalid_input("Tag name cannot contain ':'"));
+    }
+
+    if resolve_tag(db, branch, name)?.is_some() {
+        return Err(StrataError::invalid_input(format!(
+            "Tag '{}' already exists on branch '{}'",
+            name, branch
+        )));
+    }
+
+    let version = version.unwrap_or_else(|| db.current_version());
+    let timestamp = strata_core::contract::Timestamp::now().as_micros();
+
+    let tag_info = TagInfo {
+        name: name.to_string(),
+        branch: branch.to_string(),
+        version,
+        message: message.map(|s| s.to_string()),
+        timestamp,
+        creator: creator.map(|s| s.to_string()),
+    };
+
+    let system_id = resolve_branch_name("_system_");
+    let tag_key = format!("tag:{}:{}", branch, name);
+    let tag_value = serde_json::to_string(&tag_info)
+        .map_err(|e| StrataError::internal(format!("Failed to serialize tag: {}", e)))?;
+
+    db.transaction(system_id, |txn| {
+        let ns = Arc::new(Namespace::for_branch_space(system_id, "default"));
+        let key = Key::new(ns, TypeTag::KV, tag_key.as_bytes().to_vec());
+        txn.put(key, Value::String(tag_value.clone()))?;
+        Ok(())
+    })?;
+
+    Ok(tag_info)
+}
+
+/// Delete a tag.
+///
+/// Returns `true` if the tag existed and was deleted.
+pub fn delete_tag(db: &Arc<Database>, branch: &str, name: &str) -> StrataResult<bool> {
+    let system_id = resolve_branch_name("_system_");
+    let tag_key = format!("tag:{}:{}", branch, name);
+
+    let storage = db.storage();
+    let entries = storage.list_by_type(&system_id, TypeTag::KV);
+    let exists = entries
+        .iter()
+        .any(|(k, _)| k.namespace.space == "default" && *k.user_key == *tag_key.as_bytes());
+
+    if exists {
+        db.transaction(system_id, |txn| {
+            let ns = Arc::new(Namespace::for_branch_space(system_id, "default"));
+            let key = Key::new(ns, TypeTag::KV, tag_key.as_bytes().to_vec());
+            txn.delete(key)?;
+            Ok(())
+        })?;
+    }
+
+    Ok(exists)
+}
+
+/// List all tags on a branch.
+pub fn list_tags(db: &Arc<Database>, branch: &str) -> StrataResult<Vec<TagInfo>> {
+    let system_id = resolve_branch_name("_system_");
+    let prefix = format!("tag:{}:", branch);
+
+    let storage = db.storage();
+    let entries = storage.list_by_type(&system_id, TypeTag::KV);
+
+    let mut tags = Vec::new();
+    for (key, vv) in &entries {
+        if key.namespace.space == "default" {
+            let key_str = String::from_utf8_lossy(&key.user_key);
+            if key_str.starts_with(&prefix) {
+                if let Value::String(json_str) = &vv.value {
+                    if let Ok(tag) = serde_json::from_str::<TagInfo>(json_str) {
+                        tags.push(tag);
+                    }
+                }
+            }
+        }
+    }
+
+    tags.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    Ok(tags)
+}
+
+/// Resolve a tag name to its info.
+pub fn resolve_tag(db: &Arc<Database>, branch: &str, name: &str) -> StrataResult<Option<TagInfo>> {
+    let system_id = resolve_branch_name("_system_");
+    let tag_key = format!("tag:{}:{}", branch, name);
+
+    let storage = db.storage();
+    let entries = storage.list_by_type(&system_id, TypeTag::KV);
+
+    for (key, vv) in &entries {
+        if key.namespace.space == "default" && *key.user_key == *tag_key.as_bytes() {
+            if let Value::String(json_str) = &vv.value {
+                if let Ok(tag) = serde_json::from_str::<TagInfo>(json_str) {
+                    return Ok(Some(tag));
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+// =============================================================================
+// Notes
+// =============================================================================
+
+/// A version-annotated note on a branch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NoteInfo {
+    /// Branch this note belongs to
+    pub branch: String,
+    /// MVCC version this note is attached to
+    pub version: u64,
+    /// Human-readable message
+    pub message: String,
+    /// Optional author identifier
+    pub author: Option<String>,
+    /// Timestamp in microseconds since epoch
+    pub timestamp: u64,
+    /// Optional structured metadata
+    pub metadata: Option<Value>,
+}
+
+/// Add a note to a specific version of a branch.
+///
+/// # Errors
+///
+/// - Branch does not exist
+/// - Serialization failure (internal)
+pub fn add_note(
+    db: &Arc<Database>,
+    branch: &str,
+    version: u64,
+    message: &str,
+    author: Option<&str>,
+    metadata: Option<Value>,
+) -> StrataResult<NoteInfo> {
+    resolve_and_verify(db, branch)?;
+
+    if branch.contains(':') {
+        return Err(StrataError::invalid_input("Branch name cannot contain ':'"));
+    }
+
+    let timestamp = strata_core::contract::Timestamp::now().as_micros();
+    let note = NoteInfo {
+        branch: branch.to_string(),
+        version,
+        message: message.to_string(),
+        author: author.map(|s| s.to_string()),
+        timestamp,
+        metadata,
+    };
+
+    let system_id = resolve_branch_name("_system_");
+    let note_key = format!("note:{}:{}", branch, version);
+    let note_value = serde_json::to_string(&note)
+        .map_err(|e| StrataError::internal(format!("Failed to serialize note: {}", e)))?;
+
+    db.transaction(system_id, |txn| {
+        let ns = Arc::new(Namespace::for_branch_space(system_id, "default"));
+        let key = Key::new(ns, TypeTag::KV, note_key.as_bytes().to_vec());
+        txn.put(key, Value::String(note_value.clone()))?;
+        Ok(())
+    })?;
+
+    Ok(note)
+}
+
+/// Get notes for a branch, optionally filtered by version.
+///
+/// If `version` is `None`, returns all notes for the branch.
+/// If `version` is `Some(v)`, returns only the note at that version (if any).
+pub fn get_notes(
+    db: &Arc<Database>,
+    branch: &str,
+    version: Option<u64>,
+) -> StrataResult<Vec<NoteInfo>> {
+    let system_id = resolve_branch_name("_system_");
+    let prefix = format!("note:{}:", branch);
+    let exact_key = version.map(|v| format!("note:{}:{}", branch, v));
+
+    let storage = db.storage();
+    let entries = storage.list_by_type(&system_id, TypeTag::KV);
+
+    let mut notes = Vec::new();
+    for (key, vv) in &entries {
+        if key.namespace.space == "default" {
+            let key_str = String::from_utf8_lossy(&key.user_key);
+            let matches = match &exact_key {
+                Some(ek) => *key_str == **ek,
+                None => key_str.starts_with(&prefix),
+            };
+            if matches {
+                if let Value::String(json_str) = &vv.value {
+                    if let Ok(note) = serde_json::from_str::<NoteInfo>(json_str) {
+                        notes.push(note);
+                    }
+                }
+            }
+        }
+    }
+
+    notes.sort_by(|a, b| a.version.cmp(&b.version));
+    Ok(notes)
+}
+
+/// Delete a note at a specific version.
+///
+/// Returns `true` if the note existed and was deleted.
+pub fn delete_note(db: &Arc<Database>, branch: &str, version: u64) -> StrataResult<bool> {
+    let system_id = resolve_branch_name("_system_");
+    let note_key = format!("note:{}:{}", branch, version);
+
+    let storage = db.storage();
+    let entries = storage.list_by_type(&system_id, TypeTag::KV);
+    let exists = entries
+        .iter()
+        .any(|(k, _)| k.namespace.space == "default" && *k.user_key == *note_key.as_bytes());
+
+    if exists {
+        db.transaction(system_id, |txn| {
+            let ns = Arc::new(Namespace::for_branch_space(system_id, "default"));
+            let key = Key::new(ns, TypeTag::KV, note_key.as_bytes().to_vec());
+            txn.delete(key)?;
+            Ok(())
+        })?;
+    }
+
+    Ok(exists)
+}
+
+// =============================================================================
+// Revert
+// =============================================================================
+
+/// Information returned after reverting a version range.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RevertInfo {
+    /// Branch name
+    pub branch: String,
+    /// Start of the reverted range (inclusive)
+    pub from_version: u64,
+    /// End of the reverted range (inclusive)
+    pub to_version: u64,
+    /// Number of keys reverted
+    pub keys_reverted: u64,
+    /// MVCC version of the revert transaction
+    pub revert_version: Option<u64>,
+}
+
+/// Revert a version range on a branch.
+///
+/// For each key modified in [from_version, to_version], restores its value
+/// to what it was at (from_version - 1). Only reverts keys whose current
+/// value matches the state at to_version — keys modified after to_version
+/// are left untouched (preserving subsequent work).
+pub fn revert_version_range(
+    db: &Arc<Database>,
+    branch: &str,
+    from_version: u64,
+    to_version: u64,
+) -> StrataResult<RevertInfo> {
+    // Validate range
+    if from_version == 0 {
+        return Err(StrataError::invalid_input("from_version must be > 0"));
+    }
+    if from_version > to_version {
+        return Err(StrataError::invalid_input(format!(
+            "from_version ({}) must be <= to_version ({})",
+            from_version, to_version
+        )));
+    }
+    let current_version = db.current_version();
+    if to_version > current_version {
+        return Err(StrataError::invalid_input(format!(
+            "to_version ({}) exceeds current database version ({})",
+            to_version, current_version
+        )));
+    }
+
+    let branch_id = resolve_and_verify(db, branch)?;
+    let storage = db.storage();
+
+    let mut puts: Vec<(Key, Value)> = Vec::new();
+    let mut deletes: Vec<Key> = Vec::new();
+
+    for &type_tag in &DATA_TYPE_TAGS {
+        // 1. "before" state: what the branch looked like at (from_version - 1)
+        //    WITH tombstones, so we can distinguish "key existed" from "key absent"
+        let before_entries =
+            storage.list_by_type_at_version(&branch_id, type_tag, from_version.saturating_sub(1));
+
+        // 2. "after" state: what the branch looked like at to_version
+        //    WITH tombstones
+        let after_entries = storage.list_by_type_at_version(&branch_id, type_tag, to_version);
+
+        // 3. Current live state
+        let current_entries = storage.list_by_type(&branch_id, type_tag);
+
+        // Build maps keyed by (space, user_key_bytes)
+        // before_map: key → Option<Value> where None = absent/tombstone
+        let mut before_map: HashMap<(String, Vec<u8>), Option<Value>> = HashMap::new();
+        for entry in &before_entries {
+            if entry.is_tombstone {
+                before_map.insert(
+                    (
+                        entry.key.namespace.space.clone(),
+                        entry.key.user_key.to_vec(),
+                    ),
+                    None,
+                );
+            } else {
+                before_map.insert(
+                    (
+                        entry.key.namespace.space.clone(),
+                        entry.key.user_key.to_vec(),
+                    ),
+                    Some(entry.value.clone()),
+                );
+            }
+        }
+
+        // after_map: key → Option<Value> where None = tombstone
+        let mut after_map: HashMap<(String, Vec<u8>), Option<Value>> = HashMap::new();
+        for entry in &after_entries {
+            if entry.is_tombstone {
+                after_map.insert(
+                    (
+                        entry.key.namespace.space.clone(),
+                        entry.key.user_key.to_vec(),
+                    ),
+                    None,
+                );
+            } else {
+                after_map.insert(
+                    (
+                        entry.key.namespace.space.clone(),
+                        entry.key.user_key.to_vec(),
+                    ),
+                    Some(entry.value.clone()),
+                );
+            }
+        }
+
+        // current_map: key → Value (live only)
+        let mut current_map: HashMap<(String, Vec<u8>), Value> = HashMap::new();
+        for (key, vv) in &current_entries {
+            current_map.insert(
+                (key.namespace.space.clone(), key.user_key.to_vec()),
+                vv.value.clone(),
+            );
+        }
+
+        // Union of all keys in before and after
+        let mut all_keys: HashSet<(String, Vec<u8>)> = HashSet::new();
+        for k in before_map.keys() {
+            all_keys.insert(k.clone());
+        }
+        for k in after_map.keys() {
+            all_keys.insert(k.clone());
+        }
+
+        for compound_key in &all_keys {
+            let before_state = before_map.get(compound_key).cloned().flatten();
+            let after_state = after_map.get(compound_key).cloned().flatten();
+            let current_state = current_map.get(compound_key).cloned();
+
+            // If before == after: key wasn't modified in range, skip
+            if before_state == after_state {
+                continue;
+            }
+
+            // Key was modified in [from_version, to_version].
+            // Only revert if current state matches the "after" state.
+            if current_state == after_state {
+                let (space, user_key) = compound_key;
+                let ns = Arc::new(Namespace::for_branch_space(branch_id, space));
+                let key = Key::new(ns, type_tag, user_key.clone());
+
+                match &before_state {
+                    Some(value) => {
+                        // Restore to "before" value
+                        puts.push((key, value.clone()));
+                    }
+                    None => {
+                        // Key didn't exist before the range — delete it
+                        deletes.push(key);
+                    }
+                }
+            }
+            // else: current != after, meaning someone modified it after the range.
+            // Preserve subsequent work by skipping.
+        }
+    }
+
+    let keys_reverted = (puts.len() + deletes.len()) as u64;
+    let mut revert_version = None;
+
+    if !puts.is_empty() || !deletes.is_empty() {
+        let ((), version) = db.transaction_with_version(branch_id, |txn| {
+            for (key, value) in &puts {
+                txn.put(key.clone(), value.clone())?;
+            }
+            for key in &deletes {
+                txn.delete(key.clone())?;
+            }
+            Ok(())
+        })?;
+        revert_version = Some(version);
+    }
+
+    info!(
+        target: "strata::branch_ops",
+        branch,
+        from_version,
+        to_version,
+        keys_reverted,
+        ?revert_version,
+        "Version range reverted"
+    );
+
+    Ok(RevertInfo {
+        branch: branch.to_string(),
+        from_version,
+        to_version,
+        keys_reverted,
+        revert_version,
+    })
+}
+
+// =============================================================================
+// Cherry-Pick
+// =============================================================================
+
+/// Information returned after cherry-picking.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CherryPickInfo {
+    /// Source branch name
+    pub source: String,
+    /// Target branch name
+    pub target: String,
+    /// Number of keys applied (puts)
+    pub keys_applied: u64,
+    /// Number of keys deleted
+    pub keys_deleted: u64,
+    /// MVCC version of the cherry-pick transaction
+    pub cherry_pick_version: Option<u64>,
+}
+
+/// Filter for cherry-pick operations.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CherryPickFilter {
+    /// Only pick changes in these spaces.
+    pub spaces: Option<Vec<String>>,
+    /// Only pick changes for these keys (user_key strings).
+    pub keys: Option<Vec<String>>,
+    /// Only pick changes for these primitive types.
+    pub primitives: Option<Vec<PrimitiveType>>,
+}
+
+/// Cherry-pick specific keys from source branch to target branch.
+///
+/// Reads the current value of each specified key from source and writes
+/// it to target in a single transaction.
+pub fn cherry_pick_keys(
+    db: &Arc<Database>,
+    source: &str,
+    target: &str,
+    keys: &[(String, String)], // (space, key) pairs
+) -> StrataResult<CherryPickInfo> {
+    let source_id = resolve_and_verify(db, source)?;
+    let target_id = resolve_and_verify(db, target)?;
+    let storage = db.storage();
+    let space_index = SpaceIndex::new(db.clone());
+
+    let requested: HashSet<(&str, &str)> =
+        keys.iter().map(|(s, k)| (s.as_str(), k.as_str())).collect();
+
+    let mut puts: Vec<(Key, Value)> = Vec::new();
+
+    for &type_tag in &DATA_TYPE_TAGS {
+        let entries = storage.list_by_type(&source_id, type_tag);
+        for (key, vv) in &entries {
+            let space = &key.namespace.space;
+            let user_key_str = format_user_key(&key.user_key);
+            if requested.contains(&(space.as_str(), user_key_str.as_str())) {
+                // Ensure target has this space
+                if space != "default" {
+                    space_index.register(target_id, space)?;
+                }
+                let ns = Arc::new(Namespace::for_branch_space(target_id, space));
+                let target_key = Key::new(ns, type_tag, key.user_key.to_vec());
+                puts.push((target_key, vv.value.clone()));
+            }
+        }
+    }
+
+    let mut cherry_pick_version = None;
+    let keys_applied = puts.len() as u64;
+
+    if !puts.is_empty() {
+        let ((), version) = db.transaction_with_version(target_id, |txn| {
+            for (key, value) in &puts {
+                txn.put(key.clone(), value.clone())?;
+            }
+            Ok(())
+        })?;
+        cherry_pick_version = Some(version);
+    }
+
+    info!(
+        target: "strata::branch_ops",
+        source,
+        target,
+        keys_applied,
+        ?cherry_pick_version,
+        "Keys cherry-picked"
+    );
+
+    Ok(CherryPickInfo {
+        source: source.to_string(),
+        target: target.to_string(),
+        keys_applied,
+        keys_deleted: 0,
+        cherry_pick_version,
+    })
+}
+
+/// Cherry-pick from a three-way diff, applying only entries matching a filter.
+///
+/// This is a selective merge: computes the three-way diff between source and
+/// target, then applies only the changes that match the filter criteria.
+pub fn cherry_pick_from_diff(
+    db: &Arc<Database>,
+    source: &str,
+    target: &str,
+    filter: CherryPickFilter,
+    merge_base_override: Option<(BranchId, u64)>,
+) -> StrataResult<CherryPickInfo> {
+    let source_id = resolve_and_verify(db, source)?;
+    let target_id = resolve_and_verify(db, target)?;
+
+    // Compute merge base
+    let merge_base = compute_merge_base(db, source_id, target_id, merge_base_override);
+
+    let merge_base = match merge_base {
+        Some(mb) => mb,
+        None => {
+            return Err(StrataError::invalid_input(format!(
+                "Cannot cherry-pick from '{}' to '{}': no fork or merge relationship found. \
+                 Branches must be related by fork or a previous merge.",
+                source, target
+            )));
+        }
+    };
+
+    // Collect spaces from both branches
+    let space_index = SpaceIndex::new(db.clone());
+    let source_spaces: HashSet<String> = space_index.list(source_id)?.into_iter().collect();
+    let target_spaces: HashSet<String> = space_index.list(target_id)?.into_iter().collect();
+    let all_spaces: Vec<String> = source_spaces.union(&target_spaces).cloned().collect();
+
+    // Compute three-way diff with LastWriterWins (we'll filter the actions)
+    let (actions, _conflicts) = three_way_diff(
+        db,
+        source_id,
+        target_id,
+        &merge_base,
+        &all_spaces,
+        MergeStrategy::LastWriterWins,
+    )?;
+
+    // Filter by CherryPickFilter
+    let space_filter: Option<HashSet<&str>> = filter
+        .spaces
+        .as_ref()
+        .map(|s| s.iter().map(|x| x.as_str()).collect());
+    let key_filter: Option<HashSet<&str>> = filter
+        .keys
+        .as_ref()
+        .map(|k| k.iter().map(|x| x.as_str()).collect());
+    let prim_filter: Option<HashSet<PrimitiveType>> = filter
+        .primitives
+        .as_ref()
+        .map(|p| p.iter().copied().collect());
+
+    let filtered_actions: Vec<&MergeAction> = actions
+        .iter()
+        .filter(|action| {
+            // Space filter
+            if let Some(ref allowed) = space_filter {
+                if !allowed.contains(action.space.as_str()) {
+                    return false;
+                }
+            }
+            // Key filter
+            if let Some(ref allowed) = key_filter {
+                let key_str = format_user_key(&action.raw_key);
+                if !allowed.contains(key_str.as_str()) {
+                    return false;
+                }
+            }
+            // Primitive type filter
+            if let Some(ref allowed) = prim_filter {
+                let prim = type_tag_to_primitive(action.type_tag);
+                if !allowed.contains(&prim) {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+
+    // Register spaces and build puts/deletes
+    let mut puts: Vec<(Key, Value)> = Vec::new();
+    let mut deletes: Vec<Key> = Vec::new();
+    let mut spaces_touched: HashSet<String> = HashSet::new();
+
+    for action in &filtered_actions {
+        spaces_touched.insert(action.space.clone());
+    }
+    for space in &spaces_touched {
+        if space != "default" {
+            space_index.register(target_id, space)?;
+        }
+    }
+
+    for action in &filtered_actions {
+        let ns = Arc::new(Namespace::for_branch_space(target_id, &action.space));
+        let key = Key::new(ns, action.type_tag, action.raw_key.clone());
+        match &action.action {
+            MergeActionKind::Put(value) => {
+                puts.push((key, value.clone()));
+            }
+            MergeActionKind::Delete => {
+                deletes.push(key);
+            }
+        }
+    }
+
+    let keys_applied = puts.len() as u64;
+    let keys_deleted = deletes.len() as u64;
+    let mut cherry_pick_version = None;
+
+    if !puts.is_empty() || !deletes.is_empty() {
+        let ((), version) = db.transaction_with_version(target_id, |txn| {
+            for (key, value) in &puts {
+                txn.put(key.clone(), value.clone())?;
+            }
+            for key in &deletes {
+                txn.delete(key.clone())?;
+            }
+            Ok(())
+        })?;
+        cherry_pick_version = Some(version);
+    }
+
+    // Reload secondary index backends
+    reload_secondary_backends(db, target_id, source_id);
+
+    info!(
+        target: "strata::branch_ops",
+        source,
+        target,
+        keys_applied,
+        keys_deleted,
+        ?cherry_pick_version,
+        "Cherry-picked from diff"
+    );
+
+    Ok(CherryPickInfo {
+        source: source.to_string(),
+        target: target.to_string(),
+        keys_applied,
+        keys_deleted,
+        cherry_pick_version,
     })
 }
 
@@ -2838,5 +3833,285 @@ mod tests {
             info.merge_version.is_some(),
             "merge should return a version"
         );
+    }
+
+    // =========================================================================
+    // Tag Tests
+    // =========================================================================
+
+    #[test]
+    fn test_tag_create_and_resolve() {
+        let (_temp, db) = setup_with_branch("main");
+        write_kv(&db, "main", "default", "k", Value::Int(1));
+
+        let tag = create_tag(&db, "main", "v1.0", None, Some("release"), None).unwrap();
+        assert_eq!(tag.name, "v1.0");
+        assert_eq!(tag.branch, "main");
+        assert!(tag.version > 0);
+
+        let resolved = resolve_tag(&db, "main", "v1.0").unwrap();
+        assert_eq!(resolved, Some(tag));
+    }
+
+    #[test]
+    fn test_tag_list_and_delete() {
+        let (_temp, db) = setup_with_branch("main");
+        write_kv(&db, "main", "default", "k", Value::Int(1));
+
+        create_tag(&db, "main", "t1", None, None, None).unwrap();
+        create_tag(&db, "main", "t2", None, None, None).unwrap();
+
+        let tags = list_tags(&db, "main").unwrap();
+        assert_eq!(tags.len(), 2);
+
+        let deleted = delete_tag(&db, "main", "t1").unwrap();
+        assert!(deleted);
+
+        let tags = list_tags(&db, "main").unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].name, "t2");
+    }
+
+    // =========================================================================
+    // Note Tests
+    // =========================================================================
+
+    #[test]
+    fn test_note_add_and_get() {
+        let (_temp, db) = setup_with_branch("main");
+        write_kv(&db, "main", "default", "k", Value::Int(1));
+
+        let note = add_note(&db, "main", 1, "initial state", Some("ai"), None).unwrap();
+        assert_eq!(note.message, "initial state");
+        assert_eq!(note.version, 1);
+
+        let notes = get_notes(&db, "main", None).unwrap();
+        assert_eq!(notes.len(), 1);
+
+        let notes_at_v = get_notes(&db, "main", Some(1)).unwrap();
+        assert_eq!(notes_at_v.len(), 1);
+    }
+
+    #[test]
+    fn test_note_delete() {
+        let (_temp, db) = setup_with_branch("main");
+
+        add_note(&db, "main", 1, "note1", None, None).unwrap();
+        add_note(&db, "main", 2, "note2", None, None).unwrap();
+
+        assert!(delete_note(&db, "main", 1).unwrap());
+
+        let notes = get_notes(&db, "main", None).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].version, 2);
+    }
+
+    // =========================================================================
+    // Three-Way Diff API Tests
+    // =========================================================================
+
+    #[test]
+    fn test_diff_three_way_disjoint_changes() {
+        // Fork, make disjoint changes, verify classification
+        let (_temp, db) = setup_with_branch("parent");
+        write_kv(&db, "parent", "default", "a", Value::Int(1));
+        write_kv(&db, "parent", "default", "b", Value::Int(2));
+
+        fork_branch(&db, "parent", "child").unwrap();
+        write_kv(&db, "parent", "default", "a", Value::Int(10));
+        write_kv(&db, "child", "default", "b", Value::Int(20));
+
+        let result = diff_three_way(&db, "child", "parent", None).unwrap();
+
+        // Should see: a=TargetChanged, b=SourceChanged
+        let a_entry = result.entries.iter().find(|e| e.key == "a").unwrap();
+        assert!(matches!(a_entry.change, ThreeWayChange::TargetChanged));
+
+        let b_entry = result.entries.iter().find(|e| e.key == "b").unwrap();
+        assert!(matches!(
+            b_entry.change,
+            ThreeWayChange::SourceChanged { .. }
+        ));
+    }
+
+    #[test]
+    fn test_get_merge_base() {
+        let (_temp, db) = setup_with_branch("parent");
+        write_kv(&db, "parent", "default", "a", Value::Int(1));
+
+        let fork_info = fork_branch(&db, "parent", "child").unwrap();
+
+        let base = get_merge_base(&db, "child", "parent", None).unwrap();
+        assert!(base.is_some());
+        let base = base.unwrap();
+        assert_eq!(base.version, fork_info.fork_version.unwrap());
+    }
+
+    #[test]
+    fn test_get_merge_base_unrelated() {
+        let (_temp, db) = setup_with_branch("a");
+        let branch_index = BranchIndex::new(db.clone());
+        branch_index.create_branch("b").unwrap();
+
+        let base = get_merge_base(&db, "a", "b", None).unwrap();
+        assert!(base.is_none());
+    }
+
+    // =========================================================================
+    // Revert Tests
+    // =========================================================================
+
+    #[test]
+    fn test_revert_single_version() {
+        let (_temp, db) = setup_with_branch("main");
+
+        write_kv(&db, "main", "default", "a", Value::Int(1)); // v1
+        write_kv(&db, "main", "default", "a", Value::Int(2)); // v2
+        write_kv(&db, "main", "default", "b", Value::Int(10)); // v3
+
+        // Get current version
+        let current = db.current_version();
+
+        // Revert the last write (v3 = b:10)
+        let info = revert_version_range(&db, "main", current, current).unwrap();
+        assert_eq!(info.keys_reverted, 1); // only "b" was changed in that version
+
+        // "a" should still be 2 (unchanged in range)
+        assert_eq!(read_kv(&db, "main", "default", "a"), Some(Value::Int(2)));
+        // "b" should be gone (didn't exist before v3)
+        assert_eq!(read_kv(&db, "main", "default", "b"), None);
+    }
+
+    #[test]
+    fn test_revert_preserves_subsequent_work() {
+        let (_temp, db) = setup_with_branch("main");
+
+        write_kv(&db, "main", "default", "a", Value::Int(1)); // v_start
+        let v_start = db.current_version();
+        write_kv(&db, "main", "default", "a", Value::Int(2)); // v_change
+        let v_change = db.current_version();
+        write_kv(&db, "main", "default", "a", Value::Int(3)); // v_after (after range)
+
+        // Revert [v_start+1, v_change] — but "a" was modified after the range
+        let info = revert_version_range(&db, "main", v_start + 1, v_change).unwrap();
+        assert_eq!(
+            info.keys_reverted, 0,
+            "should skip keys modified after range"
+        );
+
+        // "a" should still be 3 (subsequent work preserved)
+        assert_eq!(read_kv(&db, "main", "default", "a"), Some(Value::Int(3)));
+    }
+
+    #[test]
+    fn test_revert_invalid_range() {
+        let (_temp, db) = setup_with_branch("main");
+
+        // from_version > to_version
+        let result = revert_version_range(&db, "main", 5, 3);
+        assert!(result.is_err());
+
+        // from_version == 0
+        let result = revert_version_range(&db, "main", 0, 3);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_revert_restores_deleted_key() {
+        let (_temp, db) = setup_with_branch("main");
+        write_kv(&db, "main", "default", "a", Value::Int(1));
+        let v_before = db.current_version();
+
+        // Delete "a" in the revert range
+        delete_kv(&db, "main", "default", "a");
+        let v_delete = db.current_version();
+
+        // Verify it's gone
+        assert_eq!(read_kv(&db, "main", "default", "a"), None);
+
+        // Revert the deletion
+        let info = revert_version_range(&db, "main", v_before + 1, v_delete).unwrap();
+        assert_eq!(info.keys_reverted, 1);
+
+        // Key should be restored
+        assert_eq!(read_kv(&db, "main", "default", "a"), Some(Value::Int(1)));
+    }
+
+    // =========================================================================
+    // Cherry-Pick Tests
+    // =========================================================================
+
+    #[test]
+    fn test_cherry_pick_specific_keys() {
+        let (_temp, db) = setup_with_branch("parent");
+        write_kv(&db, "parent", "default", "a", Value::Int(1));
+        write_kv(&db, "parent", "default", "b", Value::Int(2));
+
+        fork_branch(&db, "parent", "source").unwrap();
+        write_kv(&db, "source", "default", "a", Value::Int(10));
+        write_kv(&db, "source", "default", "b", Value::Int(20));
+        write_kv(&db, "source", "default", "c", Value::Int(30));
+
+        // Cherry-pick only "a" from source to parent
+        let info = cherry_pick_keys(
+            &db,
+            "source",
+            "parent",
+            &[("default".to_string(), "a".to_string())],
+        )
+        .unwrap();
+        assert_eq!(info.keys_applied, 1);
+
+        // "a" should have source's value
+        assert_eq!(read_kv(&db, "parent", "default", "a"), Some(Value::Int(10)));
+        // "b" should be unchanged (not cherry-picked)
+        assert_eq!(read_kv(&db, "parent", "default", "b"), Some(Value::Int(2)));
+        // "c" should not exist on parent
+        assert_eq!(read_kv(&db, "parent", "default", "c"), None);
+    }
+
+    #[test]
+    fn test_cherry_pick_from_diff_with_filter() {
+        let (_temp, db) = setup_with_branch("parent");
+        write_kv(&db, "parent", "default", "a", Value::Int(1));
+        write_kv(&db, "parent", "default", "b", Value::Int(2));
+
+        fork_branch(&db, "parent", "child").unwrap();
+        write_kv(&db, "child", "default", "a", Value::Int(10));
+        write_kv(&db, "child", "default", "b", Value::Int(20));
+        write_kv(&db, "child", "default", "c", Value::Int(30));
+
+        // Cherry-pick from diff, only key "b"
+        let filter = CherryPickFilter {
+            keys: Some(vec!["b".to_string()]),
+            spaces: None,
+            primitives: None,
+        };
+        let info = cherry_pick_from_diff(&db, "child", "parent", filter, None).unwrap();
+        assert_eq!(info.keys_applied, 1);
+
+        // Only "b" should be changed
+        assert_eq!(read_kv(&db, "parent", "default", "a"), Some(Value::Int(1)));
+        assert_eq!(read_kv(&db, "parent", "default", "b"), Some(Value::Int(20)));
+    }
+
+    #[test]
+    fn test_cherry_pick_empty_keys() {
+        let (_temp, db) = setup_with_branch("parent");
+        write_kv(&db, "parent", "default", "a", Value::Int(1));
+
+        fork_branch(&db, "parent", "source").unwrap();
+        write_kv(&db, "source", "default", "a", Value::Int(10));
+
+        // Cherry-pick with no matching keys
+        let info = cherry_pick_keys(
+            &db,
+            "source",
+            "parent",
+            &[("default".to_string(), "nonexistent".to_string())],
+        )
+        .unwrap();
+        assert_eq!(info.keys_applied, 0);
+        assert!(info.cherry_pick_version.is_none());
     }
 }

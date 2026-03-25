@@ -882,6 +882,22 @@ impl Executor {
                 filter_spaces,
                 as_of,
             ),
+            Command::BranchDiffThreeWay {
+                branch_a,
+                branch_b,
+            } => crate::handlers::branch::branch_diff_three_way(
+                &self.primitives,
+                branch_a,
+                branch_b,
+            ),
+            Command::BranchMergeBase {
+                branch_a,
+                branch_b,
+            } => crate::handlers::branch::branch_merge_base(
+                &self.primitives,
+                branch_a,
+                branch_b,
+            ),
             Command::BranchMerge {
                 source,
                 target,
@@ -895,6 +911,81 @@ impl Executor {
                 strategy,
                 message,
                 creator,
+            ),
+
+            // Tag commands
+            Command::TagCreate {
+                branch,
+                name,
+                version,
+                message,
+                creator,
+            } => crate::handlers::branch::tag_create(
+                &self.primitives,
+                branch,
+                name,
+                version,
+                message,
+                creator,
+            ),
+            Command::TagDelete { branch, name } => {
+                crate::handlers::branch::tag_delete(&self.primitives, branch, name)
+            }
+            Command::TagList { branch } => {
+                crate::handlers::branch::tag_list(&self.primitives, branch)
+            }
+            Command::TagResolve { branch, name } => {
+                crate::handlers::branch::tag_resolve(&self.primitives, branch, name)
+            }
+
+            // Note commands
+            Command::NoteAdd {
+                branch,
+                version,
+                message,
+                author,
+                metadata,
+            } => crate::handlers::branch::note_add(
+                &self.primitives,
+                branch,
+                version,
+                message,
+                author,
+                metadata,
+            ),
+            Command::NoteGet { branch, version } => {
+                crate::handlers::branch::note_get(&self.primitives, branch, version)
+            }
+            Command::NoteDelete { branch, version } => {
+                crate::handlers::branch::note_delete(&self.primitives, branch, version)
+            }
+
+            Command::BranchRevert {
+                branch,
+                from_version,
+                to_version,
+            } => crate::handlers::branch::branch_revert(
+                &self.primitives,
+                branch,
+                from_version,
+                to_version,
+            ),
+
+            Command::BranchCherryPick {
+                source,
+                target,
+                keys,
+                filter_spaces,
+                filter_keys,
+                filter_primitives,
+            } => crate::handlers::branch::branch_cherry_pick(
+                &self.primitives,
+                source,
+                target,
+                keys,
+                filter_spaces,
+                filter_keys,
+                filter_primitives,
             ),
 
             // Transaction commands - handled by Session, not Executor

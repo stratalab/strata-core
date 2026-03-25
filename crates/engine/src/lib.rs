@@ -111,8 +111,9 @@ pub use bundle::{BundleInfo, ExportInfo, ImportInfo};
 
 // Re-export branch_ops types at crate root
 pub use branch_ops::{
-    BranchDiffEntry, BranchDiffResult, ConflictEntry, DiffFilter, DiffOptions, DiffSummary,
-    ForkInfo, MergeInfo, MergeStrategy, SpaceDiff,
+    BranchDiffEntry, BranchDiffResult, CherryPickFilter, CherryPickInfo, ConflictEntry, DiffFilter,
+    DiffOptions, DiffSummary, ForkInfo, MergeBaseInfo, MergeInfo, MergeStrategy, NoteInfo,
+    RevertInfo, SpaceDiff, TagInfo, ThreeWayChange, ThreeWayDiffEntry, ThreeWayDiffResult,
 };
 
 // Re-export branch_dag types from core at crate root for convenience

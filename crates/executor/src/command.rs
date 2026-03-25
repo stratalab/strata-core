@@ -605,6 +605,137 @@ pub enum Command {
         creator: Option<String>,
     },
 
+    /// Compute three-way diff between two branches.
+    /// Returns: `Output::ThreeWayDiff`
+    BranchDiffThreeWay {
+        /// First branch to compare (source).
+        branch_a: String,
+        /// Second branch to compare (target).
+        branch_b: String,
+    },
+
+    /// Get the merge base for two branches.
+    /// Returns: `Output::MergeBaseInfo`
+    BranchMergeBase {
+        /// First branch (source).
+        branch_a: String,
+        /// Second branch (target).
+        branch_b: String,
+    },
+
+    // ==================== Tags ====================
+    /// Create a tag (named version bookmark) on a branch.
+    /// Returns: `Output::TagCreated`
+    TagCreate {
+        /// Branch to tag.
+        branch: String,
+        /// Tag name (e.g. "v1.0").
+        name: String,
+        /// Version to tag. If omitted, tags the current version.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<u64>,
+        /// Optional human-readable message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        /// Optional creator identifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        creator: Option<String>,
+    },
+
+    /// Delete a tag.
+    /// Returns: `Output::Bool`
+    TagDelete {
+        /// Branch the tag belongs to.
+        branch: String,
+        /// Tag name to delete.
+        name: String,
+    },
+
+    /// List all tags on a branch.
+    /// Returns: `Output::TagList`
+    TagList {
+        /// Branch to list tags for.
+        branch: String,
+    },
+
+    /// Resolve a tag to its version info.
+    /// Returns: `Output::MaybeTag`
+    TagResolve {
+        /// Branch the tag belongs to.
+        branch: String,
+        /// Tag name to resolve.
+        name: String,
+    },
+
+    // ==================== Notes ====================
+    /// Add a note to a specific version of a branch.
+    /// Returns: `Output::NoteAdded`
+    NoteAdd {
+        /// Branch to annotate.
+        branch: String,
+        /// Version to attach the note to.
+        version: u64,
+        /// Note message.
+        message: String,
+        /// Optional author identifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
+        /// Optional structured metadata.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<Value>,
+    },
+
+    /// Get notes for a branch, optionally filtered by version.
+    /// Returns: `Output::NoteList`
+    NoteGet {
+        /// Branch to query.
+        branch: String,
+        /// Optional version filter. If omitted, returns all notes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<u64>,
+    },
+
+    /// Delete a note at a specific version.
+    /// Returns: `Output::Bool`
+    NoteDelete {
+        /// Branch the note belongs to.
+        branch: String,
+        /// Version whose note to delete.
+        version: u64,
+    },
+
+    /// Revert a version range on a branch.
+    /// Returns: `Output::BranchReverted`
+    BranchRevert {
+        /// Branch to revert on.
+        branch: String,
+        /// Start of the version range (inclusive).
+        from_version: u64,
+        /// End of the version range (inclusive).
+        to_version: u64,
+    },
+
+    /// Cherry-pick specific keys or filtered changes from one branch to another.
+    /// Returns: `Output::BranchCherryPicked`
+    BranchCherryPick {
+        /// Source branch name.
+        source: String,
+        /// Target branch name.
+        target: String,
+        /// Specific (space, key) pairs for direct pick. Mutually exclusive with filter fields.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keys: Option<Vec<(String, String)>>,
+        /// Filter: only pick changes in these spaces (for diff-based pick).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter_spaces: Option<Vec<String>>,
+        /// Filter: only pick changes for these keys (for diff-based pick).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter_keys: Option<Vec<String>>,
+        /// Filter: only pick changes for these primitive types (for diff-based pick).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter_primitives: Option<Vec<strata_core::PrimitiveType>>,
+    },
+
     // ==================== Transaction (5) ====================
     /// Begin a new transaction.
     /// Returns: `Output::TxnBegun`
@@ -1547,6 +1678,12 @@ impl Command {
                 | Command::GraphDeleteLinkType { .. }
                 | Command::GraphFreezeOntology { .. }
                 | Command::ReindexEmbeddings { .. }
+                | Command::TagCreate { .. }
+                | Command::TagDelete { .. }
+                | Command::NoteAdd { .. }
+                | Command::NoteDelete { .. }
+                | Command::BranchRevert { .. }
+                | Command::BranchCherryPick { .. }
         )
     }
 
@@ -1591,7 +1728,18 @@ impl Command {
             Command::BranchDelete { .. } => "BranchDelete",
             Command::BranchFork { .. } => "BranchFork",
             Command::BranchDiff { .. } => "BranchDiff",
+            Command::BranchDiffThreeWay { .. } => "BranchDiffThreeWay",
+            Command::BranchMergeBase { .. } => "BranchMergeBase",
             Command::BranchMerge { .. } => "BranchMerge",
+            Command::TagCreate { .. } => "TagCreate",
+            Command::TagDelete { .. } => "TagDelete",
+            Command::TagList { .. } => "TagList",
+            Command::TagResolve { .. } => "TagResolve",
+            Command::NoteAdd { .. } => "NoteAdd",
+            Command::NoteGet { .. } => "NoteGet",
+            Command::NoteDelete { .. } => "NoteDelete",
+            Command::BranchRevert { .. } => "BranchRevert",
+            Command::BranchCherryPick { .. } => "BranchCherryPick",
             Command::TxnBegin { .. } => "TxnBegin",
             Command::TxnCommit => "TxnCommit",
             Command::TxnRollback => "TxnRollback",
@@ -1806,7 +1954,18 @@ impl Command {
             | Command::BranchDelete { .. }
             | Command::BranchFork { .. }
             | Command::BranchDiff { .. }
+            | Command::BranchDiffThreeWay { .. }
+            | Command::BranchMergeBase { .. }
             | Command::BranchMerge { .. }
+            | Command::TagCreate { .. }
+            | Command::TagDelete { .. }
+            | Command::TagList { .. }
+            | Command::TagResolve { .. }
+            | Command::NoteAdd { .. }
+            | Command::NoteGet { .. }
+            | Command::NoteDelete { .. }
+            | Command::BranchRevert { .. }
+            | Command::BranchCherryPick { .. }
             | Command::TxnCommit
             | Command::TxnRollback
             | Command::TxnInfo
