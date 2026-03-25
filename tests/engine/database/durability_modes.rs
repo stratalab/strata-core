@@ -26,9 +26,8 @@ fn kv_put_get_same_across_modes() {
 
         kv.put(&branch_id, "default", "key", Value::Int(42))
             .unwrap();
-        let result = kv.get(&branch_id, "default", "key").unwrap();
 
-        result
+        kv.get(&branch_id, "default", "key").unwrap()
     });
 }
 

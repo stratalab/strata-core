@@ -230,17 +230,12 @@ fn supports_float_values() {
     let test_db = TestDb::new();
     let kv = test_db.kv();
 
-    kv.put(
-        &test_db.branch_id,
-        "default",
-        "float",
-        Value::Float(3.125.into()),
-    )
-    .unwrap();
+    kv.put(&test_db.branch_id, "default", "float", Value::Float(3.125))
+        .unwrap();
     let result = kv.get(&test_db.branch_id, "default", "float").unwrap();
 
     match result.unwrap() {
-        Value::Float(f) => assert!((f64::from(f) - 3.125).abs() < 0.001),
+        Value::Float(f) => assert!((f - 3.125).abs() < 0.001),
         _ => panic!("Expected float"),
     }
 }

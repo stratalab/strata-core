@@ -404,7 +404,7 @@ mod tests {
         let p = ProviderKind::Anthropic;
         let p2 = p; // Copy
         assert_eq!(p, p2);
-        let p3 = p.clone();
+        let p3 = p;
         assert_eq!(p, p3);
         let dbg = format!("{:?}", p);
         assert_eq!(dbg, "Anthropic");

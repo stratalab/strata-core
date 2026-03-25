@@ -605,4 +605,3 @@ fn compact_concurrent_flush_preserves_new_segment() {
         Value::Int(4)
     );
 }
-

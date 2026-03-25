@@ -930,7 +930,10 @@ fn format_human(output: &Output) -> String {
             lines.push("storage".to_string());
             lines.push(format!("  branches:    {}", m.storage.total_branches));
             lines.push(format!("  entries:     {}", m.storage.total_entries));
-            lines.push(format!("  memory:      {} bytes", m.storage.estimated_bytes));
+            lines.push(format!(
+                "  memory:      {} bytes",
+                m.storage.estimated_bytes
+            ));
             lines.push(String::new());
             lines.push("cache".to_string());
             lines.push(format!("  hits:        {}", m.cache.hits));
@@ -942,12 +945,16 @@ fn format_human(output: &Output) -> String {
             ));
             lines.push(String::new());
             lines.push("disk".to_string());
-            lines.push(format!("  wal:         {} bytes", m.disk_usage.wal.total_bytes));
-            lines.push(format!("  snapshots:   {} bytes", m.disk_usage.snapshot_bytes));
+            lines.push(format!(
+                "  wal:         {} bytes",
+                m.disk_usage.wal.total_bytes
+            ));
+            lines.push(format!(
+                "  snapshots:   {} bytes",
+                m.disk_usage.snapshot_bytes
+            ));
             match m.available_disk_bytes {
-                Some(avail) => {
-                    lines.push(format!("  available:   {} MB", avail / (1024 * 1024)))
-                }
+                Some(avail) => lines.push(format!("  available:   {} MB", avail / (1024 * 1024))),
                 None => lines.push("  available:   (ephemeral)".to_string()),
             }
             lines.join("\n")

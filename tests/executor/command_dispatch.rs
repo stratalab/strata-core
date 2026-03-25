@@ -1112,11 +1112,7 @@ fn config_set_rejects_zero_embed_batch_size() {
     });
     match result {
         Err(Error::InvalidInput { reason, .. }) => {
-            assert!(
-                reason.contains("greater than 0"),
-                "reason: {}",
-                reason
-            );
+            assert!(reason.contains("greater than 0"), "reason: {}", reason);
         }
         other => panic!("Expected InvalidInput for 0, got {:?}", other),
     }

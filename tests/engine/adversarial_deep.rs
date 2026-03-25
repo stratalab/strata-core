@@ -521,7 +521,7 @@ fn interleaved_multikey_consistency() {
 
     // Transaction B: reads x and y, checks invariant x == y
     let txn_b = thread::spawn(move || {
-        let result = db2.transaction(branch_id, |txn| {
+        db2.transaction(branch_id, |txn| {
             let x = txn
                 .kv_get("x")?
                 .map(|v| match v {
@@ -547,9 +547,7 @@ fn interleaved_multikey_consistency() {
             }
 
             Ok((x, y))
-        });
-
-        result
+        })
     });
 
     txn_a.join().unwrap();

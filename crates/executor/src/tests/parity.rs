@@ -3,7 +3,7 @@
 //! These tests ensure the Executor layer is a faithful proxy to the underlying
 //! engine primitives, with no unexpected transformations or data loss.
 
-use crate::bridge::{self, Primitives};
+use crate::bridge::Primitives;
 use crate::types::*;
 use crate::Value;
 use crate::{Command, Executor, Output};

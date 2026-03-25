@@ -381,7 +381,7 @@ fn snapshot_scan_sees_consistent_state() {
 
     // Put values with common prefix
     for i in 0..10 {
-        let key = Key::new_kv(ns.clone(), &format!("prefix_{}", i));
+        let key = Key::new_kv(ns.clone(), format!("prefix_{}", i));
         store
             .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append)
             .unwrap();
@@ -391,7 +391,7 @@ fn snapshot_scan_sees_consistent_state() {
 
     // Modify after version capture
     for i in 0..10 {
-        let key = Key::new_kv(ns.clone(), &format!("prefix_{}", i));
+        let key = Key::new_kv(ns.clone(), format!("prefix_{}", i));
         store
             .put_with_version_mode(
                 key,
@@ -423,7 +423,7 @@ fn snapshot_list_sees_all_keys() {
 
     // Put 5 values
     for i in 0..5 {
-        let key = Key::new_kv(ns.clone(), &format!("list_key_{}", i));
+        let key = Key::new_kv(ns.clone(), format!("list_key_{}", i));
         store
             .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append)
             .unwrap();
@@ -433,7 +433,7 @@ fn snapshot_list_sees_all_keys() {
 
     // Delete some in store
     for i in 0..3 {
-        let key = Key::new_kv(ns.clone(), &format!("list_key_{}", i));
+        let key = Key::new_kv(ns.clone(), format!("list_key_{}", i));
         store.delete_with_version(&key, (i + 6) as u64).unwrap();
     }
 

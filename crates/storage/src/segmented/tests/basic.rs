@@ -568,4 +568,3 @@ fn list_branch_nonexistent_branch() {
         .list_branch(&BranchId::from_bytes([99; 16]))
         .is_empty());
 }
-

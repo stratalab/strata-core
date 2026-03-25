@@ -6,7 +6,7 @@
 //! - Multi-threaded (no conflict): >10K txns/sec
 //! - Multi-threaded (with conflict): >2K txns/sec
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::sync::Arc;
 use std::thread;
 use strata_core::types::{BranchId, Key, Namespace};
@@ -36,7 +36,7 @@ fn bench_single_threaded_transactions(c: &mut Criterion) {
                 txn.put(key.clone(), Value::Int(i as i64))?;
                 Ok(())
             });
-            black_box(result.unwrap());
+            result.unwrap();
             i += 1;
         });
     });
@@ -59,7 +59,7 @@ fn bench_single_threaded_transactions(c: &mut Criterion) {
                 txn.put(key.clone(), Value::Int(new_val))?;
                 Ok(())
             });
-            black_box(result.unwrap());
+            result.unwrap();
         });
     });
 
@@ -203,7 +203,7 @@ fn bench_read_only_transactions(c: &mut Criterion) {
         let key = Key::new_kv(ns.clone(), "key_500");
         b.iter(|| {
             let result = db.transaction(branch_id, |txn| txn.get(&key));
-            black_box(result.unwrap());
+            result.unwrap();
         });
     });
 
@@ -219,7 +219,7 @@ fn bench_read_only_transactions(c: &mut Criterion) {
                 }
                 Ok(())
             });
-            black_box(result.unwrap());
+            result.unwrap();
         });
     });
 
@@ -244,7 +244,7 @@ fn bench_direct_operations(c: &mut Criterion) {
                 txn.put(key.clone(), Value::Int(i as i64))?;
                 Ok(())
             });
-            black_box(result.unwrap());
+            result.unwrap();
             i += 1;
         });
     });
@@ -260,7 +260,7 @@ fn bench_direct_operations(c: &mut Criterion) {
     group.bench_function("direct_get", |b| {
         b.iter(|| {
             let result = db.transaction(branch_id, |txn| txn.get(&get_key));
-            black_box(result.unwrap());
+            result.unwrap();
         });
     });
 

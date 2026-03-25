@@ -168,7 +168,7 @@ fn snapshot_scan_prefix_returns_matching_keys() {
     let ns = Arc::new(Namespace::for_branch(branch_id));
 
     for i in 0..10 {
-        let key = Key::new_kv(ns.clone(), &format!("prefix_{}", i));
+        let key = Key::new_kv(ns.clone(), format!("prefix_{}", i));
         store
             .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append)
             .unwrap();

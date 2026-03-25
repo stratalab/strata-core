@@ -918,4 +918,3 @@ fn materialize_multi_level_inherited_layer() {
         .unwrap();
     assert_eq!(c.value, Value::Int(3));
 }
-

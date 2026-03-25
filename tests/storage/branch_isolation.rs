@@ -261,7 +261,7 @@ fn list_branch_keys() {
 
     // Put 5 keys
     for i in 0..5 {
-        let key = Key::new_kv(ns.clone(), &format!("key_{}", i));
+        let key = Key::new_kv(ns.clone(), format!("key_{}", i));
         store
             .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append)
             .unwrap();
