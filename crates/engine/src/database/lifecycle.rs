@@ -400,7 +400,7 @@ impl Database {
     /// With lite KV records (embedding stripped), the mmap cache is required
     /// for the next recovery to reconstruct embeddings. This is called during
     /// shutdown and drop.
-    pub(super) fn freeze_vector_heaps(&self) -> StrataResult<()> {
+    pub(crate) fn freeze_vector_heaps(&self) -> StrataResult<()> {
         use crate::primitives::vector::VectorBackendState;
 
         let data_dir = self.data_dir();
@@ -433,7 +433,7 @@ impl Database {
     }
 
     /// Freeze the search index to disk for fast recovery on next open.
-    pub(super) fn freeze_search_index(&self) -> StrataResult<()> {
+    pub(crate) fn freeze_search_index(&self) -> StrataResult<()> {
         let data_dir = self.data_dir();
         if data_dir.as_os_str().is_empty() {
             return Ok(()); // Ephemeral database — no persistence
@@ -496,13 +496,10 @@ impl Database {
         // 5. Final flush to ensure all data is persisted
         self.flush()?;
 
-        // 6. Freeze both vector heaps and search index. Attempt both even if
-        // the first fails, so a vector freeze error doesn't also lose search data.
-        let vec_result = self.freeze_vector_heaps();
-        let search_result = self.freeze_search_index();
+        // 6. Freeze all registered subsystems. Attempts all even if one fails.
+        let freeze_result = self.run_freeze_hooks();
         self.shutdown_complete.store(true, Ordering::Release);
-        vec_result?;
-        search_result?;
+        freeze_result?;
 
         Ok(())
     }

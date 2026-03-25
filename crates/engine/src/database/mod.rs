@@ -332,9 +332,16 @@ pub struct Database {
 
     /// Instant when this database instance was created (for uptime tracking).
     opened_at: Instant,
+
+    /// Registered subsystems for recovery and shutdown hooks.
+    ///
+    /// Populated by `DatabaseBuilder` or `Database::open()` (backward compat).
+    /// Frozen in reverse order during shutdown/drop.
+    subsystems: parking_lot::RwLock<Vec<Box<dyn crate::recovery::Subsystem>>>,
 }
 
 // Split impl blocks
+pub mod builder;
 mod compaction;
 mod lifecycle;
 mod open;
@@ -363,6 +370,37 @@ impl Database {
     /// deletion succeeds.
     pub fn clear_branch_storage(&self, branch_id: &BranchId) {
         self.storage.clear_branch(branch_id);
+    }
+
+    /// Set subsystems for this database (called by DatabaseBuilder).
+    pub(crate) fn set_subsystems(&self, subsystems: Vec<Box<dyn crate::recovery::Subsystem>>) {
+        *self.subsystems.write() = subsystems;
+    }
+
+    /// Run freeze hooks on all registered subsystems.
+    ///
+    /// Called during shutdown and drop. Attempts all hooks even if one fails,
+    /// so a vector freeze error doesn't also lose search data.
+    pub(crate) fn run_freeze_hooks(&self) -> StrataResult<()> {
+        let subsystems = self.subsystems.read();
+        let mut first_error: Option<strata_core::StrataError> = None;
+        for subsystem in subsystems.iter().rev() {
+            if let Err(e) = subsystem.freeze(self) {
+                tracing::warn!(
+                    target: "strata::db",
+                    subsystem = subsystem.name(),
+                    error = %e,
+                    "Subsystem freeze failed"
+                );
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+        }
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Direct single-key read returning only the Value (no VersionedValue).
@@ -947,14 +985,9 @@ impl Drop for Database {
                     "Final flush on drop failed — data may not be durable");
             }
 
-            // Freeze vector heaps to mmap so lite KV records can recover
-            if let Err(e) = self.freeze_vector_heaps() {
-                tracing::warn!(target: "strata::db", error = %e, "Failed to freeze vector heaps in drop");
-            }
-
-            // Freeze search index to disk for fast recovery
-            if let Err(e) = self.freeze_search_index() {
-                tracing::warn!(target: "strata::db", error = %e, "Failed to freeze search index in drop");
+            // Freeze all registered subsystems
+            if let Err(e) = self.run_freeze_hooks() {
+                tracing::warn!(target: "strata::db", error = %e, "Subsystem freeze failed in drop");
             }
         }
 
