@@ -22,11 +22,11 @@
 //! All mmap files are **caches** — if missing, corrupt, or version-mismatched,
 //! recovery falls back transparently to full KV-based rebuild with no data loss.
 
-use crate::branch_dag::SYSTEM_BRANCH;
 use crate::database::Database;
 use crate::primitives::branch::resolve_branch_name;
 use crate::recovery::{register_recovery_participant, RecoveryParticipant};
 use crate::search::InvertedIndex;
+use strata_core::branch_dag::SYSTEM_BRANCH;
 use strata_core::types::TypeTag;
 use strata_core::value::Value;
 use strata_core::StrataResult;
@@ -208,7 +208,10 @@ impl crate::recovery::Subsystem for SearchSubsystem {
         "search"
     }
 
-    fn recover(&self, db: &crate::database::Database) -> strata_core::StrataResult<()> {
+    fn recover(
+        &self,
+        db: &std::sync::Arc<crate::database::Database>,
+    ) -> strata_core::StrataResult<()> {
         recover_search_state(db)
     }
 

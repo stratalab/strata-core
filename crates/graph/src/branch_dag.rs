@@ -12,174 +12,18 @@
 //! Read helpers (`dag_get_status`, `dag_get_branch_info`, `find_children`)
 //! assemble branch lineage from the graph.
 
-use std::fmt;
+pub use strata_core::branch_dag::*;
+
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use strata_core::contract::Timestamp;
 use strata_core::{StrataError, StrataResult};
 use tracing::warn;
 
-use crate::database::Database;
-use crate::graph::types::{Direction, EdgeData, NodeData};
-use crate::graph::GraphStore;
-use crate::primitives::branch::{resolve_branch_name, BranchIndex};
-
-/// Reserved branch name for system-internal data.
-pub const SYSTEM_BRANCH: &str = "_system_";
-
-/// Graph name for the branch DAG on the `_system_` branch.
-pub const BRANCH_DAG_GRAPH: &str = "_branch_dag";
-
-/// Status of a branch in the DAG.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum DagBranchStatus {
-    /// Branch is active and writable.
-    Active,
-    /// Branch is archived (read-only).
-    Archived,
-    /// Branch has been merged into another branch.
-    Merged,
-    /// Branch has been deleted.
-    Deleted,
-}
-
-impl DagBranchStatus {
-    /// Returns `true` if this status allows writes.
-    pub fn is_writable(&self) -> bool {
-        matches!(self, DagBranchStatus::Active)
-    }
-    /// String representation of this status.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            DagBranchStatus::Active => "active",
-            DagBranchStatus::Archived => "archived",
-            DagBranchStatus::Merged => "merged",
-            DagBranchStatus::Deleted => "deleted",
-        }
-    }
-    /// Parse a status string. Returns `None` for unknown values.
-    pub fn parse_str(s: &str) -> Option<Self> {
-        match s {
-            "active" => Some(DagBranchStatus::Active),
-            "archived" => Some(DagBranchStatus::Archived),
-            "merged" => Some(DagBranchStatus::Merged),
-            "deleted" => Some(DagBranchStatus::Deleted),
-            _ => None,
-        }
-    }
-}
-
-impl fmt::Display for DagBranchStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// Unique identifier for a DAG event (fork or merge).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct DagEventId(String);
-
-impl DagEventId {
-    /// Create a new fork event ID.
-    pub fn new_fork() -> Self {
-        Self(format!("fork:{}", uuid::Uuid::new_v4()))
-    }
-    /// Create a new merge event ID.
-    pub fn new_merge() -> Self {
-        Self(format!("merge:{}", uuid::Uuid::new_v4()))
-    }
-    /// The string representation of this event ID.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-    /// Returns `true` if this is a fork event.
-    pub fn is_fork(&self) -> bool {
-        self.0.starts_with("fork:")
-    }
-    /// Returns `true` if this is a merge event.
-    pub fn is_merge(&self) -> bool {
-        self.0.starts_with("merge:")
-    }
-}
-
-impl fmt::Display for DagEventId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-/// Record of a fork event in the DAG.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ForkRecord {
-    /// Unique event identifier.
-    pub event_id: DagEventId,
-    /// Parent branch name.
-    pub parent: String,
-    /// Child (forked) branch name.
-    pub child: String,
-    /// Timestamp in microseconds.
-    pub timestamp: u64,
-    /// MVCC snapshot version at the time of fork.
-    pub fork_version: Option<u64>,
-    /// Optional descriptive message.
-    pub message: Option<String>,
-    /// Optional creator identifier.
-    pub creator: Option<String>,
-}
-
-/// Record of a merge event in the DAG.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MergeRecord {
-    /// Unique event identifier.
-    pub event_id: DagEventId,
-    /// Source branch name.
-    pub source: String,
-    /// Target branch name.
-    pub target: String,
-    /// Timestamp in microseconds.
-    pub timestamp: u64,
-    /// Merge strategy used.
-    pub strategy: Option<String>,
-    /// Number of keys applied.
-    pub keys_applied: Option<u64>,
-    /// Number of spaces merged.
-    pub spaces_merged: Option<u64>,
-    /// Number of conflicts encountered.
-    pub conflicts: Option<u64>,
-    /// Optional descriptive message.
-    pub message: Option<String>,
-    /// Optional creator identifier.
-    pub creator: Option<String>,
-}
-
-/// Full information about a branch in the DAG.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DagBranchInfo {
-    /// Branch name.
-    pub name: String,
-    /// Current status.
-    pub status: DagBranchStatus,
-    /// Creation timestamp in microseconds.
-    pub created_at: Option<u64>,
-    /// Last update timestamp in microseconds.
-    pub updated_at: Option<u64>,
-    /// Optional descriptive message.
-    pub message: Option<String>,
-    /// Optional creator identifier.
-    pub creator: Option<String>,
-    /// Fork origin, if this branch was forked.
-    pub forked_from: Option<ForkRecord>,
-    /// Merge events where this branch was the source.
-    pub merges: Vec<MergeRecord>,
-    /// Names of branches forked from this one.
-    pub children: Vec<String>,
-}
-
-/// Returns `true` if the given name starts with the reserved `_system` prefix.
-pub fn is_system_branch(name: &str) -> bool {
-    name.starts_with("_system")
-}
+use crate::types::{Direction, EdgeData, NodeData};
+use crate::GraphStore;
+use strata_engine::primitives::branch::{resolve_branch_name, BranchIndex};
+use strata_engine::Database;
 
 /// Ensure the `_system_` branch exists in BranchIndex.
 fn ensure_system_branch(db: &Arc<Database>) -> Result<(), String> {
@@ -403,7 +247,7 @@ pub fn dag_record_merge(
     db: &Arc<Database>,
     source: &str,
     target: &str,
-    merge_info: &crate::branch_ops::MergeInfo,
+    merge_info: &strata_engine::branch_ops::MergeInfo,
     strategy: Option<&str>,
     message: Option<&str>,
     creator: Option<&str>,
@@ -628,7 +472,7 @@ fn find_fork_origin(db: &Arc<Database>, name: &str) -> StrataResult<Option<ForkR
             if let Some(parent) = parents.first() {
                 let props = event_node.properties.as_ref();
                 return Ok(Some(ForkRecord {
-                    event_id: DagEventId(neighbor.node_id.clone()),
+                    event_id: DagEventId::from_string(neighbor.node_id.clone()),
                     parent: parent.node_id.clone(),
                     child: name.to_string(),
                     timestamp: props
@@ -689,7 +533,7 @@ fn find_merge_history(db: &Arc<Database>, name: &str) -> StrataResult<Vec<MergeR
                 .unwrap_or_default();
             let props = event_node.properties.as_ref();
             records.push(MergeRecord {
-                event_id: DagEventId(neighbor.node_id.clone()),
+                event_id: DagEventId::from_string(neighbor.node_id.clone()),
                 source: name.to_string(),
                 target: target_name,
                 timestamp: props
@@ -776,25 +620,49 @@ fn status_from_node_props(node: &NodeData) -> DagBranchStatus {
     DagBranchStatus::Active
 }
 
+/// Subsystem implementation for graph initialization and branch DAG management.
+///
+/// Handles:
+/// - Creating the `_system_` branch on database open
+/// - Creating the `_branch_dag` graph for tracking branch lifecycle
+/// - Populating the branch status cache (for followers)
+pub struct GraphSubsystem;
+
+impl strata_engine::Subsystem for GraphSubsystem {
+    fn name(&self) -> &'static str {
+        "graph"
+    }
+
+    fn recover(
+        &self,
+        db: &std::sync::Arc<strata_engine::Database>,
+    ) -> strata_core::StrataResult<()> {
+        init_system_branch(db);
+        load_status_cache_readonly(db);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Note: Database::cache() already calls init_system_branch() internally,
-    // so these tests verify state after automatic init (and idempotency of
-    // additional explicit calls).
+    fn setup() -> Arc<Database> {
+        let db = Database::cache().unwrap();
+        init_system_branch(&db);
+        db
+    }
 
     #[test]
     fn system_branch_auto_created() {
-        // Database::cache() calls init_system_branch automatically
-        let db = Database::cache().unwrap();
+        let db = setup();
         let branch_index = BranchIndex::new(db.clone());
         assert!(branch_index.exists(SYSTEM_BRANCH).unwrap());
     }
 
     #[test]
     fn branch_dag_graph_exists() {
-        let db = Database::cache().unwrap();
+        let db = setup();
         let graph_store = GraphStore::new(db.clone());
         let branch_id = resolve_branch_name(SYSTEM_BRANCH);
         let meta = graph_store
@@ -805,7 +673,7 @@ mod tests {
 
     #[test]
     fn default_branch_seeded() {
-        let db = Database::cache().unwrap();
+        let db = setup();
         let graph_store = GraphStore::new(db.clone());
         let branch_id = resolve_branch_name(SYSTEM_BRANCH);
         let node = graph_store
@@ -821,7 +689,7 @@ mod tests {
 
     #[test]
     fn init_is_idempotent() {
-        let db = Database::cache().unwrap();
+        let db = setup();
         // cache() already called init once; call again explicitly
         init_system_branch(&db);
         let branch_index = BranchIndex::new(db.clone());
@@ -910,7 +778,7 @@ mod tests {
 
     #[test]
     fn dag_add_branch_creates_node() {
-        let db = Database::cache().unwrap();
+        let db = setup();
         dag_add_branch(&db, "test-add", Some("test message"), Some("tester")).unwrap();
 
         let graph_store = GraphStore::new(db.clone());
@@ -935,7 +803,7 @@ mod tests {
 
     #[test]
     fn dag_record_fork_creates_event_and_edges() {
-        let db = Database::cache().unwrap();
+        let db = setup();
         dag_add_branch(&db, "parent-branch", None, None).unwrap();
         dag_add_branch(&db, "child-branch", None, None).unwrap();
 
@@ -1004,11 +872,11 @@ mod tests {
 
     #[test]
     fn dag_record_merge_creates_event_and_edges() {
-        let db = Database::cache().unwrap();
+        let db = setup();
         dag_add_branch(&db, "merge-src", None, None).unwrap();
         dag_add_branch(&db, "merge-tgt", None, None).unwrap();
 
-        let merge_info = crate::branch_ops::MergeInfo {
+        let merge_info = strata_engine::branch_ops::MergeInfo {
             source: "merge-src".to_string(),
             target: "merge-tgt".to_string(),
             keys_applied: 10,
@@ -1067,7 +935,7 @@ mod tests {
 
     #[test]
     fn dag_set_status_updates_node() {
-        let db = Database::cache().unwrap();
+        let db = setup();
         dag_add_branch(&db, "status-test", None, None).unwrap();
         assert_eq!(
             dag_get_status(&db, "status-test").unwrap(),
@@ -1083,7 +951,7 @@ mod tests {
 
     #[test]
     fn dag_mark_deleted_sets_status() {
-        let db = Database::cache().unwrap();
+        let db = setup();
         dag_add_branch(&db, "del-test", None, None).unwrap();
 
         dag_mark_deleted(&db, "del-test").unwrap();
@@ -1108,14 +976,14 @@ mod tests {
 
     #[test]
     fn dag_mark_deleted_noop_if_missing() {
-        let db = Database::cache().unwrap();
+        let db = setup();
         // Should not error for non-existent branch
         dag_mark_deleted(&db, "nonexistent-branch-xyz").unwrap();
     }
 
     #[test]
     fn dag_get_branch_info_assembles_full_record() {
-        let db = Database::cache().unwrap();
+        let db = setup();
         dag_add_branch(&db, "info-parent", Some("parent branch"), Some("admin")).unwrap();
         dag_add_branch(&db, "info-child", None, None).unwrap();
         dag_record_fork(
@@ -1128,7 +996,7 @@ mod tests {
         )
         .unwrap();
 
-        let merge_info = crate::branch_ops::MergeInfo {
+        let merge_info = strata_engine::branch_ops::MergeInfo {
             source: "info-child".to_string(),
             target: "info-parent".to_string(),
             keys_applied: 5,
@@ -1168,7 +1036,7 @@ mod tests {
 
     #[test]
     fn find_children_returns_forked_branches() {
-        let db = Database::cache().unwrap();
+        let db = setup();
         dag_add_branch(&db, "fc-parent", None, None).unwrap();
         dag_add_branch(&db, "fc-child1", None, None).unwrap();
         dag_add_branch(&db, "fc-child2", None, None).unwrap();
@@ -1182,7 +1050,7 @@ mod tests {
 
     #[test]
     fn ensure_branch_node_exists_is_idempotent() {
-        let db = Database::cache().unwrap();
+        let db = setup();
         ensure_branch_node_exists(&db, "idempotent-test").unwrap();
         ensure_branch_node_exists(&db, "idempotent-test").unwrap();
 
@@ -1196,28 +1064,28 @@ mod tests {
 
     #[test]
     fn dag_get_branch_info_returns_none_for_missing() {
-        let db = Database::cache().unwrap();
+        let db = setup();
         let info = dag_get_branch_info(&db, "no-such-branch-xyz").unwrap();
         assert!(info.is_none());
     }
 
     #[test]
     fn dag_set_status_errors_for_missing_branch() {
-        let db = Database::cache().unwrap();
+        let db = setup();
         let result = dag_set_status(&db, "no-such-branch-xyz", DagBranchStatus::Archived);
         assert!(result.is_err());
     }
 
     #[test]
     fn dag_set_message_errors_for_missing_branch() {
-        let db = Database::cache().unwrap();
+        let db = setup();
         let result = dag_set_message(&db, "no-such-branch-xyz", "hello");
         assert!(result.is_err());
     }
 
     #[test]
     fn dag_set_message_updates_node() {
-        let db = Database::cache().unwrap();
+        let db = setup();
         dag_add_branch(&db, "msg-test", None, None).unwrap();
 
         dag_set_message(&db, "msg-test", "hello world").unwrap();

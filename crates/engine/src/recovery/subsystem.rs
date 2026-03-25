@@ -11,7 +11,7 @@
 //! struct MySubsystem;
 //! impl Subsystem for MySubsystem {
 //!     fn name(&self) -> &'static str { "my-subsystem" }
-//!     fn recover(&self, db: &Database) -> StrataResult<()> { Ok(()) }
+//!     fn recover(&self, db: &Arc<Database>) -> StrataResult<()> { Ok(()) }
 //! }
 //!
 //! let db = DatabaseBuilder::new()
@@ -20,6 +20,7 @@
 //! ```
 
 use crate::database::Database;
+use std::sync::Arc;
 use strata_core::StrataResult;
 
 /// Trait for subsystems that need recovery on open and cleanup on shutdown.
@@ -35,7 +36,7 @@ pub trait Subsystem: Send + Sync + 'static {
     /// Called after WAL recovery completes during database open.
     ///
     /// Rebuild in-memory state from persistent storage (KV scan, mmap files, etc.).
-    fn recover(&self, db: &Database) -> StrataResult<()>;
+    fn recover(&self, db: &Arc<Database>) -> StrataResult<()>;
 
     /// Called during shutdown/drop for cleanup and persistence.
     ///

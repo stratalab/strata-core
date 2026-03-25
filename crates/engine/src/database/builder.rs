@@ -88,7 +88,7 @@ impl DatabaseBuilder {
     }
 
     /// Run recovery for all registered subsystems.
-    fn run_subsystem_recovery(&self, db: &Database) -> StrataResult<()> {
+    fn run_subsystem_recovery(&self, db: &Arc<Database>) -> StrataResult<()> {
         for subsystem in &self.subsystems {
             info!(
                 target: "strata::recovery",

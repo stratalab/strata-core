@@ -7,9 +7,9 @@ mod tests {
 
     use strata_core::types::BranchId;
 
-    use crate::database::Database;
-    use crate::graph::types::*;
-    use crate::graph::GraphStore;
+    use crate::types::*;
+    use crate::GraphStore;
+    use strata_engine::Database;
 
     fn setup() -> (Arc<Database>, GraphStore) {
         let db = Database::cache().unwrap();

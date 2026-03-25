@@ -1,0 +1,16 @@
+[package]
+name = "strata-graph"
+version = "0.6.0"
+edition = "2021"
+description = "Graph engine for StrataDB"
+
+[dependencies]
+strata-core = { path = "../core" }
+strata-concurrency = { path = "../concurrency" }
+strata-engine = { path = "../engine" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+dashmap = { workspace = true }
+once_cell = { workspace = true }
+uuid = { workspace = true }

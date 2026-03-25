@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use strata_core::Value;
-use strata_engine::graph::types::{
+use strata_graph::types::{
     BfsOptions, CascadePolicy, CdlpOptions, Direction, EdgeData, GraphMeta, LinkTypeDef, NodeData,
     ObjectTypeDef, PageRankOptions, SsspOptions,
 };
@@ -245,7 +245,7 @@ pub fn graph_list_nodes_paginated(
     limit: usize,
     cursor: Option<String>,
 ) -> Result<Output> {
-    use strata_engine::graph::types::PageRequest;
+    use strata_graph::types::PageRequest;
     let core_branch = to_core_branch_id(&branch)?;
     let page = PageRequest { limit, cursor };
     let result = convert_result(p.graph.list_nodes_paginated(core_branch, &graph, page))

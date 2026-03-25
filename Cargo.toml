@@ -12,6 +12,7 @@ members = [
     "crates/concurrency",
     "crates/durability",
     "crates/engine",
+    "crates/graph",
     "crates/inference",
     "crates/intelligence",
     "crates/cli",
@@ -138,6 +139,7 @@ strata-storage = { path = "crates/storage" }
 strata-concurrency = { path = "crates/concurrency" }
 strata-durability = { path = "crates/durability" }
 strata-engine = { path = "crates/engine" }
+strata-graph = { path = "crates/graph" }
 strata-intelligence = { path = "crates/intelligence" }
 strata-search = { path = "crates/search" }
 uuid = { workspace = true }

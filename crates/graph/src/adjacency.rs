@@ -99,7 +99,7 @@ impl AdjacencyIndex {
             .map(|edges| {
                 edges
                     .iter()
-                    .filter(|(_, et, _)| edge_type_filter.map_or(true, |f| et == f))
+                    .filter(|(_, et, _)| edge_type_filter.is_none_or(|f| et == f))
                     .map(|(dst, et, data)| Neighbor {
                         node_id: dst.clone(),
                         edge_type: et.clone(),
@@ -121,7 +121,7 @@ impl AdjacencyIndex {
             .map(|edges| {
                 edges
                     .iter()
-                    .filter(|(_, et, _)| edge_type_filter.map_or(true, |f| et == f))
+                    .filter(|(_, et, _)| edge_type_filter.is_none_or(|f| et == f))
                     .map(|(src, et, data)| Neighbor {
                         node_id: src.clone(),
                         edge_type: et.clone(),
@@ -147,7 +147,7 @@ impl AdjacencyIndex {
             .flat_map(move |edges| {
                 edges
                     .iter()
-                    .filter(move |(_, et, _)| edge_type_filter.map_or(true, |f| et == f))
+                    .filter(move |(_, et, _)| edge_type_filter.is_none_or(|f| et == f))
                     .map(|(dst, et, _)| (dst.as_str(), et.as_str()))
             })
     }
@@ -179,7 +179,7 @@ impl AdjacencyIndex {
             .flat_map(move |edges| {
                 edges
                     .iter()
-                    .filter(move |(_, et, _)| edge_type_filter.map_or(true, |f| et == f))
+                    .filter(move |(_, et, _)| edge_type_filter.is_none_or(|f| et == f))
                     .map(|(src, et, _)| (src.as_str(), et.as_str()))
             })
     }

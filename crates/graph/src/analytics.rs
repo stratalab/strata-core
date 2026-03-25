@@ -585,7 +585,7 @@ impl Ord for OrdF64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::types::EdgeData;
+    use crate::types::EdgeData;
 
     fn make_index(edges: &[(&str, &str, f64)]) -> AdjacencyIndex {
         let mut idx = AdjacencyIndex::new();
@@ -1000,8 +1000,8 @@ mod tests {
     // Integration: GraphStore-level tests
     // =========================================================================
 
-    use crate::database::Database;
     use std::sync::Arc;
+    use strata_engine::Database;
 
     fn setup() -> (Arc<Database>, GraphStore) {
         let db = Database::cache().unwrap();

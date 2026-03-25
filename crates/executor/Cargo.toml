@@ -23,6 +23,7 @@ google = ["embed", "strata-intelligence/google"]
 # Internal crates
 strata-core = { path = "../core" }
 strata-engine = { path = "../engine" }
+strata-graph = { path = "../graph" }
 strata-intelligence = { path = "../intelligence" }
 strata-search = { path = "../search" }
 strata-security = { path = "../security" }

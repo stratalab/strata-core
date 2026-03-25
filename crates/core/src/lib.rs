@@ -15,6 +15,7 @@
 #![warn(clippy::all)]
 
 // Module declarations
+pub mod branch_dag; // Branch DAG types and constants
 pub mod branch_types; // Branch lifecycle types
 pub mod contract; // contract types
 pub mod error;
