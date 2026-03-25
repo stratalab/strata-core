@@ -407,10 +407,32 @@ impl Database {
     pub fn begin_transaction(&self, branch_id: BranchId) -> StrataResult<TransactionContext> {
         self.check_accepting()?;
         let txn_id = self.coordinator.next_txn_id()?;
-        let snapshot_version = self.storage.version();
+        // Use storage.version() as the snapshot (includes own thread's commits),
+        // but wait for visible_version to catch up so all data at versions
+        // ≤ snapshot is fully applied. This prevents the cross-branch snapshot
+        // gap (#1913) without breaking same-thread sequential operations.
+        let mut snapshot_version = self.storage.version();
+        let mut spins = 0u32;
+        while self.coordinator.visible_version() < snapshot_version {
+            spins += 1;
+            if spins < 16 {
+                std::hint::spin_loop();
+            } else if spins < 1000 {
+                std::thread::yield_now();
+            } else {
+                // Safety valve: a panicked commit thread could leave a version
+                // permanently pending. Fall back to visible_version to avoid
+                // deadlock. This is strictly safe (more conservative snapshot).
+                snapshot_version = self.coordinator.visible_version();
+                break;
+            }
+        }
         self.coordinator.record_start(txn_id, snapshot_version);
 
         let mut txn = TransactionPool::acquire(txn_id, branch_id, Some(Arc::clone(&self.storage)));
+        // Override start_version set by pool acquire (which reads storage.version()
+        // directly, bypassing the visible_version wait) (#1913).
+        txn.start_version = snapshot_version;
         txn.set_max_write_entries(self.coordinator.max_write_buffer_entries());
         Ok(txn)
     }

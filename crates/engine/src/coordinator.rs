@@ -333,6 +333,14 @@ impl TransactionCoordinator {
         self.manager.current_version()
     }
 
+    /// Get the highest version where all data ≤ V is fully applied (#1913).
+    ///
+    /// Safe for use as a transaction snapshot version — guarantees no
+    /// in-flight `apply_writes` exists at any version ≤ the returned value.
+    pub fn visible_version(&self) -> u64 {
+        self.manager.visible_version()
+    }
+
     /// Ensure the version counter is at least `floor` (#1726).
     ///
     /// Called after segment recovery to prevent version collisions when the

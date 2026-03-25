@@ -31,6 +31,7 @@ use crate::payload::TransactionPayload;
 use crate::{CommitError, TransactionContext, TransactionStatus};
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use strata_core::perf_time;
@@ -92,6 +93,21 @@ pub struct TransactionManager {
     /// version is then safe to use as a checkpoint watermark — no version ≤ that
     /// value has storage application still in progress.
     commit_quiesce: RwLock<()>,
+
+    /// Highest version V where all data at versions ≤ V is fully applied (#1913).
+    ///
+    /// Unlike `version` (which reflects allocated versions), this only advances
+    /// when the contiguous prefix of applied versions grows. Transactions use
+    /// this for their snapshot to avoid seeing a state that never existed
+    /// (e.g., branch B committed but branch A's earlier version not yet applied).
+    visible_version: AtomicU64,
+
+    /// Set of allocated but not-yet-applied versions (#1913).
+    ///
+    /// When `allocate_version()` returns V, V is inserted here. When
+    /// `mark_version_applied(V)` is called, V is removed and `visible_version`
+    /// is advanced if the contiguous applied prefix grew.
+    pending_versions: Mutex<BTreeSet<u64>>,
 }
 
 impl TransactionManager {
@@ -118,12 +134,50 @@ impl TransactionManager {
             next_txn_id: AtomicU64::new(max_txn_id + 1),
             commit_locks: DashMap::new(),
             commit_quiesce: RwLock::new(()),
+            visible_version: AtomicU64::new(initial_version),
+            pending_versions: Mutex::new(BTreeSet::new()),
         }
     }
 
     /// Get current global version
     pub fn current_version(&self) -> u64 {
         self.version.load(Ordering::Acquire)
+    }
+
+    /// Get the highest version where all data at versions ≤ V is fully applied.
+    ///
+    /// Unlike `current_version()` (which reflects allocated versions), this
+    /// returns a version safe for snapshot reads: no in-flight `apply_writes`
+    /// exists at any version ≤ the returned value.
+    ///
+    /// This prevents the cross-branch snapshot gap described in #1913:
+    /// if branch A allocates version N and branch B allocates N+1, B can
+    /// finish apply before A. A reader using `current_version()` (= N+1)
+    /// would miss A's writes. `visible_version()` only advances to N+1
+    /// once both A and B have completed their applies.
+    pub fn visible_version(&self) -> u64 {
+        self.visible_version.load(Ordering::Acquire)
+    }
+
+    /// Mark a version as fully applied to storage.
+    ///
+    /// Called after `apply_writes_atomic` completes (or after a version is
+    /// allocated but the commit fails, creating a version gap). Removes the
+    /// version from the in-flight set and advances `visible_version` if the
+    /// contiguous applied prefix has grown.
+    pub fn mark_version_applied(&self, version: u64) {
+        let mut pending = self.pending_versions.lock();
+        pending.remove(&version);
+        let new_visible = match pending.iter().next() {
+            // Some versions still in-flight: safe up to (lowest_pending - 1)
+            Some(&min_pending) => min_pending.saturating_sub(1),
+            // All allocated versions applied: safe up to last allocated
+            // (counter value = last allocated, since allocate_version
+            // returns prev+1 and sets counter to prev+1).
+            None => self.version.load(Ordering::Acquire),
+        };
+        self.visible_version
+            .fetch_max(new_visible, Ordering::AcqRel);
     }
 
     /// Ensure the version counter is at least `floor` (#1726).
@@ -134,6 +188,9 @@ impl TransactionManager {
     /// the counter so that new transactions start above all existing data.
     pub fn bump_version_floor(&self, floor: u64) {
         self.version.fetch_max(floor, Ordering::AcqRel);
+        // Recovery data at versions ≤ floor is already in storage,
+        // so visible_version must reflect this (#1913).
+        self.visible_version.fetch_max(floor, Ordering::AcqRel);
     }
 
     /// Get the current version after draining all in-flight commits (#1710).
@@ -194,6 +251,7 @@ impl TransactionManager {
     /// (584 years at 1 billion txn/sec). See `next_txn_id` for the overflow
     /// race tradeoff rationale.
     pub fn allocate_version(&self) -> std::result::Result<u64, CommitError> {
+        let mut pending = self.pending_versions.lock();
         let prev = self.version.fetch_add(1, Ordering::AcqRel);
         if prev == u64::MAX {
             // Undo the wrapping increment: restore counter to u64::MAX
@@ -202,7 +260,9 @@ impl TransactionManager {
                 "version counter at u64::MAX".into(),
             ));
         }
-        Ok(prev + 1)
+        let version = prev + 1;
+        pending.insert(version);
+        Ok(version)
     }
 
     /// Commit a transaction atomically
@@ -304,8 +364,13 @@ impl TransactionManager {
         let commit_version = self.allocate_version()?;
 
         // Step 2.5: Materialize JSON patches into write_set (#1739 OCC-H1)
-        txn.materialize_json_writes()
-            .map_err(|e| CommitError::WALError(format!("JSON materialization failed: {}", e)))?;
+        if let Err(e) = txn.materialize_json_writes() {
+            self.mark_version_applied(commit_version);
+            return Err(CommitError::WALError(format!(
+                "JSON materialization failed: {}",
+                e
+            )));
+        }
 
         // Step 3: Write to WAL (durability) - only for transactions with mutations.
         // After materialization, json_writes are in write_set, so is_read_only() covers all cases.
@@ -327,6 +392,7 @@ impl TransactionManager {
                     txn.status = TransactionStatus::Aborted {
                         reason: format!("WAL write failed: {}", e),
                     };
+                    self.mark_version_applied(commit_version);
                     return Err(CommitError::WALError(e.to_string()));
                 }
 
@@ -338,6 +404,9 @@ impl TransactionManager {
 
         // Step 4: Apply to storage
         if let Err(e) = txn.apply_writes(store, commit_version) {
+            // Version was allocated but apply failed — unregister so
+            // visible_version can advance past this gap (#1913).
+            self.mark_version_applied(commit_version);
             if wal.is_some() {
                 // WAL says committed but storage failed — data is durable
                 // but NOT visible to reads until restart replays WAL (#1725).
@@ -364,7 +433,8 @@ impl TransactionManager {
             }
         }
 
-        // Step 5: Return commit version
+        // Step 5: Version fully applied — advance visible_version (#1913)
+        self.mark_version_applied(commit_version);
         Ok(commit_version)
     }
 
@@ -446,8 +516,13 @@ impl TransactionManager {
         let commit_version = self.allocate_version()?;
 
         // Materialize JSON patches into write_set (#1739 OCC-H1)
-        txn.materialize_json_writes()
-            .map_err(|e| CommitError::WALError(format!("JSON materialization failed: {}", e)))?;
+        if let Err(e) = txn.materialize_json_writes() {
+            self.mark_version_applied(commit_version);
+            return Err(CommitError::WALError(format!(
+                "JSON materialization failed: {}",
+                e
+            )));
+        }
 
         let has_mutations = !txn.is_read_only();
         if has_mutations {
@@ -471,6 +546,7 @@ impl TransactionManager {
                             txn.status = TransactionStatus::Aborted {
                                 reason: format!("WAL write failed: {}", e),
                             };
+                            self.mark_version_applied(commit_version);
                             return Err(CommitError::WALError(e.to_string()));
                         }
                     }
@@ -481,6 +557,7 @@ impl TransactionManager {
 
         perf_time!(trace, write_set_apply_ns, {
             if let Err(e) = txn.apply_writes(store, commit_version) {
+                self.mark_version_applied(commit_version);
                 if wal_arc.is_some() {
                     tracing::error!(
                         target: "strata::txn",
@@ -504,6 +581,9 @@ impl TransactionManager {
                 }
             }
         });
+
+        // Version fully applied — advance visible_version (#1913)
+        self.mark_version_applied(commit_version);
 
         #[cfg(feature = "perf-trace")]
         {
@@ -554,6 +634,9 @@ impl TransactionManager {
     /// Uses `fetch_max` so the counter never goes backward.
     pub fn catch_up_version(&self, v: u64) {
         self.version.fetch_max(v, Ordering::AcqRel);
+        // Data at version v was applied by another process, so it is
+        // already visible in storage (#1913).
+        self.visible_version.fetch_max(v, Ordering::AcqRel);
     }
 
     /// Advance the next_txn_id counter to at least `id + 1`.
@@ -624,12 +707,24 @@ impl TransactionManager {
         // Use the externally-provided version (do NOT allocate from local counter)
         let commit_version = version;
 
-        // Advance local counter so it stays in sync
-        self.version.fetch_max(commit_version, Ordering::AcqRel);
+        // Register external version as pending BEFORE advancing the counter.
+        // If we advance first, a concurrent mark_version_applied could see
+        // the higher counter with an empty pending set and advance
+        // visible_version to include this not-yet-applied version (#1913).
+        {
+            let mut pending = self.pending_versions.lock();
+            self.version.fetch_max(commit_version, Ordering::AcqRel);
+            pending.insert(commit_version);
+        }
 
         // Materialize JSON patches into write_set (#1739 OCC-H1)
-        txn.materialize_json_writes()
-            .map_err(|e| CommitError::WALError(format!("JSON materialization failed: {}", e)))?;
+        if let Err(e) = txn.materialize_json_writes() {
+            self.mark_version_applied(commit_version);
+            return Err(CommitError::WALError(format!(
+                "JSON materialization failed: {}",
+                e
+            )));
+        }
 
         // Write to WAL
         let has_mutations = !txn.is_read_only();
@@ -648,6 +743,7 @@ impl TransactionManager {
                     txn.status = TransactionStatus::Aborted {
                         reason: format!("WAL write failed: {}", e),
                     };
+                    self.mark_version_applied(commit_version);
                     return Err(CommitError::WALError(e.to_string()));
                 }
             }
@@ -655,6 +751,7 @@ impl TransactionManager {
 
         // Apply to storage
         if let Err(e) = txn.apply_writes(store, commit_version) {
+            self.mark_version_applied(commit_version);
             if wal.is_some() {
                 tracing::error!(
                     target: "strata::txn",
@@ -678,6 +775,8 @@ impl TransactionManager {
             }
         }
 
+        // Version fully applied — advance visible_version (#1913)
+        self.mark_version_applied(commit_version);
         Ok(commit_version)
     }
 
@@ -2540,5 +2639,197 @@ mod tests {
             result.is_err(),
             "cas_with_read() must reject a key already in write_set"
         );
+    }
+
+    /// Issue #1913: Cross-branch snapshot ordering.
+    ///
+    /// When branch A allocates version N and branch B allocates N+1, B can
+    /// finish apply_writes before A. A reader using `current_version()` as its
+    /// snapshot version would see B's writes but miss A's writes (version gap).
+    ///
+    /// `visible_version()` must NOT advance past N-1 while version N is
+    /// still in-flight, ensuring no reader sees a state that never existed.
+    #[test]
+    fn test_issue_1913_cross_branch_snapshot_ordering() {
+        let store = Arc::new(SegmentedStore::new());
+        let manager = TransactionManager::new(0);
+
+        let branch_a = BranchId::new();
+        let branch_b = BranchId::new();
+        let ns_a = create_test_namespace(branch_a);
+        let ns_b = create_test_namespace(branch_b);
+        let key_a = create_test_key(&ns_a, "key_a");
+        let key_b = create_test_key(&ns_b, "key_b");
+
+        // Prepare two transactions on different branches
+        let mut txn_a = TransactionContext::with_store(1, branch_a, Arc::clone(&store));
+        txn_a.put(key_a.clone(), Value::Int(100)).unwrap();
+        txn_a.status = TransactionStatus::Committed; // skip validation
+
+        let mut txn_b = TransactionContext::with_store(2, branch_b, Arc::clone(&store));
+        txn_b.put(key_b.clone(), Value::Int(200)).unwrap();
+        txn_b.status = TransactionStatus::Committed;
+
+        // Step 1: Both branches allocate versions (simulates parallel allocation)
+        let version_a = manager.allocate_version().unwrap(); // 1
+        let version_b = manager.allocate_version().unwrap(); // 2
+        assert_eq!(version_a, 1);
+        assert_eq!(version_b, 2);
+
+        // Step 2: Branch B applies FIRST (out-of-order, the faster branch)
+        txn_b.apply_writes(store.as_ref(), version_b).unwrap();
+        manager.mark_version_applied(version_b);
+
+        // Step 3: visible_version must NOT include version_a (still in-flight)
+        // A safe snapshot must be < version_a to prevent reading a state
+        // where B is committed but A is not yet visible.
+        let vis = manager.visible_version();
+        assert!(
+            vis < version_a,
+            "visible_version ({}) must be < in-flight version {} \
+             to prevent snapshot gap (issue #1913). \
+             store.version()={}, current_version()={}",
+            vis,
+            version_a,
+            store.version(),
+            manager.current_version(),
+        );
+
+        // Step 4: Now branch A applies (slow branch completes)
+        txn_a.apply_writes(store.as_ref(), version_a).unwrap();
+        manager.mark_version_applied(version_a);
+
+        // Step 5: After both are applied, visible_version must include both
+        let vis_final = manager.visible_version();
+        assert!(
+            vis_final >= version_b,
+            "After all versions applied, visible_version ({}) must be >= {}",
+            vis_final,
+            version_b,
+        );
+
+        // Step 6: Verify data is actually readable at the final visible version
+        let result_a = store.get_versioned(&key_a, vis_final).unwrap();
+        let result_b = store.get_versioned(&key_b, vis_final).unwrap();
+        assert!(
+            result_a.is_some(),
+            "key_a must be visible at version {}",
+            vis_final
+        );
+        assert!(
+            result_b.is_some(),
+            "key_b must be visible at version {}",
+            vis_final
+        );
+    }
+
+    /// Issue #1913 concurrent stress test: many parallel commits must produce
+    /// a visible_version that is safe for snapshot reads at all times.
+    #[test]
+    fn test_issue_1913_cross_branch_snapshot_ordering_concurrent() {
+        use std::sync::Barrier;
+
+        let store = Arc::new(SegmentedStore::new());
+        let manager = Arc::new(TransactionManager::new(0));
+        let num_threads = 8;
+        let barrier = Arc::new(Barrier::new(num_threads));
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|i| {
+                let store = Arc::clone(&store);
+                let manager = Arc::clone(&manager);
+                let barrier = Arc::clone(&barrier);
+
+                std::thread::spawn(move || {
+                    let branch_id = BranchId::new();
+                    let ns = create_test_namespace(branch_id);
+                    let key = create_test_key(&ns, &format!("key_{}", i));
+
+                    let mut txn =
+                        TransactionContext::with_store(i as u64 + 1, branch_id, Arc::clone(&store));
+                    txn.put(key, Value::Int(i as i64)).unwrap();
+                    txn.status = TransactionStatus::Committed;
+
+                    let version = manager.allocate_version().unwrap();
+
+                    // Synchronize: all threads allocate before any applies
+                    barrier.wait();
+
+                    // Apply writes (order is non-deterministic)
+                    txn.apply_writes(store.as_ref(), version).unwrap();
+                    manager.mark_version_applied(version);
+
+                    version
+                })
+            })
+            .collect();
+
+        let versions: Vec<u64> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let max_version = *versions.iter().max().unwrap();
+
+        // After all threads complete, visible_version must include all versions
+        let vis = manager.visible_version();
+        assert!(
+            vis >= max_version,
+            "After all {} commits applied, visible_version ({}) must be >= max_version ({})",
+            num_threads,
+            vis,
+            max_version,
+        );
+
+        // At no point during execution should visible_version have been
+        // higher than the lowest unapplied version - 1. We can't verify
+        // the invariant at every instant, but the final state must be correct.
+    }
+
+    /// Issue #1913: version gap — a failed commit must not block visible_version.
+    ///
+    /// If version N is allocated but the commit fails (WAL error, etc.),
+    /// mark_version_applied(N) must still advance visible_version past N
+    /// so subsequent versions become visible.
+    #[test]
+    fn test_issue_1913_version_gap_does_not_block_visible() {
+        let store = Arc::new(SegmentedStore::new());
+        let manager = TransactionManager::new(0);
+
+        let branch = BranchId::new();
+        let ns = create_test_namespace(branch);
+        let key = create_test_key(&ns, "key1");
+
+        // Version 1: allocated and applied normally
+        let v1 = manager.allocate_version().unwrap();
+        {
+            let mut txn = TransactionContext::with_store(1, branch, Arc::clone(&store));
+            txn.put(key.clone(), Value::Int(1)).unwrap();
+            txn.status = TransactionStatus::Committed;
+            txn.apply_writes(store.as_ref(), v1).unwrap();
+        }
+        manager.mark_version_applied(v1);
+        assert_eq!(manager.visible_version(), v1);
+
+        // Version 2: allocated but commit FAILS (simulates WAL error)
+        let v2 = manager.allocate_version().unwrap();
+        // No apply_writes — the commit failed. Just unregister the gap.
+        manager.mark_version_applied(v2);
+
+        // visible_version must advance past the gap
+        assert_eq!(
+            manager.visible_version(),
+            v2,
+            "visible_version must advance past version gap (failed commit at v{})",
+            v2,
+        );
+
+        // Version 3: normal commit after the gap
+        let v3 = manager.allocate_version().unwrap();
+        {
+            let mut txn = TransactionContext::with_store(3, branch, Arc::clone(&store));
+            txn.put(key.clone(), Value::Int(3)).unwrap();
+            txn.status = TransactionStatus::Committed;
+            txn.apply_writes(store.as_ref(), v3).unwrap();
+        }
+        manager.mark_version_applied(v3);
+        assert_eq!(manager.visible_version(), v3);
     }
 }
