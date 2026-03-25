@@ -268,7 +268,7 @@ fn version_counter_monotonically_increases() {
 }
 
 #[test]
-fn version_counter_wraps_at_u64_max() {
+fn version_counter_panics_at_u64_max() {
     let store = SegmentedStore::new();
 
     // Set version close to MAX
@@ -280,12 +280,11 @@ fn version_counter_wraps_at_u64_max() {
     let v2 = store.next_version();
     assert_eq!(v2, u64::MAX);
 
-    // Should wrap to 0
-    let v3 = store.next_version();
-    assert_eq!(v3, 0, "Should wrap at u64::MAX");
-
-    let v4 = store.next_version();
-    assert_eq!(v4, 1);
+    // Overflow must panic — wrapping would corrupt MVCC ordering
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        store.next_version();
+    }));
+    assert!(result.is_err(), "next_version() should panic at u64::MAX");
 }
 
 #[test]
