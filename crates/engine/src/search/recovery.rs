@@ -197,3 +197,22 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
 pub fn register_search_recovery() {
     register_recovery_participant(RecoveryParticipant::new("search", recover_search_state));
 }
+
+/// Subsystem implementation for search index recovery and shutdown hooks.
+///
+/// Used with `DatabaseBuilder` for explicit subsystem registration.
+pub struct SearchSubsystem;
+
+impl crate::recovery::Subsystem for SearchSubsystem {
+    fn name(&self) -> &'static str {
+        "search"
+    }
+
+    fn recover(&self, db: &crate::database::Database) -> strata_core::StrataResult<()> {
+        recover_search_state(db)
+    }
+
+    fn freeze(&self, db: &crate::database::Database) -> strata_core::StrataResult<()> {
+        db.freeze_search_index()
+    }
+}

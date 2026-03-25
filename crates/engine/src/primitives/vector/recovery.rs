@@ -355,3 +355,22 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
 pub fn register_vector_recovery() {
     register_recovery_participant(RecoveryParticipant::new("vector", recover_vector_state));
 }
+
+/// Subsystem implementation for vector recovery and shutdown hooks.
+///
+/// Used with `DatabaseBuilder` for explicit subsystem registration.
+pub struct VectorSubsystem;
+
+impl crate::recovery::Subsystem for VectorSubsystem {
+    fn name(&self) -> &'static str {
+        "vector"
+    }
+
+    fn recover(&self, db: &crate::database::Database) -> strata_core::StrataResult<()> {
+        recover_vector_state(db)
+    }
+
+    fn freeze(&self, db: &crate::database::Database) -> strata_core::StrataResult<()> {
+        db.freeze_vector_heaps()
+    }
+}

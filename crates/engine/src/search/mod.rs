@@ -19,7 +19,7 @@ pub mod tokenizer;
 mod types;
 
 pub use index::{InvertedIndex, PostingEntry, PostingList, ScoredDocId};
-pub use recovery::{extract_indexable_text, register_search_recovery};
+pub use recovery::{extract_indexable_text, register_search_recovery, SearchSubsystem};
 pub use searchable::{
     build_search_response, build_search_response_with_index, build_search_response_with_scorer,
     truncate_text, BM25LiteScorer, Scorer, ScorerContext, SearchCandidate, SearchDoc, Searchable,

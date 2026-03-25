@@ -165,6 +165,8 @@ impl Database {
         registry.insert(canonical_path, Arc::downgrade(&db));
         drop(registry);
 
+        // Register and run recovery for vector and search subsystems.
+        // Also sets subsystems on the Database for freeze-on-drop.
         crate::primitives::vector::register_vector_recovery();
         crate::search::register_search_recovery();
         crate::recovery::recover_all_participants(&db)?;
@@ -172,6 +174,10 @@ impl Database {
         if !index.is_enabled() {
             index.enable();
         }
+        db.set_subsystems(vec![
+            Box::new(crate::primitives::vector::VectorSubsystem),
+            Box::new(crate::search::SearchSubsystem),
+        ]);
 
         Ok(db)
     }
@@ -303,6 +309,7 @@ impl Database {
             follower: true,
             shutdown_complete: AtomicBool::new(false),
             opened_at: Instant::now(),
+            subsystems: parking_lot::RwLock::new(Vec::new()),
         });
 
         crate::primitives::vector::register_vector_recovery();
@@ -312,6 +319,10 @@ impl Database {
         if !index.is_enabled() {
             index.enable();
         }
+        db.set_subsystems(vec![
+            Box::new(crate::primitives::vector::VectorSubsystem),
+            Box::new(crate::search::SearchSubsystem),
+        ]);
 
         crate::branch_dag::load_status_cache_readonly(&db);
 
@@ -496,6 +507,7 @@ impl Database {
             follower: false,
             shutdown_complete: AtomicBool::new(false),
             opened_at: Instant::now(),
+            subsystems: parking_lot::RwLock::new(Vec::new()),
         });
 
         crate::branch_dag::init_system_branch(&db);
@@ -579,6 +591,7 @@ impl Database {
             follower: false,
             shutdown_complete: AtomicBool::new(false),
             opened_at: Instant::now(),
+            subsystems: parking_lot::RwLock::new(Vec::new()),
         });
 
         // Note: Ephemeral databases are NOT registered in the global registry
