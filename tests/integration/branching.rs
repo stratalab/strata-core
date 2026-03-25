@@ -563,12 +563,18 @@ fn test_merge_branches_lww() {
     let kv = test_db.kv();
 
     branch_index.create_branch("target").unwrap();
-    branch_index.create_branch("source").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    // Write initial data before fork
+    kv.put(&target_id, "default", "shared", Value::Int(1))
+        .unwrap();
+
+    // Fork target → source
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
-    // Write conflicting data
-    kv.put(&target_id, "default", "shared", Value::Int(1))
+    // Both modify "shared" (conflict), source adds a new key
+    kv.put(&target_id, "default", "shared", Value::Int(10))
         .unwrap();
     kv.put(&source_id, "default", "shared", Value::Int(2))
         .unwrap();
@@ -585,11 +591,12 @@ fn test_merge_branches_lww() {
         "source",
         "target",
         MergeStrategy::LastWriterWins,
+        None,
     )
     .unwrap();
     assert!(info.keys_applied >= 2);
 
-    // Target should have source's value for "shared"
+    // Target should have source's value for "shared" (LWW: source wins)
     assert_eq!(
         kv.get(&target_id, "default", "shared").unwrap(),
         Some(Value::Int(2))
@@ -608,24 +615,31 @@ fn test_merge_branches_strict() {
     let kv = test_db.kv();
 
     branch_index.create_branch("target").unwrap();
-    branch_index.create_branch("source").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    // Write initial data before fork
+    kv.put(&target_id, "default", "shared", Value::Int(1))
+        .unwrap();
+
+    // Fork target → source
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
-    // Write conflicting data
-    kv.put(&target_id, "default", "shared", Value::Int(1))
+    // Both modify "shared" to different values (conflict)
+    kv.put(&target_id, "default", "shared", Value::Int(10))
         .unwrap();
     kv.put(&source_id, "default", "shared", Value::Int(2))
         .unwrap();
 
     // Strict merge should fail with conflicts
-    let result = branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict);
+    let result =
+        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None);
     assert!(result.is_err());
 
     // Target should be unchanged
     assert_eq!(
         kv.get(&target_id, "default", "shared").unwrap(),
-        Some(Value::Int(1))
+        Some(Value::Int(10))
     );
 }
 
@@ -680,6 +694,7 @@ fn test_fork_diff_merge_roundtrip() {
         "fork",
         "original",
         MergeStrategy::LastWriterWins,
+        None,
     )
     .unwrap();
     assert!(info.keys_applied >= 2, "Should apply fork-only and shared");
@@ -818,18 +833,17 @@ fn cow_merge_lww_with_inherited_layers() {
         "child",
         "parent",
         MergeStrategy::LastWriterWins,
+        None,
     )
     .unwrap();
     assert!(info.keys_applied >= 1, "at least b should be applied");
 
-    // 5. Verify: b gets child's value, c unchanged.
-    //    Two-way LWW sees child's inherited a:1 vs parent's a:10 as
-    //    "modified" and overwrites with child's value. A true three-way
-    //    merge would preserve parent's a:10 (see cow_three_way_merge test).
+    // 5. Verify: a keeps parent's value (three-way merge recognizes this as
+    //    TargetChanged — ancestor was 1, child still has 1, parent changed to 10).
     assert_eq!(
         kv.get(&parent_id, "default", "a").unwrap(),
-        Some(Value::Int(1)),
-        "a: two-way LWW overwrites parent's 10 with child's inherited 1"
+        Some(Value::Int(10)),
+        "a: three-way merge preserves parent's change (ancestor=1, parent=10, child=1)"
     );
     assert_eq!(
         kv.get(&parent_id, "default", "b").unwrap(),
@@ -845,11 +859,9 @@ fn cow_merge_lww_with_inherited_layers() {
 
 /// #1666: Three-way merge with ancestor state from inherited layers.
 ///
-/// NOT YET IMPLEMENTED — three-way merge requires ancestor awareness
-/// (reading the fork point to determine which side actually changed a key).
-/// This test documents the desired behavior.
+/// Three-way merge with ancestor state from inherited layers.
+/// Verifies that disjoint changes merge cleanly without conflict.
 #[test]
-#[ignore = "three-way merge not yet implemented"]
 fn cow_three_way_merge_with_inherited_layers() {
     let test_db = TestDb::new();
     let branch_index = test_db.branch_index();
@@ -878,6 +890,7 @@ fn cow_three_way_merge_with_inherited_layers() {
         "child",
         "parent",
         MergeStrategy::LastWriterWins, // TODO: ThreeWay strategy
+        None,
     )
     .unwrap();
 
@@ -920,6 +933,7 @@ fn cow_repeated_merge_after_fork() {
         "child",
         "parent",
         MergeStrategy::LastWriterWins,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -934,6 +948,7 @@ fn cow_repeated_merge_after_fork() {
         "child",
         "parent",
         MergeStrategy::LastWriterWins,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -1459,6 +1474,7 @@ fn test_issue_1695_fork_disjoint_changes_merge() {
         "child",
         "parent",
         MergeStrategy::LastWriterWins,
+        None,
     )
     .unwrap();
 

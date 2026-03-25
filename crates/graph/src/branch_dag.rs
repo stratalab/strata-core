@@ -266,6 +266,9 @@ pub fn dag_record_merge(
         "spaces_merged": merge_info.spaces_merged,
         "conflicts": merge_info.conflicts.len() as u64,
     });
+    if let Some(mv) = merge_info.merge_version {
+        props["merge_version"] = serde_json::json!(mv);
+    }
     if let Some(s) = strategy {
         props["strategy"] = serde_json::json!(s);
     }
@@ -540,6 +543,9 @@ fn find_merge_history(db: &Arc<Database>, name: &str) -> StrataResult<Vec<MergeR
                     .and_then(|p| p.get("timestamp"))
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0),
+                merge_version: props
+                    .and_then(|p| p.get("merge_version"))
+                    .and_then(|v| v.as_u64()),
                 strategy: props
                     .and_then(|p| p.get("strategy"))
                     .and_then(|v| v.as_str())
@@ -606,6 +612,58 @@ pub fn find_children(db: &Arc<Database>, name: &str) -> StrataResult<Vec<String>
         }
     }
     Ok(children)
+}
+
+/// Find the most recent `merge_version` between two branches (in either direction).
+///
+/// Checks merges where `source` merged into `target` and also where `target`
+/// merged into `source`, returning the highest `merge_version` found.
+pub fn find_last_merge_version(
+    db: &Arc<Database>,
+    source: &str,
+    target: &str,
+) -> StrataResult<Option<u64>> {
+    // Merges where source was the source branch
+    let forward = find_merge_history(db, source)?;
+    // Merges where target was the source branch (reverse direction)
+    let reverse = find_merge_history(db, target)?;
+
+    let best = forward
+        .iter()
+        .filter(|r| r.target == target)
+        .chain(reverse.iter().filter(|r| r.target == source))
+        .filter_map(|r| r.merge_version)
+        .max();
+
+    Ok(best)
+}
+
+/// Find the fork version between two branches.
+///
+/// Checks whether `source` was forked from `target` or `target` was forked
+/// from `source`. Returns `(child_branch_name, fork_version)` if found.
+pub fn find_fork_version(
+    db: &Arc<Database>,
+    source: &str,
+    target: &str,
+) -> StrataResult<Option<(String, u64)>> {
+    // Check if source was forked from target
+    if let Some(fork) = find_fork_origin(db, source)? {
+        if fork.parent == target {
+            if let Some(fv) = fork.fork_version {
+                return Ok(Some((source.to_string(), fv)));
+            }
+        }
+    }
+    // Check if target was forked from source
+    if let Some(fork) = find_fork_origin(db, target)? {
+        if fork.parent == source {
+            if let Some(fv) = fork.fork_version {
+                return Ok(Some((target.to_string(), fv)));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Extract `DagBranchStatus` from node properties.
@@ -882,6 +940,8 @@ mod tests {
             keys_applied: 10,
             conflicts: vec![],
             spaces_merged: 2,
+            keys_deleted: 0,
+            merge_version: None,
         };
         let event_id = dag_record_merge(
             &db,
@@ -1002,6 +1062,8 @@ mod tests {
             keys_applied: 5,
             conflicts: vec![],
             spaces_merged: 1,
+            keys_deleted: 0,
+            merge_version: None,
         };
         dag_record_merge(
             &db,
@@ -1101,5 +1163,148 @@ mod tests {
             props.get("message").and_then(|v| v.as_str()),
             Some("hello world")
         );
+    }
+
+    #[test]
+    fn test_merge_version_round_trip() {
+        let db = setup();
+        dag_add_branch(&db, "mv-src", None, None).unwrap();
+        dag_add_branch(&db, "mv-tgt", None, None).unwrap();
+
+        let merge_info = strata_engine::branch_ops::MergeInfo {
+            source: "mv-src".to_string(),
+            target: "mv-tgt".to_string(),
+            keys_applied: 3,
+            conflicts: vec![],
+            spaces_merged: 1,
+            keys_deleted: 0,
+            merge_version: Some(42),
+        };
+        let event_id = dag_record_merge(
+            &db,
+            "mv-src",
+            "mv-tgt",
+            &merge_info,
+            Some("lww"),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Verify the merge_version is stored in the DAG node
+        let graph_store = GraphStore::new(db.clone());
+        let branch_id = resolve_branch_name(SYSTEM_BRANCH);
+        let event_node = graph_store
+            .get_node(branch_id, BRANCH_DAG_GRAPH, event_id.as_str())
+            .unwrap()
+            .unwrap();
+        let props = event_node.properties.as_ref().unwrap();
+        assert_eq!(
+            props.get("merge_version").and_then(|v| v.as_u64()),
+            Some(42),
+            "merge_version should be persisted in DAG node properties"
+        );
+
+        // Verify it comes back via dag_get_branch_info -> merges
+        let info = dag_get_branch_info(&db, "mv-src").unwrap().unwrap();
+        assert_eq!(info.merges.len(), 1);
+        assert_eq!(info.merges[0].merge_version, Some(42));
+    }
+
+    #[test]
+    fn test_find_last_merge_version() {
+        let db = setup();
+        dag_add_branch(&db, "flmv-parent", None, None).unwrap();
+        dag_add_branch(&db, "flmv-child", None, None).unwrap();
+        dag_record_fork(&db, "flmv-parent", "flmv-child", Some(10), None, None).unwrap();
+
+        let merge_info = strata_engine::branch_ops::MergeInfo {
+            source: "flmv-child".to_string(),
+            target: "flmv-parent".to_string(),
+            keys_applied: 5,
+            conflicts: vec![],
+            spaces_merged: 1,
+            keys_deleted: 0,
+            merge_version: Some(20),
+        };
+        dag_record_merge(
+            &db,
+            "flmv-child",
+            "flmv-parent",
+            &merge_info,
+            Some("lww"),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let result = find_last_merge_version(&db, "flmv-child", "flmv-parent").unwrap();
+        assert_eq!(result, Some(20));
+    }
+
+    #[test]
+    fn test_find_last_merge_version_both_directions() {
+        let db = setup();
+        dag_add_branch(&db, "bidir-a", None, None).unwrap();
+        dag_add_branch(&db, "bidir-b", None, None).unwrap();
+
+        // Merge A -> B with merge_version 10
+        let merge_info_ab = strata_engine::branch_ops::MergeInfo {
+            source: "bidir-a".to_string(),
+            target: "bidir-b".to_string(),
+            keys_applied: 2,
+            conflicts: vec![],
+            spaces_merged: 1,
+            keys_deleted: 0,
+            merge_version: Some(10),
+        };
+        dag_record_merge(&db, "bidir-a", "bidir-b", &merge_info_ab, None, None, None).unwrap();
+
+        // Merge B -> A with merge_version 25
+        let merge_info_ba = strata_engine::branch_ops::MergeInfo {
+            source: "bidir-b".to_string(),
+            target: "bidir-a".to_string(),
+            keys_applied: 3,
+            conflicts: vec![],
+            spaces_merged: 1,
+            keys_deleted: 0,
+            merge_version: Some(25),
+        };
+        dag_record_merge(&db, "bidir-b", "bidir-a", &merge_info_ba, None, None, None).unwrap();
+
+        // Both directions should find the max (25)
+        let fwd = find_last_merge_version(&db, "bidir-a", "bidir-b").unwrap();
+        assert_eq!(fwd, Some(25));
+        let rev = find_last_merge_version(&db, "bidir-b", "bidir-a").unwrap();
+        assert_eq!(rev, Some(25));
+    }
+
+    #[test]
+    fn test_find_fork_version() {
+        let db = setup();
+        dag_add_branch(&db, "fv-parent", None, None).unwrap();
+        dag_add_branch(&db, "fv-child", None, None).unwrap();
+        dag_record_fork(&db, "fv-parent", "fv-child", Some(55), None, None).unwrap();
+
+        // source=child, target=parent => child was forked from parent
+        let result = find_fork_version(&db, "fv-child", "fv-parent").unwrap();
+        assert_eq!(result, Some(("fv-child".to_string(), 55)));
+    }
+
+    #[test]
+    fn test_find_fork_version_reverse() {
+        let db = setup();
+        dag_add_branch(&db, "fvr-parent", None, None).unwrap();
+        dag_add_branch(&db, "fvr-child", None, None).unwrap();
+        dag_record_fork(&db, "fvr-parent", "fvr-child", Some(77), None, None).unwrap();
+
+        // source=parent, target=child => should still find that child was forked from parent
+        let result = find_fork_version(&db, "fvr-parent", "fvr-child").unwrap();
+        assert_eq!(result, Some(("fvr-child".to_string(), 77)));
+
+        // Unrelated branches should return None
+        dag_add_branch(&db, "fvr-unrelated", None, None).unwrap();
+        let result = find_fork_version(&db, "fvr-parent", "fvr-unrelated").unwrap();
+        assert_eq!(result, None);
     }
 }

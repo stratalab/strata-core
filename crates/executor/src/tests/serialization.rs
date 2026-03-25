@@ -963,8 +963,10 @@ fn test_output_branch_merged() {
         source: "experiment".to_string(),
         target: "main".to_string(),
         keys_applied: 5,
+        keys_deleted: 0,
         conflicts: vec![],
         spaces_merged: 1,
+        merge_version: None,
     }));
 }
 
