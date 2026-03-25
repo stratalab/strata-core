@@ -130,6 +130,9 @@ pub struct MergeRecord {
     pub target: String,
     /// Timestamp in microseconds.
     pub timestamp: u64,
+    /// MVCC snapshot version at the time of merge (for three-way merge).
+    #[serde(default)]
+    pub merge_version: Option<u64>,
     /// Merge strategy used.
     pub strategy: Option<String>,
     /// Number of keys applied.

@@ -149,10 +149,16 @@ pub struct MergeInfo {
     pub target: String,
     /// Number of keys written to target
     pub keys_applied: u64,
+    /// Number of keys deleted on target (via tombstone)
+    #[serde(default)]
+    pub keys_deleted: u64,
     /// Conflicts encountered (empty for LWW, populated for Strict failures)
     pub conflicts: Vec<ConflictEntry>,
     /// Number of spaces merged
     pub spaces_merged: u64,
+    /// MVCC version of the merge transaction (used as merge base for subsequent merges)
+    #[serde(default)]
+    pub merge_version: Option<u64>,
 }
 
 /// Options for filtering and time-scoping a branch diff.
@@ -529,139 +535,379 @@ pub fn diff_branches_with_options(
 }
 
 // =============================================================================
-// Merge
+// Three-Way Merge Infrastructure
 // =============================================================================
 
-/// Merge data from source branch into target branch.
+/// Common ancestor state for three-way merge.
+#[derive(Debug, Clone)]
+struct MergeBase {
+    /// Branch to read ancestor state from.
+    branch_id: BranchId,
+    /// MVCC version to read at.
+    version: u64,
+}
+
+/// Classification of a key in a three-way merge.
+#[derive(Debug, Clone, PartialEq)]
+enum ThreeWayChange {
+    /// Key unchanged on both sides. No action.
+    Unchanged,
+    /// Key only changed on source side. Apply source value to target.
+    SourceChanged { value: Value },
+    /// Key only changed on target side. No action.
+    TargetChanged,
+    /// Key changed on both sides to the same value. No action.
+    BothChangedSame,
+    /// Key changed on both sides to different values. Conflict.
+    Conflict {
+        source_value: Value,
+        target_value: Value,
+    },
+    /// Key added on source only. Apply.
+    SourceAdded { value: Value },
+    /// Key added on target only. No action.
+    TargetAdded,
+    /// Key added on both sides with same value. No action.
+    BothAddedSame,
+    /// Key added on both sides with different values. Conflict.
+    BothAddedDifferent {
+        source_value: Value,
+        target_value: Value,
+    },
+    /// Key deleted on source, unchanged on target. Delete on target.
+    SourceDeleted,
+    /// Key deleted on target, unchanged on source. No action.
+    TargetDeleted,
+    /// Key deleted on both sides. No action.
+    BothDeleted,
+    /// Key deleted on source, modified on target. Conflict.
+    DeleteModifyConflict { target_value: Value },
+    /// Key modified on source, deleted on target. Conflict.
+    ModifyDeleteConflict { source_value: Value },
+}
+
+/// Classify a single key's change across ancestor, source, and target.
 ///
-/// Uses `diff_branches(target, source)` to identify changes, then applies
-/// them to the target. Target is branch A (base), source is branch B (incoming).
+/// Implements the 14-case decision matrix used by git, Dolt, and lakeFS:
+/// - `ancestor`: None = key absent (or tombstoned) at ancestor
+/// - `source`: None = key absent in current source (live listing)
+/// - `target`: None = key absent in current target (live listing)
+fn classify_change(
+    ancestor: Option<&Value>,
+    source: Option<&Value>,
+    target: Option<&Value>,
+) -> ThreeWayChange {
+    match (ancestor, source, target) {
+        // All absent
+        (None, None, None) => ThreeWayChange::Unchanged,
+
+        // All present and equal
+        (Some(a), Some(s), Some(t)) if a == s && s == t => ThreeWayChange::Unchanged,
+
+        // Only source changed
+        (Some(a), Some(s), Some(t)) if a == t && a != s => {
+            ThreeWayChange::SourceChanged { value: s.clone() }
+        }
+        // Only target changed
+        (Some(a), Some(s), Some(t)) if a == s && a != t => ThreeWayChange::TargetChanged,
+        // Both changed to same value
+        (Some(a), Some(s), Some(t)) if a != s && s == t => ThreeWayChange::BothChangedSame,
+        // Both changed to different values → conflict
+        (Some(_), Some(s), Some(t)) => ThreeWayChange::Conflict {
+            source_value: s.clone(),
+            target_value: t.clone(),
+        },
+
+        // Source added (not in ancestor or target)
+        (None, Some(s), None) => ThreeWayChange::SourceAdded { value: s.clone() },
+        // Target added (not in ancestor or source)
+        (None, None, Some(_)) => ThreeWayChange::TargetAdded,
+        // Both added same value
+        (None, Some(s), Some(t)) if s == t => ThreeWayChange::BothAddedSame,
+        // Both added different values → conflict
+        (None, Some(s), Some(t)) => ThreeWayChange::BothAddedDifferent {
+            source_value: s.clone(),
+            target_value: t.clone(),
+        },
+
+        // Source deleted, target unchanged
+        (Some(a), None, Some(t)) if a == t => ThreeWayChange::SourceDeleted,
+        // Source deleted, target modified → conflict
+        (Some(_), None, Some(t)) => ThreeWayChange::DeleteModifyConflict {
+            target_value: t.clone(),
+        },
+        // Target deleted, source unchanged
+        (Some(a), Some(s), None) if a == s => ThreeWayChange::TargetDeleted,
+        // Source modified, target deleted → conflict
+        (Some(_), Some(s), None) => ThreeWayChange::ModifyDeleteConflict {
+            source_value: s.clone(),
+        },
+        // Both deleted
+        (Some(_), None, None) => ThreeWayChange::BothDeleted,
+    }
+}
+
+/// A merge action to apply to the target branch.
+struct MergeAction {
+    space: String,
+    raw_key: Vec<u8>,
+    type_tag: TypeTag,
+    action: MergeActionKind,
+}
+
+enum MergeActionKind {
+    Put(Value),
+    Delete,
+}
+
+/// Compute the merge base between two branches.
 ///
-/// - **Added entries** (in source but not target): written to target
-/// - **Modified entries** (in both, different values):
-///   - `LastWriterWins`: source value overwrites target (appends new version)
-///   - `Strict`: merge fails with conflict list (no writes)
-/// - **Removed entries** (in target but not source): left unchanged
-///
-/// Version history in the target is preserved — merged values are appended
-/// as new versions via `db.transaction()`.
-///
-/// # Errors
-///
-/// - Either branch does not exist
-/// - `Strict` strategy with conflicts
-pub fn merge_branches(
+/// Priority:
+/// 1. `merge_base_override` from the executor (DAG-derived, covers repeated merges
+///    and materialized branches).
+/// 2. Storage-level fork info from `InheritedLayer` (fast path for COW branches).
+/// 3. None (unrelated branches → two-way fallback).
+fn compute_merge_base(
     db: &Arc<Database>,
-    source: &str,
-    target: &str,
-    strategy: MergeStrategy,
-) -> StrataResult<MergeInfo> {
-    let space_index = SpaceIndex::new(db.clone());
-
-    // 1. Diff: target is A (base), source is B (incoming)
-    let diff = diff_branches(db, target, source)?;
-
-    // 2. Check for conflicts in Strict mode
-    if strategy == MergeStrategy::Strict && diff.summary.total_modified > 0 {
-        let conflicts: Vec<ConflictEntry> = diff
-            .spaces
-            .iter()
-            .flat_map(|sd| {
-                sd.modified.iter().map(|entry| ConflictEntry {
-                    key: entry.key.clone(),
-                    primitive: entry.primitive,
-                    space: entry.space.clone(),
-                    source_value: entry.value_b.clone(),
-                    target_value: entry.value_a.clone(),
-                })
-            })
-            .collect();
-
-        return Err(StrataError::invalid_input(format!(
-            "Merge conflict: {} keys differ between '{}' and '{}'. Use LastWriterWins strategy or resolve conflicts manually.",
-            conflicts.len(),
-            source,
-            target
-        )));
+    source_id: BranchId,
+    target_id: BranchId,
+    merge_base_override: Option<(BranchId, u64)>,
+) -> Option<MergeBase> {
+    // 1. Executor-provided override (from DAG)
+    if let Some((branch_id, version)) = merge_base_override {
+        return Some(MergeBase { branch_id, version });
     }
 
-    // Collect conflicts for reporting (LWW resolves them, Strict already returned error)
-    let conflicts: Vec<ConflictEntry> = if strategy == MergeStrategy::LastWriterWins {
-        diff.spaces
-            .iter()
-            .flat_map(|sd| {
-                sd.modified.iter().map(|entry| ConflictEntry {
-                    key: entry.key.clone(),
-                    primitive: entry.primitive,
-                    space: entry.space.clone(),
-                    source_value: entry.value_b.clone(),
-                    target_value: entry.value_a.clone(),
-                })
-            })
-            .collect()
-    } else {
-        vec![]
-    };
+    // 2. Check storage for fork relationship
+    let storage = db.storage();
 
-    // 3. Resolve IDs
-    let source_id = resolve_branch_name(source);
-    let target_id = resolve_branch_name(target);
-
-    let mut keys_applied = 0u64;
-    let mut spaces_merged = 0u64;
-
-    // 4. Apply changes
-    for space_diff in &diff.spaces {
-        let space = &space_diff.space;
-
-        // Ensure target has this space
-        if space != "default" {
-            space_index.register(target_id, space)?;
+    // Case A: source was forked from target (child merging into parent)
+    if let Some((parent_id, fork_version)) = storage.get_fork_info(&source_id) {
+        if parent_id == target_id {
+            // Ancestor is the target (parent) at fork_version.
+            // The child inherited from the parent at this version, so reading
+            // the child at fork_version returns the same data as the parent
+            // at fork_version (via inherited layers).
+            return Some(MergeBase {
+                branch_id: source_id,
+                version: fork_version,
+            });
         }
-        spaces_merged += 1;
+    }
 
-        // Collect entries to write from source: added + modified (for LWW)
-        let entries_to_apply: Vec<&BranchDiffEntry> = space_diff
-            .added
-            .iter()
-            .chain(if strategy == MergeStrategy::LastWriterWins {
-                space_diff.modified.iter()
-            } else {
-                [].iter()
-            })
-            .collect();
-
-        if entries_to_apply.is_empty() {
-            continue;
+    // Case B: target was forked from source (parent merging into child)
+    if let Some((parent_id, fork_version)) = storage.get_fork_info(&target_id) {
+        if parent_id == source_id {
+            return Some(MergeBase {
+                branch_id: target_id,
+                version: fork_version,
+            });
         }
+    }
 
-        // Write to target using values already present in the diff entries.
-        // Each diff entry corresponds to exactly one (user_key, type_tag) pair
-        // from the diff scan, so we use the type_tag directly.
-        let mut batch: Vec<(Key, Value)> = Vec::new();
-        for diff_entry in &entries_to_apply {
-            if let Some(value) = &diff_entry.value_b {
-                let target_ns = Arc::new(Namespace::for_branch_space(target_id, space));
-                let target_key =
-                    Key::new(target_ns, diff_entry.type_tag, diff_entry.raw_key.clone());
-                batch.push((target_key, value.clone()));
+    // No relationship found
+    None
+}
+
+/// Compute three-way diff and produce merge actions.
+///
+/// For each key across all spaces and data type tags, classifies the change
+/// using the 14-case decision matrix and produces Put/Delete actions.
+fn three_way_diff(
+    db: &Arc<Database>,
+    source_id: BranchId,
+    target_id: BranchId,
+    merge_base: &MergeBase,
+    spaces: &[String],
+    strategy: MergeStrategy,
+) -> StrataResult<(Vec<MergeAction>, Vec<ConflictEntry>)> {
+    let storage = db.storage();
+    let mut actions = Vec::new();
+    let mut conflicts = Vec::new();
+
+    for space in spaces {
+        for &type_tag in &DATA_TYPE_TAGS {
+            // 1. Ancestor state (at merge base version, WITH tombstones)
+            let ancestor_entries = storage.list_by_type_at_version(
+                &merge_base.branch_id,
+                type_tag,
+                merge_base.version,
+            );
+
+            // 2. Source current state (live keys only)
+            let source_entries = storage.list_by_type(&source_id, type_tag);
+
+            // 3. Target current state (live keys only)
+            let target_entries = storage.list_by_type(&target_id, type_tag);
+
+            // Build lookup maps: user_key_bytes → Value (or None for tombstone)
+            let mut ancestor_map: HashMap<Vec<u8>, Option<Value>> = HashMap::new();
+            for entry in &ancestor_entries {
+                if entry.key.namespace.space == *space {
+                    if entry.is_tombstone {
+                        ancestor_map.insert(entry.key.user_key.to_vec(), None);
+                    } else {
+                        ancestor_map.insert(entry.key.user_key.to_vec(), Some(entry.value.clone()));
+                    }
+                }
+            }
+
+            let mut source_map: HashMap<Vec<u8>, Value> = HashMap::new();
+            for (key, vv) in &source_entries {
+                if key.namespace.space == *space {
+                    source_map.insert(key.user_key.to_vec(), vv.value.clone());
+                }
+            }
+
+            let mut target_map: HashMap<Vec<u8>, Value> = HashMap::new();
+            for (key, vv) in &target_entries {
+                if key.namespace.space == *space {
+                    target_map.insert(key.user_key.to_vec(), vv.value.clone());
+                }
+            }
+
+            // Union all keys
+            let mut all_keys: HashSet<Vec<u8>> = HashSet::new();
+            for k in ancestor_map.keys() {
+                all_keys.insert(k.clone());
+            }
+            for k in source_map.keys() {
+                all_keys.insert(k.clone());
+            }
+            for k in target_map.keys() {
+                all_keys.insert(k.clone());
+            }
+
+            // Classify each key
+            for user_key in &all_keys {
+                // Ancestor: flatten Option<Option<Value>> → Option<&Value>
+                // ancestor_map entry = Some(None) means tombstone → treat as absent
+                // ancestor_map entry = Some(Some(v)) means live value
+                // ancestor_map entry = None means key never existed at ancestor
+                let ancestor_val = ancestor_map.get(user_key).and_then(|opt| opt.as_ref());
+                let source_val = source_map.get(user_key);
+                let target_val = target_map.get(user_key);
+
+                let change = classify_change(ancestor_val, source_val, target_val);
+
+                match change {
+                    ThreeWayChange::Unchanged
+                    | ThreeWayChange::TargetChanged
+                    | ThreeWayChange::BothChangedSame
+                    | ThreeWayChange::TargetAdded
+                    | ThreeWayChange::BothAddedSame
+                    | ThreeWayChange::TargetDeleted
+                    | ThreeWayChange::BothDeleted => {
+                        // No action needed — target already has the correct state
+                    }
+
+                    ThreeWayChange::SourceChanged { value }
+                    | ThreeWayChange::SourceAdded { value } => {
+                        actions.push(MergeAction {
+                            space: space.clone(),
+                            raw_key: user_key.clone(),
+                            type_tag,
+                            action: MergeActionKind::Put(value),
+                        });
+                    }
+
+                    ThreeWayChange::SourceDeleted => {
+                        actions.push(MergeAction {
+                            space: space.clone(),
+                            raw_key: user_key.clone(),
+                            type_tag,
+                            action: MergeActionKind::Delete,
+                        });
+                    }
+
+                    // Conflicts — always report, resolve per strategy
+                    ThreeWayChange::Conflict {
+                        source_value,
+                        target_value,
+                    } => {
+                        conflicts.push(ConflictEntry {
+                            key: format_user_key(user_key),
+                            primitive: type_tag_to_primitive(type_tag),
+                            space: space.clone(),
+                            source_value: Some(source_value.clone()),
+                            target_value: Some(target_value),
+                        });
+                        if strategy == MergeStrategy::LastWriterWins {
+                            actions.push(MergeAction {
+                                space: space.clone(),
+                                raw_key: user_key.clone(),
+                                type_tag,
+                                action: MergeActionKind::Put(source_value),
+                            });
+                        }
+                    }
+
+                    ThreeWayChange::BothAddedDifferent {
+                        source_value,
+                        target_value,
+                    } => {
+                        conflicts.push(ConflictEntry {
+                            key: format_user_key(user_key),
+                            primitive: type_tag_to_primitive(type_tag),
+                            space: space.clone(),
+                            source_value: Some(source_value.clone()),
+                            target_value: Some(target_value),
+                        });
+                        if strategy == MergeStrategy::LastWriterWins {
+                            actions.push(MergeAction {
+                                space: space.clone(),
+                                raw_key: user_key.clone(),
+                                type_tag,
+                                action: MergeActionKind::Put(source_value),
+                            });
+                        }
+                    }
+
+                    ThreeWayChange::ModifyDeleteConflict { source_value } => {
+                        conflicts.push(ConflictEntry {
+                            key: format_user_key(user_key),
+                            primitive: type_tag_to_primitive(type_tag),
+                            space: space.clone(),
+                            source_value: Some(source_value.clone()),
+                            target_value: None,
+                        });
+                        if strategy == MergeStrategy::LastWriterWins {
+                            actions.push(MergeAction {
+                                space: space.clone(),
+                                raw_key: user_key.clone(),
+                                type_tag,
+                                action: MergeActionKind::Put(source_value),
+                            });
+                        }
+                    }
+
+                    ThreeWayChange::DeleteModifyConflict { target_value } => {
+                        conflicts.push(ConflictEntry {
+                            key: format_user_key(user_key),
+                            primitive: type_tag_to_primitive(type_tag),
+                            space: space.clone(),
+                            source_value: None,
+                            target_value: Some(target_value),
+                        });
+                        if strategy == MergeStrategy::LastWriterWins {
+                            actions.push(MergeAction {
+                                space: space.clone(),
+                                raw_key: user_key.clone(),
+                                type_tag,
+                                action: MergeActionKind::Delete,
+                            });
+                        }
+                    }
+                }
             }
         }
-
-        let batch_len = batch.len() as u64;
-        if batch_len > 0 {
-            db.transaction(target_id, |txn| {
-                for (key, value) in &batch {
-                    txn.put(key.clone(), value.clone())?;
-                }
-                Ok(())
-            })?;
-            keys_applied += batch_len;
-        }
     }
 
-    // Reload secondary index backends (vector, etc.) for the target branch
-    // so that entries merged at the KV level become visible immediately.
+    Ok((actions, conflicts))
+}
+
+/// Reload secondary index backends after merge.
+fn reload_secondary_backends(db: &Arc<Database>, target_id: BranchId, source_id: BranchId) {
     if let Ok(hooks) = db.extension::<crate::database::refresh::RefreshHooks>() {
         for hook in hooks.hooks() {
             if let Err(e) = hook.post_merge_reload(db, target_id, Some(source_id)) {
@@ -673,23 +919,143 @@ pub fn merge_branches(
             }
         }
     }
+}
+
+// =============================================================================
+// Merge (public entry point)
+// =============================================================================
+
+/// Merge data from source branch into target branch using three-way merge.
+///
+/// Computes the common ancestor (merge base) from the fork/merge relationship
+/// between the branches, then classifies each key using a 14-case decision matrix.
+/// Correctly handles delete propagation and preserves target-only changes.
+///
+/// The `merge_base_override` parameter is populated by the executor from DAG data,
+/// covering repeated merges and materialized branches where storage-level fork
+/// info is no longer available.
+///
+/// # Errors
+///
+/// - Either branch does not exist
+/// - No fork or merge relationship between branches
+/// - `Strict` strategy with conflicts
+pub fn merge_branches(
+    db: &Arc<Database>,
+    source: &str,
+    target: &str,
+    strategy: MergeStrategy,
+    merge_base_override: Option<(BranchId, u64)>,
+) -> StrataResult<MergeInfo> {
+    let source_id = resolve_and_verify(db, source)?;
+    let target_id = resolve_and_verify(db, target)?;
+
+    // Compute merge base
+    let merge_base = compute_merge_base(db, source_id, target_id, merge_base_override);
+
+    let merge_base = match merge_base {
+        Some(mb) => mb,
+        None => {
+            return Err(StrataError::invalid_input(format!(
+                "Cannot merge '{}' into '{}': no fork or merge relationship found. \
+                 Branches must be related by fork or a previous merge.",
+                source, target
+            )));
+        }
+    };
+
+    // Collect spaces from both branches
+    let space_index = SpaceIndex::new(db.clone());
+    let source_spaces: HashSet<String> = space_index.list(source_id)?.into_iter().collect();
+    let target_spaces: HashSet<String> = space_index.list(target_id)?.into_iter().collect();
+    let all_spaces: Vec<String> = source_spaces.union(&target_spaces).cloned().collect();
+
+    // Three-way diff
+    let (actions, conflicts) =
+        three_way_diff(db, source_id, target_id, &merge_base, &all_spaces, strategy)?;
+
+    // If strict and conflicts exist, return error
+    if strategy == MergeStrategy::Strict && !conflicts.is_empty() {
+        return Err(StrataError::invalid_input(format!(
+            "Merge conflict: {} keys differ between '{}' and '{}'. Use LastWriterWins strategy or resolve conflicts manually.",
+            conflicts.len(),
+            source,
+            target
+        )));
+    }
+
+    // Apply actions
+    let mut keys_applied = 0u64;
+    let mut keys_deleted = 0u64;
+    let mut spaces_touched: HashSet<String> = HashSet::new();
+    let mut merge_version: Option<u64> = None;
+
+    // Group actions by space for space registration
+    for action in &actions {
+        spaces_touched.insert(action.space.clone());
+    }
+    for space in &spaces_touched {
+        if space != "default" {
+            space_index.register(target_id, space)?;
+        }
+    }
+
+    if !actions.is_empty() {
+        // Build puts and deletes
+        let mut puts: Vec<(Key, Value)> = Vec::new();
+        let mut deletes: Vec<Key> = Vec::new();
+
+        for action in &actions {
+            let ns = Arc::new(Namespace::for_branch_space(target_id, &action.space));
+            let key = Key::new(ns, action.type_tag, action.raw_key.clone());
+            match &action.action {
+                MergeActionKind::Put(value) => {
+                    puts.push((key, value.clone()));
+                    keys_applied += 1;
+                }
+                MergeActionKind::Delete => {
+                    deletes.push(key);
+                    keys_deleted += 1;
+                }
+            }
+        }
+
+        // Apply in a single transaction, capturing the merge version
+        let ((), version) = db.transaction_with_version(target_id, |txn| {
+            for (key, value) in &puts {
+                txn.put(key.clone(), value.clone())?;
+            }
+            for key in &deletes {
+                txn.delete(key.clone())?;
+            }
+            Ok(())
+        })?;
+        merge_version = Some(version);
+    }
+
+    // Reload secondary index backends
+    reload_secondary_backends(db, target_id, source_id);
 
     info!(
         target: "strata::branch_ops",
         source,
         target,
         keys_applied,
-        spaces_merged,
+        keys_deleted,
+        ?merge_version,
+        spaces_merged = spaces_touched.len(),
         strategy = ?strategy,
-        "Branches merged"
+        "Branches merged (three-way)"
     );
 
     Ok(MergeInfo {
         source: source.to_string(),
         target: target.to_string(),
         keys_applied,
+        keys_deleted,
         conflicts,
-        spaces_merged,
+        spaces_merged: spaces_touched.len() as u64,
+        merge_version,
     })
 }
 
@@ -1075,15 +1441,16 @@ mod tests {
 
     #[test]
     fn test_merge_lww() {
+        // Fork target → source, both modify "shared", source adds "new_key"
         let (_temp, db) = setup_with_branch("target");
-        let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("source").unwrap();
-
-        // Write conflicting data
         write_kv(&db, "target", "default", "shared", Value::Int(1));
-        write_kv(&db, "source", "default", "shared", Value::Int(2));
 
-        // Source-only key
+        fork_branch(&db, "target", "source").unwrap();
+
+        // Both modify "shared" (conflict under three-way: both changed from ancestor=1)
+        write_kv(&db, "target", "default", "shared", Value::Int(10));
+        write_kv(&db, "source", "default", "shared", Value::Int(2));
+        // Source adds a new key
         write_kv(
             &db,
             "source",
@@ -1092,15 +1459,18 @@ mod tests {
             Value::String("new".into()),
         );
 
-        let info = merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
-        assert!(info.keys_applied >= 2);
+        let info =
+            merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins, None).unwrap();
+        assert!(
+            info.keys_applied >= 2,
+            "shared (conflict resolved) + new_key"
+        );
 
-        // Target should now have source's value for "shared"
+        // LWW: source wins on conflict → shared=2
         assert_eq!(
             read_kv(&db, "target", "default", "shared"),
             Some(Value::Int(2))
         );
-        // Target should have the new key
         assert_eq!(
             read_kv(&db, "target", "default", "new_key"),
             Some(Value::String("new".into()))
@@ -1109,18 +1479,17 @@ mod tests {
 
     #[test]
     fn test_merge_strict_no_conflicts() {
+        // Fork target → source, each writes a different key (no conflict)
         let (_temp, db) = setup_with_branch("target");
-        let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("source").unwrap();
+        write_kv(&db, "target", "default", "base_key", Value::Int(0)); // ensure branch in storage
+        fork_branch(&db, "target", "source").unwrap();
 
-        // Non-overlapping data (no conflicts)
         write_kv(&db, "target", "default", "target_key", Value::Int(1));
         write_kv(&db, "source", "default", "source_key", Value::Int(2));
 
-        let info = merge_branches(&db, "source", "target", MergeStrategy::Strict).unwrap();
+        let info = merge_branches(&db, "source", "target", MergeStrategy::Strict, None).unwrap();
         assert!(info.keys_applied >= 1);
 
-        // Target should have both keys
         assert_eq!(
             read_kv(&db, "target", "default", "target_key"),
             Some(Value::Int(1))
@@ -1133,15 +1502,16 @@ mod tests {
 
     #[test]
     fn test_merge_strict_with_conflicts() {
+        // Fork target → source, both modify same key → Strict fails
         let (_temp, db) = setup_with_branch("target");
-        let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("source").unwrap();
-
-        // Conflicting data
         write_kv(&db, "target", "default", "shared", Value::Int(1));
+
+        fork_branch(&db, "target", "source").unwrap();
+
+        write_kv(&db, "target", "default", "shared", Value::Int(10));
         write_kv(&db, "source", "default", "shared", Value::Int(2));
 
-        let result = merge_branches(&db, "source", "target", MergeStrategy::Strict);
+        let result = merge_branches(&db, "source", "target", MergeStrategy::Strict, None);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1153,28 +1523,27 @@ mod tests {
         // Target should be unchanged (no writes happened)
         assert_eq!(
             read_kv(&db, "target", "default", "shared"),
-            Some(Value::Int(1))
+            Some(Value::Int(10))
         );
     }
 
     #[test]
-    fn test_merge_adds_without_deleting() {
+    fn test_merge_preserves_target_additions() {
+        // Fork target → source, target adds a key, source adds a different key
         let (_temp, db) = setup_with_branch("target");
-        let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("source").unwrap();
+        write_kv(&db, "target", "default", "base_key", Value::Int(0)); // ensure branch in storage
+        fork_branch(&db, "target", "source").unwrap();
 
-        // Target has keys that source doesn't
         write_kv(&db, "target", "default", "target_only", Value::Int(1));
         write_kv(&db, "source", "default", "source_only", Value::Int(2));
 
-        merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
+        merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins, None).unwrap();
 
-        // Target-only key should still exist
+        // Both keys should exist on target
         assert_eq!(
             read_kv(&db, "target", "default", "target_only"),
             Some(Value::Int(1))
         );
-        // Source-only key should now be in target
         assert_eq!(
             read_kv(&db, "target", "default", "source_only"),
             Some(Value::Int(2))
@@ -1183,12 +1552,13 @@ mod tests {
 
     #[test]
     fn test_merge_preserves_target_version_history() {
+        // Fork target → source, target writes multiple versions, source overwrites
         let (_temp, db) = setup_with_branch("target");
-        let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("source").unwrap();
-
-        // Write multiple versions to target
         write_kv(&db, "target", "default", "key", Value::Int(1));
+
+        fork_branch(&db, "target", "source").unwrap();
+
+        // Target writes more versions
         write_kv(&db, "target", "default", "key", Value::Int(2));
 
         // Source has different value
@@ -1201,8 +1571,8 @@ mod tests {
         let history_before = db.get_history(&history_key, None, None).unwrap();
         let versions_before = history_before.len();
 
-        // Merge
-        merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
+        // Merge (both modified from ancestor=1 → conflict, LWW takes source=99)
+        merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins, None).unwrap();
 
         // Check version history after merge — should have one more version
         let ns2 = Arc::new(Namespace::for_branch_space(target_id, "default"));
@@ -1224,9 +1594,10 @@ mod tests {
 
     #[test]
     fn test_merge_binary_keys() {
+        // Fork target → source, source writes a binary key (event)
         let (_temp, db) = setup_with_branch("target");
-        let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("source").unwrap();
+        write_kv(&db, "target", "default", "base_key", Value::Int(0)); // ensure branch in storage
+        fork_branch(&db, "target", "source").unwrap();
 
         let source_id = resolve_branch_name("source");
         let target_id = resolve_branch_name("target");
@@ -1244,7 +1615,8 @@ mod tests {
         .unwrap();
 
         // Merge source into target
-        let info = merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
+        let info =
+            merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins, None).unwrap();
         assert_eq!(info.keys_applied, 1, "Binary key entry should be merged");
 
         // Verify the binary key data is in target
@@ -1261,15 +1633,14 @@ mod tests {
 
     #[test]
     fn test_merge_lww_reports_conflicts() {
+        // Fork target → source, both modify "shared" → LWW resolves but reports
         let (_temp, db) = setup_with_branch("target");
-        let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("source").unwrap();
-
-        // Write conflicting data
         write_kv(&db, "target", "default", "shared", Value::Int(1));
-        write_kv(&db, "source", "default", "shared", Value::Int(2));
 
-        // Source-only key (not a conflict)
+        fork_branch(&db, "target", "source").unwrap();
+
+        write_kv(&db, "target", "default", "shared", Value::Int(10));
+        write_kv(&db, "source", "default", "shared", Value::Int(2));
         write_kv(
             &db,
             "source",
@@ -1278,33 +1649,52 @@ mod tests {
             Value::String("new".into()),
         );
 
-        let info = merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
+        let info =
+            merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins, None).unwrap();
 
         // Should report the conflict even though LWW resolved it
         assert_eq!(info.conflicts.len(), 1, "Should report 1 conflict");
         assert_eq!(info.conflicts[0].key, "shared");
         assert_eq!(info.conflicts[0].primitive, PrimitiveType::Kv);
-        // Verify conflict carries actual Values (source=B=incoming, target=A=base)
         assert_eq!(info.conflicts[0].source_value, Some(Value::Int(2)));
-        assert_eq!(info.conflicts[0].target_value, Some(Value::Int(1)));
+        assert_eq!(info.conflicts[0].target_value, Some(Value::Int(10)));
     }
 
     #[test]
     fn test_merge_no_vectors_is_noop() {
         // Merge with only KV data (no vectors) should not error
         let (_temp, db) = setup_with_branch("target");
-        let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("source").unwrap();
+        write_kv(&db, "target", "default", "base_key", Value::Int(0)); // ensure branch in storage
+        fork_branch(&db, "target", "source").unwrap();
 
         write_kv(&db, "source", "default", "k1", Value::String("v1".into()));
 
-        let info = merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
+        let info =
+            merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins, None).unwrap();
         assert!(info.keys_applied >= 1);
-
-        // No vector collections means no error
         assert_eq!(
             read_kv(&db, "target", "default", "k1"),
             Some(Value::String("v1".into()))
+        );
+    }
+
+    #[test]
+    fn test_merge_unrelated_branches_errors() {
+        // Two branches with no fork relationship should fail
+        let (_temp, db) = setup_with_branch("a");
+        let branch_index = BranchIndex::new(db.clone());
+        branch_index.create_branch("b").unwrap();
+
+        write_kv(&db, "a", "default", "k1", Value::Int(1));
+        write_kv(&db, "b", "default", "k2", Value::Int(2));
+
+        let result = merge_branches(&db, "a", "b", MergeStrategy::LastWriterWins, None);
+        assert!(result.is_err(), "Merging unrelated branches should error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no fork or merge relationship"),
+            "Error: {}",
+            err
         );
     }
 
@@ -1706,13 +2096,16 @@ mod tests {
         // Write to source
         write_kv(&db, "source", "default", "shared", Value::Int(1));
 
-        // Fork
-        fork_branch(&db, "source", "dest").unwrap();
+        // Fork — capture fork_version for later (needed after materialization)
+        let fork_info = fork_branch(&db, "source", "dest").unwrap();
+        let fork_version = fork_info.fork_version.unwrap();
+        let dest_id = resolve_branch_name("dest");
 
         // Write different data to dest
         write_kv(&db, "dest", "default", "dest_only", Value::Int(42));
 
-        // Materialize dest
+        // Materialize dest — this removes inherited layers, so storage
+        // can no longer determine the fork relationship
         let mat_info = materialize_branch(&db, "dest").unwrap();
         assert!(mat_info.layers_collapsed > 0);
 
@@ -1723,9 +2116,16 @@ mod tests {
             "dest_only should show as added in dest"
         );
 
-        // Merge dest → source should work
-        let merge_info =
-            merge_branches(&db, "dest", "source", MergeStrategy::LastWriterWins).unwrap();
+        // Merge dest → source: must pass merge base explicitly since inherited
+        // layers are gone (in production, the executor reads this from the DAG)
+        let merge_info = merge_branches(
+            &db,
+            "dest",
+            "source",
+            MergeStrategy::LastWriterWins,
+            Some((dest_id, fork_version)),
+        )
+        .unwrap();
         assert!(merge_info.keys_applied > 0);
 
         // Source should now have dest_only
@@ -2154,6 +2554,289 @@ mod tests {
         assert!(
             !manifest.unwrap().inherited_layers.is_empty(),
             "forked branch must have inherited layers in manifest"
+        );
+    }
+
+    // =========================================================================
+    // Three-Way Merge: classify_change unit tests
+    // =========================================================================
+
+    #[test]
+    fn test_classify_all_absent() {
+        assert_eq!(classify_change(None, None, None), ThreeWayChange::Unchanged);
+    }
+
+    #[test]
+    fn test_classify_all_same() {
+        let v = Value::Int(1);
+        assert_eq!(
+            classify_change(Some(&v), Some(&v), Some(&v)),
+            ThreeWayChange::Unchanged
+        );
+    }
+
+    #[test]
+    fn test_classify_source_changed() {
+        let a = Value::Int(1);
+        let s = Value::Int(2);
+        assert_eq!(
+            classify_change(Some(&a), Some(&s), Some(&a)),
+            ThreeWayChange::SourceChanged {
+                value: Value::Int(2)
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_target_changed() {
+        let a = Value::Int(1);
+        let t = Value::Int(2);
+        assert_eq!(
+            classify_change(Some(&a), Some(&a), Some(&t)),
+            ThreeWayChange::TargetChanged
+        );
+    }
+
+    #[test]
+    fn test_classify_both_changed_same() {
+        let a = Value::Int(1);
+        let v = Value::Int(2);
+        assert_eq!(
+            classify_change(Some(&a), Some(&v), Some(&v)),
+            ThreeWayChange::BothChangedSame
+        );
+    }
+
+    #[test]
+    fn test_classify_conflict() {
+        let a = Value::Int(1);
+        let s = Value::Int(2);
+        let t = Value::Int(3);
+        assert_eq!(
+            classify_change(Some(&a), Some(&s), Some(&t)),
+            ThreeWayChange::Conflict {
+                source_value: Value::Int(2),
+                target_value: Value::Int(3),
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_source_added() {
+        let s = Value::Int(1);
+        assert_eq!(
+            classify_change(None, Some(&s), None),
+            ThreeWayChange::SourceAdded {
+                value: Value::Int(1)
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_target_added() {
+        let t = Value::Int(1);
+        assert_eq!(
+            classify_change(None, None, Some(&t)),
+            ThreeWayChange::TargetAdded
+        );
+    }
+
+    #[test]
+    fn test_classify_both_added_same() {
+        let v = Value::Int(1);
+        assert_eq!(
+            classify_change(None, Some(&v), Some(&v)),
+            ThreeWayChange::BothAddedSame
+        );
+    }
+
+    #[test]
+    fn test_classify_both_added_different() {
+        let s = Value::Int(1);
+        let t = Value::Int(2);
+        assert_eq!(
+            classify_change(None, Some(&s), Some(&t)),
+            ThreeWayChange::BothAddedDifferent {
+                source_value: Value::Int(1),
+                target_value: Value::Int(2),
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_source_deleted() {
+        let a = Value::Int(1);
+        assert_eq!(
+            classify_change(Some(&a), None, Some(&a)),
+            ThreeWayChange::SourceDeleted
+        );
+    }
+
+    #[test]
+    fn test_classify_target_deleted() {
+        let a = Value::Int(1);
+        assert_eq!(
+            classify_change(Some(&a), Some(&a), None),
+            ThreeWayChange::TargetDeleted
+        );
+    }
+
+    #[test]
+    fn test_classify_both_deleted() {
+        let a = Value::Int(1);
+        assert_eq!(
+            classify_change(Some(&a), None, None),
+            ThreeWayChange::BothDeleted
+        );
+    }
+
+    #[test]
+    fn test_classify_delete_modify_conflict() {
+        let a = Value::Int(1);
+        let t = Value::Int(2);
+        assert_eq!(
+            classify_change(Some(&a), None, Some(&t)),
+            ThreeWayChange::DeleteModifyConflict {
+                target_value: Value::Int(2),
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_modify_delete_conflict() {
+        let a = Value::Int(1);
+        let s = Value::Int(2);
+        assert_eq!(
+            classify_change(Some(&a), Some(&s), None),
+            ThreeWayChange::ModifyDeleteConflict {
+                source_value: Value::Int(2),
+            }
+        );
+    }
+
+    // =========================================================================
+    // Three-Way Merge: integration tests
+    // =========================================================================
+
+    fn delete_kv(db: &Arc<Database>, branch: &str, space: &str, key: &str) {
+        let branch_id = resolve_branch_name(branch);
+        let ns = Arc::new(Namespace::for_branch_space(branch_id, space));
+        db.transaction(branch_id, |txn| {
+            txn.delete(Key::new(ns.clone(), TypeTag::KV, key.as_bytes().to_vec()))?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_three_way_merge_delete_propagation() {
+        // #1537: Key deleted on source after fork → should be deleted on target after merge
+        let (_temp, db) = setup_with_branch("parent");
+
+        write_kv(&db, "parent", "default", "a", Value::Int(1));
+        write_kv(&db, "parent", "default", "b", Value::Int(2));
+
+        fork_branch(&db, "parent", "child").unwrap();
+
+        // Child deletes "b"
+        delete_kv(&db, "child", "default", "b");
+
+        // Merge child → parent
+        let info =
+            merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins, None).unwrap();
+        assert!(info.keys_deleted >= 1, "should have deleted at least 1 key");
+
+        // Verify: "a" still exists, "b" is gone
+        assert_eq!(read_kv(&db, "parent", "default", "a"), Some(Value::Int(1)));
+        assert_eq!(read_kv(&db, "parent", "default", "b"), None);
+    }
+
+    #[test]
+    fn test_three_way_merge_preserves_target_only_changes() {
+        // #1692: Key added on target after fork → should NOT be deleted by merge
+        let (_temp, db) = setup_with_branch("parent");
+
+        write_kv(&db, "parent", "default", "a", Value::Int(1));
+
+        fork_branch(&db, "parent", "child").unwrap();
+
+        // Parent adds "b" after fork
+        write_kv(&db, "parent", "default", "b", Value::Int(2));
+
+        // Child does nothing. Merge child → parent.
+        let info =
+            merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins, None).unwrap();
+        assert_eq!(info.keys_deleted, 0, "nothing should be deleted");
+
+        // Verify: both "a" and "b" still exist on parent
+        assert_eq!(read_kv(&db, "parent", "default", "a"), Some(Value::Int(1)));
+        assert_eq!(read_kv(&db, "parent", "default", "b"), Some(Value::Int(2)));
+    }
+
+    #[test]
+    fn test_three_way_merge_disjoint_changes() {
+        // Disjoint changes on parent and child merge cleanly
+        let (_temp, db) = setup_with_branch("parent");
+
+        write_kv(&db, "parent", "default", "a", Value::Int(1));
+        write_kv(&db, "parent", "default", "b", Value::Int(2));
+        write_kv(&db, "parent", "default", "c", Value::Int(3));
+
+        fork_branch(&db, "parent", "child").unwrap();
+
+        // Parent changes a, child changes b
+        write_kv(&db, "parent", "default", "a", Value::Int(10));
+        write_kv(&db, "child", "default", "b", Value::Int(20));
+
+        // Merge child → parent
+        merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins, None).unwrap();
+
+        // Verify: a=10 (parent's change preserved), b=20 (child's change applied), c=3 (unchanged)
+        assert_eq!(read_kv(&db, "parent", "default", "a"), Some(Value::Int(10)));
+        assert_eq!(read_kv(&db, "parent", "default", "b"), Some(Value::Int(20)));
+        assert_eq!(read_kv(&db, "parent", "default", "c"), Some(Value::Int(3)));
+    }
+
+    #[test]
+    fn test_three_way_merge_strict_conflict() {
+        // Both-modified conflict under Strict mode should fail
+        let (_temp, db) = setup_with_branch("parent");
+
+        write_kv(&db, "parent", "default", "a", Value::Int(1));
+
+        fork_branch(&db, "parent", "child").unwrap();
+
+        // Both sides change "a" to different values
+        write_kv(&db, "parent", "default", "a", Value::Int(10));
+        write_kv(&db, "child", "default", "a", Value::Int(20));
+
+        // Strict merge should fail
+        let result = merge_branches(&db, "child", "parent", MergeStrategy::Strict, None);
+        assert!(result.is_err(), "Strict merge should fail on conflict");
+
+        // Parent's value should be unchanged
+        assert_eq!(read_kv(&db, "parent", "default", "a"), Some(Value::Int(10)));
+
+        // LWW merge should succeed with source's value
+        let info =
+            merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins, None).unwrap();
+        assert!(info.keys_applied >= 1);
+        assert_eq!(read_kv(&db, "parent", "default", "a"), Some(Value::Int(20)));
+    }
+
+    #[test]
+    fn test_three_way_merge_returns_merge_version() {
+        let (_temp, db) = setup_with_branch("parent");
+        write_kv(&db, "parent", "default", "a", Value::Int(1));
+
+        fork_branch(&db, "parent", "child").unwrap();
+        write_kv(&db, "child", "default", "b", Value::Int(2));
+
+        let info =
+            merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins, None).unwrap();
+        assert!(
+            info.merge_version.is_some(),
+            "merge should return a version"
         );
     }
 }

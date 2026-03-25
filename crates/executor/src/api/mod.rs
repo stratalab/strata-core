@@ -1126,13 +1126,14 @@ mod tests {
 
     #[test]
     fn test_branches_merge() {
-        let mut db = create_strata();
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let mut db = Strata::open(temp_dir.path()).unwrap();
 
-        // Write data to default
+        // Write data to default before fork
         db.kv_put("base-key", "base-value").unwrap();
 
-        // Create and populate source branch
-        db.create_branch("source").unwrap();
+        // Fork default → source, then write on source
+        db.fork_branch("source").unwrap();
         db.set_branch("source").unwrap();
         db.kv_put("new-key", "new-value").unwrap();
 

@@ -306,13 +306,43 @@ pub fn branch_merge(
             hint: Some("Branches starting with '_system' are internal.".to_string()),
         });
     }
-    let info = strata_engine::branch_ops::merge_branches(&p.db, &source, &target, strategy)
-        .map_err(|e| Error::Internal {
-            reason: e.to_string(),
-            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-        })?;
 
-    // Best-effort: record merge in the DAG
+    // Compute merge base override from DAG (for repeated merges and materialized branches)
+    let merge_base_override = {
+        // Check for previous merge first (takes priority over fork)
+        match branch_dag::find_last_merge_version(&p.db, &source, &target) {
+            Ok(Some(v)) => {
+                let target_id = strata_engine::primitives::branch::resolve_branch_name(&target);
+                Some((target_id, v))
+            }
+            _ => {
+                // No previous merge — check for fork relationship in DAG
+                // (covers materialized branches where storage lost fork info)
+                match branch_dag::find_fork_version(&p.db, &source, &target) {
+                    Ok(Some((child_name, fork_version))) => {
+                        let child_id =
+                            strata_engine::primitives::branch::resolve_branch_name(&child_name);
+                        Some((child_id, fork_version))
+                    }
+                    _ => None, // Let engine try storage-level fork info
+                }
+            }
+        }
+    };
+
+    let info = strata_engine::branch_ops::merge_branches(
+        &p.db,
+        &source,
+        &target,
+        strategy,
+        merge_base_override,
+    )
+    .map_err(|e| Error::Internal {
+        reason: e.to_string(),
+        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+    })?;
+
+    // Best-effort: record merge in the DAG (merge_version now comes from MergeInfo)
     let strategy_str = match strategy {
         strata_engine::MergeStrategy::LastWriterWins => "last_writer_wins",
         strata_engine::MergeStrategy::Strict => "strict",

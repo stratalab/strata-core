@@ -140,6 +140,24 @@ pub struct MaterializeResult {
 }
 
 // ---------------------------------------------------------------------------
+// VersionedEntry — version-scoped listing with tombstone status
+// ---------------------------------------------------------------------------
+
+/// Entry from version-scoped listing that preserves tombstone status.
+/// Used by three-way merge to reconstruct ancestor state including deletions.
+#[derive(Debug, Clone)]
+pub struct VersionedEntry {
+    /// The decoded user key.
+    pub key: Key,
+    /// The stored value (empty for tombstones).
+    pub value: Value,
+    /// Whether this entry is a deletion tombstone.
+    pub is_tombstone: bool,
+    /// The MVCC commit version that wrote this entry.
+    pub commit_id: u64,
+}
+
+// ---------------------------------------------------------------------------
 // SegmentVersion
 // ---------------------------------------------------------------------------
 
@@ -667,6 +685,23 @@ impl SegmentedStore {
         self.branches
             .get(branch_id)
             .map_or(0, |b| b.inherited_layers.len())
+    }
+
+    /// Get the fork origin of a branch from its nearest active inherited layer.
+    ///
+    /// Returns the `(source_branch_id, fork_version)` of the first non-materialized
+    /// inherited layer, or `None` if the branch has no inherited layers (was never
+    /// forked, or all layers have been fully materialized).
+    pub fn get_fork_info(&self, branch_id: &BranchId) -> Option<(BranchId, u64)> {
+        let branch = self.branches.get(branch_id)?;
+        // Find first non-materialized layer (nearest ancestor with live data).
+        // Layers are ordered nearest-ancestor-first; skip any that have been
+        // fully materialized, as their fork info is no longer useful for reads.
+        branch
+            .inherited_layers
+            .iter()
+            .find(|l| l.status != LayerStatus::Materialized)
+            .map(|l| (l.source_branch_id, l.fork_version))
     }
 
     /// Return branch IDs where inherited layer depth exceeds `MAX_INHERITED_LAYERS`.
@@ -1383,6 +1418,87 @@ impl SegmentedStore {
             .into_iter()
             .filter(|(key, _)| key.type_tag == type_tag)
             .collect()
+    }
+
+    /// List entries filtered by type tag at a specific MVCC version, preserving tombstones.
+    ///
+    /// Unlike `list_by_type()`, this method:
+    /// - Uses `max_version` for MVCC visibility instead of `u64::MAX`
+    /// - Does NOT filter tombstones -- returns them with `is_tombstone: true`
+    /// - Does NOT filter expired entries
+    ///
+    /// This is required for three-way merge ancestor state reconstruction.
+    pub fn list_by_type_at_version(
+        &self,
+        branch_id: &BranchId,
+        type_tag: TypeTag,
+        max_version: u64,
+    ) -> Vec<VersionedEntry> {
+        let branch = match self.branches.get(branch_id) {
+            Some(b) => b,
+            None => return Vec::new(),
+        };
+
+        let mut sources: Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> = Vec::new();
+
+        // Active memtable
+        let active_entries: Vec<_> = branch.active.iter_all().collect();
+        sources.push(Box::new(active_entries.into_iter()));
+
+        // Frozen memtables (newest first)
+        for frozen in &branch.frozen {
+            let entries: Vec<_> = frozen.iter_all().collect();
+            sources.push(Box::new(entries.into_iter()));
+        }
+
+        // On-disk segments -- all levels
+        let ver = branch.version.load();
+        for level in &ver.levels {
+            for seg in level {
+                let entries: Vec<_> = seg
+                    .iter_seek_all()
+                    .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
+                    .collect();
+                sources.push(Box::new(entries.into_iter()));
+            }
+        }
+
+        // Inherited layers (COW branching)
+        for layer in &branch.inherited_layers {
+            if layer.status == LayerStatus::Materialized {
+                continue;
+            }
+            for level in &layer.segments.levels {
+                for seg in level {
+                    let entries: Vec<_> = seg
+                        .iter_seek_all()
+                        .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
+                        .collect();
+                    sources.push(Box::new(RewritingIterator::new(
+                        entries.into_iter(),
+                        *branch_id,
+                        layer.fork_version,
+                    )));
+                }
+            }
+        }
+
+        let merge = MergeIterator::new(sources);
+        let mvcc = MvccIterator::new(merge, max_version);
+
+        mvcc.filter_map(|(ik, entry)| {
+            let (key, commit_id) = ik.decode()?;
+            if key.type_tag != type_tag {
+                return None;
+            }
+            Some(VersionedEntry {
+                key,
+                value: entry.value.clone(),
+                is_tombstone: entry.is_tombstone,
+                commit_id,
+            })
+        })
+        .collect()
     }
 
     /// List entries filtered by type tag with timestamp ≤ max_ts.

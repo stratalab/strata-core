@@ -38,5 +38,7 @@ pub use pressure::{MemoryPressure, PressureLevel};
 pub use rate_limiter::RateLimiter;
 pub use segment::{KVSegment, OwnedSegmentIter};
 pub use segment_builder::{CompressionCodec, SegmentBuilder, SegmentMeta, SplittingSegmentBuilder};
-pub use segmented::{CompactionResult, MaterializeResult, PickAndCompactResult, SegmentedStore};
+pub use segmented::{
+    CompactionResult, MaterializeResult, PickAndCompactResult, SegmentedStore, VersionedEntry,
+};
 pub use ttl::TTLIndex;
