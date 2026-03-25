@@ -124,35 +124,6 @@ mod invariant_1_addressable {
         assert!(entity_ref.is_json());
     }
 
-    #[cfg(any())] // Disabled: VectorStore moved to strata-vector
-    #[test]
-    fn vector_has_stable_entity_ref() {
-        let (db, branch_id) = setup();
-        let vectors = VectorStore::new(db);
-        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
-
-        vectors
-            .create_collection(branch_id, "default", "test-col", config)
-            .unwrap();
-        vectors
-            .insert(
-                branch_id,
-                "default",
-                "test-col",
-                "vec-1",
-                &[1.0, 2.0, 3.0],
-                None,
-            )
-            .unwrap();
-
-        let entity_ref = EntityRef::vector(branch_id, "test-col", "vec-1");
-
-        assert_eq!(entity_ref.branch_id(), branch_id);
-        assert_eq!(entity_ref.primitive_type(), PrimitiveType::Vector);
-        assert_eq!(entity_ref.vector_location(), Some(("test-col", "vec-1")));
-        assert!(entity_ref.is_vector());
-    }
-
     #[test]
     fn branch_has_stable_entity_ref() {
         let (db, branch_id) = setup();
@@ -290,59 +261,6 @@ mod invariant_2_versioned {
             .unwrap();
 
         assert!(matches!(version, Version::Counter(2)));
-    }
-
-    // --- VectorStore ---
-    #[cfg(any())] // Disabled: VectorStore moved to strata-vector
-    #[test]
-    fn vector_get_returns_versioned() {
-        let (db, branch_id) = setup();
-        let vectors = VectorStore::new(db);
-        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
-
-        vectors
-            .create_collection(branch_id, "default", "test", config)
-            .unwrap();
-        vectors
-            .insert(branch_id, "default", "test", "v1", &[1.0, 2.0, 3.0], None)
-            .unwrap();
-
-        let versioned = vectors
-            .get(branch_id, "default", "test", "v1")
-            .unwrap()
-            .unwrap();
-        assert_eq!(versioned.value.key, "v1");
-    }
-
-    #[cfg(any())] // Disabled: VectorStore moved to strata-vector
-    #[test]
-    fn vector_insert_returns_version() {
-        let (db, branch_id) = setup();
-        let vectors = VectorStore::new(db);
-        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
-
-        vectors
-            .create_collection(branch_id, "default", "test", config)
-            .unwrap();
-
-        let version = vectors
-            .insert(branch_id, "default", "test", "v1", &[1.0, 2.0, 3.0], None)
-            .unwrap();
-
-        assert!(matches!(version, Version::Counter(_)));
-    }
-
-    #[cfg(any())] // Disabled: VectorStore moved to strata-vector
-    #[test]
-    fn vector_create_collection_returns_versioned() {
-        let (db, branch_id) = setup();
-        let vectors = VectorStore::new(db);
-        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
-
-        let versioned = vectors
-            .create_collection(branch_id, "default", "test", config)
-            .unwrap();
-        assert_eq!(versioned.value.name, "test");
     }
 
     // --- BranchIndex ---
@@ -558,46 +476,6 @@ mod invariant_4_lifecycle {
         // Note: json.delete() may not exist, but lifecycle is still demonstrable
     }
 
-    #[cfg(any())] // Disabled: VectorStore moved to strata-vector
-    #[test]
-    fn vector_full_lifecycle() {
-        let (db, branch_id) = setup();
-        let vectors = VectorStore::new(db);
-        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
-
-        vectors
-            .create_collection(branch_id, "default", "col", config)
-            .unwrap();
-
-        // Create (insert)
-        vectors
-            .insert(branch_id, "default", "col", "v1", &[1.0, 2.0, 3.0], None)
-            .unwrap();
-
-        // Exist
-        assert!(vectors
-            .get(branch_id, "default", "col", "v1")
-            .unwrap()
-            .is_some());
-
-        // Evolve (upsert/update)
-        vectors
-            .insert(branch_id, "default", "col", "v1", &[4.0, 5.0, 6.0], None)
-            .unwrap();
-        let _v = vectors
-            .get(branch_id, "default", "col", "v1")
-            .unwrap()
-            .unwrap();
-        // Vector was updated (same key, new embedding)
-
-        // Destroy
-        vectors.delete(branch_id, "default", "col", "v1").unwrap();
-        assert!(vectors
-            .get(branch_id, "default", "col", "v1")
-            .unwrap()
-            .is_none());
-    }
-
     #[test]
     fn branch_full_lifecycle() {
         let (db, _) = setup();
@@ -704,32 +582,6 @@ mod invariant_5_branch_scoped {
         assert_eq!(j2.get("branch").and_then(|v| v.as_i64()), Some(2));
     }
 
-    #[cfg(any())] // Disabled: VectorStore moved to strata-vector
-    #[test]
-    fn vectors_isolated_between_branches() {
-        let (db, branch1) = setup();
-        let branch2 = BranchId::new();
-        let vectors = VectorStore::new(db);
-        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
-
-        vectors
-            .create_collection(branch1, "default", "col", config.clone())
-            .unwrap();
-        vectors
-            .create_collection(branch2, "default", "col", config)
-            .unwrap();
-
-        vectors
-            .insert(branch1, "default", "col", "v", &[1.0, 2.0, 3.0], None)
-            .unwrap();
-
-        // branch2's collection is separate - should not find branch1's vector
-        assert!(vectors
-            .get(branch2, "default", "col", "v")
-            .unwrap()
-            .is_none());
-    }
-
     #[test]
     fn branch_id_always_explicit_in_api() {
         let (db, branch_id) = setup();
@@ -800,34 +652,6 @@ mod invariant_6_introspectable {
             .unwrap();
 
         assert!(json.exists(&branch_id, "default", doc_id).unwrap());
-    }
-
-    #[cfg(any())] // Disabled: VectorStore moved to strata-vector
-    #[test]
-    fn vector_can_check_existence_via_get() {
-        let (db, branch_id) = setup();
-        let vectors = VectorStore::new(db);
-        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
-
-        vectors
-            .create_collection(branch_id, "default", "col", config)
-            .unwrap();
-
-        // Vector doesn't exist yet
-        assert!(vectors
-            .get(branch_id, "default", "col", "v1")
-            .unwrap()
-            .is_none());
-
-        vectors
-            .insert(branch_id, "default", "col", "v1", &[1.0, 2.0, 3.0], None)
-            .unwrap();
-
-        // Now exists
-        assert!(vectors
-            .get(branch_id, "default", "col", "v1")
-            .unwrap()
-            .is_some());
     }
 
     #[test]
@@ -919,52 +743,6 @@ mod invariant_7_read_write {
             Ok(())
         })
         .unwrap();
-    }
-
-    #[cfg(any())] // Disabled: VectorStore moved to strata-vector
-    #[test]
-    fn all_primitives_follow_read_write_pattern() {
-        let (db, branch_id) = setup();
-
-        // Every primitive: reads don't modify, writes produce versions
-
-        // KV
-        let kv = KVStore::new(db.clone());
-        let _ = kv.put(&branch_id, "default", "k", Value::Int(1)).unwrap(); // write
-        let _ = kv.get(&branch_id, "default", "k").unwrap(); // read
-
-        // Event
-        let events = EventLog::new(db.clone());
-        let _ = events
-            .append(&branch_id, "default", "e", empty_payload())
-            .unwrap(); // write
-        let _ = events.get(&branch_id, "default", 0).unwrap(); // read
-
-        // Json
-        let json = JsonStore::new(db.clone());
-        let doc_id = "test-doc";
-        let _ = json
-            .create(&branch_id, "default", doc_id, serde_json::json!({}).into())
-            .unwrap(); // write
-        let _ = json
-            .get(&branch_id, "default", doc_id, &JsonPath::root())
-            .unwrap(); // read
-
-        // Vector
-        let vectors = VectorStore::new(db.clone());
-        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
-        vectors
-            .create_collection(branch_id, "default", "c", config)
-            .unwrap();
-        let _ = vectors
-            .insert(branch_id, "default", "c", "v", &[1.0, 2.0, 3.0], None)
-            .unwrap(); // write
-        let _ = vectors.get(branch_id, "default", "c", "v").unwrap(); // read
-
-        // BranchIndex
-        let index = BranchIndex::new(db);
-        let _ = index.create_branch("r").unwrap(); // write
-        let _ = index.get_branch("r").unwrap(); // read
     }
 }
 
