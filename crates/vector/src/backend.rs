@@ -4,8 +4,8 @@
 //! BruteForceBackend (O(n) search)
 //! HnswBackend (O(log n) search) - reserved
 
-use crate::primitives::vector::types::InlineMeta;
-use crate::primitives::vector::{DistanceMetric, VectorConfig, VectorError, VectorId};
+use crate::types::InlineMeta;
+use crate::{DistanceMetric, VectorConfig, VectorError, VectorId};
 
 /// Trait for swappable vector index implementations
 ///
@@ -188,7 +188,7 @@ pub trait VectorIndexBackend: Send + Sync {
     /// Used when recovery detects a valid `.vec` cache file. The caller
     /// is responsible for populating graph structures via `register_mmap_vector()`
     /// and `rebuild_index()` afterward.
-    fn replace_heap(&mut self, _heap: crate::primitives::vector::VectorHeap) {
+    fn replace_heap(&mut self, _heap: crate::VectorHeap) {
         // Default: no-op (backends that don't support mmap ignore this)
     }
 

@@ -345,6 +345,7 @@ pub mod builder;
 mod compaction;
 mod lifecycle;
 mod open;
+pub mod refresh;
 mod transaction;
 
 #[cfg(test)]
@@ -434,7 +435,8 @@ impl Database {
     /// Get value at or before the given timestamp directly from storage.
     ///
     /// This is a non-transactional read for time-travel queries.
-    pub(crate) fn get_at_timestamp(
+    /// Get value at or before the given timestamp directly from storage.
+    pub fn get_at_timestamp(
         &self,
         key: &Key,
         max_timestamp: u64,
@@ -445,7 +447,8 @@ impl Database {
     /// Scan keys matching a prefix at or before the given timestamp.
     ///
     /// This is a non-transactional read for time-travel queries.
-    pub(crate) fn scan_prefix_at_timestamp(
+    /// Scan keys matching a prefix at or before the given timestamp.
+    pub fn scan_prefix_at_timestamp(
         &self,
         prefix: &Key,
         max_timestamp: u64,

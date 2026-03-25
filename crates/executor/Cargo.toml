@@ -24,6 +24,7 @@ google = ["embed", "strata-intelligence/google"]
 strata-core = { path = "../core" }
 strata-engine = { path = "../engine" }
 strata-graph = { path = "../graph" }
+strata-vector = { path = "../vector" }
 strata-intelligence = { path = "../intelligence" }
 strata-search = { path = "../search" }
 strata-security = { path = "../security" }

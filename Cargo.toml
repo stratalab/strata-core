@@ -19,6 +19,7 @@ members = [
     "crates/security",
     "crates/executor",
     "crates/search",
+    "crates/vector",
 ]
 
 [workspace.package]
@@ -140,6 +141,7 @@ strata-concurrency = { path = "crates/concurrency" }
 strata-durability = { path = "crates/durability" }
 strata-engine = { path = "crates/engine" }
 strata-graph = { path = "crates/graph" }
+strata-vector = { path = "crates/vector" }
 strata-intelligence = { path = "crates/intelligence" }
 strata-search = { path = "crates/search" }
 uuid = { workspace = true }

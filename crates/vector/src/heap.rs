@@ -14,9 +14,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::primitives::vector::error::{VectorError, VectorResult};
-use crate::primitives::vector::mmap::{self, MmapVectorData};
-use crate::primitives::vector::types::{DistanceMetric, InlineMeta, VectorConfig, VectorId};
+use crate::error::{VectorError, VectorResult};
+use crate::mmap::{self, MmapVectorData};
+use crate::types::{DistanceMetric, InlineMeta, VectorConfig, VectorId};
 
 /// Backing storage for vector embeddings.
 ///
@@ -585,7 +585,7 @@ impl VectorHeap {
                     if offset < vec.len() {
                         let ptr = vec[offset..].as_ptr() as *const u8;
                         let embedding_bytes = self.config.dimension * 4; // f32 = 4 bytes
-                        crate::primitives::vector::distance::prefetch_read(ptr);
+                        crate::distance::prefetch_read(ptr);
                         // Issue multiple cache line hints (64 bytes each) for large embeddings.
                         // At 384d, each embedding is 1536 bytes (24 cache lines). Prefetching
                         // the first 256 bytes gives the hardware prefetcher a head start.
@@ -594,16 +594,12 @@ impl VectorHeap {
                             // Each ptr.add(N) is guarded by `embedding_bytes > N`, ensuring
                             // the target is within the embedding's allocation.
                             unsafe {
-                                crate::primitives::vector::distance::prefetch_read(ptr.add(64));
+                                crate::distance::prefetch_read(ptr.add(64));
                                 if embedding_bytes > 128 {
-                                    crate::primitives::vector::distance::prefetch_read(
-                                        ptr.add(128),
-                                    );
+                                    crate::distance::prefetch_read(ptr.add(128));
                                 }
                                 if embedding_bytes > 192 {
-                                    crate::primitives::vector::distance::prefetch_read(
-                                        ptr.add(192),
-                                    );
+                                    crate::distance::prefetch_read(ptr.add(192));
                                 }
                             }
                         }

@@ -72,7 +72,7 @@ static RECOVERY_INIT: Once = Once::new();
 
 fn ensure_vector_recovery() {
     RECOVERY_INIT.call_once(|| {
-        strata_engine::register_vector_recovery();
+        strata_vector::register_vector_recovery();
         strata_engine::register_search_recovery();
     });
 }

@@ -317,7 +317,7 @@ fn test_vector_upsert_search_parity() {
     // Create collection first via primitive
     let config = strata_core::primitives::vector::VectorConfig::new(
         4,
-        strata_engine::DistanceMetric::Cosine,
+        strata_vector::DistanceMetric::Cosine,
     )
     .unwrap();
     p.vector

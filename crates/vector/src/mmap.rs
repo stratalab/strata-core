@@ -31,8 +31,8 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 
-use crate::primitives::vector::error::VectorError;
-use crate::primitives::vector::types::VectorId;
+use crate::error::VectorError;
+use crate::types::VectorId;
 
 /// Magic bytes identifying a Strata vector mmap file
 const MAGIC: &[u8; 4] = b"SVEC";
@@ -266,7 +266,7 @@ impl MmapVectorData {
         }
         let slice = &self.mmap[byte_start..byte_end];
         assert!(
-            slice.as_ptr() as usize % std::mem::align_of::<f32>() == 0,
+            (slice.as_ptr() as usize).is_multiple_of(std::mem::align_of::<f32>()),
             "mmap slice pointer is not aligned to f32"
         );
         // SAFETY: f32 is 4 bytes, alignment is asserted above,
@@ -285,7 +285,7 @@ impl MmapVectorData {
         }
         let slice = &self.mmap[byte_start..byte_end];
         assert!(
-            slice.as_ptr() as usize % std::mem::align_of::<f32>() == 0,
+            (slice.as_ptr() as usize).is_multiple_of(std::mem::align_of::<f32>()),
             "mmap slice pointer is not aligned to f32"
         );
         let floats = unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const f32, dim) };

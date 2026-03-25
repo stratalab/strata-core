@@ -16,9 +16,10 @@ use strata_core::{StrataError, StrataResult, Value};
 use strata_engine::{
     BranchIndex as PrimitiveBranchIndex, Database, EventLog as PrimitiveEventLog,
     JsonStore as PrimitiveJsonStore, KVStore as PrimitiveKVStore,
-    SpaceIndex as PrimitiveSpaceIndex, VectorStore as PrimitiveVectorStore,
+    SpaceIndex as PrimitiveSpaceIndex,
 };
 use strata_graph::GraphStore;
+use strata_vector::VectorStore as PrimitiveVectorStore;
 
 use crate::types::BranchId;
 
@@ -316,20 +317,20 @@ pub fn to_versioned_value(v: strata_core::Versioned<Value>) -> crate::types::Ver
 // =============================================================================
 
 /// Convert executor DistanceMetric to engine DistanceMetric.
-pub fn to_engine_metric(metric: crate::types::DistanceMetric) -> strata_engine::DistanceMetric {
+pub fn to_engine_metric(metric: crate::types::DistanceMetric) -> strata_vector::DistanceMetric {
     match metric {
-        crate::types::DistanceMetric::Cosine => strata_engine::DistanceMetric::Cosine,
-        crate::types::DistanceMetric::Euclidean => strata_engine::DistanceMetric::Euclidean,
-        crate::types::DistanceMetric::DotProduct => strata_engine::DistanceMetric::DotProduct,
+        crate::types::DistanceMetric::Cosine => strata_vector::DistanceMetric::Cosine,
+        crate::types::DistanceMetric::Euclidean => strata_vector::DistanceMetric::Euclidean,
+        crate::types::DistanceMetric::DotProduct => strata_vector::DistanceMetric::DotProduct,
     }
 }
 
 /// Convert engine DistanceMetric to executor DistanceMetric.
-pub fn from_engine_metric(metric: strata_engine::DistanceMetric) -> crate::types::DistanceMetric {
+pub fn from_engine_metric(metric: strata_vector::DistanceMetric) -> crate::types::DistanceMetric {
     match metric {
-        strata_engine::DistanceMetric::Cosine => crate::types::DistanceMetric::Cosine,
-        strata_engine::DistanceMetric::Euclidean => crate::types::DistanceMetric::Euclidean,
-        strata_engine::DistanceMetric::DotProduct => crate::types::DistanceMetric::DotProduct,
+        strata_vector::DistanceMetric::Cosine => crate::types::DistanceMetric::Cosine,
+        strata_vector::DistanceMetric::Euclidean => crate::types::DistanceMetric::Euclidean,
+        strata_vector::DistanceMetric::DotProduct => crate::types::DistanceMetric::DotProduct,
     }
 }
 
@@ -340,12 +341,12 @@ pub fn from_engine_metric(metric: strata_engine::DistanceMetric) -> crate::types
 /// Convert executor MetadataFilter list to engine MetadataFilter.
 pub fn to_engine_filter(
     filters: &[crate::types::MetadataFilter],
-) -> Option<strata_engine::MetadataFilter> {
+) -> Option<strata_vector::MetadataFilter> {
     if filters.is_empty() {
         return None;
     }
 
-    let mut engine_filter = strata_engine::MetadataFilter::new();
+    let mut engine_filter = strata_vector::MetadataFilter::new();
 
     for f in filters {
         let scalar = value_to_json_scalar(&f.value);
@@ -355,18 +356,18 @@ pub fn to_engine_filter(
             }
             _ => {
                 let engine_op = match f.op {
-                    crate::types::FilterOp::Eq => strata_engine::FilterOp::Eq,
-                    crate::types::FilterOp::Ne => strata_engine::FilterOp::Ne,
-                    crate::types::FilterOp::Gt => strata_engine::FilterOp::Gt,
-                    crate::types::FilterOp::Gte => strata_engine::FilterOp::Gte,
-                    crate::types::FilterOp::Lt => strata_engine::FilterOp::Lt,
-                    crate::types::FilterOp::Lte => strata_engine::FilterOp::Lte,
-                    crate::types::FilterOp::In => strata_engine::FilterOp::In,
-                    crate::types::FilterOp::Contains => strata_engine::FilterOp::Contains,
+                    crate::types::FilterOp::Eq => strata_vector::FilterOp::Eq,
+                    crate::types::FilterOp::Ne => strata_vector::FilterOp::Ne,
+                    crate::types::FilterOp::Gt => strata_vector::FilterOp::Gt,
+                    crate::types::FilterOp::Gte => strata_vector::FilterOp::Gte,
+                    crate::types::FilterOp::Lt => strata_vector::FilterOp::Lt,
+                    crate::types::FilterOp::Lte => strata_vector::FilterOp::Lte,
+                    crate::types::FilterOp::In => strata_vector::FilterOp::In,
+                    crate::types::FilterOp::Contains => strata_vector::FilterOp::Contains,
                 };
                 engine_filter
                     .conditions
-                    .push(strata_engine::FilterCondition {
+                    .push(strata_vector::FilterCondition {
                         field: f.field.clone(),
                         op: engine_op,
                         value: scalar,
@@ -383,14 +384,14 @@ pub fn to_engine_filter(
 }
 
 /// Convert a Value to a JsonScalar for vector metadata filtering.
-fn value_to_json_scalar(value: &Value) -> strata_engine::JsonScalar {
+fn value_to_json_scalar(value: &Value) -> strata_vector::JsonScalar {
     match value {
-        Value::Null => strata_engine::JsonScalar::Null,
-        Value::Bool(b) => strata_engine::JsonScalar::Bool(*b),
-        Value::Int(i) => strata_engine::JsonScalar::Number(*i as f64),
-        Value::Float(f) => strata_engine::JsonScalar::Number(*f),
-        Value::String(s) => strata_engine::JsonScalar::String(s.clone()),
-        _ => strata_engine::JsonScalar::Null,
+        Value::Null => strata_vector::JsonScalar::Null,
+        Value::Bool(b) => strata_vector::JsonScalar::Bool(*b),
+        Value::Int(i) => strata_vector::JsonScalar::Number(*i as f64),
+        Value::Float(f) => strata_vector::JsonScalar::Number(*f),
+        Value::String(s) => strata_vector::JsonScalar::String(s.clone()),
+        _ => strata_vector::JsonScalar::Null,
     }
 }
 

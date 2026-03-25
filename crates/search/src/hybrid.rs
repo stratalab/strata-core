@@ -26,7 +26,8 @@ use strata_engine::search::{
     SearchBudget, SearchHit, SearchMode, SearchRequest, SearchResponse, SearchStats,
 };
 use strata_engine::Database;
-use strata_engine::{BranchIndex, EventLog, JsonStore, KVStore, VectorStore};
+use strata_engine::{BranchIndex, EventLog, JsonStore, KVStore};
+use strata_vector::VectorStore;
 
 /// Result type for BM25 search across primitives: (results, total_candidates, any_truncated)
 type Bm25SearchResult = (Vec<(PrimitiveType, SearchResponse)>, usize, bool);

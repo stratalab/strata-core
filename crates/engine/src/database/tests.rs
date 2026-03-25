@@ -948,19 +948,19 @@ fn test_lossy_recovery_discards_valid_data_before_corruption() {
 
 #[test]
 fn test_recovery_participants_auto_registered() {
-    // After Database::open, both vector and search recovery should be
-    // registered automatically (no need for executor to call
-    // register_vector_recovery / register_search_recovery).
+    // After Database::open, search recovery should be registered automatically.
+    // Vector recovery is now handled by strata-vector crate (caller must register).
     let temp_dir = TempDir::new().unwrap();
     let _db = Database::open(temp_dir.path().join("db")).unwrap();
 
     // The registry is global and additive (idempotent), so other tests
     // may have already registered participants. We just verify the count
-    // is at least 2 (vector + search).
+    // is at least 1 (search). Vector recovery is registered by the caller
+    // (executor/Strata API) since it moved to the strata-vector crate.
     let count = crate::recovery::recovery_registry_count();
     assert!(
-        count >= 2,
-        "Expected at least 2 recovery participants (vector + search), got {}",
+        count >= 1,
+        "Expected at least 1 recovery participant (search), got {}",
         count
     );
 }
@@ -1828,11 +1828,12 @@ fn test_issue_1732_checkpoint_data_preserves_branch_names() {
     );
 }
 
+#[cfg(any())] // Disabled: VectorStore moved to strata-vector crate
 #[test]
 fn test_issue_1732_checkpoint_data_includes_vectors() {
     // Issue #1732: collect_checkpoint_data() never collects vector data.
-    use crate::primitives::vector::store::VectorStore;
-    use strata_core::primitives::vector::VectorConfig;
+    use strata_vector::VectorConfig;
+    use strata_vector::VectorStore;
 
     let temp_dir = TempDir::new().unwrap();
     let db = Database::open(temp_dir.path().join("db")).unwrap();
@@ -1842,8 +1843,8 @@ fn test_issue_1732_checkpoint_data_includes_vectors() {
 
     let config = VectorConfig {
         dimension: 3,
-        metric: strata_core::primitives::vector::DistanceMetric::Cosine,
-        storage_dtype: strata_core::primitives::vector::StorageDtype::F32,
+        metric: strata_vector::DistanceMetric::Cosine,
+        storage_dtype: strata_vector::StorageDtype::F32,
     };
     store
         .create_collection(branch_id, "default", "my_vectors", config)

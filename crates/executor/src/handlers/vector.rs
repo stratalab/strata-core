@@ -23,7 +23,7 @@ use crate::{Output, Result};
 /// Accepts the `branch_id` so that error messages reference the actual branch
 /// instead of a placeholder UUID.
 fn convert_vector_result<T>(
-    r: std::result::Result<T, strata_engine::VectorError>,
+    r: std::result::Result<T, strata_vector::VectorError>,
     branch_id: strata_core::BranchId,
 ) -> Result<T> {
     convert_result(r.map_err(|e| e.into_strata_error(branch_id)))
@@ -31,7 +31,7 @@ fn convert_vector_result<T>(
 
 /// Convert engine `VectorEntry` to executor `VersionedVectorData`.
 fn to_versioned_vector_data(
-    entry: &strata_engine::VectorEntry,
+    entry: &strata_vector::VectorEntry,
     version: u64,
     timestamp: u64,
 ) -> Result<VersionedVectorData> {
@@ -100,7 +100,7 @@ fn enrich_dimension_error(collection: &str, err: crate::Error) -> crate::Error {
 }
 
 /// Convert engine `VectorMatch` metadata to executor `VectorMatch`.
-fn to_vector_match(m: strata_engine::VectorMatch) -> Result<VectorMatch> {
+fn to_vector_match(m: strata_vector::VectorMatch) -> Result<VectorMatch> {
     let metadata = m
         .metadata
         .map(serde_json_to_value_public)
@@ -308,7 +308,7 @@ pub fn vector_delete_collection(
     // Try to delete - returns error if not found, which we convert to false
     match p.vector.delete_collection(branch_id, &space, &collection) {
         Ok(()) => Ok(Output::Bool(true)),
-        Err(strata_engine::VectorError::CollectionNotFound { .. }) => Ok(Output::Bool(false)),
+        Err(strata_vector::VectorError::CollectionNotFound { .. }) => Ok(Output::Bool(false)),
         Err(e) => Err(e.into_strata_error(branch_id).into()),
     }
 }

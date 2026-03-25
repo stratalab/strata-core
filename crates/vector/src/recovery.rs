@@ -31,16 +31,21 @@
 //! mismatch, recovery falls back transparently to full KV-based rebuild
 //! with no data loss.
 
-use crate::database::Database;
-use crate::recovery::{register_recovery_participant, RecoveryParticipant};
 use strata_core::StrataResult;
+use strata_engine::recovery::{register_recovery_participant, RecoveryParticipant};
+use strata_engine::Database;
 use tracing::info;
 
 /// Recovery function for VectorStore
 ///
 /// Called by Database during startup to restore vector state from KV store.
 fn recover_vector_state(db: &Database) -> StrataResult<()> {
-    recover_from_db(db)
+    recover_from_db(db)?;
+
+    // Register the vector refresh hook for follower refresh support
+    register_vector_refresh_hook(db);
+
+    Ok(())
 }
 
 /// Compute the `.vec` mmap cache path for a given collection.
@@ -59,7 +64,7 @@ pub(crate) fn mmap_path(
 /// Internal recovery implementation that works with &Database
 fn recover_from_db(db: &Database) -> StrataResult<()> {
     use super::{CollectionId, IndexBackendFactory, VectorBackendState, VectorConfig, VectorId};
-    use crate::primitives::vector::heap::VectorHeap;
+    use crate::heap::VectorHeap;
     use std::sync::Arc;
     use strata_core::traits::Storage;
     use strata_core::types::{Key, Namespace};
@@ -361,19 +366,298 @@ pub fn register_vector_recovery() {
 /// Used with `DatabaseBuilder` for explicit subsystem registration.
 pub struct VectorSubsystem;
 
-impl crate::recovery::Subsystem for VectorSubsystem {
+impl strata_engine::recovery::Subsystem for VectorSubsystem {
     fn name(&self) -> &'static str {
         "vector"
     }
 
     fn recover(
         &self,
-        db: &std::sync::Arc<crate::database::Database>,
+        db: &std::sync::Arc<strata_engine::Database>,
     ) -> strata_core::StrataResult<()> {
         recover_vector_state(db)
     }
 
-    fn freeze(&self, db: &crate::database::Database) -> strata_core::StrataResult<()> {
+    fn freeze(&self, db: &strata_engine::Database) -> strata_core::StrataResult<()> {
         db.freeze_vector_heaps()
+    }
+}
+
+// =============================================================================
+// Refresh Hook Implementation
+// =============================================================================
+
+/// Register the vector refresh hook with the database.
+///
+/// This allows the engine's follower refresh to incrementally update
+/// vector backends without knowing the concrete vector types.
+fn register_vector_refresh_hook(db: &Database) {
+    use std::sync::Arc;
+
+    let state = match db.extension::<super::VectorBackendState>() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let hook = Arc::new(VectorRefreshHook { state });
+
+    if let Ok(hooks) = db.extension::<strata_engine::RefreshHooks>() {
+        hooks.register(hook);
+    }
+}
+
+/// Refresh hook implementation for vector backends.
+struct VectorRefreshHook {
+    state: std::sync::Arc<super::VectorBackendState>,
+}
+
+// Safety: VectorBackendState uses DashMap which is Send + Sync
+unsafe impl Send for VectorRefreshHook {}
+unsafe impl Sync for VectorRefreshHook {}
+
+impl strata_engine::RefreshHook for VectorRefreshHook {
+    fn pre_delete_read(
+        &self,
+        db: &strata_engine::Database,
+        deletes: &[strata_core::types::Key],
+    ) -> Vec<(strata_core::types::Key, Vec<u8>)> {
+        use strata_core::traits::Storage;
+        use strata_core::types::TypeTag;
+
+        let mut pre_reads = Vec::new();
+        for key in deletes {
+            if key.type_tag == TypeTag::Vector {
+                if let Ok(Some(vv)) = db.storage().get_versioned(key, u64::MAX) {
+                    if let strata_core::value::Value::Bytes(ref bytes) = vv.value {
+                        pre_reads.push((key.clone(), bytes.clone()));
+                    }
+                }
+            }
+        }
+        pre_reads
+    }
+
+    fn apply_refresh(
+        &self,
+        puts: &[(strata_core::types::Key, strata_core::value::Value)],
+        pre_read_deletes: &[(strata_core::types::Key, Vec<u8>)],
+    ) {
+        use strata_core::primitives::vector::{CollectionId, VectorId};
+        use strata_core::types::TypeTag;
+
+        // Vector puts: insert into backend
+        for (key, value) in puts {
+            if key.type_tag != TypeTag::Vector {
+                continue;
+            }
+            let bytes = match value {
+                strata_core::value::Value::Bytes(b) => b,
+                _ => continue,
+            };
+            let record = match super::VectorRecord::from_bytes(bytes) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let user_key_str = match key.user_key_string() {
+                Some(s) => s,
+                None => continue,
+            };
+            let (collection, vector_key) = match user_key_str.split_once('/') {
+                Some(pair) => pair,
+                None => continue,
+            };
+            let branch_id = key.namespace.branch_id;
+            let cid = CollectionId::new(branch_id, collection);
+            let vid = VectorId::new(record.vector_id);
+
+            if let Some(mut backend) = self.state.backends.get_mut(&cid) {
+                if let Err(e) =
+                    backend.insert_with_timestamp(vid, &record.embedding, record.created_at)
+                {
+                    tracing::warn!(
+                        target: "strata::refresh",
+                        collection = collection,
+                        vector_key = vector_key,
+                        error = %e,
+                        "Vector insert failed during refresh"
+                    );
+                }
+                backend.set_inline_meta(
+                    vid,
+                    super::types::InlineMeta {
+                        key: vector_key.to_string(),
+                        source_ref: record.source_ref.clone(),
+                    },
+                );
+            } else {
+                tracing::debug!(
+                    target: "strata::refresh",
+                    collection = collection,
+                    "Skipping vector insert for unknown collection (will be picked up on restart)"
+                );
+            }
+        }
+
+        // Vector deletes: remove from backend using pre-reads
+        for (key, bytes) in pre_read_deletes {
+            let record = match super::VectorRecord::from_bytes(bytes) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let user_key_str = match key.user_key_string() {
+                Some(s) => s,
+                None => continue,
+            };
+            let collection = match user_key_str.split_once('/') {
+                Some((coll, _)) => coll,
+                None => continue,
+            };
+            let branch_id = key.namespace.branch_id;
+            let cid = CollectionId::new(branch_id, collection);
+            let vid = VectorId::new(record.vector_id);
+
+            if let Some(mut backend) = self.state.backends.get_mut(&cid) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_micros() as u64)
+                    .unwrap_or(0);
+                if let Err(e) = backend.delete_with_timestamp(vid, now) {
+                    tracing::warn!(
+                        target: "strata::refresh",
+                        collection = collection,
+                        error = %e,
+                        "Vector delete failed during refresh"
+                    );
+                }
+                backend.remove_inline_meta(vid);
+            }
+        }
+    }
+
+    fn freeze_to_disk(&self, db: &strata_engine::Database) -> strata_core::StrataResult<()> {
+        let data_dir = db.data_dir();
+        if data_dir.as_os_str().is_empty() {
+            return Ok(()); // Ephemeral database — no mmap
+        }
+
+        for entry in self.state.backends.iter() {
+            let (cid, backend) = (entry.key(), entry.value());
+            let branch_hex = format!("{:032x}", u128::from_be_bytes(*cid.branch_id.as_bytes()));
+            let vec_path = data_dir
+                .join("vectors")
+                .join(&branch_hex)
+                .join(format!("{}.vec", cid.name));
+            backend.freeze_heap_to_disk(&vec_path)?;
+
+            // Also freeze graphs
+            let gdir = data_dir
+                .join("vectors")
+                .join(&branch_hex)
+                .join(format!("{}_graphs", cid.name));
+            backend.freeze_graphs_to_disk(&gdir)?;
+        }
+        Ok(())
+    }
+
+    fn post_merge_reload(
+        &self,
+        db: &strata_engine::Database,
+        target_branch: strata_core::types::BranchId,
+        source_branch: Option<strata_core::types::BranchId>,
+    ) -> strata_core::StrataResult<()> {
+        // Reload vector backends from KV for the target branch.
+        // This is a simplified inline version that doesn't require Arc<Database>.
+        use strata_core::traits::Storage;
+        use strata_core::types::{Key, Namespace};
+        use strata_core::value::Value;
+
+        let factory = super::IndexBackendFactory::default();
+        let version = db.storage().version();
+        let ns = std::sync::Arc::new(Namespace::for_branch_space(target_branch, "default"));
+
+        let config_prefix = Key::new_vector_config_prefix(ns.clone());
+        let config_entries = db
+            .storage()
+            .scan_prefix(&config_prefix, version)
+            .map_err(|e| strata_core::StrataError::storage(e.to_string()))?;
+
+        for (key, versioned) in &config_entries {
+            let config_bytes = match &versioned.value {
+                Value::Bytes(b) => b,
+                _ => continue,
+            };
+            let record = match super::CollectionRecord::from_bytes(config_bytes) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let collection_name = match key.user_key_string() {
+                Some(name) => name,
+                None => continue,
+            };
+            let config: super::VectorConfig = match record.config.try_into() {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let cid = super::CollectionId::new(target_branch, &collection_name);
+
+            let mut backend = factory.create(&config);
+            let vector_prefix = Key::new_vector(ns.clone(), &collection_name, "");
+            let vector_entries = match db.storage().scan_prefix(&vector_prefix, version) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            let collection_prefix = format!("{}/", collection_name);
+            for (vec_key, vec_versioned) in &vector_entries {
+                let vec_bytes = match &vec_versioned.value {
+                    Value::Bytes(b) => b,
+                    _ => continue,
+                };
+                let vec_record = match super::VectorRecord::from_bytes(vec_bytes) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                let vid = super::VectorId::new(vec_record.vector_id);
+
+                if vec_record.embedding.is_empty() {
+                    // Lite record — try to copy embedding from source branch backend
+                    if let Some(src) = source_branch {
+                        let src_cid = super::CollectionId::new(src, &collection_name);
+                        if let Some(src_backend) = self.state.backends.get(&src_cid) {
+                            if let Some(emb) = src_backend.get(vid) {
+                                let _ = backend.insert_with_id_and_timestamp(
+                                    vid,
+                                    emb,
+                                    vec_record.created_at,
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    let _ = backend.insert_with_id_and_timestamp(
+                        vid,
+                        &vec_record.embedding,
+                        vec_record.created_at,
+                    );
+                }
+
+                let vector_key = String::from_utf8(vec_key.user_key.to_vec())
+                    .ok()
+                    .and_then(|uk| uk.strip_prefix(&collection_prefix).map(|s| s.to_string()))
+                    .unwrap_or_default();
+                backend.set_inline_meta(
+                    vid,
+                    super::types::InlineMeta {
+                        key: vector_key,
+                        source_ref: vec_record.source_ref.clone(),
+                    },
+                );
+            }
+
+            backend.rebuild_index();
+            backend.seal_remaining_active();
+            self.state.backends.insert(cid, backend);
+        }
+        Ok(())
     }
 }

@@ -24,10 +24,8 @@
 //! All VectorStore instances for the same Database share backend state
 //! through `Database::extension::<VectorBackendState>()`.
 
-use crate::database::Database;
-use crate::primitives::extensions::VectorStoreExt;
-use crate::primitives::vector::collection::{validate_collection_name, validate_vector_key};
-use crate::primitives::vector::{
+use crate::collection::{validate_collection_name, validate_vector_key};
+use crate::{
     CollectionId, CollectionInfo, CollectionRecord, IndexBackendFactory, MetadataFilter,
     VectorConfig, VectorEntry, VectorError, VectorId, VectorIndexBackend, VectorMatch,
     VectorMatchWithSource, VectorRecord, VectorResult,
@@ -36,11 +34,11 @@ use dashmap::DashMap;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use strata_concurrency::TransactionContext;
 use strata_core::contract::{Timestamp, Version, Versioned};
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
 use strata_core::EntityRef;
+use strata_engine::Database;
 use tracing::{debug, info, warn};
 
 /// Statistics from vector recovery
@@ -109,7 +107,7 @@ fn validate_query_values(values: &[f32]) -> VectorResult<()> {
 ///
 /// ```text
 /// use strata_primitives::VectorStore;
-/// use crate::database::Database;
+/// use strata_engine::Database;
 /// use strata_core::types::BranchId;
 ///
 /// let db = Database::open("/path/to/data")?;
@@ -1861,7 +1859,7 @@ impl VectorStore {
         name: &str,
         config: VectorConfig,
     ) -> VectorResult<Versioned<CollectionInfo>> {
-        use crate::primitives::vector::collection::validate_system_collection_name;
+        use crate::collection::validate_system_collection_name;
 
         validate_system_collection_name(name)?;
 
@@ -1916,7 +1914,7 @@ impl VectorStore {
         embedding: &[f32],
         metadata: Option<JsonValue>,
     ) -> VectorResult<Version> {
-        use crate::primitives::vector::collection::validate_system_collection_name;
+        use crate::collection::validate_system_collection_name;
         validate_system_collection_name(collection)?;
         // Delegate to the normal insert path (which doesn't re-check collection name)
         self.insert(branch_id, "default", collection, key, embedding, metadata)
@@ -1935,7 +1933,7 @@ impl VectorStore {
         metadata: Option<JsonValue>,
         source_ref: EntityRef,
     ) -> VectorResult<Version> {
-        use crate::primitives::vector::collection::validate_system_collection_name;
+        use crate::collection::validate_system_collection_name;
         validate_system_collection_name(collection)?;
         self.insert_inner(
             branch_id,
@@ -1961,7 +1959,7 @@ impl VectorStore {
 
     /// Delete a system collection (idempotent — returns Ok if it doesn't exist).
     pub fn delete_system_collection(&self, branch_id: BranchId, name: &str) -> VectorResult<()> {
-        use crate::primitives::vector::collection::validate_system_collection_name;
+        use crate::collection::validate_system_collection_name;
         validate_system_collection_name(name)?;
 
         if !self.collection_exists(branch_id, "default", name)? {
@@ -2005,7 +2003,7 @@ impl VectorStore {
         k: usize,
         filter: Option<MetadataFilter>,
     ) -> VectorResult<Vec<VectorMatch>> {
-        use crate::primitives::vector::collection::validate_system_collection_name;
+        use crate::collection::validate_system_collection_name;
         validate_system_collection_name(collection)?;
         self.search(branch_id, "default", collection, query, k, filter)
     }
@@ -2022,7 +2020,7 @@ impl VectorStore {
         query: &[f32],
         k: usize,
     ) -> VectorResult<Vec<VectorMatchWithSource>> {
-        use crate::primitives::vector::collection::validate_system_collection_name;
+        use crate::collection::validate_system_collection_name;
         validate_system_collection_name(collection)?;
         self.search_with_sources(branch_id, "default", collection, query, k)
     }
@@ -2131,7 +2129,7 @@ impl VectorStore {
         start_ts: u64,
         end_ts: u64,
     ) -> VectorResult<Vec<VectorMatchWithSource>> {
-        use crate::primitives::vector::collection::validate_system_collection_name;
+        use crate::collection::validate_system_collection_name;
         validate_system_collection_name(collection)?;
         self.search_with_sources_in_range(
             branch_id, "default", collection, query, k, start_ts, end_ts,
@@ -2239,7 +2237,7 @@ impl VectorStore {
         collection: &str,
         key: &str,
     ) -> VectorResult<bool> {
-        use crate::primitives::vector::collection::validate_system_collection_name;
+        use crate::collection::validate_system_collection_name;
         validate_system_collection_name(collection)?;
         self.delete(branch_id, "default", collection, key)
     }
@@ -2325,7 +2323,7 @@ impl VectorStore {
         let version = self.db.storage().version();
 
         // Get all spaces for this branch (SpaceIndex.list always includes "default")
-        let space_index = crate::SpaceIndex::new(self.db.clone());
+        let space_index = strata_engine::SpaceIndex::new(self.db.clone());
         let spaces = space_index
             .list(branch_id)
             .map_err(|e| VectorError::Storage(e.to_string()))?;
@@ -2633,7 +2631,7 @@ impl VectorStore {
 
 // ========== Searchable Trait Implementation ==========
 
-impl crate::search::Searchable for VectorStore {
+impl strata_engine::search::Searchable for VectorStore {
     /// Vector search via search interface
     ///
     /// NOTE: Per architecture documentation:
@@ -2648,10 +2646,10 @@ impl crate::search::Searchable for VectorStore {
     /// 3. Fusing results via RRF
     fn search(
         &self,
-        req: &crate::SearchRequest,
-    ) -> strata_core::StrataResult<crate::SearchResponse> {
-        use crate::search::{SearchMode, SearchResponse, SearchStats};
+        req: &strata_engine::SearchRequest,
+    ) -> strata_core::StrataResult<strata_engine::SearchResponse> {
         use std::time::Instant;
+        use strata_engine::search::{SearchMode, SearchResponse, SearchStats};
 
         let start = Instant::now();
 
@@ -2713,57 +2711,14 @@ fn now_micros() -> u64 {
 // Future enhancement: Could add pending_vector_ops to TransactionContext
 // and apply them at commit time, but this requires significant infrastructure.
 
-impl VectorStoreExt for TransactionContext {
-    fn vector_get(
-        &mut self,
-        collection: &str,
-        key: &str,
-    ) -> strata_core::StrataResult<Option<Vec<f32>>> {
-        // VectorStore embeddings are stored in VectorHeap (in-memory backend),
-        // which is not accessible from TransactionContext.
-        //
-        // The VectorRecord in KV storage only contains vector_id (index into heap),
-        // not the actual embedding data.
-        //
-        // To properly support this, TransactionContext would need access to
-        // Database::extension::<VectorBackendState>().
-        let _ = (collection, key); // Mark as intentionally unused
-        Err(strata_core::StrataError::invalid_input(
-            "VectorStore get operations are not supported in cross-primitive transactions. \
-             Embeddings are stored in in-memory backends not accessible from TransactionContext. \
-             Use VectorStore::get() directly outside of transactions."
-                .to_string(),
-        ))
-    }
-
-    fn vector_insert(
-        &mut self,
-        collection: &str,
-        key: &str,
-        embedding: &[f32],
-    ) -> strata_core::StrataResult<Version> {
-        // VectorStore inserts require:
-        // 1. Adding embedding to VectorHeap (in-memory)
-        // 2. Getting a VectorId from the backend's allocator
-        // 3. Creating/updating VectorRecord in KV storage
-        // 4. Updating the search index
-        //
-        // Steps 1, 2, and 4 require access to VectorBackendState which is
-        // not available from TransactionContext.
-        let _ = (collection, key, embedding); // Mark as intentionally unused
-        Err(strata_core::StrataError::invalid_input(
-            "VectorStore insert operations are not supported in cross-primitive transactions. \
-             Vector operations require access to in-memory backends not accessible from \
-             TransactionContext. Use VectorStore::insert() directly outside of transactions."
-                .to_string(),
-        ))
-    }
-}
+// NOTE: The VectorStoreExt impl for TransactionContext lives in
+// strata-engine/src/primitives/extensions.rs due to orphan rules
+// (neither the trait nor TransactionContext is defined in strata-vector).
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::primitives::vector::{DistanceMetric, VectorConfig};
+    use crate::{DistanceMetric, VectorConfig};
     use tempfile::TempDir;
 
     fn setup() -> (TempDir, Arc<Database>, VectorStore) {
@@ -3048,7 +3003,7 @@ mod tests {
         let config = VectorConfig {
             dimension: 0,
             metric: DistanceMetric::Cosine,
-            storage_dtype: crate::primitives::vector::StorageDtype::F32,
+            storage_dtype: crate::StorageDtype::F32,
         };
 
         let result = store.create_collection(branch_id, "default", "test", config);

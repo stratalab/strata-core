@@ -16,9 +16,7 @@
 //! 3. **Replay vs Normal Operations**: replay_* methods do NOT write to WAL (they are
 //!    replaying from WAL). Normal operations use the VectorStore methods which write WAL.
 
-use crate::primitives::vector::{
-    VectorConfig, VectorConfigSerde, VectorError, VectorId, VectorResult,
-};
+use crate::{VectorConfig, VectorConfigSerde, VectorError, VectorId, VectorResult};
 use serde::{Deserialize, Serialize};
 use strata_core::{BranchId, EntityRef};
 
@@ -277,7 +275,7 @@ pub fn create_wal_delete(
 // VectorWalReplayer
 // ============================================================================
 
-use crate::primitives::vector::{DistanceMetric, VectorStore};
+use crate::{DistanceMetric, VectorStore};
 
 /// Replayer for Vector WAL entries
 ///
@@ -311,10 +309,8 @@ impl<'a> VectorWalReplayer<'a> {
                         VectorError::Serialization(format!("Invalid metric: {}", wal.config.metric))
                     })?,
                     // Use persisted storage_dtype, default to F32 for backward compatibility
-                    storage_dtype: crate::primitives::vector::StorageDtype::from_byte(
-                        wal.config.storage_dtype,
-                    )
-                    .unwrap_or(crate::primitives::vector::StorageDtype::F32),
+                    storage_dtype: crate::StorageDtype::from_byte(wal.config.storage_dtype)
+                        .unwrap_or(crate::StorageDtype::F32),
                 };
                 self.store
                     .replay_create_collection(wal.branch_id, &wal.collection, config)
@@ -358,7 +354,7 @@ impl<'a> VectorWalReplayer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::primitives::vector::DistanceMetric;
+    use crate::DistanceMetric;
 
     #[test]
     fn test_collection_create_roundtrip() {
