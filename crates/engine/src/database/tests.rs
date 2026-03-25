@@ -1828,56 +1828,6 @@ fn test_issue_1732_checkpoint_data_preserves_branch_names() {
     );
 }
 
-#[cfg(any())] // Disabled: VectorStore moved to strata-vector crate
-#[test]
-fn test_issue_1732_checkpoint_data_includes_vectors() {
-    // Issue #1732: collect_checkpoint_data() never collects vector data.
-    use strata_vector::VectorConfig;
-    use strata_vector::VectorStore;
-
-    let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path().join("db")).unwrap();
-
-    let branch_id = BranchId::new();
-    let store = VectorStore::new(db.clone());
-
-    let config = VectorConfig {
-        dimension: 3,
-        metric: strata_vector::DistanceMetric::Cosine,
-        storage_dtype: strata_vector::StorageDtype::F32,
-    };
-    store
-        .create_collection(branch_id, "default", "my_vectors", config)
-        .unwrap();
-    store
-        .insert(
-            branch_id,
-            "default",
-            "my_vectors",
-            "vec1",
-            &[1.0, 0.0, 0.0],
-            None,
-        )
-        .unwrap();
-
-    let data = db.collect_checkpoint_data();
-    let vectors = data
-        .vectors
-        .expect("Checkpoint should include vector data, but vectors field is None");
-    assert!(
-        !vectors.is_empty(),
-        "Should have at least one vector collection"
-    );
-    assert_eq!(vectors[0].name, "my_vectors");
-    assert_eq!(vectors[0].vectors.len(), 1);
-    assert_eq!(vectors[0].vectors[0].key, "vec1");
-    assert_eq!(
-        vectors[0].vectors[0].embedding,
-        vec![1.0, 0.0, 0.0],
-        "Embedding values should be preserved in checkpoint",
-    );
-}
-
 /// Issue #1738 / 9.2.A: begin_transaction() does not check accepting_transactions.
 /// After shutdown(), manual callers can still start transactions.
 #[test]
