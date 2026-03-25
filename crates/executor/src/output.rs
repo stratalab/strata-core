@@ -6,7 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 use strata_core::Value;
-use strata_engine::branch_ops::{BranchDiffResult, ForkInfo, MergeInfo};
+use strata_engine::branch_ops::{
+    BranchDiffResult, CherryPickInfo, ForkInfo, MergeInfo, NoteInfo, RevertInfo, TagInfo,
+};
 use strata_engine::{HealthReport, StrataConfig, SystemMetrics, WalCounters};
 
 use crate::types::*;
@@ -175,6 +177,34 @@ pub enum Output {
 
     /// Branch merge result
     BranchMerged(MergeInfo),
+
+    /// Three-way diff result
+    ThreeWayDiff(strata_engine::branch_ops::ThreeWayDiffResult),
+
+    /// Merge base info result
+    MergeBaseInfo(Option<strata_engine::branch_ops::MergeBaseInfo>),
+
+    /// Branch revert result
+    BranchReverted(RevertInfo),
+
+    /// Branch cherry-pick result
+    BranchCherryPicked(CherryPickInfo),
+
+    // ==================== Tags & Notes ====================
+    /// Tag creation result
+    TagCreated(TagInfo),
+
+    /// List of tags
+    TagList(Vec<TagInfo>),
+
+    /// Optional tag info (for resolve)
+    MaybeTag(Option<TagInfo>),
+
+    /// Note creation result
+    NoteAdded(NoteInfo),
+
+    /// List of notes
+    NoteList(Vec<NoteInfo>),
 
     /// Database configuration snapshot
     Config(StrataConfig),

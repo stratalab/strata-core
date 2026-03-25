@@ -50,8 +50,8 @@ mod vector;
 
 pub use branches::Branches;
 pub use strata_engine::branch_ops::{
-    BranchDiffEntry, BranchDiffResult, ConflictEntry, DiffFilter, DiffOptions, DiffSummary,
-    ForkInfo, MergeInfo, MergeStrategy, SpaceDiff,
+    BranchDiffEntry, BranchDiffResult, CherryPickFilter, CherryPickInfo, ConflictEntry, DiffFilter,
+    DiffOptions, DiffSummary, ForkInfo, MergeInfo, MergeStrategy, RevertInfo, SpaceDiff,
 };
 pub use system::SystemBranch;
 

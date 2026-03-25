@@ -369,6 +369,18 @@ fn format_raw(output: &Output) -> String {
         Output::BranchMerged(info) => {
             format!("{}\t{}\t{}", info.source, info.target, info.keys_applied)
         }
+        Output::BranchReverted(info) => {
+            format!(
+                "{}\t{}\t{}\t{}",
+                info.branch, info.from_version, info.to_version, info.keys_reverted
+            )
+        }
+        Output::BranchCherryPicked(info) => {
+            format!(
+                "{}\t{}\t{}\t{}",
+                info.source, info.target, info.keys_applied, info.keys_deleted
+            )
+        }
         Output::Config(_) | Output::DurabilityCounters(_) => {
             serde_json::to_string(output).unwrap_or_default()
         }
@@ -520,6 +532,13 @@ fn format_raw(output: &Output) -> String {
             serde_json::to_string(&page).unwrap_or_default()
         }
         Output::Exported(r) => r.data.clone().unwrap_or_default(),
+        Output::ThreeWayDiff(result) => serde_json::to_string(&result).unwrap_or_default(),
+        Output::MergeBaseInfo(info) => serde_json::to_string(&info).unwrap_or_default(),
+        Output::TagCreated(info) => serde_json::to_string(&info).unwrap_or_default(),
+        Output::TagList(tags) => serde_json::to_string(&tags).unwrap_or_default(),
+        Output::MaybeTag(tag) => serde_json::to_string(&tag).unwrap_or_default(),
+        Output::NoteAdded(note) => serde_json::to_string(&note).unwrap_or_default(),
+        Output::NoteList(notes) => serde_json::to_string(&notes).unwrap_or_default(),
     }
 }
 
@@ -799,6 +818,23 @@ fn format_human(output: &Output) -> String {
             format!(
                 "Merged \"{}\" → \"{}\" ({} keys applied, {} spaces{})",
                 info.source, info.target, info.keys_applied, info.spaces_merged, conflict_msg
+            )
+        }
+        Output::BranchReverted(info) => {
+            format!(
+                "Reverted \"{}\" versions [{}, {}] ({} keys reverted)",
+                info.branch, info.from_version, info.to_version, info.keys_reverted
+            )
+        }
+        Output::BranchCherryPicked(info) => {
+            let delete_msg = if info.keys_deleted > 0 {
+                format!(", {} deleted", info.keys_deleted)
+            } else {
+                String::new()
+            };
+            format!(
+                "Cherry-picked \"{}\" → \"{}\" ({} keys applied{})",
+                info.source, info.target, info.keys_applied, delete_msg
             )
         }
         Output::Config(cfg) => {
@@ -1352,6 +1388,68 @@ fn format_human(output: &Output) -> String {
             }
             _ => format!("(exported) {} row(s)", r.row_count),
         },
+        Output::ThreeWayDiff(result) => serde_json::to_string_pretty(&result).unwrap_or_default(),
+        Output::MergeBaseInfo(None) => "(nil)".to_string(),
+        Output::MergeBaseInfo(Some(info)) => {
+            format!("merge base: {} @ v{}", info.branch, info.version)
+        }
+        Output::TagCreated(info) => {
+            format!(
+                "Tag '{}' created on '{}' @ v{}",
+                info.name, info.branch, info.version
+            )
+        }
+        Output::TagList(tags) => {
+            if tags.is_empty() {
+                "(no tags)".to_string()
+            } else {
+                tags.iter()
+                    .map(|t| {
+                        format!(
+                            "  {} -> v{}{}",
+                            t.name,
+                            t.version,
+                            t.message
+                                .as_deref()
+                                .map(|m| format!(" ({})", m))
+                                .unwrap_or_default()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+        Output::MaybeTag(None) => "(nil)".to_string(),
+        Output::MaybeTag(Some(tag)) => {
+            format!("{} -> {} @ v{}", tag.name, tag.branch, tag.version)
+        }
+        Output::NoteAdded(note) => {
+            format!(
+                "Note added to '{}' @ v{}: {}",
+                note.branch, note.version, note.message
+            )
+        }
+        Output::NoteList(notes) => {
+            if notes.is_empty() {
+                "(no notes)".to_string()
+            } else {
+                notes
+                    .iter()
+                    .map(|n| {
+                        format!(
+                            "  v{}: {}{}",
+                            n.version,
+                            n.message,
+                            n.author
+                                .as_deref()
+                                .map(|a| format!(" [{}]", a))
+                                .unwrap_or_default()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
     }
 }
 

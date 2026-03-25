@@ -14,6 +14,30 @@ use crate::types::{BranchId, BranchInfo, VersionedBranchInfo};
 use crate::{Error, Output, Result};
 
 // =============================================================================
+// Audit Log Helper
+// =============================================================================
+
+/// Emit an audit event on the `_system_` branch. Best-effort — failures are
+/// logged, never propagated.
+fn emit_audit_event(p: &Arc<Primitives>, event_type: &str, payload: serde_json::Value) {
+    let system_branch_id = strata_engine::primitives::branch::resolve_branch_name("_system_");
+    // Convert serde_json::Value (Object) to strata_core::Value (Object).
+    // Event payload must be a Value::Object for event log validation.
+    let core_value: strata_core::value::Value = payload.into();
+    if let Err(e) = p
+        .event
+        .append(&system_branch_id, "default", event_type, core_value)
+    {
+        tracing::warn!(
+            target: "strata::audit",
+            event_type,
+            error = %e,
+            "Failed to emit audit event"
+        );
+    }
+}
+
+// =============================================================================
 // Conversion Helpers
 // =============================================================================
 
@@ -120,6 +144,14 @@ pub fn branch_create(
         tracing::warn!(target: "strata::branch_dag", branch = %branch_str, error = %e, "Failed to record branch creation in DAG");
     }
 
+    emit_audit_event(
+        p,
+        "branch.create",
+        serde_json::json!({
+            "branch": branch_str,
+        }),
+    );
+
     Ok(Output::BranchWithVersion {
         info: metadata_to_branch_info(&versioned.value),
         version: extract_version(&versioned.version),
@@ -214,7 +246,49 @@ pub fn branch_delete(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
         tracing::warn!(target: "strata::branch_dag", branch = %branch.as_str(), error = %e, "Failed to mark branch as deleted in DAG");
     }
 
+    emit_audit_event(
+        p,
+        "branch.delete",
+        serde_json::json!({
+            "branch": branch.as_str(),
+        }),
+    );
+
     Ok(Output::Unit)
+}
+
+// =============================================================================
+// Shared Helpers
+// =============================================================================
+
+/// Compute merge base override from DAG for two branches.
+///
+/// Checks for previous merge first (takes priority over fork), then falls
+/// back to fork relationship in the DAG.
+fn compute_merge_base_from_dag(
+    db: &Arc<strata_engine::Database>,
+    source: &str,
+    target: &str,
+) -> Option<(strata_core::types::BranchId, u64)> {
+    // Check for previous merge first (takes priority over fork)
+    match branch_dag::find_last_merge_version(db, source, target) {
+        Ok(Some(v)) => {
+            let target_id = strata_engine::primitives::branch::resolve_branch_name(target);
+            Some((target_id, v))
+        }
+        _ => {
+            // No previous merge — check for fork relationship in DAG
+            // (covers materialized branches where storage lost fork info)
+            match branch_dag::find_fork_version(db, source, target) {
+                Ok(Some((child_name, fork_version))) => {
+                    let child_id =
+                        strata_engine::primitives::branch::resolve_branch_name(&child_name);
+                    Some((child_id, fork_version))
+                }
+                _ => None, // Let engine try storage-level fork info
+            }
+        }
+    }
 }
 
 // =============================================================================
@@ -257,6 +331,16 @@ pub fn branch_fork(
     ) {
         tracing::warn!(target: "strata::branch_dag", source = %source, destination = %destination, error = %e, "Failed to record fork in DAG");
     }
+
+    emit_audit_event(
+        p,
+        "branch.fork",
+        serde_json::json!({
+            "parent": source,
+            "child": destination,
+            "fork_version": info.fork_version,
+        }),
+    );
 
     Ok(Output::BranchForked(info))
 }
@@ -308,27 +392,7 @@ pub fn branch_merge(
     }
 
     // Compute merge base override from DAG (for repeated merges and materialized branches)
-    let merge_base_override = {
-        // Check for previous merge first (takes priority over fork)
-        match branch_dag::find_last_merge_version(&p.db, &source, &target) {
-            Ok(Some(v)) => {
-                let target_id = strata_engine::primitives::branch::resolve_branch_name(&target);
-                Some((target_id, v))
-            }
-            _ => {
-                // No previous merge — check for fork relationship in DAG
-                // (covers materialized branches where storage lost fork info)
-                match branch_dag::find_fork_version(&p.db, &source, &target) {
-                    Ok(Some((child_name, fork_version))) => {
-                        let child_id =
-                            strata_engine::primitives::branch::resolve_branch_name(&child_name);
-                        Some((child_id, fork_version))
-                    }
-                    _ => None, // Let engine try storage-level fork info
-                }
-            }
-        }
-    };
+    let merge_base_override = compute_merge_base_from_dag(&p.db, &source, &target);
 
     let info = strata_engine::branch_ops::merge_branches(
         &p.db,
@@ -359,7 +423,143 @@ pub fn branch_merge(
         tracing::warn!(target: "strata::branch_dag", source = %source, target = %target, error = %e, "Failed to record merge in DAG");
     }
 
+    emit_audit_event(
+        p,
+        "branch.merge",
+        serde_json::json!({
+            "source": source,
+            "target": target,
+            "strategy": strategy_str,
+            "keys_applied": info.keys_applied,
+            "keys_deleted": info.keys_deleted,
+            "merge_version": info.merge_version,
+        }),
+    );
+
     Ok(Output::BranchMerged(info))
+}
+
+/// Handle BranchDiffThreeWay command.
+pub fn branch_diff_three_way(
+    p: &Arc<Primitives>,
+    branch_a: String,
+    branch_b: String,
+) -> Result<Output> {
+    let merge_base_override = compute_merge_base_from_dag(&p.db, &branch_a, &branch_b);
+
+    let result =
+        strata_engine::branch_ops::diff_three_way(&p.db, &branch_a, &branch_b, merge_base_override)
+            .map_err(|e| Error::Internal {
+                reason: e.to_string(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            })?;
+
+    Ok(Output::ThreeWayDiff(result))
+}
+
+/// Handle BranchMergeBase command.
+pub fn branch_merge_base(
+    p: &Arc<Primitives>,
+    branch_a: String,
+    branch_b: String,
+) -> Result<Output> {
+    let merge_base_override = compute_merge_base_from_dag(&p.db, &branch_a, &branch_b);
+
+    let result =
+        strata_engine::branch_ops::get_merge_base(&p.db, &branch_a, &branch_b, merge_base_override)
+            .map_err(|e| Error::Internal {
+                reason: e.to_string(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            })?;
+
+    Ok(Output::MergeBaseInfo(result))
+}
+
+// =============================================================================
+// Revert Handlers
+// =============================================================================
+
+/// Handle BranchRevert command.
+pub fn branch_revert(
+    p: &Arc<Primitives>,
+    branch: String,
+    from_version: u64,
+    to_version: u64,
+) -> Result<Output> {
+    crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
+    let info =
+        strata_engine::branch_ops::revert_version_range(&p.db, &branch, from_version, to_version)
+            .map_err(|e| Error::Internal {
+            reason: e.to_string(),
+            hint: None,
+        })?;
+
+    emit_audit_event(
+        p,
+        "branch.revert",
+        serde_json::json!({
+            "branch": branch,
+            "from_version": from_version,
+            "to_version": to_version,
+            "keys_reverted": info.keys_reverted,
+        }),
+    );
+
+    Ok(Output::BranchReverted(info))
+}
+
+// =============================================================================
+// Cherry-Pick Handlers
+// =============================================================================
+
+/// Handle BranchCherryPick command.
+pub fn branch_cherry_pick(
+    p: &Arc<Primitives>,
+    source: String,
+    target: String,
+    keys: Option<Vec<(String, String)>>,
+    filter_spaces: Option<Vec<String>>,
+    filter_keys: Option<Vec<String>>,
+    filter_primitives: Option<Vec<strata_core::PrimitiveType>>,
+) -> Result<Output> {
+    crate::handlers::reject_system_branch(&crate::types::BranchId::from(source.as_str()))?;
+    crate::handlers::reject_system_branch(&crate::types::BranchId::from(target.as_str()))?;
+    let info = if let Some(keys) = keys {
+        // Direct key pick
+        strata_engine::branch_ops::cherry_pick_keys(&p.db, &source, &target, &keys)
+    } else {
+        // Diff-based pick with filter
+        let merge_base_override = compute_merge_base_from_dag(&p.db, &source, &target);
+        let filter = strata_engine::branch_ops::CherryPickFilter {
+            spaces: filter_spaces,
+            keys: filter_keys,
+            primitives: filter_primitives,
+        };
+        strata_engine::branch_ops::cherry_pick_from_diff(
+            &p.db,
+            &source,
+            &target,
+            filter,
+            merge_base_override,
+        )
+    }
+    .map_err(|e| Error::Internal {
+        reason: e.to_string(),
+        hint: None,
+    })?;
+
+    emit_audit_event(
+        p,
+        "branch.cherry_pick",
+        serde_json::json!({
+            "source": source,
+            "target": target,
+            "keys_applied": info.keys_applied,
+            "keys_deleted": info.keys_deleted,
+        }),
+    );
+
+    Ok(Output::BranchCherryPicked(info))
 }
 
 // =============================================================================
@@ -421,6 +621,146 @@ pub fn branch_bundle_validate(path: String) -> Result<Output> {
             checksums_valid: info.checksums_valid,
         },
     ))
+}
+
+// =============================================================================
+// Tag Handlers
+// =============================================================================
+
+/// Handle TagCreate command.
+pub fn tag_create(
+    p: &Arc<Primitives>,
+    branch: String,
+    name: String,
+    version: Option<u64>,
+    message: Option<String>,
+    creator: Option<String>,
+) -> Result<Output> {
+    crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
+    let info = strata_engine::branch_ops::create_tag(
+        &p.db,
+        &branch,
+        &name,
+        version,
+        message.as_deref(),
+        creator.as_deref(),
+    )
+    .map_err(|e| Error::Internal {
+        reason: e.to_string(),
+        hint: None,
+    })?;
+
+    emit_audit_event(
+        p,
+        "branch.tag",
+        serde_json::json!({
+            "branch": branch,
+            "tag": name,
+            "version": info.version,
+            "message": message,
+        }),
+    );
+
+    Ok(Output::TagCreated(info))
+}
+
+/// Handle TagDelete command.
+pub fn tag_delete(p: &Arc<Primitives>, branch: String, name: String) -> Result<Output> {
+    crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
+    let deleted = strata_engine::branch_ops::delete_tag(&p.db, &branch, &name).map_err(|e| {
+        Error::Internal {
+            reason: e.to_string(),
+            hint: None,
+        }
+    })?;
+    Ok(Output::Bool(deleted))
+}
+
+/// Handle TagList command.
+pub fn tag_list(p: &Arc<Primitives>, branch: String) -> Result<Output> {
+    crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
+    let tags =
+        strata_engine::branch_ops::list_tags(&p.db, &branch).map_err(|e| Error::Internal {
+            reason: e.to_string(),
+            hint: None,
+        })?;
+    Ok(Output::TagList(tags))
+}
+
+/// Handle TagResolve command.
+pub fn tag_resolve(p: &Arc<Primitives>, branch: String, name: String) -> Result<Output> {
+    crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
+    let tag = strata_engine::branch_ops::resolve_tag(&p.db, &branch, &name).map_err(|e| {
+        Error::Internal {
+            reason: e.to_string(),
+            hint: None,
+        }
+    })?;
+    Ok(Output::MaybeTag(tag))
+}
+
+// =============================================================================
+// Note Handlers
+// =============================================================================
+
+/// Handle NoteAdd command.
+pub fn note_add(
+    p: &Arc<Primitives>,
+    branch: String,
+    version: u64,
+    message: String,
+    author: Option<String>,
+    metadata: Option<strata_core::Value>,
+) -> Result<Output> {
+    crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
+    let note = strata_engine::branch_ops::add_note(
+        &p.db,
+        &branch,
+        version,
+        &message,
+        author.as_deref(),
+        metadata,
+    )
+    .map_err(|e| Error::Internal {
+        reason: e.to_string(),
+        hint: None,
+    })?;
+
+    emit_audit_event(
+        p,
+        "branch.note",
+        serde_json::json!({
+            "branch": branch,
+            "version": version,
+            "message": message,
+        }),
+    );
+
+    Ok(Output::NoteAdded(note))
+}
+
+/// Handle NoteGet command.
+pub fn note_get(p: &Arc<Primitives>, branch: String, version: Option<u64>) -> Result<Output> {
+    crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
+    let notes = strata_engine::branch_ops::get_notes(&p.db, &branch, version).map_err(|e| {
+        Error::Internal {
+            reason: e.to_string(),
+            hint: None,
+        }
+    })?;
+    Ok(Output::NoteList(notes))
+}
+
+/// Handle NoteDelete command.
+pub fn note_delete(p: &Arc<Primitives>, branch: String, version: u64) -> Result<Output> {
+    crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
+    let deleted = strata_engine::branch_ops::delete_note(&p.db, &branch, version).map_err(|e| {
+        Error::Internal {
+            reason: e.to_string(),
+            hint: None,
+        }
+    })?;
+    Ok(Output::Bool(deleted))
 }
 
 #[cfg(test)]
