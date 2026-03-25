@@ -480,10 +480,11 @@ impl WalWriter {
         let old = self.durability;
         self.durability = mode;
         // When switching to Always, flush any unsynced data immediately
-        if matches!(mode, DurabilityMode::Always) && !matches!(old, DurabilityMode::Always) {
-            if self.has_unsynced_data {
-                self.flush()?;
-            }
+        if matches!(mode, DurabilityMode::Always)
+            && !matches!(old, DurabilityMode::Always)
+            && self.has_unsynced_data
+        {
+            self.flush()?;
         }
         Ok(())
     }

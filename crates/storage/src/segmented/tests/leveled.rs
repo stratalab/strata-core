@@ -2123,4 +2123,3 @@ fn rate_limited_compaction_preserves_prune_semantics() {
         .unwrap()
         .is_none());
 }
-

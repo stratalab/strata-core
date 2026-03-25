@@ -1261,4 +1261,3 @@ fn fork_double_fork_same_dest_rejected() {
         );
     }
 }
-

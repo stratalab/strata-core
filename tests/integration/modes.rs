@@ -278,13 +278,11 @@ fn all_modes_produce_same_results() {
 
         let mut results = Vec::new();
         for i in 0..10 {
-            if let Some(v) = kv
+            if let Some(Value::Int(n)) = kv
                 .get(&branch_id, "default", &format!("key_{}", i))
                 .unwrap()
             {
-                if let Value::Int(n) = v {
-                    results.push(n);
-                }
+                results.push(n);
             }
         }
         results

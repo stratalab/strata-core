@@ -2287,7 +2287,7 @@ mod tests {
         let key = test_key(&ns, "adj1"); // same key name as before
         txn.put(key.clone(), Value::Int(99)).unwrap();
         assert!(
-            txn.key_write_modes.get(&key).is_none(),
+            !txn.key_write_modes.contains_key(&key),
             "normal put after reset should not inherit stale KeepLast mode"
         );
     }

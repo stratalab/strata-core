@@ -513,4 +513,3 @@ fn write_stalling_disabled_when_max_is_zero() {
     // Should have rotated freely — more than 2 frozen
     assert!(store.branch_frozen_count(&branch()) > 2);
 }
-

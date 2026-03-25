@@ -727,7 +727,7 @@ fn large_nested_object() {
     outer.insert("nested".to_string(), Value::object(inner));
     outer.insert(
         "array".to_string(),
-        Value::array((0..100).map(|i| Value::Int(i)).collect()),
+        Value::array((0..100).map(Value::Int).collect()),
     );
 
     executor

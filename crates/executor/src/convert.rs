@@ -245,7 +245,9 @@ mod tests {
         let err = StrataError::wrong_type("Int", "String");
         let converted: Error = err.into();
         match converted {
-            Error::WrongType { expected, actual, .. } => {
+            Error::WrongType {
+                expected, actual, ..
+            } => {
                 assert_eq!(expected, "Int");
                 assert_eq!(actual, "String");
             }

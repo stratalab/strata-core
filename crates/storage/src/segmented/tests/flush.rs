@@ -537,4 +537,3 @@ fn frozen_memtable_reads_correct_order() {
         Value::Int(1),
     );
 }
-

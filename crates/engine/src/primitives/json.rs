@@ -360,21 +360,19 @@ impl JsonStore {
         let history = self.db.get_history(&key, None, None)?;
         let versions: Vec<Versioned<JsonValue>> = history
             .iter()
-            .filter_map(|vv| {
-                match Self::deserialize_doc(&vv.value) {
-                    Ok(doc) => Some(Versioned::with_timestamp(
-                        doc.value,
-                        Version::counter(doc.version),
-                        vv.timestamp,
-                    )),
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "strata::json",
-                            error = %e,
-                            "Skipping corrupt document entry in version history"
-                        );
-                        None
-                    }
+            .filter_map(|vv| match Self::deserialize_doc(&vv.value) {
+                Ok(doc) => Some(Versioned::with_timestamp(
+                    doc.value,
+                    Version::counter(doc.version),
+                    vv.timestamp,
+                )),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "strata::json",
+                        error = %e,
+                        "Skipping corrupt document entry in version history"
+                    );
+                    None
                 }
             })
             .collect();

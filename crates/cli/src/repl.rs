@@ -450,8 +450,8 @@ fn print_help(command: Option<&str>) {
 /// Known top-level commands for TAB completion.
 const TOP_LEVEL_COMMANDS: &[&str] = &[
     "kv", "json", "event", "vector", "graph", "branch", "space", "begin", "commit", "rollback",
-    "txn", "ping", "info", "health", "metrics", "init", "flush", "compact", "search", "config", "use", "help",
-    "quit", "exit", "clear",
+    "txn", "ping", "info", "health", "metrics", "init", "flush", "compact", "search", "config",
+    "use", "help", "quit", "exit", "clear",
 ];
 
 /// Known subcommands for each top-level command.

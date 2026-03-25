@@ -501,10 +501,10 @@ pub fn random_json_tree(depth: usize, seed: u64) -> JsonValue {
             match seed % 4 {
                 0 => JsonValue::from(seed as i64),
                 1 => JsonValue::from(format!("str_{}", seed)),
-                2 => JsonValue::from(seed % 2 == 0),
+                2 => JsonValue::from(seed.is_multiple_of(2)),
                 _ => JsonValue::null(),
             }
-        } else if seed % 2 == 0 {
+        } else if seed.is_multiple_of(2) {
             let mut map = serde_json::Map::new();
             let count = (seed % 5) as usize + 1;
             for i in 0..count {

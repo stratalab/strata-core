@@ -423,7 +423,7 @@ fn test_issue_1707_refresh_atomic_visibility() {
     // Use a large number of keys to widen the race window.
     let n = ns(branch);
     for i in 0..50 {
-        let k = Key::new_kv(n.clone(), &format!("old_{}", i));
+        let k = Key::new_kv(n.clone(), format!("old_{}", i));
         primary
             .transaction(branch, |txn| {
                 txn.put(k.clone(), Value::String(format!("old_val_{}", i)))?;
@@ -442,10 +442,10 @@ fn test_issue_1707_refresh_atomic_visibility() {
         .transaction(branch, |txn| {
             for i in 0..50 {
                 txn.put(
-                    Key::new_kv(n.clone(), &format!("new_{}", i)),
+                    Key::new_kv(n.clone(), format!("new_{}", i)),
                     Value::String(format!("new_val_{}", i)),
                 )?;
-                txn.delete(Key::new_kv(n.clone(), &format!("old_{}", i)))?;
+                txn.delete(Key::new_kv(n.clone(), format!("old_{}", i)))?;
             }
             Ok(())
         })
@@ -478,11 +478,11 @@ fn test_issue_1707_refresh_atomic_visibility() {
                     let mut new_visible = 0u32;
                     let mut old_visible = 0u32;
                     for i in 0..50 {
-                        let nk = Key::new_kv(n.clone(), &format!("new_{}", i));
+                        let nk = Key::new_kv(n.clone(), format!("new_{}", i));
                         if let Ok(Some(_)) = txn.get(&nk) {
                             new_visible += 1;
                         }
-                        let ok = Key::new_kv(n.clone(), &format!("old_{}", i));
+                        let ok = Key::new_kv(n.clone(), format!("old_{}", i));
                         if let Ok(Some(_)) = txn.get(&ok) {
                             old_visible += 1;
                         }
@@ -558,7 +558,7 @@ fn test_issue_1707_refresh_atomic_concurrent() {
             .transaction(branch, |txn| {
                 for k in 0..20u32 {
                     txn.put(
-                        Key::new_kv(n.clone(), &format!("batch_{}", k)),
+                        Key::new_kv(n.clone(), format!("batch_{}", k)),
                         Value::String(format!("txn_{}", t)),
                     )?;
                 }
@@ -591,7 +591,7 @@ fn test_issue_1707_refresh_atomic_concurrent() {
                     let mut mismatch = false;
 
                     for k in 0..20u32 {
-                        let key = Key::new_kv(n.clone(), &format!("batch_{}", k));
+                        let key = Key::new_kv(n.clone(), format!("batch_{}", k));
                         match txn.get(&key) {
                             Ok(Some(Value::String(s))) => {
                                 all_none = false;

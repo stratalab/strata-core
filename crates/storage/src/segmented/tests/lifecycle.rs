@@ -1262,4 +1262,3 @@ fn test_issue_1677_shadow_check_returns_true_on_corruption() {
         "shadow check must return true on corruption to prevent stale data resurrection"
     );
 }
-

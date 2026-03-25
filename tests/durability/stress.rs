@@ -293,7 +293,7 @@ fn stress_all_primitives_sustained() {
         p.kv.put(&branch_id, "default", &key, Value::Int(ops as i64))
             .unwrap();
 
-        if ops % 10 == 0 {
+        if ops.is_multiple_of(10) {
             p.event
                 .append(
                     &branch_id,
@@ -303,7 +303,7 @@ fn stress_all_primitives_sustained() {
                 )
                 .unwrap();
         }
-        if ops % 50 == 0 {
+        if ops.is_multiple_of(50) {
             let doc = format!("doc_{}", ops);
             p.json
                 .create(&branch_id, "default", &doc, test_json_value(ops as usize))

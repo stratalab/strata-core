@@ -360,7 +360,7 @@ fn stress_sustained_workload() {
                     let key_idx = (thread_id * 13 + ops.load(Ordering::Relaxed) as usize * 7) % 50;
                     let key = create_test_key(branch_id, &format!("key_{}", key_idx));
 
-                    if ops.load(Ordering::Relaxed) % 3 == 0 {
+                    if ops.load(Ordering::Relaxed).is_multiple_of(3) {
                         // Write
                         let current = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
                         let version = current.version.as_u64();
