@@ -6,7 +6,7 @@
 //!
 //! This is a capability-based design: having the handle *is* the authorization.
 
-use strata_engine::branch_dag::SYSTEM_BRANCH;
+use strata_graph::SYSTEM_BRANCH;
 
 use crate::ipc::Backend;
 use crate::types::{BranchId, VersionedValue};

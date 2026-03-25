@@ -324,8 +324,6 @@ impl Database {
             Box::new(crate::search::SearchSubsystem),
         ]);
 
-        crate::branch_dag::load_status_cache_readonly(&db);
-
         Ok(db)
     }
 
@@ -510,8 +508,6 @@ impl Database {
             subsystems: parking_lot::RwLock::new(Vec::new()),
         });
 
-        crate::branch_dag::init_system_branch(&db);
-
         Ok(db)
     }
 
@@ -602,8 +598,6 @@ impl Database {
         // so we enable the index directly.
         let index = db.extension::<crate::search::InvertedIndex>()?;
         index.enable();
-
-        crate::branch_dag::init_system_branch(&db);
 
         Ok(db)
     }

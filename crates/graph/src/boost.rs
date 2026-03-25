@@ -98,9 +98,9 @@ pub fn apply_boost(score: f32, weight: f64, proximity: f64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::Database;
-    use crate::graph::types::*;
+    use crate::types::*;
     use std::sync::Arc;
+    use strata_engine::Database;
 
     fn setup() -> (Arc<Database>, GraphStore) {
         let db = Database::cache().unwrap();

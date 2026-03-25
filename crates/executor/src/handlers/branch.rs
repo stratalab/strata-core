@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
-use strata_engine::branch_dag;
 use strata_engine::BranchMetadata;
+use strata_graph::branch_dag;
 
 use crate::bridge::{extract_version, from_engine_branch_status, Primitives};
 use crate::convert::convert_result;

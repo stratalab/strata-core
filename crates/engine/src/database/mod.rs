@@ -359,7 +359,7 @@ impl Database {
     ///
     /// This is for internal engine use. External users should use
     /// primitives (KVStore, EventLog, etc.) which go through transactions.
-    pub(crate) fn storage(&self) -> &Arc<SegmentedStore> {
+    pub fn storage(&self) -> &Arc<SegmentedStore> {
         &self.storage
     }
 
@@ -407,7 +407,7 @@ impl Database {
     ///
     /// Skips Version enum and VersionedValue construction. Used by the
     /// KVStore::get() hot path where version metadata is not needed.
-    pub(crate) fn get_value_direct(
+    pub fn get_value_direct(
         &self,
         key: &Key,
     ) -> strata_core::StrataResult<Option<strata_core::value::Value>> {

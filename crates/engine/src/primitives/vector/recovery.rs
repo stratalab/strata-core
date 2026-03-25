@@ -366,7 +366,10 @@ impl crate::recovery::Subsystem for VectorSubsystem {
         "vector"
     }
 
-    fn recover(&self, db: &crate::database::Database) -> strata_core::StrataResult<()> {
+    fn recover(
+        &self,
+        db: &std::sync::Arc<crate::database::Database>,
+    ) -> strata_core::StrataResult<()> {
         recover_vector_state(db)
     }
 

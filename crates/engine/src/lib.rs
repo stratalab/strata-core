@@ -33,12 +33,12 @@ pub mod transaction_ops; // TransactionOps Trait Definition
 
 pub use background::{BackgroundScheduler, BackpressureError, SchedulerStats, TaskPriority};
 pub use coordinator::{TransactionCoordinator, TransactionMetrics};
+pub use database::builder::DatabaseBuilder;
 pub use database::{
     CacheMetrics, Database, DatabaseDiskUsage, HealthReport, ModelConfig, StorageConfig,
     StorageMetricsSummary, StrataConfig, SubsystemHealth, SubsystemStatus, SystemMetrics,
 };
 pub use instrumentation::PerfTrace;
-pub use database::builder::DatabaseBuilder;
 pub use recovery::{
     recover_all_participants, register_recovery_participant, RecoveryFn, RecoveryParticipant,
     Subsystem,
@@ -49,11 +49,8 @@ pub use strata_durability::WalCounters;
 pub use transaction::{Transaction, TransactionPool, MAX_POOL_SIZE};
 pub use transaction_ops::TransactionOps;
 
-pub mod branch_dag;
 pub mod branch_ops;
-pub mod branch_status_cache;
 pub mod bundle;
-pub mod graph;
 pub mod primitives;
 pub mod search;
 
@@ -64,9 +61,9 @@ pub use search::{SearchBudget, SearchHit, SearchMode, SearchRequest, SearchRespo
 pub use branch_ops::MaterializeInfo;
 
 // Re-export search recovery registration and subsystem implementations
+pub use primitives::vector::VectorSubsystem;
 pub use search::register_search_recovery;
 pub use search::SearchSubsystem;
-pub use primitives::vector::VectorSubsystem;
 
 // Re-export submodules for `strata_engine::vector::*` and `strata_engine::extensions::*` access
 pub use primitives::extensions;
@@ -139,14 +136,6 @@ pub use primitives::{
     VectorStoreExt,
 };
 
-// Re-export graph types at crate root
-pub use graph::boost::{apply_boost, compute_proximity_map, GraphBoost};
-pub use graph::types::{
-    BfsOptions, BfsResult, CascadePolicy, Direction, Edge, EdgeData, GraphAlgorithm, GraphMeta,
-    GraphSnapshot, Neighbor, NodeData,
-};
-pub use graph::GraphStore;
-
 // Re-export bundle types at crate root
 pub use bundle::{BundleInfo, ExportInfo, ImportInfo};
 
@@ -156,8 +145,11 @@ pub use branch_ops::{
     ForkInfo, MergeInfo, MergeStrategy, SpaceDiff,
 };
 
-// Re-export branch_dag types at crate root
-pub use branch_dag::{DagBranchInfo, DagBranchStatus, DagEventId, ForkRecord, MergeRecord};
+// Re-export branch_dag types from core at crate root for convenience
+pub use strata_core::branch_dag::{
+    is_system_branch, DagBranchInfo, DagBranchStatus, DagEventId, ForkRecord, MergeRecord,
+    BRANCH_DAG_GRAPH, SYSTEM_BRANCH,
+};
 
 #[cfg(feature = "perf-trace")]
 pub use instrumentation::{PerfBreakdown, PerfStats};

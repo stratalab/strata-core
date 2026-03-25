@@ -5,7 +5,7 @@
 
 use dashmap::DashMap;
 
-use crate::branch_dag::DagBranchStatus;
+use strata_core::branch_dag::DagBranchStatus;
 
 /// Cache of branch statuses, populated from the `_branch_dag` graph.
 ///

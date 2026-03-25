@@ -173,6 +173,7 @@ impl Strata {
         // Try to open the database directly
         match Database::open_with_config(&data_dir, cfg) {
             Ok(db) => {
+                strata_graph::branch_dag::init_system_branch(&db);
                 let executor = Executor::new_with_mode(db, access_mode);
                 match access_mode {
                     AccessMode::ReadWrite => Self::ensure_default_branch(&executor)?,
@@ -290,6 +291,7 @@ impl Strata {
             reason: format!("Failed to open cache database: {}", e),
             hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
         })?;
+        strata_graph::branch_dag::init_system_branch(&db);
         let executor = Executor::new(db);
 
         // Ensure the default branch exists

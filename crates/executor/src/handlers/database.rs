@@ -124,7 +124,7 @@ pub fn describe(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
                 .snapshot_stats(branch_id, &name)
                 .unwrap_or_else(|e| {
                     warn!("describe: snapshot_stats for '{}' failed: {}", name, e);
-                    strata_engine::graph::types::GraphStats {
+                    strata_graph::types::GraphStats {
                         node_count: 0,
                         edge_count: 0,
                     }

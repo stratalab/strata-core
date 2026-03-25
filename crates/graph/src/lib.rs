@@ -7,6 +7,8 @@
 pub mod adjacency;
 pub mod analytics;
 pub mod boost;
+pub mod branch_dag;
+pub mod branch_status_cache;
 pub mod integrity;
 pub mod keys;
 pub mod ontology;
@@ -15,13 +17,19 @@ mod snapshot;
 pub mod traversal;
 pub mod types;
 
+pub use branch_dag::GraphSubsystem;
+pub use strata_core::branch_dag::{
+    is_system_branch, DagBranchInfo, DagBranchStatus, DagEventId, ForkRecord, MergeRecord,
+    BRANCH_DAG_GRAPH, SYSTEM_BRANCH,
+};
+
 use std::sync::Arc;
 
 use strata_core::types::{BranchId, Key};
 use strata_core::{StrataError, StrataResult, Value};
 
-use crate::database::Database;
 use adjacency::AdjacencyIndex;
+use strata_engine::Database;
 use types::*;
 
 /// Graph store providing CRUD operations on nodes and edges.
