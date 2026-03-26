@@ -19,9 +19,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 use strata_core::value::Value;
-use strata_core::PrimitiveType;
 use strata_core::StrataError;
 use strata_core::StrataResult;
+use strata_core::{PrimitiveType, Version, VersionedValue};
 use tracing::info;
 
 // =============================================================================
@@ -896,6 +896,10 @@ struct MergeAction {
     raw_key: Vec<u8>,
     type_tag: TypeTag,
     action: MergeActionKind,
+    /// What the diff saw in the target at snapshot time.
+    /// `None` means the key did not exist in the target.
+    /// Used to validate target hasn't changed between diff and apply (#1917).
+    expected_target: Option<Value>,
 }
 
 enum MergeActionKind {
@@ -963,6 +967,7 @@ fn three_way_diff(
     merge_base: &MergeBase,
     spaces: &[String],
     strategy: MergeStrategy,
+    snapshot_version: u64,
 ) -> StrataResult<(Vec<MergeAction>, Vec<ConflictEntry>)> {
     let storage = db.storage();
     let mut actions = Vec::new();
@@ -977,11 +982,35 @@ fn three_way_diff(
                 merge_base.version,
             );
 
-            // 2. Source current state (live keys only)
-            let source_entries = storage.list_by_type(&source_id, type_tag);
+            // 2. Source state at snapshot (consistent point-in-time, #1917)
+            let source_entries: Vec<(Key, VersionedValue)> = storage
+                .list_by_type_at_version(&source_id, type_tag, snapshot_version)
+                .into_iter()
+                .filter(|e| !e.is_tombstone)
+                .map(|e| {
+                    let vv = VersionedValue {
+                        value: e.value,
+                        version: Version::Txn(e.commit_id),
+                        timestamp: strata_core::Timestamp::from_micros(0),
+                    };
+                    (e.key, vv)
+                })
+                .collect();
 
-            // 3. Target current state (live keys only)
-            let target_entries = storage.list_by_type(&target_id, type_tag);
+            // 3. Target state at snapshot (consistent point-in-time, #1917)
+            let target_entries: Vec<(Key, VersionedValue)> = storage
+                .list_by_type_at_version(&target_id, type_tag, snapshot_version)
+                .into_iter()
+                .filter(|e| !e.is_tombstone)
+                .map(|e| {
+                    let vv = VersionedValue {
+                        value: e.value,
+                        version: Version::Txn(e.commit_id),
+                        timestamp: strata_core::Timestamp::from_micros(0),
+                    };
+                    (e.key, vv)
+                })
+                .collect();
 
             // Build lookup maps: user_key_bytes → Value (or None for tombstone)
             let mut ancestor_map: HashMap<Vec<u8>, Option<Value>> = HashMap::new();
@@ -1051,6 +1080,7 @@ fn three_way_diff(
                             raw_key: user_key.clone(),
                             type_tag,
                             action: MergeActionKind::Put(value),
+                            expected_target: target_val.cloned(),
                         });
                     }
 
@@ -1060,6 +1090,7 @@ fn three_way_diff(
                             raw_key: user_key.clone(),
                             type_tag,
                             action: MergeActionKind::Delete,
+                            expected_target: target_val.cloned(),
                         });
                     }
 
@@ -1081,6 +1112,7 @@ fn three_way_diff(
                                 raw_key: user_key.clone(),
                                 type_tag,
                                 action: MergeActionKind::Put(source_value),
+                                expected_target: target_val.cloned(),
                             });
                         }
                     }
@@ -1102,6 +1134,7 @@ fn three_way_diff(
                                 raw_key: user_key.clone(),
                                 type_tag,
                                 action: MergeActionKind::Put(source_value),
+                                expected_target: target_val.cloned(),
                             });
                         }
                     }
@@ -1120,6 +1153,7 @@ fn three_way_diff(
                                 raw_key: user_key.clone(),
                                 type_tag,
                                 action: MergeActionKind::Put(source_value),
+                                expected_target: target_val.cloned(),
                             });
                         }
                     }
@@ -1138,6 +1172,7 @@ fn three_way_diff(
                                 raw_key: user_key.clone(),
                                 type_tag,
                                 action: MergeActionKind::Delete,
+                                expected_target: target_val.cloned(),
                             });
                         }
                     }
@@ -1213,9 +1248,19 @@ pub fn merge_branches(
     let target_spaces: HashSet<String> = space_index.list(target_id)?.into_iter().collect();
     let all_spaces: Vec<String> = source_spaces.union(&target_spaces).cloned().collect();
 
-    // Three-way diff
-    let (actions, conflicts) =
-        three_way_diff(db, source_id, target_id, &merge_base, &all_spaces, strategy)?;
+    // Capture snapshot version for consistent reads during diff (#1917)
+    let snapshot_version = db.current_version();
+
+    // Three-way diff (reads at snapshot_version for both source and target)
+    let (actions, conflicts) = three_way_diff(
+        db,
+        source_id,
+        target_id,
+        &merge_base,
+        &all_spaces,
+        strategy,
+        snapshot_version,
+    )?;
 
     // If strict and conflicts exist, return error
     if strategy == MergeStrategy::Strict && !conflicts.is_empty() {
@@ -1244,13 +1289,15 @@ pub fn merge_branches(
     }
 
     if !actions.is_empty() {
-        // Build puts and deletes
+        // Build puts, deletes, and expected target values for validation (#1917)
         let mut puts: Vec<(Key, Value)> = Vec::new();
         let mut deletes: Vec<Key> = Vec::new();
+        let mut expected_targets: Vec<(Key, Option<Value>)> = Vec::new();
 
         for action in &actions {
             let ns = Arc::new(Namespace::for_branch_space(target_id, &action.space));
             let key = Key::new(ns, action.type_tag, action.raw_key.clone());
+            expected_targets.push((key.clone(), action.expected_target.clone()));
             match &action.action {
                 MergeActionKind::Put(value) => {
                     puts.push((key, value.clone()));
@@ -1263,8 +1310,22 @@ pub fn merge_branches(
             }
         }
 
-        // Apply in a single transaction, capturing the merge version
+        // Apply in a single transaction, capturing the merge version.
+        // Read each target key first to populate read_set for OCC (#1917).
         let ((), version) = db.transaction_with_version(target_id, |txn| {
+            // Validate target hasn't changed since the diff snapshot (#1917).
+            // txn.get() populates read_set, enabling OCC conflict detection.
+            for (key, expected) in &expected_targets {
+                let current = txn.get(key)?;
+                if current.as_ref() != expected.as_ref() {
+                    return Err(StrataError::conflict(format!(
+                        "merge target concurrently modified: key changed between \
+                         diff snapshot and apply (expected present={}, found present={})",
+                        expected.is_some(),
+                        current.is_some(),
+                    )));
+                }
+            }
             for (key, value) in &puts {
                 txn.put(key.clone(), value.clone())?;
             }
@@ -2213,6 +2274,9 @@ pub fn cherry_pick_from_diff(
     let target_spaces: HashSet<String> = space_index.list(target_id)?.into_iter().collect();
     let all_spaces: Vec<String> = source_spaces.union(&target_spaces).cloned().collect();
 
+    // Capture snapshot for consistent reads (#1917)
+    let snapshot_version = db.current_version();
+
     // Compute three-way diff with LastWriterWins (we'll filter the actions)
     let (actions, _conflicts) = three_way_diff(
         db,
@@ -2221,6 +2285,7 @@ pub fn cherry_pick_from_diff(
         &merge_base,
         &all_spaces,
         MergeStrategy::LastWriterWins,
+        snapshot_version,
     )?;
 
     // Filter by CherryPickFilter
@@ -2278,9 +2343,11 @@ pub fn cherry_pick_from_diff(
         }
     }
 
+    let mut expected_targets: Vec<(Key, Option<Value>)> = Vec::new();
     for action in &filtered_actions {
         let ns = Arc::new(Namespace::for_branch_space(target_id, &action.space));
         let key = Key::new(ns, action.type_tag, action.raw_key.clone());
+        expected_targets.push((key.clone(), action.expected_target.clone()));
         match &action.action {
             MergeActionKind::Put(value) => {
                 puts.push((key, value.clone()));
@@ -2297,6 +2364,15 @@ pub fn cherry_pick_from_diff(
 
     if !puts.is_empty() || !deletes.is_empty() {
         let ((), version) = db.transaction_with_version(target_id, |txn| {
+            // Validate target hasn't changed since diff snapshot (#1917)
+            for (key, expected) in &expected_targets {
+                let current = txn.get(key)?;
+                if current.as_ref() != expected.as_ref() {
+                    return Err(StrataError::conflict(
+                        "cherry-pick target concurrently modified",
+                    ));
+                }
+            }
             for (key, value) in &puts {
                 txn.put(key.clone(), value.clone())?;
             }
@@ -4525,6 +4601,227 @@ mod tests {
         assert_eq!(diff.summary.total_added, 0);
         assert_eq!(diff.summary.total_removed, 0);
         assert_eq!(diff.summary.total_modified, 0);
+    }
+
+    /// Issue #1917: merge_branches() blind writes skip OCC validation,
+    /// allowing concurrent target modifications to be silently overwritten.
+    ///
+    /// This test reproduces the race:
+    /// - Target has key_A="old", source has key_A="new" (SourceChanged)
+    /// - A concurrent writer modifies target[key_A]="concurrent_value"
+    /// - merge_branches applies key_A="new" to target
+    ///
+    /// Before fix: merge blindly writes "new" (empty read_set → OCC skipped),
+    ///   "concurrent_value" silently lost.
+    /// After fix: merge reads target keys in apply transaction (populating
+    ///   read_set), detects concurrent modification via OCC or validation.
+    #[test]
+    fn test_issue_1917_merge_concurrent_target_write() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        let (_temp, db) = setup_with_branch("target");
+        write_kv(
+            &db,
+            "target",
+            "default",
+            "key_A",
+            Value::String("old".into()),
+        );
+
+        // Add padding keys so the diff computation takes longer,
+        // widening the window for the concurrent write to land between
+        // the diff read and the apply.
+        for i in 0..200 {
+            write_kv(
+                &db,
+                "target",
+                "default",
+                &format!("pad_{:04}", i),
+                Value::Int(i as i64),
+            );
+        }
+
+        fork_branch(&db, "target", "source").unwrap();
+        write_kv(
+            &db,
+            "source",
+            "default",
+            "key_A",
+            Value::String("new".into()),
+        );
+
+        // Modify padding keys on source so diff has work to do
+        for i in 0..200 {
+            write_kv(
+                &db,
+                "source",
+                "default",
+                &format!("pad_{:04}", i),
+                Value::Int(i as i64 + 1000),
+            );
+        }
+
+        let mut silent_overwrites = 0u32;
+        let iterations = 200;
+
+        for _ in 0..iterations {
+            // Reset target key_A to "old" (ancestor value)
+            write_kv(
+                &db,
+                "target",
+                "default",
+                "key_A",
+                Value::String("old".into()),
+            );
+
+            let db2 = db.clone();
+            let barrier = Arc::new(Barrier::new(2));
+            let b2 = barrier.clone();
+
+            let writer = thread::spawn(move || {
+                b2.wait();
+                thread::yield_now();
+                write_kv(
+                    &db2,
+                    "target",
+                    "default",
+                    "key_A",
+                    Value::String("concurrent_value".into()),
+                );
+            });
+
+            barrier.wait();
+            let result =
+                merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins, None);
+            writer.join().unwrap();
+
+            // Both merge and concurrent write have committed at this point.
+            let val = read_kv(&db, "target", "default", "key_A").unwrap();
+
+            if let Ok(info) = result {
+                // Merge succeeded. Check if the concurrent write was handled correctly:
+                //
+                // - If val == "new" AND conflicts includes key_A: the diff SAW the
+                //   concurrent write (BothChanged) and resolved via LWW → correct.
+                //
+                // - If val == "new" AND conflicts is empty: the diff saw target as
+                //   "old" (SourceChanged), but the concurrent write committed before
+                //   the merge → silent overwrite (BUG #1917).
+                //
+                // - If val == "concurrent_value": concurrent write committed after
+                //   the merge → correct (latest write wins).
+                if val == Value::String("new".into()) && info.conflicts.is_empty() {
+                    silent_overwrites += 1;
+                }
+            }
+            // If result is Err: merge detected concurrent modification → correct.
+        }
+
+        // After fix: concurrent modifications are either seen during diff
+        // (reported as conflicts) or detected during apply (error returned).
+        // Silent overwrites should be zero.
+        assert_eq!(
+            silent_overwrites, 0,
+            "Bug #1917: merge silently overwrote concurrent target modifications \
+             {} times out of {} iterations. merge_branches() should detect \
+             concurrent target writes via OCC validation, not use blind writes.",
+            silent_overwrites, iterations
+        );
+    }
+
+    /// Issue #1917 stress variant: two concurrent merges to the same target
+    /// should not both succeed with blind writes. After fix, OCC detects
+    /// the conflict when both transactions read and write the same target key.
+    #[test]
+    fn test_issue_1917_concurrent_merges_occ() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        let (_temp, db) = setup_with_branch("target");
+        write_kv(
+            &db,
+            "target",
+            "default",
+            "shared",
+            Value::String("ancestor".into()),
+        );
+
+        fork_branch(&db, "target", "source1").unwrap();
+        fork_branch(&db, "target", "source2").unwrap();
+        write_kv(
+            &db,
+            "source1",
+            "default",
+            "shared",
+            Value::String("from_s1".into()),
+        );
+        write_kv(
+            &db,
+            "source2",
+            "default",
+            "shared",
+            Value::String("from_s2".into()),
+        );
+
+        let mut both_succeeded = 0u32;
+        let iterations = 200;
+
+        for _ in 0..iterations {
+            // Reset target to ancestor value
+            write_kv(
+                &db,
+                "target",
+                "default",
+                "shared",
+                Value::String("ancestor".into()),
+            );
+
+            let db1 = db.clone();
+            let db2 = db.clone();
+            let barrier = Arc::new(Barrier::new(2));
+            let b1 = barrier.clone();
+            let b2 = barrier.clone();
+
+            let t1 = thread::spawn(move || {
+                b1.wait();
+                merge_branches(
+                    &db1,
+                    "source1",
+                    "target",
+                    MergeStrategy::LastWriterWins,
+                    None,
+                )
+            });
+            let t2 = thread::spawn(move || {
+                b2.wait();
+                merge_branches(
+                    &db2,
+                    "source2",
+                    "target",
+                    MergeStrategy::LastWriterWins,
+                    None,
+                )
+            });
+
+            let r1 = t1.join().unwrap();
+            let r2 = t2.join().unwrap();
+
+            if r1.is_ok() && r2.is_ok() {
+                both_succeeded += 1;
+            }
+        }
+
+        // After fix: concurrent merges to the same target key should produce
+        // OCC conflicts (both read and write the same key in their transactions).
+        // Before fix: both always succeed (blind writes, empty read_set).
+        assert!(
+            both_succeeded < iterations,
+            "Bug #1917: two concurrent merges to the same target key both succeeded \
+             in all {} iterations. At least some should fail with OCC conflict when \
+             merge transactions include target key reads.",
+            iterations
+        );
     }
 
     #[test]
