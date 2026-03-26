@@ -161,13 +161,19 @@ impl Database {
         for record in &records {
             max_txn_id = max_txn_id.max(record.txn_id);
 
-            let payload = strata_concurrency::TransactionPayload::from_bytes(&record.writeset)
-                .map_err(|e| {
-                    StrataError::storage(format!(
-                        "Failed to decode WAL payload for txn {}: {}",
-                        record.txn_id, e
-                    ))
-                })?;
+            let payload =
+                match strata_concurrency::TransactionPayload::from_bytes(&record.writeset) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!(
+                            target: "strata::db",
+                            txn_id = record.txn_id,
+                            error = %e,
+                            "Refresh: skipping WAL record with corrupt payload"
+                        );
+                        continue;
+                    }
+                };
 
             max_version = max_version.max(payload.version);
 

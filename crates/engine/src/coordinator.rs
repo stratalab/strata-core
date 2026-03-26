@@ -413,6 +413,9 @@ impl TransactionCoordinator {
     }
 
     /// Remove the per-branch commit lock for a deleted branch.
+    ///
+    /// Returns `true` if removed (or didn't exist), `false` if a concurrent
+    /// commit is in-flight.
     pub fn remove_branch_lock(&self, branch_id: &BranchId) -> bool {
         self.manager.remove_branch_lock(branch_id)
     }
