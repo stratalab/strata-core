@@ -24,12 +24,18 @@
 
 use crate::database::Database;
 use crate::primitives::extensions::KVStoreExt;
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
 use std::sync::Arc;
 use strata_concurrency::TransactionContext;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
 use strata_core::StrataResult;
 use strata_core::{Version, VersionedHistory};
+
+/// Global cache of `Arc<Namespace>` per (branch, space) pair. One heap allocation
+/// per unique combination, ever — subsequent calls return `Arc::clone()`.
+static NS_CACHE: Lazy<DashMap<(BranchId, String), Arc<Namespace>>> = Lazy::new(DashMap::new);
 
 /// General-purpose key-value store primitive
 ///
@@ -58,9 +64,12 @@ impl KVStore {
         Self { db }
     }
 
-    /// Build namespace for branch+space-scoped operations
+    /// Build namespace for branch+space-scoped operations.
+    ///
+    /// Returns a cached `Arc<Namespace>` — one heap allocation per unique
+    /// (branch, space) pair, ever. Subsequent calls return `Arc::clone()`.
     fn namespace_for(&self, branch_id: &BranchId, space: &str) -> Arc<Namespace> {
-        Arc::new(Namespace::for_branch_space(*branch_id, space))
+        cached_namespace(*branch_id, space)
     }
 
     /// Build key for KV operation
@@ -138,11 +147,7 @@ impl KVStore {
         value: Value,
     ) -> StrataResult<Version> {
         // Extract text for indexing before the value is consumed
-        let text_for_index = match &value {
-            Value::String(s) => Some(s.clone()),
-            Value::Null | Value::Bool(_) | Value::Bytes(_) => None,
-            other => serde_json::to_string(other).ok(),
-        };
+        let text_for_index = value.extractable_text();
 
         let storage_key = self.key_for(branch_id, space, key);
         let branch_id = *branch_id;
@@ -232,6 +237,116 @@ impl KVStore {
         })
     }
 
+    /// List keys with cursor-based pagination pushed down to the engine.
+    ///
+    /// Returns up to `limit + 1` keys after `cursor` (the extra entry signals
+    /// "has more"). This avoids materializing user-key strings for the entire
+    /// scan — only the page window is allocated.
+    ///
+    /// Note: The underlying `scan_prefix` still reads all matching entries from
+    /// storage. True storage-level push-down is a future optimisation.
+    pub fn list_with_cursor_limit(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        prefix: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> StrataResult<Vec<String>> {
+        self.db.transaction(*branch_id, |txn| {
+            let ns = self.namespace_for(branch_id, space);
+            let scan_prefix = Key::new_kv(ns, prefix.unwrap_or(""));
+
+            let results = txn.scan_prefix(&scan_prefix)?;
+
+            let iter = results
+                .into_iter()
+                .filter_map(|(key, _)| key.user_key_string());
+
+            if let Some(cur) = cursor {
+                // "Start after" semantics: skip keys <= cursor
+                let cur_owned = cur.to_string();
+                Ok(iter
+                    .skip_while(move |k| k.as_str() <= cur_owned.as_str())
+                    .take(limit + 1)
+                    .collect())
+            } else {
+                Ok(iter.take(limit + 1).collect())
+            }
+        })
+    }
+
+    /// Count keys matching an optional prefix without materializing user-key strings.
+    ///
+    /// Returns the number of matching keys. More memory-efficient than
+    /// `list().len()` because it never allocates the key strings.
+    pub fn count(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        prefix: Option<&str>,
+    ) -> StrataResult<u64> {
+        self.db.transaction(*branch_id, |txn| {
+            let ns = self.namespace_for(branch_id, space);
+            let scan_prefix = Key::new_kv(ns, prefix.unwrap_or(""));
+
+            let results = txn.scan_prefix(&scan_prefix)?;
+
+            Ok(results
+                .into_iter()
+                .filter(|(key, _)| key.user_key_string().is_some())
+                .count() as u64)
+        })
+    }
+
+    /// Sample key-value pairs with evenly-spaced selection from a single scan.
+    ///
+    /// Performs one `scan_prefix` and reads values inline, avoiding the
+    /// separate `list()` + K `get()` round-trips of the old approach.
+    pub fn sample(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        prefix: Option<&str>,
+        count: usize,
+    ) -> StrataResult<(u64, Vec<(String, Value)>)> {
+        self.db.transaction(*branch_id, |txn| {
+            let ns = self.namespace_for(branch_id, space);
+            let scan_prefix = Key::new_kv(ns, prefix.unwrap_or(""));
+
+            let results = txn.scan_prefix(&scan_prefix)?;
+
+            // Collect only user-key entries (filter out internal keys)
+            let entries: Vec<(String, Value)> = results
+                .into_iter()
+                .filter_map(|(key, value)| {
+                    key.user_key_string().map(|k| (k, value))
+                })
+                .collect();
+
+            let total = entries.len() as u64;
+
+            if count == 0 || entries.is_empty() {
+                return Ok((total, Vec::new()));
+            }
+            if count >= entries.len() {
+                return Ok((total, entries));
+            }
+
+            // Evenly-spaced sampling
+            let step = entries.len() as f64 / count as f64;
+            let sampled = (0..count)
+                .map(|i| {
+                    let idx = (i as f64 * step) as usize;
+                    // Safety: idx < entries.len() because step = len/count and i < count
+                    entries[idx].clone()
+                })
+                .collect();
+
+            Ok((total, sampled))
+        })
+    }
+
     // ========== Batch API ==========
 
     /// Put multiple key-value pairs in a single transaction.
@@ -252,11 +367,7 @@ impl KVStore {
         // Extract text for indexing BEFORE the values are consumed by the transaction
         let texts: Vec<Option<String>> = entries
             .iter()
-            .map(|(_, value)| match value {
-                Value::String(s) => Some(s.clone()),
-                Value::Null | Value::Bool(_) | Value::Bytes(_) => None,
-                other => serde_json::to_string(other).ok(),
-            })
+            .map(|(_, value)| value.extractable_text())
             .collect();
 
         let ((), commit_version) = self.db.transaction_with_version(*branch_id, |txn| {
@@ -407,21 +518,30 @@ impl crate::search::Searchable for KVStore {
 
 // ========== KVStoreExt Implementation ==========
 
+/// Look up or create a cached namespace for a (branch, space) pair.
+fn cached_namespace(branch_id: BranchId, space: &str) -> Arc<Namespace> {
+    let sp = space.to_string();
+    NS_CACHE
+        .entry((branch_id, sp.clone()))
+        .or_insert_with(|| Arc::new(Namespace::for_branch_space(branch_id, &sp)))
+        .clone()
+}
+
 impl KVStoreExt for TransactionContext {
-    fn kv_get(&mut self, key: &str) -> StrataResult<Option<Value>> {
-        let ns = Arc::new(Namespace::for_branch(self.branch_id));
+    fn kv_get_in_space(&mut self, space: &str, key: &str) -> StrataResult<Option<Value>> {
+        let ns = cached_namespace(self.branch_id, space);
         let storage_key = Key::new_kv(ns, key);
         self.get(&storage_key)
     }
 
-    fn kv_put(&mut self, key: &str, value: Value) -> StrataResult<()> {
-        let ns = Arc::new(Namespace::for_branch(self.branch_id));
+    fn kv_put_in_space(&mut self, space: &str, key: &str, value: Value) -> StrataResult<()> {
+        let ns = cached_namespace(self.branch_id, space);
         let storage_key = Key::new_kv(ns, key);
         self.put(storage_key, value)
     }
 
-    fn kv_delete(&mut self, key: &str) -> StrataResult<()> {
-        let ns = Arc::new(Namespace::for_branch(self.branch_id));
+    fn kv_delete_in_space(&mut self, space: &str, key: &str) -> StrataResult<()> {
+        let ns = cached_namespace(self.branch_id, space);
         let storage_key = Key::new_kv(ns, key);
         self.delete(storage_key)?;
         Ok(())

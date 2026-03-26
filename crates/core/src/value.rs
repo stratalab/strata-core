@@ -119,6 +119,22 @@ impl Value {
         }
     }
 
+    /// Extract indexable text from this value for BM25 / full-text search.
+    ///
+    /// Returns `Some(text)` for values that produce meaningful text:
+    /// - `String` → the string itself
+    /// - `Int`, `Float`, `Array`, `Object` → JSON serialization
+    ///
+    /// Returns `None` for values with no useful textual representation:
+    /// - `Null`, `Bool`, `Bytes`
+    pub fn extractable_text(&self) -> Option<String> {
+        match self {
+            Value::String(s) => Some(s.clone()),
+            Value::Null | Value::Bool(_) | Value::Bytes(_) => None,
+            other => serde_json::to_string(other).ok(),
+        }
+    }
+
     /// Check if this is a null value
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
