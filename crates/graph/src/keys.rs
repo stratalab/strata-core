@@ -1,6 +1,6 @@
 //! Key construction and parsing for graph storage.
 //!
-//! All graph data is stored under the `_graph_` space using KV-type keys.
+//! All graph data is stored under the `_graph_` space using Graph-type keys.
 //! Key format uses `/` as a separator between path segments.
 
 use std::sync::Arc;
@@ -110,7 +110,7 @@ pub fn invalidate_namespace_cache(branch_id: &BranchId) {
 
 /// Build a full storage Key from a user_key string in the graph namespace.
 pub fn graph_key(branch_id: BranchId, user_key: &str) -> Key {
-    Key::new_kv(graph_namespace(branch_id), user_key)
+    Key::new_graph(graph_namespace(branch_id), user_key)
 }
 
 // --- Packed adjacency list keys ---
@@ -356,10 +356,10 @@ pub fn storage_key(branch_id: BranchId, user_key: &str) -> Key {
     graph_key(branch_id, user_key)
 }
 
-/// Check that a storage key has the expected TypeTag::KV.
+/// Check that a storage key has the expected TypeTag::Graph.
 #[cfg(test)]
-fn assert_kv_tag(key: &Key) {
-    assert_eq!(key.type_tag, TypeTag::KV);
+fn assert_graph_tag(key: &Key) {
+    assert_eq!(key.type_tag, TypeTag::Graph);
 }
 
 #[cfg(test)]
@@ -501,10 +501,10 @@ mod tests {
     }
 
     #[test]
-    fn storage_key_has_kv_type_tag() {
+    fn storage_key_has_graph_type_tag() {
         let branch = BranchId::from_bytes([0u8; 16]);
         let key = storage_key(branch, "test/key");
-        assert_kv_tag(&key);
+        assert_graph_tag(&key);
     }
 
     // --- URI encoding edge cases ---
@@ -786,7 +786,7 @@ mod tests {
     #[test]
     fn hoisted_namespace_key_equals_storage_key() {
         // Verify that the bulk_insert optimization path
-        // (Key::new_kv(ns.clone(), ...)) produces keys identical to
+        // (Key::new_graph(ns.clone(), ...)) produces keys identical to
         // the standard path (storage_key(branch_id, ...)).
         let branch =
             BranchId::from_bytes([0xCA, 0xCE, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -804,7 +804,7 @@ mod tests {
 
         for user_key in &user_keys {
             let via_storage = storage_key(branch, user_key);
-            let via_hoisted = Key::new_kv(ns.clone(), user_key);
+            let via_hoisted = Key::new_graph(ns.clone(), user_key);
             assert_eq!(
                 via_storage, via_hoisted,
                 "Key mismatch for user_key={user_key:?}"
