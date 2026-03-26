@@ -208,10 +208,11 @@ impl Session {
             // prefix scan, which is non-trivial. It reads from the committed
             // store even during an active transaction.
             | Command::JsonList { .. }
-            // EventGetByType filters events by type tag at the storage layer.
-            // The transaction write-set does not maintain per-type indexes, so
-            // this always reads from the committed store even during an active
-            // transaction.
+            // EventGetByType uses scan_prefix on per-type index keys.
+            // The transaction write-set has these keys (#1972), but
+            // scan_prefix is only available on the committed store, so
+            // this always reads from the committed store even during an
+            // active transaction.
             | Command::EventGetByType { .. } => self.executor.execute(cmd),
 
             // Data commands: route through txn if active, else delegate
