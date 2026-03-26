@@ -33,6 +33,10 @@ impl From<StrataError> for Error {
                         stream: entity_str,
                         hint: None,
                     },
+                    EntityRef::Graph { .. } => Error::KeyNotFound {
+                        key: entity_str,
+                        hint: None,
+                    },
                 }
             }
 

@@ -3,9 +3,9 @@
 //! This type supports Invariant 6: Everything is Introspectable.
 //! Every entity can report what kind of primitive it is.
 //!
-//! ## The Five Primitives
+//! ## The Six Primitives
 //!
-//! The database has exactly five primitives:
+//! The database has exactly six primitives:
 //!
 //! | Primitive | Purpose | Versioning |
 //! |-----------|---------|------------|
@@ -14,17 +14,18 @@
 //! | Branch | Branch lifecycle management | TxnId |
 //! | Json | JSON document store | TxnId |
 //! | Vector | Vector similarity search | TxnId |
+//! | Graph | Property graph store | TxnId |
 
 use serde::{Deserialize, Serialize};
 
-/// The five primitive types in the database
+/// The six primitive types in the database
 ///
 /// This enum identifies which primitive a value or operation belongs to.
 /// Used for type discrimination, routing, and introspection.
 ///
 /// ## Invariant
 ///
-/// This enum MUST have exactly 5 variants - one for each primitive.
+/// This enum MUST have exactly 6 variants - one for each primitive.
 /// Adding a new primitive requires adding a variant here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PrimitiveType {
@@ -57,16 +58,23 @@ pub enum PrimitiveType {
     /// Vector similarity search with HNSW index.
     /// Versioning: TxnId
     Vector,
+
+    /// Graph store
+    ///
+    /// Property graph with nodes, edges, and traversal algorithms.
+    /// Versioning: TxnId
+    Graph,
 }
 
 impl PrimitiveType {
     /// All primitive types (for iteration)
-    pub const ALL: [PrimitiveType; 5] = [
+    pub const ALL: [PrimitiveType; 6] = [
         PrimitiveType::Kv,
         PrimitiveType::Event,
         PrimitiveType::Branch,
         PrimitiveType::Json,
         PrimitiveType::Vector,
+        PrimitiveType::Graph,
     ];
 
     /// Get all primitive types as a slice
@@ -82,6 +90,7 @@ impl PrimitiveType {
             PrimitiveType::Branch => "BranchIndex",
             PrimitiveType::Json => "JsonStore",
             PrimitiveType::Vector => "VectorStore",
+            PrimitiveType::Graph => "GraphStore",
         }
     }
 
@@ -93,6 +102,7 @@ impl PrimitiveType {
             PrimitiveType::Branch => "branch",
             PrimitiveType::Json => "json",
             PrimitiveType::Vector => "vector",
+            PrimitiveType::Graph => "graph",
         }
     }
 
@@ -104,6 +114,7 @@ impl PrimitiveType {
             "branch" => Some(PrimitiveType::Branch),
             "json" => Some(PrimitiveType::Json),
             "vector" => Some(PrimitiveType::Vector),
+            "graph" => Some(PrimitiveType::Graph),
             _ => None,
         }
     }
@@ -119,6 +130,7 @@ impl PrimitiveType {
             PrimitiveType::Branch => true,
             PrimitiveType::Json => true,
             PrimitiveType::Vector => true,
+            PrimitiveType::Graph => true,
         }
     }
 
@@ -142,6 +154,7 @@ impl PrimitiveType {
             PrimitiveType::Event => (0x30, 0x3F),
             PrimitiveType::Branch => (0x40, 0x4F),
             PrimitiveType::Vector => (0x50, 0x5F),
+            PrimitiveType::Graph => (0x60, 0x6F),
         }
     }
 
@@ -155,6 +168,7 @@ impl PrimitiveType {
             PrimitiveType::Event => 3,
             PrimitiveType::Branch => 4,
             PrimitiveType::Vector => 5,
+            PrimitiveType::Graph => 6,
         }
     }
 }
@@ -176,7 +190,7 @@ mod tests {
     #[test]
     fn test_primitive_type_all() {
         let all = PrimitiveType::all();
-        assert_eq!(all.len(), 5);
+        assert_eq!(all.len(), 6);
 
         // Verify all variants are present
         assert!(all.contains(&PrimitiveType::Kv));
@@ -184,11 +198,12 @@ mod tests {
         assert!(all.contains(&PrimitiveType::Branch));
         assert!(all.contains(&PrimitiveType::Json));
         assert!(all.contains(&PrimitiveType::Vector));
+        assert!(all.contains(&PrimitiveType::Graph));
     }
 
     #[test]
     fn test_primitive_type_const_all() {
-        assert_eq!(PrimitiveType::ALL.len(), 5);
+        assert_eq!(PrimitiveType::ALL.len(), 6);
     }
 
     #[test]
@@ -198,6 +213,7 @@ mod tests {
         assert_eq!(PrimitiveType::Branch.name(), "BranchIndex");
         assert_eq!(PrimitiveType::Json.name(), "JsonStore");
         assert_eq!(PrimitiveType::Vector.name(), "VectorStore");
+        assert_eq!(PrimitiveType::Graph.name(), "GraphStore");
     }
 
     #[test]
@@ -207,6 +223,7 @@ mod tests {
         assert_eq!(PrimitiveType::Branch.id(), "branch");
         assert_eq!(PrimitiveType::Json.id(), "json");
         assert_eq!(PrimitiveType::Vector.id(), "vector");
+        assert_eq!(PrimitiveType::Graph.id(), "graph");
     }
 
     #[test]
@@ -222,6 +239,7 @@ mod tests {
             PrimitiveType::from_id("vector"),
             Some(PrimitiveType::Vector)
         );
+        assert_eq!(PrimitiveType::from_id("graph"), Some(PrimitiveType::Graph));
         assert_eq!(PrimitiveType::from_id("state"), None);
         assert_eq!(PrimitiveType::from_id("invalid"), None);
     }
@@ -249,6 +267,7 @@ mod tests {
         assert!(PrimitiveType::Branch.supports_crud());
         assert!(PrimitiveType::Json.supports_crud());
         assert!(PrimitiveType::Vector.supports_crud());
+        assert!(PrimitiveType::Graph.supports_crud());
 
         // Append-only (no delete/update)
         assert!(!PrimitiveType::Event.supports_crud());
@@ -262,6 +281,7 @@ mod tests {
         assert!(!PrimitiveType::Branch.is_append_only());
         assert!(!PrimitiveType::Json.is_append_only());
         assert!(!PrimitiveType::Vector.is_append_only());
+        assert!(!PrimitiveType::Graph.is_append_only());
     }
 
     #[test]
@@ -279,7 +299,7 @@ mod tests {
         for pt in PrimitiveType::all() {
             set.insert(*pt);
         }
-        assert_eq!(set.len(), 5, "All PrimitiveTypes should be unique");
+        assert_eq!(set.len(), 6, "All PrimitiveTypes should be unique");
     }
 
     #[test]
@@ -305,6 +325,7 @@ mod tests {
         assert_eq!(PrimitiveType::Event.entry_type_range(), (0x30, 0x3F));
         assert_eq!(PrimitiveType::Branch.entry_type_range(), (0x40, 0x4F));
         assert_eq!(PrimitiveType::Vector.entry_type_range(), (0x50, 0x5F));
+        assert_eq!(PrimitiveType::Graph.entry_type_range(), (0x60, 0x6F));
     }
 
     #[test]
@@ -314,6 +335,7 @@ mod tests {
         assert_eq!(PrimitiveType::Event.primitive_id(), 3);
         assert_eq!(PrimitiveType::Branch.primitive_id(), 4);
         assert_eq!(PrimitiveType::Vector.primitive_id(), 5);
+        assert_eq!(PrimitiveType::Graph.primitive_id(), 6);
     }
 
     #[test]
@@ -346,7 +368,7 @@ mod tests {
             .iter()
             .map(|pt| pt.primitive_id())
             .collect();
-        assert_eq!(ids.len(), 5, "All primitive IDs must be unique");
+        assert_eq!(ids.len(), 6, "All primitive IDs must be unique");
     }
 
     #[test]

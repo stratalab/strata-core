@@ -380,6 +380,7 @@ fn primitive_to_type_tags(prim: PrimitiveType) -> Vec<TypeTag> {
         PrimitiveType::Json => vec![TypeTag::Json],
         PrimitiveType::Vector => vec![TypeTag::Vector],
         PrimitiveType::Branch => vec![], // Branch metadata is not scanned in diffs
+        PrimitiveType::Graph => vec![TypeTag::Graph],
     }
 }
 
@@ -390,7 +391,8 @@ fn type_tag_to_primitive(tag: TypeTag) -> PrimitiveType {
         TypeTag::Event => PrimitiveType::Event,
         TypeTag::Json => PrimitiveType::Json,
         TypeTag::Vector => PrimitiveType::Vector,
-        _ => PrimitiveType::Kv, // fallback for Branch/Space/State/Trace metadata tags
+        TypeTag::Graph => PrimitiveType::Graph,
+        _ => PrimitiveType::Kv, // fallback for Branch/Space metadata tags
     }
 }
 

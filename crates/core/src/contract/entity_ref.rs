@@ -90,6 +90,14 @@ pub enum EntityRef {
         /// Key within collection
         key: String,
     },
+
+    /// Reference to a graph entry (node, edge, or metadata)
+    Graph {
+        /// Branch scope
+        branch_id: BranchId,
+        /// Graph name and key (e.g., "mygraph/n/node1")
+        key: String,
+    },
 }
 
 impl EntityRef {
@@ -127,6 +135,14 @@ impl EntityRef {
         EntityRef::Json { branch_id, doc_id }
     }
 
+    /// Create a graph entity reference
+    pub fn graph(branch_id: BranchId, key: impl Into<String>) -> Self {
+        EntityRef::Graph {
+            branch_id,
+            key: key.into(),
+        }
+    }
+
     /// Create a vector entity reference
     pub fn vector(
         branch_id: BranchId,
@@ -161,6 +177,7 @@ impl EntityRef {
             EntityRef::Branch { branch_id } => *branch_id,
             EntityRef::Json { branch_id, .. } => *branch_id,
             EntityRef::Vector { branch_id, .. } => *branch_id,
+            EntityRef::Graph { branch_id, .. } => *branch_id,
         }
     }
 
@@ -172,6 +189,7 @@ impl EntityRef {
             EntityRef::Branch { .. } => PrimitiveType::Branch,
             EntityRef::Json { .. } => PrimitiveType::Json,
             EntityRef::Vector { .. } => PrimitiveType::Vector,
+            EntityRef::Graph { .. } => PrimitiveType::Graph,
         }
     }
 
@@ -202,6 +220,11 @@ impl EntityRef {
     /// Check if this is a vector reference
     pub fn is_vector(&self) -> bool {
         matches!(self, EntityRef::Vector { .. })
+    }
+
+    /// Check if this is a graph reference
+    pub fn is_graph(&self) -> bool {
+        matches!(self, EntityRef::Graph { .. })
     }
 
     // =========================================================================
@@ -241,6 +264,14 @@ impl EntityRef {
             _ => None,
         }
     }
+
+    /// Get the graph key if this is a graph reference
+    pub fn graph_key(&self) -> Option<&str> {
+        match self {
+            EntityRef::Graph { key, .. } => Some(key),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for EntityRef {
@@ -267,6 +298,9 @@ impl std::fmt::Display for EntityRef {
                 key,
             } => {
                 write!(f, "vector://{}/{}/{}", branch_id, collection, key)
+            }
+            EntityRef::Graph { branch_id, key } => {
+                write!(f, "graph://{}/{}", branch_id, key)
             }
         }
     }
@@ -337,6 +371,18 @@ mod tests {
     }
 
     #[test]
+    fn test_entity_ref_graph() {
+        let branch_id = BranchId::new();
+        let ref_ = EntityRef::graph(branch_id, "mygraph/n/node1");
+
+        assert!(ref_.is_graph());
+        assert!(!ref_.is_kv());
+        assert_eq!(ref_.branch_id(), branch_id);
+        assert_eq!(ref_.primitive_type(), PrimitiveType::Graph);
+        assert_eq!(ref_.graph_key(), Some("mygraph/n/node1"));
+    }
+
+    #[test]
     fn test_entity_ref_display() {
         let branch_id = BranchId::new();
 
@@ -354,6 +400,9 @@ mod tests {
 
         let vector = EntityRef::vector(branch_id, "col", "key");
         assert!(format!("{}", vector).starts_with("vector://"));
+
+        let graph = EntityRef::graph(branch_id, "g/n/1");
+        assert!(format!("{}", graph).starts_with("graph://"));
     }
 
     #[test]
@@ -391,6 +440,7 @@ mod tests {
             EntityRef::branch(branch_id),
             EntityRef::json(branch_id, "test-doc"),
             EntityRef::vector(branch_id, "col", "key"),
+            EntityRef::graph(branch_id, "g/n/1"),
         ];
 
         for ref_ in refs {
@@ -409,6 +459,7 @@ mod tests {
         assert!(kv_ref.event_sequence().is_none());
         assert!(kv_ref.json_doc_id().is_none());
         assert!(kv_ref.vector_location().is_none());
+        assert!(kv_ref.graph_key().is_none());
     }
 
     #[test]
@@ -422,11 +473,12 @@ mod tests {
             EntityRef::branch(branch_id),
             EntityRef::json(branch_id, "j"),
             EntityRef::vector(branch_id, "c", "k"),
+            EntityRef::graph(branch_id, "g/n/1"),
         ];
 
-        // Verify they map to all 5 primitive types
+        // Verify they map to all 6 primitive types
         let types: std::collections::HashSet<_> = refs.iter().map(|r| r.primitive_type()).collect();
-        assert_eq!(types.len(), 5);
+        assert_eq!(types.len(), 6);
     }
 
     #[test]
@@ -446,6 +498,7 @@ mod tests {
             EntityRef::branch(branch_id),
             EntityRef::json(branch_id, "j"),
             EntityRef::vector(branch_id, "c", "k"),
+            EntityRef::graph(branch_id, "g/n/1"),
         ];
 
         for r in &refs {
@@ -455,6 +508,7 @@ mod tests {
                 r.is_branch(),
                 r.is_json(),
                 r.is_vector(),
+                r.is_graph(),
             ];
             assert_eq!(
                 checks.iter().filter(|&&b| b).count(),

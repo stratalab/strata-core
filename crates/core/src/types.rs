@@ -142,8 +142,9 @@ impl PartialOrd for Namespace {
 /// - Space = 0x04
 /// - Vector = 0x05
 /// - Json = 0x06
+/// - Graph = 0x07
 ///
-/// Ordering: KV < Event < Branch < Space < Vector < Json
+/// Ordering: KV < Event < Branch < Space < Vector < Json < Graph
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum TypeTag {
@@ -159,6 +160,8 @@ pub enum TypeTag {
     Vector = 0x05,
     /// JSON document store entries
     Json = 0x06,
+    /// Graph store entries (nodes, edges, metadata under `_graph_` space)
+    Graph = 0x07,
 }
 
 impl TypeTag {
@@ -176,6 +179,7 @@ impl TypeTag {
             0x04 => Some(TypeTag::Space),
             0x05 => Some(TypeTag::Vector),
             0x06 => Some(TypeTag::Json),
+            0x07 => Some(TypeTag::Graph),
             _ => None,
         }
     }
@@ -249,6 +253,13 @@ impl Key {
     /// Helper that automatically sets type_tag to TypeTag::KV
     pub fn new_kv(namespace: Arc<Namespace>, key: impl AsRef<[u8]>) -> Self {
         Self::new(namespace, TypeTag::KV, key.as_ref().to_vec())
+    }
+
+    /// Create a Graph key
+    ///
+    /// Helper that automatically sets type_tag to TypeTag::Graph
+    pub fn new_graph(namespace: Arc<Namespace>, key: impl AsRef<[u8]>) -> Self {
+        Self::new(namespace, TypeTag::Graph, key.as_ref().to_vec())
     }
 
     /// Create an event key with sequence number
@@ -823,6 +834,7 @@ mod tests {
         assert!(TypeTag::Branch < TypeTag::Space);
         assert!(TypeTag::Space < TypeTag::Vector);
         assert!(TypeTag::Vector < TypeTag::Json);
+        assert!(TypeTag::Json < TypeTag::Graph);
 
         // Verify numeric values match spec
         assert_eq!(TypeTag::KV as u8, 0x01);
@@ -831,6 +843,7 @@ mod tests {
         assert_eq!(TypeTag::Space as u8, 0x04);
         assert_eq!(TypeTag::Vector as u8, 0x05);
         assert_eq!(TypeTag::Json as u8, 0x06);
+        assert_eq!(TypeTag::Graph as u8, 0x07);
     }
 
     #[test]
@@ -841,6 +854,7 @@ mod tests {
         assert_eq!(TypeTag::Space.as_byte(), 0x04);
         assert_eq!(TypeTag::Vector.as_byte(), 0x05);
         assert_eq!(TypeTag::Json.as_byte(), 0x06);
+        assert_eq!(TypeTag::Graph.as_byte(), 0x07);
     }
 
     #[test]
@@ -851,7 +865,7 @@ mod tests {
         assert_eq!(TypeTag::from_byte(0x04), Some(TypeTag::Space));
         assert_eq!(TypeTag::from_byte(0x05), Some(TypeTag::Vector));
         assert_eq!(TypeTag::from_byte(0x06), Some(TypeTag::Json));
-        assert_eq!(TypeTag::from_byte(0x07), None);
+        assert_eq!(TypeTag::from_byte(0x07), Some(TypeTag::Graph));
         assert_eq!(TypeTag::from_byte(0x00), None);
         assert_eq!(TypeTag::from_byte(0x08), None);
         assert_eq!(TypeTag::from_byte(0xFF), None);
@@ -867,6 +881,7 @@ mod tests {
             TypeTag::Space,
             TypeTag::Vector,
             TypeTag::Json,
+            TypeTag::Graph,
         ];
         let bytes: Vec<u8> = tags.iter().map(|t| t.as_byte()).collect();
         let unique: std::collections::HashSet<u8> = bytes.iter().cloned().collect();
@@ -883,6 +898,7 @@ mod tests {
             TypeTag::Space,
             TypeTag::Vector,
             TypeTag::Json,
+            TypeTag::Graph,
         ];
 
         for tag in tags {
@@ -900,8 +916,7 @@ mod tests {
     fn test_typetag_from_byte_gap_values_return_none() {
         // Bytes outside defined variants must return None (on-disk format safety)
         for byte in [
-            0x00, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x20, 0x80, 0xFE,
-            0xFF,
+            0x00, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x20, 0x80, 0xFE, 0xFF,
         ] {
             assert_eq!(
                 TypeTag::from_byte(byte),
@@ -922,6 +937,7 @@ mod tests {
             TypeTag::Space,
             TypeTag::Vector,
             TypeTag::Json,
+            TypeTag::Graph,
         ];
         for tag in all_tags {
             let byte = tag.as_byte();
@@ -946,6 +962,7 @@ mod tests {
             TypeTag::Space,
             TypeTag::Vector,
             TypeTag::Json,
+            TypeTag::Graph,
         ];
         for window in tags_in_order.windows(2) {
             assert!(
@@ -976,6 +993,19 @@ mod tests {
     // ========================================
     // Key Tests
     // ========================================
+
+    #[test]
+    fn test_key_new_graph() {
+        let branch_id = BranchId::new();
+        let ns = Arc::new(Namespace::for_branch(branch_id));
+        let key = Key::new_graph(ns.clone(), "test_key");
+        assert_eq!(key.type_tag, TypeTag::Graph);
+        assert_eq!(key.user_key_string(), Some("test_key".to_string()));
+
+        // Graph key must not match KV prefix
+        let kv_prefix = Key::new_kv(ns.clone(), "");
+        assert_ne!(key.type_tag, kv_prefix.type_tag);
+    }
 
     #[test]
     fn test_key_construction() {

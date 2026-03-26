@@ -402,5 +402,6 @@ fn format_entity_ref(doc_ref: &strata_engine::search::EntityRef) -> (String, Str
             (uuid.to_string(), "branch".to_string())
         }
         strata_engine::search::EntityRef::Vector { key, .. } => (key.clone(), "vector".to_string()),
+        strata_engine::search::EntityRef::Graph { key, .. } => (key.clone(), "graph".to_string()),
     }
 }
