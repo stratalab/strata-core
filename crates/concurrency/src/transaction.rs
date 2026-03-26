@@ -57,6 +57,12 @@ pub enum CommitError {
     /// on restart, but it is NOT visible to reads in the current process.
     /// The caller must not assume the data is immediately readable.
     DurableButNotVisible(String),
+
+    /// Branch is being deleted (#1916)
+    ///
+    /// The target branch has been marked for deletion. Commits are rejected
+    /// to prevent data resurrection on a deleted branch.
+    BranchDeleting(strata_core::types::BranchId),
 }
 
 impl std::fmt::Display for CommitError {
@@ -75,6 +81,9 @@ impl std::fmt::Display for CommitError {
                     "Durable but not visible (will recover on restart): {}",
                     msg
                 )
+            }
+            CommitError::BranchDeleting(branch_id) => {
+                write!(f, "Branch {} is being deleted", branch_id)
             }
         }
     }
@@ -104,6 +113,9 @@ impl From<CommitError> for StrataError {
             CommitError::DurableButNotVisible(msg) => StrataError::Storage {
                 message: format!("Durable but not visible (will recover on restart): {}", msg),
                 source: None,
+            },
+            CommitError::BranchDeleting(branch_id) => StrataError::TransactionAborted {
+                reason: format!("Branch {} is being deleted", branch_id),
             },
         }
     }

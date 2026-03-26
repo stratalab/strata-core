@@ -382,6 +382,28 @@ impl TransactionCoordinator {
         self.manager.remove_branch_lock(branch_id)
     }
 
+    /// Mark a branch as being deleted (#1916).
+    ///
+    /// Subsequent commits on this branch will be rejected.
+    pub fn mark_branch_deleting(&self, branch_id: &BranchId) {
+        self.manager.mark_branch_deleting(branch_id);
+    }
+
+    /// Remove the deleting mark for a branch (#1916).
+    pub fn unmark_branch_deleting(&self, branch_id: &BranchId) {
+        self.manager.unmark_branch_deleting(branch_id);
+    }
+
+    /// Get the commit lock Arc for a branch (#1916).
+    ///
+    /// Callers can lock this to serialize with in-flight commits.
+    pub fn branch_commit_lock(
+        &self,
+        branch_id: &BranchId,
+    ) -> std::sync::Arc<parking_lot::Mutex<()>> {
+        self.manager.branch_commit_lock(branch_id)
+    }
+
     /// Advance the version counter to at least `v`.
     ///
     /// Used during multi-process refresh to catch up with other processes.

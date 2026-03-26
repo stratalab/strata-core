@@ -316,11 +316,26 @@ impl BranchIndex {
 
         let meta_key = self.key_for(branch_id);
 
-        // Single atomic transaction for all delete operations (#974).
-        // Deletes branch data from all namespaces + metadata entry.
-        // Cross-branch access is safe here: the branch is being deleted,
-        // so no concurrent user transactions should target it (#1709).
-        self.db.transaction(global_branch_id(), |txn| {
+        // --- #1916: Quiesce the target branch before deletion ---
+        //
+        // 1. Mark as deleting → future commits on this branch are rejected.
+        // 2. Acquire the target branch's commit lock → waits for any
+        //    in-flight commit to finish.  While we hold the lock no new
+        //    commit can start (the mark rejects them after they acquire
+        //    the lock, so the lock is released immediately).
+        // 3. Run the delete transaction (on global_branch_id, cross-branch).
+        // 4. Clear storage.
+        // 5. Clean up the mark and commit lock entry.
+        self.db.mark_branch_deleting(&executor_branch_id);
+        if let Some(meta_id) = metadata_branch_id {
+            if meta_id != executor_branch_id {
+                self.db.mark_branch_deleting(&meta_id);
+            }
+        }
+        let target_lock = self.db.branch_commit_lock(&executor_branch_id);
+        let _target_guard = target_lock.lock();
+
+        let result = self.db.transaction(global_branch_id(), |txn| {
             txn.set_allow_cross_branch(true);
             // Delete data from the executor's namespace
             Self::delete_namespace_data(txn, executor_branch_id)?;
@@ -337,7 +352,19 @@ impl BranchIndex {
 
             info!(target: "strata::branch", %branch_id, "Branch deleted");
             Ok(())
-        })?;
+        });
+
+        if let Err(e) = result {
+            // Roll back the deleting mark on failure so the branch
+            // remains usable.
+            self.db.unmark_branch_deleting(&executor_branch_id);
+            if let Some(meta_id) = metadata_branch_id {
+                if meta_id != executor_branch_id {
+                    self.db.unmark_branch_deleting(&meta_id);
+                }
+            }
+            return Err(e);
+        }
 
         // Evict cached namespaces for the deleted branch to prevent unbounded
         // growth of the global NS_CACHE (SCALE-001).
@@ -347,6 +374,11 @@ impl BranchIndex {
         // Must happen after logical deletion so in-progress reads see the
         // deletion before files disappear.
         self.db.clear_branch_storage(&executor_branch_id);
+
+        // Remove commit lock entry. The deleting mark is intentionally
+        // kept: any pre-existing transaction that tries to commit on
+        // this branch after deletion will be rejected (#1916).
+        self.db.remove_branch_lock(&executor_branch_id);
 
         Ok(())
     }
@@ -498,5 +530,113 @@ mod tests {
     #[test]
     fn test_branch_status_as_str() {
         assert_eq!(BranchStatus::Active.as_str(), "Active");
+    }
+
+    /// #1916: Concurrent commit on target branch must not resurrect data
+    /// after delete_branch() completes.
+    ///
+    /// Scenario: T1 starts a transaction on branch "victim", then T2
+    /// deletes "victim". If T1 commits after T2 finishes, T1's writes
+    /// must be rejected — otherwise data is resurrected on a deleted branch.
+    #[test]
+    fn test_issue_1916_delete_branch_rejects_concurrent_commit() {
+        let (_temp, db, ri) = setup();
+
+        // 1. Create the target branch and write initial data
+        ri.create_branch("victim").unwrap();
+        let branch_id = resolve_branch_name("victim");
+        let ns = Arc::new(Namespace::for_branch(branch_id));
+        let key_a = Key::new(ns.clone(), TypeTag::KV, b"key_a".to_vec());
+
+        db.transaction(branch_id, |txn| {
+            txn.put(key_a.clone(), Value::from("initial"))?;
+            Ok(())
+        })
+        .unwrap();
+
+        // 2. Start a transaction on the target branch (don't commit yet)
+        let mut inflight_txn = db.begin_transaction(branch_id).unwrap();
+        let key_b = Key::new(ns.clone(), TypeTag::KV, b"key_b".to_vec());
+        inflight_txn
+            .put(key_b.clone(), Value::from("resurrected"))
+            .unwrap();
+
+        // 3. Delete the branch (should mark as deleting, drain, then delete)
+        ri.delete_branch("victim").unwrap();
+
+        // 4. The in-flight transaction's commit must fail
+        let commit_result = db.commit_transaction(&mut inflight_txn);
+        db.end_transaction(inflight_txn);
+
+        assert!(
+            commit_result.is_err(),
+            "Commit on a deleted branch must be rejected, but it succeeded"
+        );
+
+        // 5. Verify no data leaked — branch should not exist
+        assert!(!ri.exists("victim").unwrap());
+    }
+
+    /// #1916: Stress test — concurrent writers vs delete_branch.
+    #[test]
+    fn test_issue_1916_delete_branch_concurrent_stress() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let (_temp, db, ri) = setup();
+
+        ri.create_branch("stress-victim").unwrap();
+        let branch_id = resolve_branch_name("stress-victim");
+        let ns = Arc::new(Namespace::for_branch(branch_id));
+
+        // Seed initial data
+        db.transaction(branch_id, |txn| {
+            for i in 0..10 {
+                let key = Key::new(ns.clone(), TypeTag::KV, format!("k{i}").into_bytes());
+                txn.put(key, Value::Int(i))?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        let barrier = Arc::new(Barrier::new(6)); // 5 writers + 1 deleter
+        let db = Arc::new(db);
+        let ri = Arc::new(ri);
+
+        // Spawn 5 writer threads
+        let mut handles = Vec::new();
+        for t in 0..5u32 {
+            let db = Arc::clone(&db);
+            let ns = ns.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                let key = Key::new(ns, TypeTag::KV, format!("writer-{t}").into_bytes());
+                // This may succeed or fail — either is acceptable.
+                // What matters is that after delete completes, no data remains.
+                let _ = db.transaction(branch_id, |txn| {
+                    txn.put(key.clone(), Value::Int(t as i64))?;
+                    Ok(())
+                });
+            }));
+        }
+
+        // Spawn deleter thread
+        let ri_del = Arc::clone(&ri);
+        let barrier_del = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            barrier_del.wait();
+            ri_del.delete_branch("stress-victim").unwrap();
+        }));
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // After deletion completes, branch must not exist
+        assert!(
+            !ri.exists("stress-victim").unwrap(),
+            "Branch must not exist after delete_branch completes"
+        );
     }
 }
