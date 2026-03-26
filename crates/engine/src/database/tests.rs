@@ -2144,8 +2144,7 @@ fn test_issue_1733_tombstone_no_duplicate_after_recovery() {
 
         // After shutdown, the flush_shutdown flag should be set
         assert!(
-            db.flush_shutdown
-                .load(std::sync::atomic::Ordering::Relaxed),
+            db.flush_shutdown.load(std::sync::atomic::Ordering::Relaxed),
             "flush_shutdown flag must be set after shutdown"
         );
 

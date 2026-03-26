@@ -526,8 +526,7 @@ mod tests {
 
     #[test]
     fn test_issue_1921_snapshot_version_in_request() {
-        let req = SearchRequest::new(BranchId::new(), "test query")
-            .with_snapshot_version(42);
+        let req = SearchRequest::new(BranchId::new(), "test query").with_snapshot_version(42);
         assert_eq!(req.snapshot_version, Some(42));
 
         // Default should be None

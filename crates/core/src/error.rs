@@ -1761,7 +1761,10 @@ mod strata_error_tests {
     fn test_write_stall_timeout_constructor() {
         let e = StrataError::write_stall_timeout(30000, 40);
 
-        assert!(!e.is_retryable(), "stall timeout is not retryable — write already committed");
+        assert!(
+            !e.is_retryable(),
+            "stall timeout is not retryable — write already committed"
+        );
         assert!(!e.is_transaction_error());
         assert_eq!(e.code(), ErrorCode::Conflict);
         match e {

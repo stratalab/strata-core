@@ -3189,7 +3189,11 @@ mod tests {
                 opts,
             )
             .unwrap();
-        assert_eq!(results.len(), 3, "Empty multipliers should fall back to [1]");
+        assert_eq!(
+            results.len(),
+            3,
+            "Empty multipliers should fall back to [1]"
+        );
     }
 
     // ========================================================================
@@ -3356,7 +3360,11 @@ mod tests {
 
         // Verify inline meta works (results have keys, not empty strings)
         for r in &results {
-            assert!(r.key.starts_with("vec"), "key should be populated: {}", r.key);
+            assert!(
+                r.key.starts_with("vec"),
+                "key should be populated: {}",
+                r.key
+            );
         }
     }
 
@@ -3404,11 +3412,7 @@ mod tests {
                 vec![0.0, 0.0, 1.0, 0.0],
                 None::<serde_json::Value>,
             ),
-            (
-                "existing2".to_string(),
-                vec![0.0, 0.0, 0.0, 1.0],
-                None,
-            ),
+            ("existing2".to_string(), vec![0.0, 0.0, 0.0, 1.0], None),
             ("new1".to_string(), vec![1.0, 1.0, 0.0, 0.0], None),
         ];
         store

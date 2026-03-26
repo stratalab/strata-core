@@ -320,9 +320,7 @@ impl TransactionManager {
                 )));
             }
             txn.status = TransactionStatus::Committed;
-            return Ok(
-                external_version.unwrap_or_else(|| self.version.load(Ordering::Acquire))
-            );
+            return Ok(external_version.unwrap_or_else(|| self.version.load(Ordering::Acquire)));
         }
 
         #[cfg(feature = "perf-trace")]
@@ -400,8 +398,7 @@ impl TransactionManager {
             perf_time!(trace, wal_append_ns, {
                 match wal_mode {
                     WalMode::Direct(wal) => {
-                        let payload =
-                            TransactionPayload::from_transaction(txn, commit_version);
+                        let payload = TransactionPayload::from_transaction(txn, commit_version);
                         let record = WalRecord::new(
                             commit_version,
                             *txn.branch_id.as_bytes(),
@@ -418,8 +415,7 @@ impl TransactionManager {
                         tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, commit_version, "WAL durable");
                     }
                     WalMode::Shared(wal_arc) => {
-                        let payload =
-                            TransactionPayload::from_transaction(txn, commit_version);
+                        let payload = TransactionPayload::from_transaction(txn, commit_version);
                         let timestamp = now_micros();
                         let record = WalRecord::new(
                             commit_version,
@@ -430,11 +426,9 @@ impl TransactionManager {
                         let record_bytes = record.to_bytes();
                         {
                             let mut wal = wal_arc.lock();
-                            if let Err(e) = wal.append_pre_serialized(
-                                &record_bytes,
-                                commit_version,
-                                timestamp,
-                            ) {
+                            if let Err(e) =
+                                wal.append_pre_serialized(&record_bytes, commit_version, timestamp)
+                            {
                                 txn.status = TransactionStatus::Aborted {
                                     reason: format!("WAL write failed: {}", e),
                                 };
@@ -643,7 +637,6 @@ impl TransactionManager {
         };
         self.commit_inner(txn, store, wal_mode, Some(version))
     }
-
 }
 
 impl Default for TransactionManager {

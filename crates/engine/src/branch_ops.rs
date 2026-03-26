@@ -601,9 +601,11 @@ pub fn diff_branches_with_options(
     for type_tag in &type_tags {
         let entries_a: Vec<(Key, VersionedValue)> = match options.as_of {
             Some(ts) => storage.list_by_type_at_timestamp(&id_a, *type_tag, ts),
-            None => live_entries_from_versioned(
-                storage.list_by_type_at_version(&id_a, *type_tag, snapshot_version),
-            ),
+            None => live_entries_from_versioned(storage.list_by_type_at_version(
+                &id_a,
+                *type_tag,
+                snapshot_version,
+            )),
         };
         for (key, vv) in entries_a {
             if space_filter
@@ -619,9 +621,11 @@ pub fn diff_branches_with_options(
 
         let entries_b: Vec<(Key, VersionedValue)> = match options.as_of {
             Some(ts) => storage.list_by_type_at_timestamp(&id_b, *type_tag, ts),
-            None => live_entries_from_versioned(
-                storage.list_by_type_at_version(&id_b, *type_tag, snapshot_version),
-            ),
+            None => live_entries_from_versioned(storage.list_by_type_at_version(
+                &id_b,
+                *type_tag,
+                snapshot_version,
+            )),
         };
         for (key, vv) in entries_b {
             if space_filter
@@ -1092,14 +1096,18 @@ fn three_way_diff(
             );
 
             // 2. Source state at snapshot (consistent point-in-time, #1917)
-            let source_entries = live_entries_from_versioned(
-                storage.list_by_type_at_version(&source_id, type_tag, snapshot_version),
-            );
+            let source_entries = live_entries_from_versioned(storage.list_by_type_at_version(
+                &source_id,
+                type_tag,
+                snapshot_version,
+            ));
 
             // 3. Target state at snapshot (consistent point-in-time, #1917)
-            let target_entries = live_entries_from_versioned(
-                storage.list_by_type_at_version(&target_id, type_tag, snapshot_version),
-            );
+            let target_entries = live_entries_from_versioned(storage.list_by_type_at_version(
+                &target_id,
+                type_tag,
+                snapshot_version,
+            ));
 
             let ancestor_map = build_ancestor_map(&ancestor_entries, space);
             let source_map = build_live_map(&source_entries, space);
@@ -2051,11 +2059,8 @@ pub fn revert_version_range(
         let current_map = build_live_space_map(&current_entries);
 
         // Union of all keys in before and after
-        let all_keys: HashSet<(String, Vec<u8>)> = before_map
-            .keys()
-            .chain(after_map.keys())
-            .cloned()
-            .collect();
+        let all_keys: HashSet<(String, Vec<u8>)> =
+            before_map.keys().chain(after_map.keys()).cloned().collect();
 
         for compound_key in &all_keys {
             let before_state = before_map.get(compound_key).cloned().flatten();
