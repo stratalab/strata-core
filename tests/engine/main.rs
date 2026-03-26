@@ -14,4 +14,5 @@ mod adversarial;
 mod adversarial_deep;
 mod branch_isolation;
 mod cross_primitive;
+mod p0_concurrency;
 mod stress;
