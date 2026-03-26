@@ -1641,7 +1641,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Bulk load commit tests (Epic 8d)
+    // No-WAL commit tests (formerly bulk-load, Epic 8d)
     // ========================================================================
 
     #[test]
@@ -1676,7 +1676,7 @@ mod tests {
         // Create WAL for reference
         let mut wal = create_test_wal(&wal_dir);
 
-        // Bulk load commit — should NOT write to WAL
+        // No-WAL commit — should NOT write to WAL
         let key = create_test_key(&ns, "no_wal");
         let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
         txn.put(key.clone(), Value::Int(1)).unwrap();
@@ -1696,7 +1696,7 @@ mod tests {
         assert_eq!(
             result.records.len(),
             1,
-            "Bulk load should not write WAL records"
+            "No-WAL commit should not write WAL records"
         );
     }
 
@@ -1710,13 +1710,13 @@ mod tests {
         let ns = create_test_namespace(branch_id);
         let mut wal = create_test_wal(&wal_dir);
 
-        // Bulk load
+        // No-WAL commit
         let key1 = create_test_key(&ns, "k1");
         let mut txn1 = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
         txn1.put(key1.clone(), Value::Int(1)).unwrap();
         manager.commit(&mut txn1, store.as_ref(), None).unwrap();
 
-        // Normal commit after bulk load
+        // Normal commit after no-WAL commit
         let key2 = create_test_key(&ns, "k2");
         let mut txn2 = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
         txn2.put(key2.clone(), Value::Int(2)).unwrap();
