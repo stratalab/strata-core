@@ -378,63 +378,49 @@ impl TransactionCoordinator {
             .fetch_max(new_gc_safe, Ordering::Release);
     }
 
-    /// Get current global version
+    // ========================================================================
+    // TransactionManager delegations
+    //
+    // Pure pass-throughs that expose TransactionManager methods without adding
+    // coordinator-level logic (no metrics, no GC tracking). Kept as explicit
+    // methods rather than `Deref` so the coordinator remains a deliberate
+    // boundary — only the methods below are forwarded.
+    // ========================================================================
+
+    /// Get current global version.
     pub fn current_version(&self) -> u64 {
         self.manager.current_version()
     }
 
     /// Get the highest version where all data ≤ V is fully applied (#1913).
-    ///
-    /// Safe for use as a transaction snapshot version — guarantees no
-    /// in-flight `apply_writes` exists at any version ≤ the returned value.
     pub fn visible_version(&self) -> u64 {
         self.manager.visible_version()
     }
 
     /// Ensure the version counter is at least `floor` (#1726).
-    ///
-    /// Called after segment recovery to prevent version collisions when the
-    /// WAL has been fully compacted.
     pub fn bump_version_floor(&self, floor: u64) {
         self.manager.bump_version_floor(floor);
     }
 
     /// Get the current version after draining all in-flight commits (#1710).
-    ///
-    /// Safe to use as a checkpoint watermark — no version ≤ the returned
-    /// value has storage application still in progress.
     pub fn quiesced_version(&self) -> u64 {
         self.manager.quiesced_version()
     }
 
-    /// Get next transaction ID (for internal use)
+    /// Get next transaction ID (for internal use).
     pub fn next_txn_id(&self) -> StrataResult<u64> {
         self.manager.next_txn_id().map_err(StrataError::from)
     }
 
-    /// Get the configured max write buffer entries limit.
-    pub fn max_write_buffer_entries(&self) -> usize {
-        self.max_write_buffer_entries.load(Ordering::Relaxed)
-    }
-
-    /// Set the max write buffer entries limit.
-    pub fn set_max_write_buffer_entries(&self, max: usize) {
-        self.max_write_buffer_entries.store(max, Ordering::Relaxed);
-    }
-
     /// Remove the per-branch commit lock for a deleted branch.
     ///
-    /// Delegates to `TransactionManager::remove_branch_lock` to prevent
-    /// unbounded growth of the commit_locks map when branches are deleted.
-    /// Returns `true` if removed (or didn't exist), `false` if skipped
-    /// because a concurrent commit is in-flight.
+    /// Returns `true` if removed (or didn't exist), `false` if a concurrent
+    /// commit is in-flight.
     pub fn remove_branch_lock(&self, branch_id: &BranchId) -> bool {
         self.manager.remove_branch_lock(branch_id)
     }
 
     /// Mark a branch as being deleted (#1916).
-    ///
-    /// Subsequent commits on this branch will be rejected.
     pub fn mark_branch_deleting(&self, branch_id: &BranchId) {
         self.manager.mark_branch_deleting(branch_id);
     }
@@ -445,8 +431,6 @@ impl TransactionCoordinator {
     }
 
     /// Get the commit lock Arc for a branch (#1916).
-    ///
-    /// Callers can lock this to serialize with in-flight commits.
     pub fn branch_commit_lock(
         &self,
         branch_id: &BranchId,
@@ -454,18 +438,28 @@ impl TransactionCoordinator {
         self.manager.branch_commit_lock(branch_id)
     }
 
-    /// Advance the version counter to at least `v`.
-    ///
-    /// Used during multi-process refresh to catch up with other processes.
+    /// Advance the version counter to at least `v` (multi-process refresh).
     pub fn catch_up_version(&self, v: u64) {
         self.manager.catch_up_version(v);
     }
 
-    /// Advance the txn_id counter to at least `id + 1`.
-    ///
-    /// Used during multi-process refresh to avoid ID collisions.
+    /// Advance the txn_id counter to at least `id + 1` (multi-process refresh).
     pub fn catch_up_txn_id(&self, id: u64) {
         self.manager.catch_up_txn_id(id);
+    }
+
+    // ========================================================================
+    // Coordinator-owned state
+    // ========================================================================
+
+    /// Get the configured max write buffer entries limit.
+    pub fn max_write_buffer_entries(&self) -> usize {
+        self.max_write_buffer_entries.load(Ordering::Relaxed)
+    }
+
+    /// Set the max write buffer entries limit.
+    pub fn set_max_write_buffer_entries(&self, max: usize) {
+        self.max_write_buffer_entries.store(max, Ordering::Relaxed);
     }
 
     /// Commit a transaction with an externally-allocated version.
@@ -1200,7 +1194,7 @@ mod tests {
         coordinator.record_abort(999);
     }
 
-    /// BUG HUNT: Metrics consistency under high concurrency
+    /// Verify metrics reach consistent state after concurrent operations.
     ///
     /// Since metrics use Relaxed ordering, they might show temporarily
     /// inconsistent values during concurrent operations.
@@ -1262,7 +1256,7 @@ mod tests {
         );
     }
 
-    /// BUG HUNT: Version allocation monotonicity under concurrent allocations
+    /// Verify concurrent version allocation produces unique values.
     ///
     /// Multiple threads allocating versions should always get strictly
     /// increasing values with no duplicates.
@@ -1312,7 +1306,7 @@ mod tests {
         }
     }
 
-    /// BUG HUNT: Transaction ID monotonicity across concurrent allocations
+    /// Verify concurrent transaction ID allocation produces unique values.
     ///
     /// Similar to version allocation, transaction IDs must be unique.
     #[test]
@@ -1356,7 +1350,7 @@ mod tests {
         );
     }
 
-    /// BUG HUNT: Commit rate calculation with zero started
+    /// Verify commit rate handles zero-started edge case without panic.
     ///
     /// The commit_rate calculation divides by total_started.
     /// Verify it handles zero gracefully.
@@ -1371,7 +1365,7 @@ mod tests {
         assert_eq!(metrics.abort_rate(), 0.0);
     }
 
-    /// BUG HUNT: wait_for_idle with rapid start/stop cycles
+    /// Verify wait_for_idle observes zero-crossings during rapid transaction cycles.
     ///
     /// If transactions start and stop rapidly, wait_for_idle might
     /// see active_count as 0 briefly even though more transactions

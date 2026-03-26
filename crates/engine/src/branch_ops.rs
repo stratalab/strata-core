@@ -25,10 +25,115 @@ use strata_core::{PrimitiveType, Version, VersionedValue};
 use tracing::info;
 
 // =============================================================================
-// Data TypeTags to scan (all user data types)
+// Constants and key-format helpers
 // =============================================================================
 
 const DATA_TYPE_TAGS: [TypeTag; 4] = [TypeTag::KV, TypeTag::Event, TypeTag::Json, TypeTag::Vector];
+
+/// The well-known branch name used for internal metadata (tags, notes).
+const SYSTEM_BRANCH: &str = "_system_";
+
+fn tag_key(branch: &str, name: &str) -> String {
+    format!("tag:{branch}:{name}")
+}
+
+fn tag_prefix(branch: &str) -> String {
+    format!("tag:{branch}:")
+}
+
+fn note_key(branch: &str, version: u64) -> String {
+    format!("note:{branch}:{version}")
+}
+
+fn note_prefix(branch: &str) -> String {
+    format!("note:{branch}:")
+}
+
+// =============================================================================
+// Snapshot map builders (ENG-DEBT-001)
+// =============================================================================
+
+/// Build an ancestor-style map from versioned entries, tombstone-aware.
+///
+/// Entries outside `space` are skipped. Tombstones map to `None`.
+fn build_ancestor_map(
+    entries: &[strata_storage::VersionedEntry],
+    space: &str,
+) -> HashMap<Vec<u8>, Option<Value>> {
+    let mut map = HashMap::new();
+    for entry in entries {
+        if entry.key.namespace.space == *space {
+            if entry.is_tombstone {
+                map.insert(entry.key.user_key.to_vec(), None);
+            } else {
+                map.insert(entry.key.user_key.to_vec(), Some(entry.value.clone()));
+            }
+        }
+    }
+    map
+}
+
+/// Convert `VersionedEntry` list to `(Key, VersionedValue)` pairs, dropping tombstones.
+fn live_entries_from_versioned(
+    entries: Vec<strata_storage::VersionedEntry>,
+) -> Vec<(Key, VersionedValue)> {
+    entries
+        .into_iter()
+        .filter(|e| !e.is_tombstone)
+        .map(|e| {
+            let vv = VersionedValue {
+                value: e.value,
+                version: Version::Txn(e.commit_id),
+                timestamp: strata_core::Timestamp::from_micros(0),
+            };
+            (e.key, vv)
+        })
+        .collect()
+}
+
+/// Build a live-entry map from `(Key, VersionedValue)` pairs, filtered by space.
+fn build_live_map(entries: &[(Key, VersionedValue)], space: &str) -> HashMap<Vec<u8>, Value> {
+    let mut map = HashMap::new();
+    for (key, vv) in entries {
+        if key.namespace.space == *space {
+            map.insert(key.user_key.to_vec(), vv.value.clone());
+        }
+    }
+    map
+}
+
+/// Build a tombstone-aware map keyed by `(space, user_key)` from versioned entries.
+///
+/// Used by `revert_version_range` where entries span multiple spaces.
+fn build_versioned_space_map(
+    entries: &[strata_storage::VersionedEntry],
+) -> HashMap<(String, Vec<u8>), Option<Value>> {
+    let mut map = HashMap::new();
+    for entry in entries {
+        let key = (
+            entry.key.namespace.space.clone(),
+            entry.key.user_key.to_vec(),
+        );
+        if entry.is_tombstone {
+            map.insert(key, None);
+        } else {
+            map.insert(key, Some(entry.value.clone()));
+        }
+    }
+    map
+}
+
+/// Build a live-entry map keyed by `(space, user_key)` from `(Key, VersionedValue)` pairs.
+fn build_live_space_map(entries: &[(Key, VersionedValue)]) -> HashMap<(String, Vec<u8>), Value> {
+    let mut map = HashMap::new();
+    for (key, vv) in entries {
+        map.insert(
+            (key.namespace.space.clone(), key.user_key.to_vec()),
+            vv.value.clone(),
+        );
+    }
+    map
+}
 
 // =============================================================================
 // Public result types
@@ -213,6 +318,54 @@ pub struct DiffFilter {
     pub primitives: Option<Vec<PrimitiveType>>,
     /// Only include these spaces. `None` means all spaces.
     pub spaces: Option<Vec<String>>,
+}
+
+// =============================================================================
+// Diff setup helpers (ENG-DEBT-004)
+// =============================================================================
+
+/// Shared space-listing and filtering for diff operations.
+///
+/// Returns `(spaces_only_in_a, spaces_only_in_b, all_spaces)`, all filtered.
+fn compute_space_sets(
+    spaces_a: &HashSet<String>,
+    spaces_b: &HashSet<String>,
+    space_filter: &Option<HashSet<String>>,
+) -> (Vec<String>, Vec<String>, HashSet<String>) {
+    let mut only_a: Vec<String> = spaces_a.difference(spaces_b).cloned().collect();
+    let mut only_b: Vec<String> = spaces_b.difference(spaces_a).cloned().collect();
+    let mut all: HashSet<String> = spaces_a.union(spaces_b).cloned().collect();
+    if let Some(ref allowed) = space_filter {
+        only_a.retain(|s| allowed.contains(s));
+        only_b.retain(|s| allowed.contains(s));
+        all.retain(|s| allowed.contains(s));
+    }
+    (only_a, only_b, all)
+}
+
+/// Extract the space filter from DiffOptions.
+fn extract_space_filter(options: &DiffOptions) -> Option<HashSet<String>> {
+    options
+        .filter
+        .as_ref()
+        .and_then(|f| f.spaces.as_ref())
+        .map(|s| s.iter().cloned().collect())
+}
+
+/// Determine which TypeTags to scan based on the filter.
+fn resolve_type_tags(options: &DiffOptions) -> Vec<TypeTag> {
+    match options.filter.as_ref().and_then(|f| f.primitives.as_ref()) {
+        Some(prims) => {
+            let mut tags: Vec<TypeTag> = prims
+                .iter()
+                .flat_map(|p| primitive_to_type_tags(*p))
+                .collect();
+            tags.sort();
+            tags.dedup();
+            tags
+        }
+        None => DATA_TYPE_TAGS.to_vec(),
+    }
 }
 
 // =============================================================================
@@ -427,42 +580,14 @@ pub fn diff_branches_with_options(
         }
     }
 
-    // 2. List spaces in both branches
+    // 2. List spaces in both branches, apply filters
     let space_index = SpaceIndex::new(db.clone());
     let spaces_a: HashSet<String> = space_index.list(id_a)?.into_iter().collect();
     let spaces_b: HashSet<String> = space_index.list(id_b)?.into_iter().collect();
-
-    // Apply space filter if set
-    let space_filter: Option<HashSet<String>> = options
-        .filter
-        .as_ref()
-        .and_then(|f| f.spaces.as_ref())
-        .map(|s| s.iter().cloned().collect());
-
-    let mut spaces_only_in_a: Vec<String> = spaces_a.difference(&spaces_b).cloned().collect();
-    let mut spaces_only_in_b: Vec<String> = spaces_b.difference(&spaces_a).cloned().collect();
-    let mut all_spaces: HashSet<String> = spaces_a.union(&spaces_b).cloned().collect();
-
-    if let Some(ref allowed) = space_filter {
-        all_spaces.retain(|s| allowed.contains(s));
-        spaces_only_in_a.retain(|s| allowed.contains(s));
-        spaces_only_in_b.retain(|s| allowed.contains(s));
-    }
-
-    // Determine which TypeTags to scan
-    let type_tags: Vec<TypeTag> = match options.filter.as_ref().and_then(|f| f.primitives.as_ref())
-    {
-        Some(prims) => {
-            let mut tags: Vec<TypeTag> = prims
-                .iter()
-                .flat_map(|p| primitive_to_type_tags(*p))
-                .collect();
-            tags.sort();
-            tags.dedup();
-            tags
-        }
-        None => DATA_TYPE_TAGS.to_vec(),
-    };
+    let space_filter = extract_space_filter(&options);
+    let (spaces_only_in_a, spaces_only_in_b, all_spaces) =
+        compute_space_sets(&spaces_a, &spaces_b, &space_filter);
+    let type_tags = resolve_type_tags(&options);
 
     let mut space_diffs = Vec::new();
     let mut total_added = 0usize;
@@ -476,19 +601,9 @@ pub fn diff_branches_with_options(
     for type_tag in &type_tags {
         let entries_a: Vec<(Key, VersionedValue)> = match options.as_of {
             Some(ts) => storage.list_by_type_at_timestamp(&id_a, *type_tag, ts),
-            None => storage
-                .list_by_type_at_version(&id_a, *type_tag, snapshot_version)
-                .into_iter()
-                .filter(|e| !e.is_tombstone)
-                .map(|e| {
-                    let vv = VersionedValue {
-                        value: e.value,
-                        version: Version::Txn(e.commit_id),
-                        timestamp: strata_core::Timestamp::from_micros(0),
-                    };
-                    (e.key, vv)
-                })
-                .collect(),
+            None => live_entries_from_versioned(
+                storage.list_by_type_at_version(&id_a, *type_tag, snapshot_version),
+            ),
         };
         for (key, vv) in entries_a {
             if space_filter
@@ -504,19 +619,9 @@ pub fn diff_branches_with_options(
 
         let entries_b: Vec<(Key, VersionedValue)> = match options.as_of {
             Some(ts) => storage.list_by_type_at_timestamp(&id_b, *type_tag, ts),
-            None => storage
-                .list_by_type_at_version(&id_b, *type_tag, snapshot_version)
-                .into_iter()
-                .filter(|e| !e.is_tombstone)
-                .map(|e| {
-                    let vv = VersionedValue {
-                        value: e.value,
-                        version: Version::Txn(e.commit_id),
-                        timestamp: strata_core::Timestamp::from_micros(0),
-                    };
-                    (e.key, vv)
-                })
-                .collect(),
+            None => live_entries_from_versioned(
+                storage.list_by_type_at_version(&id_b, *type_tag, snapshot_version),
+            ),
         };
         for (key, vv) in entries_b {
             if space_filter
@@ -535,70 +640,14 @@ pub fn diff_branches_with_options(
     for space in &all_spaces {
         let map_a = maps_a.remove(space).unwrap_or_default();
         let map_b = maps_b.remove(space).unwrap_or_default();
+        let diff = classify_two_way_space(space, map_a, map_b);
 
-        let mut added = Vec::new();
-        let mut removed = Vec::new();
-        let mut modified = Vec::new();
+        total_added += diff.added.len();
+        total_removed += diff.removed.len();
+        total_modified += diff.modified.len();
 
-        // Keys in A (check for removed and modified)
-        for ((user_key, tag), val_a) in &map_a {
-            let key_str = format_user_key(user_key);
-            let primitive = type_tag_to_primitive(*tag);
-
-            match map_b.get(&(user_key.clone(), *tag)) {
-                None => {
-                    removed.push(BranchDiffEntry {
-                        key: key_str,
-                        raw_key: user_key.clone(),
-                        primitive,
-                        type_tag: *tag,
-                        space: space.clone(),
-                        value_a: Some(val_a.clone()),
-                        value_b: None,
-                    });
-                }
-                Some(val_b) => {
-                    if val_a != val_b {
-                        modified.push(BranchDiffEntry {
-                            key: key_str,
-                            raw_key: user_key.clone(),
-                            primitive,
-                            type_tag: *tag,
-                            space: space.clone(),
-                            value_a: Some(val_a.clone()),
-                            value_b: Some(val_b.clone()),
-                        });
-                    }
-                }
-            }
-        }
-
-        // Keys only in B (added)
-        for ((user_key, tag), val_b) in &map_b {
-            if !map_a.contains_key(&(user_key.clone(), *tag)) {
-                added.push(BranchDiffEntry {
-                    key: format_user_key(user_key),
-                    raw_key: user_key.clone(),
-                    primitive: type_tag_to_primitive(*tag),
-                    type_tag: *tag,
-                    space: space.clone(),
-                    value_a: None,
-                    value_b: Some(val_b.clone()),
-                });
-            }
-        }
-
-        total_added += added.len();
-        total_removed += removed.len();
-        total_modified += modified.len();
-
-        if !added.is_empty() || !removed.is_empty() || !modified.is_empty() {
-            space_diffs.push(SpaceDiff {
-                space: space.clone(),
-                added,
-                removed,
-                modified,
-            });
+        if !diff.added.is_empty() || !diff.removed.is_empty() || !diff.modified.is_empty() {
+            space_diffs.push(diff);
         }
     }
 
@@ -645,33 +694,15 @@ fn cow_diff_branches(
     let space_index = SpaceIndex::new(db.clone());
     let storage = db.storage();
 
-    // 1. Space listing and filtering (same as full-scan path)
+    // 1. Space listing and filtering (shared with full-scan path)
     let spaces_a: HashSet<String> = space_index.list(id_a)?.into_iter().collect();
     let spaces_b: HashSet<String> = space_index.list(id_b)?.into_iter().collect();
-
-    let space_filter: Option<HashSet<String>> = options
-        .filter
-        .as_ref()
-        .and_then(|f| f.spaces.as_ref())
-        .map(|s| s.iter().cloned().collect());
-
-    let mut spaces_only_in_a: Vec<String> = spaces_a.difference(&spaces_b).cloned().collect();
-    let mut spaces_only_in_b: Vec<String> = spaces_b.difference(&spaces_a).cloned().collect();
-
-    if let Some(ref allowed) = space_filter {
-        spaces_only_in_a.retain(|s| allowed.contains(s));
-        spaces_only_in_b.retain(|s| allowed.contains(s));
-    }
+    let space_filter = extract_space_filter(options);
+    let (spaces_only_in_a, spaces_only_in_b, _all_spaces) =
+        compute_space_sets(&spaces_a, &spaces_b, &space_filter);
 
     // 2. Determine which TypeTags to scan
-    let type_tags: HashSet<TypeTag> =
-        match options.filter.as_ref().and_then(|f| f.primitives.as_ref()) {
-            Some(prims) => prims
-                .iter()
-                .flat_map(|p| primitive_to_type_tags(*p))
-                .collect(),
-            None => DATA_TYPE_TAGS.iter().copied().collect(),
-        };
+    let type_tags: HashSet<TypeTag> = resolve_type_tags(options).into_iter().collect();
 
     // 3. Scan only changed entries (child's own + parent's post-fork)
     let child_own = storage.list_own_entries(&child_id, None);
@@ -850,6 +881,63 @@ pub enum ThreeWayChange {
     },
 }
 
+/// Compare two branch maps for a single space and classify entries as added/removed/modified.
+fn classify_two_way_space(
+    space: &str,
+    map_a: HashMap<(Vec<u8>, TypeTag), Value>,
+    map_b: HashMap<(Vec<u8>, TypeTag), Value>,
+) -> SpaceDiff {
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut modified = Vec::new();
+
+    for ((user_key, tag), val_a) in &map_a {
+        let key_str = format_user_key(user_key);
+        let primitive = type_tag_to_primitive(*tag);
+        match map_b.get(&(user_key.clone(), *tag)) {
+            None => removed.push(BranchDiffEntry {
+                key: key_str,
+                raw_key: user_key.clone(),
+                primitive,
+                type_tag: *tag,
+                space: space.to_string(),
+                value_a: Some(val_a.clone()),
+                value_b: None,
+            }),
+            Some(val_b) if val_a != val_b => modified.push(BranchDiffEntry {
+                key: key_str,
+                raw_key: user_key.clone(),
+                primitive,
+                type_tag: *tag,
+                space: space.to_string(),
+                value_a: Some(val_a.clone()),
+                value_b: Some(val_b.clone()),
+            }),
+            _ => {}
+        }
+    }
+    for ((user_key, tag), val_b) in &map_b {
+        if !map_a.contains_key(&(user_key.clone(), *tag)) {
+            added.push(BranchDiffEntry {
+                key: format_user_key(user_key),
+                raw_key: user_key.clone(),
+                primitive: type_tag_to_primitive(*tag),
+                type_tag: *tag,
+                space: space.to_string(),
+                value_a: None,
+                value_b: Some(val_b.clone()),
+            });
+        }
+    }
+
+    SpaceDiff {
+        space: space.to_string(),
+        added,
+        removed,
+        modified,
+    }
+}
+
 /// Classify a single key's change across ancestor, source, and target.
 ///
 /// Implements the 14-case decision matrix used by git, Dolt, and lakeFS:
@@ -1004,74 +1092,27 @@ fn three_way_diff(
             );
 
             // 2. Source state at snapshot (consistent point-in-time, #1917)
-            let source_entries: Vec<(Key, VersionedValue)> = storage
-                .list_by_type_at_version(&source_id, type_tag, snapshot_version)
-                .into_iter()
-                .filter(|e| !e.is_tombstone)
-                .map(|e| {
-                    let vv = VersionedValue {
-                        value: e.value,
-                        version: Version::Txn(e.commit_id),
-                        timestamp: strata_core::Timestamp::from_micros(0),
-                    };
-                    (e.key, vv)
-                })
-                .collect();
+            let source_entries = live_entries_from_versioned(
+                storage.list_by_type_at_version(&source_id, type_tag, snapshot_version),
+            );
 
             // 3. Target state at snapshot (consistent point-in-time, #1917)
-            let target_entries: Vec<(Key, VersionedValue)> = storage
-                .list_by_type_at_version(&target_id, type_tag, snapshot_version)
-                .into_iter()
-                .filter(|e| !e.is_tombstone)
-                .map(|e| {
-                    let vv = VersionedValue {
-                        value: e.value,
-                        version: Version::Txn(e.commit_id),
-                        timestamp: strata_core::Timestamp::from_micros(0),
-                    };
-                    (e.key, vv)
-                })
+            let target_entries = live_entries_from_versioned(
+                storage.list_by_type_at_version(&target_id, type_tag, snapshot_version),
+            );
+
+            let ancestor_map = build_ancestor_map(&ancestor_entries, space);
+            let source_map = build_live_map(&source_entries, space);
+            let target_map = build_live_map(&target_entries, space);
+
+            // Union all keys and classify
+            let all_keys: HashSet<Vec<u8>> = ancestor_map
+                .keys()
+                .chain(source_map.keys())
+                .chain(target_map.keys())
+                .cloned()
                 .collect();
 
-            // Build lookup maps: user_key_bytes → Value (or None for tombstone)
-            let mut ancestor_map: HashMap<Vec<u8>, Option<Value>> = HashMap::new();
-            for entry in &ancestor_entries {
-                if entry.key.namespace.space == *space {
-                    if entry.is_tombstone {
-                        ancestor_map.insert(entry.key.user_key.to_vec(), None);
-                    } else {
-                        ancestor_map.insert(entry.key.user_key.to_vec(), Some(entry.value.clone()));
-                    }
-                }
-            }
-
-            let mut source_map: HashMap<Vec<u8>, Value> = HashMap::new();
-            for (key, vv) in &source_entries {
-                if key.namespace.space == *space {
-                    source_map.insert(key.user_key.to_vec(), vv.value.clone());
-                }
-            }
-
-            let mut target_map: HashMap<Vec<u8>, Value> = HashMap::new();
-            for (key, vv) in &target_entries {
-                if key.namespace.space == *space {
-                    target_map.insert(key.user_key.to_vec(), vv.value.clone());
-                }
-            }
-
-            // Union all keys
-            let mut all_keys: HashSet<Vec<u8>> = HashSet::new();
-            for k in ancestor_map.keys() {
-                all_keys.insert(k.clone());
-            }
-            for k in source_map.keys() {
-                all_keys.insert(k.clone());
-            }
-            for k in target_map.keys() {
-                all_keys.insert(k.clone());
-            }
-
-            // Classify each key
             for user_key in &all_keys {
                 // Ancestor: flatten Option<Option<Value>> → Option<&Value>
                 // ancestor_map entry = Some(None) means tombstone → treat as absent
@@ -1470,45 +1511,18 @@ pub fn diff_three_way(
             // 3. Target current state (live keys only)
             let target_entries = storage.list_by_type(&target_id, type_tag);
 
-            // Build lookup maps
-            let mut ancestor_map: HashMap<Vec<u8>, Option<Value>> = HashMap::new();
-            for entry in &ancestor_entries {
-                if entry.key.namespace.space == *space {
-                    if entry.is_tombstone {
-                        ancestor_map.insert(entry.key.user_key.to_vec(), None);
-                    } else {
-                        ancestor_map.insert(entry.key.user_key.to_vec(), Some(entry.value.clone()));
-                    }
-                }
-            }
+            let ancestor_map = build_ancestor_map(&ancestor_entries, space);
+            let source_map = build_live_map(&source_entries, space);
+            let target_map = build_live_map(&target_entries, space);
 
-            let mut source_map: HashMap<Vec<u8>, Value> = HashMap::new();
-            for (key, vv) in &source_entries {
-                if key.namespace.space == *space {
-                    source_map.insert(key.user_key.to_vec(), vv.value.clone());
-                }
-            }
+            // Union all keys and classify
+            let all_keys: HashSet<Vec<u8>> = ancestor_map
+                .keys()
+                .chain(source_map.keys())
+                .chain(target_map.keys())
+                .cloned()
+                .collect();
 
-            let mut target_map: HashMap<Vec<u8>, Value> = HashMap::new();
-            for (key, vv) in &target_entries {
-                if key.namespace.space == *space {
-                    target_map.insert(key.user_key.to_vec(), vv.value.clone());
-                }
-            }
-
-            // Union all keys
-            let mut all_keys: HashSet<Vec<u8>> = HashSet::new();
-            for k in ancestor_map.keys() {
-                all_keys.insert(k.clone());
-            }
-            for k in source_map.keys() {
-                all_keys.insert(k.clone());
-            }
-            for k in target_map.keys() {
-                all_keys.insert(k.clone());
-            }
-
-            // Classify each key
             for user_key in &all_keys {
                 let ancestor_val = ancestor_map.get(user_key).and_then(|opt| opt.as_ref());
                 let source_val = source_map.get(user_key);
@@ -1748,8 +1762,8 @@ pub fn create_tag(
         creator: creator.map(|s| s.to_string()),
     };
 
-    let system_id = resolve_branch_name("_system_");
-    let tag_key = format!("tag:{}:{}", branch, name);
+    let system_id = resolve_branch_name(SYSTEM_BRANCH);
+    let tag_key = tag_key(branch, name);
     let tag_value = serde_json::to_string(&tag_info)
         .map_err(|e| StrataError::internal(format!("Failed to serialize tag: {}", e)))?;
 
@@ -1767,8 +1781,8 @@ pub fn create_tag(
 ///
 /// Returns `true` if the tag existed and was deleted.
 pub fn delete_tag(db: &Arc<Database>, branch: &str, name: &str) -> StrataResult<bool> {
-    let system_id = resolve_branch_name("_system_");
-    let tag_key = format!("tag:{}:{}", branch, name);
+    let system_id = resolve_branch_name(SYSTEM_BRANCH);
+    let tag_key = tag_key(branch, name);
 
     let storage = db.storage();
     let entries = storage.list_by_type(&system_id, TypeTag::KV);
@@ -1790,8 +1804,8 @@ pub fn delete_tag(db: &Arc<Database>, branch: &str, name: &str) -> StrataResult<
 
 /// List all tags on a branch.
 pub fn list_tags(db: &Arc<Database>, branch: &str) -> StrataResult<Vec<TagInfo>> {
-    let system_id = resolve_branch_name("_system_");
-    let prefix = format!("tag:{}:", branch);
+    let system_id = resolve_branch_name(SYSTEM_BRANCH);
+    let prefix = tag_prefix(branch);
 
     let storage = db.storage();
     let entries = storage.list_by_type(&system_id, TypeTag::KV);
@@ -1816,8 +1830,8 @@ pub fn list_tags(db: &Arc<Database>, branch: &str) -> StrataResult<Vec<TagInfo>>
 
 /// Resolve a tag name to its info.
 pub fn resolve_tag(db: &Arc<Database>, branch: &str, name: &str) -> StrataResult<Option<TagInfo>> {
-    let system_id = resolve_branch_name("_system_");
-    let tag_key = format!("tag:{}:{}", branch, name);
+    let system_id = resolve_branch_name(SYSTEM_BRANCH);
+    let tag_key = tag_key(branch, name);
 
     let storage = db.storage();
     let entries = storage.list_by_type(&system_id, TypeTag::KV);
@@ -1886,8 +1900,8 @@ pub fn add_note(
         metadata,
     };
 
-    let system_id = resolve_branch_name("_system_");
-    let note_key = format!("note:{}:{}", branch, version);
+    let system_id = resolve_branch_name(SYSTEM_BRANCH);
+    let note_key = note_key(branch, version);
     let note_value = serde_json::to_string(&note)
         .map_err(|e| StrataError::internal(format!("Failed to serialize note: {}", e)))?;
 
@@ -1910,9 +1924,9 @@ pub fn get_notes(
     branch: &str,
     version: Option<u64>,
 ) -> StrataResult<Vec<NoteInfo>> {
-    let system_id = resolve_branch_name("_system_");
-    let prefix = format!("note:{}:", branch);
-    let exact_key = version.map(|v| format!("note:{}:{}", branch, v));
+    let system_id = resolve_branch_name(SYSTEM_BRANCH);
+    let prefix = note_prefix(branch);
+    let exact_key = version.map(|v| note_key(branch, v));
 
     let storage = db.storage();
     let entries = storage.list_by_type(&system_id, TypeTag::KV);
@@ -1943,8 +1957,8 @@ pub fn get_notes(
 ///
 /// Returns `true` if the note existed and was deleted.
 pub fn delete_note(db: &Arc<Database>, branch: &str, version: u64) -> StrataResult<bool> {
-    let system_id = resolve_branch_name("_system_");
-    let note_key = format!("note:{}:{}", branch, version);
+    let system_id = resolve_branch_name(SYSTEM_BRANCH);
+    let note_key = note_key(branch, version);
 
     let storage = db.storage();
     let entries = storage.list_by_type(&system_id, TypeTag::KV);
@@ -2032,68 +2046,16 @@ pub fn revert_version_range(
         // 3. Current live state
         let current_entries = storage.list_by_type(&branch_id, type_tag);
 
-        // Build maps keyed by (space, user_key_bytes)
-        // before_map: key → Option<Value> where None = absent/tombstone
-        let mut before_map: HashMap<(String, Vec<u8>), Option<Value>> = HashMap::new();
-        for entry in &before_entries {
-            if entry.is_tombstone {
-                before_map.insert(
-                    (
-                        entry.key.namespace.space.clone(),
-                        entry.key.user_key.to_vec(),
-                    ),
-                    None,
-                );
-            } else {
-                before_map.insert(
-                    (
-                        entry.key.namespace.space.clone(),
-                        entry.key.user_key.to_vec(),
-                    ),
-                    Some(entry.value.clone()),
-                );
-            }
-        }
-
-        // after_map: key → Option<Value> where None = tombstone
-        let mut after_map: HashMap<(String, Vec<u8>), Option<Value>> = HashMap::new();
-        for entry in &after_entries {
-            if entry.is_tombstone {
-                after_map.insert(
-                    (
-                        entry.key.namespace.space.clone(),
-                        entry.key.user_key.to_vec(),
-                    ),
-                    None,
-                );
-            } else {
-                after_map.insert(
-                    (
-                        entry.key.namespace.space.clone(),
-                        entry.key.user_key.to_vec(),
-                    ),
-                    Some(entry.value.clone()),
-                );
-            }
-        }
-
-        // current_map: key → Value (live only)
-        let mut current_map: HashMap<(String, Vec<u8>), Value> = HashMap::new();
-        for (key, vv) in &current_entries {
-            current_map.insert(
-                (key.namespace.space.clone(), key.user_key.to_vec()),
-                vv.value.clone(),
-            );
-        }
+        let before_map = build_versioned_space_map(&before_entries);
+        let after_map = build_versioned_space_map(&after_entries);
+        let current_map = build_live_space_map(&current_entries);
 
         // Union of all keys in before and after
-        let mut all_keys: HashSet<(String, Vec<u8>)> = HashSet::new();
-        for k in before_map.keys() {
-            all_keys.insert(k.clone());
-        }
-        for k in after_map.keys() {
-            all_keys.insert(k.clone());
-        }
+        let all_keys: HashSet<(String, Vec<u8>)> = before_map
+            .keys()
+            .chain(after_map.keys())
+            .cloned()
+            .collect();
 
         for compound_key in &all_keys {
             let before_state = before_map.get(compound_key).cloned().flatten();
