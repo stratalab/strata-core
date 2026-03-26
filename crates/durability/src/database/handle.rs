@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::warn;
 
-use crate::codec::{get_codec, StorageCodec};
+use crate::codec::{clone_codec, get_codec, StorageCodec};
 use crate::disk_snapshot::{CheckpointCoordinator, CheckpointData};
 use crate::format::{CheckpointInfo, Manifest, ManifestManager, SnapshotWatermark, WalRecord};
 use crate::recovery::{RecoveryCoordinator, RecoveryError, RecoveryResult, RecoverySnapshot};
@@ -371,11 +371,6 @@ fn generate_uuid() -> [u8; 16] {
     uuid[8..16].copy_from_slice(&random_seed.to_le_bytes());
 
     uuid
-}
-
-/// Clone a boxed codec, preserving internal state (e.g., encryption keys).
-fn clone_codec(codec: &dyn StorageCodec) -> Box<dyn StorageCodec> {
-    codec.clone_box()
 }
 
 #[cfg(test)]

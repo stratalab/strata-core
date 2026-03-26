@@ -17,7 +17,8 @@
 pub mod branch_bundle; // Portable execution artifacts (BranchBundle)
 pub mod codec; // Storage codec abstraction (identity, future encryption/compression)
 pub mod compaction; // WAL segment cleanup and tombstone tracking
-pub mod coordination; // WAL file lock + counter file (currently unused, retained for future use)
+#[cfg(feature = "multi_process")]
+pub mod coordination; // WAL file lock + counter file (gated behind `multi_process` feature)
 pub mod database; // Database handle, config, paths (DatabaseHandle, DatabaseConfig, etc.)
 pub mod disk_snapshot; // Crash-safe snapshot I/O and checkpoint coordination
 pub mod format; // Binary on-disk formats (WAL segments, snapshots, manifest, writesets)
@@ -52,7 +53,7 @@ pub use branch_bundle::{
 };
 
 // Codec
-pub use codec::{get_codec, CodecError, IdentityCodec, StorageCodec};
+pub use codec::{clone_codec, get_codec, CodecError, IdentityCodec, StorageCodec};
 
 // Disk snapshot
 pub use disk_snapshot::{

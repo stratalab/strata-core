@@ -200,49 +200,14 @@ impl WalWriter {
     /// - `Always`: Writes and fsyncs before returning
     /// - `Standard`: Writes, fsyncs periodically
     pub fn append(&mut self, record: &WalRecord) -> std::io::Result<()> {
-        // Cache mode: no persistence
         if !self.durability.requires_wal() {
             return Ok(());
         }
 
-        let segment = self
-            .segment
-            .as_mut()
-            .expect("Segment should exist for non-Cache mode");
-
-        // Serialize record
         let record_bytes = record.to_bytes();
-
-        // Encode through codec
         let encoded = self.codec.encode(&record_bytes);
-
-        // Check if we need to rotate before writing
-        if segment.size() + encoded.len() as u64 > self.config.segment_size {
-            self.rotate_segment()?;
-        }
-
-        // Write to segment
-        let segment = self.segment.as_mut().unwrap();
-        segment.write(&encoded)?;
-
-        // Track metadata for the current segment
-        if let Some(ref mut meta) = self.current_segment_meta {
-            meta.track_record(record.txn_id, record.timestamp);
-        }
-
-        self.total_wal_appends += 1;
-        self.total_bytes_written += encoded.len() as u64;
-
-        debug!(target: "strata::wal", txn_id = record.txn_id, record_bytes = encoded.len(), segment = self.current_segment_number, "WAL record appended");
-
-        self.bytes_since_sync += encoded.len() as u64;
-        self.writes_since_sync += 1;
-        self.has_unsynced_data = true;
-
-        // Handle sync based on durability mode
-        self.maybe_sync()?;
-
-        Ok(())
+        self.append_inner(&encoded, record.txn_id, record.timestamp)?;
+        self.maybe_sync()
     }
 
     /// Append a pre-serialized WAL record.
@@ -260,13 +225,26 @@ impl WalWriter {
             return Ok(());
         }
 
+        let encoded = self.codec.encode_cow(record_bytes);
+        self.append_inner(&encoded, txn_id, timestamp)?;
+        self.maybe_sync()
+    }
+
+    /// Core append logic shared by `append()`, `append_pre_serialized()`,
+    /// and `append_and_flush()`.
+    ///
+    /// Handles segment rotation, writing, metadata tracking, and counter updates.
+    /// Callers are responsible for encoding and post-write sync behavior.
+    fn append_inner(
+        &mut self,
+        encoded: &[u8],
+        txn_id: u64,
+        timestamp: u64,
+    ) -> std::io::Result<()> {
         let segment = self
             .segment
             .as_mut()
             .expect("Segment should exist for non-Cache mode");
-
-        // Encode through codec (identity codec: zero-copy borrow)
-        let encoded = self.codec.encode_cow(record_bytes);
 
         // Check if we need to rotate before writing
         if segment.size() + encoded.len() as u64 > self.config.segment_size {
@@ -275,7 +253,7 @@ impl WalWriter {
 
         // Write to segment
         let segment = self.segment.as_mut().unwrap();
-        segment.write(&encoded)?;
+        segment.write(encoded)?;
 
         // Track metadata for the current segment
         if let Some(ref mut meta) = self.current_segment_meta {
@@ -291,8 +269,6 @@ impl WalWriter {
         self.writes_since_sync += 1;
         self.has_unsynced_data = true;
 
-        self.maybe_sync()?;
-
         Ok(())
     }
 
@@ -301,13 +277,7 @@ impl WalWriter {
         match self.durability {
             DurabilityMode::Always => {
                 // Always sync immediately
-                if let Some(ref mut segment) = self.segment {
-                    let start = Instant::now();
-                    segment.sync()?;
-                    let elapsed = start.elapsed();
-                    self.total_sync_calls += 1;
-                    self.total_sync_nanos += elapsed.as_nanos() as u64;
-                }
+                self.perform_sync()?;
                 self.reset_sync_counters();
             }
             DurabilityMode::Standard {
@@ -337,13 +307,7 @@ impl WalWriter {
                             batch_size,
                             "Batch size reached — inline sync");
                     }
-                    if let Some(ref mut segment) = self.segment {
-                        let start = Instant::now();
-                        segment.sync()?;
-                        let elapsed = start.elapsed();
-                        self.total_sync_calls += 1;
-                        self.total_sync_nanos += elapsed.as_nanos() as u64;
-                    }
+                    self.perform_sync()?;
                     self.reset_sync_counters();
                 }
             }
@@ -352,6 +316,18 @@ impl WalWriter {
             }
         }
 
+        Ok(())
+    }
+
+    /// Sync the active segment to disk, tracking timing metrics.
+    fn perform_sync(&mut self) -> std::io::Result<()> {
+        if let Some(ref mut segment) = self.segment {
+            let start = Instant::now();
+            segment.sync()?;
+            let elapsed = start.elapsed();
+            self.total_sync_calls += 1;
+            self.total_sync_nanos += elapsed.as_nanos() as u64;
+        }
         Ok(())
     }
 
@@ -410,13 +386,7 @@ impl WalWriter {
     /// This ensures all written records are persisted, regardless of
     /// durability mode settings.
     pub fn flush(&mut self) -> std::io::Result<()> {
-        if let Some(ref mut segment) = self.segment {
-            let start = Instant::now();
-            segment.sync()?;
-            let elapsed = start.elapsed();
-            self.total_sync_calls += 1;
-            self.total_sync_nanos += elapsed.as_nanos() as u64;
-        }
+        self.perform_sync()?;
         self.reset_sync_counters();
         self.flush_active_meta();
         debug!(target: "strata::wal", segment = self.current_segment_number, "WAL flushed");
@@ -441,13 +411,7 @@ impl WalWriter {
             if self.last_sync_time.elapsed().as_millis() as u64 >= interval_ms
                 || self.writes_since_sync >= batch_size
             {
-                if let Some(ref mut segment) = self.segment {
-                    let start = Instant::now();
-                    segment.sync()?;
-                    let elapsed = start.elapsed();
-                    self.total_sync_calls += 1;
-                    self.total_sync_nanos += elapsed.as_nanos() as u64;
-                }
+                self.perform_sync()?;
                 self.reset_sync_counters();
                 debug!(target: "strata::wal", segment = self.current_segment_number, "WAL periodic sync");
                 return Ok(true);
@@ -526,7 +490,7 @@ impl WalWriter {
         if let Ok(entries) = std::fs::read_dir(&self.wal_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("wal-") && name.ends_with(".seg") {
+                if super::parse_segment_number(&name).is_some() {
                     if let Ok(metadata) = entry.metadata() {
                         total_bytes += metadata.len();
                         segment_count += 1;
@@ -599,13 +563,7 @@ impl WalWriter {
             .filter_map(|e| e.ok())
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().to_string();
-                if name.starts_with("wal-") && name.ends_with(".seg") {
-                    // Extract segment number from "wal-NNNNNN.seg"
-                    let num_str = &name[4..10];
-                    num_str.parse::<u64>().ok()
-                } else {
-                    None
-                }
+                super::parse_segment_number(&name)
             })
             .max()
     }
@@ -617,10 +575,8 @@ impl WalWriter {
         for entry in std::fs::read_dir(&self.wal_dir)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with("wal-") && name.ends_with(".seg") {
-                if let Ok(num) = name[4..10].parse::<u64>() {
-                    segments.push(num);
-                }
+            if let Some(num) = super::parse_segment_number(&name) {
+                segments.push(num);
             }
         }
 
@@ -691,33 +647,12 @@ impl WalWriter {
 
         self.reopen_if_needed()?;
 
-        let segment = self
-            .segment
-            .as_mut()
-            .expect("Segment should exist for non-Cache mode");
-
         let record_bytes = record.to_bytes();
         let encoded = self.codec.encode(&record_bytes);
-
-        // Check if rotation is needed
-        if segment.size() + encoded.len() as u64 > self.config.segment_size {
-            self.rotate_segment()?;
-        }
-
-        let segment = self.segment.as_mut().unwrap();
-        segment.write(&encoded)?;
-
-        if let Some(ref mut meta) = self.current_segment_meta {
-            meta.track_record(record.txn_id, record.timestamp);
-        }
-
-        self.total_wal_appends += 1;
-        self.total_bytes_written += encoded.len() as u64;
+        self.append_inner(&encoded, record.txn_id, record.timestamp)?;
 
         // Immediately flush for cross-process visibility
-        self.flush()?;
-
-        Ok(())
+        self.flush()
     }
 
     /// Close the writer, ensuring all data is flushed.

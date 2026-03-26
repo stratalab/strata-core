@@ -301,13 +301,8 @@ impl WalReader {
             let entry = entry.map_err(|e| WalReaderError::IoError(e.to_string()))?;
             let name = entry.file_name().to_string_lossy().to_string();
 
-            // Expected format: "wal-NNNNNN.seg" where NNNNNN is a 6-digit sequence number
-            // Minimum length: "wal-" (4) + 6 digits + ".seg" (4) = 14 chars
-            if name.starts_with("wal-") && name.ends_with(".seg") && name.len() >= 14 {
-                // Extract the 6-digit sequence number between "wal-" and ".seg"
-                if let Ok(num) = name[4..10].parse::<u64>() {
-                    segments.push(num);
-                }
+            if let Some(num) = super::parse_segment_number(&name) {
+                segments.push(num);
             }
         }
 

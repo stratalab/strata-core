@@ -2,6 +2,12 @@
 //!
 //! Controls WAL sync behavior (Cache, Standard, Always).
 
+/// Default maximum time between fsyncs in Standard mode: 100 ms.
+pub const DEFAULT_SYNC_INTERVAL_MS: u64 = 100;
+
+/// Default maximum writes between fsyncs in Standard mode.
+pub const DEFAULT_SYNC_BATCH_SIZE: usize = 1000;
+
 /// Durability mode for WAL operations
 ///
 /// Controls when the WAL is fsynced to disk. This is orthogonal to
@@ -89,18 +95,17 @@ impl DurabilityMode {
     /// This is the recommended mode for production workloads.
     pub fn standard_default() -> Self {
         DurabilityMode::Standard {
-            interval_ms: 100,
-            batch_size: 1000,
+            interval_ms: DEFAULT_SYNC_INTERVAL_MS,
+            batch_size: DEFAULT_SYNC_BATCH_SIZE,
         }
     }
 }
 
 impl Default for DurabilityMode {
     fn default() -> Self {
-        // Default: standard with 100ms interval or 1000 commits
         DurabilityMode::Standard {
-            interval_ms: 100,
-            batch_size: 1000,
+            interval_ms: DEFAULT_SYNC_INTERVAL_MS,
+            batch_size: DEFAULT_SYNC_BATCH_SIZE,
         }
     }
 }
