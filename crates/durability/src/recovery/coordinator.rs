@@ -22,7 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::codec::{CodecError, StorageCodec};
+use crate::codec::{clone_codec, CodecError, StorageCodec};
 use crate::disk_snapshot::{SnapshotReadError, SnapshotReader};
 use crate::format::manifest::{Manifest, ManifestError, ManifestManager};
 use crate::format::segment_meta::SegmentMeta;
@@ -382,11 +382,6 @@ impl RecoveryError {
     pub fn apply(msg: impl Into<String>) -> Self {
         RecoveryError::Apply(msg.into())
     }
-}
-
-/// Clone a boxed codec, preserving internal state (e.g., encryption keys).
-fn clone_codec(codec: &dyn StorageCodec) -> Box<dyn StorageCodec> {
-    codec.clone_box()
 }
 
 #[cfg(test)]

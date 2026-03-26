@@ -1,19 +1,37 @@
 //! Storage codec abstraction.
 //!
-//! The codec seam provides a hook point for future encryption-at-rest and
+//! The codec seam provides a hook point for encryption-at-rest and
 //! compression. All bytes passing through the storage layer go through the
 //! codec for encode/decode operations.
 //!
+//! # Available Codecs
 //!
+//! | Codec ID | Description | Status |
+//! |----------|-------------|--------|
+//! | `"identity"` | No-op pass-through | Default |
+//! | `"aes-gcm-256"` | AES-256-GCM authenticated encryption | Available |
 //!
-//! Uses `IdentityCodec` which performs no transformation. This establishes
-//! the codec seam without adding complexity. Future milestones can add:
+//! # Enabling Encryption
 //!
-//! - `AesGcmCodec`: AES-256-GCM encryption at rest
-//! - `Lz4Codec`: LZ4 compression
-//! - `ChainedCodec`: Compression + encryption pipeline
+//! To enable AES-256-GCM encryption at rest:
 //!
-//! # Usage
+//! 1. Set the `STRATA_ENCRYPTION_KEY` environment variable to a 64-character
+//!    hex string (32 bytes):
+//!    ```text
+//!    export STRATA_ENCRYPTION_KEY="000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+//!    ```
+//!
+//! 2. Use `"aes-gcm-256"` as the codec ID when creating a database:
+//!    ```text
+//!    let config = DatabaseConfig { codec_id: "aes-gcm-256".to_string(), .. };
+//!    ```
+//!
+//! 3. Or obtain a codec directly via [`get_codec("aes-gcm-256")`](get_codec).
+//!
+//! **Important:** A database created with one codec cannot be opened with a
+//! different codec — the MANIFEST records the codec ID and validates on open.
+//!
+//! # Identity Codec Example
 //!
 //! ```text
 //! use strata_durability::codec::{StorageCodec, IdentityCodec};
@@ -33,7 +51,7 @@ mod traits;
 
 use aes_gcm::AesGcmCodec;
 pub use identity::IdentityCodec;
-pub use traits::{CodecError, StorageCodec};
+pub use traits::{clone_codec, CodecError, StorageCodec};
 
 /// Get a codec by its identifier.
 ///
@@ -43,9 +61,12 @@ pub use traits::{CodecError, StorageCodec};
 ///
 /// - `"identity"`: No-op codec (pass-through)
 ///
+/// # Encryption
+///
+/// - `"aes-gcm-256"`: AES-256-GCM encryption (requires `STRATA_ENCRYPTION_KEY` env var)
+///
 /// # Future Codecs
 ///
-/// - `"aes-gcm-256"`: AES-256-GCM encryption
 /// - `"lz4"`: LZ4 compression
 pub fn get_codec(codec_id: &str) -> Result<Box<dyn StorageCodec>, CodecError> {
     match codec_id {

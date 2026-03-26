@@ -91,6 +91,14 @@ impl CodecError {
     }
 }
 
+/// Clone a boxed codec, preserving internal state (e.g., encryption keys).
+///
+/// Convenience wrapper around [`StorageCodec::clone_box()`] for use with
+/// `&dyn StorageCodec` references.
+pub fn clone_codec(codec: &dyn StorageCodec) -> Box<dyn StorageCodec> {
+    codec.clone_box()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

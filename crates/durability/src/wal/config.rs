@@ -2,6 +2,12 @@
 //!
 //! This module provides configuration for the Write-Ahead Log.
 
+/// Default maximum segment size: 64 MB.
+pub const DEFAULT_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
+
+/// Default bytes between fsyncs in Standard mode: 4 MB.
+pub const DEFAULT_BUFFERED_SYNC_BYTES: u64 = 4 * 1024 * 1024;
+
 /// WAL configuration parameters.
 #[derive(Debug, Clone)]
 pub struct WalConfig {
@@ -20,8 +26,8 @@ pub struct WalConfig {
 impl Default for WalConfig {
     fn default() -> Self {
         WalConfig {
-            segment_size: 64 * 1024 * 1024,       // 64MB
-            buffered_sync_bytes: 4 * 1024 * 1024, // 4MB
+            segment_size: DEFAULT_SEGMENT_SIZE,
+            buffered_sync_bytes: DEFAULT_BUFFERED_SYNC_BYTES,
         }
     }
 }

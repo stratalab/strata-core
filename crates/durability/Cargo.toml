@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+default = []
+multi_process = []
+
 [dependencies]
 strata-core = { path = "../core" }
 parking_lot = { workspace = true }
