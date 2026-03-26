@@ -276,10 +276,11 @@ impl KVStore {
         })
     }
 
-    /// Count keys matching an optional prefix without materializing user-key strings.
+    /// Count keys matching an optional prefix without allocating user-key strings.
     ///
-    /// Returns the number of matching keys. More memory-efficient than
-    /// `list().len()` because it never allocates the key strings.
+    /// Uses UTF-8 validity check directly on the raw key bytes instead of
+    /// calling `user_key_string()`, which avoids one `String` allocation per
+    /// scanned entry.
     pub fn count(
         &self,
         branch_id: &BranchId,
@@ -292,9 +293,10 @@ impl KVStore {
 
             let results = txn.scan_prefix(&scan_prefix)?;
 
+            // Check UTF-8 validity without allocating a String per key
             Ok(results
                 .into_iter()
-                .filter(|(key, _)| key.user_key_string().is_some())
+                .filter(|(key, _)| std::str::from_utf8(&key.user_key).is_ok())
                 .count() as u64)
         })
     }
@@ -525,6 +527,11 @@ fn cached_namespace(branch_id: BranchId, space: &str) -> Arc<Namespace> {
         .entry((branch_id, sp.clone()))
         .or_insert_with(|| Arc::new(Namespace::for_branch_space(branch_id, &sp)))
         .clone()
+}
+
+/// Remove all cached namespace entries for a branch (call on branch deletion).
+pub fn invalidate_kv_namespace_cache(branch_id: &BranchId) {
+    NS_CACHE.retain(|k, _| k.0 != *branch_id);
 }
 
 impl KVStoreExt for TransactionContext {
@@ -1501,5 +1508,247 @@ mod tests {
         let vv = vv.unwrap();
         assert_eq!(vv.value, Value::Int(99));
         assert!(vv.version.as_u64() > 0, "Version must be non-zero");
+    }
+
+    // ========== count() tests ==========
+
+    #[test]
+    fn test_count_empty() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        assert_eq!(kv.count(&branch_id, "default", None).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_count_all() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        kv.put(&branch_id, "default", "a", Value::Int(1)).unwrap();
+        kv.put(&branch_id, "default", "b", Value::Int(2)).unwrap();
+        kv.put(&branch_id, "default", "c", Value::Int(3)).unwrap();
+        assert_eq!(kv.count(&branch_id, "default", None).unwrap(), 3);
+    }
+
+    #[test]
+    fn test_count_with_prefix() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        kv.put(&branch_id, "default", "user:1", Value::Int(1)).unwrap();
+        kv.put(&branch_id, "default", "user:2", Value::Int(2)).unwrap();
+        kv.put(&branch_id, "default", "task:1", Value::Int(3)).unwrap();
+        assert_eq!(kv.count(&branch_id, "default", Some("user:")).unwrap(), 2);
+        assert_eq!(kv.count(&branch_id, "default", Some("task:")).unwrap(), 1);
+        assert_eq!(kv.count(&branch_id, "default", Some("none:")).unwrap(), 0);
+    }
+
+    // ========== list_with_cursor_limit() tests ==========
+
+    #[test]
+    fn test_list_with_cursor_limit_basic() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        for i in 0..10 {
+            kv.put(&branch_id, "default", &format!("key_{:02}", i), Value::Int(i))
+                .unwrap();
+        }
+
+        // First page of 3
+        let page = kv
+            .list_with_cursor_limit(&branch_id, "default", None, None, 3)
+            .unwrap();
+        assert_eq!(page.len(), 4); // limit + 1 for has_more detection
+        assert_eq!(page[0], "key_00");
+        assert_eq!(page[1], "key_01");
+        assert_eq!(page[2], "key_02");
+        assert_eq!(page[3], "key_03"); // extra "has more" entry
+    }
+
+    #[test]
+    fn test_list_with_cursor_limit_with_cursor() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        for i in 0..10 {
+            kv.put(&branch_id, "default", &format!("key_{:02}", i), Value::Int(i))
+                .unwrap();
+        }
+
+        // Page after "key_04", limit 3
+        let page = kv
+            .list_with_cursor_limit(&branch_id, "default", None, Some("key_04"), 3)
+            .unwrap();
+        assert_eq!(page.len(), 4); // limit + 1
+        assert_eq!(page[0], "key_05"); // start after cursor
+    }
+
+    #[test]
+    fn test_list_with_cursor_limit_cursor_beyond_end() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        kv.put(&branch_id, "default", "a", Value::Int(1)).unwrap();
+        kv.put(&branch_id, "default", "b", Value::Int(2)).unwrap();
+
+        let page = kv
+            .list_with_cursor_limit(&branch_id, "default", None, Some("z"), 10)
+            .unwrap();
+        assert!(page.is_empty(), "cursor beyond all keys returns empty");
+    }
+
+    #[test]
+    fn test_list_with_cursor_limit_last_page() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        kv.put(&branch_id, "default", "a", Value::Int(1)).unwrap();
+        kv.put(&branch_id, "default", "b", Value::Int(2)).unwrap();
+
+        // Request limit 5, only 2 keys exist → returns 2 (no extra "has_more" entry)
+        let page = kv
+            .list_with_cursor_limit(&branch_id, "default", None, None, 5)
+            .unwrap();
+        assert_eq!(page.len(), 2);
+    }
+
+    // ========== sample() tests ==========
+
+    #[test]
+    fn test_sample_empty() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        let (total, items) = kv.sample(&branch_id, "default", None, 5).unwrap();
+        assert_eq!(total, 0);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_sample_count_zero() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        kv.put(&branch_id, "default", "a", Value::Int(1)).unwrap();
+        let (total, items) = kv.sample(&branch_id, "default", None, 0).unwrap();
+        assert_eq!(total, 1);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_sample_count_exceeds_total() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        kv.put(&branch_id, "default", "a", Value::Int(1)).unwrap();
+        kv.put(&branch_id, "default", "b", Value::Int(2)).unwrap();
+        let (total, items) = kv.sample(&branch_id, "default", None, 10).unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(items.len(), 2); // returns all entries
+    }
+
+    #[test]
+    fn test_sample_returns_values() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        for i in 0..20 {
+            kv.put(
+                &branch_id,
+                "default",
+                &format!("k{:02}", i),
+                Value::Int(i),
+            )
+            .unwrap();
+        }
+        let (total, items) = kv.sample(&branch_id, "default", None, 5).unwrap();
+        assert_eq!(total, 20);
+        assert_eq!(items.len(), 5);
+        // Each sampled item should have key and value
+        for (key, value) in &items {
+            assert!(key.starts_with('k'));
+            assert!(matches!(value, Value::Int(_)));
+        }
+    }
+
+    #[test]
+    fn test_sample_with_prefix() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        kv.put(&branch_id, "default", "user:1", Value::Int(1)).unwrap();
+        kv.put(&branch_id, "default", "user:2", Value::Int(2)).unwrap();
+        kv.put(&branch_id, "default", "task:1", Value::Int(3)).unwrap();
+        let (total, items) = kv.sample(&branch_id, "default", Some("user:"), 10).unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(items.len(), 2);
+    }
+
+    // ========== KVStoreExt in-space tests ==========
+
+    #[test]
+    fn test_kvstore_ext_in_space() {
+        use crate::primitives::extensions::KVStoreExt;
+
+        let (_temp, db, _kv) = setup();
+        let branch_id = BranchId::new();
+
+        db.transaction(branch_id, |txn| {
+            // Write to non-default space
+            txn.kv_put_in_space("myspace", "key1", Value::Int(42))?;
+
+            // Read from non-default space
+            let val = txn.kv_get_in_space("myspace", "key1")?;
+            assert_eq!(val, Some(Value::Int(42)));
+
+            // Default space should not see it
+            let val_default = txn.kv_get("key1")?;
+            assert_eq!(val_default, None, "default space must not see myspace key");
+
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_kvstore_ext_delete_in_space() {
+        use crate::primitives::extensions::KVStoreExt;
+
+        let (_temp, db, _kv) = setup();
+        let branch_id = BranchId::new();
+
+        db.transaction(branch_id, |txn| {
+            txn.kv_put_in_space("alpha", "k", Value::Int(1))?;
+            txn.kv_put_in_space("beta", "k", Value::Int(2))?;
+
+            // Delete from alpha only
+            txn.kv_delete_in_space("alpha", "k")?;
+
+            assert_eq!(txn.kv_get_in_space("alpha", "k")?, None);
+            assert_eq!(txn.kv_get_in_space("beta", "k")?, Some(Value::Int(2)));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    // ========== Namespace cache tests ==========
+
+    #[test]
+    fn test_namespace_cache_returns_same_arc() {
+        let branch = BranchId::new();
+        let ns1 = super::cached_namespace(branch, "test-space");
+        let ns2 = super::cached_namespace(branch, "test-space");
+        assert!(Arc::ptr_eq(&ns1, &ns2), "cache must return same Arc");
+    }
+
+    #[test]
+    fn test_namespace_cache_different_spaces_different_arcs() {
+        let branch = BranchId::new();
+        let ns_a = super::cached_namespace(branch, "space-a");
+        let ns_b = super::cached_namespace(branch, "space-b");
+        assert!(!Arc::ptr_eq(&ns_a, &ns_b));
+        assert_eq!(ns_a.space, "space-a");
+        assert_eq!(ns_b.space, "space-b");
+    }
+
+    #[test]
+    fn test_invalidate_kv_namespace_cache() {
+        let branch = BranchId::new();
+        let ns_before = super::cached_namespace(branch, "evict-test");
+        super::invalidate_kv_namespace_cache(&branch);
+        let ns_after = super::cached_namespace(branch, "evict-test");
+        // Value is identical but must be a new allocation
+        assert_eq!(*ns_before, *ns_after);
+        assert!(!Arc::ptr_eq(&ns_before, &ns_after));
     }
 }
