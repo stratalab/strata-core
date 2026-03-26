@@ -386,6 +386,8 @@ impl HybridSearch {
             // - For vector/hybrid search with embeddings, the orchestrator
             //   should call vector.search_response() directly with the embedding
             PrimitiveType::Vector => Searchable::search(&self.vector, req),
+            // Graph primitive search not yet implemented — return empty results
+            PrimitiveType::Graph => Ok(SearchResponse::empty()),
         }
     }
 

@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn test_all_tags() {
-        assert_eq!(primitive_tags::ALL_TAGS.len(), 5);
+        assert_eq!(primitive_tags::ALL_TAGS.len(), 6);
         assert_eq!(
             primitive_tags::ALL_TAGS,
             [
@@ -331,6 +331,7 @@ mod tests {
                 primitive_tags::BRANCH,
                 primitive_tags::JSON,
                 primitive_tags::VECTOR,
+                primitive_tags::GRAPH,
             ]
         );
     }

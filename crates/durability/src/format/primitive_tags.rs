@@ -13,9 +13,11 @@ pub const BRANCH: u8 = 0x03;
 pub const JSON: u8 = 0x04;
 /// Vector embedding
 pub const VECTOR: u8 = 0x05;
+/// Graph store
+pub const GRAPH: u8 = 0x06;
 
 /// All valid primitive tags in order
-pub const ALL_TAGS: [u8; 5] = [KV, EVENT, BRANCH, JSON, VECTOR];
+pub const ALL_TAGS: [u8; 6] = [KV, EVENT, BRANCH, JSON, VECTOR, GRAPH];
 
 /// Get the tag name for display
 pub fn tag_name(tag: u8) -> &'static str {
@@ -25,6 +27,7 @@ pub fn tag_name(tag: u8) -> &'static str {
         BRANCH => "Branch",
         JSON => "Json",
         VECTOR => "Vector",
+        GRAPH => "Graph",
         _ => "Unknown",
     }
 }
@@ -49,12 +52,13 @@ mod tests {
         assert_eq!(tag_name(BRANCH), "Branch");
         assert_eq!(tag_name(JSON), "Json");
         assert_eq!(tag_name(VECTOR), "Vector");
+        assert_eq!(tag_name(GRAPH), "Graph");
         assert_eq!(tag_name(0xFF), "Unknown");
     }
 
     #[test]
     fn all_tags_complete() {
-        assert_eq!(ALL_TAGS.len(), 5);
-        assert_eq!(ALL_TAGS, [KV, EVENT, BRANCH, JSON, VECTOR]);
+        assert_eq!(ALL_TAGS.len(), 6);
+        assert_eq!(ALL_TAGS, [KV, EVENT, BRANCH, JSON, VECTOR, GRAPH]);
     }
 }
