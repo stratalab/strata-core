@@ -2832,4 +2832,156 @@ mod tests {
         manager.mark_version_applied(v3);
         assert_eq!(manager.visible_version(), v3);
     }
+
+    /// Issue #1915: json_exists(), json_get(), and json_set() don't record reads
+    /// for non-existent documents, making OCC blind to create-if-absent races.
+    ///
+    /// Scenario: T1 and T2 both call json_exists() → false, then json_set() to
+    /// create the doc. Both should record snapshot_version=0 for the missing doc.
+    /// T1 commits first (creating the doc). T2's commit must detect the conflict
+    /// because the doc now exists (version > 0) but T2 recorded version 0.
+    #[test]
+    fn test_issue_1915_json_missing_doc_read_invisible_to_occ() {
+        use strata_core::primitives::json::JsonPath;
+
+        let store = Arc::new(SegmentedStore::new());
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let json_key = Key::new_json(ns.clone(), "unique_doc");
+
+        // T1: check existence → false, then set the document
+        let mut txn1 = TransactionContext::with_store(
+            manager.next_txn_id().unwrap(),
+            branch_id,
+            Arc::clone(&store),
+        );
+        let exists1 = txn1.json_exists(&json_key).unwrap();
+        assert!(!exists1, "doc should not exist yet");
+
+        // T1 creates the document via json_set at root
+        let doc = serde_json::json!({"from": "txn1"});
+        txn1.json_set(&json_key, &JsonPath::root(), doc.into())
+            .unwrap();
+
+        // T2: also check existence → false, then set the document
+        let mut txn2 = TransactionContext::with_store(
+            manager.next_txn_id().unwrap(),
+            branch_id,
+            Arc::clone(&store),
+        );
+        let exists2 = txn2.json_exists(&json_key).unwrap();
+        assert!(!exists2, "doc should not exist yet for T2 either");
+
+        let doc2 = serde_json::json!({"from": "txn2"});
+        txn2.json_set(&json_key, &JsonPath::root(), doc2.into())
+            .unwrap();
+
+        // T1 commits first — should succeed
+        let v1 = manager.commit(&mut txn1, store.as_ref(), None);
+        assert!(v1.is_ok(), "T1 commit should succeed: {:?}", v1.err());
+
+        // T2 commits second — MUST fail with conflict because the doc now exists
+        // but T2 observed it as missing (snapshot_version=0, current_version > 0)
+        let v2 = manager.commit(&mut txn2, store.as_ref(), None);
+        assert!(
+            v2.is_err(),
+            "T2 commit must fail: json_exists() saw missing doc but T1 created it"
+        );
+    }
+
+    /// Issue #1915: json_get() for a non-existent document must record
+    /// snapshot_version=0 so that a concurrent create is detected.
+    #[test]
+    fn test_issue_1915_json_get_missing_doc_records_read() {
+        use strata_core::primitives::json::JsonPath;
+
+        let store = Arc::new(SegmentedStore::new());
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let json_key = Key::new_json(ns.clone(), "phantom_doc");
+
+        // T1: json_get on non-existent doc → None, then write something
+        let mut txn1 = TransactionContext::with_store(
+            manager.next_txn_id().unwrap(),
+            branch_id,
+            Arc::clone(&store),
+        );
+        let result = txn1.json_get(&json_key, &JsonPath::root()).unwrap();
+        assert!(result.is_none(), "doc should not exist");
+
+        // T1 creates the doc
+        let doc = serde_json::json!({"data": 1});
+        txn1.json_set(&json_key, &JsonPath::root(), doc.into())
+            .unwrap();
+
+        // T2: also json_get on non-existent doc → None, then create
+        let mut txn2 = TransactionContext::with_store(
+            manager.next_txn_id().unwrap(),
+            branch_id,
+            Arc::clone(&store),
+        );
+        let result2 = txn2.json_get(&json_key, &JsonPath::root()).unwrap();
+        assert!(result2.is_none(), "doc should not exist for T2");
+
+        let doc2 = serde_json::json!({"data": 2});
+        txn2.json_set(&json_key, &JsonPath::root(), doc2.into())
+            .unwrap();
+
+        // T1 commits
+        let v1 = manager.commit(&mut txn1, store.as_ref(), None);
+        assert!(v1.is_ok(), "T1 commit should succeed");
+
+        // T2 must fail — json_get saw doc as absent, but T1 created it
+        let v2 = manager.commit(&mut txn2, store.as_ref(), None);
+        assert!(
+            v2.is_err(),
+            "T2 commit must fail: json_get() saw missing doc but T1 created it"
+        );
+    }
+
+    /// Issue #1915: json_set() on a non-existent document must record
+    /// snapshot_version=0 so that concurrent creation is detected.
+    #[test]
+    fn test_issue_1915_json_set_missing_doc_records_read() {
+        use strata_core::primitives::json::JsonPath;
+
+        let store = Arc::new(SegmentedStore::new());
+        let manager = TransactionManager::new(0);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let json_key = Key::new_json(ns.clone(), "set_race_doc");
+
+        // T1: json_set on a non-existent doc (blind create)
+        let mut txn1 = TransactionContext::with_store(
+            manager.next_txn_id().unwrap(),
+            branch_id,
+            Arc::clone(&store),
+        );
+        let doc = serde_json::json!({"from": "txn1"});
+        txn1.json_set(&json_key, &JsonPath::root(), doc.into())
+            .unwrap();
+
+        // T2: also json_set on the same non-existent doc
+        let mut txn2 = TransactionContext::with_store(
+            manager.next_txn_id().unwrap(),
+            branch_id,
+            Arc::clone(&store),
+        );
+        let doc2 = serde_json::json!({"from": "txn2"});
+        txn2.json_set(&json_key, &JsonPath::root(), doc2.into())
+            .unwrap();
+
+        // T1 commits first
+        let v1 = manager.commit(&mut txn1, store.as_ref(), None);
+        assert!(v1.is_ok(), "T1 commit should succeed");
+
+        // T2 must fail — both read the doc as absent and tried to create it
+        let v2 = manager.commit(&mut txn2, store.as_ref(), None);
+        assert!(
+            v2.is_err(),
+            "T2 commit must fail: json_set() on missing doc but T1 created it"
+        );
+    }
 }
