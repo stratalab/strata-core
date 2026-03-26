@@ -532,12 +532,12 @@ impl SegmentedStore {
                 continue; // empty segment
             }
             let seg_min_prefix = if seg_min.len() >= 8 {
-                &seg_min[..seg_min.len() - 8]
+                &seg_min[..seg_min.len() - COMMIT_ID_SUFFIX_LEN]
             } else {
                 seg_min
             };
             let seg_max_prefix = if seg_max.len() >= 8 {
-                &seg_max[..seg_max.len() - 8]
+                &seg_max[..seg_max.len() - COMMIT_ID_SUFFIX_LEN]
             } else {
                 seg_max
             };
@@ -568,12 +568,12 @@ impl SegmentedStore {
                         return false;
                     }
                     let seg_min_prefix = if seg_min.len() >= 8 {
-                        &seg_min[..seg_min.len() - 8]
+                        &seg_min[..seg_min.len() - COMMIT_ID_SUFFIX_LEN]
                     } else {
                         seg_min
                     };
                     let seg_max_prefix = if seg_max.len() >= 8 {
-                        &seg_max[..seg_max.len() - 8]
+                        &seg_max[..seg_max.len() - COMMIT_ID_SUFFIX_LEN]
                     } else {
                         seg_max
                     };
@@ -1077,7 +1077,7 @@ fn check_corruption_flags(flags: &[Arc<AtomicBool>]) -> io::Result<()> {
 #[inline]
 fn typed_key_prefix_of(ik_bytes: &[u8]) -> &[u8] {
     if ik_bytes.len() >= 8 {
-        &ik_bytes[..ik_bytes.len() - 8]
+        &ik_bytes[..ik_bytes.len() - COMMIT_ID_SUFFIX_LEN]
     } else {
         ik_bytes
     }

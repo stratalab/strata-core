@@ -17,14 +17,15 @@
 //!
 //! [`SegmentBuilder`]: crate::segment_builder::SegmentBuilder
 
-use crate::block_cache::{self, Priority};
 use crate::bloom::BloomFilter;
-use crate::key_encoding::{encode_typed_key, encode_typed_key_prefix, InternalKey};
+use crate::key_encoding::{
+    encode_typed_key, encode_typed_key_prefix, InternalKey, COMMIT_ID_SUFFIX_LEN,
+};
 use crate::segment_builder::{
     decode_entry_header_ref_v4, decode_entry_header_v4, decode_entry_v4, decode_entry_v4_raw,
     decode_entry_value, parse_filter_index, parse_footer, parse_framed_block,
     parse_framed_block_raw, parse_header, parse_index_block, parse_properties_block, EntryHeader,
-    FilterIndexEntry, Footer, IndexEntry, KVHeader, PropertiesBlock, FOOTER_SZ, FRAME_OVERHEAD,
+    FilterIndexEntry, IndexEntry, KVHeader, PropertiesBlock, FOOTER_SZ, FRAME_OVERHEAD,
     HEADER_SIZE, IDX_TYPE_PARTITIONED,
 };
 use strata_core::error::StrataError;
@@ -35,6 +36,16 @@ use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
+
+/// Shorthand for `io::Error::new(io::ErrorKind::InvalidData, ...)`.
+macro_rules! invalid_data {
+    ($msg:expr) => {
+        io::Error::new(io::ErrorKind::InvalidData, $msg)
+    };
+    ($fmt:expr, $($arg:tt)*) => {
+        io::Error::new(io::ErrorKind::InvalidData, format!($fmt, $($arg)*))
+    };
+}
 
 // ---------------------------------------------------------------------------
 // SegmentEntry — what queries return
@@ -89,6 +100,59 @@ enum SegmentIndex {
     },
 }
 
+impl SegmentIndex {
+    /// Return the sub-index for a given partition, or `None` if out of bounds.
+    ///
+    /// For monolithic indexes, partition 0 returns the full index. For
+    /// partitioned indexes, returns the corresponding sub-index slice.
+    fn partition(&self, idx: usize) -> Option<&[IndexEntry]> {
+        match self {
+            SegmentIndex::Monolithic(entries) => {
+                if idx == 0 {
+                    Some(entries)
+                } else {
+                    None
+                }
+            }
+            SegmentIndex::Partitioned { sub_indexes, .. } => {
+                sub_indexes.get(idx).map(|v| v.as_slice())
+            }
+        }
+    }
+
+    /// Whether the index is empty (no entries at all).
+    fn is_empty(&self) -> bool {
+        match self {
+            SegmentIndex::Monolithic(entries) => entries.is_empty(),
+            SegmentIndex::Partitioned { sub_indexes, .. } => sub_indexes.is_empty(),
+        }
+    }
+
+    /// Find the starting partition and block for a seek key.
+    ///
+    /// Returns `(partition_idx, block_within_partition)`.
+    fn seek_position(&self, seek_bytes: &[u8]) -> (usize, usize) {
+        let search = |entries: &[IndexEntry]| -> usize {
+            match entries.binary_search_by(|e| e.key.as_slice().cmp(seek_bytes)) {
+                Ok(i) => i,
+                Err(0) => 0,
+                Err(i) => i - 1,
+            }
+        };
+        match self {
+            SegmentIndex::Monolithic(entries) => (0, search(entries)),
+            SegmentIndex::Partitioned {
+                top_level,
+                sub_indexes,
+            } => {
+                let part = search(top_level);
+                let block_in = search(&sub_indexes[part]);
+                (part, block_in)
+            }
+        }
+    }
+}
+
 /// An immutable KV segment file backed by pread + block cache.
 ///
 /// Opened via [`KVSegment::open`], provides point lookups and prefix iteration
@@ -97,8 +161,6 @@ pub struct KVSegment {
     /// Open file handle for pread I/O.
     file: std::fs::File,
     header: KVHeader,
-    #[allow(dead_code)] // used by future compaction/GC
-    footer: Footer,
     index: SegmentIndex,
     bloom: PartitionedBloom,
     props: PropertiesBlock,
@@ -128,10 +190,7 @@ impl KVSegment {
         let file_size = file.metadata()?.len();
 
         if file_size < (HEADER_SIZE + FOOTER_SZ) as u64 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "segment file too small",
-            ));
+            return Err(invalid_data!("segment file too small"));
         }
 
         // Parse header via pread
@@ -139,9 +198,9 @@ impl KVSegment {
         let header_bytes: &[u8; HEADER_SIZE] = header_buf
             .as_slice()
             .try_into()
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "header size mismatch"))?;
+            .map_err(|_| invalid_data!("header size mismatch"))?;
         let header = parse_header(header_bytes)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid segment header"))?;
+            .ok_or_else(|| invalid_data!("invalid segment header"))?;
 
         // Parse footer via pread (last FOOTER_SZ bytes)
         let footer_offset = file_size - FOOTER_SZ as u64;
@@ -149,27 +208,17 @@ impl KVSegment {
         let footer_bytes: &[u8; FOOTER_SZ] = footer_buf
             .as_slice()
             .try_into()
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "footer size mismatch"))?;
-        let footer = parse_footer(footer_bytes).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid segment footer (bad magic)",
-            )
-        })?;
+            .map_err(|_| invalid_data!("footer size mismatch"))?;
+        let footer = parse_footer(footer_bytes)
+            .ok_or_else(|| invalid_data!("invalid segment footer (bad magic)"))?;
 
         // Helper: validate block offset + length fits within the file.
         let check_block_bounds = |offset: u64, len: u32, name: &str| -> io::Result<(u64, usize)> {
-            let end = offset.checked_add(len as u64).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("{} offset+len overflows", name),
-                )
-            })?;
+            let end = offset
+                .checked_add(len as u64)
+                .ok_or_else(|| invalid_data!("{} offset+len overflows", name))?;
             if end > file_size {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("{} extends past end of file", name),
-                ));
+                return Err(invalid_data!("{} extends past end of file", name));
             }
             Ok((offset, len as usize))
         };
@@ -181,25 +230,19 @@ impl KVSegment {
             "index block",
         )?;
         let idx_buf = pread_exact(&file, idx_off, idx_len)?;
-        let (_, idx_data) = parse_framed_block(&idx_buf).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "index block CRC mismatch")
-        })?;
+        let (_, idx_data) = parse_framed_block(&idx_buf)
+            .ok_or_else(|| invalid_data!("index block CRC mismatch"))?;
         let index_entries = parse_index_block(idx_data)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed index block"))?;
+            .ok_or_else(|| invalid_data!("malformed index block"))?;
         let index = if footer.index_type == IDX_TYPE_PARTITIONED {
             // Eagerly load all sub-index partitions into memory.
             let mut sub_indexes = Vec::with_capacity(index_entries.len());
             for entry in &index_entries {
                 let raw = pread_exact(&file, entry.block_offset, entry.block_data_len as usize)?;
-                let (_, data) = parse_framed_block(&raw).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "sub-index partition CRC mismatch",
-                    )
-                })?;
-                let sub = parse_index_block(data).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "malformed sub-index partition")
-                })?;
+                let (_, data) = parse_framed_block(&raw)
+                    .ok_or_else(|| invalid_data!("sub-index partition CRC mismatch"))?;
+                let sub = parse_index_block(data)
+                    .ok_or_else(|| invalid_data!("malformed sub-index partition"))?;
                 sub_indexes.push(sub);
             }
             SegmentIndex::Partitioned {
@@ -217,22 +260,17 @@ impl KVSegment {
             "filter index block",
         )?;
         let fi_buf = pread_exact(&file, fi_off, fi_len)?;
-        let (_, fi_data) = parse_framed_block(&fi_buf).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "filter index block CRC mismatch",
-            )
-        })?;
+        let (_, fi_data) = parse_framed_block(&fi_buf)
+            .ok_or_else(|| invalid_data!("filter index block CRC mismatch"))?;
         let filter_index = parse_filter_index(fi_data)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed filter index"))?;
+            .ok_or_else(|| invalid_data!("malformed filter index"))?;
 
         // Eagerly load all bloom partition data into memory.
         let mut bloom_partitions = Vec::with_capacity(filter_index.len());
         for entry in &filter_index {
             let raw = pread_exact(&file, entry.block_offset, entry.block_data_len as usize)?;
-            let (_, data) = parse_framed_block(&raw).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "bloom partition CRC mismatch")
-            })?;
+            let (_, data) =
+                parse_framed_block(&raw).ok_or_else(|| invalid_data!("bloom partition CRC mismatch"))?;
             bloom_partitions.push(Arc::new(data.to_vec()));
         }
         let bloom = PartitionedBloom {
@@ -247,19 +285,16 @@ impl KVSegment {
             "properties block",
         )?;
         let props_buf = pread_exact(&file, props_off, props_len)?;
-        let (_, props_data) = parse_framed_block(&props_buf).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "properties block CRC mismatch")
-        })?;
-        let props = parse_properties_block(props_data).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "malformed properties block")
-        })?;
+        let (_, props_data) = parse_framed_block(&props_buf)
+            .ok_or_else(|| invalid_data!("properties block CRC mismatch"))?;
+        let props = parse_properties_block(props_data)
+            .ok_or_else(|| invalid_data!("malformed properties block"))?;
 
         let file_path = path.to_path_buf();
         let file_id = crate::block_cache::file_path_hash(&file_path);
         Ok(Self {
             file,
             header,
-            footer,
             index,
             bloom,
             props,
@@ -323,8 +358,8 @@ impl KVSegment {
                 for pi in part_idx..top_level.len() {
                     if pi > part_idx {
                         let prev_key = &top_level[pi - 1].key;
-                        if prev_key.len() >= 8 {
-                            let prefix = &prev_key[..prev_key.len() - 8];
+                        if prev_key.len() >= COMMIT_ID_SUFFIX_LEN {
+                            let prefix = &prev_key[..prev_key.len() - COMMIT_ID_SUFFIX_LEN];
                             if prefix > typed_key {
                                 break;
                             }
@@ -366,8 +401,8 @@ impl KVSegment {
 
             if bi > block_idx {
                 let prev_key = &index[bi - 1].key;
-                if prev_key.len() >= 8 {
-                    let prefix = &prev_key[..prev_key.len() - 8];
+                if prev_key.len() >= COMMIT_ID_SUFFIX_LEN {
+                    let prefix = &prev_key[..prev_key.len() - COMMIT_ID_SUFFIX_LEN];
                     if prefix > typed_key {
                         break;
                     }
@@ -389,49 +424,12 @@ impl KVSegment {
     /// Iteration stops when entries no longer match the prefix.
     pub fn iter_seek<'a>(&'a self, prefix: &Key) -> SegmentIter<'a> {
         let prefix_bytes = encode_typed_key_prefix(prefix);
-        let seek_ik = InternalKey::encode(prefix, u64::MAX);
-        let seek_bytes = seek_ik.as_bytes().to_vec();
-
-        let (partition_idx, block_within_partition, current_sub_index, done) = match &self.index {
-            SegmentIndex::Monolithic(entries) => {
-                if entries.is_empty() {
-                    (0, 0, Vec::new(), true)
-                } else {
-                    let start = match entries
-                        .binary_search_by(|e| e.key.as_slice().cmp(seek_bytes.as_slice()))
-                    {
-                        Ok(i) => i,
-                        Err(0) => 0,
-                        Err(i) => i - 1,
-                    };
-                    (0, start, entries.clone(), false)
-                }
-            }
-            SegmentIndex::Partitioned {
-                top_level,
-                sub_indexes,
-            } => {
-                if top_level.is_empty() {
-                    (0, 0, Vec::new(), true)
-                } else {
-                    let part = match top_level
-                        .binary_search_by(|e| e.key.as_slice().cmp(seek_bytes.as_slice()))
-                    {
-                        Ok(i) => i,
-                        Err(0) => 0,
-                        Err(i) => i - 1,
-                    };
-                    let sub = &sub_indexes[part];
-                    let block_in = match sub
-                        .binary_search_by(|e| e.key.as_slice().cmp(seek_bytes.as_slice()))
-                    {
-                        Ok(i) => i,
-                        Err(0) => 0,
-                        Err(i) => i - 1,
-                    };
-                    (part, block_in, sub.clone(), false)
-                }
-            }
+        let done = self.index.is_empty();
+        let (partition_idx, block_within_partition) = if done {
+            (0, 0)
+        } else {
+            let seek_ik = InternalKey::encode(prefix, u64::MAX);
+            self.index.seek_position(seek_ik.as_bytes())
         };
 
         SegmentIter {
@@ -439,7 +437,6 @@ impl KVSegment {
             prefix_bytes,
             partition_idx,
             block_within_partition,
-            current_sub_index,
             block_offset: 0,
             block_data_end: 0,
             block_data: None,
@@ -496,43 +493,15 @@ impl KVSegment {
         }
     }
 
-    /// No-op: bloom partitions are now loaded into memory at open time.
-    ///
-    /// Retained for API compatibility with callers that pin L0 blooms.
-    pub fn pin_bloom_partitions(&self) {}
+    /// Whether this segment uses a partitioned (two-level) index.
+    #[cfg(test)]
+    fn is_partitioned_index(&self) -> bool {
+        matches!(&self.index, SegmentIndex::Partitioned { .. })
+    }
 
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
-
-    /// Load a sub-index partition from disk / block cache.
-    ///
-    /// Follows the same pattern as `partitioned_bloom_check`: check cache
-    /// first, pread on miss, insert at High priority.
-    #[allow(dead_code)]
-    fn load_sub_index(&self, entry: &IndexEntry) -> Option<Vec<IndexEntry>> {
-        let cache = block_cache::global_cache();
-        let data = if let Some(cached) = cache.get(self.file_id, entry.block_offset) {
-            cached
-        } else {
-            // block_data_len already includes frame overhead (same convention
-            // as FilterIndexEntry / partitioned bloom).
-            let raw = pread_exact(
-                &self.file,
-                entry.block_offset,
-                entry.block_data_len as usize,
-            )
-            .ok()?;
-            let (_, data) = parse_framed_block(&raw)?;
-            cache.insert_with_priority(
-                self.file_id,
-                entry.block_offset,
-                data.to_vec(),
-                Priority::High,
-            )
-        };
-        parse_index_block(&data)
-    }
 
     /// Check the partitioned bloom filter for a typed key.
     ///
@@ -663,7 +632,11 @@ impl KVSegment {
                 let bucket = h % hi.num_buckets;
                 let interval = hi.buckets[bucket];
                 if interval != 0xFF && (interval as usize) < num_restarts {
-                    restart_offset_at(block, de, interval as usize) as usize
+                    restart_offset_at(block, de, interval as usize)
+                        .map(|o| o as usize)
+                        .unwrap_or_else(|| {
+                            binary_search_restarts(block, de, num_restarts, typed_key)
+                        })
                 } else {
                     // Empty bucket or out of range: fall back to binary search
                     binary_search_restarts(block, de, num_restarts, typed_key)
@@ -703,7 +676,7 @@ impl KVSegment {
             if prev_key.len() < 8 {
                 return None;
             }
-            let tkp = &prev_key[..prev_key.len() - 8];
+            let tkp = &prev_key[..prev_key.len() - COMMIT_ID_SUFFIX_LEN];
             if tkp != typed_key {
                 if tkp > typed_key {
                     break;
@@ -740,26 +713,15 @@ impl KVSegment {
     ///
     /// Used by `SegmentedStore::list_branch` to scan every entry.
     pub fn iter_seek_all(&self) -> SegmentIter<'_> {
-        let (current_sub_index, done) = match &self.index {
-            SegmentIndex::Monolithic(entries) => (entries.clone(), entries.is_empty()),
-            SegmentIndex::Partitioned { sub_indexes, .. } => {
-                if sub_indexes.is_empty() {
-                    (Vec::new(), true)
-                } else {
-                    (sub_indexes[0].clone(), false)
-                }
-            }
-        };
         SegmentIter {
             segment: self,
             prefix_bytes: Vec::new(), // empty prefix matches everything
             partition_idx: 0,
             block_within_partition: 0,
-            current_sub_index,
             block_offset: 0,
             block_data_end: 0,
             block_data: None,
-            done,
+            done: self.index.is_empty(),
             prev_key: Vec::new(),
         }
     }
@@ -788,15 +750,12 @@ pub(crate) fn parse_restart_trailer(data: &[u8]) -> Option<(usize, usize)> {
     Some((data.len() - trailer_size, num))
 }
 
-/// Read the i-th restart offset from the trailer.
+/// Read the i-th restart offset from the trailer. Returns `None` on corrupt data.
 #[inline]
-fn restart_offset_at(data: &[u8], data_end: usize, index: usize) -> u32 {
+fn restart_offset_at(data: &[u8], data_end: usize, index: usize) -> Option<u32> {
     let off = data_end + index * 4;
-    u32::from_le_bytes(
-        data[off..off + 4]
-            .try_into()
-            .expect("restart offset within bounds"),
-    )
+    let bytes: [u8; 4] = data.get(off..off + 4)?.try_into().ok()?;
+    Some(u32::from_le_bytes(bytes))
 }
 
 /// Binary search restart points to find the interval containing `typed_key`.
@@ -815,7 +774,13 @@ fn binary_search_restarts(
 
     while left < right {
         let mid = (left + right + 1) / 2;
-        let offset = restart_offset_at(data, data_end, mid) as usize;
+        let offset = match restart_offset_at(data, data_end, mid) {
+            Some(o) => o as usize,
+            None => {
+                right = mid - 1;
+                continue;
+            }
+        };
         if offset < data_end {
             // At restart points, shared=0 always, so key is self-contained.
             let cmp = decode_entry_header_ref_v4(&data[offset..data_end])
@@ -831,7 +796,9 @@ fn binary_search_restarts(
         }
     }
 
-    let start = restart_offset_at(data, data_end, left) as usize;
+    let start = restart_offset_at(data, data_end, left)
+        .map(|o| o as usize)
+        .unwrap_or(data_end);
     // Clamp to data_end so the caller's linear scan safely produces no results
     start.min(data_end)
 }
@@ -852,8 +819,10 @@ fn strip_hash_index(data: &[u8]) -> (&[u8], Option<HashIndex<'_>>) {
     if data.len() < 8 || data[data.len() - 1] != 0x01 {
         return (data, None);
     }
-    let num_buckets =
-        u16::from_le_bytes(data[data.len() - 3..data.len() - 1].try_into().unwrap()) as usize;
+    let num_buckets = match data[data.len() - 3..data.len() - 1].try_into() {
+        Ok(bytes) => u16::from_le_bytes(bytes) as usize,
+        Err(_) => return (data, None),
+    };
     if num_buckets == 0 {
         return (data, None);
     }
@@ -883,13 +852,48 @@ fn block_data_end(data: &[u8]) -> usize {
 // SegmentIter — prefix scan iterator
 // ---------------------------------------------------------------------------
 
+/// Common block-loading logic shared by `SegmentIter` and `OwnedSegmentIter`.
+///
+/// Attempts to load the block at `(partition_idx, block_within_partition)` from
+/// the segment's index. On success, sets the block data and resets the offset.
+/// On partition exhaustion, advances partitions until a non-empty one is found
+/// or all partitions are consumed.
+///
+/// Returns `Some(block_data)` on success, `None` if all partitions exhausted,
+/// or the corruption error string if a block read fails.
+fn load_next_block(
+    segment: &KVSegment,
+    partition_idx: &mut usize,
+    block_within_partition: &mut usize,
+) -> Result<Option<(Arc<Vec<u8>>, usize)>, String> {
+    let sub = loop {
+        match segment.index.partition(*partition_idx) {
+            Some(sub) if *block_within_partition < sub.len() => break sub,
+            Some(_) | None => {
+                *partition_idx += 1;
+                *block_within_partition = 0;
+                if segment.index.partition(*partition_idx).is_none() {
+                    return Ok(None);
+                }
+            }
+        }
+    };
+    let ie = &sub[*block_within_partition];
+    match segment.read_data_block(ie) {
+        Ok(data) => {
+            let de = block_data_end(&data);
+            Ok(Some((data, de)))
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Iterator over segment entries matching a prefix.
 pub struct SegmentIter<'a> {
     segment: &'a KVSegment,
     prefix_bytes: Vec<u8>,
     partition_idx: usize,
     block_within_partition: usize,
-    current_sub_index: Vec<IndexEntry>,
     block_offset: usize,
     /// End of entry data in the current block (excludes restart trailer for v3+).
     block_data_end: usize,
@@ -897,24 +901,6 @@ pub struct SegmentIter<'a> {
     done: bool,
     /// Buffer for v4 prefix-compressed key reconstruction (reused across entries).
     prev_key: Vec<u8>,
-}
-
-impl<'a> SegmentIter<'a> {
-    /// Advance to the next partition. Returns `false` if no more partitions.
-    fn advance_partition(&mut self) -> bool {
-        match &self.segment.index {
-            SegmentIndex::Monolithic(_) => false, // single partition, already exhausted
-            SegmentIndex::Partitioned { sub_indexes, .. } => {
-                self.partition_idx += 1;
-                if self.partition_idx >= sub_indexes.len() {
-                    return false;
-                }
-                self.current_sub_index = sub_indexes[self.partition_idx].clone();
-                self.block_within_partition = 0;
-                true
-            }
-        }
-    }
 }
 
 impl<'a> Iterator for SegmentIter<'a> {
@@ -928,21 +914,20 @@ impl<'a> Iterator for SegmentIter<'a> {
 
             // Load current block if needed
             if self.block_data.is_none() {
-                // Advance partition if we've exhausted the current sub-index
-                if self.block_within_partition >= self.current_sub_index.len()
-                    && !self.advance_partition()
-                {
-                    self.done = true;
-                    return None;
-                }
-                let ie = &self.current_sub_index[self.block_within_partition];
-                match self.segment.read_data_block(ie) {
-                    Ok(data) => {
-                        let de = block_data_end(&data);
+                match load_next_block(
+                    self.segment,
+                    &mut self.partition_idx,
+                    &mut self.block_within_partition,
+                ) {
+                    Ok(Some((data, de))) => {
                         self.block_data_end = de;
                         self.block_data = Some(data);
                         self.block_offset = 0;
                         self.prev_key.clear();
+                    }
+                    Ok(None) => {
+                        self.done = true;
+                        return None;
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "segment iterator stopping due to corruption");
@@ -1017,7 +1002,6 @@ pub struct OwnedSegmentIter {
     segment: Arc<KVSegment>,
     partition_idx: usize,
     block_within_partition: usize,
-    current_sub_index: Vec<IndexEntry>,
     block_offset: usize,
     /// End of entry data in the current block (excludes restart trailer for v3+).
     block_data_end: usize,
@@ -1037,21 +1021,11 @@ pub struct OwnedSegmentIter {
 impl OwnedSegmentIter {
     /// Create a streaming iterator over all entries in the segment.
     pub fn new(segment: Arc<KVSegment>) -> Self {
-        let (current_sub_index, done) = match &segment.index {
-            SegmentIndex::Monolithic(entries) => (entries.clone(), entries.is_empty()),
-            SegmentIndex::Partitioned { sub_indexes, .. } => {
-                if sub_indexes.is_empty() {
-                    (Vec::new(), true)
-                } else {
-                    (sub_indexes[0].clone(), false)
-                }
-            }
-        };
+        let done = segment.index.is_empty();
         Self {
             segment,
             partition_idx: 0,
             block_within_partition: 0,
-            current_sub_index,
             block_offset: 0,
             block_data_end: 0,
             block_data: None,
@@ -1081,22 +1055,6 @@ impl OwnedSegmentIter {
         self.corruption_detected = Some(flag);
         self
     }
-
-    /// Advance to the next partition. Returns `false` if no more partitions.
-    fn advance_partition(&mut self) -> bool {
-        match &self.segment.index {
-            SegmentIndex::Monolithic(_) => false,
-            SegmentIndex::Partitioned { sub_indexes, .. } => {
-                self.partition_idx += 1;
-                if self.partition_idx >= sub_indexes.len() {
-                    return false;
-                }
-                self.current_sub_index = sub_indexes[self.partition_idx].clone();
-                self.block_within_partition = 0;
-                true
-            }
-        }
-    }
 }
 
 impl OwnedSegmentIter {
@@ -1116,20 +1074,20 @@ impl Iterator for OwnedSegmentIter {
             }
 
             if self.block_data.is_none() {
-                if self.block_within_partition >= self.current_sub_index.len()
-                    && !self.advance_partition()
-                {
-                    self.done = true;
-                    return None;
-                }
-                let ie = &self.current_sub_index[self.block_within_partition];
-                match self.segment.read_data_block(ie) {
-                    Ok(data) => {
-                        let de = block_data_end(&data);
+                match load_next_block(
+                    &self.segment,
+                    &mut self.partition_idx,
+                    &mut self.block_within_partition,
+                ) {
+                    Ok(Some((data, de))) => {
                         self.block_data_end = de;
                         self.block_data = Some(data);
                         self.block_offset = 0;
                         self.prev_key.clear();
+                    }
+                    Ok(None) => {
+                        self.done = true;
+                        return None;
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "segment iterator stopping due to corruption");
@@ -3292,7 +3250,7 @@ mod tests {
         build_segment_tiny_blocks(&mt, &path_part);
 
         let seg = KVSegment::open(&path_part).unwrap();
-        assert_eq!(seg.footer.index_type, 1); // INDEX_TYPE_PARTITIONED
+        assert!(seg.is_partitioned_index());
 
         // Monolithic segment
         let path_mono = dir.path().join("ft_mono.sst");
@@ -3302,7 +3260,7 @@ mod tests {
         build_segment(&mt2, &path_mono);
 
         let seg2 = KVSegment::open(&path_mono).unwrap();
-        assert_eq!(seg2.footer.index_type, 0); // INDEX_TYPE_MONOLITHIC
+        assert!(!seg2.is_partitioned_index());
     }
 
     #[test]
