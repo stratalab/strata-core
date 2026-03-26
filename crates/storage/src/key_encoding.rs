@@ -227,13 +227,14 @@ impl InternalKey {
     /// Decode the full `(Key, commit_id)` pair.
     pub fn decode(&self) -> Option<(Key, u64)> {
         let buf = &self.0;
-        if buf.len() < 16 + 1 + 1 + 2 + 8 {
-            // minimum: 16 (branch) + 1 (space NUL) + 1 (tag) + 2 (user_key terminator) + 8 (commit)
+        if buf.len() < 16 + 1 + 1 + 2 + COMMIT_ID_SUFFIX_LEN {
+            // minimum: 16 (branch) + 1 (space NUL) + 1 (tag) + 2 (user_key terminator) + commit_id
             return None;
         }
 
-        let commit_id_start = buf.len() - 8;
-        let commit_id_bytes: [u8; 8] = buf[commit_id_start..].try_into().ok()?;
+        let commit_id_start = buf.len() - COMMIT_ID_SUFFIX_LEN;
+        let commit_id_bytes: [u8; COMMIT_ID_SUFFIX_LEN] =
+            buf[commit_id_start..].try_into().ok()?;
         let commit_id = !u64::from_be_bytes(commit_id_bytes);
 
         let typed = &buf[..commit_id_start];

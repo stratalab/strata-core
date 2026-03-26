@@ -673,7 +673,7 @@ impl KVSegment {
             pos += hdr.total_len;
 
             // prev_key now holds the full reconstructed InternalKey bytes
-            if prev_key.len() < 8 {
+            if prev_key.len() < COMMIT_ID_SUFFIX_LEN {
                 return None;
             }
             let tkp = &prev_key[..prev_key.len() - COMMIT_ID_SUFFIX_LEN];

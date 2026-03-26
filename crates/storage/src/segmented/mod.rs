@@ -3414,7 +3414,7 @@ fn point_lookup_level_preencoded(
 
     let idx = l1_segments.partition_point(|seg| {
         let (_, max_ik) = seg.key_range();
-        if max_ik.len() < 8 {
+        if max_ik.len() < COMMIT_ID_SUFFIX_LEN {
             return true;
         }
         let max_prefix = &max_ik[..max_ik.len() - COMMIT_ID_SUFFIX_LEN];
@@ -3427,7 +3427,7 @@ fn point_lookup_level_preencoded(
 
     let seg = &l1_segments[idx];
     let (min_ik, _) = seg.key_range();
-    if min_ik.len() >= 8 {
+    if min_ik.len() >= COMMIT_ID_SUFFIX_LEN {
         let min_prefix = &min_ik[..min_ik.len() - COMMIT_ID_SUFFIX_LEN];
         if min_prefix > typed_key {
             return Ok(None);

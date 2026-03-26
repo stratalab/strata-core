@@ -1914,7 +1914,7 @@ mod tests {
             let (_, prev_max) = prev_seg.key_range();
             let (curr_min, _) = curr_seg.key_range();
             // Strip commit_id to compare typed_key_prefix
-            if prev_max.len() >= 8 && curr_min.len() >= 8 {
+            if prev_max.len() >= COMMIT_ID_SUFFIX_LEN && curr_min.len() >= COMMIT_ID_SUFFIX_LEN {
                 let prev_prefix = &prev_max[..prev_max.len() - COMMIT_ID_SUFFIX_LEN];
                 let curr_prefix = &curr_min[..curr_min.len() - COMMIT_ID_SUFFIX_LEN];
                 assert!(
@@ -2315,8 +2315,8 @@ mod tests {
 
         let result = shorten_index_key(&a, &b);
         // Prefix shortened: "abd", then u64::MAX suffix
-        assert!(result.len() >= 8);
-        let suffix = &result[result.len() - 8..];
+        assert!(result.len() >= COMMIT_ID_SUFFIX_LEN);
+        let suffix = &result[result.len() - COMMIT_ID_SUFFIX_LEN..];
         assert_eq!(suffix, &(!0_u64).to_be_bytes());
         let prefix = &result[..result.len() - COMMIT_ID_SUFFIX_LEN];
         assert_eq!(prefix, b"abd");
