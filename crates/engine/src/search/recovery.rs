@@ -80,6 +80,27 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                     "Search index loaded from mmap cache (fast path)"
                 );
                 index.enable();
+
+                // Reconcile: re-index any KV/Event entries committed after the
+                // last freeze but before a crash (issue #1908).
+                let reconciled = reconcile_index(db, &index)?;
+                if reconciled > 0 {
+                    info!(
+                        target: "strata::search",
+                        reconciled,
+                        "Reconciled missing entries after fast-path load"
+                    );
+                    if !db.is_follower() {
+                        if let Err(e) = index.freeze_to_disk() {
+                            tracing::warn!(
+                                target: "strata::search",
+                                error = %e,
+                                "Failed to freeze search index after reconciliation"
+                            );
+                        }
+                    }
+                }
+
                 return Ok(());
             }
             Ok(false) => {
@@ -187,6 +208,78 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
     }
 
     Ok(())
+}
+
+/// Scan KV/Event entries and re-index any missing from the search index.
+///
+/// Returns the number of entries that were re-indexed. Entries already
+/// present in the DocIdMap are skipped (O(1) DashMap lookup per entry).
+fn reconcile_index(db: &Database, index: &InvertedIndex) -> StrataResult<u64> {
+    let system_branch_id = resolve_branch_name(SYSTEM_BRANCH);
+    let mut reconciled: u64 = 0;
+
+    for branch_id in db.storage().branch_ids() {
+        if branch_id == system_branch_id {
+            continue;
+        }
+
+        // --- KV entries ---
+        for (key, vv) in db.storage().list_by_type(&branch_id, TypeTag::KV) {
+            let user_key = match key.user_key_string() {
+                Some(k) => k,
+                None => continue,
+            };
+
+            let entity_ref = crate::search::EntityRef::Kv {
+                branch_id,
+                key: user_key,
+            };
+
+            if index.has_document(&entity_ref) {
+                continue;
+            }
+
+            let text = match extract_indexable_text(&vv.value) {
+                Some(t) => t,
+                None => continue,
+            };
+
+            index.index_document(&entity_ref, &text, None);
+            reconciled += 1;
+        }
+
+        // --- Event entries ---
+        for (key, vv) in db.storage().list_by_type(&branch_id, TypeTag::Event) {
+            if *key.user_key == *b"__meta__" || key.user_key.starts_with(b"__tidx__") {
+                continue;
+            }
+
+            let sequence = if key.user_key.len() == 8 {
+                u64::from_be_bytes((*key.user_key).try_into().unwrap_or([0; 8]))
+            } else {
+                continue;
+            };
+
+            let entity_ref = crate::search::EntityRef::Event {
+                branch_id,
+                sequence,
+            };
+
+            if index.has_document(&entity_ref) {
+                continue;
+            }
+
+            let text = match extract_indexable_text(&vv.value) {
+                Some(t) => t,
+                None => continue,
+            };
+
+            index.index_document(&entity_ref, &text, None);
+            reconciled += 1;
+        }
+    }
+
+    Ok(reconciled)
 }
 
 /// Register the InvertedIndex as a recovery participant.

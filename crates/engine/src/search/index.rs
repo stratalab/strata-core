@@ -388,6 +388,11 @@ impl InvertedIndex {
         self.version.load(Ordering::Acquire)
     }
 
+    /// Check if a document is already present in the index.
+    pub fn has_document(&self, doc_ref: &EntityRef) -> bool {
+        self.doc_id_map.get(doc_ref).is_some()
+    }
+
     /// Check if index is at least at given version
     pub fn is_at_version(&self, min_version: u64) -> bool {
         self.version.load(Ordering::Acquire) >= min_version
