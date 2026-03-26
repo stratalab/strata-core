@@ -244,6 +244,22 @@ struct SealedSegment {
 /// - Active buffer for O(1) inserts
 /// - Sealed segments for O(log n) HNSW search
 /// - Fan-out search across all segments
+///
+/// ## Thread Safety (Issue #1907)
+///
+/// `SegmentedHnswBackend` has NO internal synchronization — `sealed` is a plain
+/// `Vec`, not an `RwLock<Vec>`. This is safe because all access goes through
+/// `VectorBackendState::backends` (a `DashMap<CollectionId, Box<dyn VectorIndexBackend>>`):
+///
+/// - **Search** calls `backends.get()` → shared read lock → `search(&self)`
+/// - **Insert/seal** calls `backends.get_mut()` → exclusive write lock → `seal_active_buffer(&mut self)`
+///
+/// Rust's borrow checker enforces this at compile time (`&self` vs `&mut self`),
+/// and DashMap enforces it at runtime (RwLock per shard). Concurrent searches on
+/// the same collection are parallel (multiple `&self`). A seal blocks all searches
+/// on that collection until it completes.
+///
+/// **Do not** expose `SegmentedHnswBackend` directly without external synchronization.
 pub struct SegmentedHnswBackend {
     config: SegmentedHnswConfig,
     vector_config: VectorConfig,
