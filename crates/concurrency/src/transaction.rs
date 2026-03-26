@@ -641,8 +641,7 @@ impl TransactionContext {
     /// # }
     /// ```
     pub fn get(&mut self, key: &Key) -> StrataResult<Option<Value>> {
-        self.ensure_active()?;
-        self.enforce_branch_scope(key)?;
+        self.guard(key)?;
 
         // 1. Check write_set first (read-your-writes)
         // No read_set entry - we're reading our own uncommitted write
@@ -700,8 +699,7 @@ impl TransactionContext {
     /// # Errors
     /// Returns `StrataError::invalid_input` if transaction is not active.
     pub fn get_versioned(&mut self, key: &Key) -> StrataResult<Option<VersionedValue>> {
-        self.ensure_active()?;
-        self.enforce_branch_scope(key)?;
+        self.guard(key)?;
 
         // 1. Check write_set first (read-your-writes)
         if let Some(value) = self.write_set.get(key) {
@@ -781,8 +779,7 @@ impl TransactionContext {
     /// # }
     /// ```
     pub fn scan_prefix(&mut self, prefix: &Key) -> StrataResult<Vec<(Key, Value)>> {
-        self.ensure_active()?;
-        self.enforce_branch_scope(prefix)?;
+        self.guard(prefix)?;
 
         let store = self.store.as_ref().ok_or_else(|| {
             StrataError::invalid_input("Transaction has no store for reads".to_string())
@@ -950,8 +947,7 @@ impl TransactionContext {
     /// # }
     /// ```
     pub fn put(&mut self, key: Key, value: Value) -> StrataResult<()> {
-        self.ensure_active()?;
-        self.enforce_branch_scope(&key)?;
+        self.guard(&key)?;
         if self.read_only {
             return Err(StrataError::invalid_input(
                 "Cannot write in a read-only transaction",
@@ -959,13 +955,7 @@ impl TransactionContext {
         }
         self.check_write_limit(Some(&key))?;
 
-        // Reject if the same key already has a CAS operation (#1739 OCC-M1)
-        if self.cas_set.iter().any(|op| op.key == key) {
-            return Err(StrataError::invalid_input(
-                "Key already has a CAS operation in this transaction; \
-                 mixing put/delete and CAS on the same key is ambiguous",
-            ));
-        }
+        self.validate_no_cas_conflict(&key)?;
 
         // Remove from delete_set if previously deleted in this txn
         self.delete_set.remove(&key);
@@ -1031,8 +1021,7 @@ impl TransactionContext {
     /// # }
     /// ```
     pub fn delete(&mut self, key: Key) -> StrataResult<()> {
-        self.ensure_active()?;
-        self.enforce_branch_scope(&key)?;
+        self.guard(&key)?;
         if self.read_only {
             return Err(StrataError::invalid_input(
                 "Cannot write in a read-only transaction",
@@ -1040,13 +1029,7 @@ impl TransactionContext {
         }
         self.check_write_limit(Some(&key))?;
 
-        // Reject if the same key already has a CAS operation (#1739 OCC-M1)
-        if self.cas_set.iter().any(|op| op.key == key) {
-            return Err(StrataError::invalid_input(
-                "Key already has a CAS operation in this transaction; \
-                 mixing put/delete and CAS on the same key is ambiguous",
-            ));
-        }
+        self.validate_no_cas_conflict(&key)?;
 
         // Remove from write_set if previously written in this txn
         self.write_set.remove(&key);
@@ -1094,8 +1077,7 @@ impl TransactionContext {
     /// # }
     /// ```
     pub fn cas(&mut self, key: Key, expected_version: u64, new_value: Value) -> StrataResult<()> {
-        self.ensure_active()?;
-        self.enforce_branch_scope(&key)?;
+        self.guard(&key)?;
         if self.read_only {
             return Err(StrataError::invalid_input(
                 "Cannot write in a read-only transaction",
@@ -1103,13 +1085,7 @@ impl TransactionContext {
         }
         self.check_write_limit(None)?;
 
-        // Reject if the same key already has a put or delete (#1739 OCC-M1)
-        if self.write_set.contains_key(&key) || self.delete_set.contains(&key) {
-            return Err(StrataError::invalid_input(
-                "Key already has a put/delete in this transaction; \
-                 mixing put/delete and CAS on the same key is ambiguous",
-            ));
-        }
+        self.validate_no_write_conflict(&key)?;
 
         self.cas_set.push(CASOperation {
             key,
@@ -1130,8 +1106,7 @@ impl TransactionContext {
         expected_version: u64,
         new_value: Value,
     ) -> StrataResult<()> {
-        self.ensure_active()?;
-        self.enforce_branch_scope(&key)?;
+        self.guard(&key)?;
         if self.read_only {
             return Err(StrataError::invalid_input(
                 "Cannot write in a read-only transaction",
@@ -1139,13 +1114,7 @@ impl TransactionContext {
         }
         self.check_write_limit(None)?;
 
-        // Reject if the same key already has a put or delete (#1739 OCC-M1)
-        if self.write_set.contains_key(&key) || self.delete_set.contains(&key) {
-            return Err(StrataError::invalid_input(
-                "Key already has a put/delete in this transaction; \
-                 mixing put/delete and CAS on the same key is ambiguous",
-            ));
-        }
+        self.validate_no_write_conflict(&key)?;
 
         self.read_from_snapshot(&key)?;
         self.cas_set.push(CASOperation {
@@ -1252,6 +1221,30 @@ impl TransactionContext {
     /// Used for document-level conflict detection.
     pub fn record_json_snapshot_version(&mut self, key: Key, version: u64) {
         self.ensure_json_snapshot_versions().insert(key, version);
+    }
+
+    /// Ensure the snapshot version for a JSON document is tracked.
+    ///
+    /// If the document's version is not yet recorded, reads it from the store
+    /// and records it for conflict detection at commit time. Errors from the
+    /// store are silently ignored (best-effort tracking).
+    fn ensure_json_snapshot_tracked(&mut self, key: &Key) {
+        if self
+            .json_snapshot_versions()
+            .map_or(true, |v| !v.contains_key(key))
+        {
+            if let Some(store) = &self.store {
+                match store.get_versioned(key, self.start_version) {
+                    Ok(Some(vv)) => {
+                        self.record_json_snapshot_version(key.clone(), vv.version.as_u64());
+                    }
+                    Ok(None) => {
+                        self.record_json_snapshot_version(key.clone(), 0);
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
     }
 
     /// Clear all buffered operations
@@ -1382,6 +1375,37 @@ impl TransactionContext {
                  cross-branch operations are not supported in a single transaction",
                 key.namespace.branch_id, self.branch_id
             )));
+        }
+        Ok(())
+    }
+
+    /// Common pre-operation guard: verify the transaction is active and the key
+    /// belongs to this transaction's branch.
+    fn guard(&self, key: &Key) -> StrataResult<()> {
+        self.ensure_active()?;
+        self.enforce_branch_scope(key)
+    }
+
+    /// Reject if the same key already has a CAS operation in this transaction.
+    /// Used by `put()` and `delete()` to prevent ambiguous CAS+write mixing (#1739 OCC-M1).
+    fn validate_no_cas_conflict(&self, key: &Key) -> StrataResult<()> {
+        if self.cas_set.iter().any(|op| op.key == *key) {
+            return Err(StrataError::invalid_input(
+                "Key already has a CAS operation in this transaction; \
+                 mixing put/delete and CAS on the same key is ambiguous",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Reject if the same key already has a put or delete in this transaction.
+    /// Used by `cas()` and `cas_with_read()` to prevent ambiguous write+CAS mixing (#1739 OCC-M1).
+    fn validate_no_write_conflict(&self, key: &Key) -> StrataResult<()> {
+        if self.write_set.contains_key(key) || self.delete_set.contains(key) {
+            return Err(StrataError::invalid_input(
+                "Key already has a put/delete in this transaction; \
+                 mixing put/delete and CAS on the same key is ambiguous",
+            ));
         }
         Ok(())
     }
@@ -1788,22 +1812,24 @@ impl TransactionContext {
 
         // Reclaim memory if a large transaction inflated capacity beyond threshold.
         // Normal workloads (< 4096 entries) keep their allocations intact.
+        //
+        // 4096 is chosen as a power-of-two that comfortably covers typical OLTP
+        // transactions (tens to low-hundreds of keys) while capping idle memory
+        // at ~128 KiB per map (4096 × ~32 B per entry). Shrinking to half the
+        // threshold avoids oscillation when capacity hovers near the boundary.
         const SHRINK_THRESHOLD: usize = 4096;
-        if self.read_set.capacity() > SHRINK_THRESHOLD {
-            self.read_set.shrink_to(SHRINK_THRESHOLD / 2);
+        macro_rules! shrink_if_large {
+            ($collection:expr) => {
+                if $collection.capacity() > SHRINK_THRESHOLD {
+                    $collection.shrink_to(SHRINK_THRESHOLD / 2);
+                }
+            };
         }
-        if self.write_set.capacity() > SHRINK_THRESHOLD {
-            self.write_set.shrink_to(SHRINK_THRESHOLD / 2);
-        }
-        if self.delete_set.capacity() > SHRINK_THRESHOLD {
-            self.delete_set.shrink_to(SHRINK_THRESHOLD / 2);
-        }
-        if self.key_write_modes.capacity() > SHRINK_THRESHOLD {
-            self.key_write_modes.shrink_to(SHRINK_THRESHOLD / 2);
-        }
-        if self.ttl_map.capacity() > SHRINK_THRESHOLD {
-            self.ttl_map.shrink_to(SHRINK_THRESHOLD / 2);
-        }
+        shrink_if_large!(self.read_set);
+        shrink_if_large!(self.write_set);
+        shrink_if_large!(self.delete_set);
+        shrink_if_large!(self.key_write_modes);
+        shrink_if_large!(self.ttl_map);
 
         // Clear event state (deallocate, since event ops are rare)
         self.event_sequence_count = None;
@@ -1851,8 +1877,7 @@ impl TransactionContext {
 
 impl JsonStoreExt for TransactionContext {
     fn json_get(&mut self, key: &Key, path: &JsonPath) -> StrataResult<Option<JsonValue>> {
-        self.ensure_active()?;
-        self.enforce_branch_scope(key)?;
+        self.guard(key)?;
 
         // Check write set first (read-your-writes)
         // Look for the most recent write that affects this path
@@ -1928,28 +1953,8 @@ impl JsonStoreExt for TransactionContext {
     }
 
     fn json_set(&mut self, key: &Key, path: &JsonPath, value: JsonValue) -> StrataResult<()> {
-        self.ensure_active()?;
-        self.enforce_branch_scope(key)?;
-
-        // Ensure we have tracked the snapshot version for this document
-        // (for conflict detection at commit time)
-        if self
-            .json_snapshot_versions()
-            .map_or(true, |v| !v.contains_key(key))
-        {
-            // Try to get the document version from store
-            if let Some(store) = &self.store {
-                match store.get_versioned(key, self.start_version) {
-                    Ok(Some(vv)) => {
-                        self.record_json_snapshot_version(key.clone(), vv.version.as_u64());
-                    }
-                    Ok(None) => {
-                        self.record_json_snapshot_version(key.clone(), 0);
-                    }
-                    Err(_) => {}
-                }
-            }
-        }
+        self.guard(key)?;
+        self.ensure_json_snapshot_tracked(key);
 
         // Record the write
         let patch = JsonPatch::set_at(path.clone(), value);
@@ -1960,26 +1965,8 @@ impl JsonStoreExt for TransactionContext {
     }
 
     fn json_delete(&mut self, key: &Key, path: &JsonPath) -> StrataResult<()> {
-        self.ensure_active()?;
-        self.enforce_branch_scope(key)?;
-
-        // Ensure we have tracked the snapshot version for this document
-        if self
-            .json_snapshot_versions()
-            .map_or(true, |v| !v.contains_key(key))
-        {
-            if let Some(store) = &self.store {
-                match store.get_versioned(key, self.start_version) {
-                    Ok(Some(vv)) => {
-                        self.record_json_snapshot_version(key.clone(), vv.version.as_u64());
-                    }
-                    Ok(None) => {
-                        self.record_json_snapshot_version(key.clone(), 0);
-                    }
-                    Err(_) => {}
-                }
-            }
-        }
+        self.guard(key)?;
+        self.ensure_json_snapshot_tracked(key);
 
         // Record the delete
         let patch = JsonPatch::delete_at(path.clone());
@@ -1995,8 +1982,7 @@ impl JsonStoreExt for TransactionContext {
     }
 
     fn json_exists(&mut self, key: &Key) -> StrataResult<bool> {
-        self.ensure_active()?;
-        self.enforce_branch_scope(key)?;
+        self.guard(key)?;
 
         // Check write buffer first (read-your-writes)
         // Look for root-level Set or Delete operations on this key
