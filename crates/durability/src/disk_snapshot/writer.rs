@@ -367,13 +367,14 @@ mod tests {
         )
         .unwrap();
 
-        // Create snapshot with all 5 primitive types
+        // Create snapshot with all 6 primitive types
         let sections = vec![
             SnapshotSection::new(primitive_tags::KV, vec![0, 0, 0, 0]),
             SnapshotSection::new(primitive_tags::EVENT, vec![0, 0, 0, 0]),
             SnapshotSection::new(primitive_tags::BRANCH, vec![0, 0, 0, 0]),
             SnapshotSection::new(primitive_tags::JSON, vec![0, 0, 0, 0]),
             SnapshotSection::new(primitive_tags::VECTOR, vec![0, 0, 0, 0]),
+            SnapshotSection::new(primitive_tags::GRAPH, vec![0, 0, 0, 0]),
         ];
 
         let info = writer.create_snapshot(1, 100, sections).unwrap();

@@ -19,6 +19,7 @@ pub use strata_core::{BranchId, JsonPath, JsonValue, Value, Version};
 pub use strata_engine::{
     register_search_recovery, BranchIndex, Database, EventLog, JsonStore, KVStore, StrataConfig,
 };
+pub use strata_graph::GraphStore;
 pub use strata_vector::{
     register_vector_recovery, DistanceMetric, StorageDtype, VectorConfig, VectorStore,
 };
@@ -88,7 +89,7 @@ impl TestDb {
         TestDb { db, dir, branch_id }
     }
 
-    /// Get all 5 primitives.
+    /// Get all 6 primitives.
     pub fn all_primitives(&self) -> AllPrimitives {
         AllPrimitives {
             kv: KVStore::new(self.db.clone()),
@@ -96,6 +97,7 @@ impl TestDb {
             event: EventLog::new(self.db.clone()),
             branch: BranchIndex::new(self.db.clone()),
             vector: VectorStore::new(self.db.clone()),
+            graph: GraphStore::new(self.db.clone()),
         }
     }
 
@@ -163,13 +165,14 @@ impl Default for TestDb {
     }
 }
 
-/// Container for all 5 primitives.
+/// Container for all 6 primitives.
 pub struct AllPrimitives {
     pub kv: KVStore,
     pub json: JsonStore,
     pub event: EventLog,
     pub branch: BranchIndex,
     pub vector: VectorStore,
+    pub graph: GraphStore,
 }
 
 // ============================================================================
@@ -1210,6 +1213,7 @@ pub mod core_types {
             EntityRef::branch(branch_id),
             EntityRef::json(branch_id, "test_doc"),
             EntityRef::vector(branch_id, "test_collection", "test_vector"),
+            EntityRef::graph(branch_id, "test_graph/n/test_node"),
         ]
     }
 
@@ -1220,6 +1224,7 @@ pub mod core_types {
             PrimitiveType::Branch,
             PrimitiveType::Json,
             PrimitiveType::Vector,
+            PrimitiveType::Graph,
         ]
     }
 }

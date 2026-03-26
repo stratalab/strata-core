@@ -1,18 +1,18 @@
 //! Cross-Primitive Recovery Tests
 //!
-//! Verify that all 5 primitives recover atomically — if one recovers,
+//! Verify that all 6 primitives recover atomically — if one recovers,
 //! they all recover. No primitive is left behind.
 
 use crate::common::*;
 
 #[test]
-fn all_five_primitives_recover_together() {
+fn all_six_primitives_recover_together() {
     let mut test_db = TestDb::new_strict();
     let branch_id = test_db.branch_id;
 
     let p = test_db.all_primitives();
 
-    // Write to all 5 primitives
+    // Write to all 6 primitives
     p.kv.put(&branch_id, "default", "k1", Value::Int(1))
         .unwrap();
 
@@ -35,7 +35,7 @@ fn all_five_primitives_recover_together() {
     drop(p);
     test_db.reopen();
 
-    // Verify all 5 primitives recovered
+    // Verify all 6 primitives recovered
     let p = test_db.all_primitives();
 
     let kv_val = p.kv.get(&branch_id, "default", "k1").unwrap();
