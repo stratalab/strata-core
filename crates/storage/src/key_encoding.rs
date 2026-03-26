@@ -27,6 +27,9 @@
 use std::sync::Arc;
 use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 
+/// Size in bytes of the trailing `!commit_id` suffix in an `InternalKey`.
+pub const COMMIT_ID_SUFFIX_LEN: usize = 8;
+
 // ---------------------------------------------------------------------------
 // Byte-stuffed encoding (order-preserving for arbitrary binary data)
 // ---------------------------------------------------------------------------
@@ -188,14 +191,15 @@ impl InternalKey {
         self.0
     }
 
-    /// Extract the TypedKeyBytes portion (everything except trailing 8-byte commit_id).
+    /// Extract the TypedKeyBytes portion (everything except trailing commit_id suffix).
     pub fn typed_key_prefix(&self) -> &[u8] {
         assert!(
-            self.0.len() >= 8,
-            "InternalKey too short for typed_key_prefix: {} bytes (need ≥8)",
-            self.0.len()
+            self.0.len() >= COMMIT_ID_SUFFIX_LEN,
+            "InternalKey too short for typed_key_prefix: {} bytes (need ≥{})",
+            self.0.len(),
+            COMMIT_ID_SUFFIX_LEN,
         );
-        &self.0[..self.0.len() - 8]
+        &self.0[..self.0.len() - COMMIT_ID_SUFFIX_LEN]
     }
 
     /// Extract the TypeTag byte from the encoded key.
@@ -223,13 +227,14 @@ impl InternalKey {
     /// Decode the full `(Key, commit_id)` pair.
     pub fn decode(&self) -> Option<(Key, u64)> {
         let buf = &self.0;
-        if buf.len() < 16 + 1 + 1 + 2 + 8 {
-            // minimum: 16 (branch) + 1 (space NUL) + 1 (tag) + 2 (user_key terminator) + 8 (commit)
+        if buf.len() < 16 + 1 + 1 + 2 + COMMIT_ID_SUFFIX_LEN {
+            // minimum: 16 (branch) + 1 (space NUL) + 1 (tag) + 2 (user_key terminator) + commit_id
             return None;
         }
 
-        let commit_id_start = buf.len() - 8;
-        let commit_id_bytes: [u8; 8] = buf[commit_id_start..].try_into().ok()?;
+        let commit_id_start = buf.len() - COMMIT_ID_SUFFIX_LEN;
+        let commit_id_bytes: [u8; COMMIT_ID_SUFFIX_LEN] =
+            buf[commit_id_start..].try_into().ok()?;
         let commit_id = !u64::from_be_bytes(commit_id_bytes);
 
         let typed = &buf[..commit_id_start];

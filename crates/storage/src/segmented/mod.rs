@@ -11,6 +11,7 @@
 use crate::compaction::CompactionIterator;
 use crate::key_encoding::{
     encode_typed_key, encode_typed_key_prefix, rewrite_branch_id_bytes, InternalKey,
+    COMMIT_ID_SUFFIX_LEN,
 };
 use crate::memory_stats::{BranchMemoryStats, StorageMemoryStats};
 use crate::memtable::{Memtable, MemtableEntry};
@@ -288,6 +289,13 @@ impl BranchState {
             ),
             inherited_layers: Vec::new(),
         }
+    }
+
+    /// Update min/max timestamp tracking for a single write.
+    #[inline]
+    fn track_timestamp(&self, ts: u64) {
+        self.min_timestamp.fetch_min(ts, Ordering::Relaxed);
+        self.max_timestamp.fetch_max(ts, Ordering::Relaxed);
     }
 }
 
@@ -858,67 +866,13 @@ impl SegmentedStore {
         self.write_branch_manifest(child_branch_id);
 
         // 2c. Build materialized entries (no locks held — I/O heavy)
-        let mut entries: Vec<(InternalKey, MemtableEntry)> = Vec::new();
-
-        // Cache shadow detection result per logical key (same typed_key_prefix).
-        // `iter_seek_all` yields entries sorted by key, so all versions of the
-        // same key are consecutive — one lookup per unique key suffices.
-        let mut last_shadow_key: Option<Vec<u8>> = None;
-        let mut last_shadow_result: bool = false; // true = shadowed (skip)
-
-        for level in &layer_segments.levels {
-            for seg in level {
-                for (ik, se) in seg.iter_seek_all() {
-                    // Filter: skip entries with commit_id > fork_version
-                    if se.commit_id > fork_version {
-                        continue;
-                    }
-
-                    let typed_key = ik.typed_key_prefix();
-
-                    // Rewrite branch_id: source → child (skip corrupt keys)
-                    let Some(child_typed_key) = rewrite_branch_id_bytes(typed_key, child_branch_id)
-                    else {
-                        continue;
-                    };
-
-                    // Shadow detection (cached per logical key)
-                    let is_shadowed = if last_shadow_key.as_deref() == Some(&child_typed_key) {
-                        last_shadow_result
-                    } else {
-                        let shadowed =
-                            Self::key_exists_in_own_segments(&own_version, &child_typed_key)
-                                || closer_layers.iter().any(
-                                    |(closer_segs, closer_source, closer_fork)| {
-                                        Self::key_exists_in_layer(
-                                            closer_segs,
-                                            *closer_source,
-                                            &child_typed_key,
-                                            *closer_fork,
-                                        )
-                                    },
-                                );
-                        last_shadow_key = Some(child_typed_key.clone());
-                        last_shadow_result = shadowed;
-                        shadowed
-                    };
-
-                    if is_shadowed {
-                        continue;
-                    }
-
-                    // Rewrite full internal key: source → child (skip corrupt keys)
-                    let Some(child_ik_bytes) =
-                        rewrite_branch_id_bytes(ik.as_bytes(), child_branch_id)
-                    else {
-                        continue;
-                    };
-                    let child_ik = InternalKey::from_bytes(child_ik_bytes);
-
-                    entries.push((child_ik, segment_entry_to_memtable_entry(se)));
-                }
-            }
-        }
+        let mut entries = Self::collect_unshadowed_entries(
+            &layer_segments,
+            child_branch_id,
+            fork_version,
+            &own_version,
+            &closer_layers,
+        );
 
         let entries_materialized = entries.len() as u64;
 
@@ -946,7 +900,6 @@ impl SegmentedStore {
             let mut segments = Vec::with_capacity(built.len());
             for (path, _meta) in built {
                 let seg = KVSegment::open(&path)?;
-                seg.pin_bloom_partitions();
                 segments.push(seg);
             }
             segments
@@ -1009,6 +962,70 @@ impl SegmentedStore {
             entries_materialized,
             segments_created,
         })
+    }
+
+    /// Collect entries from an inherited layer that are not shadowed by the
+    /// child's own segments or closer inherited layers.
+    fn collect_unshadowed_entries(
+        layer_segments: &SegmentVersion,
+        child_branch_id: &BranchId,
+        fork_version: u64,
+        own_version: &SegmentVersion,
+        closer_layers: &[(Arc<SegmentVersion>, BranchId, u64)],
+    ) -> Vec<(InternalKey, MemtableEntry)> {
+        let mut entries = Vec::new();
+        let mut last_shadow_key: Option<Vec<u8>> = None;
+        let mut last_shadow_result = false;
+
+        for level in &layer_segments.levels {
+            for seg in level {
+                for (ik, se) in seg.iter_seek_all() {
+                    if se.commit_id > fork_version {
+                        continue;
+                    }
+
+                    let typed_key = ik.typed_key_prefix();
+                    let Some(child_typed_key) =
+                        rewrite_branch_id_bytes(typed_key, child_branch_id)
+                    else {
+                        continue;
+                    };
+
+                    let is_shadowed = if last_shadow_key.as_deref() == Some(&child_typed_key) {
+                        last_shadow_result
+                    } else {
+                        let shadowed =
+                            Self::key_exists_in_own_segments(own_version, &child_typed_key)
+                                || closer_layers.iter().any(
+                                    |(closer_segs, closer_source, closer_fork)| {
+                                        Self::key_exists_in_layer(
+                                            closer_segs,
+                                            *closer_source,
+                                            &child_typed_key,
+                                            *closer_fork,
+                                        )
+                                    },
+                                );
+                        last_shadow_key = Some(child_typed_key.clone());
+                        last_shadow_result = shadowed;
+                        shadowed
+                    };
+
+                    if is_shadowed {
+                        continue;
+                    }
+
+                    let Some(child_ik_bytes) =
+                        rewrite_branch_id_bytes(ik.as_bytes(), child_branch_id)
+                    else {
+                        continue;
+                    };
+                    let child_ik = InternalKey::from_bytes(child_ik_bytes);
+                    entries.push((child_ik, segment_entry_to_memtable_entry(se)));
+                }
+            }
+        }
+        entries
     }
 
     /// Check if a key exists in the child's own segments.
@@ -1163,7 +1180,6 @@ impl SegmentedStore {
                         .with_compression(crate::segment_builder::CompressionCodec::None);
                     builder.build_from_iter(mt.iter_all(), &seg_path)?;
                     let segment = KVSegment::open(&seg_path)?;
-                    segment.pin_bloom_partitions();
 
                     // Install segment into source's SegmentVersion.
                     let old_ver = source.version.load();
@@ -1729,17 +1745,8 @@ impl SegmentedStore {
         let ver = branch.version.load();
         for level in &ver.levels {
             for seg in level {
-                let (seg_min, seg_max) = seg.key_range();
-                if seg_max.len() >= 8 && seg_min.len() >= 8 {
-                    let max_typed = &seg_max[..seg_max.len() - 8];
-                    let min_typed = &seg_min[..seg_min.len() - 8];
-                    if max_typed < prefix_bytes.as_slice() {
-                        continue;
-                    }
-                    if !min_typed.starts_with(&prefix_bytes) && min_typed > prefix_bytes.as_slice()
-                    {
-                        continue;
-                    }
+                if !segment_overlaps_prefix(seg, &prefix_bytes) {
+                    continue;
                 }
                 let entries: Vec<_> = seg
                     .iter_seek(prefix)
@@ -1758,18 +1765,8 @@ impl SegmentedStore {
             let src_prefix_bytes = encode_typed_key_prefix(&src_prefix);
             for level in &layer.segments.levels {
                 for seg in level {
-                    let (seg_min, seg_max) = seg.key_range();
-                    if seg_max.len() >= 8 && seg_min.len() >= 8 {
-                        let max_typed = &seg_max[..seg_max.len() - 8];
-                        let min_typed = &seg_min[..seg_min.len() - 8];
-                        if max_typed < src_prefix_bytes.as_slice() {
-                            continue;
-                        }
-                        if !min_typed.starts_with(&src_prefix_bytes)
-                            && min_typed > src_prefix_bytes.as_slice()
-                        {
-                            continue;
-                        }
+                    if !segment_overlaps_prefix(seg, &src_prefix_bytes) {
+                        continue;
                     }
                     let entries: Vec<_> = seg
                         .iter_seek(&src_prefix)
@@ -1852,8 +1849,8 @@ impl SegmentedStore {
             scan_max = scan_max.max(ts);
         }
         // Populate atomics so subsequent calls are O(1)
-        branch.min_timestamp.fetch_min(scan_min, Ordering::Relaxed);
-        branch.max_timestamp.fetch_max(scan_max, Ordering::Relaxed);
+        branch.track_timestamp(scan_min);
+        branch.track_timestamp(scan_max);
         Ok(Some((scan_min, scan_max)))
     }
 
@@ -1898,8 +1895,7 @@ impl SegmentedStore {
         };
         let ts = entry.timestamp.as_micros();
         branch.active.put_entry(&key, version, entry);
-        branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
-        branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
+        branch.track_timestamp(ts);
 
         self.maybe_rotate_branch(branch_id, &mut branch);
         self.version.fetch_max(version, Ordering::AcqRel);
@@ -1930,8 +1926,7 @@ impl SegmentedStore {
         };
         let ts = entry.timestamp.as_micros();
         branch.active.put_entry(key, version, entry);
-        branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
-        branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
+        branch.track_timestamp(ts);
 
         self.maybe_rotate_branch(branch_id, &mut branch);
         self.version.fetch_max(version, Ordering::AcqRel);
@@ -1994,8 +1989,7 @@ impl SegmentedStore {
                 };
                 branch.active.put_entry(&key, version, entry);
             }
-            branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
-            branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
+            branch.track_timestamp(ts);
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
@@ -2015,8 +2009,7 @@ impl SegmentedStore {
                 };
                 branch.active.put_entry(&key, version, entry);
             }
-            branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
-            branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
+            branch.track_timestamp(ts);
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
@@ -2178,9 +2171,7 @@ impl SegmentedStore {
             .with_compression(crate::segment_builder::CompressionCodec::None);
         builder.build_from_iter(frozen_mt.iter_all(), &seg_path)?;
 
-        // Open the newly written segment and pin its bloom partitions (L0).
         let segment = KVSegment::open(&seg_path)?;
-        segment.pin_bloom_partitions();
 
         // Atomically: remove the frozen memtable we just flushed and install
         // the segment, under a single DashMap guard.
@@ -2460,10 +2451,6 @@ impl SegmentedStore {
 
             // L0: sorted by commit_max descending (newest first)
             level_segs[0].sort_by(|a, b| b.commit_range().1.cmp(&a.commit_range().1));
-            // Pin L0 bloom partitions so they're never evicted
-            for seg in &level_segs[0] {
-                seg.pin_bloom_partitions();
-            }
             // L1+: sorted by key_range min ascending
             for level in level_segs.iter_mut().skip(1) {
                 level.sort_by(|a, b| a.key_range().0.cmp(b.key_range().0));
@@ -2507,20 +2494,24 @@ impl SegmentedStore {
             info.branches_recovered += 1;
         }
 
-        // ── Second pass: resolve inherited layers and rebuild refcounts ──
-        //
-        // After all branches have been loaded with their own segments, we can
-        // resolve inherited layer references to source branch segments.
+        // Second pass + refcount rebuild
+        self.resolve_inherited_layers(segments_dir, deferred_inherited, &mut info);
+
+        Ok(info)
+    }
+
+    /// Second pass of recovery: resolve inherited layers from manifests and
+    /// rebuild segment refcounts.
+    fn resolve_inherited_layers(
+        &self,
+        segments_dir: &std::path::Path,
+        deferred_inherited: Vec<(BranchId, Vec<crate::manifest::ManifestInheritedLayer>)>,
+        info: &mut RecoverSegmentsInfo,
+    ) {
         for (child_id, manifest_layers) in deferred_inherited {
             let mut inherited_layers = Vec::new();
 
             for ml in &manifest_layers {
-                // Open inherited segment files directly by path (#1691).
-                // The child's manifest has the source_branch_id and filename,
-                // which is enough to construct the full path.  This makes
-                // resolution independent of the source branch's recovery state
-                // (e.g. the source may have a corrupt manifest, or its
-                // directory may have been partially cleaned up).
                 let source_dir = segments_dir.join(hex_encode_branch(&ml.source_branch_id));
                 let mut layer_levels: Vec<Vec<Arc<KVSegment>>> = vec![Vec::new(); NUM_LEVELS];
                 let mut any_found = false;
@@ -2530,14 +2521,12 @@ impl SegmentedStore {
                     let seg_path = source_dir.join(&entry.filename);
                     match KVSegment::open(&seg_path) {
                         Ok(seg) => {
-                            // Track segment ID to avoid collisions.
                             if let Some(stem) = seg_path.file_stem().and_then(|s| s.to_str()) {
                                 if let Ok(file_seg_id) = stem.parse::<u64>() {
                                     self.next_segment_id
                                         .fetch_max(file_seg_id + 1, Ordering::Relaxed);
                                 }
                             }
-                            // Track max commit_id for version counter (#1726)
                             info.max_commit_id = info.max_commit_id.max(seg.commit_range().1);
                             layer_levels[level].push(Arc::new(seg));
                             any_found = true;
@@ -2559,17 +2548,11 @@ impl SegmentedStore {
                     continue;
                 }
 
-                // Sort levels consistently
                 layer_levels[0].sort_by(|a, b| b.commit_range().1.cmp(&a.commit_range().1));
                 for level in layer_levels.iter_mut().skip(1) {
                     level.sort_by(|a, b| a.key_range().0.cmp(b.key_range().0));
                 }
 
-                let seg_version = Arc::new(SegmentVersion {
-                    levels: layer_levels,
-                });
-
-                // Reset Materializing → Active on crash recovery
                 let status = if ml.status == 1 {
                     LayerStatus::Active
                 } else if ml.status == 2 {
@@ -2581,7 +2564,9 @@ impl SegmentedStore {
                 inherited_layers.push(InheritedLayer {
                     source_branch_id: ml.source_branch_id,
                     fork_version: ml.fork_version,
-                    segments: seg_version,
+                    segments: Arc::new(SegmentVersion {
+                        levels: layer_levels,
+                    }),
                     status,
                 });
             }
@@ -2601,8 +2586,6 @@ impl SegmentedStore {
                 }
             }
         }
-
-        Ok(info)
     }
 
     /// Check whether the active memtable should be rotated and do so inline.
@@ -2649,6 +2632,9 @@ impl SegmentedStore {
     }
 
     /// Check the current memory pressure level.
+    ///
+    /// Currently unused in production — will be wired into the background
+    /// flush/compaction scheduler to trigger adaptive write stalling.
     pub fn pressure_level(&self) -> PressureLevel {
         self.pressure.level(self.total_memtable_bytes())
     }
@@ -2866,25 +2852,9 @@ impl SegmentedStore {
         let ver = branch.version.load();
         for level in &ver.levels {
             for seg in level {
-                let (seg_min, seg_max) = seg.key_range();
-                // key_range returns full InternalKey bytes; strip the
-                // trailing 8-byte commit_id to get the typed-key prefix.
-                if seg_max.len() >= 8 && seg_min.len() >= 8 {
-                    let max_typed = &seg_max[..seg_max.len() - 8];
-                    let min_typed = &seg_min[..seg_min.len() - 8];
-                    // Segment is entirely before the prefix range.
-                    if max_typed < prefix_bytes.as_slice() {
-                        continue;
-                    }
-                    // Segment is entirely after the prefix range: its min key
-                    // doesn't start with the prefix AND is lexicographically
-                    // greater than the prefix.
-                    if !min_typed.starts_with(&prefix_bytes) && min_typed > prefix_bytes.as_slice()
-                    {
-                        continue;
-                    }
+                if !segment_overlaps_prefix(seg, &prefix_bytes) {
+                    continue;
                 }
-
                 let entries: Vec<_> = seg
                     .iter_seek(prefix)
                     .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
@@ -2902,18 +2872,8 @@ impl SegmentedStore {
             let src_prefix_bytes = encode_typed_key_prefix(&src_prefix);
             for level in &layer.segments.levels {
                 for seg in level {
-                    let (seg_min, seg_max) = seg.key_range();
-                    if seg_max.len() >= 8 && seg_min.len() >= 8 {
-                        let max_typed = &seg_max[..seg_max.len() - 8];
-                        let min_typed = &seg_min[..seg_min.len() - 8];
-                        if max_typed < src_prefix_bytes.as_slice() {
-                            continue;
-                        }
-                        if !min_typed.starts_with(&src_prefix_bytes)
-                            && min_typed > src_prefix_bytes.as_slice()
-                        {
-                            continue;
-                        }
+                    if !segment_overlaps_prefix(seg, &src_prefix_bytes) {
+                        continue;
                     }
                     let entries: Vec<_> = seg
                         .iter_seek(&src_prefix)
@@ -3175,8 +3135,7 @@ impl Storage for SegmentedStore {
         let ts = entry.timestamp.as_micros();
         branch.active.put_entry(&key, version, entry);
         // Track timestamp for O(1) time_range
-        branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
-        branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
+        branch.track_timestamp(ts);
 
         // Rotate if active memtable exceeds threshold
         self.maybe_rotate_branch(branch_id, &mut branch);
@@ -3205,8 +3164,7 @@ impl Storage for SegmentedStore {
         let ts = entry.timestamp.as_micros();
         branch.active.put_entry(key, version, entry);
         // Track timestamp for O(1) time_range
-        branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
-        branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
+        branch.track_timestamp(ts);
 
         // Rotate if active memtable exceeds threshold
         self.maybe_rotate_branch(branch_id, &mut branch);
@@ -3252,8 +3210,7 @@ impl Storage for SegmentedStore {
                 branch.active.put_entry(&key, version, entry);
             }
             // Track timestamp for O(1) time_range
-            branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
-            branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
+            branch.track_timestamp(ts);
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
@@ -3293,8 +3250,7 @@ impl Storage for SegmentedStore {
                 branch.active.put_entry(&key, version, entry);
             }
             // Track timestamp for O(1) time_range
-            branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
-            branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
+            branch.track_timestamp(ts);
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
@@ -3352,8 +3308,7 @@ impl Storage for SegmentedStore {
                 };
                 branch.active.put_entry(&key, version, entry);
             }
-            branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
-            branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
+            branch.track_timestamp(ts);
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
@@ -3373,8 +3328,7 @@ impl Storage for SegmentedStore {
                 };
                 branch.active.put_entry(&key, version, entry);
             }
-            branch.min_timestamp.fetch_min(ts, Ordering::Relaxed);
-            branch.max_timestamp.fetch_max(ts, Ordering::Relaxed);
+            branch.track_timestamp(ts);
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
@@ -3460,10 +3414,10 @@ fn point_lookup_level_preencoded(
 
     let idx = l1_segments.partition_point(|seg| {
         let (_, max_ik) = seg.key_range();
-        if max_ik.len() < 8 {
+        if max_ik.len() < COMMIT_ID_SUFFIX_LEN {
             return true;
         }
-        let max_prefix = &max_ik[..max_ik.len() - 8];
+        let max_prefix = &max_ik[..max_ik.len() - COMMIT_ID_SUFFIX_LEN];
         max_prefix < typed_key
     });
 
@@ -3473,14 +3427,34 @@ fn point_lookup_level_preencoded(
 
     let seg = &l1_segments[idx];
     let (min_ik, _) = seg.key_range();
-    if min_ik.len() >= 8 {
-        let min_prefix = &min_ik[..min_ik.len() - 8];
+    if min_ik.len() >= COMMIT_ID_SUFFIX_LEN {
+        let min_prefix = &min_ik[..min_ik.len() - COMMIT_ID_SUFFIX_LEN];
         if min_prefix > typed_key {
             return Ok(None);
         }
     }
 
     seg.point_lookup_preencoded(typed_key, seek_bytes, max_version)
+}
+
+/// Check whether a segment's key range overlaps a typed-key prefix.
+///
+/// Returns `true` if the segment might contain entries matching the prefix,
+/// `false` if it definitely does not. Used to skip non-overlapping segments
+/// during prefix scans and list operations.
+fn segment_overlaps_prefix(seg: &KVSegment, prefix_bytes: &[u8]) -> bool {
+    let (seg_min, seg_max) = seg.key_range();
+    if seg_max.len() >= COMMIT_ID_SUFFIX_LEN && seg_min.len() >= COMMIT_ID_SUFFIX_LEN {
+        let max_typed = &seg_max[..seg_max.len() - COMMIT_ID_SUFFIX_LEN];
+        let min_typed = &seg_min[..seg_min.len() - COMMIT_ID_SUFFIX_LEN];
+        if max_typed < prefix_bytes {
+            return false;
+        }
+        if !min_typed.starts_with(prefix_bytes) && min_typed > prefix_bytes {
+            return false;
+        }
+    }
+    true
 }
 
 /// Convert a `SegmentEntry` into a `MemtableEntry` for the merge path.

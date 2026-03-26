@@ -17,7 +17,7 @@
 //! Each block is framed with a type byte, codec byte, length, and CRC32.
 
 use crate::bloom::BloomFilter;
-use crate::key_encoding::InternalKey;
+use crate::key_encoding::{InternalKey, COMMIT_ID_SUFFIX_LEN};
 use crate::memtable::MemtableEntry;
 use strata_core::value::Value;
 
@@ -275,30 +275,21 @@ impl SegmentBuilder {
 
             // Flush block when it reaches target size
             if block_buf.len() >= self.data_block_size {
-                // Append restart trailer and hash index before compression
-                append_restart_trailer(&mut block_buf, &restart_offsets);
-                append_hash_index(&mut block_buf, &block_hash_entries);
-
                 let bfk = block_first_key.take().unwrap();
-                let block_last = prev_key.clone(); // last key written to this block
+                let block_last = prev_key.clone();
 
-                // Resolve pending entry from previous block
-                if let Some((pending_last, offset, len)) = pending_index.take() {
-                    let shortened = shorten_index_key(&pending_last, &bfk);
-                    index_entries.push((shortened, offset, len));
-                }
-
-                let framed_size = write_framed_block_compressed(
+                let (framed_size, on_disk_data_len) = flush_data_block(
                     &mut w,
-                    BLOCK_TYPE_DATA,
-                    &block_buf,
+                    &mut block_buf,
+                    &restart_offsets,
+                    &block_hash_entries,
                     self.compression,
                     zstd_compressor.as_mut(),
+                    self.rate_limiter.as_deref(),
+                    &mut pending_index,
+                    &bfk,
+                    &mut index_entries,
                 )?;
-                let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
-                if let Some(ref limiter) = self.rate_limiter {
-                    limiter.acquire(framed_size as u64);
-                }
                 pending_index = Some((block_last, file_offset, on_disk_data_len));
                 file_offset += framed_size as u64;
                 block_buf.clear();
@@ -321,30 +312,21 @@ impl SegmentBuilder {
 
         // Flush final partial block
         if !block_buf.is_empty() {
-            // Append restart trailer and hash index before compression
-            append_restart_trailer(&mut block_buf, &restart_offsets);
-            append_hash_index(&mut block_buf, &block_hash_entries);
-
             let bfk = block_first_key.take().unwrap_or_default();
             let block_last = prev_key.clone();
 
-            // Resolve pending entry from previous block
-            if let Some((pending_last, offset, len)) = pending_index.take() {
-                let shortened = shorten_index_key(&pending_last, &bfk);
-                index_entries.push((shortened, offset, len));
-            }
-
-            let framed_size = write_framed_block_compressed(
+            let (framed_size, on_disk_data_len) = flush_data_block(
                 &mut w,
-                BLOCK_TYPE_DATA,
-                &block_buf,
+                &mut block_buf,
+                &restart_offsets,
+                &block_hash_entries,
                 self.compression,
                 zstd_compressor.as_mut(),
+                self.rate_limiter.as_deref(),
+                &mut pending_index,
+                &bfk,
+                &mut index_entries,
             )?;
-            let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
-            if let Some(ref limiter) = self.rate_limiter {
-                limiter.acquire(framed_size as u64);
-            }
             let shortened = shorten_final_index_key(&block_last);
             index_entries.push((shortened, file_offset, on_disk_data_len));
             file_offset += framed_size as u64;
@@ -486,6 +468,44 @@ impl SegmentBuilder {
     }
 }
 
+/// Flush a data block: append restart trailer + hash index, resolve pending
+/// index entry, write the compressed block, and apply rate limiting.
+///
+/// Returns `(framed_size, on_disk_data_len)`.
+fn flush_data_block(
+    w: &mut BufWriter<std::fs::File>,
+    block_buf: &mut Vec<u8>,
+    restart_offsets: &[u32],
+    hash_entries: &[(u64, usize)],
+    compression: CompressionCodec,
+    zstd_compressor: Option<&mut zstd::bulk::Compressor<'static>>,
+    rate_limiter: Option<&crate::rate_limiter::RateLimiter>,
+    pending_index: &mut Option<(Vec<u8>, u64, u32)>,
+    block_first_key: &[u8],
+    index_entries: &mut Vec<(Vec<u8>, u64, u32)>,
+) -> io::Result<(u64, u32)> {
+    append_restart_trailer(block_buf, restart_offsets);
+    append_hash_index(block_buf, hash_entries);
+
+    if let Some((pending_last, offset, len)) = pending_index.take() {
+        let shortened = shorten_index_key(&pending_last, block_first_key);
+        index_entries.push((shortened, offset, len));
+    }
+
+    let framed_size = write_framed_block_compressed(
+        w,
+        BLOCK_TYPE_DATA,
+        block_buf,
+        compression,
+        zstd_compressor,
+    )?;
+    let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
+    if let Some(limiter) = rate_limiter {
+        limiter.acquire(framed_size as u64);
+    }
+    Ok((framed_size as u64, on_disk_data_len))
+}
+
 // ---------------------------------------------------------------------------
 // Partitioned bloom filter index
 // ---------------------------------------------------------------------------
@@ -615,7 +635,7 @@ impl<'a> EntryHeaderRef<'a> {
     /// Typed key prefix (everything except trailing 8-byte commit_id).
     #[inline]
     pub fn typed_key_prefix(&self) -> &[u8] {
-        &self.ik_bytes[..self.ik_bytes.len() - 8]
+        &self.ik_bytes[..self.ik_bytes.len() - COMMIT_ID_SUFFIX_LEN]
     }
 }
 
@@ -688,11 +708,11 @@ fn shortest_successor(a: &[u8]) -> Vec<u8> {
 /// key of the next block. Operates on the typed_key_prefix portion (everything
 /// except trailing 8-byte commit_id) and re-appends `u64::MAX` as suffix.
 fn shorten_index_key(prev_last: &[u8], next_first: &[u8]) -> Vec<u8> {
-    if prev_last.len() < 8 || next_first.len() < 8 {
+    if prev_last.len() < COMMIT_ID_SUFFIX_LEN || next_first.len() < COMMIT_ID_SUFFIX_LEN {
         return prev_last.to_vec();
     }
-    let a_prefix = &prev_last[..prev_last.len() - 8];
-    let b_prefix = &next_first[..next_first.len() - 8];
+    let a_prefix = &prev_last[..prev_last.len() - COMMIT_ID_SUFFIX_LEN];
+    let b_prefix = &next_first[..next_first.len() - COMMIT_ID_SUFFIX_LEN];
     let shortened = shortest_separator(a_prefix, b_prefix);
     if shortened.as_slice() == a_prefix {
         // Prefix was NOT shortened (keys differ only in commit_id, or the
@@ -714,10 +734,10 @@ fn shorten_index_key(prev_last: &[u8], next_first: &[u8]) -> Vec<u8> {
 /// Shorten the index key for the last block in a segment.
 /// Uses `shortest_successor` on the typed_key_prefix, re-appends `u64::MAX`.
 fn shorten_final_index_key(last_key: &[u8]) -> Vec<u8> {
-    if last_key.len() < 8 {
+    if last_key.len() < COMMIT_ID_SUFFIX_LEN {
         return last_key.to_vec();
     }
-    let prefix = &last_key[..last_key.len() - 8];
+    let prefix = &last_key[..last_key.len() - COMMIT_ID_SUFFIX_LEN];
     let mut shortened = shortest_successor(prefix);
     shortened.extend_from_slice(&(!0_u64).to_be_bytes());
     shortened
@@ -1894,9 +1914,9 @@ mod tests {
             let (_, prev_max) = prev_seg.key_range();
             let (curr_min, _) = curr_seg.key_range();
             // Strip commit_id to compare typed_key_prefix
-            if prev_max.len() >= 8 && curr_min.len() >= 8 {
-                let prev_prefix = &prev_max[..prev_max.len() - 8];
-                let curr_prefix = &curr_min[..curr_min.len() - 8];
+            if prev_max.len() >= COMMIT_ID_SUFFIX_LEN && curr_min.len() >= COMMIT_ID_SUFFIX_LEN {
+                let prev_prefix = &prev_max[..prev_max.len() - COMMIT_ID_SUFFIX_LEN];
+                let curr_prefix = &curr_min[..curr_min.len() - COMMIT_ID_SUFFIX_LEN];
                 assert!(
                     prev_prefix < curr_prefix,
                     "keys should not span file boundaries"
@@ -2295,10 +2315,10 @@ mod tests {
 
         let result = shorten_index_key(&a, &b);
         // Prefix shortened: "abd", then u64::MAX suffix
-        assert!(result.len() >= 8);
-        let suffix = &result[result.len() - 8..];
+        assert!(result.len() >= COMMIT_ID_SUFFIX_LEN);
+        let suffix = &result[result.len() - COMMIT_ID_SUFFIX_LEN..];
         assert_eq!(suffix, &(!0_u64).to_be_bytes());
-        let prefix = &result[..result.len() - 8];
+        let prefix = &result[..result.len() - COMMIT_ID_SUFFIX_LEN];
         assert_eq!(prefix, b"abd");
     }
 
