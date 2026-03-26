@@ -182,6 +182,33 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
             index.index_document(&entity_ref, &text, None);
             docs_indexed += 1;
         }
+
+        // --- Graph entries (node data only) ---
+        for (key, vv) in db.storage().list_by_type(&branch_id, TypeTag::Graph) {
+            // Skip internal metadata keys (catalog, meta, type defs,
+            // edge counts, indexes). Covers both top-level (__catalog__)
+            // and graph-scoped ({graph}/__meta__, {graph}/__types__/, etc.)
+            if key.user_key.starts_with(b"__") || key.user_key.windows(3).any(|w| w == b"/__") {
+                continue;
+            }
+
+            let text = match extract_indexable_text(&vv.value) {
+                Some(t) => t,
+                None => continue,
+            };
+
+            let user_key = match key.user_key_string() {
+                Some(k) => k,
+                None => continue,
+            };
+
+            let entity_ref = crate::search::EntityRef::Graph {
+                branch_id,
+                key: user_key,
+            };
+            index.index_document(&entity_ref, &text, None);
+            docs_indexed += 1;
+        }
     }
 
     // Freeze to disk for next startup (fast path).
@@ -263,6 +290,35 @@ fn reconcile_index(db: &Database, index: &InvertedIndex) -> StrataResult<u64> {
             let entity_ref = crate::search::EntityRef::Event {
                 branch_id,
                 sequence,
+            };
+
+            if index.has_document(&entity_ref) {
+                continue;
+            }
+
+            let text = match extract_indexable_text(&vv.value) {
+                Some(t) => t,
+                None => continue,
+            };
+
+            index.index_document(&entity_ref, &text, None);
+            reconciled += 1;
+        }
+
+        // --- Graph entries ---
+        for (key, vv) in db.storage().list_by_type(&branch_id, TypeTag::Graph) {
+            if key.user_key.starts_with(b"__") {
+                continue;
+            }
+
+            let user_key = match key.user_key_string() {
+                Some(k) => k,
+                None => continue,
+            };
+
+            let entity_ref = crate::search::EntityRef::Graph {
+                branch_id,
+                key: user_key,
             };
 
             if index.has_document(&entity_ref) {
