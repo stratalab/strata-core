@@ -2366,3 +2366,48 @@ fn test_issue_1924_write_stall_timeout_surfaced_to_caller() {
         db.storage().max_l0_segment_count()
     );
 }
+
+/// Issue #1924 (manual API): Same backpressure fix for begin/commit_transaction path.
+#[test]
+fn test_issue_1924_write_stall_timeout_manual_commit() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+
+    let branch_id = BranchId::new();
+    let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
+
+    let cfg = StrataConfig {
+        durability: "cache".to_string(),
+        storage: StorageConfig {
+            write_buffer_size: 128,
+            l0_stop_writes_trigger: 1,
+            l0_slowdown_writes_trigger: 0,
+            write_stall_timeout_ms: 1,
+            ..StorageConfig::default()
+        },
+        ..StrataConfig::default()
+    };
+
+    let db = Database::open_internal(&db_path, DurabilityMode::Cache, cfg).unwrap();
+    let big_value = Value::Bytes(vec![0u8; 512]);
+
+    let mut saw_timeout = false;
+    for i in 0..20 {
+        let mut txn = db.begin_transaction(branch_id).unwrap();
+        let key = Key::new_kv(ns.clone(), &format!("key_{}", i));
+        txn.put(key, big_value.clone()).unwrap();
+        let result = db.commit_transaction(&mut txn);
+        db.end_transaction(txn);
+        if matches!(&result, Err(StrataError::WriteStallTimeout { .. })) {
+            saw_timeout = true;
+            break;
+        }
+    }
+
+    assert!(
+        saw_timeout,
+        "Expected WriteStallTimeout via manual commit_transaction path, \
+         but all succeeded. L0 count: {}",
+        db.storage().max_l0_segment_count()
+    );
+}
