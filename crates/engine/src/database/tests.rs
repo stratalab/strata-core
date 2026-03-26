@@ -2037,3 +2037,114 @@ fn test_issue_1733_tombstone_no_duplicate_after_recovery() {
         );
     }
 }
+
+// ========================================================================
+// Issue #1914: Executor event append bypasses OCC — hash chain corruption
+// ========================================================================
+
+/// Two concurrent transactions both appending events to the same branch
+/// must conflict at commit time. Before the fix, the meta_key was never
+/// read, so OCC validation had no read-set entry to detect the conflict.
+#[test]
+fn test_issue_1914_concurrent_event_append_occ_conflict() {
+    use crate::transaction::Transaction;
+    use crate::transaction_ops::TransactionOps;
+
+    let temp_dir = TempDir::new().unwrap();
+    let db = Database::open(temp_dir.path().join("db")).unwrap();
+    let branch_id = BranchId::new();
+
+    let ns = Arc::new(Namespace::for_branch(branch_id));
+
+    // Begin two transactions on the same branch at the same snapshot
+    let mut txn1 = db.begin_transaction(branch_id).unwrap();
+    let mut txn2 = db.begin_transaction(branch_id).unwrap();
+
+    // Both append an event using the Transaction wrapper (executor path)
+    {
+        let mut t1 = Transaction::new(&mut txn1, ns.clone());
+        t1.event_append("test_event", Value::String("from_t1".into()))
+            .unwrap();
+    }
+    {
+        let mut t2 = Transaction::new(&mut txn2, ns.clone());
+        t2.event_append("test_event", Value::String("from_t2".into()))
+            .unwrap();
+    }
+
+    // Commit T1 — should succeed
+    db.commit_transaction(&mut txn1).unwrap();
+    db.end_transaction(txn1);
+
+    // Commit T2 — MUST fail with a conflict.
+    // Both wrote to meta_key (event log metadata). If meta_key is in both
+    // read_sets, OCC detects that T1 modified it after T2's snapshot.
+    // Before the fix: both commit succeeds → duplicate sequence 0,
+    // corrupted hash chain.
+    let result = db.commit_transaction(&mut txn2);
+    db.end_transaction(txn2);
+
+    assert!(
+        result.is_err(),
+        "T2 must conflict: both transactions appended to the same event log \
+         but OCC did not detect the conflict because meta_key was never read"
+    );
+}
+
+/// Verify that after the fix, sequential event appends produce correct
+/// sequence numbers sourced from persisted metadata, not ephemeral defaults.
+#[test]
+fn test_issue_1914_sequence_from_persisted_meta() {
+    use crate::transaction::Transaction;
+    use crate::transaction_ops::TransactionOps;
+
+    let temp_dir = TempDir::new().unwrap();
+    let db = Database::open(temp_dir.path().join("db")).unwrap();
+    let branch_id = BranchId::new();
+
+    let ns = Arc::new(Namespace::for_branch(branch_id));
+
+    // First transaction: append event at sequence 0
+    let mut txn1 = db.begin_transaction(branch_id).unwrap();
+    {
+        let mut t = Transaction::new(&mut txn1, ns.clone());
+        let v = t
+            .event_append("evt", Value::String("first".into()))
+            .unwrap();
+        assert_eq!(v, strata_core::Version::seq(0));
+    }
+    db.commit_transaction(&mut txn1).unwrap();
+    db.end_transaction(txn1);
+
+    // Second transaction: should continue at sequence 1 (from persisted meta)
+    let mut txn2 = db.begin_transaction(branch_id).unwrap();
+    {
+        let mut t = Transaction::new(&mut txn2, ns.clone());
+        let v = t
+            .event_append("evt", Value::String("second".into()))
+            .unwrap();
+        // Before fix: base_sequence comes from ctx.event_sequence_count()
+        // which defaults to 0 → duplicate sequence 0.
+        // After fix: reads persisted meta.next_sequence = 1.
+        assert_eq!(
+            v,
+            strata_core::Version::seq(1),
+            "Second append must use sequence 1 from persisted meta, not 0"
+        );
+    }
+    db.commit_transaction(&mut txn2).unwrap();
+    db.end_transaction(txn2);
+
+    // Verify the hash chain: event 1's prev_hash must equal event 0's hash
+    let mut txn3 = db.begin_transaction(branch_id).unwrap();
+    {
+        let mut t = Transaction::new(&mut txn3, ns.clone());
+        let e0 = t.event_get(0).unwrap().expect("event 0 must exist");
+        let e1 = t.event_get(1).unwrap().expect("event 1 must exist");
+        assert_eq!(
+            e1.value.prev_hash, e0.value.hash,
+            "event 1's prev_hash must chain from event 0's hash"
+        );
+    }
+    db.end_transaction(txn3);
+}
