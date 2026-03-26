@@ -511,6 +511,12 @@ impl JsonStore {
             return Ok(Vec::new());
         }
 
+        // Validate all paths and values upfront (matching set_or_create)
+        for (_, path, value) in &entries {
+            path.validate().map_err(limit_error_to_error)?;
+            value.validate().map_err(limit_error_to_error)?;
+        }
+
         self.db.transaction(*branch_id, |txn| {
             let mut results = Vec::with_capacity(entries.len());
             for (doc_id, path, value) in &entries {
@@ -752,6 +758,11 @@ impl JsonStore {
     ) -> StrataResult<Vec<StrataResult<Version>>> {
         if entries.is_empty() {
             return Ok(Vec::new());
+        }
+
+        // Validate all paths upfront
+        for (_, path) in entries {
+            path.validate().map_err(limit_error_to_error)?;
         }
 
         self.db.transaction(*branch_id, |txn| {
