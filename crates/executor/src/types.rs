@@ -803,6 +803,8 @@ pub enum ExportPrimitive {
     Json,
     /// Event log.
     Events,
+    /// Graph store.
+    Graph,
 }
 
 impl ExportPrimitive {
@@ -812,6 +814,7 @@ impl ExportPrimitive {
             ExportPrimitive::Kv => "kv",
             ExportPrimitive::Json => "json",
             ExportPrimitive::Events => "events",
+            ExportPrimitive::Graph => "graph",
         }
     }
 }

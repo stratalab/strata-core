@@ -113,6 +113,39 @@ fn collect_events(
     Ok(rows)
 }
 
+fn collect_graph(
+    p: &Arc<Primitives>,
+    branch_id: strata_core::types::BranchId,
+    prefix: Option<&str>,
+    limit: Option<u64>,
+) -> Result<Vec<ExportRow>> {
+    let graphs = convert_result(p.graph.list_graphs(branch_id))?;
+    let max = limit.map(|l| l as usize).unwrap_or(usize::MAX);
+    let mut rows = Vec::new();
+
+    for graph_name in &graphs {
+        if let Some(pfx) = prefix {
+            if !graph_name.starts_with(pfx) {
+                continue;
+            }
+        }
+        let nodes = convert_result(p.graph.list_nodes(branch_id, graph_name))?;
+        for node_id in nodes {
+            if rows.len() >= max {
+                return Ok(rows);
+            }
+            if let Some(data) = convert_result(p.graph.get_node(branch_id, graph_name, &node_id))? {
+                let key = format!("{}/{}", graph_name, node_id);
+                let value = serde_json::to_string(&data)
+                    .map(Value::String)
+                    .unwrap_or(Value::Null);
+                rows.push(ExportRow { key, value });
+            }
+        }
+    }
+    Ok(rows)
+}
+
 // =============================================================================
 // CSV helpers
 // =============================================================================
@@ -346,6 +379,7 @@ pub fn db_export(
         ExportPrimitive::Kv => collect_kv(p, branch_id, &space, prefix.as_deref(), limit)?,
         ExportPrimitive::Json => collect_json(p, branch_id, &space, prefix.as_deref(), limit)?,
         ExportPrimitive::Events => collect_events(p, branch_id, &space, limit)?,
+        ExportPrimitive::Graph => collect_graph(p, branch_id, prefix.as_deref(), limit)?,
     };
 
     // 2. Render
