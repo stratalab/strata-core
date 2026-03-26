@@ -205,6 +205,24 @@ impl<'a> TransactionOps for Transaction<'a> {
     // =========================================================================
 
     fn event_append(&mut self, event_type: &str, payload: Value) -> Result<Version, StrataError> {
+        // Read persisted meta BEFORE writing — adds meta_key to the read_set
+        // so OCC detects concurrent appends (#1914).
+        // ctx.get() checks write_set first (our prior appends), then snapshot.
+        let meta_key = Key::new_event_meta(self.namespace.clone());
+        let persisted_meta: EventLogMeta = match self.ctx.get(&meta_key)? {
+            Some(Value::String(s)) => {
+                serde_json::from_str(&s).unwrap_or_else(|_| EventLogMeta::default())
+            }
+            _ => EventLogMeta::default(),
+        };
+
+        // On first append in this Transaction instance, initialize from
+        // persisted state instead of ephemeral defaults.
+        if self.pending_events.is_empty() {
+            self.base_sequence = persisted_meta.next_sequence;
+            self.last_hash = persisted_meta.head_hash;
+        }
+
         let sequence = self.next_sequence();
         let timestamp = Timestamp::now();
         let prev_hash = self.last_hash;
@@ -232,13 +250,31 @@ impl<'a> TransactionOps for Transaction<'a> {
         })?;
         self.ctx.put(event_key, Value::String(event_json))?;
 
-        // Write EventLogMeta so EventLog::len() and other readers see the update after commit
-        let meta_key = Key::new_event_meta(self.namespace.clone());
+        // Write EventLogMeta — preserve streams from persisted meta (#1914)
+        let mut streams = persisted_meta.streams;
+        let ts_micros = timestamp.as_micros();
+        if let Some(sm) = streams.get_mut(event_type) {
+            sm.count += 1;
+            sm.last_sequence = sequence;
+            sm.last_timestamp = ts_micros;
+        } else {
+            streams.insert(
+                event_type.to_string(),
+                crate::primitives::event::StreamMeta {
+                    count: 1,
+                    first_sequence: sequence,
+                    last_sequence: sequence,
+                    first_timestamp: ts_micros,
+                    last_timestamp: ts_micros,
+                },
+            );
+        }
+
         let meta = EventLogMeta {
             next_sequence: sequence + 1,
             head_hash: event.hash,
             hash_version: HASH_VERSION_SHA256,
-            streams: Default::default(),
+            streams,
         };
         let meta_json = serde_json::to_string(&meta).map_err(|e| StrataError::Serialization {
             message: e.to_string(),
@@ -621,11 +657,34 @@ mod tests {
 
     #[test]
     fn test_event_with_base_sequence() {
-        let ns = create_test_namespace();
-        let mut ctx = create_test_context(&ns);
+        use strata_core::traits::Storage;
+        use strata_core::WriteMode;
 
-        // Create transaction with existing events (simulating snapshot)
+        let ns = create_test_namespace();
+        let store = Arc::new(SegmentedStore::new());
+
+        // Pre-populate event meta in the store to simulate 100 existing events
         let last_hash = [42u8; 32];
+        let meta = EventLogMeta {
+            next_sequence: 100,
+            head_hash: last_hash,
+            hash_version: HASH_VERSION_SHA256,
+            streams: Default::default(),
+        };
+        let meta_json = serde_json::to_string(&meta).unwrap();
+        let meta_key = Key::new_event_meta(ns.clone());
+        let version = store.next_version();
+        store
+            .put_with_version_mode(
+                meta_key,
+                Value::String(meta_json),
+                version,
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
+
+        let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
         let mut txn = Transaction::with_base_sequence(&mut ctx, ns.clone(), 100, last_hash);
 
         // New events should continue from base
