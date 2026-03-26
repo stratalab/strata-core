@@ -117,7 +117,14 @@ impl VectorStore {
             }
             drop(backend);
         } else {
-            // Filter active — use adaptive over-fetch (Issue #1966: configurable multipliers)
+            // Filter active — use adaptive over-fetch (Issue #1966: configurable multipliers).
+            // Fall back to [1] if multipliers is empty so we still fetch at least k candidates.
+            let default_multipliers = vec![1usize];
+            let multipliers = if opts.overfetch_multipliers.is_empty() {
+                &default_multipliers
+            } else {
+                &opts.overfetch_multipliers
+            };
             let state = self.state()?;
             let backend = state.backends.get(&collection_id).ok_or_else(|| {
                 VectorError::CollectionNotFound {
@@ -127,7 +134,7 @@ impl VectorStore {
             let collection_size = backend.len();
             let namespace = self.namespace_for(branch_id, space);
 
-            for &mult in &opts.overfetch_multipliers {
+            for &mult in multipliers {
                 let fetch_k = (k * mult).min(collection_size);
                 if fetch_k == 0 {
                     break;

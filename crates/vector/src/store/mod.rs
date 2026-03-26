@@ -541,12 +541,10 @@ impl VectorStore {
         Ok(entries.len())
     }
 
-    /// Delete all vectors in a collection using batched transactions (Issue #1968).
+    /// Delete all vectors in a collection atomically (Issue #1968).
     ///
-    /// For collections with many vectors, a single transaction containing 100K+
-    /// deletes can be slow. This method chunks deletes into batches to keep
-    /// individual transactions manageable while preserving eventual consistency
-    /// (all vectors will be deleted, but intermediate states may be visible).
+    /// All deletes are performed in a single transaction to guarantee
+    /// atomicity — either all vectors are deleted or none are.
     fn delete_all_vectors(&self, branch_id: BranchId, space: &str, name: &str) -> VectorResult<()> {
         use strata_core::traits::Storage;
 
@@ -563,13 +561,10 @@ impl VectorStore {
 
         let keys: Vec<Key> = entries.into_iter().map(|(key, _)| key).collect();
 
-        // Delete in batches of 1000 to keep transactions manageable
-        const BATCH_SIZE: usize = 1000;
-        for chunk in keys.chunks(BATCH_SIZE) {
-            let chunk = chunk.to_vec();
+        if !keys.is_empty() {
             self.db
                 .transaction(branch_id, |txn| {
-                    for key in &chunk {
+                    for key in &keys {
                         txn.delete(key.clone())?;
                     }
                     Ok(())
@@ -3032,13 +3027,20 @@ mod tests {
     }
 
     #[test]
-    fn test_old_collection_record_defaults_to_segmented_hnsw() {
+    fn test_backend_type_all_variants_roundtrip() {
         use crate::types::IndexBackendType;
 
         let config = VectorConfig::new(4, DistanceMetric::Cosine).unwrap();
-        // Simulate old record without backend_type field
-        let old_record = CollectionRecord::new(&config);
-        assert_eq!(old_record.backend_type(), IndexBackendType::SegmentedHnsw);
+        for bt in [
+            IndexBackendType::BruteForce,
+            IndexBackendType::Hnsw,
+            IndexBackendType::SegmentedHnsw,
+        ] {
+            let record = CollectionRecord::with_backend_type(&config, bt);
+            let bytes = record.to_bytes().unwrap();
+            let loaded = CollectionRecord::from_bytes(&bytes).unwrap();
+            assert_eq!(loaded.backend_type(), bt, "Roundtrip failed for {:?}", bt);
+        }
     }
 
     // ========================================================================
@@ -3144,6 +3146,50 @@ mod tests {
         // Should find up to 3 results with category "a"
         assert!(!results.is_empty());
         assert!(results.len() <= 3);
+    }
+
+    #[test]
+    fn test_search_with_empty_overfetch_multipliers_still_returns_results() {
+        let db = Database::cache().unwrap();
+        let store = VectorStore::new(db);
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(4, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "empty_mult", config)
+            .unwrap();
+
+        for i in 0..5 {
+            let metadata = serde_json::json!({"x": "a"});
+            store
+                .insert(
+                    branch_id,
+                    "default",
+                    "empty_mult",
+                    &format!("v{}", i),
+                    &[i as f32, 0.0, 0.0, 1.0],
+                    Some(metadata),
+                )
+                .unwrap();
+        }
+
+        // Empty multipliers with a filter should still return results (falls back to [1])
+        let filter = MetadataFilter::new().eq("x", "a");
+        let opts = SearchOptions::default()
+            .with_filter(filter)
+            .with_overfetch_multipliers(vec![]);
+
+        let results = store
+            .search_with_options(
+                branch_id,
+                "default",
+                "empty_mult",
+                &[0.0, 0.0, 0.0, 1.0],
+                3,
+                opts,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 3, "Empty multipliers should fall back to [1]");
     }
 
     // ========================================================================
