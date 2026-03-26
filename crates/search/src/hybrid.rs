@@ -139,11 +139,14 @@ impl HybridSearch {
     ///
     /// # Snapshot Consistency
     ///
-    /// Per Rule 4: Each primitive's search() uses its own snapshot.
-    /// For true cross-primitive consistency, primitives would need
-    /// search_with_snapshot() methods. This is acceptable for M6.
+    /// A unified `snapshot_version` is captured at the start of each search
+    /// and threaded through to all primitive searches via `SearchRequest` (#1921).
+    /// Primitives that perform post-scoring storage reads can use this version
+    /// for cross-primitive consistency. The inverted index scoring itself is
+    /// not yet version-bounded (future work).
     pub fn search(&self, req: &SearchRequest) -> StrataResult<SearchResponse> {
         let start = Instant::now();
+        let snapshot_version = self.db.current_version();
 
         // 1. Select primitives
         let primitives = self.select_primitives(req);
@@ -180,7 +183,7 @@ impl HybridSearch {
                             any_truncated = true;
                             break;
                         }
-                        let sub_req = req.clone().with_budget(*budget);
+                        let sub_req = req.clone().with_budget(*budget).with_snapshot_version(snapshot_version);
                         let result = self.search_primitive(*primitive, &sub_req)?;
                         total_candidates += result.stats.candidates_considered;
                         if result.truncated {
@@ -209,7 +212,7 @@ impl HybridSearch {
                         any_truncated = true;
                         break;
                     }
-                    let sub_req = req.clone().with_budget(*budget);
+                    let sub_req = req.clone().with_budget(*budget).with_snapshot_version(snapshot_version);
                     let result = self.search_primitive(*primitive, &sub_req)?;
                     total_candidates += result.stats.candidates_considered;
                     if result.truncated {

@@ -147,13 +147,21 @@ fn scan_branch_data(
 ) -> StrataResult<Vec<BranchlogPayload>> {
     let storage = db.storage();
 
+    // Capture snapshot version for consistent reads (#1920)
+    let snapshot_version = db.current_version();
+
     // Discover all current keys across all type tags
     let type_tags = [TypeTag::KV, TypeTag::Event, TypeTag::Json, TypeTag::Vector];
 
     let mut all_keys: Vec<Key> = Vec::new();
     for type_tag in type_tags {
-        let entries = storage.list_by_type(&core_branch_id, type_tag);
-        all_keys.extend(entries.into_iter().map(|(k, _)| k));
+        let entries = storage.list_by_type_at_version(&core_branch_id, type_tag, snapshot_version);
+        all_keys.extend(
+            entries
+                .into_iter()
+                .filter(|e| !e.is_tombstone)
+                .map(|e| e.key),
+        );
     }
 
     if all_keys.is_empty() {
@@ -466,5 +474,47 @@ mod tests {
         let formatted = format_micros(ts);
         assert!(!formatted.is_empty());
         assert!(formatted.ends_with('Z'));
+    }
+
+    #[test]
+    fn test_issue_1920_export_branch_snapshot_consistency() {
+        // Verify that export_branch uses snapshot-isolated reads so that
+        // the exported bundle captures a consistent point-in-time view.
+        let (temp_dir, db) = setup_with_branch("snap-export");
+
+        // Write data to the branch
+        let branch_index = BranchIndex::new(db.clone());
+        let meta = branch_index
+            .get_branch("snap-export")
+            .unwrap()
+            .unwrap()
+            .value;
+        let core_branch_id = crate::primitives::branch::resolve_branch_name(&meta.name);
+        let ns = Arc::new(Namespace::for_branch(core_branch_id));
+
+        db.transaction(core_branch_id, |txn| {
+            txn.put(
+                Key::new(ns.clone(), TypeTag::KV, b"k1".to_vec()),
+                strata_core::value::Value::String("v1".to_string()),
+            )?;
+            txn.put(
+                Key::new(ns.clone(), TypeTag::KV, b"k2".to_vec()),
+                strata_core::value::Value::Int(42),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        // Export should succeed with snapshot-isolated reads
+        let path = temp_dir.path().join("snap.branchbundle.tar.zst");
+        let info = export_branch(&db, "snap-export", &path).unwrap();
+
+        assert_eq!(info.branch_id, "snap-export");
+        assert!(info.entry_count > 0);
+        assert!(info.bundle_size > 0);
+
+        // Validate the bundle is well-formed
+        let bundle_info = validate_bundle(&path).unwrap();
+        assert!(bundle_info.checksums_valid);
     }
 }

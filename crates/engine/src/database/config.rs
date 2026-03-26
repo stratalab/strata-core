@@ -110,6 +110,11 @@ pub struct StorageConfig {
     /// On slow storage (SD cards), set to e.g. 5–10 MB/s to avoid starving user I/O.
     #[serde(default)]
     pub compaction_rate_limit: u64,
+    /// Maximum time (milliseconds) a write can be stalled waiting for L0 compaction.
+    /// If exceeded, the write returns an error instead of blocking indefinitely.
+    /// Default: 30000 (30 seconds). Set to 0 for unlimited (not recommended).
+    #[serde(default = "default_write_stall_timeout_ms")]
+    pub write_stall_timeout_ms: u64,
 }
 
 fn default_max_branches() -> usize {
@@ -158,6 +163,10 @@ fn default_bloom_bits_per_key() -> usize {
     10
 }
 
+fn default_write_stall_timeout_ms() -> u64 {
+    30_000 // 30 seconds
+}
+
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
@@ -175,6 +184,7 @@ impl Default for StorageConfig {
             data_block_size: default_data_block_size(),
             bloom_bits_per_key: default_bloom_bits_per_key(),
             compaction_rate_limit: 0,
+            write_stall_timeout_ms: default_write_stall_timeout_ms(),
         }
     }
 }

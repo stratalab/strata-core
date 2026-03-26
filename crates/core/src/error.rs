@@ -598,6 +598,25 @@ pub enum StrataError {
         duration_ms: u64,
     },
 
+    /// Write stall timeout
+    ///
+    /// The write was stalled waiting for L0 compaction to reduce the segment
+    /// count below the stop-writes trigger, but the wait exceeded the
+    /// configured timeout.
+    ///
+    /// ## Example
+    /// ```no_run
+    /// # use strata_core::StrataError;
+    /// StrataError::WriteStallTimeout { stall_duration_ms: 30000, l0_count: 40 };
+    /// ```
+    #[error("write stall timeout after {stall_duration_ms}ms (L0 count: {l0_count})")]
+    WriteStallTimeout {
+        /// How long the write was stalled before giving up
+        stall_duration_ms: u64,
+        /// L0 segment count at the time of timeout
+        l0_count: usize,
+    },
+
     /// Transaction not active
     ///
     /// An operation was attempted on a transaction that has already
@@ -934,6 +953,20 @@ impl StrataError {
         StrataError::TransactionTimeout { duration_ms }
     }
 
+    /// Create a WriteStallTimeout error
+    ///
+    /// ## Example
+    /// ```no_run
+    /// # use strata_core::StrataError;
+    /// StrataError::write_stall_timeout(30000, 40);
+    /// ```
+    pub fn write_stall_timeout(stall_duration_ms: u64, l0_count: usize) -> Self {
+        StrataError::WriteStallTimeout {
+            stall_duration_ms,
+            l0_count,
+        }
+    }
+
     /// Create a TransactionNotActive error
     ///
     /// ## Example
@@ -1211,6 +1244,7 @@ impl StrataError {
             StrataError::WriteConflict { .. } => ErrorCode::Conflict,
             StrataError::TransactionAborted { .. } => ErrorCode::Conflict,
             StrataError::TransactionTimeout { .. } => ErrorCode::Conflict,
+            StrataError::WriteStallTimeout { .. } => ErrorCode::Conflict,
             StrataError::TransactionNotActive { .. } => ErrorCode::Conflict,
 
             // ConstraintViolation errors (structural failures)
@@ -1289,6 +1323,12 @@ impl StrataError {
             StrataError::TransactionTimeout { duration_ms } => {
                 ErrorDetails::new().with_int("duration_ms", *duration_ms as i64)
             }
+            StrataError::WriteStallTimeout {
+                stall_duration_ms,
+                l0_count,
+            } => ErrorDetails::new()
+                .with_int("stall_duration_ms", *stall_duration_ms as i64)
+                .with_int("l0_count", *l0_count as i64),
             StrataError::TransactionNotActive { state } => {
                 ErrorDetails::new().with_string("state", state)
             }
@@ -1713,6 +1753,25 @@ mod strata_error_tests {
         assert!(!e.is_retryable());
         match e {
             StrataError::TransactionTimeout { duration_ms } => assert_eq!(duration_ms, 5000),
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_write_stall_timeout_constructor() {
+        let e = StrataError::write_stall_timeout(30000, 40);
+
+        assert!(!e.is_retryable(), "stall timeout is not retryable — write already committed");
+        assert!(!e.is_transaction_error());
+        assert_eq!(e.code(), ErrorCode::Conflict);
+        match e {
+            StrataError::WriteStallTimeout {
+                stall_duration_ms,
+                l0_count,
+            } => {
+                assert_eq!(stall_duration_ms, 30000);
+                assert_eq!(l0_count, 40);
+            }
             _ => panic!("Wrong variant"),
         }
     }
@@ -2547,6 +2606,7 @@ mod adversarial_error_tests {
             StrataError::write_conflict(entity.clone()),
             StrataError::transaction_aborted("reason"),
             StrataError::transaction_timeout(100),
+            StrataError::write_stall_timeout(30000, 40),
             StrataError::transaction_not_active("committed"),
             StrataError::invalid_operation(entity.clone(), "reason"),
             StrataError::invalid_input("bad"),
@@ -2565,7 +2625,7 @@ mod adversarial_error_tests {
             let _ = e.message(); // Should not panic
             let _ = e.details(); // Should not panic
         }
-        assert_eq!(errors.len(), 22, "Should test all 22 error constructors");
+        assert_eq!(errors.len(), 23, "Should test all 23 error constructors");
     }
 
     #[test]

@@ -10,6 +10,7 @@
 //! - Commit rate calculation
 
 use parking_lot::Mutex as ParkingMutex;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,11 +47,17 @@ pub struct TransactionCoordinator {
     total_committed: AtomicU64,
     /// Total transactions aborted - uses Relaxed ordering
     total_aborted: AtomicU64,
-    /// Lock-free GC safe point: the version at which all prior transactions
-    /// have completed. Advances via `fetch_max` only when active_count drains
-    /// to 0, ensuring it is always ≤ the minimum active snapshot version.
-    /// Initialized to 0 (no drain has occurred yet).
+    /// GC safe point: the highest version at which all prior transactions
+    /// have completed. Advances incrementally as transactions finish (#1923):
+    /// - When active_snapshots is non-empty → `min(start_versions) - 1`
+    /// - When empty (full drain) → `current_version()`
+    ///
+    /// Always ≤ the minimum active snapshot version.
     gc_safe_version: AtomicU64,
+    /// Per-transaction snapshot tracking for incremental GC advancement (#1923).
+    /// Maps txn_id → start_version. Protected by Mutex; held only during
+    /// insert/remove (O(log n)), not during transaction lifetime.
+    active_snapshots: ParkingMutex<BTreeMap<u64, u64>>,
     /// Maximum entries in a transaction's write buffer (0 = unlimited).
     max_write_buffer_entries: AtomicUsize,
     /// Effective transaction timeout. Defaults to `TRANSACTION_TIMEOUT`.
@@ -79,6 +86,7 @@ impl TransactionCoordinator {
             total_committed: AtomicU64::new(0),
             total_aborted: AtomicU64::new(0),
             gc_safe_version: AtomicU64::new(0),
+            active_snapshots: ParkingMutex::new(BTreeMap::new()),
             max_write_buffer_entries: AtomicUsize::new(0),
             transaction_timeout: Self::TRANSACTION_TIMEOUT,
         }
@@ -106,6 +114,7 @@ impl TransactionCoordinator {
             total_committed: AtomicU64::new(0),
             total_aborted: AtomicU64::new(0),
             gc_safe_version: AtomicU64::new(0),
+            active_snapshots: ParkingMutex::new(BTreeMap::new()),
             max_write_buffer_entries: AtomicUsize::new(0),
             transaction_timeout: Self::TRANSACTION_TIMEOUT,
         }
@@ -126,6 +135,7 @@ impl TransactionCoordinator {
             total_committed: AtomicU64::new(0),
             total_aborted: AtomicU64::new(0),
             gc_safe_version: AtomicU64::new(0),
+            active_snapshots: ParkingMutex::new(BTreeMap::new()),
             max_write_buffer_entries: AtomicUsize::new(max_write_buffer_entries),
             transaction_timeout: Self::TRANSACTION_TIMEOUT,
         }
@@ -162,14 +172,39 @@ impl TransactionCoordinator {
 
         let mut txn = TransactionContext::with_store(txn_id, branch_id, Arc::clone(storage));
         txn.set_max_write_entries(self.max_write_buffer_entries.load(Ordering::Relaxed));
+
+        // Track per-transaction snapshot for incremental GC advancement (#1923).
+        self.active_snapshots
+            .lock()
+            .insert(txn.txn_id, txn.start_version);
+
         Ok(txn)
     }
 
-    /// Enforce the transaction timeout. If expired, records an abort
-    /// (decrementing active_count) and returns `TransactionTimeout`.
-    fn enforce_timeout(&self, txn: &TransactionContext) -> StrataResult<()> {
+    /// Enforce the transaction timeout. If expired, transitions the
+    /// transaction to Aborted (preventing double-decrement on retry)
+    /// and returns `TransactionTimeout`.
+    ///
+    /// # Safety (concurrency)
+    ///
+    /// `record_abort` is called at most once per transaction because
+    /// `mark_aborted` is idempotent on terminal states and we gate
+    /// the decrement on `is_active()`. This prevents the active_count
+    /// underflow described in #1922.
+    fn enforce_timeout(&self, txn: &mut TransactionContext) -> StrataResult<()> {
         if txn.is_expired(self.transaction_timeout) {
             let elapsed = txn.elapsed();
+            // Guard: only decrement active_count once. If the transaction
+            // is already aborted (e.g., from a prior timeout call), skip
+            // the bookkeeping — just return the error (#1922).
+            if txn.is_active() {
+                let _ = txn.mark_aborted(format!(
+                    "timeout after {}ms (limit: {}ms)",
+                    elapsed.as_millis(),
+                    self.transaction_timeout.as_millis()
+                ));
+                self.record_abort(txn.txn_id);
+            }
             warn!(
                 target: "strata::txn",
                 txn_id = txn.txn_id,
@@ -177,7 +212,6 @@ impl TransactionCoordinator {
                 timeout_ms = self.transaction_timeout.as_millis() as u64,
                 "Transaction expired — rejecting commit"
             );
-            self.record_abort(txn.txn_id);
             return Err(StrataError::transaction_timeout(elapsed.as_millis() as u64));
         }
         Ok(())
@@ -256,76 +290,92 @@ impl TransactionCoordinator {
 
     /// Record transaction start
     ///
-    /// Increments active count and total started count.
+    /// Increments active count and total started count, and tracks the
+    /// transaction's snapshot version for incremental GC advancement (#1923).
     ///
     /// # Arguments
-    /// * `_txn_id` - Unique transaction ID (unused, kept for API compat)
-    /// * `_start_version` - Snapshot version at transaction start (unused)
-    pub fn record_start(&self, _txn_id: u64, _start_version: u64) {
+    /// * `txn_id` - Unique transaction ID
+    /// * `start_version` - Snapshot version at transaction start
+    pub fn record_start(&self, txn_id: u64, start_version: u64) {
         // Relaxed: observational counters only (see struct-level doc).
         self.active_count.fetch_add(1, Ordering::Relaxed);
         self.total_started.fetch_add(1, Ordering::Relaxed);
+        self.active_snapshots.lock().insert(txn_id, start_version);
     }
 
     /// Record transaction commit
     ///
     /// Decrements active count, increments committed count,
-    /// and advances `gc_safe_version` when all transactions have drained.
+    /// and advances `gc_safe_version` incrementally (#1923).
     ///
     /// # Panics (debug only)
     /// Debug-asserts that `active_count > 0`. A zero active_count at this
     /// point indicates a bug (missing `record_start`).
     ///
     /// # Arguments
-    /// * `_txn_id` - Transaction ID (unused, kept for API compat)
-    pub fn record_commit(&self, _txn_id: u64) {
-        // Capture version BEFORE the decrement so gc_safe_version is always
-        // ≤ the snapshot version of any concurrently-starting transaction.
-        // A transaction that starts between our version read and the
-        // decrement will have a snapshot version ≥ drain_version.
-        let drain_version = self.manager.current_version();
-
-        // Single LOCK XADD instruction — no CAS loop. Underflow is a bug
-        // (record_start always precedes record_commit), so debug-assert.
-        let prev = self.active_count.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(prev > 0, "active_count underflow in record_commit");
-        // Relaxed: observational counter only — does not gate GC or any
-        // other correctness decision. The AcqRel on active_count above is
-        // the critical synchronization point.
+    /// * `txn_id` - Transaction ID (used for snapshot tracking)
+    pub fn record_commit(&self, txn_id: u64) {
         self.total_committed.fetch_add(1, Ordering::Relaxed);
-        if prev == 1 {
-            // All transactions drained — advance GC safe point
-            self.gc_safe_version
-                .fetch_max(drain_version, Ordering::Release);
-        }
+        self.finish_transaction(txn_id);
     }
 
     /// Record transaction abort
     ///
     /// Decrements active count, increments aborted count,
-    /// and advances `gc_safe_version` when all transactions have drained.
+    /// and advances `gc_safe_version` incrementally (#1923).
     ///
     /// # Panics (debug only)
     /// Debug-asserts that `active_count > 0`. A zero active_count at this
     /// point indicates a bug (missing `record_start`).
     ///
     /// # Arguments
-    /// * `_txn_id` - Transaction ID (unused, kept for API compat)
-    pub fn record_abort(&self, _txn_id: u64) {
-        // Capture version BEFORE the decrement (same rationale as record_commit)
+    /// * `txn_id` - Transaction ID (used for snapshot tracking)
+    pub fn record_abort(&self, txn_id: u64) {
+        self.total_aborted.fetch_add(1, Ordering::Relaxed);
+        self.finish_transaction(txn_id);
+    }
+
+    /// Remove a transaction from active tracking and advance gc_safe_version.
+    ///
+    /// Before #1923, gc_safe_version only advanced when active_count drained
+    /// to 0. Now it advances incrementally: when the oldest transaction
+    /// completes, gc_safe_version moves to `min(remaining start_versions) - 1`.
+    ///
+    /// # Memory ordering
+    ///
+    /// The Mutex on active_snapshots is held only for the brief
+    /// insert/remove + min() computation. The lock is released before the
+    /// atomic `fetch_max` to minimize contention.
+    fn finish_transaction(&self, txn_id: u64) {
+        // Capture version BEFORE the decrement so gc_safe_version is always
+        // ≤ the snapshot version of any concurrently-starting transaction.
         let drain_version = self.manager.current_version();
 
-        // Single LOCK XADD instruction — no CAS loop. Underflow is a bug
-        // (record_start always precedes record_abort), so debug-assert.
         let prev = self.active_count.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(prev > 0, "active_count underflow in record_abort");
-        // Relaxed: observational counter only (same rationale as total_committed).
-        self.total_aborted.fetch_add(1, Ordering::Relaxed);
-        if prev == 1 {
-            // All transactions drained — advance GC safe point
-            self.gc_safe_version
-                .fetch_max(drain_version, Ordering::Release);
-        }
+        debug_assert!(prev > 0, "active_count underflow in finish_transaction");
+
+        let new_gc_safe = {
+            let mut snapshots = self.active_snapshots.lock();
+            snapshots.remove(&txn_id);
+
+            if snapshots.is_empty() {
+                // All transactions drained — advance to current version
+                drain_version
+            } else {
+                // Advance to one below the oldest remaining snapshot.
+                // No active transaction reads data older than its start_version,
+                // so versions < min_start are safe to GC.
+                let min_start = *snapshots.values().min().unwrap();
+                if min_start > 0 {
+                    min_start - 1
+                } else {
+                    0
+                }
+            }
+        }; // lock released
+
+        self.gc_safe_version
+            .fetch_max(new_gc_safe, Ordering::Release);
     }
 
     /// Get current global version
@@ -1134,7 +1184,7 @@ mod tests {
 
     #[test]
     #[cfg(debug_assertions)]
-    #[should_panic(expected = "active_count underflow in record_commit")]
+    #[should_panic(expected = "active_count underflow in finish_transaction")]
     fn test_active_count_underflow_panics_in_debug_commit() {
         let coordinator = TransactionCoordinator::new(0);
         // Commit without a preceding start — should panic in debug builds
@@ -1143,7 +1193,7 @@ mod tests {
 
     #[test]
     #[cfg(debug_assertions)]
-    #[should_panic(expected = "active_count underflow in record_abort")]
+    #[should_panic(expected = "active_count underflow in finish_transaction")]
     fn test_active_count_underflow_panics_in_debug_abort() {
         let coordinator = TransactionCoordinator::new(0);
         // Abort without a preceding start — should panic in debug builds
@@ -1438,31 +1488,31 @@ mod tests {
     fn test_min_active_version_tracks_correctly() {
         let coordinator = TransactionCoordinator::new(10);
 
-        // Register 3 transactions
+        // Register 3 transactions at version 10
         coordinator.record_start(1, 10);
         coordinator.record_start(2, 10);
         coordinator.record_start(3, 10);
 
-        // While transactions are active, gc_safe_version hasn't advanced yet
-        // (no full drain has occurred), so min_active_version returns None
+        // While transactions are active but none have finished,
+        // gc_safe_version is still 0 (initial)
         assert_eq!(coordinator.min_active_version(), None);
 
-        // Committing first two doesn't cause a full drain (active_count stays > 0)
+        // Partial commit: gc_safe advances to min(remaining) - 1 = 9 (#1923)
         coordinator.record_commit(1);
         assert_eq!(
             coordinator.min_active_version(),
-            None,
-            "partial drain should not advance gc_safe_version"
+            Some(9),
+            "partial drain should advance gc_safe to min(snapshots) - 1"
         );
 
         coordinator.record_commit(2);
         assert_eq!(
             coordinator.min_active_version(),
-            None,
-            "still one active txn, no drain"
+            Some(9),
+            "txn3 still at version 10, gc_safe stays at 9"
         );
 
-        // Committing last → full drain → gc_safe_version advances to current_version (10)
+        // Full drain → gc_safe_version advances to current_version (10)
         coordinator.record_commit(3);
         assert_eq!(
             coordinator.min_active_version(),
@@ -1529,7 +1579,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gc_safe_version_advances_on_full_drain() {
+    fn test_gc_safe_version_advances_incrementally() {
         let coordinator = TransactionCoordinator::new(10);
 
         // Start 3 transactions at version 10
@@ -1537,22 +1587,22 @@ mod tests {
         coordinator.record_start(2, 10);
         coordinator.record_start(3, 10);
 
-        // Partial commits don't trigger drain
+        // Partial commit: gc_safe = min(10, 10) - 1 = 9 (#1923)
         coordinator.record_commit(1);
         assert_eq!(
             coordinator.min_active_version(),
-            None,
-            "2 still active, no drain"
+            Some(9),
+            "gc_safe should be min(remaining_snapshots) - 1 = 9"
         );
 
         coordinator.record_commit(2);
         assert_eq!(
             coordinator.min_active_version(),
-            None,
-            "1 still active, no drain"
+            Some(9),
+            "gc_safe should still be 9 (txn3 still at version 10)"
         );
 
-        // Final commit → full drain → gc_safe_version = 10
+        // Final commit → full drain → gc_safe_version = current_version = 10
         coordinator.record_commit(3);
         assert_eq!(
             coordinator.min_active_version(),
@@ -1787,5 +1837,133 @@ mod tests {
             v, 3,
             "gc_safe_version should be 3 (current version at drain time)"
         );
+    }
+
+    // =========================================================================
+    // #1923 — incremental gc_safe_version advancement
+    // =========================================================================
+
+    #[test]
+    fn test_issue_1923_overlapping_txns_dont_pin_gc() {
+        let coordinator = TransactionCoordinator::new(100);
+
+        // Simulate the scenario from #1923: overlapping transactions
+        // where a new txn starts before the previous one completes.
+        // Use record_start with explicit versions to control snapshot points.
+        coordinator.record_start(1, 100); // txn1 at v100
+        coordinator.record_start(2, 200); // txn2 at v200
+        coordinator.record_start(3, 300); // txn3 at v300
+        assert_eq!(coordinator.active_count(), 3);
+
+        // Complete oldest (txn1). Before #1923, gc_safe would stay at 0
+        // because active_count > 0. Now it advances to min(200,300)-1 = 199.
+        coordinator.record_commit(1);
+        let v1 = coordinator.min_active_version();
+        assert!(
+            v1.is_some(),
+            "gc_safe_version should advance after oldest txn completes (#1923)"
+        );
+        assert_eq!(v1, Some(199));
+
+        // Start another txn — the overlapping pattern
+        coordinator.record_start(4, 400);
+
+        // Complete txn2 — gc_safe should advance: min(300,400)-1 = 299
+        coordinator.record_commit(2);
+        let v2 = coordinator.min_active_version().unwrap();
+        assert_eq!(v2, 299);
+        assert!(v2 > v1.unwrap(), "gc_safe must monotonically increase");
+
+        // Complete txn3 — gc_safe = min(400)-1 = 399
+        coordinator.record_commit(3);
+        let v3 = coordinator.min_active_version().unwrap();
+        assert_eq!(v3, 399);
+
+        // Complete final txn — full drain → gc_safe = current_version
+        coordinator.record_commit(4);
+        let v4 = coordinator.min_active_version().unwrap();
+        assert!(v4 >= v3, "full drain should advance gc_safe");
+        assert_eq!(coordinator.active_count(), 0);
+    }
+
+    #[test]
+    fn test_issue_1923_gc_advances_to_min_snapshot_minus_one() {
+        let coordinator = TransactionCoordinator::new(0);
+
+        // Use record_start with explicit, distinct versions
+        coordinator.record_start(1, 10); // txn1 at v10
+        coordinator.record_start(2, 20); // txn2 at v20
+        coordinator.record_start(3, 30); // txn3 at v30
+
+        // Complete txn1 (oldest). Remaining: txn2@20, txn3@30.
+        // gc_safe = min(20, 30) - 1 = 19
+        coordinator.record_commit(1);
+        let gc = coordinator.min_active_version().unwrap();
+        assert_eq!(gc, 19, "gc_safe should be min(remaining) - 1 = 20 - 1");
+
+        // Complete txn2. Remaining: txn3@30.
+        // gc_safe = 30 - 1 = 29
+        coordinator.record_commit(2);
+        let gc = coordinator.min_active_version().unwrap();
+        assert_eq!(gc, 29, "gc_safe should be min(remaining) - 1 = 30 - 1");
+
+        // Complete txn3 → full drain → gc_safe = current_version
+        coordinator.record_commit(3);
+        let gc = coordinator.min_active_version().unwrap();
+        assert!(gc > 0, "full drain should advance gc_safe to current_version");
+    }
+
+    // =========================================================================
+    // #1922 — double-decrement prevention
+    // =========================================================================
+
+    #[test]
+    fn test_issue_1922_expired_commit_no_double_decrement() {
+        let mut coordinator = TransactionCoordinator::new(0);
+        coordinator.set_transaction_timeout(Duration::from_millis(1));
+        let storage = create_test_storage();
+        let branch_id = BranchId::new();
+
+        let mut txn = coordinator
+            .start_transaction(branch_id, &storage)
+            .unwrap();
+        assert_eq!(coordinator.metrics().active_count, 1);
+
+        std::thread::sleep(Duration::from_millis(5));
+
+        // First commit attempt: should fail with timeout and decrement active_count
+        let r1 = coordinator.commit(&mut txn, storage.as_ref(), None);
+        assert!(r1.is_err());
+        assert_eq!(coordinator.metrics().active_count, 0);
+
+        // Second commit attempt: should fail again but NOT decrement further.
+        // Before #1922 fix, this would underflow active_count (debug_assert panic).
+        let r2 = coordinator.commit(&mut txn, storage.as_ref(), None);
+        assert!(r2.is_err());
+        assert_eq!(coordinator.metrics().active_count, 0);
+
+        // Transaction should be in Aborted state
+        assert!(!txn.is_active());
+    }
+
+    #[test]
+    fn test_issue_1922_timeout_marks_transaction_aborted() {
+        let mut coordinator = TransactionCoordinator::new(0);
+        coordinator.set_transaction_timeout(Duration::from_millis(1));
+        let storage = create_test_storage();
+        let branch_id = BranchId::new();
+
+        let mut txn = coordinator
+            .start_transaction(branch_id, &storage)
+            .unwrap();
+        assert!(txn.is_active());
+
+        std::thread::sleep(Duration::from_millis(5));
+
+        let _ = coordinator.commit(&mut txn, storage.as_ref(), None);
+        // enforce_timeout should have marked it aborted
+        assert!(!txn.is_active());
+        assert!(txn.abort_reason().is_some());
+        assert!(txn.abort_reason().unwrap().contains("timeout"));
     }
 }
