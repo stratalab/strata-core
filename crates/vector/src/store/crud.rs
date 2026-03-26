@@ -306,7 +306,6 @@ impl VectorStore {
         // Backend after KV succeeds. Non-fatal since KV is already deleted and
         // search verifies KV existence for candidates (Issue #1731).
         if let Some(mut backend) = state.backends.get_mut(&collection_id) {
-            use crate::types::now_micros;
             match backend.delete_with_timestamp(vector_id, now_micros()) {
                 Ok(_) => {
                     backend.remove_inline_meta(vector_id);

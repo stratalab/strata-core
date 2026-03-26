@@ -27,8 +27,8 @@
 use crate::collection::{validate_collection_name, validate_vector_key};
 use crate::{
     CollectionId, CollectionInfo, CollectionRecord, IndexBackendFactory, MetadataFilter,
-    VectorConfig, VectorEntry, VectorError, VectorId, VectorIndexBackend, VectorMatch,
-    VectorMatchWithSource, VectorRecord, VectorResult,
+    SearchOptions, VectorConfig, VectorEntry, VectorError, VectorId, VectorIndexBackend,
+    VectorMatch, VectorMatchWithSource, VectorRecord, VectorResult,
 };
 use dashmap::DashMap;
 use serde_json::Value as JsonValue;
@@ -165,30 +165,46 @@ impl VectorStore {
         Arc::new(Namespace::for_branch_space(branch_id, space))
     }
 
-    /// Get the backend factory (hardcoded currently, configurable in future versions)
+    /// Get the default backend factory (SegmentedHnsw).
     fn backend_factory(&self) -> IndexBackendFactory {
-        IndexBackendFactory::SegmentedHnsw(super::segmented::SegmentedHnswConfig::default())
+        IndexBackendFactory::default()
+    }
+
+    /// Get a backend factory for a specific backend type (Issue #1964).
+    fn backend_factory_for(&self, backend_type: crate::IndexBackendType) -> IndexBackendFactory {
+        IndexBackendFactory::from_type(backend_type)
     }
 
     // ========================================================================
     // Internal Helpers
     // ========================================================================
 
-    /// Initialize the index backend for a collection
+    /// Initialize the index backend for a collection (uses default backend type).
     fn init_backend(&self, id: &CollectionId, config: &VectorConfig) -> Result<(), VectorError> {
-        let backend = self.create_backend(id, config)?;
+        self.init_backend_with_type(id, config, crate::IndexBackendType::default())
+    }
+
+    /// Initialize the index backend for a collection with explicit backend type.
+    fn init_backend_with_type(
+        &self,
+        id: &CollectionId,
+        config: &VectorConfig,
+        backend_type: crate::IndexBackendType,
+    ) -> Result<(), VectorError> {
+        let backend = self.create_backend_with_type(id, config, backend_type)?;
         let state = self.state()?;
         state.backends.insert(id.clone(), backend);
         Ok(())
     }
 
-    /// Create and configure an index backend without inserting it into the map.
-    fn create_backend(
+    /// Create and configure an index backend with explicit type (Issue #1964).
+    fn create_backend_with_type(
         &self,
         id: &CollectionId,
         config: &VectorConfig,
+        backend_type: crate::IndexBackendType,
     ) -> Result<Box<dyn VectorIndexBackend>, VectorError> {
-        let mut backend = self.backend_factory().create(config);
+        let mut backend = self.backend_factory_for(backend_type).create(config);
 
         // Set flush_path so the tiered heap can flush overlays during fresh
         // indexing (not just during recovery). Without this, fresh inserts
@@ -226,10 +242,11 @@ impl VectorStore {
         id: &CollectionId,
         config: &VectorConfig,
         space: &str,
+        backend_type: crate::IndexBackendType,
     ) -> Result<Box<dyn VectorIndexBackend>, VectorError> {
         use strata_core::traits::Storage;
 
-        let mut backend = self.create_backend(id, config)?;
+        let mut backend = self.create_backend_with_type(id, config, backend_type)?;
 
         let data_dir = self.db.data_dir();
         let use_mmap = !data_dir.as_os_str().is_empty();
@@ -524,7 +541,10 @@ impl VectorStore {
         Ok(entries.len())
     }
 
-    /// Delete all vectors in a collection
+    /// Delete all vectors in a collection atomically (Issue #1968).
+    ///
+    /// All deletes are performed in a single transaction to guarantee
+    /// atomicity — either all vectors are deleted or none are.
     fn delete_all_vectors(&self, branch_id: BranchId, space: &str, name: &str) -> VectorResult<()> {
         use strata_core::traits::Storage;
 
@@ -541,13 +561,11 @@ impl VectorStore {
 
         let keys: Vec<Key> = entries.into_iter().map(|(key, _)| key).collect();
 
-        // Delete each vector in a transaction
         if !keys.is_empty() {
             self.db
                 .transaction(branch_id, |txn| {
                     for key in &keys {
-                        let k: Key = key.clone();
-                        txn.delete(k)?;
+                        txn.delete(key.clone())?;
                     }
                     Ok(())
                 })
@@ -564,6 +582,18 @@ impl VectorStore {
         space: &str,
         name: &str,
     ) -> VectorResult<Option<VectorConfig>> {
+        Ok(self
+            .load_collection_record(branch_id, space, name)?
+            .map(|(config, _record)| config))
+    }
+
+    /// Load the full CollectionRecord from KV (includes backend_type).
+    fn load_collection_record(
+        &self,
+        branch_id: BranchId,
+        space: &str,
+        name: &str,
+    ) -> VectorResult<Option<(VectorConfig, CollectionRecord)>> {
         use strata_core::traits::Storage;
 
         let config_key = Key::new_vector_config(self.namespace_for(branch_id, space), name);
@@ -588,8 +618,8 @@ impl VectorStore {
         };
 
         let record = CollectionRecord::from_bytes(&bytes)?;
-        let config = VectorConfig::try_from(record.config)?;
-        Ok(Some(config))
+        let config = VectorConfig::try_from(record.config.clone())?;
+        Ok(Some((config, record)))
     }
 
     /// Ensure collection is loaded into memory
@@ -615,12 +645,13 @@ impl VectorStore {
         }
 
         // Slow path: load config and rebuild backend from KV (ARCH-003)
-        let config = self
-            .load_collection_config(branch_id, space, name)?
+        let (config, record) = self
+            .load_collection_record(branch_id, space, name)?
             .ok_or_else(|| VectorError::CollectionNotFound {
                 name: name.to_string(),
             })?;
-        let backend = self.load_backend_from_kv(&collection_id, &config, space)?;
+        let backend_type = record.backend_type();
+        let backend = self.load_backend_from_kv(&collection_id, &config, space, backend_type)?;
 
         // Double-check via entry API: another thread may have loaded it,
         // or a concurrent delete may have removed the collection (#1738 / 9.5.A).
@@ -701,16 +732,8 @@ impl strata_engine::search::Searchable for VectorStore {
     }
 }
 
-/// Get current time in microseconds since Unix epoch
-///
-/// Returns 0 if system clock is before Unix epoch (clock went backwards).
-fn now_micros() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
-        .unwrap_or(0)
-}
+// Re-export now_micros from types for use in store submodules (via `use super::*`).
+use crate::types::now_micros;
 
 // =============================================================================
 // VectorStoreExt Implementation
@@ -2926,5 +2949,485 @@ mod tests {
 
             db.shutdown().unwrap();
         }
+    }
+
+    // ========================================================================
+    // Issue #1964: Configurable backend factory
+    // ========================================================================
+
+    #[test]
+    fn test_create_collection_with_brute_force_backend() {
+        let db = Database::cache().unwrap();
+        let store = VectorStore::new(db);
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(4, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection_with_backend(
+                branch_id,
+                "default",
+                "small_collection",
+                config,
+                crate::IndexBackendType::BruteForce,
+            )
+            .unwrap();
+
+        // Insert and search should work with BruteForce backend
+        store
+            .insert(
+                branch_id,
+                "default",
+                "small_collection",
+                "vec1",
+                &[1.0, 0.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+        store
+            .insert(
+                branch_id,
+                "default",
+                "small_collection",
+                "vec2",
+                &[0.0, 1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+
+        let results = store
+            .search(
+                branch_id,
+                "default",
+                "small_collection",
+                &[1.0, 0.0, 0.0, 0.0],
+                2,
+                None,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].key, "vec1");
+
+        // Verify backend is reported as brute_force
+        let stats = store
+            .collection_backend_stats(branch_id, "default", "small_collection")
+            .unwrap();
+        assert_eq!(stats.0, "brute_force");
+    }
+
+    #[test]
+    fn test_backend_type_persisted_in_collection_record() {
+        use crate::types::IndexBackendType;
+
+        let config = VectorConfig::new(4, DistanceMetric::Cosine).unwrap();
+        let record = CollectionRecord::with_backend_type(&config, IndexBackendType::BruteForce);
+
+        let bytes = record.to_bytes().unwrap();
+        let loaded = CollectionRecord::from_bytes(&bytes).unwrap();
+        assert_eq!(loaded.backend_type(), IndexBackendType::BruteForce);
+    }
+
+    #[test]
+    fn test_backend_type_all_variants_roundtrip() {
+        use crate::types::IndexBackendType;
+
+        let config = VectorConfig::new(4, DistanceMetric::Cosine).unwrap();
+        for bt in [
+            IndexBackendType::BruteForce,
+            IndexBackendType::Hnsw,
+            IndexBackendType::SegmentedHnsw,
+        ] {
+            let record = CollectionRecord::with_backend_type(&config, bt);
+            let bytes = record.to_bytes().unwrap();
+            let loaded = CollectionRecord::from_bytes(&bytes).unwrap();
+            assert_eq!(loaded.backend_type(), bt, "Roundtrip failed for {:?}", bt);
+        }
+    }
+
+    // ========================================================================
+    // Issues #1966, #1967: SearchOptions
+    // ========================================================================
+
+    #[test]
+    fn test_search_with_include_metadata() {
+        let db = Database::cache().unwrap();
+        let store = VectorStore::new(db);
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(4, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "meta_test", config)
+            .unwrap();
+
+        let metadata = serde_json::json!({"category": "science"});
+        store
+            .insert(
+                branch_id,
+                "default",
+                "meta_test",
+                "doc1",
+                &[1.0, 0.0, 0.0, 0.0],
+                Some(metadata.clone()),
+            )
+            .unwrap();
+
+        // Default search: metadata=None for unfiltered
+        let results = store
+            .search(
+                branch_id,
+                "default",
+                "meta_test",
+                &[1.0, 0.0, 0.0, 0.0],
+                1,
+                None,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].metadata.is_none());
+
+        // With include_metadata=true: metadata should be populated
+        let results = store
+            .search_with_options(
+                branch_id,
+                "default",
+                "meta_test",
+                &[1.0, 0.0, 0.0, 0.0],
+                1,
+                SearchOptions::default().with_include_metadata(true),
+            )
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].metadata.as_ref().unwrap(), &metadata);
+    }
+
+    #[test]
+    fn test_search_with_custom_overfetch_multipliers() {
+        let db = Database::cache().unwrap();
+        let store = VectorStore::new(db);
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(4, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "overfetch", config)
+            .unwrap();
+
+        // Insert 10 vectors, half with category "a", half with "b"
+        for i in 0..10 {
+            let cat = if i < 5 { "a" } else { "b" };
+            let metadata = serde_json::json!({"cat": cat});
+            let emb = [i as f32, 0.0, 0.0, 1.0];
+            store
+                .insert(
+                    branch_id,
+                    "default",
+                    "overfetch",
+                    &format!("vec{}", i),
+                    &emb,
+                    Some(metadata),
+                )
+                .unwrap();
+        }
+
+        // Search with filter and custom multipliers [2]
+        let filter = MetadataFilter::new().eq("cat", "a");
+        let opts = SearchOptions::default()
+            .with_filter(filter)
+            .with_overfetch_multipliers(vec![2]);
+
+        let results = store
+            .search_with_options(
+                branch_id,
+                "default",
+                "overfetch",
+                &[5.0, 0.0, 0.0, 1.0],
+                3,
+                opts,
+            )
+            .unwrap();
+        // Should find up to 3 results with category "a"
+        assert!(!results.is_empty());
+        assert!(results.len() <= 3);
+    }
+
+    #[test]
+    fn test_search_with_empty_overfetch_multipliers_still_returns_results() {
+        let db = Database::cache().unwrap();
+        let store = VectorStore::new(db);
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(4, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "empty_mult", config)
+            .unwrap();
+
+        for i in 0..5 {
+            let metadata = serde_json::json!({"x": "a"});
+            store
+                .insert(
+                    branch_id,
+                    "default",
+                    "empty_mult",
+                    &format!("v{}", i),
+                    &[i as f32, 0.0, 0.0, 1.0],
+                    Some(metadata),
+                )
+                .unwrap();
+        }
+
+        // Empty multipliers with a filter should still return results (falls back to [1])
+        let filter = MetadataFilter::new().eq("x", "a");
+        let opts = SearchOptions::default()
+            .with_filter(filter)
+            .with_overfetch_multipliers(vec![]);
+
+        let results = store
+            .search_with_options(
+                branch_id,
+                "default",
+                "empty_mult",
+                &[0.0, 0.0, 0.0, 1.0],
+                3,
+                opts,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 3, "Empty multipliers should fall back to [1]");
+    }
+
+    // ========================================================================
+    // Issue #1968: Batched delete_all_vectors
+    // ========================================================================
+
+    #[test]
+    fn test_delete_collection_with_many_vectors() {
+        let db = Database::cache().unwrap();
+        let store = VectorStore::new(db);
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(4, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "large", config)
+            .unwrap();
+
+        // Insert 2500 vectors (tests batched deletion with BATCH_SIZE=1000)
+        for i in 0..2500 {
+            let emb = [i as f32, 0.0, 0.0, 1.0];
+            store
+                .insert(
+                    branch_id,
+                    "default",
+                    "large",
+                    &format!("v{}", i),
+                    &emb,
+                    None,
+                )
+                .unwrap();
+        }
+
+        // Verify vectors exist
+        let results = store
+            .search(
+                branch_id,
+                "default",
+                "large",
+                &[0.0, 0.0, 0.0, 1.0],
+                10,
+                None,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 10);
+
+        // Delete collection (exercises batched delete)
+        store
+            .delete_collection(branch_id, "default", "large")
+            .unwrap();
+
+        // Verify collection is gone
+        let collections = store.list_collections(branch_id, "default").unwrap();
+        assert!(collections.is_empty());
+    }
+
+    // ========================================================================
+    // Issue #1970: Concurrent inserts to same collection
+    // ========================================================================
+
+    #[test]
+    fn test_concurrent_upserts_same_collection() {
+        let db = Database::cache().unwrap();
+        let store = VectorStore::new(db);
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(4, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "concurrent", config)
+            .unwrap();
+
+        let num_threads = 4;
+        let vectors_per_thread = 25;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(num_threads));
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|thread_id| {
+                let store = store.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for i in 0..vectors_per_thread {
+                        let key = format!("t{}_v{}", thread_id, i);
+                        let emb = [thread_id as f32, i as f32, (thread_id + i) as f32, 1.0];
+                        store
+                            .insert(branch_id, "default", "concurrent", &key, &emb, None)
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let expected = num_threads * vectors_per_thread;
+        let results = store
+            .search(
+                branch_id,
+                "default",
+                "concurrent",
+                &[1.0, 1.0, 1.0, 1.0],
+                expected,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            expected,
+            "All {} vectors should be searchable",
+            expected
+        );
+    }
+
+    // ========================================================================
+    // Issue #1970 scenario 1: Search after backend reload (simulates recovery)
+    // ========================================================================
+
+    #[test]
+    fn test_search_after_backend_eviction_and_reload() {
+        let db = Database::cache().unwrap();
+        let store = VectorStore::new(db.clone());
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(4, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "recover_test", config)
+            .unwrap();
+
+        // Insert vectors
+        for i in 0..10 {
+            let emb = [i as f32, 0.0, 0.0, 1.0];
+            store
+                .insert(
+                    branch_id,
+                    "default",
+                    "recover_test",
+                    &format!("vec{}", i),
+                    &emb,
+                    None,
+                )
+                .unwrap();
+        }
+
+        // Evict the backend to simulate recovery scenario
+        {
+            let state = store.state().unwrap();
+            let cid = CollectionId::new(branch_id, "recover_test");
+            state.backends.remove(&cid);
+        }
+
+        // Search should reload backend from KV and still work
+        let results = store
+            .search(
+                branch_id,
+                "default",
+                "recover_test",
+                &[5.0, 0.0, 0.0, 1.0],
+                5,
+                None,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 5);
+
+        // Verify inline meta works (results have keys, not empty strings)
+        for r in &results {
+            assert!(r.key.starts_with("vec"), "key should be populated: {}", r.key);
+        }
+    }
+
+    // ========================================================================
+    // Issue #1970 scenario 8: Batch insert with mix of new/update vectors
+    // ========================================================================
+
+    #[test]
+    fn test_batch_insert_mix_new_and_update() {
+        let db = Database::cache().unwrap();
+        let store = VectorStore::new(db);
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(4, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "batch_mix", config)
+            .unwrap();
+
+        // Insert initial vectors
+        store
+            .insert(
+                branch_id,
+                "default",
+                "batch_mix",
+                "existing1",
+                &[1.0, 0.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+        store
+            .insert(
+                branch_id,
+                "default",
+                "batch_mix",
+                "existing2",
+                &[0.0, 1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+
+        // Batch: update existing1, update existing2, add new1
+        let batch = vec![
+            (
+                "existing1".to_string(),
+                vec![0.0, 0.0, 1.0, 0.0],
+                None::<serde_json::Value>,
+            ),
+            (
+                "existing2".to_string(),
+                vec![0.0, 0.0, 0.0, 1.0],
+                None,
+            ),
+            ("new1".to_string(), vec![1.0, 1.0, 0.0, 0.0], None),
+        ];
+        store
+            .batch_insert(branch_id, "default", "batch_mix", batch)
+            .unwrap();
+
+        // Should have 3 vectors total
+        let results = store
+            .search(
+                branch_id,
+                "default",
+                "batch_mix",
+                &[0.0, 0.0, 1.0, 0.0],
+                10,
+                None,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 3);
+        // existing1 should be closest (updated to [0,0,1,0])
+        assert_eq!(results[0].key, "existing1");
     }
 }

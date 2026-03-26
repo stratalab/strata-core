@@ -23,6 +23,26 @@ impl VectorStore {
         k: usize,
         filter: Option<MetadataFilter>,
     ) -> VectorResult<Vec<VectorMatch>> {
+        let mut opts = SearchOptions::default();
+        if let Some(f) = filter {
+            opts.filter = Some(f);
+        }
+        self.search_with_options(branch_id, space, collection, query, k, opts)
+    }
+
+    /// Search with full control over filtering, metadata inclusion, and over-fetch
+    /// behavior (Issues #1966, #1967).
+    ///
+    /// See [`SearchOptions`] for available knobs.
+    pub fn search_with_options(
+        &self,
+        branch_id: BranchId,
+        space: &str,
+        collection: &str,
+        query: &[f32],
+        k: usize,
+        opts: SearchOptions,
+    ) -> VectorResult<Vec<VectorMatch>> {
         let start = std::time::Instant::now();
 
         // k=0 returns empty
@@ -47,17 +67,10 @@ impl VectorStore {
             });
         }
 
-        // Search backend with adaptive over-fetch for filtering (Issue #453)
-        //
-        // When a metadata filter is active, we over-fetch from the backend to account
-        // for filtered-out results. If the initial fetch doesn't yield enough results,
-        // we retry with a higher multiplier up to a max limit.
-        //
-        // Multiplier strategy: 3x -> 6x -> 12x -> all (capped at collection size)
         let mut matches = Vec::with_capacity(k);
 
-        if filter.is_none() {
-            // No filter - simple case, fetch exactly k with O(1) inline meta lookup.
+        if opts.filter.is_none() {
+            // No filter — fetch exactly k with O(1) inline meta lookup.
             // Each candidate is verified against KV to skip deleted vectors (Issue #1731).
             let namespace = self.namespace_for(branch_id, space);
             let state = self.state()?;
@@ -70,15 +83,23 @@ impl VectorStore {
 
             for (vector_id, score) in candidates {
                 if let Some(meta) = backend.get_inline_meta(vector_id) {
-                    // Verify vector still exists in KV (may have been deleted)
                     let kv_key = Key::new_vector(namespace.clone(), collection, &meta.key);
-                    if self.get_vector_record_by_key(&kv_key)?.is_none() {
-                        continue;
-                    }
+                    // Issue #1967: optionally fetch metadata even when no filter
+                    let metadata = if opts.include_metadata {
+                        match self.get_vector_record_by_key(&kv_key)? {
+                            Some(r) => r.metadata,
+                            None => continue, // deleted
+                        }
+                    } else {
+                        if self.get_vector_record_by_key(&kv_key)?.is_none() {
+                            continue;
+                        }
+                        None
+                    };
                     matches.push(VectorMatch {
                         key: meta.key.clone(),
                         score,
-                        metadata: None,
+                        metadata,
                     });
                 } else {
                     // Fallback to KV scan — implicitly skips deleted vectors
@@ -96,8 +117,14 @@ impl VectorStore {
             }
             drop(backend);
         } else {
-            // Filter active - use adaptive over-fetch with O(1) key lookup + point-get for metadata
-            let multipliers = [3, 6, 12];
+            // Filter active — use adaptive over-fetch (Issue #1966: configurable multipliers).
+            // Fall back to [1] if multipliers is empty so we still fetch at least k candidates.
+            let default_multipliers = vec![1usize];
+            let multipliers = if opts.overfetch_multipliers.is_empty() {
+                &default_multipliers
+            } else {
+                &opts.overfetch_multipliers
+            };
             let state = self.state()?;
             let backend = state.backends.get(&collection_id).ok_or_else(|| {
                 VectorError::CollectionNotFound {
@@ -107,7 +134,7 @@ impl VectorStore {
             let collection_size = backend.len();
             let namespace = self.namespace_for(branch_id, space);
 
-            for &mult in &multipliers {
+            for &mult in multipliers {
                 let fetch_k = (k * mult).min(collection_size);
                 if fetch_k == 0 {
                     break;
@@ -117,8 +144,6 @@ impl VectorStore {
 
                 matches.clear();
                 for (vector_id, score) in candidates {
-                    // Use inline meta for O(1) key lookup, then point-get for metadata.
-                    // Skip candidates deleted from KV (Issue #1731).
                     let (key, metadata) = if let Some(meta) = backend.get_inline_meta(vector_id) {
                         let kv_key = Key::new_vector(namespace.clone(), collection, &meta.key);
                         match self.get_vector_record_by_key(&kv_key)? {
@@ -132,8 +157,7 @@ impl VectorStore {
                         }
                     };
 
-                    // Apply filter
-                    if let Some(ref f) = filter {
+                    if let Some(ref f) = opts.filter {
                         if !f.matches(&metadata) {
                             continue;
                         }
@@ -149,7 +173,6 @@ impl VectorStore {
                     }
                 }
 
-                // If we have enough results or searched all vectors, stop
                 if matches.len() >= k || fetch_k >= collection_size {
                     break;
                 }
@@ -157,8 +180,7 @@ impl VectorStore {
             drop(backend);
         }
 
-        // Apply facade-level tie-breaking (score desc, key asc)
-        // This satisfies Invariant R5
+        // Facade-level tie-breaking (score desc, key asc) — Invariant R5
         matches.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -166,7 +188,6 @@ impl VectorStore {
                 .then_with(|| a.key.cmp(&b.key))
         });
 
-        // Ensure we don't exceed k after sorting
         matches.truncate(k);
 
         debug!(target: "strata::vector", collection, k, results = matches.len(), duration_us = start.elapsed().as_micros() as u64, branch_id = %branch_id, "Vector search completed");

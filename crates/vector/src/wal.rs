@@ -172,16 +172,8 @@ impl WalVectorDelete {
 // Helper Functions
 // ============================================================================
 
-/// Get current time in microseconds since Unix epoch
-///
-/// Returns 0 if system clock is before Unix epoch (clock went backwards).
-pub fn now_micros() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
-        .unwrap_or(0)
-}
+// Re-use now_micros from types (single canonical definition).
+use crate::types::now_micros;
 
 /// Create a WalVectorCollectionCreate payload
 pub fn create_wal_collection_create(

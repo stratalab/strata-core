@@ -175,6 +175,68 @@ impl VectorRecord {
     }
 }
 
+// ============================================================================
+// SearchOptions (Issues #1966, #1967)
+// ============================================================================
+
+/// Options for vector search that control filtering, metadata, and over-fetch behavior.
+///
+/// Use `SearchOptions::default()` for backward-compatible behavior, then chain
+/// builder methods to customize:
+///
+/// ```ignore
+/// let opts = SearchOptions::default()
+///     .with_filter(filter)
+///     .with_include_metadata(true)
+///     .with_overfetch_multipliers(vec![2, 4, 8]);
+/// store.search_with_options(branch_id, space, "my_collection", &query, 10, opts)?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct SearchOptions {
+    /// Metadata filter (post-filter on search results).
+    pub filter: Option<MetadataFilter>,
+
+    /// When true, fetch metadata from KV for each result even when no filter
+    /// is active (Issue #1967). Default: `false` (metadata is `None` in
+    /// unfiltered results for performance).
+    pub include_metadata: bool,
+
+    /// Over-fetch multipliers for filtered search (Issue #1966).
+    /// Each round fetches `k * multiplier` candidates from the backend.
+    /// Default: `[3, 6, 12]`.
+    pub overfetch_multipliers: Vec<usize>,
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        SearchOptions {
+            filter: None,
+            include_metadata: false,
+            overfetch_multipliers: vec![3, 6, 12],
+        }
+    }
+}
+
+impl SearchOptions {
+    /// Set the metadata filter.
+    pub fn with_filter(mut self, filter: MetadataFilter) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    /// Set whether to include metadata in unfiltered results.
+    pub fn with_include_metadata(mut self, include: bool) -> Self {
+        self.include_metadata = include;
+        self
+    }
+
+    /// Set custom over-fetch multipliers for filtered search.
+    pub fn with_overfetch_multipliers(mut self, multipliers: Vec<usize>) -> Self {
+        self.overfetch_multipliers = multipliers;
+        self
+    }
+}
+
 /// Search result with source reference
 ///
 /// Extended version of VectorMatch that includes the source reference.
@@ -213,6 +275,51 @@ impl VectorMatchWithSource {
     }
 }
 
+// ============================================================================
+// IndexBackendType (Issue #1964)
+// ============================================================================
+
+/// Selects which index backend a collection uses.
+///
+/// Stored as a byte in `CollectionRecord` for persistence.
+/// Defaults to `SegmentedHnsw` (the most capable backend).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexBackendType {
+    /// Brute-force O(n) scan — lowest memory, best for small collections.
+    BruteForce,
+    /// Single-segment HNSW graph.
+    Hnsw,
+    /// Segmented HNSW with auto-sealing — default for all collections.
+    SegmentedHnsw,
+}
+
+impl Default for IndexBackendType {
+    fn default() -> Self {
+        IndexBackendType::SegmentedHnsw
+    }
+}
+
+impl IndexBackendType {
+    /// Serialize to a single byte for compact storage.
+    pub fn to_byte(self) -> u8 {
+        match self {
+            IndexBackendType::BruteForce => 0,
+            IndexBackendType::Hnsw => 1,
+            IndexBackendType::SegmentedHnsw => 2,
+        }
+    }
+
+    /// Deserialize from byte. Returns `None` for unknown values.
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(IndexBackendType::BruteForce),
+            1 => Some(IndexBackendType::Hnsw),
+            2 => Some(IndexBackendType::SegmentedHnsw),
+            _ => None,
+        }
+    }
+}
+
 /// Collection configuration stored in KV
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectionRecord {
@@ -221,15 +328,36 @@ pub struct CollectionRecord {
 
     /// Creation timestamp
     pub created_at: u64,
+
+    /// Index backend type (Issue #1964).
+    /// Defaults to SegmentedHnsw (byte 2) for backward compatibility
+    /// with records that predate this field.
+    #[serde(default = "default_backend_type_byte")]
+    pub backend_type: u8,
+}
+
+fn default_backend_type_byte() -> u8 {
+    IndexBackendType::SegmentedHnsw.to_byte()
 }
 
 impl CollectionRecord {
-    /// Create a new CollectionRecord
+    /// Create a new CollectionRecord with the default backend type (SegmentedHnsw).
     pub fn new(config: &VectorConfig) -> Self {
+        Self::with_backend_type(config, IndexBackendType::default())
+    }
+
+    /// Create a new CollectionRecord with an explicit backend type (Issue #1964).
+    pub fn with_backend_type(config: &VectorConfig, backend_type: IndexBackendType) -> Self {
         CollectionRecord {
             config: VectorConfigSerde::from(config),
             created_at: now_micros(),
+            backend_type: backend_type.to_byte(),
         }
+    }
+
+    /// Get the stored backend type, defaulting to SegmentedHnsw for old records.
+    pub fn backend_type(&self) -> IndexBackendType {
+        IndexBackendType::from_byte(self.backend_type).unwrap_or(IndexBackendType::SegmentedHnsw)
     }
 
     /// Serialize to bytes (MessagePack)

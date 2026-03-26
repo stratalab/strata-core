@@ -77,7 +77,6 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
 
     // Get access to the shared backend state
     let state = db.extension::<VectorBackendState>()?;
-    let factory = IndexBackendFactory::default();
 
     let snapshot_version = db.storage().version();
     let mut stats = super::RecoveryStats::default();
@@ -132,6 +131,9 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                 None => continue,
             };
 
+            // Read backend type before consuming record.config (Issue #1964)
+            let backend_type = record.backend_type();
+
             let config: VectorConfig = match record.config.try_into() {
                 Ok(c) => c,
                 Err(e) => {
@@ -146,7 +148,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
             };
             let collection_id = CollectionId::new(branch_id, &collection_name);
 
-            // Create backend for this collection
+            let factory = IndexBackendFactory::from_type(backend_type);
             let mut backend = factory.create(&config);
 
             // -----------------------------------------------------------
@@ -568,7 +570,6 @@ impl strata_engine::RefreshHook for VectorRefreshHook {
         use strata_core::types::{Key, Namespace};
         use strata_core::value::Value;
 
-        let factory = super::IndexBackendFactory::default();
         let version = db.storage().version();
         let ns = std::sync::Arc::new(Namespace::for_branch_space(target_branch, "default"));
 
@@ -591,12 +592,14 @@ impl strata_engine::RefreshHook for VectorRefreshHook {
                 Some(raw) => raw.strip_prefix("__config__/").unwrap_or(&raw).to_string(),
                 None => continue,
             };
-            let config: super::VectorConfig = match record.config.try_into() {
+            let config: super::VectorConfig = match record.config.clone().try_into() {
                 Ok(c) => c,
                 Err(_) => continue,
             };
             let cid = super::CollectionId::new(target_branch, &collection_name);
 
+            let backend_type = record.backend_type();
+            let factory = super::IndexBackendFactory::from_type(backend_type);
             let mut backend = factory.create(&config);
             let vector_prefix = Key::new_vector(ns.clone(), &collection_name, "");
             let vector_entries = match db.storage().scan_prefix(&vector_prefix, version) {
