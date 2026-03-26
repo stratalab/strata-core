@@ -147,19 +147,19 @@ pub fn kv_list(
             convert_result(validate_key(pfx))?;
         }
     }
-    let keys = convert_result(p.kv.list(&branch_id, &space, prefix.as_deref()))?;
 
-    // Apply cursor-based pagination if limit is present
     if let Some(lim) = limit {
-        let start_idx = if let Some(ref cur) = cursor {
-            keys.iter().position(|k| k > cur).unwrap_or(keys.len())
-        } else {
-            0
-        };
-        let fetch_end = std::cmp::min(start_idx + lim as usize + 1, keys.len());
-        let fetched = &keys[start_idx..fetch_end];
+        // Push cursor + limit down to the engine: only materializes lim+1
+        // user-key strings instead of the entire key space.
+        let fetched = convert_result(p.kv.list_with_cursor_limit(
+            &branch_id,
+            &space,
+            prefix.as_deref(),
+            cursor.as_deref(),
+            lim as usize,
+        ))?;
         let has_more = fetched.len() > lim as usize;
-        let page: Vec<String> = fetched.iter().take(lim as usize).cloned().collect();
+        let page: Vec<String> = fetched.into_iter().take(lim as usize).collect();
         let next_cursor = if has_more { page.last().cloned() } else { None };
         Ok(Output::KeysPage {
             keys: page,
@@ -167,6 +167,7 @@ pub fn kv_list(
             cursor: next_cursor,
         })
     } else {
+        let keys = convert_result(p.kv.list(&branch_id, &space, prefix.as_deref()))?;
         Ok(Output::Keys(keys))
     }
 }
@@ -263,6 +264,9 @@ pub fn kv_batch_put(
 }
 
 /// Handle KvCount command — count keys matching a prefix.
+///
+/// Delegates to `KVStore::count()` which counts scan results without
+/// materializing user-key strings, avoiding O(N) String allocations.
 pub fn kv_count(
     p: &Arc<Primitives>,
     branch: BranchId,
@@ -275,11 +279,14 @@ pub fn kv_count(
             convert_result(validate_key(pfx))?;
         }
     }
-    let keys = convert_result(p.kv.list(&branch_id, &space, prefix.as_deref()))?;
-    Ok(Output::Uint(keys.len() as u64))
+    let count = convert_result(p.kv.count(&branch_id, &space, prefix.as_deref()))?;
+    Ok(Output::Uint(count))
 }
 
 /// Handle KvSample command — evenly-spaced sample of KV entries.
+///
+/// Delegates to `KVStore::sample()` which performs a single `scan_prefix`
+/// and reads values inline, avoiding separate `list()` + K `get()` round-trips.
 pub fn kv_sample(
     p: &Arc<Primitives>,
     branch: BranchId,
@@ -293,35 +300,23 @@ pub fn kv_sample(
             convert_result(validate_key(pfx))?;
         }
     }
-    let keys = convert_result(p.kv.list(&branch_id, &space, prefix.as_deref()))?;
-    let total = keys.len() as u64;
-    let indices = super::sample_indices(keys.len(), count);
-    let mut items = Vec::with_capacity(indices.len());
-    for idx in indices {
-        let key = &keys[idx];
-        let value = match convert_result(p.kv.get(&branch_id, &space, key))? {
-            Some(v) => v,
-            None => continue,
-        };
-        items.push(crate::types::SampleItem {
-            key: key.clone(),
-            value,
-        });
-    }
+    let (total_count, sampled) =
+        convert_result(p.kv.sample(&branch_id, &space, prefix.as_deref(), count))?;
+    let items = sampled
+        .into_iter()
+        .map(|(key, value)| crate::types::SampleItem { key, value })
+        .collect();
     Ok(Output::SampleResult {
-        total_count: total,
+        total_count,
         items,
     })
 }
 
-/// Maximum number of keys to scan for fuzzy matching suggestions.
-const MAX_FUZZY_CANDIDATES: usize = 100;
-
 /// Enrich a KV error with fuzzy-match suggestions for key-not-found errors.
 ///
-/// Uses the first character of the key as a prefix filter to avoid a full
-/// key scan on spaces with many keys. The KV list primitive has no limit
-/// parameter, so prefix narrowing is the main safeguard.
+/// Uses the first character of the key as a prefix filter combined with
+/// `list_with_cursor_limit` to avoid materializing millions of keys just
+/// for fuzzy matching (SCALE-001).
 fn enrich_kv_error(
     p: &Arc<Primitives>,
     branch_id: &strata_core::types::BranchId,
@@ -334,12 +329,20 @@ fn enrich_kv_error(
             // This misses typos that change the first character, but those
             // are rare compared to mid-key typos.
             let prefix = key.chars().next().map(|c| c.to_string());
-            let candidates =
-                p.kv.list(branch_id, space, prefix.as_deref())
-                    .unwrap_or_default()
-                    .into_iter()
-                    .take(MAX_FUZZY_CANDIDATES)
-                    .collect::<Vec<_>>();
+            let max_candidates = p.limits.max_fuzzy_candidates;
+            let candidates = match p.kv.list_with_cursor_limit(
+                branch_id,
+                space,
+                prefix.as_deref(),
+                None,
+                max_candidates,
+            ) {
+                Ok(keys) => keys.into_iter().take(max_candidates).collect::<Vec<_>>(),
+                Err(e) => {
+                    tracing::debug!("fuzzy suggestion list failed: {e}");
+                    vec![]
+                }
+            };
             let hint = crate::suggest::format_hint("keys", &candidates, &key, 2);
             Error::KeyNotFound { key, hint }
         }

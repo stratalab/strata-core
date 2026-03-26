@@ -24,12 +24,18 @@
 
 use crate::database::Database;
 use crate::primitives::extensions::KVStoreExt;
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
 use std::sync::Arc;
 use strata_concurrency::TransactionContext;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
 use strata_core::StrataResult;
 use strata_core::{Version, VersionedHistory};
+
+/// Global cache of `Arc<Namespace>` per (branch, space) pair. One heap allocation
+/// per unique combination, ever — subsequent calls return `Arc::clone()`.
+static NS_CACHE: Lazy<DashMap<(BranchId, String), Arc<Namespace>>> = Lazy::new(DashMap::new);
 
 /// General-purpose key-value store primitive
 ///
@@ -58,9 +64,12 @@ impl KVStore {
         Self { db }
     }
 
-    /// Build namespace for branch+space-scoped operations
+    /// Build namespace for branch+space-scoped operations.
+    ///
+    /// Returns a cached `Arc<Namespace>` — one heap allocation per unique
+    /// (branch, space) pair, ever. Subsequent calls return `Arc::clone()`.
     fn namespace_for(&self, branch_id: &BranchId, space: &str) -> Arc<Namespace> {
-        Arc::new(Namespace::for_branch_space(*branch_id, space))
+        cached_namespace(*branch_id, space)
     }
 
     /// Build key for KV operation
@@ -138,11 +147,7 @@ impl KVStore {
         value: Value,
     ) -> StrataResult<Version> {
         // Extract text for indexing before the value is consumed
-        let text_for_index = match &value {
-            Value::String(s) => Some(s.clone()),
-            Value::Null | Value::Bool(_) | Value::Bytes(_) => None,
-            other => serde_json::to_string(other).ok(),
-        };
+        let text_for_index = value.extractable_text();
 
         let storage_key = self.key_for(branch_id, space, key);
         let branch_id = *branch_id;
@@ -232,6 +237,118 @@ impl KVStore {
         })
     }
 
+    /// List keys with cursor-based pagination pushed down to the engine.
+    ///
+    /// Returns up to `limit + 1` keys after `cursor` (the extra entry signals
+    /// "has more"). This avoids materializing user-key strings for the entire
+    /// scan — only the page window is allocated.
+    ///
+    /// Note: The underlying `scan_prefix` still reads all matching entries from
+    /// storage. True storage-level push-down is a future optimisation.
+    pub fn list_with_cursor_limit(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        prefix: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> StrataResult<Vec<String>> {
+        self.db.transaction(*branch_id, |txn| {
+            let ns = self.namespace_for(branch_id, space);
+            let scan_prefix = Key::new_kv(ns, prefix.unwrap_or(""));
+
+            let results = txn.scan_prefix(&scan_prefix)?;
+
+            let iter = results
+                .into_iter()
+                .filter_map(|(key, _)| key.user_key_string());
+
+            if let Some(cur) = cursor {
+                // "Start after" semantics: skip keys <= cursor
+                let cur_owned = cur.to_string();
+                Ok(iter
+                    .skip_while(move |k| k.as_str() <= cur_owned.as_str())
+                    .take(limit + 1)
+                    .collect())
+            } else {
+                Ok(iter.take(limit + 1).collect())
+            }
+        })
+    }
+
+    /// Count keys matching an optional prefix without allocating user-key strings.
+    ///
+    /// Uses UTF-8 validity check directly on the raw key bytes instead of
+    /// calling `user_key_string()`, which avoids one `String` allocation per
+    /// scanned entry.
+    pub fn count(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        prefix: Option<&str>,
+    ) -> StrataResult<u64> {
+        self.db.transaction(*branch_id, |txn| {
+            let ns = self.namespace_for(branch_id, space);
+            let scan_prefix = Key::new_kv(ns, prefix.unwrap_or(""));
+
+            let results = txn.scan_prefix(&scan_prefix)?;
+
+            // Check UTF-8 validity without allocating a String per key
+            Ok(results
+                .into_iter()
+                .filter(|(key, _)| std::str::from_utf8(&key.user_key).is_ok())
+                .count() as u64)
+        })
+    }
+
+    /// Sample key-value pairs with evenly-spaced selection from a single scan.
+    ///
+    /// Performs one `scan_prefix` and reads values inline, avoiding the
+    /// separate `list()` + K `get()` round-trips of the old approach.
+    pub fn sample(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        prefix: Option<&str>,
+        count: usize,
+    ) -> StrataResult<(u64, Vec<(String, Value)>)> {
+        self.db.transaction(*branch_id, |txn| {
+            let ns = self.namespace_for(branch_id, space);
+            let scan_prefix = Key::new_kv(ns, prefix.unwrap_or(""));
+
+            let results = txn.scan_prefix(&scan_prefix)?;
+
+            // Collect only user-key entries (filter out internal keys)
+            let entries: Vec<(String, Value)> = results
+                .into_iter()
+                .filter_map(|(key, value)| {
+                    key.user_key_string().map(|k| (k, value))
+                })
+                .collect();
+
+            let total = entries.len() as u64;
+
+            if count == 0 || entries.is_empty() {
+                return Ok((total, Vec::new()));
+            }
+            if count >= entries.len() {
+                return Ok((total, entries));
+            }
+
+            // Evenly-spaced sampling
+            let step = entries.len() as f64 / count as f64;
+            let sampled = (0..count)
+                .map(|i| {
+                    let idx = (i as f64 * step) as usize;
+                    // Safety: idx < entries.len() because step = len/count and i < count
+                    entries[idx].clone()
+                })
+                .collect();
+
+            Ok((total, sampled))
+        })
+    }
+
     // ========== Batch API ==========
 
     /// Put multiple key-value pairs in a single transaction.
@@ -252,11 +369,7 @@ impl KVStore {
         // Extract text for indexing BEFORE the values are consumed by the transaction
         let texts: Vec<Option<String>> = entries
             .iter()
-            .map(|(_, value)| match value {
-                Value::String(s) => Some(s.clone()),
-                Value::Null | Value::Bool(_) | Value::Bytes(_) => None,
-                other => serde_json::to_string(other).ok(),
-            })
+            .map(|(_, value)| value.extractable_text())
             .collect();
 
         let ((), commit_version) = self.db.transaction_with_version(*branch_id, |txn| {
@@ -407,21 +520,35 @@ impl crate::search::Searchable for KVStore {
 
 // ========== KVStoreExt Implementation ==========
 
+/// Look up or create a cached namespace for a (branch, space) pair.
+fn cached_namespace(branch_id: BranchId, space: &str) -> Arc<Namespace> {
+    let sp = space.to_string();
+    NS_CACHE
+        .entry((branch_id, sp.clone()))
+        .or_insert_with(|| Arc::new(Namespace::for_branch_space(branch_id, &sp)))
+        .clone()
+}
+
+/// Remove all cached namespace entries for a branch (call on branch deletion).
+pub fn invalidate_kv_namespace_cache(branch_id: &BranchId) {
+    NS_CACHE.retain(|k, _| k.0 != *branch_id);
+}
+
 impl KVStoreExt for TransactionContext {
-    fn kv_get(&mut self, key: &str) -> StrataResult<Option<Value>> {
-        let ns = Arc::new(Namespace::for_branch(self.branch_id));
+    fn kv_get_in_space(&mut self, space: &str, key: &str) -> StrataResult<Option<Value>> {
+        let ns = cached_namespace(self.branch_id, space);
         let storage_key = Key::new_kv(ns, key);
         self.get(&storage_key)
     }
 
-    fn kv_put(&mut self, key: &str, value: Value) -> StrataResult<()> {
-        let ns = Arc::new(Namespace::for_branch(self.branch_id));
+    fn kv_put_in_space(&mut self, space: &str, key: &str, value: Value) -> StrataResult<()> {
+        let ns = cached_namespace(self.branch_id, space);
         let storage_key = Key::new_kv(ns, key);
         self.put(storage_key, value)
     }
 
-    fn kv_delete(&mut self, key: &str) -> StrataResult<()> {
-        let ns = Arc::new(Namespace::for_branch(self.branch_id));
+    fn kv_delete_in_space(&mut self, space: &str, key: &str) -> StrataResult<()> {
+        let ns = cached_namespace(self.branch_id, space);
         let storage_key = Key::new_kv(ns, key);
         self.delete(storage_key)?;
         Ok(())
@@ -1381,5 +1508,247 @@ mod tests {
         let vv = vv.unwrap();
         assert_eq!(vv.value, Value::Int(99));
         assert!(vv.version.as_u64() > 0, "Version must be non-zero");
+    }
+
+    // ========== count() tests ==========
+
+    #[test]
+    fn test_count_empty() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        assert_eq!(kv.count(&branch_id, "default", None).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_count_all() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        kv.put(&branch_id, "default", "a", Value::Int(1)).unwrap();
+        kv.put(&branch_id, "default", "b", Value::Int(2)).unwrap();
+        kv.put(&branch_id, "default", "c", Value::Int(3)).unwrap();
+        assert_eq!(kv.count(&branch_id, "default", None).unwrap(), 3);
+    }
+
+    #[test]
+    fn test_count_with_prefix() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        kv.put(&branch_id, "default", "user:1", Value::Int(1)).unwrap();
+        kv.put(&branch_id, "default", "user:2", Value::Int(2)).unwrap();
+        kv.put(&branch_id, "default", "task:1", Value::Int(3)).unwrap();
+        assert_eq!(kv.count(&branch_id, "default", Some("user:")).unwrap(), 2);
+        assert_eq!(kv.count(&branch_id, "default", Some("task:")).unwrap(), 1);
+        assert_eq!(kv.count(&branch_id, "default", Some("none:")).unwrap(), 0);
+    }
+
+    // ========== list_with_cursor_limit() tests ==========
+
+    #[test]
+    fn test_list_with_cursor_limit_basic() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        for i in 0..10 {
+            kv.put(&branch_id, "default", &format!("key_{:02}", i), Value::Int(i))
+                .unwrap();
+        }
+
+        // First page of 3
+        let page = kv
+            .list_with_cursor_limit(&branch_id, "default", None, None, 3)
+            .unwrap();
+        assert_eq!(page.len(), 4); // limit + 1 for has_more detection
+        assert_eq!(page[0], "key_00");
+        assert_eq!(page[1], "key_01");
+        assert_eq!(page[2], "key_02");
+        assert_eq!(page[3], "key_03"); // extra "has more" entry
+    }
+
+    #[test]
+    fn test_list_with_cursor_limit_with_cursor() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        for i in 0..10 {
+            kv.put(&branch_id, "default", &format!("key_{:02}", i), Value::Int(i))
+                .unwrap();
+        }
+
+        // Page after "key_04", limit 3
+        let page = kv
+            .list_with_cursor_limit(&branch_id, "default", None, Some("key_04"), 3)
+            .unwrap();
+        assert_eq!(page.len(), 4); // limit + 1
+        assert_eq!(page[0], "key_05"); // start after cursor
+    }
+
+    #[test]
+    fn test_list_with_cursor_limit_cursor_beyond_end() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        kv.put(&branch_id, "default", "a", Value::Int(1)).unwrap();
+        kv.put(&branch_id, "default", "b", Value::Int(2)).unwrap();
+
+        let page = kv
+            .list_with_cursor_limit(&branch_id, "default", None, Some("z"), 10)
+            .unwrap();
+        assert!(page.is_empty(), "cursor beyond all keys returns empty");
+    }
+
+    #[test]
+    fn test_list_with_cursor_limit_last_page() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        kv.put(&branch_id, "default", "a", Value::Int(1)).unwrap();
+        kv.put(&branch_id, "default", "b", Value::Int(2)).unwrap();
+
+        // Request limit 5, only 2 keys exist → returns 2 (no extra "has_more" entry)
+        let page = kv
+            .list_with_cursor_limit(&branch_id, "default", None, None, 5)
+            .unwrap();
+        assert_eq!(page.len(), 2);
+    }
+
+    // ========== sample() tests ==========
+
+    #[test]
+    fn test_sample_empty() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        let (total, items) = kv.sample(&branch_id, "default", None, 5).unwrap();
+        assert_eq!(total, 0);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_sample_count_zero() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        kv.put(&branch_id, "default", "a", Value::Int(1)).unwrap();
+        let (total, items) = kv.sample(&branch_id, "default", None, 0).unwrap();
+        assert_eq!(total, 1);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_sample_count_exceeds_total() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        kv.put(&branch_id, "default", "a", Value::Int(1)).unwrap();
+        kv.put(&branch_id, "default", "b", Value::Int(2)).unwrap();
+        let (total, items) = kv.sample(&branch_id, "default", None, 10).unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(items.len(), 2); // returns all entries
+    }
+
+    #[test]
+    fn test_sample_returns_values() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        for i in 0..20 {
+            kv.put(
+                &branch_id,
+                "default",
+                &format!("k{:02}", i),
+                Value::Int(i),
+            )
+            .unwrap();
+        }
+        let (total, items) = kv.sample(&branch_id, "default", None, 5).unwrap();
+        assert_eq!(total, 20);
+        assert_eq!(items.len(), 5);
+        // Each sampled item should have key and value
+        for (key, value) in &items {
+            assert!(key.starts_with('k'));
+            assert!(matches!(value, Value::Int(_)));
+        }
+    }
+
+    #[test]
+    fn test_sample_with_prefix() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+        kv.put(&branch_id, "default", "user:1", Value::Int(1)).unwrap();
+        kv.put(&branch_id, "default", "user:2", Value::Int(2)).unwrap();
+        kv.put(&branch_id, "default", "task:1", Value::Int(3)).unwrap();
+        let (total, items) = kv.sample(&branch_id, "default", Some("user:"), 10).unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(items.len(), 2);
+    }
+
+    // ========== KVStoreExt in-space tests ==========
+
+    #[test]
+    fn test_kvstore_ext_in_space() {
+        use crate::primitives::extensions::KVStoreExt;
+
+        let (_temp, db, _kv) = setup();
+        let branch_id = BranchId::new();
+
+        db.transaction(branch_id, |txn| {
+            // Write to non-default space
+            txn.kv_put_in_space("myspace", "key1", Value::Int(42))?;
+
+            // Read from non-default space
+            let val = txn.kv_get_in_space("myspace", "key1")?;
+            assert_eq!(val, Some(Value::Int(42)));
+
+            // Default space should not see it
+            let val_default = txn.kv_get("key1")?;
+            assert_eq!(val_default, None, "default space must not see myspace key");
+
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_kvstore_ext_delete_in_space() {
+        use crate::primitives::extensions::KVStoreExt;
+
+        let (_temp, db, _kv) = setup();
+        let branch_id = BranchId::new();
+
+        db.transaction(branch_id, |txn| {
+            txn.kv_put_in_space("alpha", "k", Value::Int(1))?;
+            txn.kv_put_in_space("beta", "k", Value::Int(2))?;
+
+            // Delete from alpha only
+            txn.kv_delete_in_space("alpha", "k")?;
+
+            assert_eq!(txn.kv_get_in_space("alpha", "k")?, None);
+            assert_eq!(txn.kv_get_in_space("beta", "k")?, Some(Value::Int(2)));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    // ========== Namespace cache tests ==========
+
+    #[test]
+    fn test_namespace_cache_returns_same_arc() {
+        let branch = BranchId::new();
+        let ns1 = super::cached_namespace(branch, "test-space");
+        let ns2 = super::cached_namespace(branch, "test-space");
+        assert!(Arc::ptr_eq(&ns1, &ns2), "cache must return same Arc");
+    }
+
+    #[test]
+    fn test_namespace_cache_different_spaces_different_arcs() {
+        let branch = BranchId::new();
+        let ns_a = super::cached_namespace(branch, "space-a");
+        let ns_b = super::cached_namespace(branch, "space-b");
+        assert!(!Arc::ptr_eq(&ns_a, &ns_b));
+        assert_eq!(ns_a.space, "space-a");
+        assert_eq!(ns_b.space, "space-b");
+    }
+
+    #[test]
+    fn test_invalidate_kv_namespace_cache() {
+        let branch = BranchId::new();
+        let ns_before = super::cached_namespace(branch, "evict-test");
+        super::invalidate_kv_namespace_cache(&branch);
+        let ns_after = super::cached_namespace(branch, "evict-test");
+        // Value is identical but must be a new allocation
+        assert_eq!(*ns_before, *ns_after);
+        assert!(!Arc::ptr_eq(&ns_before, &ns_after));
     }
 }

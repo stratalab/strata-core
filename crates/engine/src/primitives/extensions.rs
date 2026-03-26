@@ -42,16 +42,34 @@ use strata_core::{StrataResult, Value};
 
 /// KV operations within a transaction
 ///
-/// Implemented in `kv.rs`
+/// Implemented in `kv.rs`.
+///
+/// The `_in_space` methods accept an explicit space parameter. The convenience
+/// methods (`kv_get`, `kv_put`, `kv_delete`) delegate to them with `"default"`.
 pub trait KVStoreExt {
-    /// Get a value by key
-    fn kv_get(&mut self, key: &str) -> StrataResult<Option<Value>>;
+    /// Get a value by key in the specified space
+    fn kv_get_in_space(&mut self, space: &str, key: &str) -> StrataResult<Option<Value>>;
 
-    /// Put a value
-    fn kv_put(&mut self, key: &str, value: Value) -> StrataResult<()>;
+    /// Put a value in the specified space
+    fn kv_put_in_space(&mut self, space: &str, key: &str, value: Value) -> StrataResult<()>;
 
-    /// Delete a key
-    fn kv_delete(&mut self, key: &str) -> StrataResult<()>;
+    /// Delete a key in the specified space
+    fn kv_delete_in_space(&mut self, space: &str, key: &str) -> StrataResult<()>;
+
+    /// Get a value by key (default space)
+    fn kv_get(&mut self, key: &str) -> StrataResult<Option<Value>> {
+        self.kv_get_in_space("default", key)
+    }
+
+    /// Put a value (default space)
+    fn kv_put(&mut self, key: &str, value: Value) -> StrataResult<()> {
+        self.kv_put_in_space("default", key, value)
+    }
+
+    /// Delete a key (default space)
+    fn kv_delete(&mut self, key: &str) -> StrataResult<()> {
+        self.kv_delete_in_space("default", key)
+    }
 }
 
 /// Event log operations within a transaction

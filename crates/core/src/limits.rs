@@ -40,6 +40,9 @@ pub struct Limits {
 
     /// Maximum vector dimensions (default: 8192)
     pub max_vector_dim: usize,
+
+    /// Maximum number of keys to scan for fuzzy-match suggestions (default: 100)
+    pub max_fuzzy_candidates: usize,
 }
 
 impl Default for Limits {
@@ -53,6 +56,7 @@ impl Default for Limits {
             max_object_entries: 1_000_000,
             max_nesting_depth: 128,
             max_vector_dim: 8192,
+            max_fuzzy_candidates: 100,
         }
     }
 }
@@ -72,6 +76,7 @@ impl Limits {
             max_object_entries: 100,
             max_nesting_depth: 10,
             max_vector_dim: 100,
+            max_fuzzy_candidates: 10,
         }
     }
 
@@ -554,6 +559,7 @@ mod tests {
         assert_eq!(limits.max_object_entries, 1_000_000);
         assert_eq!(limits.max_nesting_depth, 128);
         assert_eq!(limits.max_vector_dim, 8192);
+        assert_eq!(limits.max_fuzzy_candidates, 100);
     }
 
     // === Reason Code Tests ===
