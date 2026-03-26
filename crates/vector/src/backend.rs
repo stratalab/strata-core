@@ -395,14 +395,12 @@ mod tests {
                 "{name}: freeze_heap_to_disk"
             );
             // load_graphs_from_disk returns false when no manifest exists
-            assert_eq!(
-                backend.load_graphs_from_disk(tmp.path()).unwrap(),
-                false,
+            assert!(
+                !backend.load_graphs_from_disk(tmp.path()).unwrap(),
                 "{name}: load_graphs_from_disk with no manifest"
             );
-            assert_eq!(
-                backend.flush_heap_to_disk_if_needed(tmp.path()).unwrap(),
-                false,
+            assert!(
+                !backend.flush_heap_to_disk_if_needed(tmp.path()).unwrap(),
                 "{name}: flush_heap_to_disk_if_needed"
             );
             assert!(

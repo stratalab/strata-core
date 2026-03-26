@@ -1,0 +1,209 @@
+//! System collection operations (internal use only).
+
+use super::*;
+
+impl VectorStore {
+    pub fn create_system_collection(
+        &self,
+        branch_id: BranchId,
+        name: &str,
+        config: VectorConfig,
+    ) -> VectorResult<Versioned<CollectionInfo>> {
+        use crate::collection::validate_system_collection_name;
+
+        validate_system_collection_name(name)?;
+
+        const MAX_DIMENSION: usize = 65536;
+        if config.dimension == 0 || config.dimension > MAX_DIMENSION {
+            return Err(VectorError::InvalidDimension {
+                dimension: config.dimension,
+            });
+        }
+
+        let collection_id = CollectionId::new(branch_id, name);
+
+        if self.collection_exists(branch_id, "default", name)? {
+            return Err(VectorError::CollectionAlreadyExists {
+                name: name.to_string(),
+            });
+        }
+
+        let now = now_micros();
+        let record = CollectionRecord::new(&config);
+        let config_key = Key::new_vector_config(Arc::new(Namespace::for_branch(branch_id)), name);
+        let config_bytes = record.to_bytes()?;
+
+        self.db
+            .transaction(branch_id, |txn| {
+                txn.put(config_key.clone(), Value::Bytes(config_bytes.clone()))
+            })
+            .map_err(|e| VectorError::Storage(e.to_string()))?;
+
+        self.init_backend(&collection_id, &config)?;
+
+        let info = CollectionInfo {
+            name: name.to_string(),
+            config,
+            count: 0,
+            created_at: now,
+        };
+
+        Ok(Versioned::with_timestamp(
+            info,
+            Version::counter(1),
+            Timestamp::from_micros(now),
+        ))
+    }
+
+    /// Insert into a system collection (internal use only)
+    pub fn system_insert(
+        &self,
+        branch_id: BranchId,
+        collection: &str,
+        key: &str,
+        embedding: &[f32],
+        metadata: Option<JsonValue>,
+    ) -> VectorResult<Version> {
+        use crate::collection::validate_system_collection_name;
+        validate_system_collection_name(collection)?;
+        // Delegate to the normal insert path (which doesn't re-check collection name)
+        self.insert(branch_id, "default", collection, key, embedding, metadata)
+    }
+
+    /// Insert into a system collection with a source reference (internal use only)
+    ///
+    /// Like `system_insert` but also stores an `EntityRef` that traces the
+    /// shadow embedding back to the originating record, enabling hybrid search.
+    pub fn system_insert_with_source(
+        &self,
+        branch_id: BranchId,
+        collection: &str,
+        key: &str,
+        embedding: &[f32],
+        metadata: Option<JsonValue>,
+        source_ref: EntityRef,
+    ) -> VectorResult<Version> {
+        use crate::collection::validate_system_collection_name;
+        validate_system_collection_name(collection)?;
+        self.insert_inner(
+            branch_id,
+            "default",
+            collection,
+            key,
+            embedding,
+            metadata,
+            Some(source_ref),
+        )
+    }
+
+    /// Get the vector count for a system collection (for filtering empty collections).
+    pub fn system_collection_len(
+        &self,
+        branch_id: BranchId,
+        collection: &str,
+    ) -> VectorResult<usize> {
+        let cid = CollectionId::new(branch_id, collection);
+        let state = self.state()?;
+        Ok(state.backends.get(&cid).map(|b| b.len()).unwrap_or(0))
+    }
+
+    /// Delete a system collection (idempotent — returns Ok if it doesn't exist).
+    pub fn delete_system_collection(&self, branch_id: BranchId, name: &str) -> VectorResult<()> {
+        use crate::collection::validate_system_collection_name;
+        validate_system_collection_name(name)?;
+
+        if !self.collection_exists(branch_id, "default", name)? {
+            return Ok(());
+        }
+
+        self.delete_all_vectors(branch_id, "default", name)?;
+
+        let config_key = Key::new_vector_config(self.namespace_for(branch_id, "default"), name);
+        self.db
+            .transaction(branch_id, |txn| txn.delete(config_key.clone()))
+            .map_err(|e| VectorError::Storage(e.to_string()))?;
+
+        {
+            let state = self.state()?;
+            let collection_id = CollectionId::new(branch_id, name);
+            state.backends.remove(&collection_id);
+        }
+
+        info!(target: "strata::vector", collection = name, "System collection deleted");
+        Ok(())
+    }
+
+    /// Get the dimension of an existing system collection, or None if not found.
+    pub fn system_collection_dimension(
+        &self,
+        branch_id: BranchId,
+        collection: &str,
+    ) -> VectorResult<Option<usize>> {
+        Ok(self
+            .get_collection(branch_id, "default", collection)?
+            .map(|v| v.value.config.dimension))
+    }
+
+    /// Search a system collection (internal use only)
+    pub fn system_search(
+        &self,
+        branch_id: BranchId,
+        collection: &str,
+        query: &[f32],
+        k: usize,
+        filter: Option<MetadataFilter>,
+    ) -> VectorResult<Vec<VectorMatch>> {
+        use crate::collection::validate_system_collection_name;
+        validate_system_collection_name(collection)?;
+        self.search(branch_id, "default", collection, query, k, filter)
+    }
+
+    /// Search a system collection returning results with source references (internal use only)
+    ///
+    /// Like `system_search()` but returns `VectorMatchWithSource` which includes the
+    /// `source_ref` and `version` from the original VectorRecord. Used by hybrid search
+    /// to trace shadow vectors back to their originating records.
+    pub fn system_search_with_sources(
+        &self,
+        branch_id: BranchId,
+        collection: &str,
+        query: &[f32],
+        k: usize,
+    ) -> VectorResult<Vec<VectorMatchWithSource>> {
+        use crate::collection::validate_system_collection_name;
+        validate_system_collection_name(collection)?;
+        self.search_with_sources(branch_id, "default", collection, query, k)
+    }
+
+    /// System search with sources, filtered by time range.
+    ///
+    /// Mirrors `system_search_with_sources()` but uses `search_in_range()` to
+    /// restrict results to vectors created within the given timestamp range.
+    pub fn system_search_with_sources_in_range(
+        &self,
+        branch_id: BranchId,
+        collection: &str,
+        query: &[f32],
+        k: usize,
+        start_ts: u64,
+        end_ts: u64,
+    ) -> VectorResult<Vec<VectorMatchWithSource>> {
+        use crate::collection::validate_system_collection_name;
+        validate_system_collection_name(collection)?;
+        self.search_with_sources_in_range(
+            branch_id, "default", collection, query, k, start_ts, end_ts,
+        )
+    }
+
+    /// Delete from a system collection (internal use only)
+    pub fn system_delete(
+        &self,
+        branch_id: BranchId,
+        collection: &str,
+        key: &str,
+    ) -> VectorResult<bool> {
+        use crate::collection::validate_system_collection_name;
+        validate_system_collection_name(collection)?;
+        self.delete(branch_id, "default", collection, key)
+    }
+}
