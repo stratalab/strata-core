@@ -306,10 +306,7 @@ pub fn kv_sample(
         .into_iter()
         .map(|(key, value)| crate::types::SampleItem { key, value })
         .collect();
-    Ok(Output::SampleResult {
-        total_count,
-        items,
-    })
+    Ok(Output::SampleResult { total_count, items })
 }
 
 /// Enrich a KV error with fuzzy-match suggestions for key-not-found errors.

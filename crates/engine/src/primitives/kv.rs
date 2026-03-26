@@ -321,9 +321,7 @@ impl KVStore {
             // Collect only user-key entries (filter out internal keys)
             let entries: Vec<(String, Value)> = results
                 .into_iter()
-                .filter_map(|(key, value)| {
-                    key.user_key_string().map(|k| (k, value))
-                })
+                .filter_map(|(key, value)| key.user_key_string().map(|k| (k, value)))
                 .collect();
 
             let total = entries.len() as u64;
@@ -1533,9 +1531,12 @@ mod tests {
     fn test_count_with_prefix() {
         let (_temp, _db, kv) = setup();
         let branch_id = BranchId::new();
-        kv.put(&branch_id, "default", "user:1", Value::Int(1)).unwrap();
-        kv.put(&branch_id, "default", "user:2", Value::Int(2)).unwrap();
-        kv.put(&branch_id, "default", "task:1", Value::Int(3)).unwrap();
+        kv.put(&branch_id, "default", "user:1", Value::Int(1))
+            .unwrap();
+        kv.put(&branch_id, "default", "user:2", Value::Int(2))
+            .unwrap();
+        kv.put(&branch_id, "default", "task:1", Value::Int(3))
+            .unwrap();
         assert_eq!(kv.count(&branch_id, "default", Some("user:")).unwrap(), 2);
         assert_eq!(kv.count(&branch_id, "default", Some("task:")).unwrap(), 1);
         assert_eq!(kv.count(&branch_id, "default", Some("none:")).unwrap(), 0);
@@ -1548,8 +1549,13 @@ mod tests {
         let (_temp, _db, kv) = setup();
         let branch_id = BranchId::new();
         for i in 0..10 {
-            kv.put(&branch_id, "default", &format!("key_{:02}", i), Value::Int(i))
-                .unwrap();
+            kv.put(
+                &branch_id,
+                "default",
+                &format!("key_{:02}", i),
+                Value::Int(i),
+            )
+            .unwrap();
         }
 
         // First page of 3
@@ -1568,8 +1574,13 @@ mod tests {
         let (_temp, _db, kv) = setup();
         let branch_id = BranchId::new();
         for i in 0..10 {
-            kv.put(&branch_id, "default", &format!("key_{:02}", i), Value::Int(i))
-                .unwrap();
+            kv.put(
+                &branch_id,
+                "default",
+                &format!("key_{:02}", i),
+                Value::Int(i),
+            )
+            .unwrap();
         }
 
         // Page after "key_04", limit 3
@@ -1644,13 +1655,8 @@ mod tests {
         let (_temp, _db, kv) = setup();
         let branch_id = BranchId::new();
         for i in 0..20 {
-            kv.put(
-                &branch_id,
-                "default",
-                &format!("k{:02}", i),
-                Value::Int(i),
-            )
-            .unwrap();
+            kv.put(&branch_id, "default", &format!("k{:02}", i), Value::Int(i))
+                .unwrap();
         }
         let (total, items) = kv.sample(&branch_id, "default", None, 5).unwrap();
         assert_eq!(total, 20);
@@ -1666,9 +1672,12 @@ mod tests {
     fn test_sample_with_prefix() {
         let (_temp, _db, kv) = setup();
         let branch_id = BranchId::new();
-        kv.put(&branch_id, "default", "user:1", Value::Int(1)).unwrap();
-        kv.put(&branch_id, "default", "user:2", Value::Int(2)).unwrap();
-        kv.put(&branch_id, "default", "task:1", Value::Int(3)).unwrap();
+        kv.put(&branch_id, "default", "user:1", Value::Int(1))
+            .unwrap();
+        kv.put(&branch_id, "default", "user:2", Value::Int(2))
+            .unwrap();
+        kv.put(&branch_id, "default", "task:1", Value::Int(3))
+            .unwrap();
         let (total, items) = kv.sample(&branch_id, "default", Some("user:"), 10).unwrap();
         assert_eq!(total, 2);
         assert_eq!(items.len(), 2);
@@ -1764,8 +1773,13 @@ mod tests {
         let (_temp, _db, kv) = setup();
         let branch_id = BranchId::new();
 
-        kv.put(&branch_id, "default", "", Value::String("empty-key-value".into()))
-            .unwrap();
+        kv.put(
+            &branch_id,
+            "default",
+            "",
+            Value::String("empty-key-value".into()),
+        )
+        .unwrap();
 
         let result = kv.get(&branch_id, "default", "").unwrap();
         assert_eq!(result, Some(Value::String("empty-key-value".into())));
@@ -1780,7 +1794,10 @@ mod tests {
         kv.put(&branch_id, "default", "a", Value::Int(1)).unwrap();
 
         let keys = kv.list(&branch_id, "default", None).unwrap();
-        assert!(keys.contains(&String::new()), "empty key must appear in list");
+        assert!(
+            keys.contains(&String::new()),
+            "empty key must appear in list"
+        );
         assert_eq!(keys.len(), 2);
     }
 
@@ -1840,7 +1857,11 @@ mod tests {
         // A far-future timestamp should see the latest value
         let far_future = u64::MAX;
         let result = kv.get_at(&branch_id, "default", "k", far_future).unwrap();
-        assert_eq!(result, Some(Value::Int(1)), "future timestamp must see latest value");
+        assert_eq!(
+            result,
+            Some(Value::Int(1)),
+            "future timestamp must see latest value"
+        );
     }
 
     #[test]
@@ -1854,7 +1875,11 @@ mod tests {
 
         let far_future = u64::MAX;
         let result = kv.get_at(&branch_id, "default", "k", far_future).unwrap();
-        assert_eq!(result, Some(Value::Int(2)), "future timestamp must see latest version");
+        assert_eq!(
+            result,
+            Some(Value::Int(2)),
+            "future timestamp must see latest version"
+        );
     }
 
     // --- Scenario 6: get_at() with timestamp before any writes ---
@@ -1876,8 +1901,13 @@ mod tests {
         let (_temp, _db, kv) = setup();
         let branch_id = BranchId::new();
 
-        let result = kv.get_at(&branch_id, "default", "missing", u64::MAX).unwrap();
-        assert_eq!(result, None, "nonexistent key must return None at any timestamp");
+        let result = kv
+            .get_at(&branch_id, "default", "missing", u64::MAX)
+            .unwrap();
+        assert_eq!(
+            result, None,
+            "nonexistent key must return None at any timestamp"
+        );
     }
 
     #[test]
@@ -1901,7 +1931,11 @@ mod tests {
         kv.put(&branch_id, "default", "b", Value::Int(2)).unwrap();
 
         let keys = kv.list_at(&branch_id, "default", None, u64::MAX).unwrap();
-        assert_eq!(keys.len(), 2, "list_at with future timestamp must see all keys");
+        assert_eq!(
+            keys.len(),
+            2,
+            "list_at with future timestamp must see all keys"
+        );
     }
 
     // --- Scenario 8: Search after batch_put() ---
@@ -1914,22 +1948,39 @@ mod tests {
         let branch_id = BranchId::new();
 
         let entries = vec![
-            ("doc1".to_string(), Value::String("alpha bravo charlie".into())),
-            ("doc2".to_string(), Value::String("delta echo foxtrot".into())),
+            (
+                "doc1".to_string(),
+                Value::String("alpha bravo charlie".into()),
+            ),
+            (
+                "doc2".to_string(),
+                Value::String("delta echo foxtrot".into()),
+            ),
             ("doc3".to_string(), Value::String("alpha delta golf".into())),
         ];
 
         let results = kv.batch_put(&branch_id, "default", entries).unwrap();
-        assert!(results.iter().all(|r| r.is_ok()), "all batch items must succeed");
+        assert!(
+            results.iter().all(|r| r.is_ok()),
+            "all batch items must succeed"
+        );
 
         // All batch_put items must be searchable immediately
         let req = crate::SearchRequest::new(branch_id, "alpha");
         let response = kv.search(&req).unwrap();
-        assert_eq!(response.len(), 2, "both docs containing 'alpha' must be found");
+        assert_eq!(
+            response.len(),
+            2,
+            "both docs containing 'alpha' must be found"
+        );
 
         let req = crate::SearchRequest::new(branch_id, "delta");
         let response = kv.search(&req).unwrap();
-        assert_eq!(response.len(), 2, "both docs containing 'delta' must be found");
+        assert_eq!(
+            response.len(),
+            2,
+            "both docs containing 'delta' must be found"
+        );
 
         let req = crate::SearchRequest::new(branch_id, "echo");
         let response = kv.search(&req).unwrap();
@@ -1944,8 +1995,14 @@ mod tests {
         let branch_id = BranchId::new();
 
         let entries = vec![
-            ("d1".to_string(), Value::String("searchable content here".into())),
-            ("d2".to_string(), Value::String("searchable data there".into())),
+            (
+                "d1".to_string(),
+                Value::String("searchable content here".into()),
+            ),
+            (
+                "d2".to_string(),
+                Value::String("searchable data there".into()),
+            ),
         ];
         kv.batch_put(&branch_id, "default", entries).unwrap();
 

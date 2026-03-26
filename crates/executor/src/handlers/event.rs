@@ -139,6 +139,7 @@ pub fn event_get_by_type(
 /// Handle EventGetByType with as_of timestamp (time-travel read).
 ///
 /// Returns only events whose timestamp <= as_of_ts.
+/// Timestamp filtering is pushed down to the engine level for efficiency.
 pub fn event_get_by_type_at(
     p: &Arc<Primitives>,
     branch: BranchId,
@@ -150,14 +151,12 @@ pub fn event_get_by_type_at(
     let events =
         convert_result(
             p.event
-                .get_by_type(&core_branch_id, &space, &event_type, None, None),
+                .get_by_type_at(&core_branch_id, &space, &event_type, as_of_ts),
         )
         .map_err(|e| enrich_event_error(p, &core_branch_id, &space, e))?;
 
-    // Filter events by timestamp
     let versioned: Vec<VersionedValue> = events
         .into_iter()
-        .filter(|e| e.value.timestamp.as_micros() <= as_of_ts)
         .map(|e| VersionedValue {
             value: e.value.payload.clone(),
             version: bridge::extract_version(&e.version),

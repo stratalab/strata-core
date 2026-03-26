@@ -74,13 +74,31 @@ pub trait KVStoreExt {
 
 /// Event log operations within a transaction
 ///
-/// Implemented in `event_log.rs`
+/// Implemented in `event.rs`.
+///
+/// The `_in_space` methods accept an explicit space parameter. The convenience
+/// methods (`event_append`, `event_get`) delegate to them with `"default"`.
 pub trait EventLogExt {
-    /// Append an event and return sequence number
-    fn event_append(&mut self, event_type: &str, payload: Value) -> StrataResult<u64>;
+    /// Append an event in the specified space and return sequence number
+    fn event_append_in_space(
+        &mut self,
+        space: &str,
+        event_type: &str,
+        payload: Value,
+    ) -> StrataResult<u64>;
 
-    /// Read an event by sequence number
-    fn event_get(&mut self, sequence: u64) -> StrataResult<Option<Value>>;
+    /// Read an event by sequence number in the specified space
+    fn event_get_in_space(&mut self, space: &str, sequence: u64) -> StrataResult<Option<Value>>;
+
+    /// Append an event (default space)
+    fn event_append(&mut self, event_type: &str, payload: Value) -> StrataResult<u64> {
+        self.event_append_in_space("default", event_type, payload)
+    }
+
+    /// Read an event by sequence number (default space)
+    fn event_get(&mut self, sequence: u64) -> StrataResult<Option<Value>> {
+        self.event_get_in_space("default", sequence)
+    }
 }
 
 /// JSON store operations within a transaction

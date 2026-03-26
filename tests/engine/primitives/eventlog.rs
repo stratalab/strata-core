@@ -444,3 +444,378 @@ fn payload_must_be_object() {
     let result = event.append(&test_db.branch_id, "default", "type", payload_int(42));
     assert!(result.is_ok());
 }
+
+// ============================================================================
+// Audit Debt Tests — coverage gaps from Event primitive dossier
+// ============================================================================
+
+#[test]
+fn concurrent_appends_preserve_data_integrity() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let test_db = TestDb::new();
+    let db = test_db.db.clone();
+    let branch_id = test_db.branch_id;
+    let barrier = Arc::new(Barrier::new(2));
+    let total_per_thread = 20;
+
+    let handles: Vec<_> = (0..2)
+        .map(|thread_idx| {
+            let db = db.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                let event = EventLog::new(db);
+                barrier.wait();
+                let mut successes = 0;
+                for i in 0..total_per_thread {
+                    let payload = Value::object(HashMap::from([
+                        ("thread".to_string(), Value::Int(thread_idx)),
+                        ("i".to_string(), Value::Int(i)),
+                    ]));
+                    // OCC may require retries; the engine handles this internally
+                    match event.append(&branch_id, "default", "concurrent", payload) {
+                        Ok(_) => successes += 1,
+                        Err(_) => {} // OCC conflict, acceptable
+                    }
+                }
+                successes
+            })
+        })
+        .collect();
+
+    let total_successes: i64 = handles.into_iter().map(|h| h.join().unwrap()).sum();
+    assert!(total_successes > 0, "at least some appends must succeed");
+
+    // Verify hash chain integrity for all successful appends
+    let event = test_db.event();
+    let len = event.len(&branch_id, "default").unwrap();
+    assert_eq!(len, total_successes as u64);
+
+    for seq in 1..len {
+        let prev = event.get(&branch_id, "default", seq - 1).unwrap().unwrap();
+        let curr = event.get(&branch_id, "default", seq).unwrap().unwrap();
+        assert_eq!(
+            curr.value.prev_hash, prev.value.hash,
+            "hash chain broken at sequence {}",
+            seq
+        );
+    }
+}
+
+#[test]
+fn large_batch_append_preserves_chain() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    let entries: Vec<(String, Value)> = (0..200)
+        .map(|i| ("batch_type".to_string(), payload_int(i)))
+        .collect();
+
+    let results = event
+        .batch_append(&test_db.branch_id, "default", entries)
+        .unwrap();
+
+    // All should succeed
+    let success_count = results.iter().filter(|r| r.is_ok()).count();
+    assert_eq!(success_count, 200);
+
+    // Verify monotonic sequences
+    let seqs: Vec<u64> = results
+        .iter()
+        .filter_map(|r| r.as_ref().ok())
+        .map(|v| v.as_u64())
+        .collect();
+    let mut sorted = seqs.clone();
+    sorted.sort();
+    assert_eq!(seqs, sorted, "sequences must be monotonically increasing");
+    assert_eq!(seqs.len(), 200);
+    assert_eq!(seqs[0], 0);
+    assert_eq!(seqs[199], 199);
+
+    // Verify hash chain integrity
+    for seq in 1u64..200 {
+        let prev = event
+            .get(&test_db.branch_id, "default", seq - 1)
+            .unwrap()
+            .unwrap();
+        let curr = event
+            .get(&test_db.branch_id, "default", seq)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            curr.value.prev_hash, prev.value.hash,
+            "hash chain broken at sequence {}",
+            seq
+        );
+    }
+
+    // Verify stream metadata count
+    assert_eq!(event.len(&test_db.branch_id, "default").unwrap(), 200);
+}
+
+#[test]
+fn list_at_before_any_events_returns_empty() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    // Append some events
+    event
+        .append(&test_db.branch_id, "default", "type", payload_int(1))
+        .unwrap();
+
+    // Query with timestamp 0 (before any events)
+    let result = event
+        .list_at(&test_db.branch_id, "default", None, 0, None)
+        .unwrap();
+    assert!(
+        result.is_empty(),
+        "list_at before any events should be empty"
+    );
+}
+
+#[test]
+fn list_at_between_events_returns_only_earlier() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    // Append first event
+    event
+        .append(&test_db.branch_id, "default", "type", payload_int(1))
+        .unwrap();
+
+    // Wait and capture a midpoint timestamp (using wall clock, which the storage layer uses)
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let mid_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as u64;
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    // Append second event
+    event
+        .append(&test_db.branch_id, "default", "type", payload_int(2))
+        .unwrap();
+
+    // Query at midpoint — should only see the first event
+    let result = event
+        .list_at(&test_db.branch_id, "default", None, mid_ts, None)
+        .unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].payload, payload_int(1));
+
+    // Query at u64::MAX — should see both events
+    let result = event
+        .list_at(&test_db.branch_id, "default", None, u64::MAX, None)
+        .unwrap();
+    assert_eq!(result.len(), 2);
+}
+
+#[test]
+fn list_at_with_limit() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    for i in 0..10 {
+        event
+            .append(&test_db.branch_id, "default", "type", payload_int(i))
+            .unwrap();
+    }
+
+    let result = event
+        .list_at(&test_db.branch_id, "default", None, u64::MAX, Some(3))
+        .unwrap();
+    assert_eq!(result.len(), 3);
+    assert_eq!(result[0].payload, payload_int(0));
+    assert_eq!(result[2].payload, payload_int(2));
+}
+
+#[test]
+fn metadata_corruption_returns_error() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    // Append an event so metadata exists
+    event
+        .append(&test_db.branch_id, "default", "type", payload_int(1))
+        .unwrap();
+
+    // Directly corrupt metadata by writing invalid data to the meta key
+    let ns = strata_core::types::Namespace::for_branch_space(test_db.branch_id, "default");
+    let meta_key = strata_core::types::Key::new_event_meta(std::sync::Arc::new(ns));
+    test_db
+        .db
+        .transaction(test_db.branch_id, |txn| {
+            txn.put(
+                meta_key.clone(),
+                Value::String("not valid json{{{".to_string()),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    // Operations that read metadata should now return errors, not silently default
+    let result = event.len(&test_db.branch_id, "default");
+    assert!(
+        result.is_err(),
+        "corrupt metadata must return error, not silent default"
+    );
+
+    let result = event.append(&test_db.branch_id, "default", "type", payload_int(2));
+    assert!(
+        result.is_err(),
+        "append with corrupt metadata must return error"
+    );
+
+    let result = event.list_types(&test_db.branch_id, "default");
+    assert!(
+        result.is_err(),
+        "list_types with corrupt metadata must return error"
+    );
+}
+
+#[test]
+fn eventlog_ext_non_default_space() {
+    use strata_engine::primitives::extensions::EventLogExt;
+
+    let test_db = TestDb::new();
+
+    // Append in "custom" space via extension trait
+    test_db
+        .db
+        .transaction(test_db.branch_id, |txn| {
+            txn.event_append_in_space("custom", "my_type", payload_int(42))?;
+            txn.event_append_in_space("custom", "my_type", payload_int(43))?;
+            Ok(())
+        })
+        .unwrap();
+
+    // Append in "default" space
+    test_db
+        .db
+        .transaction(test_db.branch_id, |txn| {
+            txn.event_append("other_type", payload_int(99))?;
+            Ok(())
+        })
+        .unwrap();
+
+    // Verify isolation: custom space has 2 events, default has 1
+    let event = test_db.event();
+    assert_eq!(event.len(&test_db.branch_id, "custom").unwrap(), 2);
+    assert_eq!(event.len(&test_db.branch_id, "default").unwrap(), 1);
+
+    // Read back from custom space via extension trait
+    test_db
+        .db
+        .transaction(test_db.branch_id, |txn| {
+            let val = txn.event_get_in_space("custom", 0)?;
+            assert!(val.is_some());
+
+            // Default space should not see custom space's events at seq 1
+            let default_val = txn.event_get(1)?;
+            assert!(
+                default_val.is_none(),
+                "default space should not see custom space's seq 1"
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn range_query_returns_correct_slice() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    for i in 0..10 {
+        event
+            .append(&test_db.branch_id, "default", "type", payload_int(i))
+            .unwrap();
+    }
+
+    // Range [3, 7) should return sequences 3, 4, 5, 6
+    let results = event
+        .range(&test_db.branch_id, "default", 3, Some(7), None)
+        .unwrap();
+    assert_eq!(results.len(), 4);
+    assert_eq!(results[0].value.payload, payload_int(3));
+    assert_eq!(results[3].value.payload, payload_int(6));
+
+    // Range with limit
+    let results = event
+        .range(&test_db.branch_id, "default", 0, None, Some(2))
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].value.payload, payload_int(0));
+    assert_eq!(results[1].value.payload, payload_int(1));
+
+    // Empty range (start >= end)
+    let results = event
+        .range(&test_db.branch_id, "default", 5, Some(5), None)
+        .unwrap();
+    assert!(results.is_empty());
+
+    // Range past end of log is clamped
+    let results = event
+        .range(&test_db.branch_id, "default", 8, Some(100), None)
+        .unwrap();
+    assert_eq!(results.len(), 2); // sequences 8, 9
+
+    // Open-ended range (no end_seq)
+    let results = event
+        .range(&test_db.branch_id, "default", 7, None, None)
+        .unwrap();
+    assert_eq!(results.len(), 3); // sequences 7, 8, 9
+}
+
+#[test]
+fn get_by_type_at_filters_by_timestamp() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    // Append first event
+    event
+        .append(&test_db.branch_id, "default", "audit", payload_int(1))
+        .unwrap();
+    let e0 = event
+        .get(&test_db.branch_id, "default", 0)
+        .unwrap()
+        .unwrap();
+    let ts0 = e0.value.timestamp.as_micros();
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+
+    // Append second event of same type
+    event
+        .append(&test_db.branch_id, "default", "audit", payload_int(2))
+        .unwrap();
+    let e1 = event
+        .get(&test_db.branch_id, "default", 1)
+        .unwrap()
+        .unwrap();
+    let ts1 = e1.value.timestamp.as_micros();
+
+    // Append event of different type
+    event
+        .append(&test_db.branch_id, "default", "other", payload_int(3))
+        .unwrap();
+
+    // get_by_type_at with ts0 should only return the first audit event
+    let results = event
+        .get_by_type_at(&test_db.branch_id, "default", "audit", ts0)
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].value.payload, payload_int(1));
+
+    // get_by_type_at with ts1 should return both audit events
+    let results = event
+        .get_by_type_at(&test_db.branch_id, "default", "audit", ts1)
+        .unwrap();
+    assert_eq!(results.len(), 2);
+
+    // get_by_type_at for "other" type at ts0 should return nothing (it was appended later)
+    let results = event
+        .get_by_type_at(&test_db.branch_id, "default", "other", ts0)
+        .unwrap();
+    assert!(results.is_empty());
+}
