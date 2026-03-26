@@ -117,6 +117,25 @@ pub struct TransactionManager {
     deleting_branches: DashSet<BranchId>,
 }
 
+/// Describes how the WAL record should be written during commit.
+///
+/// Used by [`TransactionManager::commit_inner`] to abstract over the three
+/// WAL passing styles: direct reference, shared Arc, or no WAL.
+enum WalMode<'a> {
+    /// No WAL — ephemeral/cache mode.
+    None,
+    /// Direct `&mut WalWriter` reference.
+    Direct(&'a mut WalWriter),
+    /// Shared `Arc<Mutex<WalWriter>>` — pre-serializes outside the lock.
+    Shared(&'a Arc<Mutex<WalWriter>>),
+}
+
+impl WalMode<'_> {
+    fn has_wal(&self) -> bool {
+        !matches!(self, WalMode::None)
+    }
+}
+
 impl TransactionManager {
     /// Create a new transaction manager
     ///
@@ -273,50 +292,24 @@ impl TransactionManager {
         Ok(version)
     }
 
-    /// Commit a transaction atomically
+    /// Core commit implementation shared by all public commit methods.
     ///
-    /// Per spec Core Invariants:
-    /// - Validates transaction (first-committer-wins)
-    /// - Writes to WAL for durability (when WAL is provided)
-    /// - Applies to storage only after WAL is durable
-    /// - All-or-nothing: either all writes succeed or transaction aborts
+    /// Implements the full commit protocol: read-only fast path, quiesce lock,
+    /// per-branch lock, OCC validation, version allocation, JSON materialization,
+    /// WAL write, storage application, and visible-version advancement.
     ///
     /// # Arguments
     /// * `txn` - Transaction to commit (must be in Active state)
     /// * `store` - Storage to validate against and apply writes to
-    /// * `wal` - Optional WAL for durability. Pass `None` for ephemeral databases
-    ///   or when durability is not required (DurabilityMode::Cache).
-    ///
-    /// # Returns
-    /// - Ok(commit_version) on success
-    /// - Err(CommitError) if validation fails or WAL write fails
-    ///
-    /// # Commit Sequence
-    ///
-    /// 0. Acquire quiesce read lock (checkpoint drains via write lock, #1710)
-    /// 1. Acquire per-branch commit lock (prevents TOCTOU race within same branch)
-    /// 2. Validate and mark committed (in-memory state transition)
-    /// 3. Allocate commit version
-    /// 4. Write to WAL if provided (BeginTxn, operations, CommitTxn)
-    /// 5. Apply writes to storage
-    /// 6. Release commit lock and quiesce lock
-    /// 7. Return commit version
-    ///
-    /// When `wal` is `None`, steps 4 is skipped entirely. The transaction is
-    /// still validated and applied to storage, but without durability guarantees.
-    ///
-    /// # Thread Safety
-    ///
-    /// Per-branch commit locks ensure that validation and apply happen atomically
-    /// with respect to other transactions on the same branch. This prevents the
-    /// TOCTOU race where validation passes but storage changes before apply.
-    ///
-    /// Transactions on different branches can commit in parallel.
-    pub fn commit<S: Storage>(
+    /// * `wal_mode` - How to write the WAL record (direct, shared, or none)
+    /// * `external_version` - If `Some(v)`, use `v` instead of allocating from
+    ///   the local counter (used by multi-process coordinated commits)
+    fn commit_inner<S: Storage>(
         &self,
         txn: &mut TransactionContext,
         store: &S,
-        mut wal: Option<&mut WalWriter>,
+        wal_mode: WalMode<'_>,
+        external_version: Option<u64>,
     ) -> std::result::Result<u64, CommitError> {
         // Fast path: read-only transactions skip lock, validation, version alloc, WAL, apply
         if txn.is_read_only() && txn.json_writes().is_empty() {
@@ -327,162 +320,9 @@ impl TransactionManager {
                 )));
             }
             txn.status = TransactionStatus::Committed;
-            return Ok(self.version.load(Ordering::Acquire));
-        }
-
-        // Acquire quiesce read lock so checkpoint's quiesced_version() can
-        // drain all in-flight commits before reading the version counter (#1710).
-        let _quiesce_guard = self.commit_quiesce.read();
-
-        // Step 1: Acquire per-branch commit lock and validate.
-        //
-        // The lock MUST be held from validation through version allocation
-        // and apply_writes — otherwise a concurrent transaction could validate
-        // against stale state (TOCTOU).
-        let commit_mutex = self
-            .commit_locks
-            .entry(txn.branch_id)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone(); // clone Arc, drop RefMut → releases shard lock (#1781)
-        let _commit_guard = commit_mutex.lock();
-
-        // Reject commits on branches that are mid-deletion (#1916).
-        if self.deleting_branches.contains(&txn.branch_id) {
-            return Err(CommitError::BranchDeleting(txn.branch_id));
-        }
-
-        // Skip OCC validation for blind writes (no reads, no CAS, no JSON snapshots)
-        let can_skip_validation = txn.read_set.is_empty()
-            && txn.cas_set.is_empty()
-            && txn.json_snapshot_versions().map_or(true, |v| v.is_empty())
-            && txn.json_writes().is_empty();
-
-        if can_skip_validation {
-            if !txn.is_active() {
-                return Err(CommitError::InvalidState(format!(
-                    "Cannot commit transaction {} from {:?} state - must be Active",
-                    txn.txn_id, txn.status
-                )));
-            }
-            txn.status = TransactionStatus::Committed;
-        } else {
-            txn.commit(store)?;
-            tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, "Validation passed");
-        }
-
-        // At this point, transaction is in Committed state
-        // but NOT yet durable (not in WAL)
-
-        // Step 2: Allocate commit version
-        let commit_version = self.allocate_version()?;
-
-        // Step 2.5: Materialize JSON patches into write_set (#1739 OCC-H1)
-        if let Err(e) = txn.materialize_json_writes() {
-            self.mark_version_applied(commit_version);
-            return Err(CommitError::WALError(format!(
-                "JSON materialization failed: {}",
-                e
-            )));
-        }
-
-        // Step 3: Write to WAL (durability) - only for transactions with mutations.
-        // After materialization, json_writes are in write_set, so is_read_only() covers all cases.
-        let has_mutations = !txn.is_read_only();
-        if has_mutations {
-            if let Some(wal) = wal.as_mut() {
-                let payload = TransactionPayload::from_transaction(txn, commit_version);
-                // Use commit_version as the WAL record ordering key (#1696).
-                // Watermarks are set from the commit_version space, so the WAL
-                // record must carry commit_version for correct replay filtering.
-                let record = WalRecord::new(
-                    commit_version,
-                    *txn.branch_id.as_bytes(),
-                    now_micros(),
-                    payload.to_bytes(),
-                );
-
-                if let Err(e) = wal.append(&record) {
-                    txn.status = TransactionStatus::Aborted {
-                        reason: format!("WAL write failed: {}", e),
-                    };
-                    self.mark_version_applied(commit_version);
-                    return Err(CommitError::WALError(e.to_string()));
-                }
-
-                // DURABILITY POINT: Transaction is now durable
-                // Even if we crash after this, recovery will replay from WAL
-                tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, commit_version, "WAL durable");
-            }
-        }
-
-        // Step 4: Apply to storage
-        if let Err(e) = txn.apply_writes(store, commit_version) {
-            // Version was allocated but apply failed — unregister so
-            // visible_version can advance past this gap (#1913).
-            self.mark_version_applied(commit_version);
-            if wal.is_some() {
-                // WAL says committed but storage failed — data is durable
-                // but NOT visible to reads until restart replays WAL (#1725).
-                tracing::error!(
-                    target: "strata::txn",
-                    txn_id = txn.txn_id,
-                    commit_version = commit_version,
-                    error = %e,
-                    "Storage application failed after WAL commit - will be recovered on restart"
-                );
-                return Err(CommitError::DurableButNotVisible(format!(
-                    "Storage application failed after WAL commit: {}",
-                    e
-                )));
-            } else {
-                // No WAL - storage failure means data loss, return error
-                txn.status = TransactionStatus::Aborted {
-                    reason: format!("Storage application failed: {}", e),
-                };
-                return Err(CommitError::WALError(format!(
-                    "Storage application failed (no WAL): {}",
-                    e
-                )));
-            }
-        }
-
-        // Step 5: Version fully applied — advance visible_version (#1913)
-        self.mark_version_applied(commit_version);
-        Ok(commit_version)
-    }
-
-    /// Commit a transaction with narrow WAL lock scope.
-    ///
-    /// Same commit protocol as `commit()`, but takes `Arc<Mutex<WalWriter>>`
-    /// instead of `&mut WalWriter`. This allows pre-serializing the WAL record
-    /// (CRC + allocations) **outside** the WAL lock, then briefly locking only
-    /// for the append I/O.
-    ///
-    /// # Lock ordering
-    ///
-    /// quiesce read lock → branch lock → WAL lock (acquired inside, released before storage apply).
-    ///
-    /// # Arguments
-    /// * `txn` - Transaction to commit (must be in Active state)
-    /// * `store` - Storage to validate against and apply writes to
-    /// * `wal_arc` - Optional WAL for durability. Pass `None` for ephemeral
-    ///   databases or when durability is not required.
-    pub fn commit_with_wal_arc<S: Storage>(
-        &self,
-        txn: &mut TransactionContext,
-        store: &S,
-        wal_arc: Option<&Arc<Mutex<WalWriter>>>,
-    ) -> std::result::Result<u64, CommitError> {
-        // Fast path: read-only transactions skip lock, validation, version alloc, WAL, apply
-        if txn.is_read_only() && txn.json_writes().is_empty() {
-            if !txn.is_active() {
-                return Err(CommitError::InvalidState(format!(
-                    "Cannot commit transaction {} from {:?} state - must be Active",
-                    txn.txn_id, txn.status
-                )));
-            }
-            txn.status = TransactionStatus::Committed;
-            return Ok(self.version.load(Ordering::Acquire));
+            return Ok(
+                external_version.unwrap_or_else(|| self.version.load(Ordering::Acquire))
+            );
         }
 
         #[cfg(feature = "perf-trace")]
@@ -494,10 +334,8 @@ impl TransactionManager {
         // drain all in-flight commits before reading the version counter (#1710).
         let _quiesce_guard = self.commit_quiesce.read();
 
-        // Step 1: Acquire per-branch commit lock. Must be held from validation
-        // through version allocation and apply_writes for ALL writers (including
-        // blind writes) to prevent a concurrent writer from advancing the store
-        // version while another transaction is mid-apply (#1708).
+        // Acquire per-branch commit lock. Must be held from validation through
+        // version allocation and apply_writes (prevents TOCTOU, #1708, #1781).
         let commit_mutex = self
             .commit_locks
             .entry(txn.branch_id)
@@ -531,7 +369,20 @@ impl TransactionManager {
             tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, "Validation passed");
         }
 
-        let commit_version = self.allocate_version()?;
+        // Version allocation: either from local counter or externally provided
+        let commit_version = match external_version {
+            None => self.allocate_version()?,
+            Some(v) => {
+                // Register external version as pending BEFORE advancing the counter.
+                // If we advance first, a concurrent mark_version_applied could see
+                // the higher counter with an empty pending set and advance
+                // visible_version to include this not-yet-applied version (#1913).
+                let mut pending = self.pending_versions.lock();
+                self.version.fetch_max(v, Ordering::AcqRel);
+                pending.insert(v);
+                v
+            }
+        };
 
         // Materialize JSON patches into write_set (#1739 OCC-H1)
         if let Err(e) = txn.materialize_json_writes() {
@@ -542,41 +393,67 @@ impl TransactionManager {
             )));
         }
 
+        // WAL write (durability)
+        let has_wal = wal_mode.has_wal();
         let has_mutations = !txn.is_read_only();
         if has_mutations {
-            if let Some(wal_arc) = wal_arc {
-                perf_time!(trace, wal_append_ns, {
-                    let payload = TransactionPayload::from_transaction(txn, commit_version);
-                    let timestamp = now_micros();
-                    // Use commit_version as WAL record ordering key (#1696)
-                    let record = WalRecord::new(
-                        commit_version,
-                        *txn.branch_id.as_bytes(),
-                        timestamp,
-                        payload.to_bytes(),
-                    );
-                    let record_bytes = record.to_bytes();
-                    {
-                        let mut wal = wal_arc.lock();
-                        if let Err(e) =
-                            wal.append_pre_serialized(&record_bytes, commit_version, timestamp)
-                        {
+            perf_time!(trace, wal_append_ns, {
+                match wal_mode {
+                    WalMode::Direct(wal) => {
+                        let payload =
+                            TransactionPayload::from_transaction(txn, commit_version);
+                        let record = WalRecord::new(
+                            commit_version,
+                            *txn.branch_id.as_bytes(),
+                            now_micros(),
+                            payload.to_bytes(),
+                        );
+                        if let Err(e) = wal.append(&record) {
                             txn.status = TransactionStatus::Aborted {
                                 reason: format!("WAL write failed: {}", e),
                             };
                             self.mark_version_applied(commit_version);
                             return Err(CommitError::WALError(e.to_string()));
                         }
+                        tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, commit_version, "WAL durable");
                     }
-                });
-                tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, commit_version, "WAL durable");
-            }
+                    WalMode::Shared(wal_arc) => {
+                        let payload =
+                            TransactionPayload::from_transaction(txn, commit_version);
+                        let timestamp = now_micros();
+                        let record = WalRecord::new(
+                            commit_version,
+                            *txn.branch_id.as_bytes(),
+                            timestamp,
+                            payload.to_bytes(),
+                        );
+                        let record_bytes = record.to_bytes();
+                        {
+                            let mut wal = wal_arc.lock();
+                            if let Err(e) = wal.append_pre_serialized(
+                                &record_bytes,
+                                commit_version,
+                                timestamp,
+                            ) {
+                                txn.status = TransactionStatus::Aborted {
+                                    reason: format!("WAL write failed: {}", e),
+                                };
+                                self.mark_version_applied(commit_version);
+                                return Err(CommitError::WALError(e.to_string()));
+                            }
+                        }
+                        tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, commit_version, "WAL durable");
+                    }
+                    WalMode::None => {}
+                }
+            });
         }
 
+        // Apply to storage
         perf_time!(trace, write_set_apply_ns, {
             if let Err(e) = txn.apply_writes(store, commit_version) {
                 self.mark_version_applied(commit_version);
-                if wal_arc.is_some() {
+                if has_wal {
                     tracing::error!(
                         target: "strata::txn",
                         txn_id = txn.txn_id,
@@ -623,6 +500,61 @@ impl TransactionManager {
         }
 
         Ok(commit_version)
+    }
+
+    /// Commit a transaction atomically
+    ///
+    /// Per spec Core Invariants:
+    /// - Validates transaction (first-committer-wins)
+    /// - Writes to WAL for durability (when WAL is provided)
+    /// - Applies to storage only after WAL is durable
+    /// - All-or-nothing: either all writes succeed or transaction aborts
+    ///
+    /// # Arguments
+    /// * `txn` - Transaction to commit (must be in Active state)
+    /// * `store` - Storage to validate against and apply writes to
+    /// * `wal` - Optional WAL for durability. Pass `None` for ephemeral databases
+    ///   or when durability is not required (DurabilityMode::Cache).
+    pub fn commit<S: Storage>(
+        &self,
+        txn: &mut TransactionContext,
+        store: &S,
+        wal: Option<&mut WalWriter>,
+    ) -> std::result::Result<u64, CommitError> {
+        let wal_mode = match wal {
+            Some(w) => WalMode::Direct(w),
+            None => WalMode::None,
+        };
+        self.commit_inner(txn, store, wal_mode, None)
+    }
+
+    /// Commit a transaction with narrow WAL lock scope.
+    ///
+    /// Same commit protocol as `commit()`, but takes `Arc<Mutex<WalWriter>>`
+    /// instead of `&mut WalWriter`. This allows pre-serializing the WAL record
+    /// (CRC + allocations) **outside** the WAL lock, then briefly locking only
+    /// for the append I/O.
+    ///
+    /// # Lock ordering
+    ///
+    /// quiesce read lock → branch lock → WAL lock (acquired inside, released before storage apply).
+    ///
+    /// # Arguments
+    /// * `txn` - Transaction to commit (must be in Active state)
+    /// * `store` - Storage to validate against and apply writes to
+    /// * `wal_arc` - Optional WAL for durability. Pass `None` for ephemeral
+    ///   databases or when durability is not required.
+    pub fn commit_with_wal_arc<S: Storage>(
+        &self,
+        txn: &mut TransactionContext,
+        store: &S,
+        wal_arc: Option<&Arc<Mutex<WalWriter>>>,
+    ) -> std::result::Result<u64, CommitError> {
+        let wal_mode = match wal_arc {
+            Some(arc) => WalMode::Shared(arc),
+            None => WalMode::None,
+        };
+        self.commit_inner(txn, store, wal_mode, None)
     }
 
     /// Remove the per-branch commit lock for a deleted branch.
@@ -702,144 +634,16 @@ impl TransactionManager {
         &self,
         txn: &mut TransactionContext,
         store: &S,
-        mut wal: Option<&mut WalWriter>,
+        wal: Option<&mut WalWriter>,
         version: u64,
     ) -> std::result::Result<u64, CommitError> {
-        // Fast path: read-only transactions
-        if txn.is_read_only() && txn.json_writes().is_empty() {
-            if !txn.is_active() {
-                return Err(CommitError::InvalidState(format!(
-                    "Cannot commit transaction {} from {:?} state - must be Active",
-                    txn.txn_id, txn.status
-                )));
-            }
-            txn.status = TransactionStatus::Committed;
-            return Ok(version);
-        }
-
-        // Acquire quiesce read lock so checkpoint's quiesced_version() can
-        // drain all in-flight commits before reading the version counter (#1710).
-        let _quiesce_guard = self.commit_quiesce.read();
-
-        // Acquire per-branch lock — must be held through validation + apply.
-        let commit_mutex = self
-            .commit_locks
-            .entry(txn.branch_id)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone(); // clone Arc, drop RefMut → releases shard lock (#1781)
-        let _commit_guard = commit_mutex.lock();
-
-        // Reject commits on branches that are mid-deletion (#1916).
-        if self.deleting_branches.contains(&txn.branch_id) {
-            return Err(CommitError::BranchDeleting(txn.branch_id));
-        }
-
-        // Skip OCC validation for blind writes (no reads, no CAS, no JSON snapshots)
-        let can_skip_validation = txn.read_set.is_empty()
-            && txn.cas_set.is_empty()
-            && txn.json_snapshot_versions().map_or(true, |v| v.is_empty())
-            && txn.json_writes().is_empty();
-
-        if can_skip_validation {
-            if !txn.is_active() {
-                return Err(CommitError::InvalidState(format!(
-                    "Cannot commit transaction {} from {:?} state - must be Active",
-                    txn.txn_id, txn.status
-                )));
-            }
-            txn.status = TransactionStatus::Committed;
-        } else {
-            txn.commit(store)?;
-        }
-
-        // Use the externally-provided version (do NOT allocate from local counter)
-        let commit_version = version;
-
-        // Register external version as pending BEFORE advancing the counter.
-        // If we advance first, a concurrent mark_version_applied could see
-        // the higher counter with an empty pending set and advance
-        // visible_version to include this not-yet-applied version (#1913).
-        {
-            let mut pending = self.pending_versions.lock();
-            self.version.fetch_max(commit_version, Ordering::AcqRel);
-            pending.insert(commit_version);
-        }
-
-        // Materialize JSON patches into write_set (#1739 OCC-H1)
-        if let Err(e) = txn.materialize_json_writes() {
-            self.mark_version_applied(commit_version);
-            return Err(CommitError::WALError(format!(
-                "JSON materialization failed: {}",
-                e
-            )));
-        }
-
-        // Write to WAL
-        let has_mutations = !txn.is_read_only();
-        if has_mutations {
-            if let Some(wal) = wal.as_mut() {
-                let payload = TransactionPayload::from_transaction(txn, commit_version);
-                // Use commit_version as WAL record ordering key (#1696)
-                let record = WalRecord::new(
-                    commit_version,
-                    *txn.branch_id.as_bytes(),
-                    now_micros(),
-                    payload.to_bytes(),
-                );
-
-                if let Err(e) = wal.append(&record) {
-                    txn.status = TransactionStatus::Aborted {
-                        reason: format!("WAL write failed: {}", e),
-                    };
-                    self.mark_version_applied(commit_version);
-                    return Err(CommitError::WALError(e.to_string()));
-                }
-            }
-        }
-
-        // Apply to storage
-        if let Err(e) = txn.apply_writes(store, commit_version) {
-            self.mark_version_applied(commit_version);
-            if wal.is_some() {
-                tracing::error!(
-                    target: "strata::txn",
-                    txn_id = txn.txn_id,
-                    commit_version = commit_version,
-                    error = %e,
-                    "Storage application failed after WAL commit - will be recovered on restart"
-                );
-                return Err(CommitError::DurableButNotVisible(format!(
-                    "Storage application failed after WAL commit: {}",
-                    e
-                )));
-            } else {
-                txn.status = TransactionStatus::Aborted {
-                    reason: format!("Storage application failed: {}", e),
-                };
-                return Err(CommitError::WALError(format!(
-                    "Storage application failed (no WAL): {}",
-                    e
-                )));
-            }
-        }
-
-        // Version fully applied — advance visible_version (#1913)
-        self.mark_version_applied(commit_version);
-        Ok(commit_version)
+        let wal_mode = match wal {
+            Some(w) => WalMode::Direct(w),
+            None => WalMode::None,
+        };
+        self.commit_inner(txn, store, wal_mode, Some(version))
     }
 
-    /// Commit a transaction in bulk load mode — skips WAL for speed.
-    ///
-    /// Identical to `commit()` with `wal: None`. Data is applied to storage but
-    /// is NOT durable until the caller flushes memtables to disk. Suitable for
-    /// large initial imports where the source data can be re-read on failure.
-    pub fn commit_bulk_load<S: Storage>(
-        &self,
-        txn: &mut TransactionContext,
-        store: &S,
-    ) -> std::result::Result<u64, CommitError> {
-        self.commit(txn, store, None)
-    }
 }
 
 impl Default for TransactionManager {
@@ -1837,11 +1641,11 @@ mod tests {
     }
 
     // ========================================================================
-    // Bulk load commit tests (Epic 8d)
+    // No-WAL commit tests (formerly bulk-load, Epic 8d)
     // ========================================================================
 
     #[test]
-    fn commit_bulk_load_applies_writes() {
+    fn commit_no_wal_applies_writes() {
         let manager = TransactionManager::new(0);
         let store = Arc::new(SegmentedStore::new());
         let branch_id = BranchId::new();
@@ -1851,7 +1655,7 @@ mod tests {
         let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
         txn.put(key.clone(), Value::Int(42)).unwrap();
 
-        let version = manager.commit_bulk_load(&mut txn, store.as_ref()).unwrap();
+        let version = manager.commit(&mut txn, store.as_ref(), None).unwrap();
         assert!(version > 0);
 
         // Data should be readable
@@ -1861,7 +1665,7 @@ mod tests {
     }
 
     #[test]
-    fn commit_bulk_load_no_wal_records() {
+    fn commit_no_wal_skips_wal_records() {
         let dir = TempDir::new().unwrap();
         let wal_dir = dir.path().join("wal");
         let manager = TransactionManager::new(0);
@@ -1872,11 +1676,11 @@ mod tests {
         // Create WAL for reference
         let mut wal = create_test_wal(&wal_dir);
 
-        // Bulk load commit — should NOT write to WAL
+        // No-WAL commit — should NOT write to WAL
         let key = create_test_key(&ns, "no_wal");
         let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
         txn.put(key.clone(), Value::Int(1)).unwrap();
-        manager.commit_bulk_load(&mut txn, store.as_ref()).unwrap();
+        manager.commit(&mut txn, store.as_ref(), None).unwrap();
 
         // Normal commit — writes to WAL
         let key2 = create_test_key(&ns, "with_wal");
@@ -1892,12 +1696,12 @@ mod tests {
         assert_eq!(
             result.records.len(),
             1,
-            "Bulk load should not write WAL records"
+            "No-WAL commit should not write WAL records"
         );
     }
 
     #[test]
-    fn commit_bulk_load_normal_commits_after() {
+    fn commit_no_wal_then_normal_commits() {
         let dir = TempDir::new().unwrap();
         let wal_dir = dir.path().join("wal");
         let manager = TransactionManager::new(0);
@@ -1906,13 +1710,13 @@ mod tests {
         let ns = create_test_namespace(branch_id);
         let mut wal = create_test_wal(&wal_dir);
 
-        // Bulk load
+        // No-WAL commit
         let key1 = create_test_key(&ns, "k1");
         let mut txn1 = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
         txn1.put(key1.clone(), Value::Int(1)).unwrap();
-        manager.commit_bulk_load(&mut txn1, store.as_ref()).unwrap();
+        manager.commit(&mut txn1, store.as_ref(), None).unwrap();
 
-        // Normal commit after bulk load
+        // Normal commit after no-WAL commit
         let key2 = create_test_key(&ns, "k2");
         let mut txn2 = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
         txn2.put(key2.clone(), Value::Int(2)).unwrap();
