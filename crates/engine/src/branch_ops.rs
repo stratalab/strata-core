@@ -576,6 +576,7 @@ pub fn diff_branches_with_options(
             if parent == id_a {
                 return cow_diff_branches(
                     db, id_a, id_b, id_b, id_a, fv, branch_a, branch_b, &options,
+                    snapshot_version,
                 );
             }
         }
@@ -583,6 +584,7 @@ pub fn diff_branches_with_options(
             if parent == id_b {
                 return cow_diff_branches(
                     db, id_a, id_b, id_a, id_b, fv, branch_a, branch_b, &options,
+                    snapshot_version,
                 );
             }
         }
@@ -702,7 +704,9 @@ fn cow_diff_branches(
     branch_a_name: &str,
     branch_b_name: &str,
     options: &DiffOptions,
+    snapshot_version: u64,
 ) -> StrataResult<BranchDiffResult> {
+    use strata_core::Storage;
     let space_index = SpaceIndex::new(db.clone());
     let storage = db.storage();
 
@@ -757,14 +761,18 @@ fn cow_diff_branches(
             .or_insert_with(|| Arc::new(Namespace::for_branch_space(id_a, space)))
             .clone();
         let key_a = Key::new(ns_a, *type_tag, user_key.clone());
-        let val_a = storage.get_value_direct(&key_a)?;
+        let val_a = storage
+            .get_versioned(&key_a, snapshot_version)?
+            .map(|vv| vv.value);
 
         let ns_b = ns_cache
             .entry((id_b, space.clone()))
             .or_insert_with(|| Arc::new(Namespace::for_branch_space(id_b, space)))
             .clone();
         let key_b = Key::new(ns_b, *type_tag, user_key.clone());
-        let val_b = storage.get_value_direct(&key_b)?;
+        let val_b = storage
+            .get_versioned(&key_b, snapshot_version)?
+            .map(|vv| vv.value);
 
         let diff_entry = match (&val_a, &val_b) {
             (None, None) => continue,
@@ -4859,5 +4867,49 @@ mod tests {
         assert_eq!(diff.summary.total_removed, 1, "only-a should be removed");
         assert_eq!(diff.summary.total_added, 1, "only-b should be added");
         assert_eq!(diff.summary.total_modified, 1, "shared should be modified");
+    }
+
+    #[test]
+    fn test_issue_1918_cow_diff_snapshot_consistency() {
+        // Verify that the COW fast path (parent-child diff) uses snapshot-isolated
+        // point lookups via get_versioned, not get_value_direct (#1918).
+        //
+        // We set up a parent-child fork, write to the child, then verify that
+        // diff_branches (which hits the COW path) returns a consistent result
+        // that matches the expected state.
+        let (_temp, db) = setup_with_branch("parent");
+        write_kv(&db, "parent", "default", "base", Value::Int(1));
+        write_kv(&db, "parent", "default", "shared", Value::Int(10));
+
+        fork_branch(&db, "parent", "child").unwrap();
+
+        // Child modifies shared and adds a new key
+        write_kv(&db, "child", "default", "shared", Value::Int(20));
+        write_kv(&db, "child", "default", "child_only", Value::Int(99));
+
+        // This diff should use the COW fast path (child is direct child of parent)
+        let diff = diff_branches(&db, "parent", "child").unwrap();
+
+        // shared: modified (10 → 20), child_only: added, base: unchanged
+        assert_eq!(diff.summary.total_modified, 1, "shared should be modified");
+        assert_eq!(diff.summary.total_added, 1, "child_only should be added");
+        assert_eq!(diff.summary.total_removed, 0, "nothing removed");
+
+        // Verify the values are snapshot-consistent
+        let space = &diff.spaces[0];
+        let all_entries: Vec<_> = space
+            .added
+            .iter()
+            .chain(space.modified.iter())
+            .collect();
+        for entry in &all_entries {
+            if entry.key == "shared" {
+                assert_eq!(entry.value_a, Some(Value::Int(10)));
+                assert_eq!(entry.value_b, Some(Value::Int(20)));
+            } else if entry.key == "child_only" {
+                assert!(entry.value_a.is_none());
+                assert_eq!(entry.value_b, Some(Value::Int(99)));
+            }
+        }
     }
 }
