@@ -81,7 +81,11 @@ fn limit_error_to_error(e: JsonLimitError) -> StrataError {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonDoc {
-    /// Document unique identifier (user-provided string key)
+    /// Document unique identifier (user-provided string key).
+    ///
+    /// NOTE: This field is redundant with the storage key (Key::new_json).
+    /// It costs ~20-100 bytes per document. Kept for error messages and
+    /// debugging convenience. Consider removing in a future format version.
     pub id: String,
     /// The JSON value (root of document)
     pub value: JsonValue,
@@ -194,22 +198,47 @@ impl JsonStore {
     // Serialization
     // ========================================================================
 
+    /// Format version byte for JsonDoc serialization.
+    ///
+    /// Version 1: MessagePack-encoded JsonDoc (original format, no header).
+    /// Version 2: 1-byte version prefix (0x02) + MessagePack-encoded JsonDoc.
+    ///
+    /// On read, if the first byte is NOT a valid version tag, we fall back to
+    /// v1 (raw MessagePack) for backward compatibility with existing data.
+    const FORMAT_VERSION: u8 = 0x02;
+
     /// Serialize document for storage
     ///
-    /// Uses MessagePack for efficient binary serialization.
+    /// Writes a version byte prefix followed by MessagePack payload.
     pub(crate) fn serialize_doc(doc: &JsonDoc) -> StrataResult<Value> {
-        let bytes =
+        let payload =
             rmp_serde::to_vec(doc).map_err(|e| StrataError::serialization(e.to_string()))?;
+        let mut bytes = Vec::with_capacity(1 + payload.len());
+        bytes.push(Self::FORMAT_VERSION);
+        bytes.extend_from_slice(&payload);
         Ok(Value::Bytes(bytes))
     }
 
     /// Deserialize document from storage
     ///
-    /// Expects Value::Bytes containing MessagePack-encoded JsonDoc.
+    /// Dispatches to version-specific deserializer based on format version byte.
+    /// Falls back to v1 (raw MessagePack) if no recognized version tag is found,
+    /// ensuring backward compatibility with documents written before versioning.
     pub(crate) fn deserialize_doc(value: &Value) -> StrataResult<JsonDoc> {
         match value {
+            Value::Bytes(bytes) if bytes.is_empty() => {
+                Err(StrataError::serialization("empty JsonDoc bytes"))
+            }
             Value::Bytes(bytes) => {
-                rmp_serde::from_slice(bytes).map_err(|e| StrataError::serialization(e.to_string()))
+                if bytes[0] == Self::FORMAT_VERSION {
+                    // v2: skip version byte, deserialize payload
+                    rmp_serde::from_slice(&bytes[1..])
+                        .map_err(|e| StrataError::serialization(e.to_string()))
+                } else {
+                    // v1 fallback: no version header, raw MessagePack
+                    rmp_serde::from_slice(bytes)
+                        .map_err(|e| StrataError::serialization(e.to_string()))
+                }
             }
             _ => Err(StrataError::invalid_input("expected bytes for JsonDoc")),
         }
@@ -358,6 +387,7 @@ impl JsonStore {
     ) -> StrataResult<Option<VersionedHistory<JsonValue>>> {
         let key = self.key_for(branch_id, space, doc_id);
         let history = self.db.get_history(&key, None, None)?;
+        let mut corrupt_count: u32 = 0;
         let versions: Vec<Versioned<JsonValue>> = history
             .iter()
             .filter_map(|vv| match Self::deserialize_doc(&vv.value) {
@@ -367,15 +397,27 @@ impl JsonStore {
                     vv.timestamp,
                 )),
                 Err(e) => {
+                    corrupt_count += 1;
                     tracing::warn!(
                         target: "strata::json",
+                        doc_id = doc_id,
                         error = %e,
+                        corrupt_count = corrupt_count,
                         "Skipping corrupt document entry in version history"
                     );
                     None
                 }
             })
             .collect();
+        if corrupt_count > 0 {
+            tracing::error!(
+                target: "strata::json",
+                doc_id = doc_id,
+                corrupt_count = corrupt_count,
+                total_versions = versions.len() + corrupt_count as usize,
+                "Version history contains corrupt entries"
+            );
+        }
         Ok(VersionedHistory::new(versions))
     }
 
@@ -383,7 +425,8 @@ impl JsonStore {
     ///
     /// If the document exists, applies `set_at_path` and increments version.
     /// If `create_if_missing` is true and the document doesn't exist, creates it.
-    /// Returns the resulting document version.
+    /// Returns the resulting document version and the full document value
+    /// (avoids a re-read when the caller needs the complete doc, e.g. for embedding).
     fn set_in_txn(
         txn: &mut TransactionContext,
         key: &Key,
@@ -391,7 +434,7 @@ impl JsonStore {
         path: &JsonPath,
         value: JsonValue,
         create_if_missing: bool,
-    ) -> StrataResult<Version> {
+    ) -> StrataResult<(Version, JsonValue)> {
         match txn.get(key)? {
             Some(stored) => {
                 let mut doc = Self::deserialize_doc(&stored)?;
@@ -401,7 +444,7 @@ impl JsonStore {
                 doc.touch();
                 let serialized = Self::serialize_doc(&doc)?;
                 txn.put(key.clone(), serialized)?;
-                Ok(Version::counter(doc.version))
+                Ok((Version::counter(doc.version), doc.value))
             }
             None if create_if_missing => {
                 let initial = if path.is_root() {
@@ -416,7 +459,7 @@ impl JsonStore {
                 let doc = JsonDoc::new(doc_id, initial);
                 let serialized = Self::serialize_doc(&doc)?;
                 txn.put(key.clone(), serialized)?;
-                Ok(Version::counter(doc.version))
+                Ok((Version::counter(doc.version), doc.value))
             }
             None => Err(StrataError::invalid_input(format!(
                 "JSON document {} not found",
@@ -440,7 +483,7 @@ impl JsonStore {
         doc_id: &str,
         path: &JsonPath,
         value: JsonValue,
-    ) -> StrataResult<Version> {
+    ) -> StrataResult<(Version, JsonValue)> {
         path.validate().map_err(limit_error_to_error)?;
         value.validate().map_err(limit_error_to_error)?;
 
@@ -455,24 +498,83 @@ impl JsonStore {
     /// Each entry does a set_or_create: creates the document if it doesn't exist,
     /// or sets the value at the given path if it does. All writes share one
     /// lock acquisition, one WAL record, and one commit.
+    ///
+    /// Returns (versions, full_doc_values) — the full document after each write,
+    /// for use by callers that need the complete content (e.g. embedding hooks).
     pub fn batch_set_or_create(
         &self,
         branch_id: &BranchId,
         space: &str,
         entries: Vec<(String, JsonPath, JsonValue)>,
-    ) -> StrataResult<Vec<Version>> {
+    ) -> StrataResult<Vec<(Version, JsonValue)>> {
         if entries.is_empty() {
             return Ok(Vec::new());
         }
 
+        // Validate all paths and values upfront (matching set_or_create)
+        for (_, path, value) in &entries {
+            path.validate().map_err(limit_error_to_error)?;
+            value.validate().map_err(limit_error_to_error)?;
+        }
+
         self.db.transaction(*branch_id, |txn| {
-            let mut versions = Vec::with_capacity(entries.len());
+            let mut results = Vec::with_capacity(entries.len());
             for (doc_id, path, value) in &entries {
                 let key = self.key_for(branch_id, space, doc_id);
-                let version = Self::set_in_txn(txn, &key, doc_id, path, value.clone(), true)?;
-                versions.push(version);
+                let result = Self::set_in_txn(txn, &key, doc_id, path, value.clone(), true)?;
+                results.push(result);
             }
-            Ok(versions)
+            Ok(results)
+        })
+    }
+
+    /// Get multiple documents in a single transaction.
+    ///
+    /// Each entry is (doc_id, path). Returns a Vec of Option<Versioned<JsonValue>>
+    /// in the same order as the input entries.
+    ///
+    /// NOTE: The timestamp in each `Versioned` is the document's `updated_at`
+    /// (set inside the writing transaction), not the storage-layer commit
+    /// timestamp. This differs slightly from `get_versioned()` which uses the
+    /// storage timestamp. The difference is sub-millisecond and the trade-off
+    /// gives transactional consistency (all reads in one snapshot).
+    pub fn batch_get(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        entries: &[(String, JsonPath)],
+    ) -> StrataResult<Vec<Option<Versioned<JsonValue>>>> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Validate all paths upfront
+        for (_, path) in entries {
+            path.validate().map_err(limit_error_to_error)?;
+        }
+
+        self.db.transaction(*branch_id, |txn| {
+            let mut results = Vec::with_capacity(entries.len());
+            for (doc_id, path) in entries {
+                let key = self.key_for(branch_id, space, doc_id);
+                match txn.get(&key)? {
+                    Some(stored) => {
+                        let doc = Self::deserialize_doc(&stored)?;
+                        match get_at_path(&doc.value, path).cloned() {
+                            Some(json_val) => {
+                                results.push(Some(Versioned::with_timestamp(
+                                    json_val,
+                                    Version::counter(doc.version),
+                                    doc.updated_at.into(),
+                                )));
+                            }
+                            None => results.push(None),
+                        }
+                    }
+                    None => results.push(None),
+                }
+            }
+            Ok(results)
         })
     }
 
@@ -520,6 +622,7 @@ impl JsonStore {
         let key = self.key_for(branch_id, space, doc_id);
         self.db.transaction(*branch_id, |txn| {
             Self::set_in_txn(txn, &key, doc_id, path, value, false)
+                .map(|(version, _)| version)
         })
     }
 
@@ -614,6 +717,76 @@ impl JsonStore {
         })
     }
 
+    /// Destroy multiple documents in a single transaction.
+    ///
+    /// Returns a Vec<bool> indicating whether each document existed (and was
+    /// destroyed). All deletes share one lock, one WAL record, one commit.
+    pub fn batch_destroy(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        doc_ids: &[String],
+    ) -> StrataResult<Vec<bool>> {
+        if doc_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.db.transaction(*branch_id, |txn| {
+            let mut results = Vec::with_capacity(doc_ids.len());
+            for doc_id in doc_ids {
+                let key = self.key_for(branch_id, space, doc_id);
+                if txn.get(&key)?.is_some() {
+                    txn.delete(key)?;
+                    results.push(true);
+                } else {
+                    results.push(false);
+                }
+            }
+            Ok(results)
+        })
+    }
+
+    /// Delete at path for multiple documents in a single transaction.
+    ///
+    /// Returns a Vec<Result<Version>> for each entry. All deletes share
+    /// one transaction for atomicity.
+    pub fn batch_delete_at_path(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        entries: &[(String, JsonPath)],
+    ) -> StrataResult<Vec<StrataResult<Version>>> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Validate all paths upfront
+        for (_, path) in entries {
+            path.validate().map_err(limit_error_to_error)?;
+        }
+
+        self.db.transaction(*branch_id, |txn| {
+            let mut results = Vec::with_capacity(entries.len());
+            for (doc_id, path) in entries {
+                let key = self.key_for(branch_id, space, doc_id);
+                let result = (|| {
+                    let stored = txn.get(&key)?.ok_or_else(|| {
+                        StrataError::invalid_input(format!("JSON document {} not found", doc_id))
+                    })?;
+                    let mut doc = Self::deserialize_doc(&stored)?;
+                    delete_at_path(&mut doc.value, path)
+                        .map_err(|e| StrataError::invalid_input(format!("Path error: {}", e)))?;
+                    doc.touch();
+                    let serialized = Self::serialize_doc(&doc)?;
+                    txn.put(key, serialized)?;
+                    Ok(Version::counter(doc.version))
+                })();
+                results.push(result);
+            }
+            Ok(results)
+        })
+    }
+
     // ========================================================================
     // Introspection
     // ========================================================================
@@ -703,6 +876,77 @@ impl JsonStore {
             })
         })
     }
+    /// Count documents matching an optional prefix in a single scan.
+    ///
+    /// More efficient than paginated `list()` calls — opens one transaction,
+    /// scans keys without collecting doc IDs or deserializing values.
+    pub fn count(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        prefix: Option<&str>,
+    ) -> StrataResult<u64> {
+        let ns = self.namespace_for(branch_id, space);
+        let scan_prefix = Key::new_json(ns, prefix.unwrap_or(""));
+
+        self.db.transaction(*branch_id, |txn| {
+            let results = txn.scan_prefix(&scan_prefix)?;
+            Ok(results
+                .into_iter()
+                .filter(|(key, _)| key.user_key_string().is_some())
+                .count() as u64)
+        })
+    }
+
+    /// Sample JSON documents with evenly-spaced selection from a single scan.
+    ///
+    /// Performs one `scan_prefix` and reads values inline, avoiding the
+    /// separate `list()` + K `get()` round-trips.
+    pub fn sample(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        prefix: Option<&str>,
+        count: usize,
+    ) -> StrataResult<(u64, Vec<(String, JsonValue)>)> {
+        let ns = self.namespace_for(branch_id, space);
+        let scan_prefix = Key::new_json(ns, prefix.unwrap_or(""));
+
+        self.db.transaction(*branch_id, |txn| {
+            let results = txn.scan_prefix(&scan_prefix)?;
+
+            // Collect entries, deserializing inline
+            let entries: Vec<(String, JsonValue)> = results
+                .into_iter()
+                .filter_map(|(key, value)| {
+                    let doc_id = key.user_key_string()?;
+                    let doc = Self::deserialize_doc(&value).ok()?;
+                    Some((doc_id, doc.value))
+                })
+                .collect();
+
+            let total = entries.len() as u64;
+
+            if count == 0 || entries.is_empty() {
+                return Ok((total, Vec::new()));
+            }
+            if count >= entries.len() {
+                return Ok((total, entries));
+            }
+
+            // Evenly-spaced sampling
+            let step = entries.len() as f64 / count as f64;
+            let sampled = (0..count)
+                .map(|i| {
+                    let idx = (i as f64 * step) as usize;
+                    entries[idx].clone()
+                })
+                .collect();
+
+            Ok((total, sampled))
+        })
+    }
+
     // ========== Time-Travel API ==========
 
     /// Get value at path in a document as of a past timestamp.
@@ -730,25 +974,55 @@ impl JsonStore {
         }
     }
 
-    /// List document IDs as of a past timestamp.
+    /// List document IDs as of a past timestamp, with cursor-based pagination.
+    ///
+    /// Matches the `list()` signature with cursor/limit support.
     pub fn list_at(
         &self,
         branch_id: &BranchId,
         space: &str,
         prefix: Option<&str>,
         as_of_ts: u64,
-    ) -> StrataResult<Vec<String>> {
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> StrataResult<JsonListResult> {
         let ns = self.namespace_for(branch_id, space);
-        // Narrow scan at storage level: if prefix is given, only scan matching keys
         let scan_key = Key::new_json(ns, prefix.unwrap_or(""));
         let results = self.db.scan_prefix_at_timestamp(&scan_key, as_of_ts)?;
-        let mut doc_ids = Vec::new();
+
+        let mut doc_ids = Vec::with_capacity(limit + 1);
+        let mut past_cursor = cursor.is_none();
+
         for (key, _vv) in results {
-            if let Some(doc_id) = key.user_key_string() {
-                doc_ids.push(doc_id);
+            let doc_id = match key.user_key_string() {
+                Some(id) => id,
+                None => continue,
+            };
+
+            if !past_cursor {
+                if cursor == Some(doc_id.as_str()) {
+                    past_cursor = true;
+                }
+                continue;
+            }
+
+            doc_ids.push(doc_id);
+            if doc_ids.len() > limit {
+                break;
             }
         }
-        Ok(doc_ids)
+
+        let next_cursor = if doc_ids.len() > limit {
+            doc_ids.pop();
+            doc_ids.last().cloned()
+        } else {
+            None
+        };
+
+        Ok(JsonListResult {
+            doc_ids,
+            next_cursor,
+        })
     }
 }
 
@@ -776,13 +1050,19 @@ impl crate::search::Searchable for JsonStore {
 // Allows JSON operations within a TransactionContext.
 
 impl JsonStoreExt for TransactionContext {
-    fn json_get(&mut self, doc_id: &str, path: &JsonPath) -> StrataResult<Option<JsonValue>> {
-        // Validate path limits (Issue #440)
+    fn json_get_in_space(
+        &mut self,
+        space: &str,
+        doc_id: &str,
+        path: &JsonPath,
+    ) -> StrataResult<Option<JsonValue>> {
         path.validate().map_err(limit_error_to_error)?;
 
-        let key = Key::new_json(Arc::new(Namespace::for_branch(self.branch_id)), doc_id);
+        let key = Key::new_json(
+            Arc::new(Namespace::for_branch_space(self.branch_id, space)),
+            doc_id,
+        );
 
-        // Read from transaction context (respects read-your-writes)
         match self.get(&key)? {
             Some(value) => {
                 let doc = JsonStore::deserialize_doc(&value)?;
@@ -792,44 +1072,50 @@ impl JsonStoreExt for TransactionContext {
         }
     }
 
-    fn json_set(
+    fn json_set_in_space(
         &mut self,
+        space: &str,
         doc_id: &str,
         path: &JsonPath,
         value: JsonValue,
     ) -> StrataResult<Version> {
-        // Validate path and value limits (Issue #440)
         path.validate().map_err(limit_error_to_error)?;
         value.validate().map_err(limit_error_to_error)?;
 
-        let key = Key::new_json(Arc::new(Namespace::for_branch(self.branch_id)), doc_id);
+        let key = Key::new_json(
+            Arc::new(Namespace::for_branch_space(self.branch_id, space)),
+            doc_id,
+        );
 
-        // Load existing document from transaction context
         let stored = self.get(&key)?.ok_or_else(|| {
             StrataError::invalid_input(format!("JSON document {} not found", doc_id))
         })?;
         let mut doc = JsonStore::deserialize_doc(&stored)?;
 
-        // Apply mutation
         set_at_path(&mut doc.value, path, value)
             .map_err(|e| StrataError::invalid_input(format!("Path error: {}", e)))?;
         doc.touch();
 
-        // Store updated document in transaction write set
         let serialized = JsonStore::serialize_doc(&doc)?;
         self.put(key, serialized)?;
 
         Ok(Version::counter(doc.version))
     }
 
-    fn json_create(&mut self, doc_id: &str, value: JsonValue) -> StrataResult<Version> {
-        // Validate document limits (Issue #440)
+    fn json_create_in_space(
+        &mut self,
+        space: &str,
+        doc_id: &str,
+        value: JsonValue,
+    ) -> StrataResult<Version> {
         value.validate().map_err(limit_error_to_error)?;
 
-        let key = Key::new_json(Arc::new(Namespace::for_branch(self.branch_id)), doc_id);
+        let key = Key::new_json(
+            Arc::new(Namespace::for_branch_space(self.branch_id, space)),
+            doc_id,
+        );
         let doc = JsonDoc::new(doc_id, value);
 
-        // Check if document already exists
         if self.get(&key)?.is_some() {
             return Err(StrataError::invalid_input(format!(
                 "JSON document {} already exists",
@@ -837,7 +1123,6 @@ impl JsonStoreExt for TransactionContext {
             )));
         }
 
-        // Store new document
         let serialized = JsonStore::serialize_doc(&doc)?;
         self.put(key, serialized)?;
 
@@ -1886,8 +2171,8 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 2);
         // Both are new documents, so version should be 1
-        assert_eq!(results[0], Version::counter(1));
-        assert_eq!(results[1], Version::counter(1));
+        assert_eq!(results[0].0, Version::counter(1));
+        assert_eq!(results[1].0, Version::counter(1));
 
         // Verify persistence
         let v1 = store
@@ -1935,7 +2220,7 @@ mod tests {
         let results = store
             .batch_set_or_create(&branch_id, "default", entries)
             .unwrap();
-        assert_eq!(results[0], Version::counter(2));
+        assert_eq!(results[0].0, Version::counter(2));
 
         let v = store
             .get(&branch_id, "default", "existing", &JsonPath::root())
@@ -2083,5 +2368,542 @@ mod tests {
              timestamp mismatch between JsonDoc.updated_at and StoredValue.timestamp"
         );
         assert_eq!(result.unwrap(), JsonValue::from("v1"));
+    }
+
+    // ========== Issue #1948: JSON Test Coverage Gaps ==========
+
+    // Scenario 1: set_or_create on non-existent doc with non-root path
+    #[test]
+    fn test_set_or_create_nonexistent_with_nested_path() {
+        let db = Database::cache().unwrap();
+        let store = JsonStore::new(db);
+        let branch_id = BranchId::new();
+
+        // Create doc via set_or_create at a nested path — doc doesn't exist
+        let path = JsonPath::root().key("user").key("name");
+        let (version, full_doc) = store
+            .set_or_create(
+                &branch_id,
+                "default",
+                "doc1",
+                &path,
+                JsonValue::from("Alice"),
+            )
+            .unwrap();
+        assert_eq!(version, Version::counter(1));
+
+        // full_doc should be an object with user.name = "Alice"
+        let name = get_at_path(&full_doc, &path);
+        assert_eq!(name.and_then(|v| v.as_str()), Some("Alice"));
+
+        // Verify root is an object, not the string itself
+        assert!(full_doc.is_object());
+
+        // Read back
+        let result = store
+            .get(&branch_id, "default", "doc1", &JsonPath::root())
+            .unwrap()
+            .unwrap();
+        assert!(result.is_object());
+        let name_val = get_at_path(&result, &path);
+        assert_eq!(name_val.and_then(|v| v.as_str()), Some("Alice"));
+    }
+
+    // Scenario 2: Concurrent set on same document (with OCC retry)
+    #[test]
+    fn test_concurrent_set_same_document() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let db = Database::cache().unwrap();
+        let store = Arc::new(JsonStore::new(db));
+        let branch_id = BranchId::new();
+
+        // Create a document (must be an object so field-level sets work)
+        store
+            .create(&branch_id, "default", "shared", JsonValue::object())
+            .unwrap();
+
+        // Spawn 10 threads, each setting a different field.
+        // Retry on OCC conflict (expected under contention).
+        let handles: Vec<_> = (0..10)
+            .map(|i| {
+                let store = Arc::clone(&store);
+                let bid = branch_id;
+                thread::spawn(move || {
+                    let path = JsonPath::root().key(format!("field_{}", i));
+                    for _ in 0..20 {
+                        match store.set_or_create(
+                            &bid,
+                            "default",
+                            "shared",
+                            &path,
+                            JsonValue::from(i as i64),
+                        ) {
+                            Ok(_) => return,
+                            Err(e) if e.to_string().contains("conflict") => continue,
+                            Err(e) => panic!("Unexpected error: {}", e),
+                        }
+                    }
+                    panic!("Failed to write field_{} after 20 retries", i);
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // All 10 fields should be present
+        let doc = store
+            .get(&branch_id, "default", "shared", &JsonPath::root())
+            .unwrap()
+            .unwrap();
+
+        for i in 0..10 {
+            let path = JsonPath::root().key(format!("field_{}", i));
+            let val = get_at_path(&doc, &path);
+            assert!(val.is_some(), "field_{} missing after concurrent writes", i);
+        }
+    }
+
+    // Scenario 4: Path at exactly MAX_PATH_LENGTH (256 segments) boundary
+    #[test]
+    fn test_path_at_max_length_boundary() {
+        use strata_core::primitives::json::MAX_PATH_LENGTH;
+
+        // Build a path with exactly MAX_PATH_LENGTH segments — should succeed
+        let mut path = JsonPath::root();
+        for i in 0..MAX_PATH_LENGTH {
+            path = path.key(format!("k{}", i));
+        }
+        assert!(
+            path.validate().is_ok(),
+            "Path at exactly MAX_PATH_LENGTH should be valid"
+        );
+
+        // One more segment should fail
+        let over_path = path.key("extra");
+        assert!(
+            over_path.validate().is_err(),
+            "Path exceeding MAX_PATH_LENGTH should fail"
+        );
+    }
+
+    // Scenario 5: getv() returns version history with correct values
+    #[test]
+    fn test_getv_version_history() {
+        let db = Database::cache().unwrap();
+        let store = JsonStore::new(db);
+        let branch_id = BranchId::new();
+
+        // Create and update a document to produce version history
+        store
+            .create(&branch_id, "default", "doc1", JsonValue::from("v1"))
+            .unwrap();
+        store
+            .set(
+                &branch_id,
+                "default",
+                "doc1",
+                &JsonPath::root(),
+                JsonValue::from("v2"),
+            )
+            .unwrap();
+
+        let history = store.getv(&branch_id, "default", "doc1").unwrap();
+        assert!(history.is_some());
+        let versions = history.unwrap().into_versions();
+        assert!(versions.len() >= 1, "Should have at least one version");
+        // Latest version should be "v2"
+        assert_eq!(versions[0].value.as_str(), Some("v2"));
+    }
+
+    // Scenario 5b: getv() gracefully handles corrupt bytes (deserialization failure)
+    #[test]
+    fn test_getv_corrupt_deserialization() {
+        // Verify that deserialize_doc on garbage bytes returns Err (not panic)
+        let garbage = Value::Bytes(vec![0xFF, 0x01, 0x02, 0x03]);
+        let result = JsonStore::deserialize_doc(&garbage);
+        assert!(result.is_err(), "Corrupt bytes should return Err");
+
+        // Empty bytes should also return Err
+        let empty = Value::Bytes(vec![]);
+        let result = JsonStore::deserialize_doc(&empty);
+        assert!(result.is_err(), "Empty bytes should return Err");
+
+        // Non-bytes value should return Err
+        let wrong_type = Value::Int(42);
+        let result = JsonStore::deserialize_doc(&wrong_type);
+        assert!(result.is_err(), "Non-bytes value should return Err");
+    }
+
+    // Scenario 6: batch_set with mix of creates and updates
+    #[test]
+    fn test_batch_set_mixed_creates_and_updates() {
+        let db = Database::cache().unwrap();
+        let store = JsonStore::new(db);
+        let branch_id = BranchId::new();
+
+        // Pre-create doc1
+        store
+            .create(&branch_id, "default", "doc1", JsonValue::from("original"))
+            .unwrap();
+
+        // Batch: update doc1, create doc2 and doc3
+        let entries = vec![
+            (
+                "doc1".to_string(),
+                JsonPath::root(),
+                JsonValue::from("updated"),
+            ),
+            (
+                "doc2".to_string(),
+                JsonPath::root(),
+                JsonValue::from("new_2"),
+            ),
+            (
+                "doc3".to_string(),
+                JsonPath::root().key("nested"),
+                JsonValue::from("new_3"),
+            ),
+        ];
+
+        let results = store
+            .batch_set_or_create(&branch_id, "default", entries)
+            .unwrap();
+        assert_eq!(results.len(), 3);
+        // doc1 was updated (version 2), doc2 and doc3 are new (version 1)
+        assert_eq!(results[0].0, Version::counter(2));
+        assert_eq!(results[1].0, Version::counter(1));
+        assert_eq!(results[2].0, Version::counter(1));
+
+        // Verify values
+        let v1 = store
+            .get(&branch_id, "default", "doc1", &JsonPath::root())
+            .unwrap()
+            .unwrap();
+        assert_eq!(v1.as_str(), Some("updated"));
+
+        let v2 = store
+            .get(&branch_id, "default", "doc2", &JsonPath::root())
+            .unwrap()
+            .unwrap();
+        assert_eq!(v2.as_str(), Some("new_2"));
+
+        // doc3 was created with non-root path — should be an object
+        let v3 = store
+            .get(&branch_id, "default", "doc3", &JsonPath::root())
+            .unwrap()
+            .unwrap();
+        assert!(v3.is_object());
+    }
+
+    // Scenario 7: list() cursor on deleted document
+    #[test]
+    fn test_list_cursor_after_delete() {
+        let db = Database::cache().unwrap();
+        let store = JsonStore::new(db);
+        let branch_id = BranchId::new();
+
+        // Create docs a, b, c, d, e
+        for name in &["a", "b", "c", "d", "e"] {
+            store
+                .create(&branch_id, "default", name, JsonValue::object())
+                .unwrap();
+        }
+
+        // Page 1: get first 2
+        let page1 = store.list(&branch_id, "default", None, None, 2).unwrap();
+        assert_eq!(page1.doc_ids.len(), 2);
+        assert_eq!(page1.doc_ids, vec!["a", "b"]);
+        assert!(page1.next_cursor.is_some());
+
+        // Delete "c" (which would be next)
+        store.destroy(&branch_id, "default", "c").unwrap();
+
+        // Page 2: continue from cursor — "c" should be skipped
+        let page2 = store
+            .list(
+                &branch_id,
+                "default",
+                None,
+                page1.next_cursor.as_deref(),
+                2,
+            )
+            .unwrap();
+        assert_eq!(page2.doc_ids.len(), 2);
+        assert_eq!(page2.doc_ids, vec!["d", "e"]);
+    }
+
+    // Scenario 8: get_at() with timestamp between two versions
+    #[test]
+    fn test_get_at_between_versions() {
+        let db = Database::cache().unwrap();
+        let store = JsonStore::new(db);
+        let branch_id = BranchId::new();
+
+        // Create doc
+        store
+            .create(&branch_id, "default", "doc1", JsonValue::from("v1"))
+            .unwrap();
+
+        // Get timestamp of v1
+        let v1_versioned = store
+            .get_versioned(&branch_id, "default", "doc1", &JsonPath::root())
+            .unwrap()
+            .unwrap();
+        let ts_v1 = v1_versioned.timestamp.as_micros();
+
+        // Sleep briefly to separate timestamps
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // Compute a timestamp between v1 and v2
+        let ts_between = ts_v1 + 1000; // 1ms later
+
+        // Update to v2
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store
+            .set(
+                &branch_id,
+                "default",
+                "doc1",
+                &JsonPath::root(),
+                JsonValue::from("v2"),
+            )
+            .unwrap();
+
+        // get_at with timestamp between v1 and v2 should return v1
+        let result = store
+            .get_at(&branch_id, "default", "doc1", &JsonPath::root(), ts_between)
+            .unwrap();
+        assert!(result.is_some(), "Should find v1 at timestamp between v1 and v2");
+        assert_eq!(result.unwrap(), JsonValue::from("v1"));
+    }
+
+    // Scenario 9: batch_destroy atomicity
+    #[test]
+    fn test_batch_destroy_atomicity() {
+        let db = Database::cache().unwrap();
+        let store = JsonStore::new(db);
+        let branch_id = BranchId::new();
+
+        // Create docs
+        for name in &["a", "b", "c"] {
+            store
+                .create(&branch_id, "default", name, JsonValue::object())
+                .unwrap();
+        }
+
+        // Batch destroy including one that doesn't exist
+        let doc_ids: Vec<String> = vec!["a", "b", "nonexistent", "c"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let results = store
+            .batch_destroy(&branch_id, "default", &doc_ids)
+            .unwrap();
+        assert_eq!(results, vec![true, true, false, true]);
+
+        // All should be gone
+        assert!(!store.exists(&branch_id, "default", "a").unwrap());
+        assert!(!store.exists(&branch_id, "default", "b").unwrap());
+        assert!(!store.exists(&branch_id, "default", "c").unwrap());
+    }
+
+    // Scenario 10: JsonStoreExt in non-default space
+    #[test]
+    fn test_json_store_ext_non_default_space() {
+        use crate::primitives::extensions::JsonStoreExt;
+
+        let db = Database::cache().unwrap();
+        let store = JsonStore::new(db.clone());
+        let branch_id = BranchId::new();
+
+        // Create a doc in "custom" space via the store directly
+        store
+            .create(&branch_id, "custom", "doc1", JsonValue::from("hello"))
+            .unwrap();
+
+        // Read it back via JsonStoreExt _in_space method
+        db.transaction(branch_id, |txn| {
+            let result = txn.json_get_in_space("custom", "doc1", &JsonPath::root())?;
+            assert!(result.is_some(), "Should find doc in custom space via ext");
+            assert_eq!(result.unwrap().as_str(), Some("hello"));
+
+            // Verify default space doesn't have it
+            let default_result = txn.json_get("doc1", &JsonPath::root())?;
+            assert!(default_result.is_none(), "Default space should not have custom space doc");
+
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    // Scenario 11: count() and sample() engine methods
+    #[test]
+    fn test_count_single_scan() {
+        let db = Database::cache().unwrap();
+        let store = JsonStore::new(db);
+        let branch_id = BranchId::new();
+
+        assert_eq!(store.count(&branch_id, "default", None).unwrap(), 0);
+
+        for i in 0..5 {
+            store
+                .create(
+                    &branch_id,
+                    "default",
+                    &format!("doc{}", i),
+                    JsonValue::from(i as i64),
+                )
+                .unwrap();
+        }
+        assert_eq!(store.count(&branch_id, "default", None).unwrap(), 5);
+
+        // With prefix
+        store
+            .create(&branch_id, "default", "other", JsonValue::object())
+            .unwrap();
+        assert_eq!(
+            store.count(&branch_id, "default", Some("doc")).unwrap(),
+            5
+        );
+        assert_eq!(store.count(&branch_id, "default", None).unwrap(), 6);
+    }
+
+    #[test]
+    fn test_sample_single_scan() {
+        let db = Database::cache().unwrap();
+        let store = JsonStore::new(db);
+        let branch_id = BranchId::new();
+
+        for i in 0..10 {
+            store
+                .create(
+                    &branch_id,
+                    "default",
+                    &format!("doc{:02}", i),
+                    JsonValue::from(i as i64),
+                )
+                .unwrap();
+        }
+
+        // Sample 3 of 10
+        let (total, sampled) = store.sample(&branch_id, "default", None, 3).unwrap();
+        assert_eq!(total, 10);
+        assert_eq!(sampled.len(), 3);
+
+        // Sample more than exist
+        let (total, sampled) = store.sample(&branch_id, "default", None, 20).unwrap();
+        assert_eq!(total, 10);
+        assert_eq!(sampled.len(), 10);
+
+        // Sample 0
+        let (total, sampled) = store.sample(&branch_id, "default", None, 0).unwrap();
+        assert_eq!(total, 10);
+        assert_eq!(sampled.len(), 0);
+    }
+
+    // Scenario: batch_get transactional consistency
+    #[test]
+    fn test_batch_get_single_transaction() {
+        let db = Database::cache().unwrap();
+        let store = JsonStore::new(db);
+        let branch_id = BranchId::new();
+
+        store
+            .create(&branch_id, "default", "a", JsonValue::from("val_a"))
+            .unwrap();
+        store
+            .create(&branch_id, "default", "b", JsonValue::from("val_b"))
+            .unwrap();
+
+        let entries = vec![
+            ("a".to_string(), JsonPath::root()),
+            ("nonexistent".to_string(), JsonPath::root()),
+            ("b".to_string(), JsonPath::root()),
+        ];
+
+        let results = store.batch_get(&branch_id, "default", &entries).unwrap();
+        assert_eq!(results.len(), 3);
+        assert!(results[0].is_some());
+        assert_eq!(results[0].as_ref().unwrap().value.as_str(), Some("val_a"));
+        assert!(results[1].is_none()); // nonexistent
+        assert!(results[2].is_some());
+        assert_eq!(results[2].as_ref().unwrap().value.as_str(), Some("val_b"));
+    }
+
+    // Scenario: list_at with pagination
+    #[test]
+    fn test_list_at_with_pagination() {
+        let db = Database::cache().unwrap();
+        let store = JsonStore::new(db);
+        let branch_id = BranchId::new();
+
+        // Create 5 docs
+        for i in 0..5 {
+            store
+                .create(
+                    &branch_id,
+                    "default",
+                    &format!("doc{}", i),
+                    JsonValue::from(i as i64),
+                )
+                .unwrap();
+        }
+
+        // Get timestamp after all docs exist
+        let versioned = store
+            .get_versioned(&branch_id, "default", "doc4", &JsonPath::root())
+            .unwrap()
+            .unwrap();
+        let ts = versioned.timestamp.as_micros();
+
+        // Paginated list_at: page 1
+        let page1 = store
+            .list_at(&branch_id, "default", None, ts, None, 2)
+            .unwrap();
+        assert_eq!(page1.doc_ids.len(), 2);
+        assert!(page1.next_cursor.is_some());
+
+        // Page 2
+        let page2 = store
+            .list_at(&branch_id, "default", None, ts, page1.next_cursor.as_deref(), 2)
+            .unwrap();
+        assert_eq!(page2.doc_ids.len(), 2);
+
+        // Page 3 (last page)
+        let page3 = store
+            .list_at(&branch_id, "default", None, ts, page2.next_cursor.as_deref(), 2)
+            .unwrap();
+        assert_eq!(page3.doc_ids.len(), 1);
+        assert!(page3.next_cursor.is_none());
+    }
+
+    // Scenario: format version backward compatibility
+    #[test]
+    fn test_format_version_backward_compat() {
+        // Simulate v1 format (no version header — raw MessagePack)
+        let doc = JsonDoc::new("test", JsonValue::from("hello"));
+        let raw_msgpack =
+            rmp_serde::to_vec(&doc).unwrap();
+        let v1_value = Value::Bytes(raw_msgpack);
+
+        // v1 should deserialize successfully
+        let deserialized = JsonStore::deserialize_doc(&v1_value).unwrap();
+        assert_eq!(deserialized.id, "test");
+        assert_eq!(deserialized.value.as_str(), Some("hello"));
+
+        // v2 format (with version byte)
+        let v2_value = JsonStore::serialize_doc(&doc).unwrap();
+        let deserialized2 = JsonStore::deserialize_doc(&v2_value).unwrap();
+        assert_eq!(deserialized2.id, "test");
+        assert_eq!(deserialized2.value.as_str(), Some("hello"));
+
+        // Verify v2 has the version byte prefix
+        if let Value::Bytes(bytes) = &v2_value {
+            assert_eq!(bytes[0], JsonStore::FORMAT_VERSION);
+        }
     }
 }

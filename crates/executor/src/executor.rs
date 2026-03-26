@@ -524,7 +524,15 @@ impl Executor {
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 if let Some(ts) = as_of {
-                    crate::handlers::json::json_list_at(&self.primitives, branch, space, prefix, ts)
+                    crate::handlers::json::json_list_at(
+                        &self.primitives,
+                        branch,
+                        space,
+                        prefix,
+                        ts,
+                        cursor,
+                        limit,
+                    )
                 } else {
                     crate::handlers::json::json_list(
                         &self.primitives,
