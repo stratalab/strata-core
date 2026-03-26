@@ -252,7 +252,7 @@ impl VectorStore {
                 let collection_id = CollectionId::new(branch_id, &collection_name);
 
                 // Grab the old backend (if any) so we can read embeddings
-                // from it for lite records that don't store them in KV.
+                // from it for legacy records that don't store them in KV.
                 let old_backend = state.backends.remove(&collection_id).map(|(_, v)| v);
 
                 // If we have a source branch, build a map from user_key → VectorId
@@ -353,7 +353,7 @@ impl VectorStore {
                                             tracing::warn!(
                                                 target: "strata::vector",
                                                 vector_id = vec_record.vector_id,
-                                                "Lite record: embedding not found, skipping"
+                                                "Empty-embedding record: embedding not found, skipping"
                                             );
                                             continue;
                                         }
@@ -366,7 +366,7 @@ impl VectorStore {
                                         tracing::warn!(
                                             target: "strata::vector",
                                             vector_id = vec_record.vector_id,
-                                            "Lite record without backend embedding, skipping"
+                                            "Empty-embedding record: backend embedding not found, skipping"
                                         );
                                         continue;
                                     }
@@ -389,7 +389,7 @@ impl VectorStore {
                                                 tracing::warn!(
                                                     target: "strata::vector",
                                                     vector_id = vec_record.vector_id,
-                                                    "Lite record: embedding not found, skipping"
+                                                    "Empty-embedding record: embedding not found, skipping"
                                                 );
                                                 continue;
                                             }
@@ -398,7 +398,7 @@ impl VectorStore {
                                         tracing::warn!(
                                             target: "strata::vector",
                                             vector_id = vec_record.vector_id,
-                                            "Lite record without old backend embedding, skipping"
+                                            "Empty-embedding record: old backend embedding not found, skipping"
                                         );
                                         continue;
                                     }

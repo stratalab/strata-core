@@ -59,10 +59,12 @@ pub struct VectorRecord {
     /// Internal vector ID (maps to VectorHeap)
     pub vector_id: u64,
 
-    /// The embedding vector (stored for history support)
+    /// The embedding vector (always stored for history + recovery)
     ///
     /// Stored as Vec<f32> and serialized to bytes via MessagePack.
-    /// This enables history() to return complete vector snapshots.
+    /// This enables history() and get_at() to return complete vector snapshots,
+    /// and ensures vectors survive recovery without mmap cache.
+    /// Must never be empty for newly created records (#1962).
     /// Backwards compatible: old records without this field will deserialize as empty vec.
     #[serde(default)]
     pub embedding: Vec<f32>,
@@ -125,53 +127,9 @@ impl VectorRecord {
         }
     }
 
-    /// Create a new VectorRecord without storing the embedding in KV.
-    ///
-    /// The embedding is stored only in the VectorHeap (and its mmap cache).
-    /// This saves ~1.5 KB per vector in KV storage. The `get_at()` fallback
-    /// path already handles empty embeddings by reading from the backend.
-    pub fn new_lite(vector_id: VectorId, metadata: Option<JsonValue>) -> Self {
-        let now = now_micros();
-        VectorRecord {
-            vector_id: vector_id.as_u64(),
-            embedding: Vec::new(),
-            metadata,
-            version: 1,
-            created_at: now,
-            updated_at: now,
-            source_ref: None,
-        }
-    }
-
-    /// Create a lite VectorRecord with a source reference (no embedding in KV).
-    pub fn new_lite_with_source(
-        vector_id: VectorId,
-        metadata: Option<JsonValue>,
-        source_ref: EntityRef,
-    ) -> Self {
-        let now = now_micros();
-        VectorRecord {
-            vector_id: vector_id.as_u64(),
-            embedding: Vec::new(),
-            metadata,
-            version: 1,
-            created_at: now,
-            updated_at: now,
-            source_ref: Some(source_ref),
-        }
-    }
-
     /// Update embedding, metadata and version
     pub fn update(&mut self, embedding: Vec<f32>, metadata: Option<JsonValue>) {
         self.embedding = embedding;
-        self.metadata = metadata;
-        self.version += 1;
-        self.updated_at = now_micros();
-    }
-
-    /// Update metadata and version without storing the embedding in KV.
-    pub fn update_lite(&mut self, metadata: Option<JsonValue>) {
-        self.embedding = Vec::new();
         self.metadata = metadata;
         self.version += 1;
         self.updated_at = now_micros();
@@ -185,19 +143,6 @@ impl VectorRecord {
         source_ref: Option<EntityRef>,
     ) {
         self.embedding = embedding;
-        self.metadata = metadata;
-        self.source_ref = source_ref;
-        self.version += 1;
-        self.updated_at = now_micros();
-    }
-
-    /// Update metadata, source reference, and version without storing embedding in KV.
-    pub fn update_lite_with_source(
-        &mut self,
-        metadata: Option<JsonValue>,
-        source_ref: Option<EntityRef>,
-    ) {
-        self.embedding = Vec::new();
         self.metadata = metadata;
         self.source_ref = source_ref;
         self.version += 1;

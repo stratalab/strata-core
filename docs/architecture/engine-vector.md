@@ -665,7 +665,6 @@ struct RecoveryStats {
     vectors_upserted: usize,        // full KV path
     vectors_mmap_registered: usize,  // mmap fast path
     vectors_deleted: usize,
-    lite_records_skipped: usize,     // new_lite() records without mmap
 }
 ```
 

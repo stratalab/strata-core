@@ -242,16 +242,14 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                     );
                     stats.vectors_upserted += 1;
                 } else if vec_record.embedding.is_empty() {
-                    // Lite record (embedding stripped from KV): skip during full
-                    // KV-based recovery. The embedding only exists in the mmap
-                    // cache, so this vector will be available on the next open
-                    // that successfully loads the mmap file.
+                    // Legacy record with no embedding (pre-#1962 lite mode or
+                    // old records deserialized via #[serde(default)]). Cannot
+                    // recover without the embedding — skip.
                     tracing::warn!(
                         target: "strata::vector",
                         vector_id = vec_record.vector_id,
-                        "Skipping lite record (no embedding) during KV-based recovery"
+                        "Skipping record with empty embedding during recovery"
                     );
-                    stats.lite_records_skipped += 1;
                     continue;
                 } else {
                     // Full KV-based recovery: insert embedding + timestamp
@@ -343,7 +341,6 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
             collections_created = stats.collections_created,
             vectors_upserted = stats.vectors_upserted,
             vectors_mmap_registered = stats.vectors_mmap_registered,
-            lite_records_skipped = stats.lite_records_skipped,
             mmap_cache = use_mmap,
             "Vector recovery complete"
         );
@@ -620,7 +617,7 @@ impl strata_engine::RefreshHook for VectorRefreshHook {
                 let vid = super::VectorId::new(vec_record.vector_id);
 
                 if vec_record.embedding.is_empty() {
-                    // Lite record — try to copy embedding from source branch backend
+                    // Legacy empty-embedding record — try to copy from source branch backend
                     if let Some(src) = source_branch {
                         let src_cid = super::CollectionId::new(src, &collection_name);
                         if let Some(src_backend) = self.state.backends.get(&src_cid) {
