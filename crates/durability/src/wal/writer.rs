@@ -235,12 +235,7 @@ impl WalWriter {
     ///
     /// Handles segment rotation, writing, metadata tracking, and counter updates.
     /// Callers are responsible for encoding and post-write sync behavior.
-    fn append_inner(
-        &mut self,
-        encoded: &[u8],
-        txn_id: u64,
-        timestamp: u64,
-    ) -> std::io::Result<()> {
+    fn append_inner(&mut self, encoded: &[u8], txn_id: u64, timestamp: u64) -> std::io::Result<()> {
         let segment = self
             .segment
             .as_mut()

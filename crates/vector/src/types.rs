@@ -283,20 +283,15 @@ impl VectorMatchWithSource {
 ///
 /// Stored as a byte in `CollectionRecord` for persistence.
 /// Defaults to `SegmentedHnsw` (the most capable backend).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IndexBackendType {
     /// Brute-force O(n) scan — lowest memory, best for small collections.
     BruteForce,
     /// Single-segment HNSW graph.
     Hnsw,
     /// Segmented HNSW with auto-sealing — default for all collections.
+    #[default]
     SegmentedHnsw,
-}
-
-impl Default for IndexBackendType {
-    fn default() -> Self {
-        IndexBackendType::SegmentedHnsw
-    }
 }
 
 impl IndexBackendType {

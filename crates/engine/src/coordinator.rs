@@ -1904,7 +1904,10 @@ mod tests {
         // Complete txn3 → full drain → gc_safe = current_version
         coordinator.record_commit(3);
         let gc = coordinator.min_active_version().unwrap();
-        assert!(gc > 0, "full drain should advance gc_safe to current_version");
+        assert!(
+            gc > 0,
+            "full drain should advance gc_safe to current_version"
+        );
     }
 
     // =========================================================================
@@ -1918,9 +1921,7 @@ mod tests {
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
-        let mut txn = coordinator
-            .start_transaction(branch_id, &storage)
-            .unwrap();
+        let mut txn = coordinator.start_transaction(branch_id, &storage).unwrap();
         assert_eq!(coordinator.metrics().active_count, 1);
 
         std::thread::sleep(Duration::from_millis(5));
@@ -1947,9 +1948,7 @@ mod tests {
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
-        let mut txn = coordinator
-            .start_transaction(branch_id, &storage)
-            .unwrap();
+        let mut txn = coordinator.start_transaction(branch_id, &storage).unwrap();
         assert!(txn.is_active());
 
         std::thread::sleep(Duration::from_millis(5));

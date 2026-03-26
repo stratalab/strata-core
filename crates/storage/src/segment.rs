@@ -199,8 +199,8 @@ impl KVSegment {
             .as_slice()
             .try_into()
             .map_err(|_| invalid_data!("header size mismatch"))?;
-        let header = parse_header(header_bytes)
-            .ok_or_else(|| invalid_data!("invalid segment header"))?;
+        let header =
+            parse_header(header_bytes).ok_or_else(|| invalid_data!("invalid segment header"))?;
 
         // Parse footer via pread (last FOOTER_SZ bytes)
         let footer_offset = file_size - FOOTER_SZ as u64;
@@ -232,8 +232,8 @@ impl KVSegment {
         let idx_buf = pread_exact(&file, idx_off, idx_len)?;
         let (_, idx_data) = parse_framed_block(&idx_buf)
             .ok_or_else(|| invalid_data!("index block CRC mismatch"))?;
-        let index_entries = parse_index_block(idx_data)
-            .ok_or_else(|| invalid_data!("malformed index block"))?;
+        let index_entries =
+            parse_index_block(idx_data).ok_or_else(|| invalid_data!("malformed index block"))?;
         let index = if footer.index_type == IDX_TYPE_PARTITIONED {
             // Eagerly load all sub-index partitions into memory.
             let mut sub_indexes = Vec::with_capacity(index_entries.len());
@@ -262,15 +262,15 @@ impl KVSegment {
         let fi_buf = pread_exact(&file, fi_off, fi_len)?;
         let (_, fi_data) = parse_framed_block(&fi_buf)
             .ok_or_else(|| invalid_data!("filter index block CRC mismatch"))?;
-        let filter_index = parse_filter_index(fi_data)
-            .ok_or_else(|| invalid_data!("malformed filter index"))?;
+        let filter_index =
+            parse_filter_index(fi_data).ok_or_else(|| invalid_data!("malformed filter index"))?;
 
         // Eagerly load all bloom partition data into memory.
         let mut bloom_partitions = Vec::with_capacity(filter_index.len());
         for entry in &filter_index {
             let raw = pread_exact(&file, entry.block_offset, entry.block_data_len as usize)?;
-            let (_, data) =
-                parse_framed_block(&raw).ok_or_else(|| invalid_data!("bloom partition CRC mismatch"))?;
+            let (_, data) = parse_framed_block(&raw)
+                .ok_or_else(|| invalid_data!("bloom partition CRC mismatch"))?;
             bloom_partitions.push(Arc::new(data.to_vec()));
         }
         let bloom = PartitionedBloom {
@@ -861,6 +861,7 @@ fn block_data_end(data: &[u8]) -> usize {
 ///
 /// Returns `Some(block_data)` on success, `None` if all partitions exhausted,
 /// or the corruption error string if a block read fails.
+#[allow(clippy::type_complexity)]
 fn load_next_block(
     segment: &KVSegment,
     partition_idx: &mut usize,

@@ -985,8 +985,7 @@ impl SegmentedStore {
                     }
 
                     let typed_key = ik.typed_key_prefix();
-                    let Some(child_typed_key) =
-                        rewrite_branch_id_bytes(typed_key, child_branch_id)
+                    let Some(child_typed_key) = rewrite_branch_id_bytes(typed_key, child_branch_id)
                     else {
                         continue;
                     };

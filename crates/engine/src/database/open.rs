@@ -1,5 +1,6 @@
 //! Database opening and initialization.
 
+use super::config::StorageConfig;
 use crate::background::BackgroundScheduler;
 use crate::coordinator::TransactionCoordinator;
 use dashmap::DashMap;
@@ -12,7 +13,6 @@ use strata_concurrency::RecoveryCoordinator;
 use strata_durability::codec::IdentityCodec;
 use strata_durability::wal::{DurabilityMode, WalConfig, WalWriter};
 use strata_storage::SegmentedStore;
-use super::config::StorageConfig;
 use tracing::{info, warn};
 
 /// Apply all storage configuration settings to a SegmentedStore.

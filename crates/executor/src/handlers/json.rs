@@ -354,8 +354,8 @@ pub fn json_batch_get(
 
     // Merge engine results
     for (j, orig_idx) in orig_indices.iter().enumerate() {
-        match &engine_results[j] {
-            Some(versioned) => match convert_result(json_to_value(versioned.value.clone())) {
+        if let Some(versioned) = &engine_results[j] {
+            match convert_result(json_to_value(versioned.value.clone())) {
                 Ok(value) => {
                     results[*orig_idx].value = Some(value);
                     results[*orig_idx].version = Some(extract_version(&versioned.version));
@@ -364,8 +364,7 @@ pub fn json_batch_get(
                 Err(e) => {
                     results[*orig_idx].error = Some(e.to_string());
                 }
-            },
-            None => {} // already initialized as None
+            }
         }
     }
 

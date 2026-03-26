@@ -183,7 +183,10 @@ impl HybridSearch {
                             any_truncated = true;
                             break;
                         }
-                        let sub_req = req.clone().with_budget(*budget).with_snapshot_version(snapshot_version);
+                        let sub_req = req
+                            .clone()
+                            .with_budget(*budget)
+                            .with_snapshot_version(snapshot_version);
                         let result = self.search_primitive(*primitive, &sub_req)?;
                         total_candidates += result.stats.candidates_considered;
                         if result.truncated {
@@ -212,7 +215,10 @@ impl HybridSearch {
                         any_truncated = true;
                         break;
                     }
-                    let sub_req = req.clone().with_budget(*budget).with_snapshot_version(snapshot_version);
+                    let sub_req = req
+                        .clone()
+                        .with_budget(*budget)
+                        .with_snapshot_version(snapshot_version);
                     let result = self.search_primitive(*primitive, &sub_req)?;
                     total_candidates += result.stats.candidates_considered;
                     if result.truncated {

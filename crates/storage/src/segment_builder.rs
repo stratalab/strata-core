@@ -291,7 +291,7 @@ impl SegmentBuilder {
                     &mut index_entries,
                 )?;
                 pending_index = Some((block_last, file_offset, on_disk_data_len));
-                file_offset += framed_size as u64;
+                file_offset += framed_size;
                 block_buf.clear();
                 restart_offsets.clear();
                 restart_offsets.push(0);
@@ -329,7 +329,7 @@ impl SegmentBuilder {
             )?;
             let shortened = shorten_final_index_key(&block_last);
             index_entries.push((shortened, file_offset, on_disk_data_len));
-            file_offset += framed_size as u64;
+            file_offset += framed_size;
             block_buf.clear();
         }
 
@@ -472,6 +472,7 @@ impl SegmentBuilder {
 /// index entry, write the compressed block, and apply rate limiting.
 ///
 /// Returns `(framed_size, on_disk_data_len)`.
+#[allow(clippy::too_many_arguments)]
 fn flush_data_block(
     w: &mut BufWriter<std::fs::File>,
     block_buf: &mut Vec<u8>,
@@ -492,13 +493,8 @@ fn flush_data_block(
         index_entries.push((shortened, offset, len));
     }
 
-    let framed_size = write_framed_block_compressed(
-        w,
-        BLOCK_TYPE_DATA,
-        block_buf,
-        compression,
-        zstd_compressor,
-    )?;
+    let framed_size =
+        write_framed_block_compressed(w, BLOCK_TYPE_DATA, block_buf, compression, zstd_compressor)?;
     let on_disk_data_len = (framed_size - BLOCK_FRAME_OVERHEAD) as u32;
     if let Some(limiter) = rate_limiter {
         limiter.acquire(framed_size as u64);
