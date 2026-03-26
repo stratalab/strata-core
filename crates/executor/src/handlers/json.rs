@@ -183,7 +183,9 @@ pub fn json_delete(
             }
             Err(e) => {
                 let err_str = e.to_string();
-                // Distinguish: path-not-found → deleted=false, type mismatch/OOB → error
+                // Distinguish: path/doc not-found → deleted=false, type mismatch/OOB → error.
+                // Uses string matching because the engine wraps JsonPathError variants
+                // into StrataError::invalid_input, losing the enum discriminant.
                 if err_str.contains("not found") {
                     Ok(Output::DeleteResult {
                         key,
@@ -458,8 +460,9 @@ pub fn json_batch_delete(
                 }
                 Err(e) => {
                     let err_str = e.to_string();
-                    // Match single json_delete behavior: path-not-found or
-                    // doc-not-found → deleted=false
+                    // Match single json_delete behavior: path/doc not-found → deleted=false.
+                    // String matching because engine wraps JsonPathError into
+                    // StrataError::invalid_input (see single delete handler).
                     if err_str.contains("Path error:") || err_str.contains("not found") {
                         results[*orig_idx].version = Some(0);
                     } else {

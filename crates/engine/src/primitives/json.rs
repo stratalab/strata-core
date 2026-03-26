@@ -442,10 +442,9 @@ impl JsonStore {
                     .map_err(|e| StrataError::invalid_input(format!("Path error: {}", e)))?;
                 doc.value.validate().map_err(limit_error_to_error)?;
                 doc.touch();
-                let full_value = doc.value.clone();
                 let serialized = Self::serialize_doc(&doc)?;
                 txn.put(key.clone(), serialized)?;
-                Ok((Version::counter(doc.version), full_value))
+                Ok((Version::counter(doc.version), doc.value))
             }
             None if create_if_missing => {
                 let initial = if path.is_root() {
@@ -458,10 +457,9 @@ impl JsonStore {
                 };
                 initial.validate().map_err(limit_error_to_error)?;
                 let doc = JsonDoc::new(doc_id, initial);
-                let full_value = doc.value.clone();
                 let serialized = Self::serialize_doc(&doc)?;
                 txn.put(key.clone(), serialized)?;
-                Ok((Version::counter(doc.version), full_value))
+                Ok((Version::counter(doc.version), doc.value))
             }
             None => Err(StrataError::invalid_input(format!(
                 "JSON document {} not found",
@@ -528,6 +526,12 @@ impl JsonStore {
     ///
     /// Each entry is (doc_id, path). Returns a Vec of Option<Versioned<JsonValue>>
     /// in the same order as the input entries.
+    ///
+    /// NOTE: The timestamp in each `Versioned` is the document's `updated_at`
+    /// (set inside the writing transaction), not the storage-layer commit
+    /// timestamp. This differs slightly from `get_versioned()` which uses the
+    /// storage timestamp. The difference is sub-millisecond and the trade-off
+    /// gives transactional consistency (all reads in one snapshot).
     pub fn batch_get(
         &self,
         branch_id: &BranchId,
@@ -536,6 +540,11 @@ impl JsonStore {
     ) -> StrataResult<Vec<Option<Versioned<JsonValue>>>> {
         if entries.is_empty() {
             return Ok(Vec::new());
+        }
+
+        // Validate all paths upfront
+        for (_, path) in entries {
+            path.validate().map_err(limit_error_to_error)?;
         }
 
         self.db.transaction(*branch_id, |txn| {
@@ -2452,27 +2461,27 @@ mod tests {
     fn test_path_at_max_length_boundary() {
         use strata_core::primitives::json::MAX_PATH_LENGTH;
 
-        let db = Database::cache().unwrap();
-        let store = JsonStore::new(db);
-        let branch_id = BranchId::new();
-
         // Build a path with exactly MAX_PATH_LENGTH segments — should succeed
         let mut path = JsonPath::root();
         for i in 0..MAX_PATH_LENGTH {
             path = path.key(format!("k{}", i));
         }
-        assert!(path.validate().is_ok(), "Path at exactly MAX_PATH_LENGTH should be valid");
+        assert!(
+            path.validate().is_ok(),
+            "Path at exactly MAX_PATH_LENGTH should be valid"
+        );
 
         // One more segment should fail
         let over_path = path.key("extra");
-        assert!(over_path.validate().is_err(), "Path exceeding MAX_PATH_LENGTH should fail");
+        assert!(
+            over_path.validate().is_err(),
+            "Path exceeding MAX_PATH_LENGTH should fail"
+        );
     }
 
-    // Scenario 5: getv() with corrupt historical entry
+    // Scenario 5: getv() returns version history with correct values
     #[test]
-    fn test_getv_with_corrupt_entry() {
-        use strata_core::types::Key;
-
+    fn test_getv_version_history() {
         let db = Database::cache().unwrap();
         let store = JsonStore::new(db);
         let branch_id = BranchId::new();
@@ -2491,11 +2500,31 @@ mod tests {
             )
             .unwrap();
 
-        // Verify getv returns at least one version
         let history = store.getv(&branch_id, "default", "doc1").unwrap();
         assert!(history.is_some());
         let versions = history.unwrap().into_versions();
         assert!(versions.len() >= 1, "Should have at least one version");
+        // Latest version should be "v2"
+        assert_eq!(versions[0].value.as_str(), Some("v2"));
+    }
+
+    // Scenario 5b: getv() gracefully handles corrupt bytes (deserialization failure)
+    #[test]
+    fn test_getv_corrupt_deserialization() {
+        // Verify that deserialize_doc on garbage bytes returns Err (not panic)
+        let garbage = Value::Bytes(vec![0xFF, 0x01, 0x02, 0x03]);
+        let result = JsonStore::deserialize_doc(&garbage);
+        assert!(result.is_err(), "Corrupt bytes should return Err");
+
+        // Empty bytes should also return Err
+        let empty = Value::Bytes(vec![]);
+        let result = JsonStore::deserialize_doc(&empty);
+        assert!(result.is_err(), "Empty bytes should return Err");
+
+        // Non-bytes value should return Err
+        let wrong_type = Value::Int(42);
+        let result = JsonStore::deserialize_doc(&wrong_type);
+        assert!(result.is_err(), "Non-bytes value should return Err");
     }
 
     // Scenario 6: batch_set with mix of creates and updates
