@@ -74,15 +74,15 @@ pub fn json_set(
 
     // Single atomic transaction: checks existence, creates if needed, sets at path.
     // Produces exactly 1 WAL append (fixes #973).
-    let version = convert_result(
+    // Returns (version, full_doc_value) — avoids re-reading the doc for embedding.
+    let (version, full_doc) = convert_result(
         p.json
             .set_or_create(&branch_id, &space, &key, &json_path, json_value),
     )?;
     let v = extract_version(&version);
 
-    // Best-effort auto-embed: read back the full document so we embed the complete
-    // content, not just the fragment written at this path.
-    embed_full_doc(p, branch_id, &space, &key);
+    // Best-effort auto-embed using the already-available full document value
+    embed_doc_value(p, branch_id, &space, &key, full_doc);
 
     Ok(Output::WriteResult { key, version: v })
 }
@@ -182,16 +182,15 @@ pub fn json_delete(
                 Ok(Output::DeleteResult { key, deleted: true })
             }
             Err(e) => {
-                // If path not found, return deleted=false (nothing deleted)
-                let err = crate::Error::from(e);
-                match err {
-                    crate::Error::InvalidPath { .. } | crate::Error::InvalidInput { .. } => {
-                        Ok(Output::DeleteResult {
-                            key,
-                            deleted: false,
-                        })
-                    }
-                    other => Err(other),
+                let err_str = e.to_string();
+                // Distinguish: path-not-found → deleted=false, type mismatch/OOB → error
+                if err_str.contains("not found") {
+                    Ok(Output::DeleteResult {
+                        key,
+                        deleted: false,
+                    })
+                } else {
+                    Err(crate::Error::from(e))
                 }
             }
         }
@@ -282,16 +281,11 @@ pub fn json_batch_set(
         engine_entries,
     ))?;
 
-    // Merge engine results
+    // Merge engine results and fire embed hooks using returned doc values
     for (j, orig_idx) in orig_indices.iter().enumerate() {
-        results[*orig_idx].version = Some(extract_version(&engine_results[j]));
-    }
-
-    // Post-commit: fire embed hooks for successful items
-    for (j, orig_idx) in orig_indices.iter().enumerate() {
-        if results[*orig_idx].version.is_some() {
-            embed_full_doc(p, branch_id, &space, &keys[j]);
-        }
+        let (ref version, ref full_doc) = engine_results[j];
+        results[*orig_idx].version = Some(extract_version(version));
+        embed_doc_value(p, branch_id, &space, &keys[j], full_doc.clone());
     }
 
     Ok(Output::BatchResults(results))
@@ -299,8 +293,8 @@ pub fn json_batch_set(
 
 /// Handle JsonBatchGet command.
 ///
-/// Loops over entries, calling `get_versioned()` for each. No engine batch
-/// method needed since reads are independent.
+/// Pre-validates entries, then reads all valid ones in a single transaction
+/// via `batch_get()`.
 pub fn json_batch_get(
     p: &Arc<Primitives>,
     branch: BranchId,
@@ -314,71 +308,62 @@ pub fn json_batch_get(
     }
 
     let n = entries.len();
-    let mut results: Vec<BatchGetItemResult> = Vec::with_capacity(n);
+    let mut results: Vec<BatchGetItemResult> = vec![
+        BatchGetItemResult {
+            value: None,
+            version: None,
+            timestamp: None,
+            error: None,
+        };
+        n
+    ];
 
-    for entry in entries {
-        // Validate key
+    // Pre-validate entries
+    let mut valid_entries: Vec<(usize, String, strata_core::primitives::json::JsonPath)> =
+        Vec::with_capacity(n);
+
+    for (i, entry) in entries.into_iter().enumerate() {
         if let Err(e) = validate_key(&entry.key) {
-            results.push(BatchGetItemResult {
-                value: None,
-                version: None,
-                timestamp: None,
-                error: Some(e.to_string()),
-            });
+            results[i].error = Some(e.to_string());
             continue;
         }
-        // Parse path
         let json_path = match parse_path(&entry.path) {
             Ok(p) => p,
             Err(e) => {
-                results.push(BatchGetItemResult {
-                    value: None,
-                    version: None,
-                    timestamp: None,
-                    error: Some(e.to_string()),
-                });
+                results[i].error = Some(e.to_string());
                 continue;
             }
         };
-        // Get from engine
-        match convert_result(
-            p.json
-                .get_versioned(&branch_id, &space, &entry.key, &json_path),
-        ) {
-            Ok(Some(versioned)) => match convert_result(json_to_value(versioned.value)) {
+        valid_entries.push((i, entry.key, json_path));
+    }
+
+    if valid_entries.is_empty() {
+        return Ok(Output::BatchGetResults(results));
+    }
+
+    // Build engine entries
+    let orig_indices: Vec<usize> = valid_entries.iter().map(|(idx, _, _)| *idx).collect();
+    let engine_entries: Vec<(String, strata_core::primitives::json::JsonPath)> = valid_entries
+        .into_iter()
+        .map(|(_, key, path)| (key, path))
+        .collect();
+
+    let engine_results = convert_result(p.json.batch_get(&branch_id, &space, &engine_entries))?;
+
+    // Merge engine results
+    for (j, orig_idx) in orig_indices.iter().enumerate() {
+        match &engine_results[j] {
+            Some(versioned) => match convert_result(json_to_value(versioned.value.clone())) {
                 Ok(value) => {
-                    results.push(BatchGetItemResult {
-                        value: Some(value),
-                        version: Some(extract_version(&versioned.version)),
-                        timestamp: Some(versioned.timestamp.into()),
-                        error: None,
-                    });
+                    results[*orig_idx].value = Some(value);
+                    results[*orig_idx].version = Some(extract_version(&versioned.version));
+                    results[*orig_idx].timestamp = Some(versioned.timestamp.into());
                 }
                 Err(e) => {
-                    results.push(BatchGetItemResult {
-                        value: None,
-                        version: None,
-                        timestamp: None,
-                        error: Some(e.to_string()),
-                    });
+                    results[*orig_idx].error = Some(e.to_string());
                 }
             },
-            Ok(None) => {
-                results.push(BatchGetItemResult {
-                    value: None,
-                    version: None,
-                    timestamp: None,
-                    error: None,
-                });
-            }
-            Err(e) => {
-                results.push(BatchGetItemResult {
-                    value: None,
-                    version: None,
-                    timestamp: None,
-                    error: Some(e.to_string()),
-                });
-            }
+            None => {} // already initialized as None
         }
     }
 
@@ -387,8 +372,8 @@ pub fn json_batch_get(
 
 /// Handle JsonBatchDelete command.
 ///
-/// Loops over entries. Root path deletes destroy the entire document;
-/// non-root deletes remove at the specified path. Reuses `BatchItemResult`
+/// Separates root deletes (destroy) from path deletes, batches each group
+/// in a single transaction for atomicity. Reuses `BatchItemResult`
 /// with `version` as count (1=deleted, 0=not found).
 pub fn json_batch_delete(
     p: &Arc<Primitives>,
@@ -412,6 +397,11 @@ pub fn json_batch_delete(
         n
     ];
 
+    // Pre-validate and partition into root deletes vs path deletes
+    let mut root_deletes: Vec<(usize, String)> = Vec::new();
+    let mut path_deletes: Vec<(usize, String, strata_core::primitives::json::JsonPath)> =
+        Vec::new();
+
     for (i, entry) in entries.into_iter().enumerate() {
         if let Err(e) = validate_key(&entry.key) {
             results[i].error = Some(e.to_string());
@@ -426,43 +416,54 @@ pub fn json_batch_delete(
         };
 
         if json_path.is_root() {
-            // Root delete — destroy entire document
-            match convert_result(p.json.destroy(&branch_id, &space, &entry.key)) {
-                Ok(deleted) => {
-                    results[i].version = Some(if deleted { 1 } else { 0 });
-                    if deleted {
-                        super::embed_hook::maybe_remove_embedding(
-                            p,
-                            branch_id,
-                            &space,
-                            super::embed_hook::SHADOW_JSON,
-                            &entry.key,
-                        );
-                    }
-                }
-                Err(e) => results[i].error = Some(e.to_string()),
-            }
+            root_deletes.push((i, entry.key));
         } else {
-            // Non-root — delete at path
-            // Match single json_delete behavior: call without convert_result,
-            // then match on error variants directly.
-            match p
-                .json
-                .delete_at_path(&branch_id, &space, &entry.key, &json_path)
-            {
+            path_deletes.push((i, entry.key, json_path));
+        }
+    }
+
+    // Batch root deletes in a single transaction
+    if !root_deletes.is_empty() {
+        let doc_ids: Vec<String> = root_deletes.iter().map(|(_, k)| k.clone()).collect();
+        let destroy_results =
+            convert_result(p.json.batch_destroy(&branch_id, &space, &doc_ids))?;
+        for (j, (orig_idx, key)) in root_deletes.iter().enumerate() {
+            let deleted = destroy_results[j];
+            results[*orig_idx].version = Some(if deleted { 1 } else { 0 });
+            if deleted {
+                super::embed_hook::maybe_remove_embedding(
+                    p,
+                    branch_id,
+                    &space,
+                    super::embed_hook::SHADOW_JSON,
+                    key,
+                );
+            }
+        }
+    }
+
+    // Batch path deletes in a single transaction
+    if !path_deletes.is_empty() {
+        let engine_entries: Vec<(String, strata_core::primitives::json::JsonPath)> = path_deletes
+            .iter()
+            .map(|(_, k, p)| (k.clone(), p.clone()))
+            .collect();
+        let del_results =
+            convert_result(p.json.batch_delete_at_path(&branch_id, &space, &engine_entries))?;
+        for (j, (orig_idx, key, _)) in path_deletes.iter().enumerate() {
+            match &del_results[j] {
                 Ok(_version) => {
-                    results[i].version = Some(1);
-                    embed_full_doc(p, branch_id, &space, &entry.key);
+                    results[*orig_idx].version = Some(1);
+                    embed_full_doc(p, branch_id, &space, key);
                 }
                 Err(e) => {
-                    let err = crate::Error::from(e);
-                    match err {
-                        crate::Error::InvalidPath { .. } | crate::Error::InvalidInput { .. } => {
-                            results[i].version = Some(0);
-                        }
-                        other => {
-                            results[i].error = Some(other.to_string());
-                        }
+                    let err_str = e.to_string();
+                    // Match single json_delete behavior: path-not-found or
+                    // doc-not-found → deleted=false
+                    if err_str.contains("Path error:") || err_str.contains("not found") {
+                        results[*orig_idx].version = Some(0);
+                    } else {
+                        results[*orig_idx].error = Some(err_str);
                     }
                 }
             }
@@ -507,23 +508,7 @@ pub fn json_count(
     prefix: Option<String>,
 ) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;
-    // Use paginated list with a large limit to count documents
-    let mut total = 0u64;
-    let mut cursor: Option<String> = None;
-    loop {
-        let result = convert_result(p.json.list(
-            &branch_id,
-            &space,
-            prefix.as_deref(),
-            cursor.as_deref(),
-            1000,
-        ))?;
-        total += result.doc_ids.len() as u64;
-        match result.next_cursor {
-            Some(c) => cursor = Some(c),
-            None => break,
-        }
-    }
+    let total = convert_result(p.json.count(&branch_id, &space, prefix.as_deref()))?;
     Ok(Output::Uint(total))
 }
 
@@ -536,37 +521,12 @@ pub fn json_sample(
     count: usize,
 ) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;
-    // Collect all document keys first
-    let mut all_keys = Vec::new();
-    let mut cursor: Option<String> = None;
-    loop {
-        let result = convert_result(p.json.list(
-            &branch_id,
-            &space,
-            prefix.as_deref(),
-            cursor.as_deref(),
-            1000,
-        ))?;
-        all_keys.extend(result.doc_ids);
-        match result.next_cursor {
-            Some(c) => cursor = Some(c),
-            None => break,
-        }
-    }
-    let total = all_keys.len() as u64;
-    let indices = super::sample_indices(all_keys.len(), count);
-    let mut items = Vec::with_capacity(indices.len());
-    for idx in indices {
-        let key = &all_keys[idx];
-        let json_path = strata_core::primitives::json::JsonPath::root();
-        let result = convert_result(p.json.get(&branch_id, &space, key, &json_path))?;
-        if let Some(json_val) = result {
-            if let Ok(value) = convert_result(json_to_value(json_val)) {
-                items.push(crate::types::SampleItem {
-                    key: key.clone(),
-                    value,
-                });
-            }
+    let (total, sampled) =
+        convert_result(p.json.sample(&branch_id, &space, prefix.as_deref(), count))?;
+    let mut items = Vec::with_capacity(sampled.len());
+    for (key, json_val) in sampled {
+        if let Ok(value) = convert_result(json_to_value(json_val)) {
+            items.push(crate::types::SampleItem { key, value });
         }
     }
     Ok(Output::SampleResult {
@@ -601,10 +561,36 @@ fn enrich_json_error(
     }
 }
 
+/// Best-effort: embed the full JSON document value that was already read/written.
+///
+/// This avoids a redundant re-read of the document by accepting the full value
+/// directly from the write transaction.
+fn embed_doc_value(
+    p: &Arc<Primitives>,
+    branch_id: strata_core::types::BranchId,
+    space: &str,
+    key: &str,
+    json_val: strata_core::primitives::json::JsonValue,
+) {
+    if let Ok(value) = json_to_value(json_val) {
+        if let Some(text) = super::embed_hook::extract_text(&value) {
+            super::embed_hook::maybe_embed_text(
+                p,
+                branch_id,
+                space,
+                super::embed_hook::SHADOW_JSON,
+                key,
+                &text,
+                strata_core::EntityRef::json(branch_id, key),
+            );
+        }
+    }
+}
+
 /// Best-effort: read back the full JSON document and embed its complete text.
 ///
-/// This ensures that partial-path writes (e.g. `$.name`) produce an embedding
-/// that reflects the entire document, not just the written fragment.
+/// Fallback for paths where the full document value isn't already available
+/// (e.g. delete_at_path).
 fn embed_full_doc(
     p: &Arc<Primitives>,
     branch_id: strata_core::types::BranchId,
@@ -616,19 +602,7 @@ fn embed_full_doc(
     let full_doc = p.json.get(&branch_id, space, key, &JsonPath::root());
     match full_doc {
         Ok(Some(json_val)) => {
-            if let Ok(value) = json_to_value(json_val) {
-                if let Some(text) = super::embed_hook::extract_text(&value) {
-                    super::embed_hook::maybe_embed_text(
-                        p,
-                        branch_id,
-                        space,
-                        super::embed_hook::SHADOW_JSON,
-                        key,
-                        &text,
-                        strata_core::EntityRef::json(branch_id, key),
-                    );
-                }
-            }
+            embed_doc_value(p, branch_id, space, key, json_val);
         }
         Ok(None) => {}
         Err(e) => {
@@ -645,23 +619,30 @@ fn embed_full_doc(
 /// Handle JsonList with as_of timestamp (time-travel list).
 ///
 /// Returns only document IDs that existed at or before the given timestamp.
-/// Does not support cursor-based pagination (returns all matching docs).
+/// Supports cursor-based pagination matching the regular list handler.
 pub fn json_list_at(
     p: &Arc<Primitives>,
     branch: BranchId,
     space: String,
     prefix: Option<String>,
     as_of_ts: u64,
+    cursor: Option<String>,
+    limit: u64,
 ) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;
-    let keys = convert_result(
-        p.json
-            .list_at(&branch_id, &space, prefix.as_deref(), as_of_ts),
-    )?;
+    let result = convert_result(p.json.list_at(
+        &branch_id,
+        &space,
+        prefix.as_deref(),
+        as_of_ts,
+        cursor.as_deref(),
+        limit as usize,
+    ))?;
+    let has_more = result.next_cursor.is_some();
     Ok(Output::JsonListResult {
-        keys,
-        has_more: false,
-        cursor: None,
+        keys: result.doc_ids,
+        has_more,
+        cursor: result.next_cursor,
     })
 }
 

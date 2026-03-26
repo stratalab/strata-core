@@ -85,21 +85,55 @@ pub trait EventLogExt {
 
 /// JSON store operations within a transaction
 ///
-/// Implemented in `json_store.rs`
+/// Implemented in `json.rs`.
+///
+/// The `_in_space` methods accept an explicit space parameter. The convenience
+/// methods (`json_get`, `json_set`, `json_create`) delegate to them with `"default"`.
 pub trait JsonStoreExt {
-    /// Get value at path in a document
-    fn json_get(&mut self, doc_id: &str, path: &JsonPath) -> StrataResult<Option<JsonValue>>;
-
-    /// Set value at path in a document, returns new version
-    fn json_set(
+    /// Get value at path in a document in the specified space
+    fn json_get_in_space(
         &mut self,
+        space: &str,
+        doc_id: &str,
+        path: &JsonPath,
+    ) -> StrataResult<Option<JsonValue>>;
+
+    /// Set value at path in a document in the specified space, returns new version
+    fn json_set_in_space(
+        &mut self,
+        space: &str,
         doc_id: &str,
         path: &JsonPath,
         value: JsonValue,
     ) -> StrataResult<Version>;
 
-    /// Create a new JSON document, returns version
-    fn json_create(&mut self, doc_id: &str, value: JsonValue) -> StrataResult<Version>;
+    /// Create a new JSON document in the specified space, returns version
+    fn json_create_in_space(
+        &mut self,
+        space: &str,
+        doc_id: &str,
+        value: JsonValue,
+    ) -> StrataResult<Version>;
+
+    /// Get value at path in a document (default space)
+    fn json_get(&mut self, doc_id: &str, path: &JsonPath) -> StrataResult<Option<JsonValue>> {
+        self.json_get_in_space("default", doc_id, path)
+    }
+
+    /// Set value at path in a document (default space), returns new version
+    fn json_set(
+        &mut self,
+        doc_id: &str,
+        path: &JsonPath,
+        value: JsonValue,
+    ) -> StrataResult<Version> {
+        self.json_set_in_space("default", doc_id, path, value)
+    }
+
+    /// Create a new JSON document (default space), returns version
+    fn json_create(&mut self, doc_id: &str, value: JsonValue) -> StrataResult<Version> {
+        self.json_create_in_space("default", doc_id, value)
+    }
 }
 
 /// Vector store operations within a transaction
