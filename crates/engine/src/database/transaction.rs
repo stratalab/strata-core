@@ -314,15 +314,21 @@ impl Database {
     ) -> StrataResult<(T, u64)> {
         match result {
             Ok(value) => {
-                // Commit on success
                 let had_writes = !txn.is_read_only();
+                // Admission control: reject writes when L0 is saturated (#1924).
+                // Must run BEFORE commit so the caller gets a clean error and
+                // no data is committed that the caller doesn't know about.
+                if had_writes {
+                    if let Err(e) = self.maybe_apply_write_backpressure() {
+                        let _ = txn.mark_aborted(format!("Write stall: {}", e));
+                        self.coordinator.record_abort(txn.txn_id);
+                        return Err(e);
+                    }
+                }
                 let commit_version = self.commit_internal(txn, durability)?;
                 // Schedule flush only for write transactions (reads skip entirely)
                 if had_writes {
                     self.schedule_flush_if_needed();
-                    // Best-effort: backpressure must not fail a committed txn (#1924).
-                    // The stall loop still bounds the delay; a timeout just logs.
-                    let _ = self.maybe_apply_write_backpressure();
                 }
                 Ok((value, commit_version))
             }
@@ -515,11 +521,18 @@ impl Database {
     /// Returns the commit version (u64) assigned to all writes in this transaction.
     pub fn commit_transaction(&self, txn: &mut TransactionContext) -> StrataResult<u64> {
         let had_writes = !txn.is_read_only();
+        // Admission control: reject writes when L0 is saturated (#1924).
+        // Must run BEFORE commit so the caller gets a clean error.
+        if had_writes {
+            if let Err(e) = self.maybe_apply_write_backpressure() {
+                let _ = txn.mark_aborted(format!("Write stall: {}", e));
+                self.coordinator.record_abort(txn.txn_id);
+                return Err(e);
+            }
+        }
         let version = self.commit_internal(txn, self.durability_mode)?;
         if had_writes {
             self.schedule_flush_if_needed();
-            // Best-effort: backpressure must not fail a committed txn (#1924).
-            let _ = self.maybe_apply_write_backpressure();
         }
         Ok(version)
     }

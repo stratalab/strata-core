@@ -2304,3 +2304,65 @@ fn test_issue_1551_cache_database_uuid_is_zero() {
     let db = Database::cache().unwrap();
     assert_eq!(db.database_uuid(), [0u8; 16]);
 }
+
+/// Issue #1924: Write stall timeout must be surfaced to the caller.
+///
+/// When L0 segment count exceeds `l0_stop_writes_trigger` and compaction
+/// cannot drain L0 within `write_stall_timeout_ms`, write transactions
+/// must return `Err(WriteStallTimeout)` instead of silently succeeding
+/// with the timeout error discarded.
+#[test]
+fn test_issue_1924_write_stall_timeout_surfaced_to_caller() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+
+    let branch_id = BranchId::new();
+    let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
+
+    // Configure: tiny write buffer to force frequent L0 creation,
+    // stop trigger of 1 (any L0 segment triggers stall), and 1ms timeout
+    // so the stall expires before compaction can drain L0.
+    let cfg = StrataConfig {
+        durability: "cache".to_string(),
+        storage: StorageConfig {
+            write_buffer_size: 128,        // tiny: forces memtable rotation
+            l0_stop_writes_trigger: 1,     // stall when ANY L0 segment exists
+            l0_slowdown_writes_trigger: 0, // disabled
+            write_stall_timeout_ms: 1,     // 1ms: too short for compaction to drain
+            ..StorageConfig::default()
+        },
+        ..StrataConfig::default()
+    };
+
+    let db = Database::open_internal(&db_path, DurabilityMode::Cache, cfg).unwrap();
+
+    // Write large values to force memtable rotation and L0 creation.
+    // With write_buffer_size=128, a 512-byte value exceeds the threshold.
+    // After each commit, schedule_flush_if_needed flushes frozen memtables
+    // into L0 segments.
+    let big_value = Value::Bytes(vec![0u8; 512]);
+
+    // Rapidly write transactions. Some may succeed (if compaction drains L0
+    // between writes), some may timeout. We care that at least one fails.
+    let mut saw_timeout = false;
+    for i in 0..20 {
+        let key_name = format!("key_{}", i);
+        let ns_clone = ns.clone();
+        let val = big_value.clone();
+        let result = db.transaction(branch_id, |txn| {
+            txn.put(Key::new_kv(ns_clone, &key_name), val)?;
+            Ok(())
+        });
+        if matches!(&result, Err(StrataError::WriteStallTimeout { .. })) {
+            saw_timeout = true;
+            break;
+        }
+    }
+
+    assert!(
+        saw_timeout,
+        "Expected at least one WriteStallTimeout error among 20 writes, \
+         but all succeeded. L0 count: {}",
+        db.storage().max_l0_segment_count()
+    );
+}
