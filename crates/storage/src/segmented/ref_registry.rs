@@ -43,23 +43,23 @@ impl SegmentRefRegistry {
         }
     }
 
-    /// Acquire a read guard on the deletion barrier.
+    /// Acquire a read guard on the deletion barrier (Lock Level 3, shared).
     ///
     /// Hold this while incrementing refcounts for a batch of segments
     /// (e.g., during `fork_branch`). Prevents concurrent segment file
     /// deletion from observing a transient zero refcount mid-batch.
     pub(crate) fn deletion_read_guard(&self) -> parking_lot::RwLockReadGuard<'_, ()> {
-        self.deletion_barrier.read()
+        self.deletion_barrier.read() // Lock Level 3 (shared)
     }
 
-    /// Acquire a write guard on the deletion barrier.
+    /// Acquire a write guard on the deletion barrier (Lock Level 3, exclusive).
     ///
     /// Hold this during the check-and-delete sequence in
     /// `delete_segment_if_unreferenced`. Ensures no concurrent fork
     /// can increment a refcount between the `is_referenced()` check
     /// and the `remove_file()` call.
     pub(crate) fn deletion_write_guard(&self) -> parking_lot::RwLockWriteGuard<'_, ()> {
-        self.deletion_barrier.write()
+        self.deletion_barrier.write() // Lock Level 3 (exclusive)
     }
 
     /// Increment the reference count for `id`.

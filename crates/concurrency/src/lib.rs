@@ -14,6 +14,7 @@
 #![warn(clippy::all)]
 
 pub(crate) mod conflict;
+pub mod lock_ordering;
 pub mod manager;
 pub mod payload;
 pub mod recovery;

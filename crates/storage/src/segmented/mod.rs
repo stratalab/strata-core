@@ -580,7 +580,7 @@ impl SegmentedStore {
             // 1. Clean up the branch's own segments.
             // Check refcount before deleting — a child branch may still
             // reference these segments through inherited layers (#1702).
-            // Hold deletion write guard to prevent TOCTOU with fork (#1682).
+            // Lock Level 3 (exclusive): prevent TOCTOU with fork (#1682).
             let ver = branch.version.load();
             {
                 let _deletion_guard = self.ref_registry.deletion_write_guard();
@@ -688,7 +688,7 @@ impl SegmentedStore {
                 // file_id is a hash of the full path, matching KVSegment::file_id().
                 let file_id = crate::block_cache::file_path_hash(&sst_path);
                 if !live_ids.contains(&file_id) {
-                    // Hold deletion write guard to prevent TOCTOU with fork (#1682).
+                    // Lock Level 3 (exclusive): prevent TOCTOU with fork (#1682).
                     let _deletion_guard = self.ref_registry.deletion_write_guard();
                     if !self.ref_registry.is_referenced(file_id) {
                         crate::block_cache::global_cache().invalidate_file(file_id);
@@ -1237,10 +1237,9 @@ impl SegmentedStore {
             });
             layers.extend(source_inherited);
 
-            // Increment refcounts while source guard is still held.
-            // Hold the deletion barrier read guard to prevent concurrent
-            // delete_segment_if_unreferenced from observing a transient
-            // zero refcount mid-batch (#1682).
+            // Lock Level 3 (shared): increment refcounts while holding the
+            // deletion barrier to prevent concurrent delete_segment_if_unreferenced
+            // from observing a transient zero refcount mid-batch (#1682).
             let mut shared = 0usize;
             {
                 let _deletion_guard = self.ref_registry.deletion_read_guard();
