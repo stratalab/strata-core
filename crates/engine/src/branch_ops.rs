@@ -28,7 +28,13 @@ use tracing::info;
 // Constants and key-format helpers
 // =============================================================================
 
-const DATA_TYPE_TAGS: [TypeTag; 4] = [TypeTag::KV, TypeTag::Event, TypeTag::Json, TypeTag::Vector];
+const DATA_TYPE_TAGS: [TypeTag; 5] = [
+    TypeTag::KV,
+    TypeTag::Event,
+    TypeTag::Json,
+    TypeTag::Vector,
+    TypeTag::Graph,
+];
 
 /// The well-known branch name used for internal metadata (tags, notes).
 const SYSTEM_BRANCH: &str = "_system_";

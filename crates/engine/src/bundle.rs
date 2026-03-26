@@ -151,7 +151,13 @@ fn scan_branch_data(
     let snapshot_version = db.current_version();
 
     // Discover all current keys across all type tags
-    let type_tags = [TypeTag::KV, TypeTag::Event, TypeTag::Json, TypeTag::Vector];
+    let type_tags = [
+        TypeTag::KV,
+        TypeTag::Event,
+        TypeTag::Json,
+        TypeTag::Vector,
+        TypeTag::Graph,
+    ];
 
     let mut all_keys: Vec<Key> = Vec::new();
     for type_tag in type_tags {

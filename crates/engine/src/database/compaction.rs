@@ -235,6 +235,17 @@ impl Database {
                 });
             }
 
+            // Graph entries (same shape as KV — stored under _graph_ namespace)
+            for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::Graph) {
+                let value_bytes = serde_json::to_vec(&vv.value).unwrap_or_default();
+                kv_entries.push(KvSnapshotEntry {
+                    key: key.user_key_string().unwrap_or_default(),
+                    value: value_bytes,
+                    version: vv.version.as_u64(),
+                    timestamp: vv.timestamp.as_micros(),
+                });
+            }
+
             // Event entries
             for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::Event) {
                 // Skip metadata keys (internal implementation details, reconstructed on restore)
