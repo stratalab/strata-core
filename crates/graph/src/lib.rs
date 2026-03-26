@@ -128,7 +128,7 @@ impl GraphStore {
 
         // Fallback: scan for __meta__ keys (legacy data without catalog)
         let ns = keys::graph_namespace(branch_id);
-        let prefix_key = strata_core::types::Key::new_kv(ns, "");
+        let prefix_key = strata_core::types::Key::new_graph(ns, "");
 
         let graphs = self.db.transaction(branch_id, |txn| {
             let results = txn.scan_prefix(&prefix_key)?;
@@ -1004,7 +1004,7 @@ impl GraphStore {
                 }
 
                 let user_key = keys::node_key(graph, node_id);
-                let sk = Key::new_kv(ns.clone(), &user_key);
+                let sk = Key::new_graph(ns.clone(), &user_key);
 
                 let json = if data.entity_ref.is_none()
                     && data.properties.is_none()
@@ -1020,12 +1020,12 @@ impl GraphStore {
 
                 if let Some(uri) = &data.entity_ref {
                     let rk = keys::ref_index_key(uri, graph, node_id);
-                    ref_entries.push(Key::new_kv(ns.clone(), &rk));
+                    ref_entries.push(Key::new_graph(ns.clone(), &rk));
                 }
 
                 if let Some(ot) = &data.object_type {
                     let tk = keys::type_index_key(graph, ot, node_id);
-                    type_entries.push(Key::new_kv(ns.clone(), &tk));
+                    type_entries.push(Key::new_graph(ns.clone(), &tk));
                 }
             }
 
@@ -1033,16 +1033,16 @@ impl GraphStore {
                 // Clean up old index entries for nodes being re-inserted (upsert)
                 for (node_id, _data) in chunk {
                     let user_key = keys::node_key(graph, node_id);
-                    let sk = Key::new_kv(ns.clone(), &user_key);
+                    let sk = Key::new_graph(ns.clone(), &user_key);
                     if let Some(Value::String(old_json)) = txn.get(&sk)? {
                         if let Ok(old_data) = serde_json::from_str::<NodeData>(&old_json) {
                             if let Some(old_uri) = old_data.entity_ref {
                                 let old_rk = keys::ref_index_key(&old_uri, graph, node_id);
-                                txn.delete(Key::new_kv(ns.clone(), &old_rk))?;
+                                txn.delete(Key::new_graph(ns.clone(), &old_rk))?;
                             }
                             if let Some(old_ot) = old_data.object_type {
                                 let old_tk = keys::type_index_key(graph, &old_ot, node_id);
-                                txn.delete(Key::new_kv(ns.clone(), &old_tk))?;
+                                txn.delete(Key::new_graph(ns.clone(), &old_tk))?;
                             }
                         }
                     }
@@ -1102,7 +1102,7 @@ impl GraphStore {
             let mut bufs: Vec<(Key, Vec<u8>)> = Vec::with_capacity(chunk.len());
             for (node_id, new_edges) in chunk {
                 let uk = keys::forward_adj_key(graph, node_id);
-                let sk = Key::new_kv(ns.clone(), &uk);
+                let sk = Key::new_graph(ns.clone(), &uk);
                 let mut buf = match self.db.get_value_direct(&sk)? {
                     Some(Value::Bytes(existing)) => existing,
                     _ => packed::empty(),
@@ -1127,7 +1127,7 @@ impl GraphStore {
             let mut bufs: Vec<(Key, Vec<u8>)> = Vec::with_capacity(chunk.len());
             for (node_id, new_edges) in chunk {
                 let uk = keys::reverse_adj_key(graph, node_id);
-                let sk = Key::new_kv(ns.clone(), &uk);
+                let sk = Key::new_graph(ns.clone(), &uk);
                 let mut buf = match self.db.get_value_direct(&sk)? {
                     Some(Value::Bytes(existing)) => existing,
                     _ => packed::empty(),
@@ -1151,7 +1151,7 @@ impl GraphStore {
             self.db.transaction(branch_id, |txn| {
                 for (et, new_count) in &edge_type_counts {
                     let count_uk = keys::edge_type_count_key(graph, et);
-                    let count_sk = Key::new_kv(ns.clone(), &count_uk);
+                    let count_sk = Key::new_graph(ns.clone(), &count_uk);
                     let existing = Self::read_edge_type_count(txn, &count_sk)?;
                     Self::write_edge_type_count(txn, &count_sk, existing + new_count)?;
                 }
@@ -1282,7 +1282,7 @@ impl GraphStore {
             // Check all referenced nodes exist (once per unique node)
             for node_id in &unique_nodes {
                 let node_uk = keys::node_key(graph, node_id);
-                let node_sk = Key::new_kv(ns.clone(), &node_uk);
+                let node_sk = Key::new_graph(ns.clone(), &node_uk);
                 if txn.get(&node_sk)?.is_none() {
                     return Err(StrataError::invalid_input(format!(
                         "Node '{}' does not exist in graph '{}'",
@@ -1294,7 +1294,7 @@ impl GraphStore {
             // Write forward adjacency lists (1 read + 1 write per unique source)
             for (src, new_edges) in &fwd_map {
                 let fwd_uk = keys::forward_adj_key(graph, src);
-                let fwd_sk = Key::new_kv(ns.clone(), &fwd_uk);
+                let fwd_sk = Key::new_graph(ns.clone(), &fwd_uk);
                 let mut buf = match txn.get(&fwd_sk)? {
                     Some(Value::Bytes(b)) => b,
                     _ => packed::empty(),
@@ -1308,7 +1308,7 @@ impl GraphStore {
             // Write reverse adjacency lists (1 read + 1 write per unique destination)
             for (dst, new_edges) in &rev_map {
                 let rev_uk = keys::reverse_adj_key(graph, dst);
-                let rev_sk = Key::new_kv(ns.clone(), &rev_uk);
+                let rev_sk = Key::new_graph(ns.clone(), &rev_uk);
                 let mut buf = match txn.get(&rev_sk)? {
                     Some(Value::Bytes(b)) => b,
                     _ => packed::empty(),
@@ -1322,7 +1322,7 @@ impl GraphStore {
             // Update edge type counters (1 read-modify-write per unique edge type)
             for (et, new_count) in &edge_type_counts {
                 let count_uk = keys::edge_type_count_key(graph, et);
-                let count_sk = Key::new_kv(ns.clone(), &count_uk);
+                let count_sk = Key::new_graph(ns.clone(), &count_uk);
                 let existing = Self::read_edge_type_count(txn, &count_sk)?;
                 Self::write_edge_type_count(txn, &count_sk, existing + new_count)?;
             }
