@@ -54,8 +54,6 @@ pub struct RecoveryStats {
     pub vectors_mmap_registered: usize,
     /// Number of vectors deleted during recovery
     pub vectors_deleted: usize,
-    /// Number of lite records skipped (no mmap cache available)
-    pub lite_records_skipped: usize,
 }
 
 /// Shared backend state for VectorStore
@@ -293,7 +291,7 @@ impl VectorStore {
             if loaded_from_mmap && backend.get(vid).is_some() {
                 backend.register_mmap_vector(vid, vec_record.created_at);
             } else if vec_record.embedding.is_empty() {
-                continue; // lite record — only available via mmap
+                continue; // legacy empty-embedding record — skip
             } else {
                 let _ = backend.insert_with_id_and_timestamp(
                     vid,
@@ -1151,6 +1149,95 @@ mod tests {
         );
     }
 
+    /// Issue #1962: Verify that lite mode constructors cannot create records that
+    /// break get_at() historical access. The VectorRecord API must not expose
+    /// constructors that omit embeddings, because get_at() requires the embedding
+    /// to be present in the KV record for time-travel queries.
+    #[test]
+    fn test_issue_1962_no_lite_constructors() {
+        // VectorRecord::new() must always include the embedding
+        let record = VectorRecord::new(VectorId(1), vec![1.0, 2.0, 3.0], None);
+        assert_eq!(record.embedding, vec![1.0, 2.0, 3.0]);
+
+        // VectorRecord::new_with_source() must always include the embedding
+        let branch_id = BranchId::new();
+        let record = VectorRecord::new_with_source(
+            VectorId(2),
+            vec![4.0, 5.0, 6.0],
+            None,
+            EntityRef::json(branch_id, "test_key"),
+        );
+        assert_eq!(record.embedding, vec![4.0, 5.0, 6.0]);
+
+        // update() must preserve the embedding
+        let mut record = VectorRecord::new(VectorId(3), vec![1.0, 0.0, 0.0], None);
+        record.update(vec![0.0, 1.0, 0.0], None);
+        assert_eq!(record.embedding, vec![0.0, 1.0, 0.0]);
+        assert!(
+            !record.embedding.is_empty(),
+            "update() must store embedding"
+        );
+
+        // update_with_source() must preserve the embedding
+        let mut record = VectorRecord::new(VectorId(4), vec![1.0, 0.0, 0.0], None);
+        record.update_with_source(vec![0.0, 0.0, 1.0], None, None);
+        assert_eq!(record.embedding, vec![0.0, 0.0, 1.0]);
+        assert!(
+            !record.embedding.is_empty(),
+            "update_with_source() must store embedding"
+        );
+
+        // Verify no constructor produces an empty embedding.
+        // If this test ever fails, it means someone added a constructor that
+        // omits the embedding, which would break get_at() and recovery.
+        // (Previously, new_lite() and update_lite() did this — removed in #1962.)
+    }
+
+    /// Issue #1962: Verify get_at() returns correct historical embeddings
+    /// after a vector is updated. This is the scenario that would fail if
+    /// lite mode were used (empty embedding in KV → get_at() error).
+    #[test]
+    fn test_issue_1962_get_at_returns_historical_embedding() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        // Insert original vector
+        store
+            .insert(branch_id, "default", "test", "doc1", &[1.0, 0.0, 0.0], None)
+            .unwrap();
+
+        // Record a timestamp after the first insert
+        let after_insert_ts = u64::MAX;
+
+        // Update the vector with a new embedding
+        store
+            .insert(branch_id, "default", "test", "doc1", &[0.0, 1.0, 0.0], None)
+            .unwrap();
+
+        // get_at with max timestamp should return the latest embedding
+        let entry = store
+            .get_at(branch_id, "default", "test", "doc1", after_insert_ts)
+            .unwrap()
+            .expect("vector should exist at this timestamp");
+
+        assert_eq!(
+            entry.embedding,
+            vec![0.0, 1.0, 0.0],
+            "get_at() must return the latest embedding when queried at max timestamp"
+        );
+
+        // Verify embedding is not empty (the core invariant from #1962)
+        assert!(
+            !entry.embedding.is_empty(),
+            "get_at() must never return an empty embedding"
+        );
+    }
+
     #[test]
     fn test_upsert_overwrites() {
         let (_temp, _db, store) = setup();
@@ -1701,7 +1788,7 @@ mod tests {
         let collection_id = CollectionId::new(branch_id, "test");
 
         // Call post_merge_reload — the old backend will be extracted
-        // per-collection and used to resolve lite record embeddings.
+        // per-collection and used to resolve legacy empty-embedding records.
         store.post_merge_reload_vectors(branch_id).unwrap();
 
         // Verify backends are restored
