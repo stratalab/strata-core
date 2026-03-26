@@ -126,9 +126,9 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                 }
             };
 
-            // Extract collection name from the key's user_key
+            // Extract collection name from the key's user_key ("__config__/{name}")
             let collection_name = match key.user_key_string() {
-                Some(name) => name,
+                Some(raw) => raw.strip_prefix("__config__/").unwrap_or(&raw).to_string(),
                 None => continue,
             };
 
@@ -588,7 +588,7 @@ impl strata_engine::RefreshHook for VectorRefreshHook {
                 Err(_) => continue,
             };
             let collection_name = match key.user_key_string() {
-                Some(name) => name,
+                Some(raw) => raw.strip_prefix("__config__/").unwrap_or(&raw).to_string(),
                 None => continue,
             };
             let config: super::VectorConfig = match record.config.try_into() {

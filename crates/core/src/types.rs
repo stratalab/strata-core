@@ -142,9 +142,8 @@ impl PartialOrd for Namespace {
 /// - Space = 0x04
 /// - Vector = 0x05
 /// - Json = 0x06
-/// - VectorConfig = 0x07
 ///
-/// Ordering: KV < Event < Branch < Space < Vector < Json < VectorConfig
+/// Ordering: KV < Event < Branch < Space < Vector < Json
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum TypeTag {
@@ -156,12 +155,10 @@ pub enum TypeTag {
     Branch = 0x03,
     /// Space metadata entries
     Space = 0x04,
-    /// Vector store entries
+    /// Vector store entries (including collection configs via `__config__/` prefix)
     Vector = 0x05,
     /// JSON document store entries
     Json = 0x06,
-    /// Vector collection configuration
-    VectorConfig = 0x07,
 }
 
 impl TypeTag {
@@ -179,7 +176,6 @@ impl TypeTag {
             0x04 => Some(TypeTag::Space),
             0x05 => Some(TypeTag::Vector),
             0x06 => Some(TypeTag::Json),
-            0x07 => Some(TypeTag::VectorConfig),
             _ => None,
         }
     }
@@ -370,13 +366,14 @@ impl Key {
 
     /// Create key for collection configuration
     ///
-    /// Format: namespace + TypeTag::VectorConfig + collection_name
+    /// Format: namespace + TypeTag::Vector + `__config__/` + collection_name
+    ///
+    /// Uses the same TypeTag as vector data with a reserved `__config__/` prefix.
+    /// This is safe because user collection names cannot start with `_` and system
+    /// collection names must start with `_system_`, so no collision is possible.
     pub fn new_vector_config(namespace: Arc<Namespace>, collection: &str) -> Self {
-        Self::new(
-            namespace,
-            TypeTag::VectorConfig,
-            collection.as_bytes().to_vec(),
-        )
+        let user_key = format!("__config__/{}", collection);
+        Self::new(namespace, TypeTag::Vector, user_key.into_bytes())
     }
 
     /// Create prefix for scanning all vectors in a collection
@@ -387,7 +384,7 @@ impl Key {
 
     /// Create prefix for scanning all vector collections
     pub fn new_vector_config_prefix(namespace: Arc<Namespace>) -> Self {
-        Self::new(namespace, TypeTag::VectorConfig, vec![])
+        Self::new(namespace, TypeTag::Vector, b"__config__/".to_vec())
     }
 
     /// Create a space metadata key.
@@ -854,7 +851,7 @@ mod tests {
         assert_eq!(TypeTag::from_byte(0x04), Some(TypeTag::Space));
         assert_eq!(TypeTag::from_byte(0x05), Some(TypeTag::Vector));
         assert_eq!(TypeTag::from_byte(0x06), Some(TypeTag::Json));
-        assert_eq!(TypeTag::from_byte(0x07), Some(TypeTag::VectorConfig));
+        assert_eq!(TypeTag::from_byte(0x07), None);
         assert_eq!(TypeTag::from_byte(0x00), None);
         assert_eq!(TypeTag::from_byte(0x08), None);
         assert_eq!(TypeTag::from_byte(0xFF), None);
@@ -870,7 +867,6 @@ mod tests {
             TypeTag::Space,
             TypeTag::Vector,
             TypeTag::Json,
-            TypeTag::VectorConfig,
         ];
         let bytes: Vec<u8> = tags.iter().map(|t| t.as_byte()).collect();
         let unique: std::collections::HashSet<u8> = bytes.iter().cloned().collect();
@@ -887,7 +883,6 @@ mod tests {
             TypeTag::Space,
             TypeTag::Vector,
             TypeTag::Json,
-            TypeTag::VectorConfig,
         ];
 
         for tag in tags {
@@ -905,7 +900,8 @@ mod tests {
     fn test_typetag_from_byte_gap_values_return_none() {
         // Bytes outside defined variants must return None (on-disk format safety)
         for byte in [
-            0x00, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x20, 0x80, 0xFE, 0xFF,
+            0x00, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x20, 0x80, 0xFE,
+            0xFF,
         ] {
             assert_eq!(
                 TypeTag::from_byte(byte),
@@ -914,13 +910,6 @@ mod tests {
                 byte
             );
         }
-    }
-
-    #[test]
-    fn test_typetag_vectorconfig_byte_roundtrip() {
-        // VectorConfig (0x07) - verify it's properly wired
-        assert_eq!(TypeTag::VectorConfig.as_byte(), 0x07);
-        assert_eq!(TypeTag::from_byte(0x07), Some(TypeTag::VectorConfig));
     }
 
     #[test]
@@ -933,7 +922,6 @@ mod tests {
             TypeTag::Space,
             TypeTag::Vector,
             TypeTag::Json,
-            TypeTag::VectorConfig,
         ];
         for tag in all_tags {
             let byte = tag.as_byte();
@@ -958,7 +946,6 @@ mod tests {
             TypeTag::Space,
             TypeTag::Vector,
             TypeTag::Json,
-            TypeTag::VectorConfig,
         ];
         for window in tags_in_order.windows(2) {
             assert!(
@@ -1261,8 +1248,8 @@ mod tests {
     fn test_key_new_vector_config() {
         let ns = Arc::new(Namespace::for_branch(BranchId::new()));
         let key = Key::new_vector_config(ns.clone(), "my_collection");
-        assert_eq!(key.type_tag, TypeTag::VectorConfig);
-        assert_eq!(key.user_key_string().unwrap(), "my_collection");
+        assert_eq!(key.type_tag, TypeTag::Vector);
+        assert_eq!(key.user_key_string().unwrap(), "__config__/my_collection");
     }
 
     #[test]
@@ -1295,7 +1282,7 @@ mod tests {
         );
         assert!(
             !vector_key.starts_with(&prefix),
-            "Vector key should not match config prefix (different TypeTag)"
+            "Vector data key should not match __config__/ prefix"
         );
     }
 

@@ -146,9 +146,10 @@ impl VectorStore {
         let mut collections = Vec::new();
 
         for (key, versioned_value) in entries {
-            // Extract collection name from key
-            let name = String::from_utf8(key.user_key.to_vec())
+            // Extract collection name from key (user_key = "__config__/{name}")
+            let raw = String::from_utf8(key.user_key.to_vec())
                 .map_err(|e| VectorError::Serialization(e.to_string()))?;
+            let name = raw.strip_prefix("__config__/").unwrap_or(&raw).to_string();
 
             // Deserialize the record from the stored bytes
             let bytes = match &versioned_value.value {

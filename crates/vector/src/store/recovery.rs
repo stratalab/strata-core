@@ -232,7 +232,7 @@ impl VectorStore {
                 };
 
                 let collection_name = match key.user_key_string() {
-                    Some(name) => name,
+                    Some(raw) => raw.strip_prefix("__config__/").unwrap_or(&raw).to_string(),
                     None => continue,
                 };
 
