@@ -12,7 +12,22 @@ use strata_concurrency::RecoveryCoordinator;
 use strata_durability::codec::IdentityCodec;
 use strata_durability::wal::{DurabilityMode, WalConfig, WalWriter};
 use strata_storage::SegmentedStore;
+use super::config::StorageConfig;
 use tracing::{info, warn};
+
+/// Apply all storage configuration settings to a SegmentedStore.
+///
+/// Centralizes the 7 storage-config setters so every open path
+/// (primary, follower, cache) applies the same set of knobs.
+fn apply_storage_config(storage: &SegmentedStore, cfg: &StorageConfig) {
+    storage.set_max_branches(cfg.max_branches);
+    storage.set_max_versions_per_key(cfg.max_versions_per_key);
+    storage.set_max_immutable_memtables(cfg.max_immutable_memtables);
+    storage.set_target_file_size(cfg.target_file_size);
+    storage.set_level_base_bytes(cfg.level_base_bytes);
+    storage.set_data_block_size(cfg.data_block_size);
+    storage.set_bloom_bits_per_key(cfg.bloom_bits_per_key);
+}
 
 use strata_core::{StrataError, StrataResult};
 
@@ -248,41 +263,11 @@ impl Database {
         );
 
         let storage = Arc::new(result.storage);
-        storage.set_max_branches(cfg.storage.max_branches);
-        storage.set_max_versions_per_key(cfg.storage.max_versions_per_key);
-        storage.set_max_immutable_memtables(cfg.storage.max_immutable_memtables);
-        storage.set_target_file_size(cfg.storage.target_file_size);
-        storage.set_level_base_bytes(cfg.storage.level_base_bytes);
-        storage.set_data_block_size(cfg.storage.data_block_size);
-        storage.set_bloom_bits_per_key(cfg.storage.bloom_bits_per_key);
+        apply_storage_config(&storage, &cfg.storage);
 
         let bg_threads = cfg.storage.background_threads.max(1);
 
-        // Recover previously flushed segments from disk
-        match storage.recover_segments() {
-            Ok(seg_info) => {
-                if seg_info.segments_loaded > 0 {
-                    info!(target: "strata::db",
-                        branches = seg_info.branches_recovered,
-                        segments = seg_info.segments_loaded,
-                        errors_skipped = seg_info.errors_skipped,
-                        "Recovered segments from disk");
-                }
-                // Bump version counter from segment data (#1726)
-                if seg_info.max_commit_id > 0 {
-                    coordinator.bump_version_floor(seg_info.max_commit_id);
-                }
-            }
-            Err(e) => {
-                warn!(target: "strata::db", error = %e, "Segment recovery failed");
-                if !cfg.allow_lossy_recovery {
-                    return Err(StrataError::corruption(format!(
-                        "Segment recovery failed: {}",
-                        e
-                    )));
-                }
-            }
-        }
+        Self::recover_segments_and_bump(&storage, &coordinator, cfg.allow_lossy_recovery)?;
 
         let db = Arc::new(Self {
             data_dir: canonical_path,
@@ -318,6 +303,80 @@ impl Database {
         db.set_subsystems(vec![Box::new(crate::search::SearchSubsystem)]);
 
         Ok(db)
+    }
+
+    /// Spawn the background WAL flush thread for Standard durability mode.
+    ///
+    /// Returns `None` for non-Standard modes (Cache, Always).
+    fn spawn_wal_flush_thread(
+        durability_mode: DurabilityMode,
+        wal: &Arc<ParkingMutex<WalWriter>>,
+        shutdown: &Arc<AtomicBool>,
+    ) -> StrataResult<Option<std::thread::JoinHandle<()>>> {
+        if let DurabilityMode::Standard { interval_ms, .. } = durability_mode {
+            let wal = Arc::clone(wal);
+            let shutdown = Arc::clone(shutdown);
+            let interval = std::time::Duration::from_millis(interval_ms);
+
+            let handle = std::thread::Builder::new()
+                .name("strata-wal-flush".to_string())
+                .spawn(move || {
+                    while !shutdown.load(Ordering::Relaxed) {
+                        std::thread::sleep(interval);
+                        if shutdown.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let mut wal = wal.lock();
+                        if let Err(e) = wal.sync_if_overdue() {
+                            tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
+                        }
+                        wal.flush_active_meta();
+                    }
+                    // Final sync: flush any data written since the last periodic sync
+                    let mut wal = wal.lock();
+                    if let Err(e) = wal.flush() {
+                        tracing::error!(target: "strata::wal", error = %e, "Final WAL flush failed during shutdown");
+                    }
+                })
+                .map_err(|e| {
+                    StrataError::internal(format!("failed to spawn WAL flush thread: {}", e))
+                })?;
+            Ok(Some(handle))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Recover on-disk segments and bump the coordinator's version floor.
+    fn recover_segments_and_bump(
+        storage: &Arc<SegmentedStore>,
+        coordinator: &TransactionCoordinator,
+        allow_lossy: bool,
+    ) -> StrataResult<()> {
+        match storage.recover_segments() {
+            Ok(seg_info) => {
+                if seg_info.segments_loaded > 0 {
+                    info!(target: "strata::db",
+                        branches = seg_info.branches_recovered,
+                        segments = seg_info.segments_loaded,
+                        errors_skipped = seg_info.errors_skipped,
+                        "Recovered segments from disk");
+                }
+                if seg_info.max_commit_id > 0 {
+                    coordinator.bump_version_floor(seg_info.max_commit_id);
+                }
+            }
+            Err(e) => {
+                warn!(target: "strata::db", error = %e, "Segment recovery failed");
+                if !allow_lossy {
+                    return Err(StrataError::corruption(format!(
+                        "Segment recovery failed: {}",
+                        e
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Shared tail of database open: recovery, WAL writer, coordinator, flush thread.
@@ -381,40 +440,8 @@ impl Database {
 
         let wal_arc = Arc::new(ParkingMutex::new(wal_writer));
         let flush_shutdown = Arc::new(AtomicBool::new(false));
-
-        // Spawn background WAL flush thread for Standard mode (#969)
-        let flush_handle = if let DurabilityMode::Standard { interval_ms, .. } = durability_mode {
-            let wal = Arc::clone(&wal_arc);
-            let shutdown = Arc::clone(&flush_shutdown);
-            let interval = std::time::Duration::from_millis(interval_ms);
-
-            let handle = std::thread::Builder::new()
-                .name("strata-wal-flush".to_string())
-                .spawn(move || {
-                    while !shutdown.load(Ordering::Relaxed) {
-                        std::thread::sleep(interval);
-                        if shutdown.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        let mut wal = wal.lock();
-                        if let Err(e) = wal.sync_if_overdue() {
-                            tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
-                        }
-                        wal.flush_active_meta();
-                    }
-                    // Final sync: flush any data written since the last periodic sync
-                    let mut wal = wal.lock();
-                    if let Err(e) = wal.flush() {
-                        tracing::error!(target: "strata::wal", error = %e, "Final WAL flush failed during shutdown");
-                    }
-                })
-                .map_err(|e| {
-                    StrataError::internal(format!("failed to spawn WAL flush thread: {}", e))
-                })?;
-            Some(handle)
-        } else {
-            None
-        };
+        let flush_handle =
+            Self::spawn_wal_flush_thread(durability_mode, &wal_arc, &flush_shutdown)?;
 
         // Create coordinator with write buffer limit from config (before moving result.storage)
         let coordinator = TransactionCoordinator::from_recovery_with_limits(
@@ -435,46 +462,14 @@ impl Database {
 
         // Apply storage resource limits from config
         let storage = Arc::new(result.storage);
-        storage.set_max_branches(cfg.storage.max_branches);
-        storage.set_max_versions_per_key(cfg.storage.max_versions_per_key);
-        storage.set_max_immutable_memtables(cfg.storage.max_immutable_memtables);
-        storage.set_target_file_size(cfg.storage.target_file_size);
-        storage.set_level_base_bytes(cfg.storage.level_base_bytes);
-        storage.set_data_block_size(cfg.storage.data_block_size);
-        storage.set_bloom_bits_per_key(cfg.storage.bloom_bits_per_key);
+        apply_storage_config(&storage, &cfg.storage);
         if cfg.storage.compaction_rate_limit > 0 {
             storage.set_compaction_rate_limit(cfg.storage.compaction_rate_limit);
         }
 
         let bg_threads = cfg.storage.background_threads.max(1);
 
-        // Recover previously flushed segments from disk
-        match storage.recover_segments() {
-            Ok(seg_info) => {
-                if seg_info.segments_loaded > 0 {
-                    info!(target: "strata::db",
-                        branches = seg_info.branches_recovered,
-                        segments = seg_info.segments_loaded,
-                        errors_skipped = seg_info.errors_skipped,
-                        "Recovered segments from disk");
-                }
-                // Bump version counter to at least the max commit_id in
-                // recovered segments, preventing version collisions when
-                // WAL has been fully compacted (#1726).
-                if seg_info.max_commit_id > 0 {
-                    coordinator.bump_version_floor(seg_info.max_commit_id);
-                }
-            }
-            Err(e) => {
-                warn!(target: "strata::db", error = %e, "Segment recovery failed");
-                if !cfg.allow_lossy_recovery {
-                    return Err(StrataError::corruption(format!(
-                        "Segment recovery failed: {}",
-                        e
-                    )));
-                }
-            }
-        }
+        Self::recover_segments_and_bump(&storage, &coordinator, cfg.allow_lossy_recovery)?;
 
         let db = Arc::new(Self {
             data_dir: canonical_path.clone(),
@@ -546,11 +541,9 @@ impl Database {
     pub fn cache() -> StrataResult<Arc<Self>> {
         let cfg = StrataConfig::default();
 
-        // Create fresh storage with branch limit from default config
+        // Create fresh storage with config limits
         let storage = SegmentedStore::new();
-        storage.set_max_branches(cfg.storage.max_branches);
-        storage.set_max_versions_per_key(cfg.storage.max_versions_per_key);
-        storage.set_max_immutable_memtables(cfg.storage.max_immutable_memtables);
+        apply_storage_config(&storage, &cfg.storage);
 
         let bg_threads = cfg.storage.background_threads.max(1);
 

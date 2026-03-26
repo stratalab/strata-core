@@ -117,6 +117,15 @@ impl Database {
     /// Returns the number of new records applied.
     ///
     /// For non-follower databases, this is a no-op returning 0.
+    ///
+    /// # Error recovery
+    ///
+    /// Refresh is a best-effort operation:
+    /// - **Storage mutations** (`apply_recovery_atomic`): a failure on a single
+    ///   WAL record logs a warning and skips that record. Subsequent records are
+    ///   still applied so the follower converges as closely as possible.
+    /// - **Search index updates**: silently skip entries that fail to parse.
+    /// - **Refresh hooks** (`apply_refresh`): infallible by trait contract.
     pub fn refresh(&self) -> StrataResult<usize> {
         if !self.follower || self.persistence_mode == PersistenceMode::Ephemeral {
             return Ok(0);
@@ -180,13 +189,22 @@ impl Database {
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 let deletes: Vec<_> = payload.deletes.to_vec();
-                self.storage.apply_recovery_atomic(
+                if let Err(e) = self.storage.apply_recovery_atomic(
                     writes,
                     deletes,
                     payload.version,
                     record.timestamp,
                     &payload.put_ttls,
-                )?;
+                ) {
+                    warn!(
+                        target: "strata::db",
+                        txn_id = record.txn_id,
+                        version = payload.version,
+                        error = %e,
+                        "Refresh: skipping WAL record due to storage error"
+                    );
+                    continue;
+                }
             }
 
             // --- Update BM25 search index ---
