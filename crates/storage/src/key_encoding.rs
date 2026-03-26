@@ -233,8 +233,7 @@ impl InternalKey {
         }
 
         let commit_id_start = buf.len() - COMMIT_ID_SUFFIX_LEN;
-        let commit_id_bytes: [u8; COMMIT_ID_SUFFIX_LEN] =
-            buf[commit_id_start..].try_into().ok()?;
+        let commit_id_bytes: [u8; COMMIT_ID_SUFFIX_LEN] = buf[commit_id_start..].try_into().ok()?;
         let commit_id = !u64::from_be_bytes(commit_id_bytes);
 
         let typed = &buf[..commit_id_start];
@@ -463,7 +462,6 @@ mod tests {
             TypeTag::Space,
             TypeTag::Vector,
             TypeTag::Json,
-            TypeTag::VectorConfig,
         ] {
             let key = make_key("test", tag, "k");
             let ik = InternalKey::encode(&key, 1);
@@ -669,7 +667,6 @@ mod tests {
                 Just(TypeTag::Space),
                 Just(TypeTag::Vector),
                 Just(TypeTag::Json),
-                Just(TypeTag::VectorConfig),
             ]
         }
 

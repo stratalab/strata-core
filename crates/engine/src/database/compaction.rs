@@ -294,9 +294,18 @@ impl Database {
                 });
             }
 
-            // Vector collection configs
-            for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::VectorConfig) {
-                let collection_name = key.user_key_string().unwrap_or_default();
+            // Vector collection configs (stored under TypeTag::Vector with __config__/ prefix)
+            for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::Vector) {
+                // Only process config entries (user_key starts with "__config__/")
+                let user_key_str = match key.user_key_string() {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let collection_name = match user_key_str.strip_prefix("__config__/") {
+                    Some(name) => name.to_string(),
+                    None => continue,
+                };
+
                 let config_bytes = match &vv.value {
                     strata_core::value::Value::Bytes(b) => b.clone(),
                     _ => serde_json::to_vec(&vv.value).unwrap_or_default(),

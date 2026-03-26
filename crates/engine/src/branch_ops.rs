@@ -28,13 +28,7 @@ use tracing::info;
 // Data TypeTags to scan (all user data types)
 // =============================================================================
 
-const DATA_TYPE_TAGS: [TypeTag; 5] = [
-    TypeTag::KV,
-    TypeTag::Event,
-    TypeTag::Json,
-    TypeTag::Vector,
-    TypeTag::VectorConfig,
-];
+const DATA_TYPE_TAGS: [TypeTag; 4] = [TypeTag::KV, TypeTag::Event, TypeTag::Json, TypeTag::Vector];
 
 // =============================================================================
 // Public result types
@@ -65,7 +59,7 @@ pub struct BranchDiffEntry {
     pub raw_key: Vec<u8>,
     /// Primitive type of this entry
     pub primitive: PrimitiveType,
-    /// Storage-level type tag (preserves Vector vs VectorConfig distinction)
+    /// Storage-level type tag
     pub type_tag: TypeTag,
     /// Space this entry belongs to
     pub space: String,
@@ -231,7 +225,7 @@ fn primitive_to_type_tags(prim: PrimitiveType) -> Vec<TypeTag> {
         PrimitiveType::Kv => vec![TypeTag::KV],
         PrimitiveType::Event => vec![TypeTag::Event],
         PrimitiveType::Json => vec![TypeTag::Json],
-        PrimitiveType::Vector => vec![TypeTag::Vector, TypeTag::VectorConfig],
+        PrimitiveType::Vector => vec![TypeTag::Vector],
         PrimitiveType::Branch => vec![], // Branch metadata is not scanned in diffs
     }
 }
@@ -242,7 +236,7 @@ fn type_tag_to_primitive(tag: TypeTag) -> PrimitiveType {
         TypeTag::KV => PrimitiveType::Kv,
         TypeTag::Event => PrimitiveType::Event,
         TypeTag::Json => PrimitiveType::Json,
-        TypeTag::Vector | TypeTag::VectorConfig => PrimitiveType::Vector,
+        TypeTag::Vector => PrimitiveType::Vector,
         _ => PrimitiveType::Kv, // fallback for Branch/Space/State/Trace metadata tags
     }
 }
@@ -4882,13 +4876,8 @@ mod tests {
         write_kv(&db, "snap-b", "default", "only-b", Value::Int(20));
 
         // Diff should succeed with consistent snapshot reads
-        let diff = diff_branches_with_options(
-            &db,
-            "snap-a",
-            "snap-b",
-            DiffOptions::default(),
-        )
-        .unwrap();
+        let diff =
+            diff_branches_with_options(&db, "snap-a", "snap-b", DiffOptions::default()).unwrap();
 
         // "only-a" removed (in A, not in B), "only-b" added (in B, not in A),
         // "shared" modified (different values)
