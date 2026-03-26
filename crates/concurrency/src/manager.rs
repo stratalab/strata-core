@@ -227,6 +227,7 @@ impl TransactionManager {
     /// returned version is safe to use as a checkpoint watermark because no
     /// version ≤ this value has storage application still in progress.
     pub fn quiesced_version(&self) -> u64 {
+        // Lock Level 1 (exclusive): drains all in-flight commits.
         let _guard = self.commit_quiesce.write();
         self.version.load(Ordering::Acquire)
     }
@@ -328,18 +329,21 @@ impl TransactionManager {
         #[allow(unused_mut, unused_variables)]
         let mut trace = strata_core::instrumentation::PerfTrace::new();
 
-        // Acquire quiesce read lock so checkpoint's quiesced_version() can
-        // drain all in-flight commits before reading the version counter (#1710).
+        // Lock Level 1 (shared): Acquire quiesce read lock so checkpoint's
+        // quiesced_version() can drain all in-flight commits before reading
+        // the version counter (#1710).
         let _quiesce_guard = self.commit_quiesce.read();
 
-        // Acquire per-branch commit lock. Must be held from validation through
+        // Lock Level 5 → Level 2: Acquire per-branch commit lock.
+        // DashMap shard guard (Level 5) is dropped by the .clone() before
+        // we lock the Mutex (Level 2). Must be held from validation through
         // version allocation and apply_writes (prevents TOCTOU, #1708, #1781).
         let commit_mutex = self
             .commit_locks
             .entry(txn.branch_id)
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone(); // clone Arc, drop RefMut → releases shard lock (#1781)
-        let _commit_guard = commit_mutex.lock();
+        let _commit_guard = commit_mutex.lock(); // Lock Level 2
 
         // Reject commits on branches that are mid-deletion (#1916).
         if self.deleting_branches.contains(&txn.branch_id) {
@@ -425,7 +429,7 @@ impl TransactionManager {
                         );
                         let record_bytes = record.to_bytes();
                         {
-                            let mut wal = wal_arc.lock();
+                            let mut wal = wal_arc.lock(); // Lock Level 4: WAL append
                             if let Err(e) =
                                 wal.append_pre_serialized(&record_bytes, commit_version, timestamp)
                             {
@@ -531,7 +535,8 @@ impl TransactionManager {
     ///
     /// # Lock ordering
     ///
-    /// quiesce read lock → branch lock → WAL lock (acquired inside, released before storage apply).
+    /// Level 1 (shared) → Level 2 → Level 4 (brief).
+    /// See [`lock_ordering`](crate::lock_ordering) for the full hierarchy.
     ///
     /// # Arguments
     /// * `txn` - Transaction to commit (must be in Active state)
@@ -2827,6 +2832,173 @@ mod tests {
         assert!(
             v2.is_err(),
             "T2 commit must fail: json_set() on missing doc but T1 created it"
+        );
+    }
+
+    // ========================================================================
+    // Issue #1912 — Lock Ordering Tests
+    // ========================================================================
+
+    /// Stress test exercising all lock levels concurrently:
+    ///   Level 1: Quiesce RwLock (shared by commits, exclusive by checkpoint)
+    ///   Level 2: Per-branch commit Mutex
+    ///   Level 4: WAL Mutex (via commit_with_wal_arc)
+    ///   Level 5: DashMap shard guards (implicit in commit_locks access)
+    ///
+    /// A deadlock here means the lock ordering is violated.
+    #[test]
+    fn test_issue_1912_lock_ordering_concurrent() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        use std::sync::Barrier;
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
+        let store = Arc::new(SegmentedStore::new());
+        let manager = Arc::new(TransactionManager::new(0));
+
+        let num_committers = 8;
+        let commits_per_thread = 50;
+        let done = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(Barrier::new(num_committers + 1)); // +1 for checkpoint thread
+
+        // Checkpoint thread: repeatedly calls quiesced_version() (Level 1 exclusive)
+        let checkpoint_done = Arc::clone(&done);
+        let checkpoint_mgr = Arc::clone(&manager);
+        let checkpoint_barrier = Arc::clone(&barrier);
+        let checkpoint_handle = std::thread::spawn(move || {
+            checkpoint_barrier.wait();
+            let mut checkpoint_count = 0u64;
+            while !checkpoint_done.load(AtomicOrdering::Relaxed) {
+                let _v = checkpoint_mgr.quiesced_version();
+                checkpoint_count += 1;
+                // Yield to let commit threads make progress
+                std::thread::yield_now();
+            }
+            checkpoint_count
+        });
+
+        // Commit threads: exercise Level 1 (shared) → Level 2 → Level 4 → Level 5
+        let mut commit_handles = Vec::new();
+        for i in 0..num_committers {
+            let mgr = Arc::clone(&manager);
+            let st = Arc::clone(&store);
+            let w = Arc::clone(&wal);
+            let b = Arc::clone(&barrier);
+
+            commit_handles.push(std::thread::spawn(move || {
+                let branch_id = BranchId::new();
+                let ns = create_test_namespace(branch_id);
+                b.wait();
+                for j in 0..commits_per_thread {
+                    let key = create_test_key(&ns, &format!("k_{}_{}", i, j));
+                    let mut txn = TransactionContext::with_store(
+                        (i * commits_per_thread + j) as u64 + 1,
+                        branch_id,
+                        Arc::clone(&st),
+                    );
+                    txn.put(key, Value::Int((i * commits_per_thread + j) as i64))
+                        .unwrap();
+                    // Use commit_with_wal_arc to exercise WAL lock (Level 4)
+                    mgr.commit_with_wal_arc(&mut txn, st.as_ref(), Some(&w))
+                        .unwrap();
+                }
+            }));
+        }
+
+        // Wait for all commit threads
+        for h in commit_handles {
+            h.join()
+                .expect("Commit thread panicked — possible deadlock");
+        }
+
+        // Signal checkpoint thread to stop
+        done.store(true, AtomicOrdering::Relaxed);
+        let checkpoint_count = checkpoint_handle.join().unwrap();
+
+        // Verify: all commits succeeded, checkpoint ran multiple times
+        let final_version = manager.current_version();
+        assert_eq!(
+            final_version,
+            (num_committers * commits_per_thread) as u64,
+            "All commits should have succeeded"
+        );
+        assert!(
+            checkpoint_count > 0,
+            "Checkpoint thread should have run at least once"
+        );
+    }
+
+    /// Same-branch variant: multiple threads commit to the SAME branch
+    /// while checkpoint runs concurrently. This exercises the per-branch
+    /// Mutex serialization (Level 2) under contention with Level 1 exclusive.
+    #[test]
+    fn test_issue_1912_lock_ordering_same_branch_stress() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        use std::sync::Barrier;
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
+        let store = Arc::new(SegmentedStore::new());
+        let manager = Arc::new(TransactionManager::new(0));
+
+        let branch_id = BranchId::new();
+        let num_committers = 4;
+        let commits_per_thread = 100;
+        let done = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(Barrier::new(num_committers + 1));
+
+        // Checkpoint thread
+        let checkpoint_done = Arc::clone(&done);
+        let checkpoint_mgr = Arc::clone(&manager);
+        let checkpoint_barrier = Arc::clone(&barrier);
+        let checkpoint_handle = std::thread::spawn(move || {
+            checkpoint_barrier.wait();
+            while !checkpoint_done.load(AtomicOrdering::Relaxed) {
+                let _v = checkpoint_mgr.quiesced_version();
+                std::thread::yield_now();
+            }
+        });
+
+        // Commit threads — all on the same branch (blind writes, so no validation conflicts)
+        let mut handles = Vec::new();
+        for i in 0..num_committers {
+            let mgr = Arc::clone(&manager);
+            let st = Arc::clone(&store);
+            let w = Arc::clone(&wal);
+            let b = Arc::clone(&barrier);
+
+            handles.push(std::thread::spawn(move || {
+                let ns = create_test_namespace(branch_id);
+                b.wait();
+                for j in 0..commits_per_thread {
+                    let key = create_test_key(&ns, &format!("sb_{}_{}", i, j));
+                    let mut txn = TransactionContext::with_store(
+                        (i * commits_per_thread + j) as u64 + 1,
+                        branch_id,
+                        Arc::clone(&st),
+                    );
+                    txn.put(key, Value::Int(j as i64)).unwrap();
+                    mgr.commit_with_wal_arc(&mut txn, st.as_ref(), Some(&w))
+                        .unwrap();
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join()
+                .expect("Commit thread panicked — possible deadlock");
+        }
+
+        done.store(true, AtomicOrdering::Relaxed);
+        checkpoint_handle.join().unwrap();
+
+        let final_version = manager.current_version();
+        assert_eq!(
+            final_version,
+            (num_committers * commits_per_thread) as u64,
+            "All same-branch commits should have succeeded"
         );
     }
 }
