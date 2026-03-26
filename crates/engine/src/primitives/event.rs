@@ -129,7 +129,7 @@ pub fn compute_event_hash(
     payload: &Value,
     timestamp: u64,
     prev_hash: &[u8; 32],
-) -> [u8; 32] {
+) -> StrataResult<[u8; 32]> {
     let mut hasher = Sha256::new();
 
     // Sequence (8 bytes, little-endian)
@@ -143,14 +143,16 @@ pub fn compute_event_hash(
     hasher.update(timestamp.to_le_bytes());
 
     // Payload as canonical JSON with length prefix
-    let payload_bytes = serde_json::to_vec(payload).unwrap_or_default();
+    let payload_bytes = serde_json::to_vec(payload).map_err(|e| {
+        StrataError::serialization(format!("failed to serialize event payload for hash: {}", e))
+    })?;
     hasher.update((payload_bytes.len() as u32).to_le_bytes());
     hasher.update(&payload_bytes);
 
     // Previous hash (32 bytes)
     hasher.update(prev_hash);
 
-    hasher.finalize().into()
+    Ok(hasher.finalize().into())
 }
 
 /// Validation error for EventLog operations
@@ -303,7 +305,7 @@ impl EventLog {
             payload,
             timestamp.as_micros(),
             &meta.head_hash,
-        );
+        )?;
 
         let event = Event {
             sequence,
@@ -358,7 +360,9 @@ impl EventLog {
         let result = self.db.transaction(*branch_id, |txn| {
             let meta_key = Key::new_event_meta(ns.clone());
             let mut meta: EventLogMeta = match txn.get(&meta_key)? {
-                Some(v) => from_stored_value(&v).unwrap_or_else(|_| EventLogMeta::default()),
+                Some(v) => from_stored_value(&v).map_err(|e| {
+                    StrataError::serialization(format!("corrupt EventLog metadata: {}", e))
+                })?,
                 None => EventLogMeta::default(),
             };
 
@@ -438,7 +442,9 @@ impl EventLog {
         let sequences = self.db.transaction(*branch_id, |txn| {
             let meta_key = Key::new_event_meta(ns.clone());
             let mut meta: EventLogMeta = match txn.get(&meta_key)? {
-                Some(v) => from_stored_value(&v).unwrap_or_else(|_| EventLogMeta::default()),
+                Some(v) => from_stored_value(&v).map_err(|e| {
+                    StrataError::serialization(format!("corrupt EventLog metadata: {}", e))
+                })?,
                 None => EventLogMeta::default(),
             };
 
@@ -524,7 +530,9 @@ impl EventLog {
             let meta_key = Key::new_event_meta(ns);
 
             let meta: EventLogMeta = match txn.get(&meta_key)? {
-                Some(v) => from_stored_value(&v).unwrap_or_else(|_| EventLogMeta::default()),
+                Some(v) => from_stored_value(&v).map_err(|e| {
+                    StrataError::serialization(format!("corrupt EventLog metadata: {}", e))
+                })?,
                 None => EventLogMeta::default(),
             };
 
@@ -542,7 +550,9 @@ impl EventLog {
             let meta_key = Key::new_event_meta(ns);
 
             let meta: EventLogMeta = match txn.get(&meta_key)? {
-                Some(v) => from_stored_value(&v).unwrap_or_else(|_| EventLogMeta::default()),
+                Some(v) => from_stored_value(&v).map_err(|e| {
+                    StrataError::serialization(format!("corrupt EventLog metadata: {}", e))
+                })?,
                 None => return Ok(Vec::new()),
             };
 
@@ -605,14 +615,18 @@ impl EventLog {
                 return Ok(results);
             }
 
-            // Fallback: O(N) scan for old data without type index keys
+            // Fallback: O(N) scan for old data without type index keys.
+            // Lazily migrates by writing missing index keys so subsequent queries use the fast path.
             let meta_key = Key::new_event_meta(ns.clone());
             let meta: EventLogMeta = match txn.get(&meta_key)? {
-                Some(v) => from_stored_value(&v).unwrap_or_else(|_| EventLogMeta::default()),
+                Some(v) => from_stored_value(&v).map_err(|e| {
+                    StrataError::serialization(format!("corrupt EventLog metadata: {}", e))
+                })?,
                 None => return Ok(Vec::new()),
             };
 
             let mut filtered = Vec::new();
+            let mut migrated_seqs = Vec::new();
             for seq in 0..meta.next_sequence {
                 if after_sequence.is_some_and(|after| seq <= after) {
                     continue;
@@ -623,6 +637,7 @@ impl EventLog {
                     let event: Event = from_stored_value(&v)
                         .map_err(|e| strata_core::StrataError::serialization(e.to_string()))?;
                     if event.event_type == event_type {
+                        migrated_seqs.push(seq);
                         filtered.push(Versioned::with_timestamp(
                             event.clone(),
                             Version::Sequence(seq),
@@ -636,6 +651,12 @@ impl EventLog {
                 }
             }
 
+            // Lazy migration: write missing type index keys for future fast-path lookups
+            for seq in &migrated_seqs {
+                let idx_key = Key::new_event_type_idx(ns.clone(), event_type, *seq);
+                txn.put(idx_key, Value::Null)?;
+            }
+
             Ok(filtered)
         })
     }
@@ -643,23 +664,37 @@ impl EventLog {
 
     /// List events up to a given timestamp.
     ///
-    /// Returns all events whose timestamp <= as_of_ts.
-    /// Optionally filtered by event_type.
+    /// Returns events whose timestamp <= as_of_ts.
+    /// Optionally filtered by event_type. Supports pagination via `limit`.
     pub fn list_at(
         &self,
         branch_id: &BranchId,
         space: &str,
         event_type: Option<&str>,
         as_of_ts: u64,
+        limit: Option<usize>,
     ) -> StrataResult<Vec<Event>> {
-        // Read metadata to get the total event count
+        if limit == Some(0) {
+            return Ok(Vec::new());
+        }
         use strata_core::Storage;
         let ns = self.namespace_for(branch_id, space);
         let meta_key = Key::new_event_meta(ns.clone());
         let meta: EventLogMeta = match self.db.storage().get_versioned(&meta_key, u64::MAX)? {
-            Some(vv) => from_stored_value(&vv.value).unwrap_or_else(|_| EventLogMeta::default()),
+            Some(vv) => from_stored_value(&vv.value).map_err(|e| {
+                StrataError::serialization(format!("corrupt EventLog metadata: {}", e))
+            })?,
             None => return Ok(Vec::new()),
         };
+
+        // Early skip: if filtering by type and the stream didn't exist at as_of_ts, return empty
+        if let Some(et) = event_type {
+            if let Some(stream_meta) = meta.streams.get(et) {
+                if stream_meta.first_timestamp > as_of_ts {
+                    return Ok(Vec::new());
+                }
+            }
+        }
 
         let mut events = Vec::new();
         for seq in 0..meta.next_sequence {
@@ -677,10 +712,160 @@ impl EventLog {
                     } else {
                         events.push(event);
                     }
+
+                    if limit.is_some_and(|l| events.len() >= l) {
+                        break;
+                    }
                 }
             }
         }
         Ok(events)
+    }
+
+    // ========== Range Query API ==========
+
+    /// Read events by sequence range.
+    ///
+    /// Returns events with sequence numbers in `[start_seq, end_seq)`.
+    /// If `end_seq` is None, reads to the end of the log.
+    /// Results are ordered by sequence number.
+    pub fn range(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        start_seq: u64,
+        end_seq: Option<u64>,
+        limit: Option<usize>,
+    ) -> StrataResult<Vec<Versioned<Event>>> {
+        if limit == Some(0) {
+            return Ok(Vec::new());
+        }
+        self.db.transaction(*branch_id, |txn| {
+            let ns = self.namespace_for(branch_id, space);
+            let meta_key = Key::new_event_meta(ns.clone());
+            let meta: EventLogMeta = match txn.get(&meta_key)? {
+                Some(v) => from_stored_value(&v).map_err(|e| {
+                    StrataError::serialization(format!("corrupt EventLog metadata: {}", e))
+                })?,
+                None => return Ok(Vec::new()),
+            };
+
+            let upper = end_seq
+                .unwrap_or(meta.next_sequence)
+                .min(meta.next_sequence);
+            if start_seq >= upper {
+                return Ok(Vec::new());
+            }
+
+            let capacity = limit
+                .unwrap_or((upper - start_seq) as usize)
+                .min((upper - start_seq) as usize);
+            let mut results = Vec::with_capacity(capacity);
+
+            for seq in start_seq..upper {
+                let event_key = Key::new_event(ns.clone(), seq);
+                if let Some(v) = txn.get(&event_key)? {
+                    let event: Event = from_stored_value(&v)
+                        .map_err(|e| StrataError::serialization(e.to_string()))?;
+                    results.push(Versioned::with_timestamp(
+                        event.clone(),
+                        Version::Sequence(seq),
+                        event.timestamp,
+                    ));
+
+                    if limit.is_some_and(|l| results.len() >= l) {
+                        break;
+                    }
+                }
+            }
+
+            Ok(results)
+        })
+    }
+
+    // ========== Time-Travel Type Query ==========
+
+    /// Read events filtered by type up to a given timestamp.
+    ///
+    /// Pushes timestamp filtering to the engine level instead of fetching
+    /// all events and filtering in the handler.
+    pub fn get_by_type_at(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        event_type: &str,
+        as_of_ts: u64,
+    ) -> StrataResult<Vec<Versioned<Event>>> {
+        self.db.transaction(*branch_id, |txn| {
+            let ns = self.namespace_for(branch_id, space);
+
+            // Try per-type index keys first (fast path)
+            let idx_prefix = Key::new_event_type_idx_prefix(ns.clone(), event_type);
+            let idx_entries = txn.scan_prefix(&idx_prefix)?;
+
+            if !idx_entries.is_empty() {
+                let mut results = Vec::new();
+                for (idx_key, _) in &idx_entries {
+                    let user_key = &idx_key.user_key;
+                    if user_key.len() >= 8 {
+                        let seq_bytes: [u8; 8] = user_key[user_key.len() - 8..].try_into().unwrap();
+                        let seq = u64::from_be_bytes(seq_bytes);
+
+                        let event_key = Key::new_event(ns.clone(), seq);
+                        if let Some(v) = txn.get(&event_key)? {
+                            let event: Event = from_stored_value(&v)
+                                .map_err(|e| StrataError::serialization(e.to_string()))?;
+                            if event.timestamp.as_micros() <= as_of_ts {
+                                results.push(Versioned::with_timestamp(
+                                    event.clone(),
+                                    Version::Sequence(seq),
+                                    event.timestamp,
+                                ));
+                            }
+                        }
+                    }
+                }
+                return Ok(results);
+            }
+
+            // Fallback: O(N) scan for old data without type index keys.
+            // Lazily migrates by writing missing index keys so subsequent queries use the fast path.
+            let meta_key = Key::new_event_meta(ns.clone());
+            let meta: EventLogMeta = match txn.get(&meta_key)? {
+                Some(v) => from_stored_value(&v).map_err(|e| {
+                    StrataError::serialization(format!("corrupt EventLog metadata: {}", e))
+                })?,
+                None => return Ok(Vec::new()),
+            };
+
+            let mut filtered = Vec::new();
+            let mut migrated_seqs = Vec::new();
+            for seq in 0..meta.next_sequence {
+                let event_key = Key::new_event(ns.clone(), seq);
+                if let Some(v) = txn.get(&event_key)? {
+                    let event: Event = from_stored_value(&v)
+                        .map_err(|e| StrataError::serialization(e.to_string()))?;
+                    if event.event_type == event_type {
+                        migrated_seqs.push(seq);
+                        if event.timestamp.as_micros() <= as_of_ts {
+                            filtered.push(Versioned::with_timestamp(
+                                event.clone(),
+                                Version::Sequence(seq),
+                                event.timestamp,
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Lazy migration: write missing type index keys for future fast-path lookups
+            for seq in &migrated_seqs {
+                let idx_key = Key::new_event_type_idx(ns.clone(), event_type, *seq);
+                txn.put(idx_key, Value::Null)?;
+            }
+
+            Ok(filtered)
+        })
     }
 }
 
@@ -703,17 +888,24 @@ impl crate::search::Searchable for EventLog {
 // ========== EventLogExt Implementation ==========
 
 impl EventLogExt for TransactionContext {
-    fn event_append(&mut self, event_type: &str, payload: Value) -> StrataResult<u64> {
+    fn event_append_in_space(
+        &mut self,
+        space: &str,
+        event_type: &str,
+        payload: Value,
+    ) -> StrataResult<u64> {
         // Validate inputs
         validate_event_type(event_type).map_err(|e| StrataError::invalid_input(e.to_string()))?;
         validate_payload(&payload).map_err(|e| StrataError::invalid_input(e.to_string()))?;
 
-        let ns = Arc::new(Namespace::for_branch(self.branch_id));
+        let ns = Arc::new(Namespace::for_branch_space(self.branch_id, space));
 
         // Read current metadata (or default)
         let meta_key = Key::new_event_meta(ns.clone());
         let mut meta: EventLogMeta = match self.get(&meta_key)? {
-            Some(v) => from_stored_value(&v).unwrap_or_else(|_| EventLogMeta::default()),
+            Some(v) => from_stored_value(&v).map_err(|e| {
+                StrataError::serialization(format!("corrupt EventLog metadata: {}", e))
+            })?,
             None => EventLogMeta::default(),
         };
 
@@ -727,7 +919,7 @@ impl EventLogExt for TransactionContext {
             &payload,
             timestamp.as_micros(),
             &meta.head_hash,
-        );
+        )?;
 
         // Build event
         let event = Event {
@@ -743,7 +935,7 @@ impl EventLogExt for TransactionContext {
         let event_key = Key::new_event(ns.clone(), sequence);
         self.put(event_key, to_stored_value(&event)?)?;
 
-        // Write per-type index key for efficient get_by_type lookups (#972)
+        // Write per-type index key for efficient get_by_type lookups
         let idx_key = Key::new_event_type_idx(ns.clone(), event_type, sequence);
         self.put(idx_key, Value::Null)?;
 
@@ -767,8 +959,8 @@ impl EventLogExt for TransactionContext {
         Ok(sequence)
     }
 
-    fn event_get(&mut self, sequence: u64) -> StrataResult<Option<Value>> {
-        let ns = Arc::new(Namespace::for_branch(self.branch_id));
+    fn event_get_in_space(&mut self, space: &str, sequence: u64) -> StrataResult<Option<Value>> {
+        let ns = Arc::new(Namespace::for_branch_space(self.branch_id, space));
         let event_key = Key::new_event(ns, sequence);
         self.get(&event_key)
     }
@@ -1099,35 +1291,43 @@ mod tests {
     #[test]
     fn test_sha256_hash_determinism() {
         // Same inputs should produce same hash
-        let hash1 = compute_event_hash(42, "test_event", &int_payload(100), 1234567890, &[0u8; 32]);
-        let hash2 = compute_event_hash(42, "test_event", &int_payload(100), 1234567890, &[0u8; 32]);
+        let hash1 = compute_event_hash(42, "test_event", &int_payload(100), 1234567890, &[0u8; 32])
+            .unwrap();
+        let hash2 = compute_event_hash(42, "test_event", &int_payload(100), 1234567890, &[0u8; 32])
+            .unwrap();
         assert_eq!(hash1, hash2);
     }
 
     #[test]
     fn test_sha256_hash_differs_for_different_inputs() {
-        let base = compute_event_hash(42, "test", &empty_payload(), 1234567890, &[0u8; 32]);
+        let base =
+            compute_event_hash(42, "test", &empty_payload(), 1234567890, &[0u8; 32]).unwrap();
 
         // Different sequence
-        let diff_seq = compute_event_hash(43, "test", &empty_payload(), 1234567890, &[0u8; 32]);
+        let diff_seq =
+            compute_event_hash(43, "test", &empty_payload(), 1234567890, &[0u8; 32]).unwrap();
         assert_ne!(base, diff_seq);
 
         // Different event type
-        let diff_type = compute_event_hash(42, "other", &empty_payload(), 1234567890, &[0u8; 32]);
+        let diff_type =
+            compute_event_hash(42, "other", &empty_payload(), 1234567890, &[0u8; 32]).unwrap();
         assert_ne!(base, diff_type);
 
         // Different timestamp
-        let diff_ts = compute_event_hash(42, "test", &empty_payload(), 1234567891, &[0u8; 32]);
+        let diff_ts =
+            compute_event_hash(42, "test", &empty_payload(), 1234567891, &[0u8; 32]).unwrap();
         assert_ne!(base, diff_ts);
 
         // Different prev_hash
-        let diff_prev = compute_event_hash(42, "test", &empty_payload(), 1234567890, &[1u8; 32]);
+        let diff_prev =
+            compute_event_hash(42, "test", &empty_payload(), 1234567890, &[1u8; 32]).unwrap();
         assert_ne!(base, diff_prev);
     }
 
     #[test]
     fn test_sha256_uses_full_32_bytes() {
-        let hash = compute_event_hash(42, "test", &empty_payload(), 1234567890, &[0u8; 32]);
+        let hash =
+            compute_event_hash(42, "test", &empty_payload(), 1234567890, &[0u8; 32]).unwrap();
 
         // SHA-256 should use all 32 bytes, not just the first 8 like DefaultHasher
         // Check that bytes beyond the first 8 are non-zero (statistically likely)

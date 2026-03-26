@@ -621,8 +621,7 @@ impl JsonStore {
 
         let key = self.key_for(branch_id, space, doc_id);
         self.db.transaction(*branch_id, |txn| {
-            Self::set_in_txn(txn, &key, doc_id, path, value, false)
-                .map(|(version, _)| version)
+            Self::set_in_txn(txn, &key, doc_id, path, value, false).map(|(version, _)| version)
         })
     }
 
@@ -2624,13 +2623,7 @@ mod tests {
 
         // Page 2: continue from cursor — "c" should be skipped
         let page2 = store
-            .list(
-                &branch_id,
-                "default",
-                None,
-                page1.next_cursor.as_deref(),
-                2,
-            )
+            .list(&branch_id, "default", None, page1.next_cursor.as_deref(), 2)
             .unwrap();
         assert_eq!(page2.doc_ids.len(), 2);
         assert_eq!(page2.doc_ids, vec!["d", "e"]);
@@ -2677,7 +2670,10 @@ mod tests {
         let result = store
             .get_at(&branch_id, "default", "doc1", &JsonPath::root(), ts_between)
             .unwrap();
-        assert!(result.is_some(), "Should find v1 at timestamp between v1 and v2");
+        assert!(
+            result.is_some(),
+            "Should find v1 at timestamp between v1 and v2"
+        );
         assert_eq!(result.unwrap(), JsonValue::from("v1"));
     }
 
@@ -2733,7 +2729,10 @@ mod tests {
 
             // Verify default space doesn't have it
             let default_result = txn.json_get("doc1", &JsonPath::root())?;
-            assert!(default_result.is_none(), "Default space should not have custom space doc");
+            assert!(
+                default_result.is_none(),
+                "Default space should not have custom space doc"
+            );
 
             Ok(())
         })
@@ -2765,10 +2764,7 @@ mod tests {
         store
             .create(&branch_id, "default", "other", JsonValue::object())
             .unwrap();
-        assert_eq!(
-            store.count(&branch_id, "default", Some("doc")).unwrap(),
-            5
-        );
+        assert_eq!(store.count(&branch_id, "default", Some("doc")).unwrap(), 5);
         assert_eq!(store.count(&branch_id, "default", None).unwrap(), 6);
     }
 
@@ -2869,13 +2865,27 @@ mod tests {
 
         // Page 2
         let page2 = store
-            .list_at(&branch_id, "default", None, ts, page1.next_cursor.as_deref(), 2)
+            .list_at(
+                &branch_id,
+                "default",
+                None,
+                ts,
+                page1.next_cursor.as_deref(),
+                2,
+            )
             .unwrap();
         assert_eq!(page2.doc_ids.len(), 2);
 
         // Page 3 (last page)
         let page3 = store
-            .list_at(&branch_id, "default", None, ts, page2.next_cursor.as_deref(), 2)
+            .list_at(
+                &branch_id,
+                "default",
+                None,
+                ts,
+                page2.next_cursor.as_deref(),
+                2,
+            )
             .unwrap();
         assert_eq!(page3.doc_ids.len(), 1);
         assert!(page3.next_cursor.is_none());
@@ -2886,8 +2896,7 @@ mod tests {
     fn test_format_version_backward_compat() {
         // Simulate v1 format (no version header — raw MessagePack)
         let doc = JsonDoc::new("test", JsonValue::from("hello"));
-        let raw_msgpack =
-            rmp_serde::to_vec(&doc).unwrap();
+        let raw_msgpack = rmp_serde::to_vec(&doc).unwrap();
         let v1_value = Value::Bytes(raw_msgpack);
 
         // v1 should deserialize successfully

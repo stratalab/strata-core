@@ -108,7 +108,7 @@ impl<'a> Transaction<'a> {
     }
 
     /// Compute hash for an event using the canonical hash function.
-    fn compute_event_hash(event: &Event) -> [u8; 32] {
+    fn compute_event_hash(event: &Event) -> strata_core::StrataResult<[u8; 32]> {
         crate::primitives::event::compute_event_hash(
             event.sequence,
             &event.event_type,
@@ -220,7 +220,7 @@ impl<'a> TransactionOps for Transaction<'a> {
         };
 
         // Compute and set the hash
-        event.hash = Self::compute_event_hash(&event);
+        event.hash = Self::compute_event_hash(&event)?;
 
         // Update last_hash for next event in chain
         self.last_hash = event.hash;

@@ -427,8 +427,7 @@ pub fn json_batch_delete(
     // Batch root deletes in a single transaction
     if !root_deletes.is_empty() {
         let doc_ids: Vec<String> = root_deletes.iter().map(|(_, k)| k.clone()).collect();
-        let destroy_results =
-            convert_result(p.json.batch_destroy(&branch_id, &space, &doc_ids))?;
+        let destroy_results = convert_result(p.json.batch_destroy(&branch_id, &space, &doc_ids))?;
         for (j, (orig_idx, key)) in root_deletes.iter().enumerate() {
             let deleted = destroy_results[j];
             results[*orig_idx].version = Some(if deleted { 1 } else { 0 });
@@ -450,8 +449,11 @@ pub fn json_batch_delete(
             .iter()
             .map(|(_, k, p)| (k.clone(), p.clone()))
             .collect();
-        let del_results =
-            convert_result(p.json.batch_delete_at_path(&branch_id, &space, &engine_entries))?;
+        let del_results = convert_result(p.json.batch_delete_at_path(
+            &branch_id,
+            &space,
+            &engine_entries,
+        ))?;
         for (j, (orig_idx, key, _)) in path_deletes.iter().enumerate() {
             match &del_results[j] {
                 Ok(_version) => {
