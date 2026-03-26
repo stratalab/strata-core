@@ -1751,4 +1751,209 @@ mod tests {
         assert_eq!(*ns_before, *ns_after);
         assert!(!Arc::ptr_eq(&ns_before, &ns_after));
     }
+
+    // ========== Issue #1934: Test coverage gap scenarios ==========
+
+    // --- Scenario 1: Engine accepts empty keys (no engine-level validation) ---
+
+    #[test]
+    fn test_put_empty_key_engine_accepts() {
+        // The engine has no key validation — only the executor's validate_key()
+        // rejects empty keys. This test documents the engine-level behavior:
+        // empty keys are accepted and round-trip correctly.
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+
+        kv.put(&branch_id, "default", "", Value::String("empty-key-value".into()))
+            .unwrap();
+
+        let result = kv.get(&branch_id, "default", "").unwrap();
+        assert_eq!(result, Some(Value::String("empty-key-value".into())));
+    }
+
+    #[test]
+    fn test_list_includes_empty_key() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+
+        kv.put(&branch_id, "default", "", Value::Int(0)).unwrap();
+        kv.put(&branch_id, "default", "a", Value::Int(1)).unwrap();
+
+        let keys = kv.list(&branch_id, "default", None).unwrap();
+        assert!(keys.contains(&String::new()), "empty key must appear in list");
+        assert_eq!(keys.len(), 2);
+    }
+
+    // --- Scenario 2: Engine accepts _strata/ prefix keys ---
+
+    #[test]
+    fn test_put_reserved_prefix_engine_accepts() {
+        // The executor rejects _strata/ prefixed keys, but the engine
+        // has no such restriction. This test documents that the engine
+        // layer stores them without error.
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+
+        kv.put(
+            &branch_id,
+            "default",
+            "_strata/internal",
+            Value::String("reserved".into()),
+        )
+        .unwrap();
+
+        let result = kv.get(&branch_id, "default", "_strata/internal").unwrap();
+        assert_eq!(result, Some(Value::String("reserved".into())));
+    }
+
+    // --- Scenario 3: Engine accepts oversized values (no engine-level validation) ---
+
+    #[test]
+    fn test_put_large_value_engine_accepts() {
+        // The executor enforces value size limits via validate_value().
+        // The engine has no such check — it stores whatever it receives.
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+
+        let large_string = "x".repeat(1_000_000); // 1MB string
+        kv.put(
+            &branch_id,
+            "default",
+            "big",
+            Value::String(large_string.clone()),
+        )
+        .unwrap();
+
+        let result = kv.get(&branch_id, "default", "big").unwrap();
+        assert_eq!(result, Some(Value::String(large_string)));
+    }
+
+    // --- Scenario 5: get_at() with future timestamp ---
+
+    #[test]
+    fn test_get_at_future_timestamp() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+
+        kv.put(&branch_id, "default", "k", Value::Int(1)).unwrap();
+
+        // A far-future timestamp should see the latest value
+        let far_future = u64::MAX;
+        let result = kv.get_at(&branch_id, "default", "k", far_future).unwrap();
+        assert_eq!(result, Some(Value::Int(1)), "future timestamp must see latest value");
+    }
+
+    #[test]
+    fn test_get_at_future_sees_latest_version() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+
+        kv.put(&branch_id, "default", "k", Value::Int(1)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        kv.put(&branch_id, "default", "k", Value::Int(2)).unwrap();
+
+        let far_future = u64::MAX;
+        let result = kv.get_at(&branch_id, "default", "k", far_future).unwrap();
+        assert_eq!(result, Some(Value::Int(2)), "future timestamp must see latest version");
+    }
+
+    // --- Scenario 6: get_at() with timestamp before any writes ---
+
+    #[test]
+    fn test_get_at_before_any_writes() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+
+        kv.put(&branch_id, "default", "k", Value::Int(1)).unwrap();
+
+        // Timestamp 0 is before any possible write
+        let result = kv.get_at(&branch_id, "default", "k", 0).unwrap();
+        assert_eq!(result, None, "timestamp before any writes must return None");
+    }
+
+    #[test]
+    fn test_get_at_nonexistent_key() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+
+        let result = kv.get_at(&branch_id, "default", "missing", u64::MAX).unwrap();
+        assert_eq!(result, None, "nonexistent key must return None at any timestamp");
+    }
+
+    #[test]
+    fn test_list_at_before_any_writes() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+
+        kv.put(&branch_id, "default", "a", Value::Int(1)).unwrap();
+        kv.put(&branch_id, "default", "b", Value::Int(2)).unwrap();
+
+        let keys = kv.list_at(&branch_id, "default", None, 0).unwrap();
+        assert!(keys.is_empty(), "list_at before any writes must be empty");
+    }
+
+    #[test]
+    fn test_list_at_future_timestamp() {
+        let (_temp, _db, kv) = setup();
+        let branch_id = BranchId::new();
+
+        kv.put(&branch_id, "default", "a", Value::Int(1)).unwrap();
+        kv.put(&branch_id, "default", "b", Value::Int(2)).unwrap();
+
+        let keys = kv.list_at(&branch_id, "default", None, u64::MAX).unwrap();
+        assert_eq!(keys.len(), 2, "list_at with future timestamp must see all keys");
+    }
+
+    // --- Scenario 8: Search after batch_put() ---
+
+    #[test]
+    fn test_search_after_batch_put() {
+        use crate::search::Searchable;
+
+        let (_temp, _db, kv) = setup_with_index();
+        let branch_id = BranchId::new();
+
+        let entries = vec![
+            ("doc1".to_string(), Value::String("alpha bravo charlie".into())),
+            ("doc2".to_string(), Value::String("delta echo foxtrot".into())),
+            ("doc3".to_string(), Value::String("alpha delta golf".into())),
+        ];
+
+        let results = kv.batch_put(&branch_id, "default", entries).unwrap();
+        assert!(results.iter().all(|r| r.is_ok()), "all batch items must succeed");
+
+        // All batch_put items must be searchable immediately
+        let req = crate::SearchRequest::new(branch_id, "alpha");
+        let response = kv.search(&req).unwrap();
+        assert_eq!(response.len(), 2, "both docs containing 'alpha' must be found");
+
+        let req = crate::SearchRequest::new(branch_id, "delta");
+        let response = kv.search(&req).unwrap();
+        assert_eq!(response.len(), 2, "both docs containing 'delta' must be found");
+
+        let req = crate::SearchRequest::new(branch_id, "echo");
+        let response = kv.search(&req).unwrap();
+        assert_eq!(response.len(), 1, "only doc2 contains 'echo'");
+    }
+
+    #[test]
+    fn test_search_after_batch_put_then_delete() {
+        use crate::search::Searchable;
+
+        let (_temp, _db, kv) = setup_with_index();
+        let branch_id = BranchId::new();
+
+        let entries = vec![
+            ("d1".to_string(), Value::String("searchable content here".into())),
+            ("d2".to_string(), Value::String("searchable data there".into())),
+        ];
+        kv.batch_put(&branch_id, "default", entries).unwrap();
+
+        // Delete one
+        kv.delete(&branch_id, "default", "d1").unwrap();
+
+        let req = crate::SearchRequest::new(branch_id, "searchable");
+        let response = kv.search(&req).unwrap();
+        assert_eq!(response.len(), 1, "deleted doc must not appear in search");
+    }
 }
