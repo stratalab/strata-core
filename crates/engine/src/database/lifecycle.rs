@@ -250,6 +250,22 @@ impl Database {
                                 }
                             }
                         }
+                        TypeTag::Graph => {
+                            if key.user_key.starts_with(b"__")
+                                || key.user_key.windows(3).any(|w| w == b"/__")
+                            {
+                                continue;
+                            }
+                            if let Some(text) = crate::search::extract_indexable_text(value) {
+                                if let Some(user_key) = key.user_key_string() {
+                                    let entity_ref = strata_core::EntityRef::Graph {
+                                        branch_id,
+                                        key: user_key,
+                                    };
+                                    index.index_document(&entity_ref, &text, None);
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -280,6 +296,20 @@ impl Database {
                                 let entity_ref = strata_core::EntityRef::Event {
                                     branch_id,
                                     sequence,
+                                };
+                                index.remove_document(&entity_ref);
+                            }
+                        }
+                        TypeTag::Graph => {
+                            if key.user_key.starts_with(b"__")
+                                || key.user_key.windows(3).any(|w| w == b"/__")
+                            {
+                                continue;
+                            }
+                            if let Some(user_key) = key.user_key_string() {
+                                let entity_ref = strata_core::EntityRef::Graph {
+                                    branch_id,
+                                    key: user_key,
                                 };
                                 index.remove_document(&entity_ref);
                             }

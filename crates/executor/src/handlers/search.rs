@@ -73,6 +73,7 @@ pub fn search(
                 "event" => Some(PrimitiveType::Event),
                 "branch" => Some(PrimitiveType::Branch),
                 "vector" => Some(PrimitiveType::Vector),
+                "graph" => Some(PrimitiveType::Graph),
                 _ => None,
             })
             .collect::<Vec<_>>()
