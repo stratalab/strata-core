@@ -164,6 +164,12 @@ pub struct SearchRequest {
 
     /// Space to search within (defaults to "default").
     pub space: String,
+
+    /// Optional: MVCC snapshot version for cross-primitive consistency (#1921).
+    /// When set, all primitive searches in a HybridSearch query share the same
+    /// snapshot. Primitives that support versioned reads use this bound; the
+    /// inverted index scoring is not yet version-bounded (future work).
+    pub snapshot_version: Option<u64>,
 }
 
 impl SearchRequest {
@@ -189,6 +195,7 @@ impl SearchRequest {
             tags_any: vec![],
             precomputed_embedding: None,
             space: "default".to_string(),
+            snapshot_version: None,
         }
     }
 
@@ -237,6 +244,12 @@ impl SearchRequest {
     /// Builder: set space to search within
     pub fn with_space(mut self, space: impl Into<String>) -> Self {
         self.space = space.into();
+        self
+    }
+
+    /// Builder: set MVCC snapshot version for consistent cross-primitive reads
+    pub fn with_snapshot_version(mut self, version: u64) -> Self {
+        self.snapshot_version = Some(version);
         self
     }
 
@@ -509,6 +522,17 @@ mod tests {
         assert!(req2.includes_primitive(PrimitiveType::Kv));
         assert!(req2.includes_primitive(PrimitiveType::Json));
         assert!(!req2.includes_primitive(PrimitiveType::Event));
+    }
+
+    #[test]
+    fn test_issue_1921_snapshot_version_in_request() {
+        let req = SearchRequest::new(BranchId::new(), "test query")
+            .with_snapshot_version(42);
+        assert_eq!(req.snapshot_version, Some(42));
+
+        // Default should be None
+        let req2 = SearchRequest::new(BranchId::new(), "test query");
+        assert_eq!(req2.snapshot_version, None);
     }
 
     // ========================================

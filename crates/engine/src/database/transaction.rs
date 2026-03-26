@@ -158,12 +158,13 @@ impl Database {
     /// 2. L0 count >= `l0_slowdown_writes_trigger` → yield 1 ms per write.
     /// 3. Memtable bytes > threshold → yield 1 ms (OOM protection).
     #[inline]
-    fn maybe_apply_write_backpressure(&self) {
+    fn maybe_apply_write_backpressure(&self) -> StrataResult<()> {
         let cfg = self.config.read();
 
         // L0-based stalling (protects read latency)
         let l0_stop = cfg.storage.l0_stop_writes_trigger;
         let l0_slow = cfg.storage.l0_slowdown_writes_trigger;
+        let timeout_ms = cfg.storage.write_stall_timeout_ms;
         drop(cfg); // release config lock before potential sleep
 
         let l0_count = self.storage.max_l0_segment_count();
@@ -172,18 +173,34 @@ impl Database {
             // Complete stall: wait on condvar until compaction drains L0.
             // Also trigger compaction in case none is running.
             self.schedule_flush_if_needed();
+            let stall_start = std::time::Instant::now();
+            let timeout = std::time::Duration::from_millis(timeout_ms);
+
             let mut guard = self.write_stall_mu.lock();
             // Re-check after acquiring lock (compaction may have finished)
             while self.storage.max_l0_segment_count() >= l0_stop {
+                if timeout_ms > 0 && stall_start.elapsed() >= timeout {
+                    let current_l0 = self.storage.max_l0_segment_count();
+                    tracing::warn!(
+                        target: "strata::backpressure",
+                        stall_ms = stall_start.elapsed().as_millis() as u64,
+                        l0_count = current_l0,
+                        "Write stall timeout — L0 compaction cannot keep up"
+                    );
+                    return Err(StrataError::write_stall_timeout(
+                        stall_start.elapsed().as_millis() as u64,
+                        current_l0,
+                    ));
+                }
                 self.write_stall_cv
                     .wait_for(&mut guard, std::time::Duration::from_millis(10));
             }
-            return;
+            return Ok(());
         }
 
         if l0_slow > 0 && l0_count >= l0_slow {
             std::thread::sleep(std::time::Duration::from_millis(1));
-            return;
+            return Ok(());
         }
 
         // Memtable-based stalling (protects memory usage)
@@ -191,13 +208,14 @@ impl Database {
         let wbs = cfg.storage.write_buffer_size as u64;
         let max_frozen = cfg.storage.max_immutable_memtables as u64;
         if wbs == 0 {
-            return;
+            return Ok(());
         }
         let threshold = wbs * (max_frozen + 2);
         let current = self.storage.total_memtable_bytes();
         if current > threshold {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+        Ok(())
     }
 
     /// Update the MANIFEST flush watermark and truncate WAL segments below it.
@@ -302,7 +320,9 @@ impl Database {
                 // Schedule flush only for write transactions (reads skip entirely)
                 if had_writes {
                     self.schedule_flush_if_needed();
-                    self.maybe_apply_write_backpressure();
+                    // Best-effort: backpressure must not fail a committed txn (#1924).
+                    // The stall loop still bounds the delay; a timeout just logs.
+                    let _ = self.maybe_apply_write_backpressure();
                 }
                 Ok((value, commit_version))
             }
@@ -498,7 +518,8 @@ impl Database {
         let version = self.commit_internal(txn, self.durability_mode)?;
         if had_writes {
             self.schedule_flush_if_needed();
-            self.maybe_apply_write_backpressure();
+            // Best-effort: backpressure must not fail a committed txn (#1924).
+            let _ = self.maybe_apply_write_backpressure();
         }
         Ok(version)
     }

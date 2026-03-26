@@ -77,6 +77,16 @@ impl From<StrataError> for Error {
                 reason: format!("Transaction timeout after {}ms", duration_ms),
             },
 
+            StrataError::WriteStallTimeout {
+                stall_duration_ms,
+                l0_count,
+            } => Error::Conflict {
+                reason: format!(
+                    "Write stall timeout after {}ms (L0 count: {})",
+                    stall_duration_ms, l0_count
+                ),
+            },
+
             StrataError::TransactionNotActive { .. } => Error::TransactionNotActive { hint: None },
 
             // Validation errors

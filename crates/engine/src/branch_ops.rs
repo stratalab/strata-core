@@ -410,6 +410,9 @@ pub fn diff_branches_with_options(
 
     let storage = db.storage();
 
+    // Capture snapshot version for consistent reads (#1920)
+    let snapshot_version = db.current_version();
+
     // COW fast path: if one branch is a direct child of the other and no
     // as_of timestamp, use O(W) diff instead of O(N) full scan.
     // Checked early to avoid the O(spaces) space listing below.
@@ -477,9 +480,21 @@ pub fn diff_branches_with_options(
     let mut maps_b: HashMap<String, HashMap<(Vec<u8>, TypeTag), Value>> = HashMap::new();
 
     for type_tag in &type_tags {
-        let entries_a = match options.as_of {
+        let entries_a: Vec<(Key, VersionedValue)> = match options.as_of {
             Some(ts) => storage.list_by_type_at_timestamp(&id_a, *type_tag, ts),
-            None => storage.list_by_type(&id_a, *type_tag),
+            None => storage
+                .list_by_type_at_version(&id_a, *type_tag, snapshot_version)
+                .into_iter()
+                .filter(|e| !e.is_tombstone)
+                .map(|e| {
+                    let vv = VersionedValue {
+                        value: e.value,
+                        version: Version::Txn(e.commit_id),
+                        timestamp: strata_core::Timestamp::from_micros(0),
+                    };
+                    (e.key, vv)
+                })
+                .collect(),
         };
         for (key, vv) in entries_a {
             if space_filter
@@ -493,9 +508,21 @@ pub fn diff_branches_with_options(
             }
         }
 
-        let entries_b = match options.as_of {
+        let entries_b: Vec<(Key, VersionedValue)> = match options.as_of {
             Some(ts) => storage.list_by_type_at_timestamp(&id_b, *type_tag, ts),
-            None => storage.list_by_type(&id_b, *type_tag),
+            None => storage
+                .list_by_type_at_version(&id_b, *type_tag, snapshot_version)
+                .into_iter()
+                .filter(|e| !e.is_tombstone)
+                .map(|e| {
+                    let vv = VersionedValue {
+                        value: e.value,
+                        version: Version::Txn(e.commit_id),
+                        timestamp: strata_core::Timestamp::from_micros(0),
+                    };
+                    (e.key, vv)
+                })
+                .collect(),
         };
         for (key, vv) in entries_b {
             if space_filter
@@ -4837,5 +4864,36 @@ mod tests {
         assert_eq!(diff.summary.total_added, 0);
         assert_eq!(diff.summary.total_removed, 0);
         assert_eq!(diff.summary.total_modified, 0);
+    }
+
+    #[test]
+    fn test_issue_1920_diff_branches_snapshot_consistency() {
+        // Verify that diff_branches uses snapshot-isolated reads so that
+        // concurrent writes don't produce an inconsistent diff.
+        let (_temp, db) = setup();
+        let branch_index = BranchIndex::new(db.clone());
+        branch_index.create_branch("snap-a").unwrap();
+        branch_index.create_branch("snap-b").unwrap();
+
+        // Write different data to each branch
+        write_kv(&db, "snap-a", "default", "shared", Value::Int(1));
+        write_kv(&db, "snap-a", "default", "only-a", Value::Int(10));
+        write_kv(&db, "snap-b", "default", "shared", Value::Int(2));
+        write_kv(&db, "snap-b", "default", "only-b", Value::Int(20));
+
+        // Diff should succeed with consistent snapshot reads
+        let diff = diff_branches_with_options(
+            &db,
+            "snap-a",
+            "snap-b",
+            DiffOptions::default(),
+        )
+        .unwrap();
+
+        // "only-a" removed (in A, not in B), "only-b" added (in B, not in A),
+        // "shared" modified (different values)
+        assert_eq!(diff.summary.total_removed, 1, "only-a should be removed");
+        assert_eq!(diff.summary.total_added, 1, "only-b should be added");
+        assert_eq!(diff.summary.total_modified, 1, "shared should be modified");
     }
 }
