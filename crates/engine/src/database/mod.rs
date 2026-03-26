@@ -373,6 +373,29 @@ impl Database {
         self.storage.clear_branch(branch_id);
     }
 
+    /// Mark a branch as being deleted (#1916).
+    ///
+    /// Blocks future commits on this branch. The caller must also acquire
+    /// `branch_commit_lock()` to drain in-flight commits.
+    pub fn mark_branch_deleting(&self, branch_id: &BranchId) {
+        self.coordinator.mark_branch_deleting(branch_id);
+    }
+
+    /// Remove the deleting mark for a branch (#1916).
+    pub fn unmark_branch_deleting(&self, branch_id: &BranchId) {
+        self.coordinator.unmark_branch_deleting(branch_id);
+    }
+
+    /// Get the commit lock Arc for a branch (#1916).
+    ///
+    /// Locking this serializes with in-flight commits on the branch.
+    pub fn branch_commit_lock(
+        &self,
+        branch_id: &BranchId,
+    ) -> std::sync::Arc<parking_lot::Mutex<()>> {
+        self.coordinator.branch_commit_lock(branch_id)
+    }
+
     /// Set subsystems for this database (called by DatabaseBuilder).
     pub(crate) fn set_subsystems(&self, subsystems: Vec<Box<dyn crate::recovery::Subsystem>>) {
         *self.subsystems.write() = subsystems;

@@ -29,7 +29,7 @@
 
 use crate::payload::TransactionPayload;
 use crate::{CommitError, TransactionContext, TransactionStatus};
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use parking_lot::{Mutex, RwLock};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -108,6 +108,13 @@ pub struct TransactionManager {
     /// `mark_version_applied(V)` is called, V is removed and `visible_version`
     /// is advanced if the contiguous applied prefix grew.
     pending_versions: Mutex<BTreeSet<u64>>,
+
+    /// Branches currently being deleted (#1916).
+    ///
+    /// Commit paths check this set after acquiring the per-branch lock and
+    /// reject commits on branches that are mid-deletion. This prevents
+    /// concurrent commits from resurrecting data on a deleted branch.
+    deleting_branches: DashSet<BranchId>,
 }
 
 impl TransactionManager {
@@ -136,6 +143,7 @@ impl TransactionManager {
             commit_quiesce: RwLock::new(()),
             visible_version: AtomicU64::new(initial_version),
             pending_versions: Mutex::new(BTreeSet::new()),
+            deleting_branches: DashSet::new(),
         }
     }
 
@@ -338,6 +346,11 @@ impl TransactionManager {
             .clone(); // clone Arc, drop RefMut → releases shard lock (#1781)
         let _commit_guard = commit_mutex.lock();
 
+        // Reject commits on branches that are mid-deletion (#1916).
+        if self.deleting_branches.contains(&txn.branch_id) {
+            return Err(CommitError::BranchDeleting(txn.branch_id));
+        }
+
         // Skip OCC validation for blind writes (no reads, no CAS, no JSON snapshots)
         let can_skip_validation = txn.read_set.is_empty()
             && txn.cas_set.is_empty()
@@ -492,6 +505,11 @@ impl TransactionManager {
             .clone(); // clone Arc, drop RefMut → releases shard lock (#1781)
         let _commit_guard = commit_mutex.lock();
 
+        // Reject commits on branches that are mid-deletion (#1916).
+        if self.deleting_branches.contains(&txn.branch_id) {
+            return Err(CommitError::BranchDeleting(txn.branch_id));
+        }
+
         // Skip OCC validation for blind writes (no reads, no CAS, no JSON snapshots)
         let can_skip_validation = txn.read_set.is_empty()
             && txn.cas_set.is_empty()
@@ -627,6 +645,31 @@ impl TransactionManager {
         true
     }
 
+    /// Mark a branch as being deleted (#1916).
+    ///
+    /// Subsequent commits on this branch will be rejected with
+    /// `CommitError::BranchDeleting` after they acquire the per-branch lock.
+    pub fn mark_branch_deleting(&self, branch_id: &BranchId) {
+        self.deleting_branches.insert(*branch_id);
+    }
+
+    /// Remove the deleting mark for a branch (#1916).
+    pub fn unmark_branch_deleting(&self, branch_id: &BranchId) {
+        self.deleting_branches.remove(branch_id);
+    }
+
+    /// Clone the `Arc<Mutex<()>>` for a branch's commit lock (#1916).
+    ///
+    /// The caller can lock this to serialize with (and drain) in-flight
+    /// commits on the branch. Used by `delete_branch` to ensure no commit
+    /// is mid-apply before scanning and deleting branch data.
+    pub fn branch_commit_lock(&self, branch_id: &BranchId) -> Arc<Mutex<()>> {
+        self.commit_locks
+            .entry(*branch_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     /// Advance the version counter to at least `v`.
     ///
     /// Used during multi-process refresh to ensure the local version counter
@@ -685,6 +728,11 @@ impl TransactionManager {
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone(); // clone Arc, drop RefMut → releases shard lock (#1781)
         let _commit_guard = commit_mutex.lock();
+
+        // Reject commits on branches that are mid-deletion (#1916).
+        if self.deleting_branches.contains(&txn.branch_id) {
+            return Err(CommitError::BranchDeleting(txn.branch_id));
+        }
 
         // Skip OCC validation for blind writes (no reads, no CAS, no JSON snapshots)
         let can_skip_validation = txn.read_set.is_empty()
