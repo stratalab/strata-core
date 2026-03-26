@@ -1,7 +1,7 @@
 # Graph Primitive Promotion: TypeTag::Graph (GRF-DEBT-001)
 
 **Issue:** #1974
-**Status:** Design
+**Status:** Implemented
 **Priority:** P0 architectural debt
 
 ## Problem

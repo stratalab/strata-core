@@ -7,6 +7,7 @@
 //! - **JsonStore**: JSON document storage with path-based operations
 //!
 //! Vector storage is provided by the `strata-vector` crate.
+//! Graph storage is provided by the `strata-graph` crate.
 //!
 //! ## Design Principle: Stateless Facades
 //!

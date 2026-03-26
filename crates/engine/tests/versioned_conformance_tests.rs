@@ -821,9 +821,9 @@ mod version_monotonicity {
 #[test]
 fn conformance_matrix_coverage() {
     // This test documents the conformance matrix
-    // 5 primitives × 7 invariants = 35 conformance checks
+    // 6 primitives × 7 invariants = 42 conformance checks
 
-    let primitives = ["KV", "Event", "Branch", "Json", "Vector"];
+    let primitives = ["KV", "Event", "Branch", "Json", "Vector", "Graph"];
 
     let invariants = [
         "1. Addressable",
