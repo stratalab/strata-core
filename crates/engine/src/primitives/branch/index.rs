@@ -390,7 +390,13 @@ impl BranchIndex {
     ) -> StrataResult<()> {
         let ns = Arc::new(Namespace::for_branch(branch_id));
 
-        for type_tag in [TypeTag::KV, TypeTag::Event, TypeTag::Json, TypeTag::Vector] {
+        for type_tag in [
+            TypeTag::KV,
+            TypeTag::Event,
+            TypeTag::Json,
+            TypeTag::Vector,
+            TypeTag::Graph,
+        ] {
             let prefix = Key::new(ns.clone(), type_tag, vec![]);
             let entries = txn.scan_prefix(&prefix)?;
 

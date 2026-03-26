@@ -462,6 +462,7 @@ mod tests {
             TypeTag::Space,
             TypeTag::Vector,
             TypeTag::Json,
+            TypeTag::Graph,
         ] {
             let key = make_key("test", tag, "k");
             let ik = InternalKey::encode(&key, 1);
@@ -667,6 +668,7 @@ mod tests {
                 Just(TypeTag::Space),
                 Just(TypeTag::Vector),
                 Just(TypeTag::Json),
+                Just(TypeTag::Graph),
             ]
         }
 

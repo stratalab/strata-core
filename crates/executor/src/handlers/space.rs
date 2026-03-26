@@ -57,7 +57,13 @@ pub fn space_delete(
     // Delete all data in the space by scanning+deleting all TypeTag prefixes
     let ns = std::sync::Arc::new(Namespace::for_branch_space(core_branch_id, &space));
     convert_result(p.db.transaction(core_branch_id, |txn| {
-        for type_tag in [TypeTag::KV, TypeTag::Event, TypeTag::Json, TypeTag::Vector] {
+        for type_tag in [
+            TypeTag::KV,
+            TypeTag::Event,
+            TypeTag::Json,
+            TypeTag::Vector,
+            TypeTag::Graph,
+        ] {
             let prefix = Key::new(ns.clone(), type_tag, vec![]);
             let entries = txn.scan_prefix(&prefix)?;
             for (key, _) in entries {
