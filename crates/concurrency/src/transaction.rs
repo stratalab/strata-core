@@ -1886,7 +1886,9 @@ impl JsonStoreExt for TransactionContext {
         // Get the document from store (bounded by start_version)
         let versioned = store.get_versioned(key, self.start_version)?;
         let Some(vv) = versioned else {
-            // Document doesn't exist
+            // Document doesn't exist — record version 0 so OCC detects
+            // concurrent creation (mirrors KV get() behavior for missing keys)
+            self.record_json_snapshot_version(key.clone(), 0);
             return Ok(None);
         };
 
@@ -1925,8 +1927,14 @@ impl JsonStoreExt for TransactionContext {
         {
             // Try to get the document version from store
             if let Some(store) = &self.store {
-                if let Ok(Some(vv)) = store.get_versioned(key, self.start_version) {
-                    self.record_json_snapshot_version(key.clone(), vv.version.as_u64());
+                match store.get_versioned(key, self.start_version) {
+                    Ok(Some(vv)) => {
+                        self.record_json_snapshot_version(key.clone(), vv.version.as_u64());
+                    }
+                    Ok(None) => {
+                        self.record_json_snapshot_version(key.clone(), 0);
+                    }
+                    Err(_) => {}
                 }
             }
         }
@@ -1949,8 +1957,14 @@ impl JsonStoreExt for TransactionContext {
             .map_or(true, |v| !v.contains_key(key))
         {
             if let Some(store) = &self.store {
-                if let Ok(Some(vv)) = store.get_versioned(key, self.start_version) {
-                    self.record_json_snapshot_version(key.clone(), vv.version.as_u64());
+                match store.get_versioned(key, self.start_version) {
+                    Ok(Some(vv)) => {
+                        self.record_json_snapshot_version(key.clone(), vv.version.as_u64());
+                    }
+                    Ok(None) => {
+                        self.record_json_snapshot_version(key.clone(), 0);
+                    }
+                    Err(_) => {}
                 }
             }
         }
@@ -1999,7 +2013,16 @@ impl JsonStoreExt for TransactionContext {
             StrataError::invalid_input("Transaction has no store for reads".to_string())
         })?;
 
-        Ok(store.get_versioned(key, self.start_version)?.is_some())
+        match store.get_versioned(key, self.start_version)? {
+            Some(vv) => {
+                self.record_json_snapshot_version(key.clone(), vv.version.as_u64());
+                Ok(true)
+            }
+            None => {
+                self.record_json_snapshot_version(key.clone(), 0);
+                Ok(false)
+            }
+        }
     }
 }
 
