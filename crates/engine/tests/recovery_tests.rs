@@ -826,3 +826,119 @@ fn test_issue_1710_checkpoint_concurrent_writes_recovery() {
         }
     }
 }
+
+/// Issue #1908: Events committed to KV but missing from search index after crash recovery.
+///
+/// Simulates a crash where the search manifest is stale (written before the latest
+/// events were committed). After recovery, the fast-path mmap load must reconcile
+/// against KV to re-index any missing entries.
+#[test]
+fn test_issue_1908_search_index_reconciles_after_crash() {
+    use strata_engine::search::Searchable;
+
+    let temp_dir = TempDir::new().unwrap();
+    let path = get_path(&temp_dir);
+    let branch_id = BranchId::new();
+    let search_manifest = path.join("search").join("search.manifest");
+
+    // Session 1: Write initial data and close cleanly (creates search manifest)
+    {
+        let db = Database::open(&path).unwrap();
+        let kv = KVStore::new(db.clone());
+
+        kv.put(
+            &branch_id,
+            "default",
+            "doc_initial",
+            Value::String("established baseline document for search".into()),
+        )
+        .unwrap();
+
+        // Also test events
+        let event_log = EventLog::new(db.clone());
+        event_log
+            .append(
+                &branch_id,
+                "default",
+                "sensor_reading",
+                string_payload("temperature humidity pressure"),
+            )
+            .unwrap();
+    }
+
+    // Save the search manifest (represents state before crash)
+    assert!(
+        search_manifest.exists(),
+        "search manifest should exist after clean close"
+    );
+    let stale_manifest = std::fs::read(&search_manifest).unwrap();
+
+    // Session 2: Add more data, close cleanly (manifest updated with new data)
+    {
+        let db = Database::open(&path).unwrap();
+        let kv = KVStore::new(db.clone());
+
+        kv.put(
+            &branch_id,
+            "default",
+            "doc_post_crash",
+            Value::String("quantum computing algorithm optimization".into()),
+        )
+        .unwrap();
+
+        let event_log = EventLog::new(db.clone());
+        event_log
+            .append(
+                &branch_id,
+                "default",
+                "alert",
+                string_payload("critical threshold exceeded anomaly"),
+            )
+            .unwrap();
+    }
+
+    // Simulate crash: revert search manifest to pre-session-2 state.
+    // KV still has session 2 data (WAL replay restores it), but the
+    // search index manifest is stale — missing session 2 entries.
+    std::fs::write(&search_manifest, &stale_manifest).unwrap();
+
+    // Session 3: Reopen — fast path loads stale manifest.
+    // Without the fix, session 2 data is in KV but invisible to search.
+    {
+        let db = Database::open(&path).unwrap();
+        let kv = KVStore::new(db.clone());
+
+        // KV data from session 2 must exist (WAL replay)
+        assert_eq!(
+            kv.get(&branch_id, "default", "doc_post_crash").unwrap(),
+            Some(Value::String(
+                "quantum computing algorithm optimization".into()
+            )),
+            "KV data from session 2 should survive via WAL replay"
+        );
+
+        // Search for session 1 data — should always work
+        let req = SearchRequest::new(branch_id, "baseline");
+        let response = kv.search(&req).unwrap();
+        assert!(
+            !response.hits.is_empty(),
+            "Session 1 KV data should be searchable"
+        );
+
+        // Search for session 2 KV data — fails without the fix
+        let req = SearchRequest::new(branch_id, "quantum");
+        let response = kv.search(&req).unwrap();
+        assert!(
+            !response.hits.is_empty(),
+            "Session 2 KV data should be searchable after crash recovery reconciliation"
+        );
+
+        // Search for session 2 event data — fails without the fix
+        let req = SearchRequest::new(branch_id, "anomaly");
+        let response = kv.search(&req).unwrap();
+        assert!(
+            !response.hits.is_empty(),
+            "Session 2 event data should be searchable after crash recovery reconciliation"
+        );
+    }
+}
