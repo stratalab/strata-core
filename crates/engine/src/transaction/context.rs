@@ -250,6 +250,10 @@ impl<'a> TransactionOps for Transaction<'a> {
         })?;
         self.ctx.put(event_key, Value::String(event_json))?;
 
+        // Write per-type index key for efficient get_by_type lookups (#972, #1972)
+        let idx_key = Key::new_event_type_idx(self.namespace.clone(), event_type, sequence);
+        self.ctx.put(idx_key, Value::Null)?;
+
         // Write EventLogMeta — preserve streams from persisted meta (#1914)
         let mut streams = persisted_meta.streams;
         let ts_micros = timestamp.as_micros();
@@ -330,7 +334,17 @@ impl<'a> TransactionOps for Transaction<'a> {
     }
 
     fn event_len(&mut self) -> Result<u64, StrataError> {
-        // Base sequence from snapshot + pending events
+        // If no appends have occurred yet, base_sequence may still be the
+        // uninitialised default (0).  Read persisted meta to get the true
+        // committed count (#1973).
+        if self.pending_events.is_empty() {
+            let meta_key = Key::new_event_meta(self.namespace.clone());
+            if let Some(Value::String(s)) = self.ctx.get(&meta_key)? {
+                if let Ok(meta) = serde_json::from_str::<EventLogMeta>(&s) {
+                    return Ok(meta.next_sequence);
+                }
+            }
+        }
         Ok(self.base_sequence + self.pending_events.len() as u64)
     }
 
@@ -710,6 +724,113 @@ mod tests {
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].event_type, "e1");
         assert_eq!(pending[1].event_type, "e2");
+    }
+
+    // =========================================================================
+    // Regression: #1972 — event_append writes per-type index key
+    // =========================================================================
+
+    #[test]
+    fn test_event_append_writes_type_index_key() {
+        let ns = create_test_namespace();
+        let mut ctx = create_test_context(&ns);
+        let mut txn = Transaction::new(&mut ctx, ns.clone());
+
+        txn.event_append("user_created", Value::Int(1)).unwrap();
+        txn.event_append("order_placed", Value::Int(2)).unwrap();
+        txn.event_append("user_created", Value::Int(3)).unwrap();
+
+        // The type index keys should be in the write set (via ctx)
+        let idx_key_0 = Key::new_event_type_idx(ns.clone(), "user_created", 0);
+        let idx_key_1 = Key::new_event_type_idx(ns.clone(), "order_placed", 1);
+        let idx_key_2 = Key::new_event_type_idx(ns.clone(), "user_created", 2);
+
+        // All three index keys should be Null in the transaction context
+        assert_eq!(txn.ctx.get(&idx_key_0).unwrap(), Some(Value::Null));
+        assert_eq!(txn.ctx.get(&idx_key_1).unwrap(), Some(Value::Null));
+        assert_eq!(txn.ctx.get(&idx_key_2).unwrap(), Some(Value::Null));
+
+        // Non-existent type index should not be present
+        let missing = Key::new_event_type_idx(ns.clone(), "nonexistent", 0);
+        assert_eq!(txn.ctx.get(&missing).unwrap(), None);
+    }
+
+    // =========================================================================
+    // Regression: #1973 — event_len reads persisted meta before first append
+    // =========================================================================
+
+    #[test]
+    fn test_event_len_with_committed_events_no_appends() {
+        use strata_core::traits::Storage;
+        use strata_core::WriteMode;
+
+        let ns = create_test_namespace();
+        let store = Arc::new(SegmentedStore::new());
+
+        // Pre-populate 50 committed events in store metadata
+        let meta = EventLogMeta {
+            next_sequence: 50,
+            head_hash: [7u8; 32],
+            hash_version: HASH_VERSION_SHA256,
+            streams: Default::default(),
+        };
+        let meta_json = serde_json::to_string(&meta).unwrap();
+        let meta_key = Key::new_event_meta(ns.clone());
+        let version = store.next_version();
+        store
+            .put_with_version_mode(
+                meta_key,
+                Value::String(meta_json),
+                version,
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
+
+        let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
+        let mut txn = Transaction::new(&mut ctx, ns.clone());
+
+        // Before any append, event_len should reflect committed count
+        assert_eq!(txn.event_len().unwrap(), 50);
+    }
+
+    #[test]
+    fn test_event_len_with_committed_events_after_append() {
+        use strata_core::traits::Storage;
+        use strata_core::WriteMode;
+
+        let ns = create_test_namespace();
+        let store = Arc::new(SegmentedStore::new());
+
+        // Pre-populate 10 committed events in store metadata
+        let meta = EventLogMeta {
+            next_sequence: 10,
+            head_hash: [5u8; 32],
+            hash_version: HASH_VERSION_SHA256,
+            streams: Default::default(),
+        };
+        let meta_json = serde_json::to_string(&meta).unwrap();
+        let meta_key = Key::new_event_meta(ns.clone());
+        let version = store.next_version();
+        store
+            .put_with_version_mode(
+                meta_key,
+                Value::String(meta_json),
+                version,
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
+
+        let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
+        let mut txn = Transaction::new(&mut ctx, ns.clone());
+
+        // Before append: should read 10 from persisted meta
+        assert_eq!(txn.event_len().unwrap(), 10);
+
+        // After append: should be 11 (base_sequence gets initialized + 1 pending)
+        txn.event_append("new_event", Value::Int(1)).unwrap();
+        assert_eq!(txn.event_len().unwrap(), 11);
     }
 
     // =========================================================================
