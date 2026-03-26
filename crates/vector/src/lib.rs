@@ -52,8 +52,9 @@ pub use segmented::{SegmentedHnswBackend, SegmentedHnswConfig};
 pub use snapshot::{CollectionSnapshotHeader, VECTOR_SNAPSHOT_VERSION};
 pub use store::{RecoveryStats, VectorBackendState, VectorStore};
 pub use types::{
-    CollectionId, CollectionInfo, CollectionRecord, DistanceMetric, StorageDtype, VectorConfig,
-    VectorConfigSerde, VectorEntry, VectorId, VectorMatch, VectorMatchWithSource, VectorRecord,
+    CollectionId, CollectionInfo, CollectionRecord, DistanceMetric, IndexBackendType,
+    SearchOptions, StorageDtype, VectorConfig, VectorConfigSerde, VectorEntry, VectorId,
+    VectorMatch, VectorMatchWithSource, VectorRecord,
 };
 pub use wal::{
     create_wal_collection_create, create_wal_collection_delete, create_wal_delete,

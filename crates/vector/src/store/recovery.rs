@@ -57,7 +57,9 @@ impl VectorStore {
             return Ok(());
         }
 
-        // Initialize backend (no KV write - KV is replayed separately)
+        // Initialize backend (no KV write - KV is replayed separately).
+        // WAL doesn't store backend_type, so use default. The full recovery
+        // path (recover_from_db) will replace this with the correct type.
         let backend = self.backend_factory().create(&config);
         state.backends.insert(collection_id, backend);
 
@@ -86,19 +88,18 @@ impl VectorStore {
     /// Uses `insert_with_id_and_timestamp` to maintain VectorId monotonicity
     /// (Invariant T4) and preserve temporal metadata for `search_at()` queries.
     ///
-    /// Note: `_key`, `_metadata`, and `_source_ref` parameters are not used here because
-    /// they are stored in the KV layer (via VectorRecord), which has its own WAL entries.
-    /// This method only replays the embedding into the VectorHeap backend.
+    /// Also populates inline metadata so that search can resolve results via
+    /// O(1) lookup instead of O(N) KV prefix scans (Issue #1965).
     #[allow(clippy::too_many_arguments)]
     pub fn replay_upsert(
         &self,
         branch_id: BranchId,
         collection: &str,
-        _key: &str,
+        key: &str,
         vector_id: VectorId,
         embedding: &[f32],
         _metadata: Option<serde_json::Value>,
-        _source_ref: Option<strata_core::EntityRef>,
+        source_ref: Option<strata_core::EntityRef>,
         created_at: u64,
     ) -> VectorResult<()> {
         let collection_id = CollectionId::new(branch_id, collection);
@@ -113,6 +114,16 @@ impl VectorStore {
         // Use insert_with_id_and_timestamp to maintain VectorId monotonicity
         // and preserve temporal data for time-travel queries after recovery.
         backend.insert_with_id_and_timestamp(vector_id, embedding, created_at)?;
+
+        // Populate inline metadata for O(1) search resolution (Issue #1965).
+        // Without this, search falls back to O(N) KV prefix scans per candidate.
+        backend.set_inline_meta(
+            vector_id,
+            crate::types::InlineMeta {
+                key: key.to_string(),
+                source_ref,
+            },
+        );
 
         Ok(())
     }
@@ -180,7 +191,6 @@ impl VectorStore {
         use strata_core::traits::Storage;
 
         let state = self.state()?;
-        let factory = self.backend_factory();
         let version = self.db.storage().version();
 
         // Get all spaces for this branch (SpaceIndex.list always includes "default")
@@ -236,6 +246,7 @@ impl VectorStore {
                     None => continue,
                 };
 
+                let backend_type = record.backend_type();
                 let config: VectorConfig = match record.config.try_into() {
                     Ok(c) => c,
                     Err(e) => {
@@ -283,7 +294,8 @@ impl VectorStore {
                     BTreeMap::new()
                 };
 
-                // Create fresh backend
+                // Create fresh backend using stored type (Issue #1964)
+                let factory = crate::IndexBackendFactory::from_type(backend_type);
                 let mut backend = factory.create(&config);
 
                 // Scan all vector entries in this collection

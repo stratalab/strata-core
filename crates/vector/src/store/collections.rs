@@ -17,6 +17,27 @@ impl VectorStore {
         name: &str,
         config: VectorConfig,
     ) -> VectorResult<Versioned<CollectionInfo>> {
+        self.create_collection_with_backend(
+            branch_id,
+            space,
+            name,
+            config,
+            crate::IndexBackendType::default(),
+        )
+    }
+
+    /// Creates a collection with an explicit backend type (Issue #1964).
+    ///
+    /// Use `IndexBackendType::BruteForce` for small collections (< 1000 vectors)
+    /// to reduce memory overhead, or `SegmentedHnsw` (default) for larger workloads.
+    pub fn create_collection_with_backend(
+        &self,
+        branch_id: BranchId,
+        space: &str,
+        name: &str,
+        config: VectorConfig,
+        backend_type: crate::IndexBackendType,
+    ) -> VectorResult<Versioned<CollectionInfo>> {
         // Validate name
         validate_collection_name(name)?;
 
@@ -44,8 +65,8 @@ impl VectorStore {
 
         let now = now_micros();
 
-        // Create collection record
-        let record = CollectionRecord::new(&config);
+        // Create collection record with backend type
+        let record = CollectionRecord::with_backend_type(&config, backend_type);
 
         // Store config in KV
         let config_key = Key::new_vector_config(self.namespace_for(branch_id, space), name);
@@ -58,8 +79,8 @@ impl VectorStore {
             })
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
-        // Initialize in-memory backend
-        self.init_backend(&collection_id, &config)?;
+        // Initialize in-memory backend with the selected backend type
+        self.init_backend_with_type(&collection_id, &config, backend_type)?;
 
         let info = CollectionInfo {
             name: name.to_string(),

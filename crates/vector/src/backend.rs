@@ -331,6 +331,21 @@ impl Default for IndexBackendFactory {
 }
 
 impl IndexBackendFactory {
+    /// Create a factory from a stored `IndexBackendType` (Issue #1964).
+    ///
+    /// Uses default sub-config for each backend variant.
+    pub fn from_type(backend_type: super::types::IndexBackendType) -> Self {
+        match backend_type {
+            super::types::IndexBackendType::BruteForce => IndexBackendFactory::BruteForce,
+            super::types::IndexBackendType::Hnsw => {
+                IndexBackendFactory::Hnsw(super::hnsw::HnswConfig::default())
+            }
+            super::types::IndexBackendType::SegmentedHnsw => {
+                IndexBackendFactory::SegmentedHnsw(super::segmented::SegmentedHnswConfig::default())
+            }
+        }
+    }
+
     /// Create a new backend instance
     pub fn create(&self, config: &VectorConfig) -> Box<dyn VectorIndexBackend> {
         match self {
