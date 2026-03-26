@@ -314,9 +314,9 @@ pub fn kv_sample(
 
 /// Enrich a KV error with fuzzy-match suggestions for key-not-found errors.
 ///
-/// Uses the first character of the key as a prefix filter to avoid a full
-/// key scan on spaces with many keys. The KV list primitive has no limit
-/// parameter, so prefix narrowing is the main safeguard.
+/// Uses the first character of the key as a prefix filter combined with
+/// `list_with_cursor_limit` to avoid materializing millions of keys just
+/// for fuzzy matching (SCALE-001).
 fn enrich_kv_error(
     p: &Arc<Primitives>,
     branch_id: &strata_core::types::BranchId,
@@ -329,16 +329,20 @@ fn enrich_kv_error(
             // This misses typos that change the first character, but those
             // are rare compared to mid-key typos.
             let prefix = key.chars().next().map(|c| c.to_string());
-            let candidates = match p.kv.list(branch_id, space, prefix.as_deref()) {
-                Ok(keys) => keys,
+            let max_candidates = p.limits.max_fuzzy_candidates;
+            let candidates = match p.kv.list_with_cursor_limit(
+                branch_id,
+                space,
+                prefix.as_deref(),
+                None,
+                max_candidates,
+            ) {
+                Ok(keys) => keys.into_iter().take(max_candidates).collect::<Vec<_>>(),
                 Err(e) => {
                     tracing::debug!("fuzzy suggestion list failed: {e}");
                     vec![]
                 }
-            }
-            .into_iter()
-            .take(p.limits.max_fuzzy_candidates)
-            .collect::<Vec<_>>();
+            };
             let hint = crate::suggest::format_hint("keys", &candidates, &key, 2);
             Error::KeyNotFound { key, hint }
         }
