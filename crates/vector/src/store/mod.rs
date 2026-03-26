@@ -3430,4 +3430,116 @@ mod tests {
         // existing1 should be closest (updated to [0,0,1,0])
         assert_eq!(results[0].key, "existing1");
     }
+
+    // ========================================================================
+    // Issue #1907: Concurrent search + insert (triggers seal) stress test
+    // ========================================================================
+
+    /// Prove that concurrent inserts (which trigger seal) and searches
+    /// produce correct results. DashMap's per-shard locking serializes
+    /// `get_mut()` (insert/seal) vs `get()` (search), so the race
+    /// described in #1907 cannot occur.
+    #[test]
+    fn test_issue_1907_concurrent_insert_and_search_during_seal() {
+        let db = Database::cache().unwrap();
+        let store = VectorStore::new(db);
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(4, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "seal_race", config)
+            .unwrap();
+
+        // Seed with some vectors so searches have results
+        for i in 0..20 {
+            let emb = [i as f32, 0.0, 0.0, 1.0];
+            store
+                .insert(
+                    branch_id,
+                    "default",
+                    "seal_race",
+                    &format!("seed_{}", i),
+                    &emb,
+                    None,
+                )
+                .unwrap();
+        }
+
+        let num_writers = 2;
+        let num_readers = 4;
+        let inserts_per_writer = 200;
+        let searches_per_reader = 200;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(num_writers + num_readers));
+
+        let mut writer_handles = Vec::new();
+        let mut reader_handles = Vec::new();
+
+        // Writer threads: insert vectors (triggers seal when active buffer fills)
+        for writer_id in 0..num_writers {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            writer_handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for i in 0..inserts_per_writer {
+                    let key = format!("w{}_{}", writer_id, i);
+                    let emb = [writer_id as f32, i as f32, 0.0, 1.0];
+                    store
+                        .insert(branch_id, "default", "seal_race", &key, &emb, None)
+                        .unwrap();
+                }
+            }));
+        }
+
+        // Reader threads: search concurrently with inserts
+        for _reader_id in 0..num_readers {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            reader_handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..searches_per_reader {
+                    let results = store
+                        .search(
+                            branch_id,
+                            "default",
+                            "seal_race",
+                            &[1.0, 1.0, 0.0, 1.0],
+                            5,
+                            None,
+                        )
+                        .unwrap();
+                    // Every search must return results (at least the seed vectors)
+                    assert!(
+                        !results.is_empty(),
+                        "Search returned 0 results during concurrent insert/seal"
+                    );
+                }
+            }));
+        }
+
+        for h in writer_handles {
+            h.join().unwrap();
+        }
+        for h in reader_handles {
+            h.join().unwrap();
+        }
+
+        // After all writers finish, verify all vectors are searchable
+        let total_expected = 20 + (num_writers * inserts_per_writer);
+        let final_results = store
+            .search(
+                branch_id,
+                "default",
+                "seal_race",
+                &[1.0, 1.0, 0.0, 1.0],
+                total_expected,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            final_results.len(),
+            total_expected,
+            "All {} vectors should be searchable after concurrent insert+search",
+            total_expected
+        );
+    }
 }
