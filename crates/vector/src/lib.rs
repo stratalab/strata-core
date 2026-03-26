@@ -36,7 +36,9 @@ pub mod store;
 pub mod types;
 pub mod wal;
 
-pub use backend::{IndexBackendFactory, VectorIndexBackend};
+pub use backend::{
+    IndexBackendFactory, InlineMetaCapable, MmapCapable, SegmentCapable, VectorIndexBackend,
+};
 pub use brute_force::BruteForceBackend;
 pub use collection::{
     validate_collection_name, validate_system_collection_name, validate_vector_key,

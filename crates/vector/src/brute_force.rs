@@ -8,7 +8,7 @@
 
 use std::cmp::Ordering;
 
-use crate::backend::VectorIndexBackend;
+use crate::backend::{InlineMetaCapable, MmapCapable, SegmentCapable, VectorIndexBackend};
 use crate::distance::compute_similarity;
 use crate::types::InlineMeta;
 use crate::{DistanceMetric, VectorConfig, VectorError, VectorHeap, VectorId};
@@ -46,6 +46,23 @@ impl BruteForceBackend {
     /// Get read access to heap (for snapshot)
     pub fn heap(&self) -> &VectorHeap {
         &self.heap
+    }
+}
+
+impl MmapCapable for BruteForceBackend {}
+impl SegmentCapable for BruteForceBackend {}
+
+impl InlineMetaCapable for BruteForceBackend {
+    fn set_inline_meta(&mut self, id: VectorId, meta: InlineMeta) {
+        self.heap.set_inline_meta(id, meta);
+    }
+
+    fn get_inline_meta(&self, id: VectorId) -> Option<&InlineMeta> {
+        self.heap.get_inline_meta(id)
+    }
+
+    fn remove_inline_meta(&mut self, id: VectorId) {
+        self.heap.remove_inline_meta(id);
     }
 }
 
@@ -158,18 +175,6 @@ impl VectorIndexBackend for BruteForceBackend {
 
     fn restore_snapshot_state(&mut self, next_id: u64, free_slots: Vec<usize>) {
         self.heap.restore_snapshot_state(next_id, free_slots);
-    }
-
-    fn set_inline_meta(&mut self, id: VectorId, meta: InlineMeta) {
-        self.heap.set_inline_meta(id, meta);
-    }
-
-    fn get_inline_meta(&self, id: VectorId) -> Option<&InlineMeta> {
-        self.heap.get_inline_meta(id)
-    }
-
-    fn remove_inline_meta(&mut self, id: VectorId) {
-        self.heap.remove_inline_meta(id);
     }
 }
 

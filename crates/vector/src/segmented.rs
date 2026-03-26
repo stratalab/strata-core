@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BinaryHeap};
 use once_cell::sync::Lazy;
 use rayon::prelude::*;
 
-use crate::backend::VectorIndexBackend;
+use crate::backend::{InlineMetaCapable, MmapCapable, SegmentCapable, VectorIndexBackend};
 use crate::distance::compute_similarity_cached;
 use crate::heap::VectorHeap;
 use crate::hnsw::{CompactHnswGraph, HnswConfig, HnswGraph};
@@ -772,6 +772,396 @@ impl SegmentedHnswBackend {
     }
 }
 
+impl MmapCapable for SegmentedHnswBackend {
+    fn freeze_heap_to_disk(&self, path: &std::path::Path) -> Result<(), VectorError> {
+        self.heap.freeze_to_disk(path)
+    }
+
+    fn flush_heap_to_disk_if_needed(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<bool, VectorError> {
+        // Store the flush path for future periodic flushes
+        self.flush_path = Some(path.to_path_buf());
+
+        // Promote Mmap → Tiered if needed (first mutation after mmap-based recovery)
+        self.heap.promote_to_tiered();
+
+        let threshold = self.config.heap_flush_threshold;
+        if threshold == 0 || self.heap.overlay_len() < threshold {
+            return Ok(false);
+        }
+
+        self.heap.flush_overlay_to_disk(path)?;
+        Ok(true)
+    }
+
+    fn replace_heap(&mut self, heap: crate::VectorHeap) {
+        self.heap = heap;
+        // Promote Mmap → Tiered so that subsequent inserts go to the overlay
+        // instead of panicking.
+        self.heap.promote_to_tiered();
+    }
+
+    fn register_mmap_vector(&mut self, id: VectorId, created_at: u64) {
+        self.active.insert(id, created_at);
+        self.pending_timestamps.insert(id, created_at);
+    }
+
+    fn is_heap_mmap(&self) -> bool {
+        self.heap.is_mmap()
+    }
+
+    fn freeze_graphs_to_disk(&self, dir: &std::path::Path) -> Result<(), VectorError> {
+        use crate::mmap_graph;
+
+        // Always write every segment — even previously mmap-backed ones may
+        // have in-memory deletions (deleted_at updates) that must be persisted.
+        for seg in &self.sealed {
+            let path = dir.join(format!("seg_{}.hgr", seg.segment_id));
+            mmap_graph::write_graph_file(&path, &seg.graph)?;
+        }
+
+        // Write a manifest recording the total vector count in the heap so
+        // that load_graphs_from_disk() can detect staleness (e.g., vectors
+        // deleted via WAL replay after graphs were frozen).
+        let manifest_path = dir.join("segments.manifest");
+        let heap_vector_count = self.heap.len() as u64;
+        let mut manifest = Vec::with_capacity(8 + self.sealed.len() * 24);
+        // First 8 bytes: heap vector count at freeze time (staleness check)
+        manifest.extend_from_slice(&heap_vector_count.to_le_bytes());
+        for seg in &self.sealed {
+            manifest.extend_from_slice(&seg.segment_id.to_le_bytes());
+            manifest.extend_from_slice(&(seg.live_count as u64).to_le_bytes());
+            manifest.extend_from_slice(&0u64.to_le_bytes()); // reserved
+        }
+        if let Some(parent) = manifest_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| VectorError::Io(e.to_string()))?;
+        }
+        std::fs::write(&manifest_path, &manifest).map_err(|e| VectorError::Io(e.to_string()))?;
+
+        Ok(())
+    }
+
+    fn load_graphs_from_disk(&mut self, dir: &std::path::Path) -> Result<bool, VectorError> {
+        use crate::mmap_graph;
+
+        let manifest_path = dir.join("segments.manifest");
+        if !manifest_path.exists() {
+            return Ok(false);
+        }
+
+        let manifest_data =
+            std::fs::read(&manifest_path).map_err(|e| VectorError::Io(e.to_string()))?;
+
+        // Manifest format: [heap_vector_count: u64 LE (8 bytes)] + N * 24-byte entries
+        if manifest_data.len() < 8 || (manifest_data.len() - 8) % 24 != 0 {
+            tracing::warn!(
+                target: "strata::vector",
+                "Corrupt segment manifest, falling back to rebuild"
+            );
+            return Ok(false);
+        }
+
+        // Staleness check: if the heap vector count changed since the graphs
+        // were frozen (e.g. vectors deleted via WAL replay), the graphs are
+        // stale and must be rebuilt.
+        let frozen_heap_count_u64 = u64::from_le_bytes(manifest_data[0..8].try_into().unwrap());
+        let frozen_heap_count = usize::try_from(frozen_heap_count_u64).map_err(|_| {
+            VectorError::Serialization(format!(
+                "frozen_heap_count {frozen_heap_count_u64} exceeds platform pointer size"
+            ))
+        })?;
+        if frozen_heap_count != self.heap.len() {
+            tracing::info!(
+                target: "strata::vector",
+                frozen = frozen_heap_count,
+                current = self.heap.len(),
+                "Graph mmap stale (heap size changed), rebuilding"
+            );
+            return Ok(false);
+        }
+
+        let segment_count = (manifest_data.len() - 8) / 24;
+        let mut loaded_segments = Vec::with_capacity(segment_count);
+        let mut max_segment_id = 0u64;
+
+        for i in 0..segment_count {
+            let offset = 8 + i * 24;
+            let segment_id =
+                u64::from_le_bytes(manifest_data[offset..offset + 8].try_into().unwrap());
+            let live_count_u64 =
+                u64::from_le_bytes(manifest_data[offset + 8..offset + 16].try_into().unwrap());
+            let live_count = usize::try_from(live_count_u64).map_err(|_| {
+                VectorError::Serialization(format!(
+                    "segment live_count {live_count_u64} exceeds platform pointer size"
+                ))
+            })?;
+            // offset+16..offset+24 reserved
+
+            let graph_path = dir.join(format!("seg_{}.hgr", segment_id));
+            if !graph_path.exists() {
+                tracing::warn!(
+                    target: "strata::vector",
+                    segment_id,
+                    "Missing graph file, falling back to rebuild"
+                );
+                return Ok(false);
+            }
+
+            match mmap_graph::open_graph_file(
+                &graph_path,
+                self.config.hnsw.clone(),
+                self.vector_config.clone(),
+            ) {
+                Ok(graph) => {
+                    loaded_segments.push(SealedSegment {
+                        segment_id,
+                        graph,
+                        live_count,
+                        source_branch: None,
+                    });
+                    if segment_id >= max_segment_id {
+                        max_segment_id = segment_id + 1;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "strata::vector",
+                        segment_id,
+                        error = %e,
+                        "Failed to load graph from mmap, falling back to rebuild"
+                    );
+                    return Ok(false);
+                }
+            }
+        }
+
+        // Success: replace sealed segments and clear pending timestamps
+        self.sealed = loaded_segments;
+        self.next_segment_id = max_segment_id;
+        self.pending_timestamps.clear();
+
+        // Move any remaining active buffer entries that belong to loaded
+        // segments out of the active buffer (they're already in sealed graphs).
+        // On recovery, all vectors start in active buffer; after loading graphs,
+        // only vectors NOT in any sealed segment should remain in active.
+        let sealed_ids: std::collections::BTreeSet<VectorId> = self
+            .sealed
+            .iter()
+            .flat_map(|seg| seg.graph.node_ids())
+            .collect();
+        self.active.ids.retain(|id| !sealed_ids.contains(id));
+        self.active
+            .timestamps
+            .retain(|id, _| !sealed_ids.contains(id));
+
+        Ok(true)
+    }
+}
+
+impl InlineMetaCapable for SegmentedHnswBackend {
+    fn set_inline_meta(&mut self, id: VectorId, meta: InlineMeta) {
+        self.heap.set_inline_meta(id, meta);
+    }
+
+    fn get_inline_meta(&self, id: VectorId) -> Option<&InlineMeta> {
+        self.heap.get_inline_meta(id)
+    }
+
+    fn remove_inline_meta(&mut self, id: VectorId) {
+        self.heap.remove_inline_meta(id);
+    }
+}
+
+impl SegmentCapable for SegmentedHnswBackend {
+    fn rebuild_index(&mut self) {
+        // Apply pending timestamps to active buffer entries
+        for (&id, &ts) in &self.pending_timestamps {
+            if let Some(entry) = self.active.timestamps.get_mut(&id) {
+                entry.0 = ts;
+            }
+        }
+        self.pending_timestamps.clear();
+
+        // Clear any existing sealed segments (recovery rebuilds from scratch)
+        self.sealed.clear();
+        self.next_segment_id = 0;
+
+        // Drain all entries from active buffer
+        let (all_ids, all_timestamps) = self.active.drain_sorted();
+
+        // Filter to only IDs that have live embeddings in the global heap.
+        // During recovery, replay_delete removes embeddings from the heap,
+        // so deleted vectors must be excluded before chunking to get accurate
+        // segment sizes.
+        let live_ids: Vec<VectorId> = all_ids
+            .into_iter()
+            .filter(|id| self.heap.contains(*id))
+            .collect();
+
+        if live_ids.len() >= self.config.seal_threshold {
+            let chunks: Vec<&[VectorId]> = live_ids.chunks(self.config.seal_threshold).collect();
+
+            for chunk in chunks {
+                // Seal all chunks into HNSW segments (including partial last chunk).
+                // Even small chunks benefit from O(log n) HNSW search vs O(n) brute-force.
+                {
+                    // Build sealed segment (graph-only, no embedding duplication)
+                    let mut graph = HnswGraph::new(&self.vector_config, self.config.hnsw.clone());
+                    let mut live_count = 0;
+
+                    let chunk_len = chunk.len();
+                    let log_interval = (chunk_len / 10).max(1);
+
+                    for (i, &id) in chunk.iter().enumerate() {
+                        if i > 0 && i % log_interval == 0 {
+                            tracing::info!(
+                                target: "strata::vector",
+                                processed = i, total = chunk_len, pct = i * 100 / chunk_len,
+                                segment_id = self.next_segment_id,
+                                "Rebuilding index segment"
+                            );
+                        }
+                        if let Some(embedding) = self.heap.get(id) {
+                            let embedding = embedding.to_vec();
+                            let created_at = all_timestamps.get(&id).map(|t| t.0).unwrap_or(0);
+                            graph.insert_into_graph(id, &embedding, created_at, &self.heap);
+                            if let Some(&(_, Some(deleted_at))) = all_timestamps.get(&id) {
+                                graph.delete_with_timestamp(id, deleted_at);
+                            } else {
+                                live_count += 1;
+                            }
+                        }
+                    }
+
+                    let segment_id = self.next_segment_id;
+                    self.next_segment_id += 1;
+
+                    self.sealed.push(SealedSegment {
+                        segment_id,
+                        graph: CompactHnswGraph::from_graph(&graph),
+                        live_count,
+                        source_branch: None,
+                    });
+                }
+            }
+        } else {
+            // Below threshold: all live vectors stay in active buffer
+            for &id in &live_ids {
+                let ts = all_timestamps.get(&id).copied().unwrap_or((0, None));
+                self.active.ids.push(id);
+                self.active.timestamps.insert(id, ts);
+            }
+        }
+    }
+
+    fn seal_remaining_active(&mut self) {
+        if self.active.is_empty() {
+            return;
+        }
+
+        let (ids, timestamps) = self.active.drain_sorted();
+        let live_ids: Vec<VectorId> = ids
+            .into_iter()
+            .filter(|id| self.heap.contains(*id))
+            .collect();
+
+        if live_ids.is_empty() {
+            return;
+        }
+
+        let mut graph = HnswGraph::new(&self.vector_config, self.config.hnsw.clone());
+        let mut live_count = 0;
+
+        for &id in &live_ids {
+            if let Some(embedding) = self.heap.get(id) {
+                let embedding = embedding.to_vec();
+                let created_at = timestamps.get(&id).map(|t| t.0).unwrap_or(0);
+                graph.insert_into_graph(id, &embedding, created_at, &self.heap);
+                if let Some(&(_, Some(deleted_at))) = timestamps.get(&id) {
+                    graph.delete_with_timestamp(id, deleted_at);
+                } else {
+                    live_count += 1;
+                }
+            }
+        }
+
+        let segment_id = self.next_segment_id;
+        self.next_segment_id += 1;
+
+        self.sealed.push(SealedSegment {
+            segment_id,
+            graph: CompactHnswGraph::from_graph(&graph),
+            live_count,
+            source_branch: None,
+        });
+    }
+
+    fn compact(&mut self) {
+        // Seal any remaining active buffer first
+        if !self.active.is_empty() {
+            self.seal_active_buffer();
+        }
+        if self.sealed.len() <= 1 {
+            return;
+        }
+
+        // Collect created_at timestamps from existing sealed segments
+        // so temporal queries still work after compaction.
+        let mut timestamps: BTreeMap<VectorId, u64> = BTreeMap::new();
+        for seg in &self.sealed {
+            for (id, node) in seg.graph.iter_nodes() {
+                if node.deleted_at.is_none() && node.created_at != 0 {
+                    timestamps.insert(id, node.created_at);
+                }
+            }
+        }
+
+        // Build a single monolithic HNSW graph from all live vectors
+        let mut graph = HnswGraph::new(&self.vector_config, self.config.hnsw.clone());
+        let mut live_count = 0;
+
+        // Insert all live vectors from the global heap (sorted by VectorId for determinism)
+        let all_ids: Vec<VectorId> = self.heap.ids().collect();
+        let total = all_ids.len();
+        let log_interval = (total / 10).max(1);
+
+        for (i, id) in all_ids.into_iter().enumerate() {
+            if i > 0 && i % log_interval == 0 {
+                tracing::info!(
+                    target: "strata::vector",
+                    processed = i, total, pct = i * 100 / total,
+                    "Compacting segments"
+                );
+            }
+            if let Some(emb) = self.heap.get(id) {
+                let emb = emb.to_vec();
+                let created_at = timestamps.get(&id).copied().unwrap_or(0);
+                graph.insert_into_graph(id, &emb, created_at, &self.heap);
+                live_count += 1;
+            }
+        }
+
+        if live_count == 0 {
+            // No live vectors — just clear segments, don't push an empty one
+            self.sealed.clear();
+            self.next_segment_id = 0;
+            return;
+        }
+
+        // Replace all sealed segments with a single compacted segment
+        self.sealed.clear();
+        self.next_segment_id = 1;
+        self.sealed.push(SealedSegment {
+            segment_id: 0,
+            graph: CompactHnswGraph::from_graph(&graph),
+            live_count,
+            source_branch: None,
+        });
+    }
+}
+
 impl VectorIndexBackend for SegmentedHnswBackend {
     fn allocate_id(&mut self) -> VectorId {
         self.heap.allocate_id()
@@ -1052,192 +1442,6 @@ impl VectorIndexBackend for SegmentedHnswBackend {
         heap_bytes + heap_overhead + free_slots_bytes + active_bytes + sealed_bytes
     }
 
-    fn rebuild_index(&mut self) {
-        // Apply pending timestamps to active buffer entries
-        for (&id, &ts) in &self.pending_timestamps {
-            if let Some(entry) = self.active.timestamps.get_mut(&id) {
-                entry.0 = ts;
-            }
-        }
-        self.pending_timestamps.clear();
-
-        // Clear any existing sealed segments (recovery rebuilds from scratch)
-        self.sealed.clear();
-        self.next_segment_id = 0;
-
-        // Drain all entries from active buffer
-        let (all_ids, all_timestamps) = self.active.drain_sorted();
-
-        // Filter to only IDs that have live embeddings in the global heap.
-        // During recovery, replay_delete removes embeddings from the heap,
-        // so deleted vectors must be excluded before chunking to get accurate
-        // segment sizes.
-        let live_ids: Vec<VectorId> = all_ids
-            .into_iter()
-            .filter(|id| self.heap.contains(*id))
-            .collect();
-
-        if live_ids.len() >= self.config.seal_threshold {
-            let chunks: Vec<&[VectorId]> = live_ids.chunks(self.config.seal_threshold).collect();
-
-            for chunk in chunks {
-                // Seal all chunks into HNSW segments (including partial last chunk).
-                // Even small chunks benefit from O(log n) HNSW search vs O(n) brute-force.
-                {
-                    // Build sealed segment (graph-only, no embedding duplication)
-                    let mut graph = HnswGraph::new(&self.vector_config, self.config.hnsw.clone());
-                    let mut live_count = 0;
-
-                    let chunk_len = chunk.len();
-                    let log_interval = (chunk_len / 10).max(1);
-
-                    for (i, &id) in chunk.iter().enumerate() {
-                        if i > 0 && i % log_interval == 0 {
-                            tracing::info!(
-                                target: "strata::vector",
-                                processed = i, total = chunk_len, pct = i * 100 / chunk_len,
-                                segment_id = self.next_segment_id,
-                                "Rebuilding index segment"
-                            );
-                        }
-                        if let Some(embedding) = self.heap.get(id) {
-                            let embedding = embedding.to_vec();
-                            let created_at = all_timestamps.get(&id).map(|t| t.0).unwrap_or(0);
-                            graph.insert_into_graph(id, &embedding, created_at, &self.heap);
-                            if let Some(&(_, Some(deleted_at))) = all_timestamps.get(&id) {
-                                graph.delete_with_timestamp(id, deleted_at);
-                            } else {
-                                live_count += 1;
-                            }
-                        }
-                    }
-
-                    let segment_id = self.next_segment_id;
-                    self.next_segment_id += 1;
-
-                    self.sealed.push(SealedSegment {
-                        segment_id,
-                        graph: CompactHnswGraph::from_graph(&graph),
-                        live_count,
-                        source_branch: None,
-                    });
-                }
-            }
-        } else {
-            // Below threshold: all live vectors stay in active buffer
-            for &id in &live_ids {
-                let ts = all_timestamps.get(&id).copied().unwrap_or((0, None));
-                self.active.ids.push(id);
-                self.active.timestamps.insert(id, ts);
-            }
-        }
-    }
-
-    fn seal_remaining_active(&mut self) {
-        if self.active.is_empty() {
-            return;
-        }
-
-        let (ids, timestamps) = self.active.drain_sorted();
-        let live_ids: Vec<VectorId> = ids
-            .into_iter()
-            .filter(|id| self.heap.contains(*id))
-            .collect();
-
-        if live_ids.is_empty() {
-            return;
-        }
-
-        let mut graph = HnswGraph::new(&self.vector_config, self.config.hnsw.clone());
-        let mut live_count = 0;
-
-        for &id in &live_ids {
-            if let Some(embedding) = self.heap.get(id) {
-                let embedding = embedding.to_vec();
-                let created_at = timestamps.get(&id).map(|t| t.0).unwrap_or(0);
-                graph.insert_into_graph(id, &embedding, created_at, &self.heap);
-                if let Some(&(_, Some(deleted_at))) = timestamps.get(&id) {
-                    graph.delete_with_timestamp(id, deleted_at);
-                } else {
-                    live_count += 1;
-                }
-            }
-        }
-
-        let segment_id = self.next_segment_id;
-        self.next_segment_id += 1;
-
-        self.sealed.push(SealedSegment {
-            segment_id,
-            graph: CompactHnswGraph::from_graph(&graph),
-            live_count,
-            source_branch: None,
-        });
-    }
-
-    fn compact(&mut self) {
-        // Seal any remaining active buffer first
-        if !self.active.is_empty() {
-            self.seal_active_buffer();
-        }
-        if self.sealed.len() <= 1 {
-            return;
-        }
-
-        // Collect created_at timestamps from existing sealed segments
-        // so temporal queries still work after compaction.
-        let mut timestamps: BTreeMap<VectorId, u64> = BTreeMap::new();
-        for seg in &self.sealed {
-            for (id, node) in seg.graph.iter_nodes() {
-                if node.deleted_at.is_none() && node.created_at != 0 {
-                    timestamps.insert(id, node.created_at);
-                }
-            }
-        }
-
-        // Build a single monolithic HNSW graph from all live vectors
-        let mut graph = HnswGraph::new(&self.vector_config, self.config.hnsw.clone());
-        let mut live_count = 0;
-
-        // Insert all live vectors from the global heap (sorted by VectorId for determinism)
-        let all_ids: Vec<VectorId> = self.heap.ids().collect();
-        let total = all_ids.len();
-        let log_interval = (total / 10).max(1);
-
-        for (i, id) in all_ids.into_iter().enumerate() {
-            if i > 0 && i % log_interval == 0 {
-                tracing::info!(
-                    target: "strata::vector",
-                    processed = i, total, pct = i * 100 / total,
-                    "Compacting segments"
-                );
-            }
-            if let Some(emb) = self.heap.get(id) {
-                let emb = emb.to_vec();
-                let created_at = timestamps.get(&id).copied().unwrap_or(0);
-                graph.insert_into_graph(id, &emb, created_at, &self.heap);
-                live_count += 1;
-            }
-        }
-
-        if live_count == 0 {
-            // No live vectors — just clear segments, don't push an empty one
-            self.sealed.clear();
-            self.next_segment_id = 0;
-            return;
-        }
-
-        // Replace all sealed segments with a single compacted segment
-        self.sealed.clear();
-        self.next_segment_id = 1;
-        self.sealed.push(SealedSegment {
-            segment_id: 0,
-            graph: CompactHnswGraph::from_graph(&graph),
-            live_count,
-            source_branch: None,
-        });
-    }
-
     fn search_with_ef(&self, query: &[f32], k: usize, ef_search: usize) -> Vec<(VectorId, f32)> {
         if k == 0 || self.heap.is_empty() {
             return Vec::new();
@@ -1294,204 +1498,6 @@ impl VectorIndexBackend for SegmentedHnswBackend {
 
     fn restore_snapshot_state(&mut self, next_id: u64, free_slots: Vec<usize>) {
         self.heap.restore_snapshot_state(next_id, free_slots);
-    }
-
-    fn freeze_heap_to_disk(&self, path: &std::path::Path) -> Result<(), VectorError> {
-        self.heap.freeze_to_disk(path)
-    }
-
-    fn flush_heap_to_disk_if_needed(
-        &mut self,
-        path: &std::path::Path,
-    ) -> Result<bool, VectorError> {
-        // Store the flush path for future periodic flushes
-        self.flush_path = Some(path.to_path_buf());
-
-        // Promote Mmap → Tiered if needed (first mutation after mmap-based recovery)
-        self.heap.promote_to_tiered();
-
-        let threshold = self.config.heap_flush_threshold;
-        if threshold == 0 || self.heap.overlay_len() < threshold {
-            return Ok(false);
-        }
-
-        self.heap.flush_overlay_to_disk(path)?;
-        Ok(true)
-    }
-
-    fn replace_heap(&mut self, heap: crate::VectorHeap) {
-        self.heap = heap;
-        // Promote Mmap → Tiered so that subsequent inserts go to the overlay
-        // instead of panicking.
-        self.heap.promote_to_tiered();
-    }
-
-    fn register_mmap_vector(&mut self, id: VectorId, created_at: u64) {
-        self.active.insert(id, created_at);
-        self.pending_timestamps.insert(id, created_at);
-    }
-
-    fn is_heap_mmap(&self) -> bool {
-        self.heap.is_mmap()
-    }
-
-    fn set_inline_meta(&mut self, id: VectorId, meta: InlineMeta) {
-        self.heap.set_inline_meta(id, meta);
-    }
-
-    fn get_inline_meta(&self, id: VectorId) -> Option<&InlineMeta> {
-        self.heap.get_inline_meta(id)
-    }
-
-    fn remove_inline_meta(&mut self, id: VectorId) {
-        self.heap.remove_inline_meta(id);
-    }
-
-    fn freeze_graphs_to_disk(&self, dir: &std::path::Path) -> Result<(), VectorError> {
-        use crate::mmap_graph;
-
-        // Always write every segment — even previously mmap-backed ones may
-        // have in-memory deletions (deleted_at updates) that must be persisted.
-        for seg in &self.sealed {
-            let path = dir.join(format!("seg_{}.hgr", seg.segment_id));
-            mmap_graph::write_graph_file(&path, &seg.graph)?;
-        }
-
-        // Write a manifest recording the total vector count in the heap so
-        // that load_graphs_from_disk() can detect staleness (e.g., vectors
-        // deleted via WAL replay after graphs were frozen).
-        let manifest_path = dir.join("segments.manifest");
-        let heap_vector_count = self.heap.len() as u64;
-        let mut manifest = Vec::with_capacity(8 + self.sealed.len() * 24);
-        // First 8 bytes: heap vector count at freeze time (staleness check)
-        manifest.extend_from_slice(&heap_vector_count.to_le_bytes());
-        for seg in &self.sealed {
-            manifest.extend_from_slice(&seg.segment_id.to_le_bytes());
-            manifest.extend_from_slice(&(seg.live_count as u64).to_le_bytes());
-            manifest.extend_from_slice(&0u64.to_le_bytes()); // reserved
-        }
-        if let Some(parent) = manifest_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| VectorError::Io(e.to_string()))?;
-        }
-        std::fs::write(&manifest_path, &manifest).map_err(|e| VectorError::Io(e.to_string()))?;
-
-        Ok(())
-    }
-
-    fn load_graphs_from_disk(&mut self, dir: &std::path::Path) -> Result<bool, VectorError> {
-        use crate::mmap_graph;
-
-        let manifest_path = dir.join("segments.manifest");
-        if !manifest_path.exists() {
-            return Ok(false);
-        }
-
-        let manifest_data =
-            std::fs::read(&manifest_path).map_err(|e| VectorError::Io(e.to_string()))?;
-
-        // Manifest format: [heap_vector_count: u64 LE (8 bytes)] + N * 24-byte entries
-        if manifest_data.len() < 8 || (manifest_data.len() - 8) % 24 != 0 {
-            tracing::warn!(
-                target: "strata::vector",
-                "Corrupt segment manifest, falling back to rebuild"
-            );
-            return Ok(false);
-        }
-
-        // Staleness check: if the heap vector count changed since the graphs
-        // were frozen (e.g. vectors deleted via WAL replay), the graphs are
-        // stale and must be rebuilt.
-        let frozen_heap_count_u64 = u64::from_le_bytes(manifest_data[0..8].try_into().unwrap());
-        let frozen_heap_count = usize::try_from(frozen_heap_count_u64).map_err(|_| {
-            VectorError::Serialization(format!(
-                "frozen_heap_count {frozen_heap_count_u64} exceeds platform pointer size"
-            ))
-        })?;
-        if frozen_heap_count != self.heap.len() {
-            tracing::info!(
-                target: "strata::vector",
-                frozen = frozen_heap_count,
-                current = self.heap.len(),
-                "Graph mmap stale (heap size changed), rebuilding"
-            );
-            return Ok(false);
-        }
-
-        let segment_count = (manifest_data.len() - 8) / 24;
-        let mut loaded_segments = Vec::with_capacity(segment_count);
-        let mut max_segment_id = 0u64;
-
-        for i in 0..segment_count {
-            let offset = 8 + i * 24;
-            let segment_id =
-                u64::from_le_bytes(manifest_data[offset..offset + 8].try_into().unwrap());
-            let live_count_u64 =
-                u64::from_le_bytes(manifest_data[offset + 8..offset + 16].try_into().unwrap());
-            let live_count = usize::try_from(live_count_u64).map_err(|_| {
-                VectorError::Serialization(format!(
-                    "segment live_count {live_count_u64} exceeds platform pointer size"
-                ))
-            })?;
-            // offset+16..offset+24 reserved
-
-            let graph_path = dir.join(format!("seg_{}.hgr", segment_id));
-            if !graph_path.exists() {
-                tracing::warn!(
-                    target: "strata::vector",
-                    segment_id,
-                    "Missing graph file, falling back to rebuild"
-                );
-                return Ok(false);
-            }
-
-            match mmap_graph::open_graph_file(
-                &graph_path,
-                self.config.hnsw.clone(),
-                self.vector_config.clone(),
-            ) {
-                Ok(graph) => {
-                    loaded_segments.push(SealedSegment {
-                        segment_id,
-                        graph,
-                        live_count,
-                        source_branch: None,
-                    });
-                    if segment_id >= max_segment_id {
-                        max_segment_id = segment_id + 1;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "strata::vector",
-                        segment_id,
-                        error = %e,
-                        "Failed to load graph from mmap, falling back to rebuild"
-                    );
-                    return Ok(false);
-                }
-            }
-        }
-
-        // Success: replace sealed segments and clear pending timestamps
-        self.sealed = loaded_segments;
-        self.next_segment_id = max_segment_id;
-        self.pending_timestamps.clear();
-
-        // Move any remaining active buffer entries that belong to loaded
-        // segments out of the active buffer (they're already in sealed graphs).
-        // On recovery, all vectors start in active buffer; after loading graphs,
-        // only vectors NOT in any sealed segment should remain in active.
-        let sealed_ids: std::collections::BTreeSet<VectorId> = self
-            .sealed
-            .iter()
-            .flat_map(|seg| seg.graph.node_ids())
-            .collect();
-        self.active.ids.retain(|id| !sealed_ids.contains(id));
-        self.active
-            .timestamps
-            .retain(|id, _| !sealed_ids.contains(id));
-
-        Ok(true)
     }
 }
 

@@ -27,7 +27,7 @@ use std::cell::RefCell;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
-use crate::backend::VectorIndexBackend;
+use crate::backend::{InlineMetaCapable, MmapCapable, SegmentCapable, VectorIndexBackend};
 use crate::distance::{compute_similarity, compute_similarity_cached};
 use crate::heap::VectorHeap;
 use crate::types::InlineMeta;
@@ -1761,6 +1761,44 @@ impl HnswBackend {
     }
 }
 
+impl MmapCapable for HnswBackend {
+    fn freeze_heap_to_disk(&self, path: &std::path::Path) -> Result<(), VectorError> {
+        self.heap.freeze_to_disk(path)
+    }
+
+    fn replace_heap(&mut self, heap: crate::VectorHeap) {
+        self.heap = heap;
+    }
+
+    fn register_mmap_vector(&mut self, id: VectorId, created_at: u64) {
+        self.pending_timestamps.insert(id, created_at);
+    }
+
+    fn is_heap_mmap(&self) -> bool {
+        self.heap.is_mmap()
+    }
+}
+
+impl SegmentCapable for HnswBackend {
+    fn rebuild_index(&mut self) {
+        self.rebuild_graph();
+    }
+}
+
+impl InlineMetaCapable for HnswBackend {
+    fn set_inline_meta(&mut self, id: VectorId, meta: InlineMeta) {
+        self.heap.set_inline_meta(id, meta);
+    }
+
+    fn get_inline_meta(&self, id: VectorId) -> Option<&InlineMeta> {
+        self.heap.get_inline_meta(id)
+    }
+
+    fn remove_inline_meta(&mut self, id: VectorId) {
+        self.heap.remove_inline_meta(id);
+    }
+}
+
 impl VectorIndexBackend for HnswBackend {
     fn allocate_id(&mut self) -> VectorId {
         self.heap.allocate_id()
@@ -1873,10 +1911,6 @@ impl VectorIndexBackend for HnswBackend {
         self.heap.contains(id)
     }
 
-    fn rebuild_index(&mut self) {
-        self.rebuild_graph();
-    }
-
     fn index_type_name(&self) -> &'static str {
         "hnsw"
     }
@@ -1903,34 +1937,6 @@ impl VectorIndexBackend for HnswBackend {
 
     fn restore_snapshot_state(&mut self, next_id: u64, free_slots: Vec<usize>) {
         self.heap.restore_snapshot_state(next_id, free_slots);
-    }
-
-    fn freeze_heap_to_disk(&self, path: &std::path::Path) -> Result<(), VectorError> {
-        self.heap.freeze_to_disk(path)
-    }
-
-    fn replace_heap(&mut self, heap: crate::VectorHeap) {
-        self.heap = heap;
-    }
-
-    fn register_mmap_vector(&mut self, id: VectorId, created_at: u64) {
-        self.pending_timestamps.insert(id, created_at);
-    }
-
-    fn is_heap_mmap(&self) -> bool {
-        self.heap.is_mmap()
-    }
-
-    fn set_inline_meta(&mut self, id: VectorId, meta: InlineMeta) {
-        self.heap.set_inline_meta(id, meta);
-    }
-
-    fn get_inline_meta(&self, id: VectorId) -> Option<&InlineMeta> {
-        self.heap.get_inline_meta(id)
-    }
-
-    fn remove_inline_meta(&mut self, id: VectorId) {
-        self.heap.remove_inline_meta(id);
     }
 }
 
