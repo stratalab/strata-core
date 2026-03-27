@@ -289,8 +289,14 @@ impl VectorStore {
         let collection_id = CollectionId::new(branch_id, collection);
         let kv_key = Key::new_vector(self.namespace_for(branch_id, space), collection, key);
 
-        // Hold per-collection lock for entire check-then-delete (mirrors insert_inner fix #936)
+        // Hold per-collection write lock for entire check-then-delete to prevent
+        // TOCTOU race with concurrent insert (fixes #1572, mirrors insert_inner #936).
         let state = self.state()?;
+        let mut backend = state.backends.get_mut(&collection_id).ok_or_else(|| {
+            VectorError::CollectionNotFound {
+                name: collection.to_string(),
+            }
+        })?;
 
         let Some(record) = self.get_vector_record_by_key(&kv_key)? else {
             return Ok(false);
@@ -305,15 +311,13 @@ impl VectorStore {
 
         // Backend after KV succeeds. Non-fatal since KV is already deleted and
         // search verifies KV existence for candidates (Issue #1731).
-        if let Some(mut backend) = state.backends.get_mut(&collection_id) {
-            match backend.delete_with_timestamp(vector_id, now_micros()) {
-                Ok(_) => {
-                    backend.remove_inline_meta(vector_id);
-                }
-                Err(e) => {
-                    warn!(target: "strata::vector", collection, key, error = %e,
-                        "Backend delete failed after KV delete; search will filter via KV check");
-                }
+        match backend.delete_with_timestamp(vector_id, now_micros()) {
+            Ok(_) => {
+                backend.remove_inline_meta(vector_id);
+            }
+            Err(e) => {
+                warn!(target: "strata::vector", collection, key, error = %e,
+                    "Backend delete failed after KV delete; search will filter via KV check");
             }
         }
 
@@ -461,11 +465,13 @@ impl VectorStore {
         let version = self.db.storage().version();
 
         let state = self.state()?;
-        let backend = state.backends.get(&collection_id).ok_or_else(|| {
-            VectorError::CollectionNotFound {
-                name: collection.to_string(),
-            }
-        })?;
+        let backend =
+            state
+                .backends
+                .get(&collection_id)
+                .ok_or_else(|| VectorError::CollectionNotFound {
+                    name: collection.to_string(),
+                })?;
 
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
@@ -541,8 +547,14 @@ impl VectorStore {
 
         let collection_id = CollectionId::new(branch_id, collection);
 
-        // Hold per-collection lock for entire batch
+        // Hold per-collection write lock for entire check-then-delete batch to
+        // prevent TOCTOU race with concurrent insert (fixes #1572).
         let state = self.state()?;
+        let mut backend = state.backends.get_mut(&collection_id).ok_or_else(|| {
+            VectorError::CollectionNotFound {
+                name: collection.to_string(),
+            }
+        })?;
 
         // Check existence and collect records before committing
         let mut kv_keys = Vec::with_capacity(keys.len());
@@ -576,17 +588,15 @@ impl VectorStore {
 
         // Update backend after KV commit succeeds
         let ts = now_micros();
-        if let Some(mut backend) = state.backends.get_mut(&collection_id) {
-            for vid in &vector_ids {
-                if let Some(vector_id) = vid {
-                    match backend.delete_with_timestamp(*vector_id, ts) {
-                        Ok(_) => {
-                            backend.remove_inline_meta(*vector_id);
-                        }
-                        Err(e) => {
-                            warn!(target: "strata::vector", collection, error = %e,
-                                "Backend delete failed after KV delete in batch; search will filter via KV check");
-                        }
+        for vid in &vector_ids {
+            if let Some(vector_id) = vid {
+                match backend.delete_with_timestamp(*vector_id, ts) {
+                    Ok(_) => {
+                        backend.remove_inline_meta(*vector_id);
+                    }
+                    Err(e) => {
+                        warn!(target: "strata::vector", collection, error = %e,
+                            "Backend delete failed after KV delete in batch; search will filter via KV check");
                     }
                 }
             }
