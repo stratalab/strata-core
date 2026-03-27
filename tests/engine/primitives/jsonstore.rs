@@ -1334,3 +1334,72 @@ fn search_unbounded_range() {
     let ids = search_doc_ids(&json, &req);
     assert_eq!(ids, vec!["p3", "p4", "p5"]); // 50, 75, 100
 }
+
+#[test]
+fn search_tag_eq_no_prefix_collision() {
+    // Verify that exact match on "active" does NOT match "actively"
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "status_idx",
+        "$.status",
+        IndexType::Tag,
+    )
+    .unwrap();
+
+    let doc1: JsonValue = json!({"status": "active"}).into();
+    let doc2: JsonValue = json!({"status": "actively"}).into();
+    json.create(&test_db.branch_id, "default", "d1", doc1)
+        .unwrap();
+    json.create(&test_db.branch_id, "default", "d2", doc2)
+        .unwrap();
+
+    let req = SearchRequest::new(test_db.branch_id, "").with_field_filter(FieldFilter::Predicate(
+        FieldPredicate::Eq {
+            field: "$.status".to_string(),
+            value: json!("active").into(),
+        },
+    ));
+
+    let ids = search_doc_ids(&json, &req);
+    assert_eq!(ids, vec!["d1"]); // Only exact match, NOT "actively"
+}
+
+#[test]
+fn search_text_prefix() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "name_idx",
+        "$.name",
+        IndexType::Text,
+    )
+    .unwrap();
+
+    let doc1: JsonValue = json!({"name": "wireless mouse"}).into();
+    let doc2: JsonValue = json!({"name": "wired keyboard"}).into();
+    let doc3: JsonValue = json!({"name": "bluetooth speaker"}).into();
+    json.create(&test_db.branch_id, "default", "d1", doc1)
+        .unwrap();
+    json.create(&test_db.branch_id, "default", "d2", doc2)
+        .unwrap();
+    json.create(&test_db.branch_id, "default", "d3", doc3)
+        .unwrap();
+
+    let req = SearchRequest::new(test_db.branch_id, "").with_field_filter(FieldFilter::Predicate(
+        FieldPredicate::Prefix {
+            field: "$.name".to_string(),
+            prefix: "wire".to_string(),
+        },
+    ));
+
+    let ids = search_doc_ids(&json, &req);
+    // "wire" matches "wireless mouse" and "wired keyboard" (lowercased)
+    assert_eq!(ids, vec!["d1", "d2"]);
+}

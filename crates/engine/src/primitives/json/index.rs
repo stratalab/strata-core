@@ -271,8 +271,13 @@ pub fn lookup_eq(
     index_name: &str,
     encoded_value: &[u8],
 ) -> StrataResult<Vec<String>> {
-    // Scan with the encoded value as prefix — matches all doc_ids with this value
-    let prefix = index_value_prefix(branch_id, space, index_name, encoded_value);
+    // Scan with encoded_value ++ separator as prefix, so "active" doesn't
+    // false-match "actively" (both start with "active" but only "active\xFF"
+    // matches "active\xFF<doc_id>").
+    let mut exact_prefix = Vec::with_capacity(encoded_value.len() + 1);
+    exact_prefix.extend_from_slice(encoded_value);
+    exact_prefix.push(INDEX_KEY_SEPARATOR);
+    let prefix = index_value_prefix(branch_id, space, index_name, &exact_prefix);
     let entries = txn.scan_prefix(&prefix)?;
     Ok(entries
         .iter()
