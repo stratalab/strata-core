@@ -70,6 +70,10 @@ Strata takes a different approach:
 | Decide what recipe to use | Agent | Agent's decision |
 | Build the knowledge graph | User | User's domain knowledge |
 
+### Multi-model routing
+
+The intelligence layer supports any GGUF model locally AND any OpenAI/Anthropic/Google-compatible API endpoint. The user assigns different models to different operations — cheap local models for high-volume operations (embedding, expansion), expensive cloud models where quality matters (RAG, AutoResearch). A single `db.search("query", mode="rag")` call may use three different models. See `intelligence-layer.md` section 2.
+
 ### The boundary
 
 **If it needs a model, it's not in the substrate.**
@@ -308,7 +312,9 @@ The individual retrieval techniques are borrowed — BM25, HNSW, RRF, PPR are al
 
 3. **Unified retrieval** — query and search are the same operation. Exact predicates, fuzzy ranking, filtering, aggregation all flow through one pipeline.
 
-4. **In-process LLM** changes the economics of write-time enrichment and query-time intelligence. Zero network overhead, zero API cost.
+4. **Multi-model routing** — assign different models (local GGUF or cloud API) to different operations. Cheap fast models for embedding and expansion, expensive smart models for RAG and planning. A single search call uses three models. No other database has built-in model routing.
+
+5. **In-process LLM** changes the economics of write-time enrichment and query-time intelligence. Zero network overhead, zero API cost for local operations.
 
 The strongest claim: **branch-parallel experimentation is an architectural capability that requires copy-on-write storage. No existing search system has this.**
 
