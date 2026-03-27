@@ -329,7 +329,9 @@ pub enum ManifestError {
     InvalidMagic,
 
     /// Unsupported format version (created by a newer version of Strata)
-    #[error("unsupported MANIFEST format version {version} (this build supports up to {max_supported})")]
+    #[error(
+        "unsupported MANIFEST format version {version} (this build supports up to {max_supported})"
+    )]
     UnsupportedVersion {
         /// Version found in the file
         version: u32,
@@ -669,7 +671,13 @@ mod tests {
 
         let result = Manifest::from_bytes(&bytes);
         assert!(
-            matches!(result, Err(ManifestError::UnsupportedVersion { version: 99, max_supported: 2 })),
+            matches!(
+                result,
+                Err(ManifestError::UnsupportedVersion {
+                    version: 99,
+                    max_supported: 2
+                })
+            ),
             "Expected UnsupportedVersion error for future format version, got: {:?}",
             result,
         );
