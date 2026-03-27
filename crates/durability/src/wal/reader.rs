@@ -100,7 +100,11 @@ impl WalReader {
                     stop_reason = ReadStopReason::PartialRecord;
                     break;
                 }
-                Err(WalRecordError::ChecksumMismatch { .. }) => {
+                Err(
+                    WalRecordError::ChecksumMismatch { .. }
+                    | WalRecordError::LengthChecksumMismatch
+                    | WalRecordError::UnsupportedVersion(_),
+                ) => {
                     if !self.allow_lossy_recovery {
                         // Strict mode (default): mid-segment corruption is fatal.
                         return Err(WalReaderError::CorruptedSegment {
@@ -1562,5 +1566,74 @@ mod tests {
         // Records 1-2 before corruption and 4-6 after should be present
         let txn_ids: Vec<u64> = lossy_records.iter().map(|r| r.txn_id).collect();
         assert_eq!(txn_ids, vec![1, 2, 4, 5, 6]);
+    }
+
+    /// Issue #1577: A torn write to the 4-byte length prefix produces a garbage
+    /// length. The reader trusts this length, skips forward past all remaining
+    /// valid records, hits InsufficientData, and stops — losing every record
+    /// after the corruption point.
+    ///
+    /// The fix adds a per-record length CRC (v2 format) so the reader detects
+    /// the bad length immediately and scans forward to find subsequent valid
+    /// records.
+    #[test]
+    fn test_issue_1577_torn_length_field_recovery() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        // Write 6 valid records into a single segment
+        let records: Vec<_> = (1..=6)
+            .map(|i| WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8; 20]))
+            .collect();
+        write_records(&wal_dir, &records);
+
+        // Compute byte offsets to find record 3's position
+        let record_bytes: Vec<Vec<u8>> = records.iter().map(|r| r.to_bytes()).collect();
+        let offset_of_record_3: usize = record_bytes[0].len() + record_bytes[1].len();
+
+        // Corrupt record 3's LENGTH field to a huge value (simulating a torn write)
+        let segment_path = WalSegment::segment_path(&wal_dir, 1);
+        let mut seg_data = std::fs::read(&segment_path).unwrap();
+        let hdr_size = 36; // v2 segment header
+        let length_offset = hdr_size + offset_of_record_3;
+
+        // Overwrite the 4-byte length prefix with 0x7FFFFFFF (2GB — way past EOF)
+        seg_data[length_offset..length_offset + 4].copy_from_slice(&0x7FFF_FFFFu32.to_le_bytes());
+        std::fs::write(&segment_path, &seg_data).unwrap();
+
+        // Lossy reader must detect the bad length and scan forward to records 4-6.
+        // Before the fix: reader hits InsufficientData at the garbage length and
+        // stops, returning only records 1-2.
+        let lossy_reader = WalReader::new().with_lossy_recovery();
+        let (lossy_records, _, _, skipped) = lossy_reader.read_segment(&wal_dir, 1).unwrap();
+        assert!(skipped > 0, "Lossy reader should report skipped corruption");
+        let txn_ids: Vec<u64> = lossy_records.iter().map(|r| r.txn_id).collect();
+        assert_eq!(
+            txn_ids,
+            vec![1, 2, 4, 5, 6],
+            "Records after the torn length must be recovered"
+        );
+    }
+
+    /// Issue #1577: The length CRC in v2 records catches torn lengths that happen
+    /// to be "reasonable" (within segment bounds but pointing to the wrong offset).
+    #[test]
+    fn test_issue_1577_length_crc_catches_plausible_torn_length() {
+        let record = WalRecord::new(42, [1u8; 16], 99999, vec![1, 2, 3, 4, 5]);
+        let bytes = record.to_bytes();
+
+        // Corrupt only the length field to a plausible but wrong value
+        let mut corrupted = bytes.clone();
+        let original_length = u32::from_le_bytes(corrupted[0..4].try_into().unwrap());
+        let bad_length = original_length + 1; // off by one — plausible but wrong
+        corrupted[0..4].copy_from_slice(&bad_length.to_le_bytes());
+
+        // from_bytes must detect this via LengthChecksumMismatch (not just InsufficientData)
+        let result = WalRecord::from_bytes(&corrupted);
+        assert!(
+            matches!(result, Err(WalRecordError::LengthChecksumMismatch)),
+            "Expected LengthChecksumMismatch for corrupted length, got: {:?}",
+            result
+        );
     }
 }
