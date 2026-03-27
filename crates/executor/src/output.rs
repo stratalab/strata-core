@@ -91,6 +91,17 @@ pub enum Output {
         event_type: String,
     },
 
+    /// Paginated event range result with cursor for continuation.
+    EventRangeResult {
+        /// Events in this page.
+        events: Vec<VersionedValue>,
+        /// Whether more results exist beyond this page.
+        has_more: bool,
+        /// Opaque cursor for fetching the next page. None = last page.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_cursor: Option<String>,
+    },
+
     /// Vector write acknowledgment — echoes collection + key + version
     VectorWriteResult {
         /// Collection name.

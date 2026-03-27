@@ -152,4 +152,88 @@ impl Strata {
             }),
         }
     }
+
+    // =========================================================================
+    // Range Queries
+    // =========================================================================
+
+    /// Query events by sequence range with pagination.
+    ///
+    /// Returns events in `[start_seq, end_seq)` with optional count limit and direction.
+    /// The result includes a cursor for fetching the next page.
+    pub fn event_range(
+        &self,
+        start_seq: u64,
+        end_seq: Option<u64>,
+        limit: Option<u64>,
+        direction: ScanDirection,
+        event_type: Option<&str>,
+    ) -> Result<(Vec<VersionedValue>, bool, Option<String>)> {
+        match self.execute_cmd(Command::EventRange {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            start_seq,
+            end_seq,
+            limit,
+            direction,
+            event_type: event_type.map(|s| s.to_string()),
+        })? {
+            Output::EventRangeResult {
+                events,
+                has_more,
+                next_cursor,
+            } => Ok((events, has_more, next_cursor)),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for EventRange".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
+
+    /// Query events by timestamp range with pagination.
+    ///
+    /// Returns events whose timestamp is in `[start_ts, end_ts]` (inclusive, microseconds).
+    /// The result includes a cursor for fetching the next page.
+    pub fn event_range_by_time(
+        &self,
+        start_ts: u64,
+        end_ts: Option<u64>,
+        limit: Option<u64>,
+        direction: ScanDirection,
+        event_type: Option<&str>,
+    ) -> Result<(Vec<VersionedValue>, bool, Option<String>)> {
+        match self.execute_cmd(Command::EventRangeByTime {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            start_ts,
+            end_ts,
+            limit,
+            direction,
+            event_type: event_type.map(|s| s.to_string()),
+        })? {
+            Output::EventRangeResult {
+                events,
+                has_more,
+                next_cursor,
+            } => Ok((events, has_more, next_cursor)),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for EventRangeByTime".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
+
+    /// List all known event types in the stream.
+    pub fn event_list_types(&self) -> Result<Vec<String>> {
+        match self.execute_cmd(Command::EventListTypes {
+            branch: self.branch_id(),
+            space: self.space_id(),
+        })? {
+            Output::Keys(types) => Ok(types),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for EventListTypes".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
 }

@@ -258,6 +258,154 @@ pub fn event_batch_append(
     Ok(Output::BatchResults(results))
 }
 
+/// Handle EventRange command — sequence-based range query with pagination.
+pub fn event_range(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    start_seq: u64,
+    end_seq: Option<u64>,
+    limit: Option<u64>,
+    reverse: bool,
+    event_type: Option<String>,
+) -> Result<Output> {
+    let core_branch_id = bridge::to_core_branch_id(&branch)?;
+    let limit_usize = limit.map(|l| l as usize);
+
+    // Request one extra to detect has_more (saturating to avoid overflow)
+    let fetch_limit = limit_usize.map(|l| l.saturating_add(1));
+
+    let mut events = convert_result(p.event.range(
+        &core_branch_id,
+        &space,
+        start_seq,
+        end_seq,
+        fetch_limit,
+        reverse,
+        event_type.as_deref(),
+    ))?;
+
+    let has_more = if let Some(l) = limit_usize {
+        if events.len() > l {
+            events.truncate(l);
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // Build cursor from the last returned event's sequence
+    let next_cursor = if has_more {
+        events.last().map(|e| {
+            let seq = bridge::extract_version(&e.version);
+            if reverse {
+                // Next page starts before this sequence
+                format!("seq:{}", seq.saturating_sub(1))
+            } else {
+                // Next page starts after this sequence
+                format!("seq:{}", seq + 1)
+            }
+        })
+    } else {
+        None
+    };
+
+    let versioned: Vec<VersionedValue> = events
+        .into_iter()
+        .map(|e| VersionedValue {
+            value: e.value.payload,
+            version: bridge::extract_version(&e.version),
+            timestamp: e.value.timestamp.into(),
+        })
+        .collect();
+
+    Ok(Output::EventRangeResult {
+        events: versioned,
+        has_more,
+        next_cursor,
+    })
+}
+
+/// Handle EventRangeByTime command — timestamp-based range query with pagination.
+pub fn event_range_by_time(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    start_ts: u64,
+    end_ts: Option<u64>,
+    limit: Option<u64>,
+    reverse: bool,
+    event_type: Option<String>,
+) -> Result<Output> {
+    let core_branch_id = bridge::to_core_branch_id(&branch)?;
+    let limit_usize = limit.map(|l| l as usize);
+
+    // Request one extra to detect has_more (saturating to avoid overflow)
+    let fetch_limit = limit_usize.map(|l| l.saturating_add(1));
+
+    let mut events = convert_result(p.event.range_by_time(
+        &core_branch_id,
+        &space,
+        start_ts,
+        end_ts,
+        fetch_limit,
+        reverse,
+        event_type.as_deref(),
+    ))?;
+
+    let has_more = if let Some(l) = limit_usize {
+        if events.len() > l {
+            events.truncate(l);
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // Build cursor from the last returned event's timestamp
+    let next_cursor = if has_more {
+        events.last().map(|e| {
+            let ts: u64 = e.value.timestamp.into();
+            let seq = bridge::extract_version(&e.version);
+            if reverse {
+                // Next page: events before this timestamp
+                format!("ts:{}:seq:{}", ts, seq)
+            } else {
+                // Next page: events after this timestamp
+                format!("ts:{}:seq:{}", ts, seq)
+            }
+        })
+    } else {
+        None
+    };
+
+    let versioned: Vec<VersionedValue> = events
+        .into_iter()
+        .map(|e| VersionedValue {
+            value: e.value.payload,
+            version: bridge::extract_version(&e.version),
+            timestamp: e.value.timestamp.into(),
+        })
+        .collect();
+
+    Ok(Output::EventRangeResult {
+        events: versioned,
+        has_more,
+        next_cursor,
+    })
+}
+
+/// Handle EventListTypes command.
+pub fn event_list_types(p: &Arc<Primitives>, branch: BranchId, space: String) -> Result<Output> {
+    let core_branch_id = bridge::to_core_branch_id(&branch)?;
+    let types = convert_result(p.event.list_types(&core_branch_id, &space))?;
+    Ok(Output::Keys(types))
+}
+
 /// Enrich a StreamNotFound error with fuzzy-match suggestions on event types.
 fn enrich_event_error(
     p: &Arc<Primitives>,

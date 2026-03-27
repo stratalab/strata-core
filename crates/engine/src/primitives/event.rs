@@ -728,7 +728,9 @@ impl EventLog {
     ///
     /// Returns events with sequence numbers in `[start_seq, end_seq)`.
     /// If `end_seq` is None, reads to the end of the log.
-    /// Results are ordered by sequence number.
+    /// If `reverse` is true, iterates from high to low sequence numbers.
+    /// If `event_type` is Some, only returns events matching that type.
+    /// Results are ordered by sequence number (ascending or descending).
     pub fn range(
         &self,
         branch_id: &BranchId,
@@ -736,6 +738,8 @@ impl EventLog {
         start_seq: u64,
         end_seq: Option<u64>,
         limit: Option<usize>,
+        reverse: bool,
+        event_type: Option<&str>,
     ) -> StrataResult<Vec<Versioned<Event>>> {
         if limit == Some(0) {
             return Ok(Vec::new());
@@ -757,29 +761,144 @@ impl EventLog {
                 return Ok(Vec::new());
             }
 
-            let capacity = limit
-                .unwrap_or((upper - start_seq) as usize)
-                .min((upper - start_seq) as usize);
+            let range_len = (upper - start_seq) as usize;
+            let capacity = limit.unwrap_or(range_len).min(range_len);
             let mut results = Vec::with_capacity(capacity);
 
-            for seq in start_seq..upper {
-                let event_key = Key::new_event(ns.clone(), seq);
-                if let Some(v) = txn.get(&event_key)? {
-                    let event: Event = from_stored_value(&v)
-                        .map_err(|e| StrataError::serialization(e.to_string()))?;
-                    results.push(Versioned::with_timestamp(
-                        event.clone(),
-                        Version::Sequence(seq),
-                        event.timestamp,
-                    ));
-
-                    if limit.is_some_and(|l| results.len() >= l) {
-                        break;
+            if reverse {
+                // Iterate from upper-1 down to start_seq (inclusive)
+                let mut seq = upper;
+                while seq > start_seq {
+                    seq -= 1;
+                    let event_key = Key::new_event(ns.clone(), seq);
+                    if let Some(v) = txn.get(&event_key)? {
+                        let event: Event = from_stored_value(&v)
+                            .map_err(|e| StrataError::serialization(e.to_string()))?;
+                        if let Some(et) = event_type {
+                            if event.event_type != et {
+                                continue;
+                            }
+                        }
+                        results.push(Versioned::with_timestamp(
+                            event.clone(),
+                            Version::Sequence(seq),
+                            event.timestamp,
+                        ));
+                        if limit.is_some_and(|l| results.len() >= l) {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                for seq in start_seq..upper {
+                    let event_key = Key::new_event(ns.clone(), seq);
+                    if let Some(v) = txn.get(&event_key)? {
+                        let event: Event = from_stored_value(&v)
+                            .map_err(|e| StrataError::serialization(e.to_string()))?;
+                        if let Some(et) = event_type {
+                            if event.event_type != et {
+                                continue;
+                            }
+                        }
+                        results.push(Versioned::with_timestamp(
+                            event.clone(),
+                            Version::Sequence(seq),
+                            event.timestamp,
+                        ));
+                        if limit.is_some_and(|l| results.len() >= l) {
+                            break;
+                        }
                     }
                 }
             }
 
             Ok(results)
+        })
+    }
+
+    /// Read events by timestamp range.
+    ///
+    /// Returns events whose timestamp is in `[start_ts, end_ts]` (inclusive both ends,
+    /// microseconds since epoch).
+    /// If `end_ts` is None, reads all events from `start_ts` onwards.
+    /// If `reverse` is true, returns results in descending timestamp order.
+    /// If `event_type` is Some, only returns events matching that type.
+    pub fn range_by_time(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        start_ts: u64,
+        end_ts: Option<u64>,
+        limit: Option<usize>,
+        reverse: bool,
+        event_type: Option<&str>,
+    ) -> StrataResult<Vec<Versioned<Event>>> {
+        if limit == Some(0) {
+            return Ok(Vec::new());
+        }
+        self.db.transaction(*branch_id, |txn| {
+            let ns = self.namespace_for(branch_id, space);
+            let meta_key = Key::new_event_meta(ns.clone());
+            let meta: EventLogMeta = match txn.get(&meta_key)? {
+                Some(v) => from_stored_value(&v).map_err(|e| {
+                    StrataError::serialization(format!("corrupt EventLog metadata: {}", e))
+                })?,
+                None => return Ok(Vec::new()),
+            };
+
+            if meta.next_sequence == 0 {
+                return Ok(Vec::new());
+            }
+
+            // Collect matching events, scanning in forward order.
+            // For forward direction, apply limit during scan to avoid
+            // unbounded memory growth on large logs.
+            let mut matching = Vec::new();
+            for seq in 0..meta.next_sequence {
+                let event_key = Key::new_event(ns.clone(), seq);
+                if let Some(v) = txn.get(&event_key)? {
+                    let event: Event = from_stored_value(&v)
+                        .map_err(|e| StrataError::serialization(e.to_string()))?;
+                    let ts = event.timestamp.as_micros();
+
+                    if ts < start_ts {
+                        continue;
+                    }
+                    if let Some(end) = end_ts {
+                        if ts > end {
+                            continue;
+                        }
+                    }
+
+                    if let Some(et) = event_type {
+                        if event.event_type != et {
+                            continue;
+                        }
+                    }
+
+                    matching.push(Versioned::with_timestamp(
+                        event.clone(),
+                        Version::Sequence(seq),
+                        event.timestamp,
+                    ));
+
+                    // For forward scans, apply limit eagerly to bound memory
+                    if !reverse {
+                        if limit.is_some_and(|l| matching.len() >= l) {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if reverse {
+                matching.reverse();
+                if let Some(l) = limit {
+                    matching.truncate(l);
+                }
+            }
+
+            Ok(matching)
         })
     }
 
