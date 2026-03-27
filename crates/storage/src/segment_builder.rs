@@ -172,6 +172,11 @@ impl SegmentBuilder {
 
         let tmp_path = path.with_extension("tmp");
         let file = std::fs::File::create(&tmp_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
+        }
         let mut w = BufWriter::new(file);
 
         // Reuse a single Zstd compressor context across all blocks to avoid

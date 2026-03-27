@@ -245,6 +245,12 @@ impl ManifestManager {
         file.sync_all()?;
         drop(file);
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600));
+        }
+
         // Atomic rename
         std::fs::rename(&temp_path, &self.path)?;
 

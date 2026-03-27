@@ -31,6 +31,31 @@ fn apply_storage_config(storage: &SegmentedStore, cfg: &StorageConfig) {
 
 use strata_core::{StrataError, StrataResult};
 
+/// Restrict a directory to owner-only access (rwx------).
+/// Best-effort: logs a warning on failure but does not block database open.
+#[cfg(unix)]
+fn restrict_dir(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)) {
+        warn!(target: "strata::db", path = %path.display(), error = %e,
+            "Failed to restrict directory permissions");
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_dir(_path: &Path) {}
+
+/// Restrict a file to owner-only read/write (rw-------).
+/// Best-effort: ignores errors (defense in depth for data files).
+#[cfg(unix)]
+fn restrict_file(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+fn restrict_file(_path: &Path) {}
+
 use super::config::{self, StrataConfig};
 use super::registry::OPEN_DATABASES;
 use super::{Database, PersistenceMode};
@@ -141,6 +166,7 @@ impl Database {
         // Create directory first so we can canonicalize the path
         let data_dir = path.as_ref().to_path_buf();
         std::fs::create_dir_all(&data_dir).map_err(StrataError::from)?;
+        restrict_dir(&data_dir);
 
         // Canonicalize path for consistent registry keys
         let canonical_path = data_dir.canonicalize().map_err(StrataError::from)?;
@@ -163,6 +189,7 @@ impl Database {
             .write(true)
             .open(&lock_path)
             .map_err(|e| StrataError::storage(format!("failed to open lock file: {}", e)))?;
+        restrict_file(&lock_path);
         fs2::FileExt::try_lock_exclusive(&lock_file).map_err(|_| {
             StrataError::storage(format!(
                 "database at '{}' is already in use by another process",
@@ -422,10 +449,12 @@ impl Database {
         // Create WAL directory
         let wal_dir = canonical_path.join("wal");
         std::fs::create_dir_all(&wal_dir).map_err(StrataError::from)?;
+        restrict_dir(&wal_dir);
 
         // Create segments directory for on-disk segment storage
         let segments_dir = canonical_path.join("segments");
         std::fs::create_dir_all(&segments_dir).map_err(StrataError::from)?;
+        restrict_dir(&segments_dir);
 
         // Use RecoveryCoordinator for proper transaction-aware recovery
         // This reads all WalRecords from the segmented WAL directory

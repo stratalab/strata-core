@@ -311,6 +311,27 @@ impl Default for StrataConfig {
     }
 }
 
+/// Restrict config file to owner-only read/write (0o600).
+///
+/// The config file may contain API keys, so we propagate permission
+/// errors rather than ignoring them.
+#[cfg(unix)]
+fn restrict_config_permissions(path: &std::path::Path) -> StrataResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+        StrataError::internal(format!(
+            "Failed to restrict permissions on '{}': {}",
+            path.display(),
+            e
+        ))
+    })
+}
+
+#[cfg(not(unix))]
+fn restrict_config_permissions(_path: &std::path::Path) -> StrataResult<()> {
+    Ok(())
+}
+
 impl StrataConfig {
     /// Build a BM25 scorer using configured parameters (or defaults).
     pub fn bm25_scorer(&self) -> crate::search::BM25LiteScorer {
@@ -416,7 +437,7 @@ auto_embed = false
                 e
             ))
         })?;
-        let config: StrataConfig = toml::from_str(&content).map_err(|e| {
+        let mut config: StrataConfig = toml::from_str(&content).map_err(|e| {
             StrataError::invalid_input(format!(
                 "Failed to parse config file '{}': {}",
                 path.display(),
@@ -425,7 +446,27 @@ auto_embed = false
         })?;
         // Validate the durability value eagerly
         config.durability_mode()?;
+        // Environment variables override config file values (12-factor app pattern).
+        // This avoids storing secrets in plaintext config files.
+        config.apply_env_overrides();
         Ok(config)
+    }
+
+    /// Override API key fields with environment variables, if set.
+    ///
+    /// Recognized variables: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`.
+    fn apply_env_overrides(&mut self) {
+        for (env_var, field) in [
+            ("ANTHROPIC_API_KEY", &mut self.anthropic_api_key),
+            ("OPENAI_API_KEY", &mut self.openai_api_key),
+            ("GOOGLE_API_KEY", &mut self.google_api_key),
+        ] {
+            if let Ok(val) = std::env::var(env_var) {
+                if !val.is_empty() {
+                    *field = Some(SensitiveString::from(val));
+                }
+            }
+        }
     }
 
     /// Write the default config file if it does not already exist.
@@ -440,6 +481,7 @@ auto_embed = false
                     e
                 ))
             })?;
+            restrict_config_permissions(path)?;
         }
         Ok(())
     }
@@ -454,7 +496,8 @@ auto_embed = false
                 path.display(),
                 e
             ))
-        })
+        })?;
+        restrict_config_permissions(path)
     }
 }
 
@@ -1081,5 +1124,48 @@ max_branches = 512
         assert_eq!(config.storage.data_block_size, 4096);
         assert_eq!(config.storage.bloom_bits_per_key, 10);
         assert_eq!(config.storage.compaction_rate_limit, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_to_file_sets_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        let config = StrataConfig::default();
+        config.write_to_file(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "strata.toml should be owner-only (0o600)");
+    }
+
+    #[test]
+    fn env_var_overrides_api_keys() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        std::fs::write(
+            &path,
+            "durability = \"standard\"\nanthropic_api_key = \"file-key\"\n",
+        )
+        .unwrap();
+
+        // Set env vars
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "env-key");
+            std::env::set_var("OPENAI_API_KEY", "env-openai");
+        }
+
+        let config = StrataConfig::from_file(&path).unwrap();
+
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+
+        // Env var overrides file value
+        assert_eq!(config.anthropic_api_key.as_deref(), Some("env-key"));
+        // Env var sets value even when file had none
+        assert_eq!(config.openai_api_key.as_deref(), Some("env-openai"));
+        // Unset env var leaves file value alone
+        assert!(config.google_api_key.is_none());
     }
 }
