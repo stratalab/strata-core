@@ -2273,7 +2273,10 @@ fn test_issue_1551_database_uuid_is_nonzero() {
     let temp_dir = TempDir::new().unwrap();
     let db = Database::open(temp_dir.path()).unwrap();
     let uuid = db.database_uuid();
-    assert_ne!(uuid, [0u8; 16], "disk-backed database must have a non-zero UUID");
+    assert_ne!(
+        uuid, [0u8; 16],
+        "disk-backed database must have a non-zero UUID"
+    );
 }
 
 #[test]

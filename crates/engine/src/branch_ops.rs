@@ -575,7 +575,15 @@ pub fn diff_branches_with_options(
         if let Some((parent, fv)) = storage.get_fork_info(&id_b) {
             if parent == id_a {
                 return cow_diff_branches(
-                    db, id_a, id_b, id_b, id_a, fv, branch_a, branch_b, &options,
+                    db,
+                    id_a,
+                    id_b,
+                    id_b,
+                    id_a,
+                    fv,
+                    branch_a,
+                    branch_b,
+                    &options,
                     snapshot_version,
                 );
             }
@@ -583,7 +591,15 @@ pub fn diff_branches_with_options(
         if let Some((parent, fv)) = storage.get_fork_info(&id_a) {
             if parent == id_b {
                 return cow_diff_branches(
-                    db, id_a, id_b, id_a, id_b, fv, branch_a, branch_b, &options,
+                    db,
+                    id_a,
+                    id_b,
+                    id_a,
+                    id_b,
+                    fv,
+                    branch_a,
+                    branch_b,
+                    &options,
                     snapshot_version,
                 );
             }
@@ -4897,11 +4913,7 @@ mod tests {
 
         // Verify the values are snapshot-consistent
         let space = &diff.spaces[0];
-        let all_entries: Vec<_> = space
-            .added
-            .iter()
-            .chain(space.modified.iter())
-            .collect();
+        let all_entries: Vec<_> = space.added.iter().chain(space.modified.iter()).collect();
         for entry in &all_entries {
             if entry.key == "shared" {
                 assert_eq!(entry.value_a, Some(Value::Int(10)));

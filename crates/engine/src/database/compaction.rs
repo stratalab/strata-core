@@ -394,11 +394,10 @@ impl Database {
                 StrataError::internal(format!("failed to load MANIFEST: {}", e))
             })?
         } else {
-            ManifestManager::create(manifest_path, self.database_uuid, "identity".to_string()).map_err(
-                |e: ManifestError| {
+            ManifestManager::create(manifest_path, self.database_uuid, "identity".to_string())
+                .map_err(|e: ManifestError| {
                     StrataError::internal(format!("failed to create MANIFEST: {}", e))
-                },
-            )?
+                })?
         };
 
         // Update active WAL segment from the writer

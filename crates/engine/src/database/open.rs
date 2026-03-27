@@ -444,15 +444,13 @@ impl Database {
         // On subsequent opens: load the existing UUID from disk.
         let manifest_path = canonical_path.join("MANIFEST");
         let database_uuid = if ManifestManager::exists(&manifest_path) {
-            let m = ManifestManager::load(manifest_path).map_err(|e| {
-                StrataError::internal(format!("failed to load MANIFEST: {}", e))
-            })?;
+            let m = ManifestManager::load(manifest_path)
+                .map_err(|e| StrataError::internal(format!("failed to load MANIFEST: {}", e)))?;
             m.manifest().database_uuid
         } else {
             let uuid = *uuid::Uuid::new_v4().as_bytes();
-            ManifestManager::create(manifest_path, uuid, "identity".to_string()).map_err(|e| {
-                StrataError::internal(format!("failed to create MANIFEST: {}", e))
-            })?;
+            ManifestManager::create(manifest_path, uuid, "identity".to_string())
+                .map_err(|e| StrataError::internal(format!("failed to create MANIFEST: {}", e)))?;
             uuid
         };
 
