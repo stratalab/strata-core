@@ -683,10 +683,7 @@ impl VectorHeap {
     /// Whether calibration is in progress (Int8 only).
     pub fn is_calibrating(&self) -> bool {
         self.calibration_samples.is_some()
-            && self
-                .quant_params
-                .as_ref()
-                .map_or(false, |p| !p.calibrated)
+            && self.quant_params.as_ref().map_or(false, |p| !p.calibrated)
     }
 
     /// Get quantization parameters (if Int8).
@@ -788,7 +785,11 @@ impl VectorHeap {
             VectorData::Mmap(mmap) => {
                 let emb = mmap.get_by_offset(offset, dim)?;
                 Some(compute_similarity_cached(
-                    query, emb, metric, norm_query, norm_stored,
+                    query,
+                    emb,
+                    metric,
+                    norm_query,
+                    norm_stored,
                 ))
             }
             VectorData::InMemoryQuantized(vec) => {

@@ -647,14 +647,7 @@ fn int8_search_returns_results() {
     // Search
     let query = seeded_vector(384, 42); // query matches vec_42 exactly
     let results = vector
-        .search(
-            test_db.branch_id,
-            "default",
-            "int8_search",
-            &query,
-            5,
-            None,
-        )
+        .search(test_db.branch_id, "default", "int8_search", &query, 5, None)
         .unwrap();
 
     assert_eq!(results.len(), 5);
@@ -693,48 +686,20 @@ fn int8_search_accuracy_vs_f32() {
         let key = format!("vec_{}", i);
         let emb = seeded_vector(384, i as u64);
         vector
-            .insert(
-                test_db.branch_id,
-                "default",
-                "f32_coll",
-                &key,
-                &emb,
-                None,
-            )
+            .insert(test_db.branch_id, "default", "f32_coll", &key, &emb, None)
             .unwrap();
         vector
-            .insert(
-                test_db.branch_id,
-                "default",
-                "int8_coll",
-                &key,
-                &emb,
-                None,
-            )
+            .insert(test_db.branch_id, "default", "int8_coll", &key, &emb, None)
             .unwrap();
     }
 
     // Search both with same query
     let query = seeded_vector(384, 999);
     let f32_results = vector
-        .search(
-            test_db.branch_id,
-            "default",
-            "f32_coll",
-            &query,
-            10,
-            None,
-        )
+        .search(test_db.branch_id, "default", "f32_coll", &query, 10, None)
         .unwrap();
     let int8_results = vector
-        .search(
-            test_db.branch_id,
-            "default",
-            "int8_coll",
-            &query,
-            10,
-            None,
-        )
+        .search(test_db.branch_id, "default", "int8_coll", &query, 10, None)
         .unwrap();
 
     assert_eq!(f32_results.len(), 10);
@@ -774,14 +739,7 @@ fn int8_delete_works() {
         let key = format!("vec_{}", i);
         let emb = seeded_vector(384, i as u64);
         vector
-            .insert(
-                test_db.branch_id,
-                "default",
-                "int8_del",
-                &key,
-                &emb,
-                None,
-            )
+            .insert(test_db.branch_id, "default", "int8_del", &key, &emb, None)
             .unwrap();
     }
 
@@ -793,14 +751,7 @@ fn int8_delete_works() {
     // Verify it's gone from search
     let query = seeded_vector(384, 50);
     let results = vector
-        .search(
-            test_db.branch_id,
-            "default",
-            "int8_del",
-            &query,
-            5,
-            None,
-        )
+        .search(test_db.branch_id, "default", "int8_del", &query, 5, None)
         .unwrap();
 
     assert!(
@@ -825,27 +776,13 @@ fn int8_small_collection_before_calibration() {
         let key = format!("vec_{}", i);
         let emb = seeded_vector(8, i as u64);
         vector
-            .insert(
-                test_db.branch_id,
-                "default",
-                "int8_small",
-                &key,
-                &emb,
-                None,
-            )
+            .insert(test_db.branch_id, "default", "int8_small", &key, &emb, None)
             .unwrap();
     }
 
     let query = seeded_vector(8, 2);
     let results = vector
-        .search(
-            test_db.branch_id,
-            "default",
-            "int8_small",
-            &query,
-            3,
-            None,
-        )
+        .search(test_db.branch_id, "default", "int8_small", &query, 3, None)
         .unwrap();
 
     assert_eq!(results.len(), 3);
@@ -877,24 +814,10 @@ fn int8_memory_savings() {
         let key = format!("vec_{}", i);
         let emb = seeded_vector(384, i as u64);
         vector
-            .insert(
-                test_db.branch_id,
-                "default",
-                "f32_mem",
-                &key,
-                &emb,
-                None,
-            )
+            .insert(test_db.branch_id, "default", "f32_mem", &key, &emb, None)
             .unwrap();
         vector
-            .insert(
-                test_db.branch_id,
-                "default",
-                "int8_mem",
-                &key,
-                &emb,
-                None,
-            )
+            .insert(test_db.branch_id, "default", "int8_mem", &key, &emb, None)
             .unwrap();
     }
 

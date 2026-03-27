@@ -363,7 +363,6 @@ impl HnswGraph {
                         visited.mark(neighbor_id.0 as usize);
 
                         if let Some(score) = heap.distance_to(query, neighbor_id, metric, None) {
-
                             let worst_result_score = results
                                 .peek()
                                 .map(|r| r.0.score)
@@ -448,7 +447,8 @@ impl HnswGraph {
                             if i + 1 < neighbors.len() {
                                 heap.prefetch_embedding(neighbors[i + 1]);
                             }
-                            if let Some(score) = heap.distance_to(query, neighbor_id, metric, None) {
+                            if let Some(score) = heap.distance_to(query, neighbor_id, metric, None)
+                            {
                                 if score > best_score
                                     || (score == best_score && neighbor_id < best_id)
                                 {
@@ -1402,7 +1402,6 @@ impl CompactHnswGraph {
                 visited.mark(neighbor_id.0 as usize);
 
                 if let Some(score) = heap.distance_to(query, neighbor_id, metric, q_norm) {
-
                     let worst_result_score = results
                         .peek()
                         .map(|r| r.0.score)

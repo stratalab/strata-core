@@ -111,7 +111,10 @@ impl QuantizationParams {
     /// `out` must have length == dimension.
     #[inline]
     pub fn quantize_into(&self, embedding: &[f32], out: &mut [u8]) {
-        debug_assert!(self.calibrated, "must finalize calibration before quantizing");
+        debug_assert!(
+            self.calibrated,
+            "must finalize calibration before quantizing"
+        );
         debug_assert_eq!(embedding.len(), self.mins.len());
         debug_assert_eq!(out.len(), self.mins.len());
         debug_assert!(

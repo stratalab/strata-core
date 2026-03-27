@@ -645,10 +645,8 @@ pub fn compute_asymmetric_similarity(
     match metric {
         DistanceMetric::Cosine => {
             let dot = asymmetric_dot_product(query, quantized, mins, scales);
-            let nq = norm_query
-                .unwrap_or_else(|| query.iter().map(|x| x * x).sum::<f32>().sqrt());
-            let ns = norm_stored
-                .unwrap_or_else(|| asymmetric_l2_norm(quantized, mins, scales));
+            let nq = norm_query.unwrap_or_else(|| query.iter().map(|x| x * x).sum::<f32>().sqrt());
+            let ns = norm_stored.unwrap_or_else(|| asymmetric_l2_norm(quantized, mins, scales));
             let denom = nq * ns;
             if denom == 0.0 {
                 0.0
