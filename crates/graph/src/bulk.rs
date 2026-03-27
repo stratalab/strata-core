@@ -119,6 +119,11 @@ impl GraphStore {
                 Ok(())
             })?;
 
+            // Post-commit: update search index for this chunk
+            for (node_id, data) in chunk {
+                self.index_node_for_search(branch_id, graph, node_id, data);
+            }
+
             nodes_inserted += chunk.len();
         }
 

@@ -42,7 +42,7 @@ impl GraphStore {
             keys::storage_key(branch_id, &tk)
         });
 
-        self.db.transaction(branch_id, |txn| {
+        let result = self.db.transaction(branch_id, |txn| {
             // If updating, clean up old ref index and type index entries
             let old_val = txn.get(&storage_key)?;
             let created = old_val.is_none();
@@ -73,7 +73,12 @@ impl GraphStore {
                 txn.put(tk, Value::Null)?;
             }
             Ok(created)
-        })
+        })?;
+
+        // Post-commit: update search index
+        self.index_node_for_search(branch_id, graph, node_id, &data);
+
+        Ok(result)
     }
 
     /// Get node data, or None if node doesn't exist.
@@ -260,7 +265,12 @@ impl GraphStore {
             txn.delete(rev_adj_sk)?;
             txn.delete(node_storage_key.clone())?;
             Ok(())
-        })
+        })?;
+
+        // Post-commit: remove from search index
+        self.deindex_node_for_search(branch_id, graph, node_id);
+
+        Ok(())
     }
 
     /// Get all nodes with their data in a graph (for snapshot).
