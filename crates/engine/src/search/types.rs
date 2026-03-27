@@ -175,6 +175,11 @@ pub struct SearchRequest {
     /// Optional: field filter for secondary index queries on JsonStore.
     /// When present, only documents matching the filter are returned.
     pub field_filter: Option<FieldFilter>,
+
+    /// Optional: sort results by an indexed field instead of by score.
+    /// The field must have a secondary index. When set, results are returned
+    /// in index order rather than sorted by doc_id or score.
+    pub sort_by: Option<SortSpec>,
 }
 
 impl SearchRequest {
@@ -202,12 +207,22 @@ impl SearchRequest {
             space: "default".to_string(),
             snapshot_version: None,
             field_filter: None,
+            sort_by: None,
         }
     }
 
     /// Builder: set field filter for secondary index queries
     pub fn with_field_filter(mut self, filter: FieldFilter) -> Self {
         self.field_filter = Some(filter);
+        self
+    }
+
+    /// Builder: sort results by an indexed field
+    pub fn with_sort_by(mut self, field: impl Into<String>, direction: SortDirection) -> Self {
+        self.sort_by = Some(SortSpec {
+            field: field.into(),
+            direction,
+        });
         self
     }
 
@@ -467,6 +482,30 @@ pub enum FieldFilter {
     Predicate(FieldPredicate),
     /// All sub-filters must match (intersection)
     And(Vec<FieldFilter>),
+    /// Any sub-filter must match (union)
+    Or(Vec<FieldFilter>),
+}
+
+// ============================================================================
+// Sort Specification
+// ============================================================================
+
+/// Sort direction for index-backed ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDirection {
+    /// Ascending (smallest first)
+    Asc,
+    /// Descending (largest first)
+    Desc,
+}
+
+/// Specification for sorting search results by an indexed field.
+#[derive(Debug, Clone)]
+pub struct SortSpec {
+    /// Field path to sort by (must have a secondary index)
+    pub field: String,
+    /// Sort direction
+    pub direction: SortDirection,
 }
 
 // ============================================================================

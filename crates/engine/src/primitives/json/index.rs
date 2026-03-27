@@ -358,6 +358,24 @@ pub fn lookup_prefix(
         .collect())
 }
 
+/// Scan all entries of an index in order, returning doc_ids in index value order.
+///
+/// Used for sort-by-indexed-field: the KV layer stores index entries in
+/// order-preserving byte order, so a prefix scan returns them sorted.
+pub fn scan_index_ordered(
+    txn: &mut TransactionContext,
+    branch_id: &BranchId,
+    space: &str,
+    index_name: &str,
+) -> StrataResult<Vec<String>> {
+    let prefix = index_scan_prefix(branch_id, space, index_name);
+    let entries = txn.scan_prefix(&prefix)?;
+    Ok(entries
+        .iter()
+        .filter_map(|(k, _)| extract_doc_id_from_index_key(&k.user_key))
+        .collect())
+}
+
 /// Resolve a FieldFilter against available indexes, returning matching doc_ids.
 ///
 /// Returns an error if a predicate references a field with no corresponding index.
@@ -382,6 +400,14 @@ pub fn resolve_filter(
                 });
             }
             Ok(result.unwrap_or_default())
+        }
+        FieldFilter::Or(filters) => {
+            let mut result = HashSet::new();
+            for f in filters {
+                let set = resolve_filter(txn, branch_id, space, f, indexes)?;
+                result.extend(set);
+            }
+            Ok(result)
         }
     }
 }
@@ -456,7 +482,10 @@ fn resolve_predicate(
 }
 
 /// Find the index definition that covers a given field path.
-fn find_index_for_field<'a>(field: &str, indexes: &'a [IndexDef]) -> StrataResult<&'a IndexDef> {
+pub fn find_index_for_field<'a>(
+    field: &str,
+    indexes: &'a [IndexDef],
+) -> StrataResult<&'a IndexDef> {
     indexes
         .iter()
         .find(|idx| idx.field_path == field)
