@@ -3,6 +3,7 @@
 //! Tests for JSON document storage with path-based operations.
 
 use crate::common::*;
+use serde_json::json;
 use std::str::FromStr;
 
 // Helper function to parse path or return root
@@ -1082,4 +1083,323 @@ fn create_index_invalid_name_rejected() {
         IndexType::Numeric,
     );
     assert!(result.is_err());
+}
+
+// ============================================================================
+// Search via Searchable Trait (Epic 2)
+// ============================================================================
+
+use strata_engine::search::{FieldFilter, FieldPredicate, SearchRequest, Searchable};
+
+fn setup_products(test_db: &TestDb) -> JsonStore {
+    let json = test_db.json();
+
+    // Create indexes
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+        "$.price",
+        IndexType::Numeric,
+    )
+    .unwrap();
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "status_idx",
+        "$.status",
+        IndexType::Tag,
+    )
+    .unwrap();
+
+    // Insert test documents
+    let docs = vec![
+        (
+            "p1",
+            json!({"price": 10.0, "status": "active", "name": "Widget A"}),
+        ),
+        (
+            "p2",
+            json!({"price": 25.0, "status": "active", "name": "Widget B"}),
+        ),
+        (
+            "p3",
+            json!({"price": 50.0, "status": "pending", "name": "Gadget C"}),
+        ),
+        (
+            "p4",
+            json!({"price": 75.0, "status": "active", "name": "Gadget D"}),
+        ),
+        (
+            "p5",
+            json!({"price": 100.0, "status": "inactive", "name": "Thing E"}),
+        ),
+    ];
+    for (id, val) in docs {
+        json.create(&test_db.branch_id, "default", id, val.into())
+            .unwrap();
+    }
+    json
+}
+
+fn search_doc_ids(json: &JsonStore, req: &SearchRequest) -> Vec<String> {
+    let response = json.search(req).unwrap();
+    response
+        .hits
+        .iter()
+        .map(|h| h.doc_ref.json_doc_id().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn search_numeric_range() {
+    let test_db = TestDb::new();
+    let json = setup_products(&test_db);
+
+    let req = SearchRequest::new(test_db.branch_id, "").with_field_filter(FieldFilter::Predicate(
+        FieldPredicate::Range {
+            field: "$.price".to_string(),
+            lower: Some(json!(20.0).into()),
+            upper: Some(json!(80.0).into()),
+            lower_inclusive: true,
+            upper_inclusive: true,
+        },
+    ));
+
+    let ids = search_doc_ids(&json, &req);
+    // price 25, 50, 75 are in [20, 80]
+    assert_eq!(ids, vec!["p2", "p3", "p4"]);
+}
+
+#[test]
+fn search_numeric_range_exclusive() {
+    let test_db = TestDb::new();
+    let json = setup_products(&test_db);
+
+    let req = SearchRequest::new(test_db.branch_id, "").with_field_filter(FieldFilter::Predicate(
+        FieldPredicate::Range {
+            field: "$.price".to_string(),
+            lower: Some(json!(25.0).into()),
+            upper: Some(json!(75.0).into()),
+            lower_inclusive: false,
+            upper_inclusive: false,
+        },
+    ));
+
+    let ids = search_doc_ids(&json, &req);
+    // Exclusive: only price 50 is in (25, 75)
+    assert_eq!(ids, vec!["p3"]);
+}
+
+#[test]
+fn search_tag_exact_match() {
+    let test_db = TestDb::new();
+    let json = setup_products(&test_db);
+
+    let req = SearchRequest::new(test_db.branch_id, "").with_field_filter(FieldFilter::Predicate(
+        FieldPredicate::Eq {
+            field: "$.status".to_string(),
+            value: json!("active").into(),
+        },
+    ));
+
+    let ids = search_doc_ids(&json, &req);
+    assert_eq!(ids, vec!["p1", "p2", "p4"]);
+}
+
+#[test]
+fn search_and_compound_filter() {
+    let test_db = TestDb::new();
+    let json = setup_products(&test_db);
+
+    // active AND price in [20, 80]
+    let req = SearchRequest::new(test_db.branch_id, "").with_field_filter(FieldFilter::And(vec![
+        FieldFilter::Predicate(FieldPredicate::Eq {
+            field: "$.status".to_string(),
+            value: json!("active").into(),
+        }),
+        FieldFilter::Predicate(FieldPredicate::Range {
+            field: "$.price".to_string(),
+            lower: Some(json!(20.0).into()),
+            upper: Some(json!(80.0).into()),
+            lower_inclusive: true,
+            upper_inclusive: true,
+        }),
+    ]));
+
+    let ids = search_doc_ids(&json, &req);
+    // active AND [20,80] = p2 (25, active), p4 (75, active)
+    assert_eq!(ids, vec!["p2", "p4"]);
+}
+
+#[test]
+fn search_empty_result() {
+    let test_db = TestDb::new();
+    let json = setup_products(&test_db);
+
+    let req = SearchRequest::new(test_db.branch_id, "").with_field_filter(FieldFilter::Predicate(
+        FieldPredicate::Eq {
+            field: "$.status".to_string(),
+            value: json!("deleted").into(),
+        },
+    ));
+
+    let response = json.search(&req).unwrap();
+    assert!(response.is_empty());
+    assert!(response.stats.index_used);
+}
+
+#[test]
+fn search_no_index_returns_error() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    // No indexes created — search with filter should fail
+    let req = SearchRequest::new(test_db.branch_id, "").with_field_filter(FieldFilter::Predicate(
+        FieldPredicate::Eq {
+            field: "$.nonexistent".to_string(),
+            value: json!("x").into(),
+        },
+    ));
+
+    let result = json.search(&req);
+    assert!(result.is_err());
+}
+
+#[test]
+fn search_without_filter_returns_empty() {
+    let test_db = TestDb::new();
+    let json = setup_products(&test_db);
+
+    // No field filter — should return empty (text search handled elsewhere)
+    let req = SearchRequest::new(test_db.branch_id, "anything");
+    let response = json.search(&req).unwrap();
+    assert!(response.is_empty());
+}
+
+#[test]
+fn search_respects_top_k() {
+    let test_db = TestDb::new();
+    let json = setup_products(&test_db);
+
+    let req = SearchRequest::new(test_db.branch_id, "")
+        .with_k(2)
+        .with_field_filter(FieldFilter::Predicate(FieldPredicate::Eq {
+            field: "$.status".to_string(),
+            value: json!("active").into(),
+        }));
+
+    let response = json.search(&req).unwrap();
+    assert_eq!(response.hits.len(), 2);
+    assert!(response.truncated);
+    // Ranks should be sequential
+    assert_eq!(response.hits[0].rank, 1);
+    assert_eq!(response.hits[1].rank, 2);
+}
+
+#[test]
+fn search_hits_have_snippets() {
+    let test_db = TestDb::new();
+    let json = setup_products(&test_db);
+
+    let req = SearchRequest::new(test_db.branch_id, "").with_field_filter(FieldFilter::Predicate(
+        FieldPredicate::Eq {
+            field: "$.status".to_string(),
+            value: json!("inactive").into(),
+        },
+    ));
+
+    let response = json.search(&req).unwrap();
+    assert_eq!(response.hits.len(), 1);
+    let snippet = response.hits[0].snippet.as_ref().unwrap();
+    assert!(snippet.contains("Thing E"));
+}
+
+#[test]
+fn search_unbounded_range() {
+    let test_db = TestDb::new();
+    let json = setup_products(&test_db);
+
+    // price >= 50 (no upper bound)
+    let req = SearchRequest::new(test_db.branch_id, "").with_field_filter(FieldFilter::Predicate(
+        FieldPredicate::Range {
+            field: "$.price".to_string(),
+            lower: Some(json!(50.0).into()),
+            upper: None,
+            lower_inclusive: true,
+            upper_inclusive: true,
+        },
+    ));
+
+    let ids = search_doc_ids(&json, &req);
+    assert_eq!(ids, vec!["p3", "p4", "p5"]); // 50, 75, 100
+}
+
+#[test]
+fn search_tag_eq_no_prefix_collision() {
+    // Verify that exact match on "active" does NOT match "actively"
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "status_idx",
+        "$.status",
+        IndexType::Tag,
+    )
+    .unwrap();
+
+    let doc1: JsonValue = json!({"status": "active"}).into();
+    let doc2: JsonValue = json!({"status": "actively"}).into();
+    json.create(&test_db.branch_id, "default", "d1", doc1)
+        .unwrap();
+    json.create(&test_db.branch_id, "default", "d2", doc2)
+        .unwrap();
+
+    let req = SearchRequest::new(test_db.branch_id, "").with_field_filter(FieldFilter::Predicate(
+        FieldPredicate::Eq {
+            field: "$.status".to_string(),
+            value: json!("active").into(),
+        },
+    ));
+
+    let ids = search_doc_ids(&json, &req);
+    assert_eq!(ids, vec!["d1"]); // Only exact match, NOT "actively"
+}
+
+#[test]
+fn search_text_prefix() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "name_idx",
+        "$.name",
+        IndexType::Text,
+    )
+    .unwrap();
+
+    let doc1: JsonValue = json!({"name": "wireless mouse"}).into();
+    let doc2: JsonValue = json!({"name": "wired keyboard"}).into();
+    let doc3: JsonValue = json!({"name": "bluetooth speaker"}).into();
+    json.create(&test_db.branch_id, "default", "d1", doc1)
+        .unwrap();
+    json.create(&test_db.branch_id, "default", "d2", doc2)
+        .unwrap();
+    json.create(&test_db.branch_id, "default", "d3", doc3)
+        .unwrap();
+
+    let req = SearchRequest::new(test_db.branch_id, "").with_field_filter(FieldFilter::Predicate(
+        FieldPredicate::Prefix {
+            field: "$.name".to_string(),
+            prefix: "wire".to_string(),
+        },
+    ));
+
+    let ids = search_doc_ids(&json, &req);
+    // "wire" matches "wireless mouse" and "wired keyboard" (lowercased)
+    assert_eq!(ids, vec!["d1", "d2"]);
 }

@@ -1352,10 +1352,75 @@ impl JsonStore {
 impl crate::search::Searchable for JsonStore {
     fn search(
         &self,
-        _req: &crate::SearchRequest,
+        req: &crate::SearchRequest,
     ) -> strata_core::StrataResult<crate::SearchResponse> {
-        // Search is handled by the intelligence layer, not the primitive
-        Ok(crate::SearchResponse::empty())
+        use crate::search::{EntityRef, SearchHit, SearchStats};
+        use std::time::Instant;
+
+        let start = Instant::now();
+
+        // If no field filter, return empty (text search via intelligence layer)
+        let filter = match &req.field_filter {
+            Some(f) => f,
+            None => return Ok(crate::SearchResponse::empty()),
+        };
+
+        self.db.transaction(req.branch_id, |txn| {
+            let indexes = Self::load_indexes(txn, &req.branch_id, &req.space)?;
+            let matching_doc_ids =
+                index::resolve_filter(txn, &req.branch_id, &req.space, filter, &indexes)?;
+
+            // Fetch documents and build hits
+            let mut hits: Vec<SearchHit> = Vec::new();
+            for doc_id in &matching_doc_ids {
+                let key = self.key_for(&req.branch_id, &req.space, doc_id);
+                if let Some(stored) = txn.get(&key)? {
+                    let doc = Self::deserialize_doc(&stored)?;
+                    let snippet = crate::search::truncate_text(
+                        &serde_json::to_string(&doc.value).unwrap_or_default(),
+                        200,
+                    );
+                    hits.push(SearchHit {
+                        doc_ref: EntityRef::Json {
+                            branch_id: req.branch_id,
+                            doc_id: doc_id.clone(),
+                        },
+                        score: 1.0, // Binary match score for field filters
+                        rank: 0,    // Set below
+                        snippet: Some(snippet),
+                    });
+                }
+            }
+
+            // Sort by doc_id for deterministic ordering, then take top-k
+            hits.sort_by(|a, b| {
+                let a_key = match &a.doc_ref {
+                    EntityRef::Json { doc_id, .. } => doc_id.as_str(),
+                    _ => "",
+                };
+                let b_key = match &b.doc_ref {
+                    EntityRef::Json { doc_id, .. } => doc_id.as_str(),
+                    _ => "",
+                };
+                a_key.cmp(b_key)
+            });
+            hits.truncate(req.k);
+
+            // Assign ranks
+            for (i, hit) in hits.iter_mut().enumerate() {
+                hit.rank = (i + 1) as u32;
+            }
+
+            let elapsed = start.elapsed().as_micros() as u64;
+            let mut stats = SearchStats::new(elapsed, matching_doc_ids.len());
+            stats = stats.with_index_used(true);
+
+            Ok(crate::SearchResponse {
+                hits,
+                truncated: matching_doc_ids.len() > req.k,
+                stats,
+            })
+        })
     }
 
     fn primitive_kind(&self) -> strata_core::PrimitiveType {

@@ -27,6 +27,6 @@ pub use searchable::{
 };
 pub use tokenizer::{tokenize, tokenize_unique};
 pub use types::{
-    EntityRef, PrimitiveType, SearchBudget, SearchHit, SearchMode, SearchRequest, SearchResponse,
-    SearchStats,
+    EntityRef, FieldFilter, FieldPredicate, PrimitiveType, SearchBudget, SearchHit, SearchMode,
+    SearchRequest, SearchResponse, SearchStats,
 };
