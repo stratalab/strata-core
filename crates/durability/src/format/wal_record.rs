@@ -16,18 +16,20 @@
 //! └────────────────────────────────────┘
 //! ```
 //!
-//! # Record Layout
+//! # Record Layout (v2, issue #1577)
 //!
 //! ```text
-//! ┌─────────────────┬──────────────────┬─────────────────────────┬──────────┐
-//! │ Length (4 bytes)│ Format Ver (1)   │ Payload (variable)      │ CRC32 (4)│
-//! └─────────────────┴──────────────────┴─────────────────────────┴──────────┘
+//! ┌──────────┬──────────────┬──────────────┬──────────────────────┬──────────┐
+//! │ Len (4B) │ FmtVer=2 (1) │ LenCRC (4B) │ Payload (variable)  │ CRC32 (4)│
+//! └──────────┴──────────────┴──────────────┴──────────────────────┴──────────┘
 //!
 //! Payload:
 //! ┌──────────────┬──────────────┬──────────────┬─────────────────────────────┐
 //! │ TxnId (8)    │ BranchId (16)   │ Timestamp (8)│ Writeset (variable)         │
 //! └──────────────┴──────────────┴──────────────┴─────────────────────────────┘
 //! ```
+//!
+//! v1 records (FmtVer=1) lack the LenCRC field and are still readable.
 
 use crc32fast::Hasher;
 use std::fs::{File, OpenOptions};
@@ -46,8 +48,8 @@ pub const SEGMENT_HEADER_SIZE: usize = 32;
 /// Size of v2 segment header in bytes (with CRC32)
 pub const SEGMENT_HEADER_SIZE_V2: usize = 36;
 
-/// Current WAL record format version
-pub const WAL_RECORD_FORMAT_VERSION: u8 = 1;
+/// Current WAL record format version (v2 adds length CRC — see issue #1577)
+pub const WAL_RECORD_FORMAT_VERSION: u8 = 2;
 
 /// WAL segment header (32 bytes for v1, 36 bytes for v2).
 ///
@@ -543,25 +545,35 @@ impl WalRecord {
 
     /// Serialize record to bytes (for writing to WAL).
     ///
-    /// Format: length (4) + format_version (1) + payload + crc32 (4)
+    /// v2 format: length (4) + format_version=2 (1) + length_crc (4) + payload + crc32 (4)
     ///
-    /// The length field contains the size of (format_version + payload + crc32).
+    /// The length field contains the size of everything after it.
+    /// The length_crc protects the length field against torn writes (issue #1577).
+    /// The main CRC covers format_version + length_crc + txn_id + branch_id + timestamp + writeset.
     pub fn to_bytes(&self) -> Vec<u8> {
-        // Build payload: format_version + txn_id + branch_id + timestamp + writeset
-        let mut payload = Vec::with_capacity(33 + self.writeset.len());
-        payload.push(WAL_RECORD_FORMAT_VERSION);
+        // Build inner payload: format_version + [placeholder for length_crc] + fields
+        let mut payload = Vec::with_capacity(37 + self.writeset.len());
+        payload.push(WAL_RECORD_FORMAT_VERSION); // 1 byte: version = 2
+        payload.extend_from_slice(&[0u8; 4]); // 4 bytes: placeholder for length_crc
         payload.extend_from_slice(&self.txn_id.to_le_bytes());
         payload.extend_from_slice(&self.branch_id);
         payload.extend_from_slice(&self.timestamp.to_le_bytes());
         payload.extend_from_slice(&self.writeset);
 
-        // Calculate CRC32 of payload
+        // Total length = payload + main CRC
+        let total_len = payload.len() + 4;
+        let length_bytes = (total_len as u32).to_le_bytes();
+
+        // Fill in the length CRC (CRC32 of the 4-byte length field)
+        let length_crc = Self::compute_crc(&length_bytes);
+        payload[1..5].copy_from_slice(&length_crc.to_le_bytes());
+
+        // Main CRC covers the full payload (version + length_crc + fields)
         let crc = Self::compute_crc(&payload);
 
         // Build final record: length + payload + crc
-        let total_len = payload.len() + 4; // payload + crc
         let mut record = Vec::with_capacity(4 + total_len);
-        record.extend_from_slice(&(total_len as u32).to_le_bytes());
+        record.extend_from_slice(&length_bytes);
         record.extend_from_slice(&payload);
         record.extend_from_slice(&crc.to_le_bytes());
 
@@ -570,9 +582,11 @@ impl WalRecord {
 
     /// Deserialize record from bytes.
     ///
+    /// Handles both v1 (no length CRC) and v2 (with length CRC) formats.
     /// Returns (record, bytes_consumed) on success.
     pub fn from_bytes(bytes: &[u8]) -> Result<(Self, usize), WalRecordError> {
-        if bytes.len() < 4 {
+        // Need at least 5 bytes: 4 (length) + 1 (format_version)
+        if bytes.len() < 5 {
             return Err(WalRecordError::InsufficientData);
         }
 
@@ -583,54 +597,106 @@ impl WalRecord {
             return Err(WalRecordError::InvalidFormat);
         }
 
-        if bytes.len() < 4 + length {
+        // Peek at format version byte (always at offset 4, both v1 and v2)
+        let format_version = bytes[4];
+
+        if format_version == 2 {
+            // v2: verify length CRC BEFORE trusting the length field
+            if bytes.len() < 9 {
+                return Err(WalRecordError::InsufficientData);
+            }
+            let stored_length_crc = u32::from_le_bytes(bytes[5..9].try_into().unwrap());
+            let computed_length_crc = Self::compute_crc(&bytes[0..4]);
+            if stored_length_crc != computed_length_crc {
+                return Err(WalRecordError::LengthChecksumMismatch);
+            }
+        }
+
+        // Now trust the length (saturating add guards against usize overflow on 32-bit)
+        let total = 4usize.saturating_add(length);
+        if bytes.len() < total {
             return Err(WalRecordError::InsufficientData);
         }
 
-        let payload_with_crc = &bytes[4..4 + length];
+        let payload_with_crc = &bytes[4..total];
 
-        if length < 5 {
-            // Minimum: 1 byte format version + 4 bytes CRC
-            return Err(WalRecordError::InvalidFormat);
+        if format_version == 2 {
+            // v2 minimum: 1 (version) + 4 (length_crc) + 4 (main CRC) = 9
+            if length < 9 {
+                return Err(WalRecordError::InvalidFormat);
+            }
+
+            // Split payload and CRC
+            let payload = &payload_with_crc[..length - 4];
+            let stored_crc = u32::from_le_bytes(payload_with_crc[length - 4..].try_into().unwrap());
+
+            // Verify main CRC (covers version + length_crc + fields)
+            let computed_crc = Self::compute_crc(payload);
+            if computed_crc != stored_crc {
+                return Err(WalRecordError::ChecksumMismatch {
+                    expected: stored_crc,
+                    computed: computed_crc,
+                });
+            }
+
+            // Parse v2 payload: skip version (1) + length_crc (4) = 5 bytes
+            // Minimum: 5 + 8 (txn_id) + 16 (branch_id) + 8 (timestamp) = 37
+            if payload.len() < 37 {
+                return Err(WalRecordError::InvalidFormat);
+            }
+
+            let txn_id = u64::from_le_bytes(payload[5..13].try_into().unwrap());
+            let branch_id: [u8; 16] = payload[13..29].try_into().unwrap();
+            let timestamp = u64::from_le_bytes(payload[29..37].try_into().unwrap());
+            let writeset = payload[37..].to_vec();
+
+            Ok((
+                WalRecord {
+                    txn_id,
+                    branch_id,
+                    timestamp,
+                    writeset,
+                },
+                4 + length,
+            ))
+        } else if format_version == 1 {
+            // v1: original format without length CRC
+            if length < 5 {
+                return Err(WalRecordError::InvalidFormat);
+            }
+
+            let payload = &payload_with_crc[..length - 4];
+            let stored_crc = u32::from_le_bytes(payload_with_crc[length - 4..].try_into().unwrap());
+
+            let computed_crc = Self::compute_crc(payload);
+            if computed_crc != stored_crc {
+                return Err(WalRecordError::ChecksumMismatch {
+                    expected: stored_crc,
+                    computed: computed_crc,
+                });
+            }
+
+            if payload.len() < 33 {
+                return Err(WalRecordError::InvalidFormat);
+            }
+
+            let txn_id = u64::from_le_bytes(payload[1..9].try_into().unwrap());
+            let branch_id: [u8; 16] = payload[9..25].try_into().unwrap();
+            let timestamp = u64::from_le_bytes(payload[25..33].try_into().unwrap());
+            let writeset = payload[33..].to_vec();
+
+            Ok((
+                WalRecord {
+                    txn_id,
+                    branch_id,
+                    timestamp,
+                    writeset,
+                },
+                4 + length,
+            ))
+        } else {
+            Err(WalRecordError::UnsupportedVersion(format_version))
         }
-
-        // Split payload and CRC
-        let payload = &payload_with_crc[..length - 4];
-        let stored_crc = u32::from_le_bytes(payload_with_crc[length - 4..].try_into().unwrap());
-
-        // Verify CRC
-        let computed_crc = Self::compute_crc(payload);
-        if computed_crc != stored_crc {
-            return Err(WalRecordError::ChecksumMismatch {
-                expected: stored_crc,
-                computed: computed_crc,
-            });
-        }
-
-        // Parse payload
-        // Minimum payload size: 1 (version) + 8 (txn_id) + 16 (branch_id) + 8 (timestamp) = 33
-        if payload.len() < 33 {
-            return Err(WalRecordError::InvalidFormat);
-        }
-
-        let format_version = payload[0];
-        if format_version != WAL_RECORD_FORMAT_VERSION {
-            return Err(WalRecordError::UnsupportedVersion(format_version));
-        }
-
-        let txn_id = u64::from_le_bytes(payload[1..9].try_into().unwrap());
-        let branch_id: [u8; 16] = payload[9..25].try_into().unwrap();
-        let timestamp = u64::from_le_bytes(payload[25..33].try_into().unwrap());
-        let writeset = payload[33..].to_vec();
-
-        let record = WalRecord {
-            txn_id,
-            branch_id,
-            timestamp,
-            writeset,
-        };
-
-        Ok((record, 4 + length))
     }
 
     /// Compute CRC32 checksum of data.
@@ -640,30 +706,9 @@ impl WalRecord {
         hasher.finalize()
     }
 
-    /// Verify the checksum of serialized record bytes.
+    /// Verify the checksum of serialized record bytes (delegates to from_bytes).
     pub fn verify_checksum(bytes: &[u8]) -> Result<(), WalRecordError> {
-        if bytes.len() < 4 {
-            return Err(WalRecordError::InsufficientData);
-        }
-
-        let length = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
-
-        if bytes.len() < 4 + length || length < 5 {
-            return Err(WalRecordError::InsufficientData);
-        }
-
-        let payload = &bytes[4..4 + length - 4];
-        let stored_crc = u32::from_le_bytes(bytes[4 + length - 4..4 + length].try_into().unwrap());
-        let computed_crc = Self::compute_crc(payload);
-
-        if computed_crc != stored_crc {
-            return Err(WalRecordError::ChecksumMismatch {
-                expected: stored_crc,
-                computed: computed_crc,
-            });
-        }
-
-        Ok(())
+        Self::from_bytes(bytes).map(|_| ())
     }
 }
 
@@ -690,6 +735,10 @@ pub enum WalRecordError {
     /// Unsupported format version
     #[error("Unsupported format version: {0}")]
     UnsupportedVersion(u8),
+
+    /// Length field checksum mismatch (torn write to length prefix — issue #1577)
+    #[error("Length field checksum mismatch (possible torn write)")]
+    LengthChecksumMismatch,
 }
 
 #[cfg(test)]
@@ -832,6 +881,43 @@ mod tests {
         let mut corrupted = bytes.clone();
         corrupted[10] ^= 0xFF;
         assert!(WalRecord::verify_checksum(&corrupted).is_err());
+    }
+
+    /// Issue #1577: v1 records (written before the length CRC change) must still
+    /// be readable by the new from_bytes so recovery of existing databases works.
+    #[test]
+    fn test_v1_wal_record_still_readable() {
+        // Manually construct a v1 record (format_version=1, no length_crc)
+        let txn_id: u64 = 42;
+        let branch_id = [0xAB; 16];
+        let timestamp: u64 = 9999;
+        let writeset = vec![1, 2, 3, 4, 5];
+
+        let mut payload = Vec::new();
+        payload.push(1u8); // format_version = 1
+        payload.extend_from_slice(&txn_id.to_le_bytes());
+        payload.extend_from_slice(&branch_id);
+        payload.extend_from_slice(&timestamp.to_le_bytes());
+        payload.extend_from_slice(&writeset);
+
+        let crc = {
+            let mut h = Hasher::new();
+            h.update(&payload);
+            h.finalize()
+        };
+        let total_len = (payload.len() + 4) as u32;
+
+        let mut record_bytes = Vec::new();
+        record_bytes.extend_from_slice(&total_len.to_le_bytes());
+        record_bytes.extend_from_slice(&payload);
+        record_bytes.extend_from_slice(&crc.to_le_bytes());
+
+        let (parsed, consumed) = WalRecord::from_bytes(&record_bytes).unwrap();
+        assert_eq!(parsed.txn_id, txn_id);
+        assert_eq!(parsed.branch_id, branch_id);
+        assert_eq!(parsed.timestamp, timestamp);
+        assert_eq!(parsed.writeset, writeset);
+        assert_eq!(consumed, record_bytes.len());
     }
 
     #[test]
