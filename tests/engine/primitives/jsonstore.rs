@@ -1089,7 +1089,9 @@ fn create_index_invalid_name_rejected() {
 // Search via Searchable Trait (Epic 2)
 // ============================================================================
 
-use strata_engine::search::{FieldFilter, FieldPredicate, SearchRequest, Searchable};
+use strata_engine::search::{
+    FieldFilter, FieldPredicate, SearchRequest, Searchable, SortDirection,
+};
 
 fn setup_products(test_db: &TestDb) -> JsonStore {
     let json = test_db.json();
@@ -1402,4 +1404,146 @@ fn search_text_prefix() {
     let ids = search_doc_ids(&json, &req);
     // "wire" matches "wireless mouse" and "wired keyboard" (lowercased)
     assert_eq!(ids, vec!["d1", "d2"]);
+}
+
+// ============================================================================
+// Epic 3: OR Filters and Sort-by-Indexed-Field
+// ============================================================================
+
+#[test]
+fn search_or_filter() {
+    let test_db = TestDb::new();
+    let json = setup_products(&test_db);
+
+    // status:active OR status:pending
+    let req = SearchRequest::new(test_db.branch_id, "").with_field_filter(FieldFilter::Or(vec![
+        FieldFilter::Predicate(FieldPredicate::Eq {
+            field: "$.status".to_string(),
+            value: json!("active").into(),
+        }),
+        FieldFilter::Predicate(FieldPredicate::Eq {
+            field: "$.status".to_string(),
+            value: json!("pending").into(),
+        }),
+    ]));
+
+    let ids = search_doc_ids(&json, &req);
+    // active: p1, p2, p4; pending: p3 → union sorted by doc_id
+    assert_eq!(ids, vec!["p1", "p2", "p3", "p4"]);
+}
+
+#[test]
+fn search_or_and_compound() {
+    let test_db = TestDb::new();
+    let json = setup_products(&test_db);
+
+    // (status:active OR status:pending) AND price:[20, 60]
+    let req = SearchRequest::new(test_db.branch_id, "").with_field_filter(FieldFilter::And(vec![
+        FieldFilter::Or(vec![
+            FieldFilter::Predicate(FieldPredicate::Eq {
+                field: "$.status".to_string(),
+                value: json!("active").into(),
+            }),
+            FieldFilter::Predicate(FieldPredicate::Eq {
+                field: "$.status".to_string(),
+                value: json!("pending").into(),
+            }),
+        ]),
+        FieldFilter::Predicate(FieldPredicate::Range {
+            field: "$.price".to_string(),
+            lower: Some(json!(20.0).into()),
+            upper: Some(json!(60.0).into()),
+            lower_inclusive: true,
+            upper_inclusive: true,
+        }),
+    ]));
+
+    let ids = search_doc_ids(&json, &req);
+    // (active|pending) = {p1,p2,p3,p4}, price [20,60] = {p2,p3} → intersection
+    assert_eq!(ids, vec!["p2", "p3"]);
+}
+
+#[test]
+fn search_sort_by_price_asc() {
+    let test_db = TestDb::new();
+    let json = setup_products(&test_db);
+
+    // All active, sorted by price ascending
+    let req = SearchRequest::new(test_db.branch_id, "")
+        .with_field_filter(FieldFilter::Predicate(FieldPredicate::Eq {
+            field: "$.status".to_string(),
+            value: json!("active").into(),
+        }))
+        .with_sort_by("$.price", SortDirection::Asc);
+
+    let ids = search_doc_ids(&json, &req);
+    // active: p1 (10), p2 (25), p4 (75) — sorted by price asc
+    assert_eq!(ids, vec!["p1", "p2", "p4"]);
+}
+
+#[test]
+fn search_sort_by_price_desc() {
+    let test_db = TestDb::new();
+    let json = setup_products(&test_db);
+
+    // All active, sorted by price descending
+    let req = SearchRequest::new(test_db.branch_id, "")
+        .with_field_filter(FieldFilter::Predicate(FieldPredicate::Eq {
+            field: "$.status".to_string(),
+            value: json!("active").into(),
+        }))
+        .with_sort_by("$.price", SortDirection::Desc);
+
+    let ids = search_doc_ids(&json, &req);
+    // active: p4 (75), p2 (25), p1 (10) — sorted by price desc
+    assert_eq!(ids, vec!["p4", "p2", "p1"]);
+}
+
+#[test]
+fn search_sort_only_no_filter() {
+    let test_db = TestDb::new();
+    let json = setup_products(&test_db);
+
+    // Sort all docs by price, no filter
+    let req = SearchRequest::new(test_db.branch_id, "").with_sort_by("$.price", SortDirection::Asc);
+
+    let ids = search_doc_ids(&json, &req);
+    // All 5 docs sorted by price: 10, 25, 50, 75, 100
+    assert_eq!(ids, vec!["p1", "p2", "p3", "p4", "p5"]);
+}
+
+#[test]
+fn search_sort_with_top_k() {
+    let test_db = TestDb::new();
+    let json = setup_products(&test_db);
+
+    // Sort by price desc, take top 2
+    let req = SearchRequest::new(test_db.branch_id, "")
+        .with_k(2)
+        .with_sort_by("$.price", SortDirection::Desc);
+
+    let response = json.search(&req).unwrap();
+    let ids: Vec<String> = response
+        .hits
+        .iter()
+        .map(|h| h.doc_ref.json_doc_id().unwrap().to_string())
+        .collect();
+    // Top 2 by price desc: p5 (100), p4 (75)
+    assert_eq!(ids, vec!["p5", "p4"]);
+    assert!(response.truncated);
+    assert_eq!(response.hits[0].rank, 1);
+    assert_eq!(response.hits[1].rank, 2);
+}
+
+#[test]
+fn search_sort_no_index_error() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    // Sort by a field with no index
+    let req =
+        SearchRequest::new(test_db.branch_id, "").with_sort_by("$.nonexistent", SortDirection::Asc);
+
+    let result = json.search(&req);
+    assert!(result.is_err());
 }

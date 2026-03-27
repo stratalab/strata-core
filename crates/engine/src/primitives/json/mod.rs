@@ -1354,25 +1354,60 @@ impl crate::search::Searchable for JsonStore {
         &self,
         req: &crate::SearchRequest,
     ) -> strata_core::StrataResult<crate::SearchResponse> {
-        use crate::search::{EntityRef, SearchHit, SearchStats};
+        use crate::search::{EntityRef, SearchHit, SearchStats, SortDirection};
+        use std::collections::HashSet;
         use std::time::Instant;
 
         let start = Instant::now();
 
-        // If no field filter, return empty (text search via intelligence layer)
-        let filter = match &req.field_filter {
-            Some(f) => f,
-            None => return Ok(crate::SearchResponse::empty()),
-        };
+        // Need at least a field filter or sort_by to do anything
+        if req.field_filter.is_none() && req.sort_by.is_none() {
+            return Ok(crate::SearchResponse::empty());
+        }
 
         self.db.transaction(req.branch_id, |txn| {
             let indexes = Self::load_indexes(txn, &req.branch_id, &req.space)?;
-            let matching_doc_ids =
-                index::resolve_filter(txn, &req.branch_id, &req.space, filter, &indexes)?;
 
-            // Fetch documents and build hits
+            // Resolve field filter to candidate set (if present)
+            let filter_set: Option<HashSet<String>> = match &req.field_filter {
+                Some(filter) => Some(index::resolve_filter(
+                    txn,
+                    &req.branch_id,
+                    &req.space,
+                    filter,
+                    &indexes,
+                )?),
+                None => None,
+            };
+
+            // Determine ordered doc_ids
+            let ordered_doc_ids: Vec<String> = if let Some(sort) = &req.sort_by {
+                // Sort by indexed field: scan the index in order
+                let sort_idx = index::find_index_for_field(&sort.field, &indexes)?;
+                let mut sorted =
+                    index::scan_index_ordered(txn, &req.branch_id, &req.space, &sort_idx.name)?;
+
+                // If there's a filter, retain only matching docs (preserving sort order)
+                if let Some(ref fset) = filter_set {
+                    sorted.retain(|id| fset.contains(id));
+                }
+
+                if sort.direction == SortDirection::Desc {
+                    sorted.reverse();
+                }
+                sorted
+            } else {
+                // No sort — use filter set, sorted by doc_id for deterministic ordering
+                let mut ids: Vec<String> = filter_set.unwrap_or_default().into_iter().collect();
+                ids.sort();
+                ids
+            };
+
+            let total_matches = ordered_doc_ids.len();
+
+            // Fetch documents and build hits (take top-k from ordered list)
             let mut hits: Vec<SearchHit> = Vec::new();
-            for doc_id in &matching_doc_ids {
+            for doc_id in ordered_doc_ids.iter().take(req.k) {
                 let key = self.key_for(&req.branch_id, &req.space, doc_id);
                 if let Some(stored) = txn.get(&key)? {
                     let doc = Self::deserialize_doc(&stored)?;
@@ -1385,26 +1420,12 @@ impl crate::search::Searchable for JsonStore {
                             branch_id: req.branch_id,
                             doc_id: doc_id.clone(),
                         },
-                        score: 1.0, // Binary match score for field filters
-                        rank: 0,    // Set below
+                        score: 1.0,
+                        rank: 0,
                         snippet: Some(snippet),
                     });
                 }
             }
-
-            // Sort by doc_id for deterministic ordering, then take top-k
-            hits.sort_by(|a, b| {
-                let a_key = match &a.doc_ref {
-                    EntityRef::Json { doc_id, .. } => doc_id.as_str(),
-                    _ => "",
-                };
-                let b_key = match &b.doc_ref {
-                    EntityRef::Json { doc_id, .. } => doc_id.as_str(),
-                    _ => "",
-                };
-                a_key.cmp(b_key)
-            });
-            hits.truncate(req.k);
 
             // Assign ranks
             for (i, hit) in hits.iter_mut().enumerate() {
@@ -1412,12 +1433,12 @@ impl crate::search::Searchable for JsonStore {
             }
 
             let elapsed = start.elapsed().as_micros() as u64;
-            let mut stats = SearchStats::new(elapsed, matching_doc_ids.len());
+            let mut stats = SearchStats::new(elapsed, total_matches);
             stats = stats.with_index_used(true);
 
             Ok(crate::SearchResponse {
                 hits,
-                truncated: matching_doc_ids.len() > req.k,
+                truncated: total_matches > req.k,
                 stats,
             })
         })
