@@ -650,6 +650,72 @@ pub fn json_list_at(
     })
 }
 
+// ============================================================================
+// Secondary Index Handlers
+// ============================================================================
+
+/// Handle JsonCreateIndex command.
+pub fn json_create_index(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    name: String,
+    field_path: String,
+    index_type_str: String,
+) -> Result<Output> {
+    use strata_engine::primitives::json::index::IndexType;
+
+    let branch_id = to_core_branch_id(&branch)?;
+    let index_type = match index_type_str.as_str() {
+        "numeric" => IndexType::Numeric,
+        "tag" => IndexType::Tag,
+        "text" => IndexType::Text,
+        other => {
+            return Err(crate::Error::InvalidInput {
+                reason: format!(
+                    "Invalid index type '{}'. Must be 'numeric', 'tag', or 'text'",
+                    other
+                ),
+                hint: None,
+            });
+        }
+    };
+
+    let def =
+        convert_result(
+            p.json
+                .create_index(&branch_id, &space, &name, &field_path, index_type),
+        )?;
+    let json_str = serde_json::to_string(&def).map_err(|e| crate::Error::Internal {
+        reason: format!("Failed to serialize IndexDef: {}", e),
+        hint: None,
+    })?;
+    Ok(Output::Maybe(Some(Value::String(json_str))))
+}
+
+/// Handle JsonDropIndex command.
+pub fn json_drop_index(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    name: String,
+) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+    let existed = convert_result(p.json.drop_index(&branch_id, &space, &name))?;
+    Ok(Output::Bool(existed))
+}
+
+/// Handle JsonListIndexes command.
+pub fn json_list_indexes(p: &Arc<Primitives>, branch: BranchId, space: String) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+    let indexes = convert_result(p.json.list_indexes(&branch_id, &space))?;
+    let json_str = serde_json::to_string(&indexes).map_err(|e| crate::Error::Internal {
+        reason: format!("Failed to serialize index list: {}", e),
+        hint: None,
+    })?;
+    Ok(Output::Maybe(Some(Value::String(json_str))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

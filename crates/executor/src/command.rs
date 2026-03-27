@@ -967,6 +967,47 @@ pub enum Command {
         count: Option<usize>,
     },
 
+    /// Create a secondary index on a JSON document field.
+    /// Returns: `Output::IndexDef`
+    JsonCreateIndex {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Index name (unique within the space).
+        name: String,
+        /// JSON field path to index (e.g., "$.price").
+        field_path: String,
+        /// Index type: "numeric", "tag", or "text".
+        index_type: String,
+    },
+
+    /// Drop a secondary index.
+    /// Returns: `Output::Bool`
+    JsonDropIndex {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Index name to drop.
+        name: String,
+    },
+
+    /// List all secondary indexes on a space.
+    /// Returns: `Output::IndexList`
+    JsonListIndexes {
+        /// Target branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+    },
+
     /// Sample vector entries for shape discovery (returns metadata, not embeddings).
     /// Returns: `Output::SampleResult`
     VectorSample {
@@ -1684,6 +1725,8 @@ impl Command {
                 | Command::NoteDelete { .. }
                 | Command::BranchRevert { .. }
                 | Command::BranchCherryPick { .. }
+                | Command::JsonCreateIndex { .. }
+                | Command::JsonDropIndex { .. }
         )
     }
 
@@ -1766,6 +1809,9 @@ impl Command {
             Command::JsonCount { .. } => "JsonCount",
             Command::KvSample { .. } => "KvSample",
             Command::JsonSample { .. } => "JsonSample",
+            Command::JsonCreateIndex { .. } => "JsonCreateIndex",
+            Command::JsonDropIndex { .. } => "JsonDropIndex",
+            Command::JsonListIndexes { .. } => "JsonListIndexes",
             Command::VectorSample { .. } => "VectorSample",
             Command::EmbedStatus => "EmbedStatus",
             Command::ReindexEmbeddings { .. } => "ReindexEmbeddings",
@@ -1883,6 +1929,9 @@ impl Command {
             | Command::JsonCount { branch, space, .. }
             | Command::KvSample { branch, space, .. }
             | Command::JsonSample { branch, space, .. }
+            | Command::JsonCreateIndex { branch, space, .. }
+            | Command::JsonDropIndex { branch, space, .. }
+            | Command::JsonListIndexes { branch, space, .. }
             | Command::VectorSample { branch, space, .. }
             // Export
             | Command::DbExport { branch, space, .. } => {
@@ -2044,6 +2093,9 @@ impl Command {
             | Command::JsonCount { branch, .. }
             | Command::KvSample { branch, .. }
             | Command::JsonSample { branch, .. }
+            | Command::JsonCreateIndex { branch, .. }
+            | Command::JsonDropIndex { branch, .. }
+            | Command::JsonListIndexes { branch, .. }
             | Command::VectorSample { branch, .. }
             | Command::DbExport { branch, .. } => branch.as_ref(),
 

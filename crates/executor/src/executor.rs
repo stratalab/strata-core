@@ -1210,6 +1210,61 @@ impl Executor {
                     count.unwrap_or(5),
                 )
             }
+            Command::JsonCreateIndex {
+                branch,
+                space,
+                name,
+                field_path,
+                index_type,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                self.ensure_space_registered(&branch, &space)?;
+                crate::handlers::json::json_create_index(
+                    &self.primitives,
+                    branch,
+                    space,
+                    name,
+                    field_path,
+                    index_type,
+                )
+            }
+            Command::JsonDropIndex {
+                branch,
+                space,
+                name,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                self.ensure_space_registered(&branch, &space)?;
+                crate::handlers::json::json_drop_index(
+                    &self.primitives,
+                    branch,
+                    space,
+                    name,
+                )
+            }
+            Command::JsonListIndexes {
+                branch,
+                space,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::json::json_list_indexes(
+                    &self.primitives,
+                    branch,
+                    space,
+                )
+            }
             Command::VectorSample {
                 branch,
                 space,

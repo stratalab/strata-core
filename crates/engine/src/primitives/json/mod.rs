@@ -30,6 +30,8 @@
 //! 5. WAL remains unified (entry types 0x20-0x23)
 //! 6. JSON API feels like other primitives
 
+pub mod index;
+
 use crate::database::Database;
 use crate::primitives::extensions::JsonStoreExt;
 use serde::{Deserialize, Serialize};
@@ -295,6 +297,21 @@ impl JsonStore {
 
             let serialized = Self::serialize_doc(&doc)?;
             txn.put(key.clone(), serialized)?;
+
+            // Update secondary indexes
+            let indexes = Self::load_indexes(txn, branch_id, space)?;
+            if !indexes.is_empty() {
+                Self::update_index_entries(
+                    txn,
+                    branch_id,
+                    space,
+                    doc_id,
+                    None,
+                    Some(&doc.value),
+                    &indexes,
+                )?;
+            }
+
             Ok(Version::counter(doc.version))
         })
     }
@@ -427,6 +444,7 @@ impl JsonStore {
     /// If `create_if_missing` is true and the document doesn't exist, creates it.
     /// Returns the resulting document version and the full document value
     /// (avoids a re-read when the caller needs the complete doc, e.g. for embedding).
+    #[allow(clippy::too_many_arguments)]
     fn set_in_txn(
         txn: &mut TransactionContext,
         key: &Key,
@@ -434,16 +452,37 @@ impl JsonStore {
         path: &JsonPath,
         value: JsonValue,
         create_if_missing: bool,
+        branch_id: &BranchId,
+        space: &str,
+        indexes: &[index::IndexDef],
     ) -> StrataResult<(Version, JsonValue)> {
         match txn.get(key)? {
             Some(stored) => {
                 let mut doc = Self::deserialize_doc(&stored)?;
+                let old_value = if !indexes.is_empty() {
+                    Some(doc.value.clone())
+                } else {
+                    None
+                };
                 set_at_path(&mut doc.value, path, value)
                     .map_err(|e| StrataError::invalid_input(format!("Path error: {}", e)))?;
                 doc.value.validate().map_err(limit_error_to_error)?;
                 doc.touch();
                 let serialized = Self::serialize_doc(&doc)?;
                 txn.put(key.clone(), serialized)?;
+
+                if !indexes.is_empty() {
+                    Self::update_index_entries(
+                        txn,
+                        branch_id,
+                        space,
+                        doc_id,
+                        old_value.as_ref(),
+                        Some(&doc.value),
+                        indexes,
+                    )?;
+                }
+
                 Ok((Version::counter(doc.version), doc.value))
             }
             None if create_if_missing => {
@@ -459,6 +498,19 @@ impl JsonStore {
                 let doc = JsonDoc::new(doc_id, initial);
                 let serialized = Self::serialize_doc(&doc)?;
                 txn.put(key.clone(), serialized)?;
+
+                if !indexes.is_empty() {
+                    Self::update_index_entries(
+                        txn,
+                        branch_id,
+                        space,
+                        doc_id,
+                        None,
+                        Some(&doc.value),
+                        indexes,
+                    )?;
+                }
+
                 Ok((Version::counter(doc.version), doc.value))
             }
             None => Err(StrataError::invalid_input(format!(
@@ -489,7 +541,10 @@ impl JsonStore {
 
         let key = self.key_for(branch_id, space, doc_id);
         self.db.transaction(*branch_id, |txn| {
-            Self::set_in_txn(txn, &key, doc_id, path, value, true)
+            let indexes = Self::load_indexes(txn, branch_id, space)?;
+            Self::set_in_txn(
+                txn, &key, doc_id, path, value, true, branch_id, space, &indexes,
+            )
         })
     }
 
@@ -518,10 +573,21 @@ impl JsonStore {
         }
 
         self.db.transaction(*branch_id, |txn| {
+            let indexes = Self::load_indexes(txn, branch_id, space)?;
             let mut results = Vec::with_capacity(entries.len());
             for (doc_id, path, value) in &entries {
                 let key = self.key_for(branch_id, space, doc_id);
-                let result = Self::set_in_txn(txn, &key, doc_id, path, value.clone(), true)?;
+                let result = Self::set_in_txn(
+                    txn,
+                    &key,
+                    doc_id,
+                    path,
+                    value.clone(),
+                    true,
+                    branch_id,
+                    space,
+                    &indexes,
+                )?;
                 results.push(result);
             }
             Ok(results)
@@ -621,7 +687,11 @@ impl JsonStore {
 
         let key = self.key_for(branch_id, space, doc_id);
         self.db.transaction(*branch_id, |txn| {
-            Self::set_in_txn(txn, &key, doc_id, path, value, false).map(|(version, _)| version)
+            let indexes = Self::load_indexes(txn, branch_id, space)?;
+            Self::set_in_txn(
+                txn, &key, doc_id, path, value, false, branch_id, space, &indexes,
+            )
+            .map(|(version, _)| version)
         })
     }
 
@@ -661,11 +731,18 @@ impl JsonStore {
         let key = self.key_for(branch_id, space, doc_id);
 
         self.db.transaction(*branch_id, |txn| {
+            let indexes = Self::load_indexes(txn, branch_id, space)?;
+
             // Load existing document
             let stored = txn.get(&key)?.ok_or_else(|| {
                 StrataError::invalid_input(format!("JSON document {} not found", doc_id))
             })?;
             let mut doc = Self::deserialize_doc(&stored)?;
+            let old_value = if !indexes.is_empty() {
+                Some(doc.value.clone())
+            } else {
+                None
+            };
 
             // Apply deletion
             delete_at_path(&mut doc.value, path)
@@ -675,6 +752,19 @@ impl JsonStore {
             // Store updated document
             let serialized = Self::serialize_doc(&doc)?;
             txn.put(key.clone(), serialized)?;
+
+            // Update secondary indexes
+            if !indexes.is_empty() {
+                Self::update_index_entries(
+                    txn,
+                    branch_id,
+                    space,
+                    doc_id,
+                    old_value.as_ref(),
+                    Some(&doc.value),
+                    &indexes,
+                )?;
+            }
 
             Ok(Version::counter(doc.version))
         })
@@ -705,9 +795,26 @@ impl JsonStore {
         let key = self.key_for(branch_id, space, doc_id);
 
         self.db.transaction(*branch_id, |txn| {
-            // Check if document exists
-            if txn.get(&key)?.is_none() {
-                return Ok(false);
+            let indexes = Self::load_indexes(txn, branch_id, space)?;
+
+            // Check if document exists and get value for index cleanup
+            let stored = match txn.get(&key)? {
+                Some(v) => v,
+                None => return Ok(false),
+            };
+
+            // Remove index entries before deleting the document
+            if !indexes.is_empty() {
+                let doc = Self::deserialize_doc(&stored)?;
+                Self::update_index_entries(
+                    txn,
+                    branch_id,
+                    space,
+                    doc_id,
+                    Some(&doc.value),
+                    None,
+                    &indexes,
+                )?;
             }
 
             // Delete the document
@@ -731,14 +838,30 @@ impl JsonStore {
         }
 
         self.db.transaction(*branch_id, |txn| {
+            let indexes = Self::load_indexes(txn, branch_id, space)?;
             let mut results = Vec::with_capacity(doc_ids.len());
             for doc_id in doc_ids {
                 let key = self.key_for(branch_id, space, doc_id);
-                if txn.get(&key)?.is_some() {
-                    txn.delete(key)?;
-                    results.push(true);
-                } else {
-                    results.push(false);
+                match txn.get(&key)? {
+                    Some(stored) => {
+                        if !indexes.is_empty() {
+                            let doc = Self::deserialize_doc(&stored)?;
+                            Self::update_index_entries(
+                                txn,
+                                branch_id,
+                                space,
+                                doc_id,
+                                Some(&doc.value),
+                                None,
+                                &indexes,
+                            )?;
+                        }
+                        txn.delete(key)?;
+                        results.push(true);
+                    }
+                    None => {
+                        results.push(false);
+                    }
                 }
             }
             Ok(results)
@@ -765,6 +888,7 @@ impl JsonStore {
         }
 
         self.db.transaction(*branch_id, |txn| {
+            let indexes = Self::load_indexes(txn, branch_id, space)?;
             let mut results = Vec::with_capacity(entries.len());
             for (doc_id, path) in entries {
                 let key = self.key_for(branch_id, space, doc_id);
@@ -773,11 +897,29 @@ impl JsonStore {
                         StrataError::invalid_input(format!("JSON document {} not found", doc_id))
                     })?;
                     let mut doc = Self::deserialize_doc(&stored)?;
+                    let old_value = if !indexes.is_empty() {
+                        Some(doc.value.clone())
+                    } else {
+                        None
+                    };
                     delete_at_path(&mut doc.value, path)
                         .map_err(|e| StrataError::invalid_input(format!("Path error: {}", e)))?;
                     doc.touch();
                     let serialized = Self::serialize_doc(&doc)?;
                     txn.put(key, serialized)?;
+
+                    if !indexes.is_empty() {
+                        Self::update_index_entries(
+                            txn,
+                            branch_id,
+                            space,
+                            doc_id,
+                            old_value.as_ref(),
+                            Some(&doc.value),
+                            &indexes,
+                        )?;
+                    }
+
                     Ok(Version::counter(doc.version))
                 })();
                 results.push(result);
@@ -1022,6 +1164,186 @@ impl JsonStore {
             doc_ids,
             next_cursor,
         })
+    }
+
+    // ========================================================================
+    // Secondary Index Operations
+    // ========================================================================
+
+    /// Create a secondary index on a JSON field.
+    ///
+    /// Index metadata is stored in `_idx_meta_{space}` and index entries
+    /// are stored in `_idx_{space}_{name}` — both in the KV layer.
+    ///
+    /// Returns error if an index with the same name already exists.
+    pub fn create_index(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        name: &str,
+        field_path: &str,
+        index_type: index::IndexType,
+    ) -> StrataResult<index::IndexDef> {
+        // Validate index name
+        if name.is_empty() {
+            return Err(StrataError::invalid_input("Index name must not be empty"));
+        }
+        if name.contains('/') || name.contains('\0') {
+            return Err(StrataError::invalid_input(
+                "Index name must not contain '/' or null characters",
+            ));
+        }
+
+        // Validate the field path is parseable
+        let def = index::IndexDef::new(name, space, field_path, index_type);
+        def.json_path()?; // validates
+
+        let meta_space = index::index_meta_space_name(space);
+        let meta_key = Key::new_json(
+            Arc::new(Namespace::for_branch_space(*branch_id, &meta_space)),
+            name,
+        );
+
+        self.db.transaction(*branch_id, |txn| {
+            // Check if index already exists
+            if txn.get(&meta_key)?.is_some() {
+                return Err(StrataError::invalid_input(format!(
+                    "Index '{}' already exists in space '{}'",
+                    name, space
+                )));
+            }
+
+            // Store index metadata as a JSON document
+            let meta_json =
+                serde_json::to_vec(&def).map_err(|e| StrataError::serialization(e.to_string()))?;
+            txn.put(meta_key.clone(), Value::Bytes(meta_json))?;
+            Ok(def.clone())
+        })
+    }
+
+    /// Drop a secondary index, removing metadata and all index entries.
+    pub fn drop_index(&self, branch_id: &BranchId, space: &str, name: &str) -> StrataResult<bool> {
+        let meta_space = index::index_meta_space_name(space);
+        let meta_key = Key::new_json(
+            Arc::new(Namespace::for_branch_space(*branch_id, &meta_space)),
+            name,
+        );
+
+        self.db.transaction(*branch_id, |txn| {
+            // Check if index exists
+            if txn.get(&meta_key)?.is_none() {
+                return Ok(false);
+            }
+
+            // Delete metadata
+            txn.delete(meta_key.clone())?;
+
+            // Delete all index entries by scanning the index space
+            let scan_prefix = index::index_scan_prefix(branch_id, space, name);
+            let entries = txn.scan_prefix(&scan_prefix)?;
+            for (key, _) in entries {
+                txn.delete(key)?;
+            }
+
+            Ok(true)
+        })
+    }
+
+    /// List all secondary indexes defined on a collection space.
+    pub fn list_indexes(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+    ) -> StrataResult<Vec<index::IndexDef>> {
+        let meta_space = index::index_meta_space_name(space);
+        let meta_ns = Arc::new(Namespace::for_branch_space(*branch_id, &meta_space));
+        let scan_prefix = Key::new_json(meta_ns, "");
+
+        self.db.transaction(*branch_id, |txn| {
+            let entries = txn.scan_prefix(&scan_prefix)?;
+            let mut indexes = Vec::new();
+            for (_, value) in entries {
+                if let Value::Bytes(bytes) = &value {
+                    let def = serde_json::from_slice::<index::IndexDef>(bytes).map_err(|e| {
+                        StrataError::serialization(format!("corrupt index metadata: {}", e))
+                    })?;
+                    indexes.push(def);
+                }
+            }
+            Ok(indexes)
+        })
+    }
+
+    /// Load all index definitions for a space (internal helper).
+    fn load_indexes(
+        txn: &mut TransactionContext,
+        branch_id: &BranchId,
+        space: &str,
+    ) -> StrataResult<Vec<index::IndexDef>> {
+        let meta_space = index::index_meta_space_name(space);
+        let meta_ns = Arc::new(Namespace::for_branch_space(*branch_id, &meta_space));
+        let scan_prefix = Key::new_json(meta_ns, "");
+
+        let entries = txn.scan_prefix(&scan_prefix)?;
+        let mut indexes = Vec::new();
+        for (_, value) in entries {
+            if let Value::Bytes(bytes) = &value {
+                let def = serde_json::from_slice::<index::IndexDef>(bytes).map_err(|e| {
+                    StrataError::serialization(format!("corrupt index metadata: {}", e))
+                })?;
+                indexes.push(def);
+            }
+        }
+        Ok(indexes)
+    }
+
+    /// Update index entries for a document write.
+    ///
+    /// If `old_value` is Some, removes old index entries first (for updates).
+    /// Then writes new index entries for the new value.
+    fn update_index_entries(
+        txn: &mut TransactionContext,
+        branch_id: &BranchId,
+        space: &str,
+        doc_id: &str,
+        old_value: Option<&JsonValue>,
+        new_value: Option<&JsonValue>,
+        indexes: &[index::IndexDef],
+    ) -> StrataResult<()> {
+        for idx_def in indexes {
+            // Remove old index entry if updating/deleting
+            if let Some(old_val) = old_value {
+                if let Some(field_val) = index::extract_field_value(old_val, &idx_def.field_path) {
+                    if let Some(encoded) = index::encode_value(&field_val, idx_def.index_type) {
+                        let key = index::index_entry_key(
+                            branch_id,
+                            space,
+                            &idx_def.name,
+                            &encoded,
+                            doc_id,
+                        );
+                        txn.delete(key)?;
+                    }
+                }
+            }
+
+            // Write new index entry if creating/updating
+            if let Some(new_val) = new_value {
+                if let Some(field_val) = index::extract_field_value(new_val, &idx_def.field_path) {
+                    if let Some(encoded) = index::encode_value(&field_val, idx_def.index_type) {
+                        let key = index::index_entry_key(
+                            branch_id,
+                            space,
+                            &idx_def.name,
+                            &encoded,
+                            doc_id,
+                        );
+                        txn.put(key, Value::Bytes(vec![]))?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 

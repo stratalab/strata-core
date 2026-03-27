@@ -411,3 +411,675 @@ fn various_json_types() {
     let result_json: serde_json::Value = result.into();
     assert_eq!(result_json, doc);
 }
+
+// ============================================================================
+// Secondary Index Tests
+// ============================================================================
+
+use strata_engine::primitives::json::index::IndexType;
+
+#[test]
+fn create_index_and_list() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    let def = json
+        .create_index(
+            &test_db.branch_id,
+            "default",
+            "price_idx",
+            "$.price",
+            IndexType::Numeric,
+        )
+        .unwrap();
+    assert_eq!(def.name, "price_idx");
+    assert_eq!(def.field_path, "$.price");
+    assert_eq!(def.index_type, IndexType::Numeric);
+
+    let indexes = json.list_indexes(&test_db.branch_id, "default").unwrap();
+    assert_eq!(indexes.len(), 1);
+    assert_eq!(indexes[0].name, "price_idx");
+}
+
+#[test]
+fn create_index_duplicate_fails() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "idx1",
+        "$.price",
+        IndexType::Numeric,
+    )
+    .unwrap();
+    let result = json.create_index(
+        &test_db.branch_id,
+        "default",
+        "idx1",
+        "$.name",
+        IndexType::Text,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn drop_index_removes_metadata_and_entries() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+        "$.price",
+        IndexType::Numeric,
+    )
+    .unwrap();
+
+    // Write a document so index entries exist
+    let doc: JsonValue = serde_json::json!({"price": 29.99}).into();
+    json.create(&test_db.branch_id, "default", "doc1", doc)
+        .unwrap();
+
+    // Drop the index
+    let existed = json
+        .drop_index(&test_db.branch_id, "default", "price_idx")
+        .unwrap();
+    assert!(existed);
+
+    // Verify metadata removed
+    let indexes = json.list_indexes(&test_db.branch_id, "default").unwrap();
+    assert!(indexes.is_empty());
+
+    // Drop again returns false
+    let existed = json
+        .drop_index(&test_db.branch_id, "default", "price_idx")
+        .unwrap();
+    assert!(!existed);
+}
+
+#[test]
+fn index_entries_created_on_document_write() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    // Create index before writing documents
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+        "$.price",
+        IndexType::Numeric,
+    )
+    .unwrap();
+
+    // Write documents
+    let doc1: JsonValue = serde_json::json!({"price": 10.0, "name": "widget"}).into();
+    let doc2: JsonValue = serde_json::json!({"price": 50.0, "name": "gadget"}).into();
+    let doc3: JsonValue = serde_json::json!({"price": 30.0, "name": "thing"}).into();
+    json.create(&test_db.branch_id, "default", "doc1", doc1)
+        .unwrap();
+    json.create(&test_db.branch_id, "default", "doc2", doc2)
+        .unwrap();
+    json.create(&test_db.branch_id, "default", "doc3", doc3)
+        .unwrap();
+
+    // Verify index entries by scanning the index space
+    let scan_prefix = strata_engine::primitives::json::index::index_scan_prefix(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+    );
+    let entries: Vec<_> = test_db
+        .db
+        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .unwrap();
+
+    // Should have 3 index entries
+    assert_eq!(entries.len(), 3);
+
+    // Entries should be in numeric order (10.0 < 30.0 < 50.0)
+    let doc_ids: Vec<String> = entries
+        .iter()
+        .filter_map(|(k, _)| {
+            strata_engine::primitives::json::index::extract_doc_id_from_index_key(&k.user_key)
+        })
+        .collect();
+    assert_eq!(doc_ids, vec!["doc1", "doc3", "doc2"]); // sorted by price
+}
+
+#[test]
+fn index_entries_updated_on_document_update() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+        "$.price",
+        IndexType::Numeric,
+    )
+    .unwrap();
+
+    // Create doc with price 10.0
+    let doc: JsonValue = serde_json::json!({"price": 10.0}).into();
+    json.create(&test_db.branch_id, "default", "doc1", doc)
+        .unwrap();
+
+    // Update price to 50.0
+    let new_val: JsonValue = serde_json::json!(50.0).into();
+    json.set(
+        &test_db.branch_id,
+        "default",
+        "doc1",
+        &jpath("price"),
+        new_val,
+    )
+    .unwrap();
+
+    // Scan index — should have exactly 1 entry (old removed, new added)
+    let scan_prefix = strata_engine::primitives::json::index::index_scan_prefix(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+    );
+    let entries: Vec<_> = test_db
+        .db
+        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+
+    // The entry should point to doc1 with the new price
+    let doc_id = strata_engine::primitives::json::index::extract_doc_id_from_index_key(
+        &entries[0].0.user_key,
+    );
+    assert_eq!(doc_id, Some("doc1".to_string()));
+}
+
+#[test]
+fn index_entries_removed_on_document_destroy() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+        "$.price",
+        IndexType::Numeric,
+    )
+    .unwrap();
+
+    let doc: JsonValue = serde_json::json!({"price": 42.0}).into();
+    json.create(&test_db.branch_id, "default", "doc1", doc)
+        .unwrap();
+
+    // Verify index entry exists
+    let scan_prefix = strata_engine::primitives::json::index::index_scan_prefix(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+    );
+    let entries: Vec<_> = test_db
+        .db
+        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+
+    // Destroy the document
+    json.destroy(&test_db.branch_id, "default", "doc1").unwrap();
+
+    // Index entry should be gone
+    let entries: Vec<_> = test_db
+        .db
+        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .unwrap();
+    assert_eq!(entries.len(), 0);
+}
+
+#[test]
+fn index_missing_field_no_entry() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+        "$.price",
+        IndexType::Numeric,
+    )
+    .unwrap();
+
+    // Write a document WITHOUT a price field
+    let doc: JsonValue = serde_json::json!({"name": "no-price"}).into();
+    json.create(&test_db.branch_id, "default", "doc1", doc)
+        .unwrap();
+
+    // No index entry should be created
+    let scan_prefix = strata_engine::primitives::json::index::index_scan_prefix(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+    );
+    let entries: Vec<_> = test_db
+        .db
+        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .unwrap();
+    assert_eq!(entries.len(), 0);
+}
+
+#[test]
+fn index_type_mismatch_no_entry() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    // Numeric index on price field
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+        "$.price",
+        IndexType::Numeric,
+    )
+    .unwrap();
+
+    // Write a document with a STRING price (type mismatch for numeric index)
+    let doc: JsonValue = serde_json::json!({"price": "expensive"}).into();
+    json.create(&test_db.branch_id, "default", "doc1", doc)
+        .unwrap();
+
+    // No index entry — string can't be encoded as numeric
+    let scan_prefix = strata_engine::primitives::json::index::index_scan_prefix(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+    );
+    let entries: Vec<_> = test_db
+        .db
+        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .unwrap();
+    assert_eq!(entries.len(), 0);
+}
+
+#[test]
+fn index_tag_type_exact_match() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "status_idx",
+        "$.status",
+        IndexType::Tag,
+    )
+    .unwrap();
+
+    let doc1: JsonValue = serde_json::json!({"status": "Active", "name": "a"}).into();
+    let doc2: JsonValue = serde_json::json!({"status": "PENDING", "name": "b"}).into();
+    let doc3: JsonValue = serde_json::json!({"status": "active", "name": "c"}).into();
+    json.create(&test_db.branch_id, "default", "doc1", doc1)
+        .unwrap();
+    json.create(&test_db.branch_id, "default", "doc2", doc2)
+        .unwrap();
+    json.create(&test_db.branch_id, "default", "doc3", doc3)
+        .unwrap();
+
+    // Tags are lowercased, so "Active" and "active" produce same index value
+    let scan_prefix = strata_engine::primitives::json::index::index_scan_prefix(
+        &test_db.branch_id,
+        "default",
+        "status_idx",
+    );
+    let entries: Vec<_> = test_db
+        .db
+        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .unwrap();
+    assert_eq!(entries.len(), 3);
+
+    // Should sort: "active" (doc1), "active" (doc3), "pending" (doc2)
+    let doc_ids: Vec<String> = entries
+        .iter()
+        .filter_map(|(k, _)| {
+            strata_engine::primitives::json::index::extract_doc_id_from_index_key(&k.user_key)
+        })
+        .collect();
+    assert_eq!(doc_ids, vec!["doc1", "doc3", "doc2"]);
+}
+
+#[test]
+fn index_branch_isolation() {
+    let mut test_db = TestDb::new();
+    let json = test_db.json();
+    let branch_a = test_db.branch_id;
+
+    // Create index on branch A
+    json.create_index(
+        &branch_a,
+        "default",
+        "price_idx",
+        "$.price",
+        IndexType::Numeric,
+    )
+    .unwrap();
+
+    // Create a new branch B
+    let branch_b = test_db.new_branch();
+
+    // Index should NOT be visible on branch B
+    let indexes_b = json.list_indexes(&branch_b, "default").unwrap();
+    assert!(indexes_b.is_empty());
+
+    // Index should still be on branch A
+    let indexes_a = json.list_indexes(&branch_a, "default").unwrap();
+    assert_eq!(indexes_a.len(), 1);
+}
+
+#[test]
+fn index_multiple_indexes_on_same_space() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+        "$.price",
+        IndexType::Numeric,
+    )
+    .unwrap();
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "status_idx",
+        "$.status",
+        IndexType::Tag,
+    )
+    .unwrap();
+
+    let indexes = json.list_indexes(&test_db.branch_id, "default").unwrap();
+    assert_eq!(indexes.len(), 2);
+
+    // Write a document — both indexes should be updated
+    let doc: JsonValue = serde_json::json!({"price": 25.0, "status": "active"}).into();
+    json.create(&test_db.branch_id, "default", "doc1", doc)
+        .unwrap();
+
+    // Check price index
+    let price_prefix = strata_engine::primitives::json::index::index_scan_prefix(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+    );
+    let price_entries: Vec<_> = test_db
+        .db
+        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&price_prefix))
+        .unwrap();
+    assert_eq!(price_entries.len(), 1);
+
+    // Check status index
+    let status_prefix = strata_engine::primitives::json::index::index_scan_prefix(
+        &test_db.branch_id,
+        "default",
+        "status_idx",
+    );
+    let status_entries: Vec<_> = test_db
+        .db
+        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&status_prefix))
+        .unwrap();
+    assert_eq!(status_entries.len(), 1);
+}
+
+#[test]
+fn index_batch_set_updates_indexes() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+        "$.price",
+        IndexType::Numeric,
+    )
+    .unwrap();
+
+    let entries = vec![
+        (
+            "doc1".to_string(),
+            jpath(""),
+            serde_json::json!({"price": 10.0}).into(),
+        ),
+        (
+            "doc2".to_string(),
+            jpath(""),
+            serde_json::json!({"price": 20.0}).into(),
+        ),
+        (
+            "doc3".to_string(),
+            jpath(""),
+            serde_json::json!({"price": 30.0}).into(),
+        ),
+    ];
+    json.batch_set_or_create(&test_db.branch_id, "default", entries)
+        .unwrap();
+
+    let scan_prefix = strata_engine::primitives::json::index::index_scan_prefix(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+    );
+    let index_entries: Vec<_> = test_db
+        .db
+        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .unwrap();
+    assert_eq!(index_entries.len(), 3);
+}
+
+#[test]
+fn index_batch_destroy_removes_entries() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+        "$.price",
+        IndexType::Numeric,
+    )
+    .unwrap();
+
+    let doc1: JsonValue = serde_json::json!({"price": 10.0}).into();
+    let doc2: JsonValue = serde_json::json!({"price": 20.0}).into();
+    json.create(&test_db.branch_id, "default", "doc1", doc1)
+        .unwrap();
+    json.create(&test_db.branch_id, "default", "doc2", doc2)
+        .unwrap();
+
+    // Batch destroy both
+    json.batch_destroy(
+        &test_db.branch_id,
+        "default",
+        &["doc1".to_string(), "doc2".to_string()],
+    )
+    .unwrap();
+
+    let scan_prefix = strata_engine::primitives::json::index::index_scan_prefix(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+    );
+    let entries: Vec<_> = test_db
+        .db
+        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .unwrap();
+    assert_eq!(entries.len(), 0);
+}
+
+#[test]
+fn index_delete_at_path_updates_entries() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+        "$.price",
+        IndexType::Numeric,
+    )
+    .unwrap();
+
+    let doc: JsonValue = serde_json::json!({"price": 42.0, "name": "widget"}).into();
+    json.create(&test_db.branch_id, "default", "doc1", doc)
+        .unwrap();
+
+    // Verify index entry exists
+    let scan_prefix = strata_engine::primitives::json::index::index_scan_prefix(
+        &test_db.branch_id,
+        "default",
+        "price_idx",
+    );
+    let entries: Vec<_> = test_db
+        .db
+        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+
+    // Delete the price field from the document
+    json.delete_at_path(&test_db.branch_id, "default", "doc1", &jpath("price"))
+        .unwrap();
+
+    // Index entry for price should be gone (field no longer exists)
+    let entries: Vec<_> = test_db
+        .db
+        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .unwrap();
+    assert_eq!(entries.len(), 0);
+}
+
+#[test]
+fn no_indexes_no_overhead() {
+    // Verify that without indexes, documents still work normally
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    // No indexes created — just normal CRUD
+    let doc: JsonValue = serde_json::json!({"price": 42.0}).into();
+    json.create(&test_db.branch_id, "default", "doc1", doc)
+        .unwrap();
+
+    let val = json
+        .get(&test_db.branch_id, "default", "doc1", &JsonPath::root())
+        .unwrap();
+    assert!(val.is_some());
+
+    json.destroy(&test_db.branch_id, "default", "doc1").unwrap();
+    let val = json
+        .get(&test_db.branch_id, "default", "doc1", &JsonPath::root())
+        .unwrap();
+    assert!(val.is_none());
+}
+
+#[test]
+fn index_numeric_handles_integers() {
+    // JSON integers (42) should be indexed correctly via as_f64()
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "qty_idx",
+        "$.quantity",
+        IndexType::Numeric,
+    )
+    .unwrap();
+
+    let doc: JsonValue = serde_json::json!({"quantity": 42}).into();
+    json.create(&test_db.branch_id, "default", "doc1", doc)
+        .unwrap();
+
+    let scan_prefix = strata_engine::primitives::json::index::index_scan_prefix(
+        &test_db.branch_id,
+        "default",
+        "qty_idx",
+    );
+    let entries: Vec<_> = test_db
+        .db
+        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+}
+
+#[test]
+fn index_nested_field_path() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    json.create_index(
+        &test_db.branch_id,
+        "default",
+        "city_idx",
+        "$.address.city",
+        IndexType::Tag,
+    )
+    .unwrap();
+
+    let doc: JsonValue =
+        serde_json::json!({"name": "Alice", "address": {"city": "Portland", "zip": "97201"}})
+            .into();
+    json.create(&test_db.branch_id, "default", "doc1", doc)
+        .unwrap();
+
+    let scan_prefix = strata_engine::primitives::json::index::index_scan_prefix(
+        &test_db.branch_id,
+        "default",
+        "city_idx",
+    );
+    let entries: Vec<_> = test_db
+        .db
+        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+
+    let doc_id = strata_engine::primitives::json::index::extract_doc_id_from_index_key(
+        &entries[0].0.user_key,
+    );
+    assert_eq!(doc_id, Some("doc1".to_string()));
+}
+
+#[test]
+fn create_index_empty_name_rejected() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    let result = json.create_index(
+        &test_db.branch_id,
+        "default",
+        "",
+        "$.price",
+        IndexType::Numeric,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn create_index_invalid_name_rejected() {
+    let test_db = TestDb::new();
+    let json = test_db.json();
+
+    let result = json.create_index(
+        &test_db.branch_id,
+        "default",
+        "bad/name",
+        "$.price",
+        IndexType::Numeric,
+    );
+    assert!(result.is_err());
+}
