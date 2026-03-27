@@ -116,8 +116,8 @@ impl strata_engine::search::Searchable for GraphStore {
         &self,
         req: &strata_engine::SearchRequest,
     ) -> StrataResult<strata_engine::SearchResponse> {
-        use strata_engine::search::{EntityRef, InvertedIndex, SearchHit, SearchStats};
         use std::time::Instant;
+        use strata_engine::search::{EntityRef, InvertedIndex, SearchHit, SearchStats};
 
         let start = Instant::now();
         let index = self.db.extension::<InvertedIndex>()?;
@@ -222,12 +222,7 @@ impl GraphStore {
     /// Remove a graph node from the inverted index.
     ///
     /// Called after successful remove_node/delete_graph commits.
-    pub(crate) fn deindex_node_for_search(
-        &self,
-        branch_id: BranchId,
-        graph: &str,
-        node_id: &str,
-    ) {
+    pub(crate) fn deindex_node_for_search(&self, branch_id: BranchId, graph: &str, node_id: &str) {
         let Ok(index) = self.db.extension::<strata_engine::search::InvertedIndex>() else {
             return;
         };

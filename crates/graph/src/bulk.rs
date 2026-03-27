@@ -1671,9 +1671,7 @@ mod tests {
             })
             .collect();
 
-        let (ni, ei) = gs
-            .bulk_insert(b, "g", &nodes, &edges, Some(5_000))
-            .unwrap();
+        let (ni, ei) = gs.bulk_insert(b, "g", &nodes, &edges, Some(5_000)).unwrap();
         assert_eq!(ni, 10_000);
         assert_eq!(ei, 9_999);
 
@@ -1742,9 +1740,7 @@ mod tests {
         assert_eq!(gs.count_edges_by_type(b, "g", "CONNECTS").unwrap(), 0);
 
         // Verify leaves have no incoming edges
-        let inc = gs
-            .incoming_neighbors(b, "g", "leaf0500", None)
-            .unwrap();
+        let inc = gs.incoming_neighbors(b, "g", "leaf0500", None).unwrap();
         assert!(inc.is_empty());
     }
 }
