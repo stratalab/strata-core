@@ -145,6 +145,45 @@ pub enum Command {
         entries: Vec<BatchKvEntry>,
     },
 
+    /// Batch get multiple values by key in a single transaction.
+    /// Returns: `Output::BatchGetResults`
+    KvBatchGet {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Keys to look up.
+        keys: Vec<String>,
+    },
+
+    /// Batch delete multiple keys in a single transaction.
+    /// Returns: `Output::BatchResults`
+    KvBatchDelete {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Keys to delete.
+        keys: Vec<String>,
+    },
+
+    /// Batch check existence of multiple keys in a single transaction.
+    /// Returns: `Output::BoolList`
+    KvBatchExists {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Keys to check.
+        keys: Vec<String>,
+    },
+
     /// Get full version history for a key.
     /// Returns: `Output::VersionHistory`
     KvGetv {
@@ -511,6 +550,36 @@ pub enum Command {
         collection: String,
         /// Vector entries to upsert.
         entries: Vec<BatchVectorEntry>,
+    },
+
+    /// Batch get multiple vectors by key.
+    /// Returns: `Output::BatchVectorGetResults`
+    VectorBatchGet {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Collection name.
+        collection: String,
+        /// Vector keys to look up.
+        keys: Vec<String>,
+    },
+
+    /// Batch delete multiple vectors by key.
+    /// Returns: `Output::BatchResults`
+    VectorBatchDelete {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Collection name.
+        collection: String,
+        /// Vector keys to delete.
+        keys: Vec<String>,
     },
 
     // ==================== Branch (5 MVP) ====================
@@ -1695,6 +1764,9 @@ impl Command {
         match self {
             Command::KvPut { .. } => "KvPut",
             Command::KvBatchPut { .. } => "KvBatchPut",
+            Command::KvBatchGet { .. } => "KvBatchGet",
+            Command::KvBatchDelete { .. } => "KvBatchDelete",
+            Command::KvBatchExists { .. } => "KvBatchExists",
             Command::KvGet { .. } => "KvGet",
             Command::KvDelete { .. } => "KvDelete",
             Command::KvList { .. } => "KvList",
@@ -1721,6 +1793,8 @@ impl Command {
             Command::VectorListCollections { .. } => "VectorListCollections",
             Command::VectorCollectionStats { .. } => "VectorCollectionStats",
             Command::VectorBatchUpsert { .. } => "VectorBatchUpsert",
+            Command::VectorBatchGet { .. } => "VectorBatchGet",
+            Command::VectorBatchDelete { .. } => "VectorBatchDelete",
             Command::BranchCreate { .. } => "BranchCreate",
             Command::BranchGet { .. } => "BranchGet",
             Command::BranchList { .. } => "BranchList",
@@ -1847,6 +1921,9 @@ impl Command {
             // KV
             Command::KvPut { branch, space, .. }
             | Command::KvBatchPut { branch, space, .. }
+            | Command::KvBatchGet { branch, space, .. }
+            | Command::KvBatchDelete { branch, space, .. }
+            | Command::KvBatchExists { branch, space, .. }
             | Command::KvGet { branch, space, .. }
             | Command::KvDelete { branch, space, .. }
             | Command::KvList { branch, space, .. }
@@ -1876,6 +1953,8 @@ impl Command {
             | Command::VectorListCollections { branch, space, .. }
             | Command::VectorCollectionStats { branch, space, .. }
             | Command::VectorBatchUpsert { branch, space, .. }
+            | Command::VectorBatchGet { branch, space, .. }
+            | Command::VectorBatchDelete { branch, space, .. }
             // Intelligence
             | Command::Search { branch, space, .. }
             // Data introspection
@@ -2013,6 +2092,9 @@ impl Command {
             // Data commands with branch + space
             Command::KvPut { branch, .. }
             | Command::KvBatchPut { branch, .. }
+            | Command::KvBatchGet { branch, .. }
+            | Command::KvBatchDelete { branch, .. }
+            | Command::KvBatchExists { branch, .. }
             | Command::KvGet { branch, .. }
             | Command::KvDelete { branch, .. }
             | Command::KvList { branch, .. }
@@ -2039,6 +2121,8 @@ impl Command {
             | Command::VectorListCollections { branch, .. }
             | Command::VectorCollectionStats { branch, .. }
             | Command::VectorBatchUpsert { branch, .. }
+            | Command::VectorBatchGet { branch, .. }
+            | Command::VectorBatchDelete { branch, .. }
             | Command::Search { branch, .. }
             | Command::KvCount { branch, .. }
             | Command::JsonCount { branch, .. }
