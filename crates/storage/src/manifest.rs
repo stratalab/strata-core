@@ -171,6 +171,15 @@ pub fn read_manifest(dir: &Path) -> io::Result<Option<SegmentManifest>> {
 
     // Parse header
     let version = u16::from_le_bytes(data[8..10].try_into().unwrap());
+    if version > MANIFEST_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "unsupported segment manifest version {} (this build supports up to {})",
+                version, MANIFEST_VERSION
+            ),
+        ));
+    }
     // skip 6 reserved bytes
     let entry_count = u32::from_le_bytes(data[16..20].try_into().unwrap()) as usize;
 
@@ -534,5 +543,34 @@ mod tests {
         assert_eq!(result.entries, entries);
         assert_eq!(result.inherited_layers.len(), 3);
         assert_eq!(result.inherited_layers, inherited);
+    }
+
+    #[test]
+    fn manifest_rejects_future_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries = vec![ManifestEntry {
+            filename: "1.sst".into(),
+            level: 0,
+        }];
+        write_manifest(dir.path(), &entries, &[]).unwrap();
+
+        // Patch the version field to a future value (bytes 8-9)
+        let path = dir.path().join(MANIFEST_FILENAME);
+        let mut data = std::fs::read(&path).unwrap();
+        data[8..10].copy_from_slice(&99u16.to_le_bytes());
+        // Recompute CRC so we hit the version check, not the CRC check
+        let crc_offset = data.len() - 4;
+        let crc = crc32fast::hash(&data[..crc_offset]);
+        data[crc_offset..].copy_from_slice(&crc.to_le_bytes());
+        std::fs::write(&path, &data).unwrap();
+
+        let result = read_manifest(dir.path());
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("unsupported segment manifest version"),
+            "Expected version error, got: {}",
+            err_msg,
+        );
     }
 }
