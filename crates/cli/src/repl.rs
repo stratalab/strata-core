@@ -25,7 +25,10 @@ use crate::parse::{
 use crate::state::SessionState;
 
 /// Run the interactive REPL.
-pub fn run_repl(state: &mut SessionState, mode: OutputMode, db_path: &str) {
+///
+/// When `first_run` is true, a short guided tour is shown before the main
+/// loop to help new users discover core commands.
+pub fn run_repl(state: &mut SessionState, mode: OutputMode, db_path: &str, first_run: bool) {
     let config = Config::builder()
         .history_ignore_space(true)
         .completion_type(CompletionType::List)
@@ -42,6 +45,10 @@ pub fn run_repl(state: &mut SessionState, mode: OutputMode, db_path: &str) {
     }
 
     print_welcome(db_path);
+
+    if first_run {
+        run_guided_tour(state, mode, &mut rl);
+    }
 
     loop {
         let prompt = state.prompt();
@@ -384,6 +391,99 @@ fn execute_action(matches: &clap::ArgMatches, state: &mut SessionState, mode: Ou
             false
         }
     }
+}
+
+// =========================================================================
+// Guided tour (first-run only)
+// =========================================================================
+
+/// Tour steps shown on first run. Each step has a hint, a suggested command,
+/// and a message shown on successful execution.
+struct TourStep {
+    hint: &'static str,
+    command: &'static str,
+    success_msg: &'static str,
+}
+
+const TOUR_STEPS: &[TourStep] = &[
+    TourStep {
+        hint:
+            "Let's try retrieving a value. Type the command below (or press Enter to auto-run it):",
+        command: "kv get greeting",
+        success_msg: "You just read a key from the KV store.",
+    },
+    TourStep {
+        hint: "Strata also stores JSON documents. Try querying one:",
+        command: "json get user:1 $.name",
+        success_msg: "JSON path queries let you reach into nested documents.",
+    },
+    TourStep {
+        hint: "Events are append-only logs. Let's check what happened:",
+        command: "event list",
+        success_msg: "Event logs are great for audit trails and time-series data.",
+    },
+];
+
+fn run_guided_tour(
+    state: &mut SessionState,
+    mode: OutputMode,
+    rl: &mut Editor<StrataHelper, rustyline::history::DefaultHistory>,
+) {
+    eprintln!("  \u{1f9ed} Quick tour \u{2014} let's explore your new database!\n");
+
+    for (i, step) in TOUR_STEPS.iter().enumerate() {
+        eprintln!("  Step {}/{}: {}", i + 1, TOUR_STEPS.len(), step.hint);
+        eprintln!("    > {}", step.command);
+        eprintln!();
+
+        // Read user input — Enter auto-runs the suggested command
+        let prompt = format!("  tour {}> ", i + 1);
+        let line = match rl.readline(&prompt) {
+            Ok(l) => {
+                let trimmed = l.trim().to_string();
+                if trimmed.is_empty() {
+                    step.command.to_string()
+                } else {
+                    let _ = rl.add_history_entry(&trimmed);
+                    trimmed
+                }
+            }
+            Err(ReadlineError::Interrupted | ReadlineError::Eof) => {
+                eprintln!("\n  Tour skipped. Type 'help' to see all commands.\n");
+                return;
+            }
+            Err(_) => {
+                eprintln!("\n  Tour skipped. Type 'help' to see all commands.\n");
+                return;
+            }
+        };
+
+        // Parse and execute whatever the user typed
+        let tokens = match shlex::split(&line) {
+            Some(t) if !t.is_empty() => t,
+            _ => {
+                eprintln!("  (invalid input, skipping step)\n");
+                continue;
+            }
+        };
+
+        let cmd = build_repl_cmd();
+        let ok = match cmd.try_get_matches_from(tokens) {
+            Ok(matches) => execute_action(&matches, state, mode),
+            Err(e) => {
+                eprintln!("{}", e);
+                false
+            }
+        };
+
+        if ok {
+            eprintln!("  \u{2713} {}\n", step.success_msg);
+        } else {
+            eprintln!("  (no worries, let's keep going)\n");
+        }
+    }
+
+    eprintln!("  \u{1f389} Tour complete! Type 'help' to see all commands, or start exploring.\n");
 }
 
 fn print_welcome(db_path: &str) {
