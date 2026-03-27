@@ -1646,4 +1646,105 @@ mod tests {
             }
         }
     }
+
+    // =========================================================================
+    // Scale tests (Issue #1983)
+    // =========================================================================
+
+    #[test]
+    fn scale_10k_nodes_bulk_insert() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+        gs.create_graph(b, "g", None).unwrap();
+
+        let nodes: Vec<(String, NodeData)> = (0..10_000)
+            .map(|i| (format!("n{:05}", i), NodeData::default()))
+            .collect();
+        let edges: Vec<(String, String, String, EdgeData)> = (0..9_999)
+            .map(|i| {
+                (
+                    format!("n{:05}", i),
+                    format!("n{:05}", i + 1),
+                    "NEXT".to_string(),
+                    EdgeData::default(),
+                )
+            })
+            .collect();
+
+        let (ni, ei) = gs
+            .bulk_insert(b, "g", &nodes, &edges, Some(5_000))
+            .unwrap();
+        assert_eq!(ni, 10_000);
+        assert_eq!(ei, 9_999);
+
+        // Verify counts
+        let stats = gs.snapshot_stats(b, "g").unwrap();
+        assert_eq!(stats.node_count, 10_000);
+        assert_eq!(stats.edge_count, 9_999);
+
+        // Spot-check first, middle, and last
+        assert!(gs.get_node(b, "g", "n00000").unwrap().is_some());
+        assert!(gs.get_node(b, "g", "n05000").unwrap().is_some());
+        assert!(gs.get_node(b, "g", "n09999").unwrap().is_some());
+
+        // Verify edge at chunk boundary
+        assert!(gs
+            .get_edge(b, "g", "n04999", "n05000", "NEXT")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn scale_high_degree_node_1000_edges() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+        gs.create_graph(b, "g", None).unwrap();
+
+        // Create hub node + 1000 leaf nodes
+        let mut nodes: Vec<(String, NodeData)> = vec![("hub".into(), NodeData::default())];
+        for i in 0..1_000 {
+            nodes.push((format!("leaf{:04}", i), NodeData::default()));
+        }
+        gs.bulk_insert(b, "g", &nodes, &[], None).unwrap();
+
+        // Add 1000 edges from hub to each leaf via batch
+        let edges: Vec<(String, String, String, EdgeData)> = (0..1_000)
+            .map(|i| {
+                (
+                    "hub".to_string(),
+                    format!("leaf{:04}", i),
+                    "CONNECTS".to_string(),
+                    EdgeData::default(),
+                )
+            })
+            .collect();
+        let inserted = gs.batch_add_edges(b, "g", &edges, Some(200)).unwrap();
+        assert_eq!(inserted, 1_000);
+
+        // Verify all outgoing edges
+        let out = gs.outgoing_neighbors(b, "g", "hub", None).unwrap();
+        assert_eq!(out.len(), 1_000);
+
+        // Verify reverse: each leaf has exactly 1 incoming
+        for i in [0, 499, 999] {
+            let inc = gs
+                .incoming_neighbors(b, "g", &format!("leaf{:04}", i), None)
+                .unwrap();
+            assert_eq!(inc.len(), 1);
+            assert_eq!(inc[0].node_id, "hub");
+        }
+
+        // Verify edge type counter
+        assert_eq!(gs.count_edges_by_type(b, "g", "CONNECTS").unwrap(), 1_000);
+
+        // Remove hub — should clean up all 1000 edges
+        gs.remove_node(b, "g", "hub").unwrap();
+        assert_eq!(gs.count_edges_by_type(b, "g", "CONNECTS").unwrap(), 0);
+
+        // Verify leaves have no incoming edges
+        let inc = gs
+            .incoming_neighbors(b, "g", "leaf0500", None)
+            .unwrap();
+        assert!(inc.is_empty());
+    }
 }
