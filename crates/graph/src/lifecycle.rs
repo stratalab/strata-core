@@ -154,6 +154,7 @@ impl GraphStore {
 
         // Step 1: Scan nodes, extract entity_refs, delete ref index entries (batched)
         loop {
+            let mut deleted_node_ids: Vec<String> = Vec::new();
             let done = self.db.transaction(branch_id, |txn| {
                 let results = txn.scan_prefix(&node_prefix_key)?;
                 if results.is_empty() {
@@ -165,10 +166,11 @@ impl GraphStore {
 
                 for (key, val) in &batch {
                     if let Some(user_key) = key.user_key_string() {
-                        if let Value::String(json) = val {
-                            if let Ok(data) = serde_json::from_str::<NodeData>(json) {
-                                if let Some(uri) = data.entity_ref {
-                                    if let Some(node_id) = keys::parse_node_key(graph, &user_key) {
+                        if let Some(node_id) = keys::parse_node_key(graph, &user_key) {
+                            deleted_node_ids.push(node_id.clone());
+                            if let Value::String(json) = val {
+                                if let Ok(data) = serde_json::from_str::<NodeData>(json) {
+                                    if let Some(uri) = data.entity_ref {
                                         let rk = keys::ref_index_key(&uri, graph, &node_id);
                                         txn.delete(keys::storage_key(branch_id, &rk))?;
                                     }
@@ -181,6 +183,11 @@ impl GraphStore {
 
                 Ok(is_last)
             })?;
+
+            // Post-commit: remove deleted nodes from search index
+            for node_id in &deleted_node_ids {
+                self.deindex_node_for_search(branch_id, graph, node_id);
+            }
 
             if done {
                 break;

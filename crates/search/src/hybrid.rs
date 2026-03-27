@@ -27,6 +27,7 @@ use strata_engine::search::{
 };
 use strata_engine::Database;
 use strata_engine::{BranchIndex, EventLog, JsonStore, KVStore};
+use strata_graph::GraphStore;
 use strata_vector::VectorStore;
 
 /// Result type for BM25 search across primitives: (results, total_candidates, any_truncated)
@@ -89,6 +90,7 @@ pub struct HybridSearch {
     event: EventLog,
     branch_index: BranchIndex,
     vector: VectorStore,
+    graph: GraphStore,
 }
 
 impl HybridSearch {
@@ -103,6 +105,7 @@ impl HybridSearch {
             event: EventLog::new(db.clone()),
             branch_index: BranchIndex::new(db.clone()),
             vector: VectorStore::new(db.clone()),
+            graph: GraphStore::new(db.clone()),
             db,
             embedder: None,
             fuser: Arc::new(RRFFuser::default()),
@@ -117,6 +120,7 @@ impl HybridSearch {
             event: EventLog::new(db.clone()),
             branch_index: BranchIndex::new(db.clone()),
             vector: VectorStore::new(db.clone()),
+            graph: GraphStore::new(db.clone()),
             db,
             embedder: Some(embedder),
             fuser: Arc::new(RRFFuser::default()),
@@ -386,8 +390,7 @@ impl HybridSearch {
             // - For vector/hybrid search with embeddings, the orchestrator
             //   should call vector.search_response() directly with the embedding
             PrimitiveType::Vector => Searchable::search(&self.vector, req),
-            // Graph primitive search not yet implemented — return empty results
-            PrimitiveType::Graph => Ok(SearchResponse::empty()),
+            PrimitiveType::Graph => Searchable::search(&self.graph, req),
         }
     }
 
@@ -883,6 +886,142 @@ mod tests {
         assert!(
             response.stats.index_used,
             "BUG #1770: index_used flag lost during hybrid search fusion"
+        );
+    }
+
+    /// Graph nodes with properties should be discoverable via text search.
+    #[test]
+    fn test_graph_nodes_searchable() {
+        let db = test_db();
+        let gs = GraphStore::new(db.clone());
+        let branch_id = BranchId::new();
+
+        gs.create_graph(branch_id, "social", None).unwrap();
+        gs.add_node(
+            branch_id,
+            "social",
+            "alice",
+            strata_graph::types::NodeData {
+                entity_ref: None,
+                properties: Some(serde_json::json!({"name": "Alice", "department": "cardiology"})),
+                object_type: Some("Person".to_string()),
+            },
+        )
+        .unwrap();
+        gs.add_node(
+            branch_id,
+            "social",
+            "bob",
+            strata_graph::types::NodeData {
+                entity_ref: None,
+                properties: Some(serde_json::json!({"name": "Bob", "department": "neurology"})),
+                object_type: Some("Person".to_string()),
+            },
+        )
+        .unwrap();
+
+        let hybrid = HybridSearch::new(db);
+        let req = SearchRequest::new(branch_id, "cardiology");
+        let response = hybrid.search(&req).unwrap();
+
+        // Should find Alice's node (cardiology in properties)
+        assert!(
+            !response.hits.is_empty(),
+            "Graph node with 'cardiology' property should be discoverable"
+        );
+
+        let graph_hits: Vec<_> = response
+            .hits
+            .iter()
+            .filter(|h| h.doc_ref.is_graph())
+            .collect();
+        assert!(
+            !graph_hits.is_empty(),
+            "Should have at least one graph-type hit"
+        );
+    }
+
+    /// Graph search should not return results for non-graph data.
+    #[test]
+    fn test_graph_search_filters_non_graph() {
+        use strata_engine::Searchable;
+
+        let db = test_db();
+        let kv = KVStore::new(db.clone());
+        let gs = GraphStore::new(db.clone());
+        let branch_id = BranchId::new();
+
+        // Add KV data
+        kv.put(
+            &branch_id,
+            "default",
+            "doc1",
+            Value::String("important medical research".into()),
+        )
+        .unwrap();
+
+        // Add graph data
+        gs.create_graph(branch_id, "kg", None).unwrap();
+        gs.add_node(
+            branch_id,
+            "kg",
+            "study1",
+            strata_graph::types::NodeData {
+                entity_ref: None,
+                properties: Some(serde_json::json!({"title": "medical trial results"})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Search via GraphStore.search() directly — should only return graph results
+        let req = SearchRequest::new(branch_id, "medical");
+        let response = Searchable::search(&gs, &req).unwrap();
+
+        for hit in &response.hits {
+            assert!(
+                hit.doc_ref.is_graph(),
+                "GraphStore.search() should only return graph EntityRefs, got: {:?}",
+                hit.doc_ref
+            );
+        }
+    }
+
+    /// Removed nodes should disappear from search results.
+    #[test]
+    fn test_graph_remove_node_deindexes() {
+        use strata_engine::Searchable;
+
+        let db = test_db();
+        let gs = GraphStore::new(db.clone());
+        let branch_id = BranchId::new();
+
+        gs.create_graph(branch_id, "g", None).unwrap();
+        gs.add_node(
+            branch_id,
+            "g",
+            "ephemeral",
+            strata_graph::types::NodeData {
+                properties: Some(serde_json::json!({"topic": "quantum_entanglement_research"})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Verify it's searchable
+        let req = SearchRequest::new(branch_id, "quantum_entanglement_research");
+        let before = Searchable::search(&gs, &req).unwrap();
+        assert!(
+            !before.hits.is_empty(),
+            "Node should be searchable after add"
+        );
+
+        // Remove and verify it's gone
+        gs.remove_node(branch_id, "g", "ephemeral").unwrap();
+        let after = Searchable::search(&gs, &req).unwrap();
+        assert!(
+            after.hits.is_empty(),
+            "Node should not be searchable after removal"
         );
     }
 }
