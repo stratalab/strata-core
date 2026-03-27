@@ -366,6 +366,67 @@ pub enum Command {
         space: Option<String>,
     },
 
+    /// Query events by sequence range with pagination.
+    /// Returns: `Output::EventRangeResult`
+    EventRange {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Start sequence (inclusive).
+        start_seq: u64,
+        /// End sequence (exclusive). If None, reads to end of log.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_seq: Option<u64>,
+        /// Maximum number of events to return.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u64>,
+        /// Scan direction (forward or reverse).
+        #[serde(default)]
+        direction: ScanDirection,
+        /// Optional event type filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_type: Option<String>,
+    },
+
+    /// Query events by timestamp range with pagination.
+    /// Returns: `Output::EventRangeResult`
+    EventRangeByTime {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Start timestamp (inclusive, microseconds since epoch).
+        start_ts: u64,
+        /// End timestamp (inclusive, microseconds since epoch). If None, reads to latest.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_ts: Option<u64>,
+        /// Maximum number of events to return.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u64>,
+        /// Scan direction (forward or reverse).
+        #[serde(default)]
+        direction: ScanDirection,
+        /// Optional event type filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_type: Option<String>,
+    },
+
+    /// List all known event types in the stream.
+    /// Returns: `Output::Keys`
+    EventListTypes {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+    },
+
     // ==================== Vector (7 MVP) ====================
     // MVP: upsert, get, delete, search, create_collection, delete_collection, list_collections
     /// Insert or update a vector.
@@ -1712,6 +1773,9 @@ impl Command {
             Command::EventGet { .. } => "EventGet",
             Command::EventGetByType { .. } => "EventGetByType",
             Command::EventLen { .. } => "EventLen",
+            Command::EventRange { .. } => "EventRange",
+            Command::EventRangeByTime { .. } => "EventRangeByTime",
+            Command::EventListTypes { .. } => "EventListTypes",
             Command::VectorUpsert { .. } => "VectorUpsert",
             Command::VectorGet { .. } => "VectorGet",
             Command::VectorDelete { .. } => "VectorDelete",
@@ -1866,6 +1930,9 @@ impl Command {
             | Command::EventGet { branch, space, .. }
             | Command::EventGetByType { branch, space, .. }
             | Command::EventLen { branch, space, .. }
+            | Command::EventRange { branch, space, .. }
+            | Command::EventRangeByTime { branch, space, .. }
+            | Command::EventListTypes { branch, space, .. }
             // Vector (7 MVP)
             | Command::VectorUpsert { branch, space, .. }
             | Command::VectorGet { branch, space, .. }
@@ -2030,6 +2097,9 @@ impl Command {
             | Command::EventGet { branch, .. }
             | Command::EventGetByType { branch, .. }
             | Command::EventLen { branch, .. }
+            | Command::EventRange { branch, .. }
+            | Command::EventRangeByTime { branch, .. }
+            | Command::EventListTypes { branch, .. }
             | Command::VectorUpsert { branch, .. }
             | Command::VectorGet { branch, .. }
             | Command::VectorDelete { branch, .. }
