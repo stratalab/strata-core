@@ -181,6 +181,7 @@ fn build_config(profile: Profile, hw: &HardwareInfo) -> strata_executor::StrataC
                 compaction_rate_limit: 5 * 1024 * 1024,
                 ..StorageConfig::default()
             };
+            cfg.default_vector_dtype = "int8".to_string();
         }
         Profile::Desktop => {
             cfg.storage = StorageConfig {

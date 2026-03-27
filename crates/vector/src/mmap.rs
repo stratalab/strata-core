@@ -32,6 +32,7 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::error::VectorError;
+use crate::quantize::QuantizationParams;
 use crate::types::VectorId;
 
 /// Magic bytes identifying a Strata vector mmap file
@@ -336,6 +337,14 @@ impl MmapVectorData {
     #[allow(dead_code)]
     pub(crate) fn dimension(&self) -> usize {
         self.dimension
+    }
+
+    /// Get quantization parameters (if stored in the mmap file).
+    ///
+    /// Currently always returns None — quantized mmap format will be
+    /// implemented in Phase 6.
+    pub(crate) fn quant_params(&self) -> Option<QuantizationParams> {
+        None
     }
 }
 

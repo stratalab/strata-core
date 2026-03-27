@@ -147,7 +147,7 @@ impl VectorStore {
                 name: collection_id.name.clone(),
                 dimension: config.dimension,
                 metric: config.metric.to_byte(),
-                storage_dtype: 0, // F32
+                storage_dtype: config.storage_dtype.to_byte(),
                 next_id,
                 free_slots,
                 count: backend.len() as u32,
@@ -190,11 +190,11 @@ impl VectorStore {
                     .write_all(key_bytes)
                     .map_err(|e| VectorError::Io(e.to_string()))?;
 
-                // Embedding (raw f32 LE)
+                // Embedding (raw f32 LE — dequantized if Int8)
                 let embedding = backend
-                    .get(vector_id)
+                    .get_f32_owned(vector_id)
                     .ok_or_else(|| VectorError::VectorNotFound { key: key.clone() })?;
-                for &value in embedding {
+                for &value in &embedding {
                     writer
                         .write_f32::<LittleEndian>(value)
                         .map_err(|e| VectorError::Io(e.to_string()))?;

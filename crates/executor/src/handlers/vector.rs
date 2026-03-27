@@ -283,9 +283,11 @@ pub fn vector_create_collection(
     let branch_id = to_core_branch_id(&branch)?;
     convert_result(validate_not_internal_collection(&collection))?;
 
-    let config = convert_result(strata_core::primitives::VectorConfig::new(
+    let storage_dtype = p.db.config().vector_storage_dtype();
+    let config = convert_result(strata_core::primitives::VectorConfig::new_with_dtype(
         dimension as usize,
         to_engine_metric(metric),
+        storage_dtype,
     ))?;
     let versioned = convert_vector_result(
         p.vector
