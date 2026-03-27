@@ -213,6 +213,13 @@ impl WalSegment {
             .read(true)
             .open(&path)?;
 
+        // Restrict to owner-only (defense in depth for data files)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+
         // Write v2 header (36 bytes)
         let header = SegmentHeader::new(segment_number, database_uuid);
         file.write_all(&header.to_bytes())?;

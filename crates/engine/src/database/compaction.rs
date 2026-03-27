@@ -67,6 +67,12 @@ impl Database {
         // Create snapshots directory
         let snapshots_dir = self.data_dir.join("snapshots");
         std::fs::create_dir_all(&snapshots_dir).map_err(StrataError::from)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ =
+                std::fs::set_permissions(&snapshots_dir, std::fs::Permissions::from_mode(0o700));
+        }
 
         // Load or create MANIFEST
         let mut manifest = self.load_or_create_manifest()?;
