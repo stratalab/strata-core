@@ -272,6 +272,11 @@ pub struct StrataConfig {
     /// Default: false (refuse to open — safer).
     #[serde(default)]
     pub allow_lossy_recovery: bool,
+    /// Default storage data type for new vector collections.
+    /// "f32" (default) or "int8" (scalar quantization, 4x memory savings).
+    /// Individual collections can override via VectorConfig.
+    #[serde(default = "default_vector_dtype")]
+    pub default_vector_dtype: String,
 }
 
 fn default_durability_str() -> String {
@@ -288,6 +293,10 @@ fn default_embed_model() -> String {
 
 fn default_provider() -> String {
     "local".to_string()
+}
+
+fn default_vector_dtype() -> String {
+    "f32".to_string()
 }
 
 impl Default for StrataConfig {
@@ -307,6 +316,7 @@ impl Default for StrataConfig {
             google_api_key: None,
             storage: StorageConfig::default(),
             allow_lossy_recovery: false,
+            default_vector_dtype: default_vector_dtype(),
         }
     }
 }
@@ -333,6 +343,15 @@ fn restrict_config_permissions(_path: &std::path::Path) -> StrataResult<()> {
 }
 
 impl StrataConfig {
+    /// Parse the default_vector_dtype string into a StorageDtype.
+    /// Returns F32 for unrecognized values.
+    pub fn vector_storage_dtype(&self) -> strata_core::primitives::StorageDtype {
+        match self.default_vector_dtype.to_lowercase().as_str() {
+            "int8" | "sq8" => strata_core::primitives::StorageDtype::Int8,
+            _ => strata_core::primitives::StorageDtype::F32,
+        }
+    }
+
     /// Build a BM25 scorer using configured parameters (or defaults).
     pub fn bm25_scorer(&self) -> crate::search::BM25LiteScorer {
         let mut scorer = crate::search::BM25LiteScorer::default();
@@ -406,6 +425,11 @@ auto_embed = false
 # anthropic_api_key = "sk-ant-..."
 # openai_api_key = "sk-..."
 # google_api_key = "AIza..."
+
+# Default storage type for new vector collections: "f32" (default) or "int8".
+# "int8" uses scalar quantization (SQ8) for 4x memory savings (~1-2% recall loss).
+# Embedded profile auto-sets "int8". Individual collections can override.
+# default_vector_dtype = "f32"
 
 # Storage resource limits.
 # [storage]
