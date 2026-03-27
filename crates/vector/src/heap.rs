@@ -635,7 +635,7 @@ impl VectorHeap {
         if self.config.storage_dtype != StorageDtype::Int8 {
             return;
         }
-        if self.quant_params.as_ref().map_or(true, |p| p.calibrated) {
+        if self.quant_params.as_ref().is_none_or(|p| p.calibrated) {
             return; // Already calibrated or no params
         }
         self.finalize_calibration_inner();
@@ -683,7 +683,7 @@ impl VectorHeap {
     /// Whether calibration is in progress (Int8 only).
     pub fn is_calibrating(&self) -> bool {
         self.calibration_samples.is_some()
-            && self.quant_params.as_ref().map_or(false, |p| !p.calibrated)
+            && self.quant_params.as_ref().is_some_and(|p| !p.calibrated)
     }
 
     /// Get quantization parameters (if Int8).
@@ -973,7 +973,7 @@ impl VectorHeap {
                     VectorData::InMemoryQuantized(vec) => {
                         // Quantized: dimension bytes (not dimension*4)
                         if offset < vec.len() {
-                            let ptr = vec[offset..].as_ptr() as *const u8;
+                            let ptr = vec[offset..].as_ptr();
                             crate::distance::prefetch_read(ptr);
                             let embedding_bytes = self.config.dimension; // u8 = 1 byte
                             if embedding_bytes > 64 {
@@ -1214,14 +1214,6 @@ impl VectorHeap {
             VectorData::InMemoryQuantized(_) => {
                 panic!("raw_data() not available on quantized heap")
             }
-        }
-    }
-
-    /// Get raw quantized u8 data (for mmap serialization).
-    pub fn raw_quantized_data(&self) -> Option<&[u8]> {
-        match &self.data {
-            VectorData::InMemoryQuantized(vec) => Some(vec),
-            _ => None,
         }
     }
 

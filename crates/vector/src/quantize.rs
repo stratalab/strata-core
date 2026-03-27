@@ -159,8 +159,8 @@ impl QuantizationParams {
     /// Compute the L2 norm of a quantized vector (for cosine similarity caching).
     pub fn quantized_l2_norm(&self, quantized: &[u8]) -> f32 {
         let mut sum = 0.0f32;
-        for i in 0..quantized.len() {
-            let val = quantized[i] as f32 * self.scales[i] + self.mins[i];
+        for (i, &q) in quantized.iter().enumerate() {
+            let val = q as f32 * self.scales[i] + self.mins[i];
             sum += val * val;
         }
         sum.sqrt()
