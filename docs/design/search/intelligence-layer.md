@@ -270,37 +270,73 @@ Same fixed structure. `diff` field populated when temporal:
 ### What the user sees
 
 ```python
-eval_set = [
+# Store recipes and eval data however you want — it's a database
+db.json.set("eval/medical", [
     {"query": "metformin side effects", "relevant": ["doc:123", "doc:456"]},
     {"query": "drug interactions warfarin", "relevant": ["doc:789"]},
-    # ... 50-100 pairs
-]
+])
 
-result = db.optimize_search(eval_set, budget=1000)
+# Compare recipes. Sync. Returns the winner in seconds.
+winner = db.experiment(
+    recipes={
+        "baseline": {"retrieve": {"bm25": {}}},
+        "tuned":    {"retrieve": {"bm25": {"k1": 1.2, "b": 0.65}}, "fusion": {"k": 45}},
+        "hybrid":   {"retrieve": {"bm25": {}, "vector": {}}},
+    },
+    eval_set=db.json.get("eval/medical")
+)
 
-# result.baseline_ndcg → 0.42
-# result.optimized_ndcg → 0.68
-# result.experiments_run → 847
-# result.winning_recipe → {...}  (automatically saved as default)
+# Set it as production
+db.set_recipe(winner)
 ```
 
-### How it works
+Three lines that matter. Store eval data. Experiment. Set the winner.
+
+### How it works internally
 
 ```
-1. User provides eval_set (query → relevant docs pairs)
-2. Evaluate current recipe → baseline metrics
-3. Loop:
-   a. AutoResearch model proposes N recipe variants
-   b. For each variant: fork branch → evaluate → record metrics
-   c. If best variant > current best → adopt it
-   d. If no improvement for 5 rounds → stop
-4. Save winning recipe as database default
-5. Return: baseline → optimized metrics, experiments run, winning recipe
+For each recipe:
+  1. Create a branch
+  2. Run every eval query through db.search(query, recipe=variant)
+  3. Compare results to expected relevant docs
+  4. Compute NDCG@10
+  5. Log results on _system_ branch
+  6. Discard the branch
+Return the recipe with the highest NDCG@10
 ```
+
+Sequential in v1. Each recipe takes a few seconds (eval queries × search time). Three recipes with 50 eval queries at ~50ms per search = ~7.5 seconds total. Fast enough.
+
+Parallel execution across branches is a future optimization — the architecture supports it, but v1 doesn't need it.
+
+### The AutoResearch loop
+
+The external agent (user, Claude Code, a Python script) drives the optimization loop. Strata provides `db.experiment()` as the primitive. The agent provides the intelligence:
+
+```python
+# The agent drives the loop. Strata runs the experiments.
+current_best = db.get_recipe()
+eval_set = db.json.get("eval/medical")
+
+for round in range(10):
+    # Agent proposes variants (mutates current best)
+    variants = agent.propose_variants(current_best, history)
+
+    # Strata compares them
+    winner = db.experiment(recipes=variants, eval_set=eval_set)
+
+    # Agent decides whether to keep
+    if agent.is_improvement(winner, current_best):
+        current_best = winner
+
+db.set_recipe(current_best)
+```
+
+Strata doesn't plan experiments, propose mutations, or decide when to stop. It runs recipes and returns the winner. The agent does the thinking.
 
 ### What gets tuned
 
-Every substrate parameter plus model assignments:
+Every parameter in the recipe:
 
 | Parameter | Range |
 |-----------|-------|
@@ -317,29 +353,10 @@ Every substrate parameter plus model assignments:
 | `graph.max_hops` | 1 — 5 |
 | `fusion.k` | 10 — 200 |
 | `fusion.weights.*` | 0.0 — 3.0 |
-| `models.expansion` | local vs cloud options |
-| `models.rerank` | local vs cloud options |
-| `expansion on/off` | enabled / disabled |
-| `reranking on/off` | enabled / disabled |
-
-### Experiment planning
-
-The AutoResearch model reads previous experiment results and plans the next batch:
-
-- **Round 1:** Broad sweep — major parameters (k1, b, fusion weights)
-- **Round 5:** Narrow in — parameters that showed sensitivity
-- **Round 10:** Fine-tune — small adjustments around the current best
-- **Ablation:** Periodically disable one component to measure its contribution
-
-A smarter model (Claude Haiku/Sonnet) produces better experiment plans than a local 1.7B model. This is where the multi-model routing pays off — use a cheap local model for high-volume operations, a smart cloud model for the planning step that runs once per round.
 
 ### Why it requires user-provided eval pairs
 
 The database doesn't know what "good results" means for your data. The user provides 50-100 (query, relevant_docs) pairs that define their quality standard. This is the only human input required.
-
-### Graceful degradation
-
-If AutoResearch model unavailable: fall back to grid search (no intelligent planning, still works). If `evaluate()` fails: abort, return best recipe found so far.
 
 ---
 
@@ -451,22 +468,28 @@ Feature gating:
 ## 10. API Summary
 
 ```python
-# Search (always available)
-results = db.search("query")
-results = db.search("query", recipe="custom")
-results = db.search("query", mode="rag")
-results = db.search("query", as_of="2025-01-01")
-results = db.search("query", diff=("2024-01-01", "2025-06-01"))
-results = db.search("query", mode="rag", diff=("2024-01-01", "2025-06-01"))
+# Search
+db.search("query")
+db.search("query", recipe="custom")
+db.search("query", mode="rag")
+db.search("query", as_of="2025-01-01")
+db.search("query", diff=("2024-01-01", "2025-06-01"))
+db.search("query", mode="rag", diff=("2024-01-01", "2025-06-01"))
 
-# AutoResearch (requires eval pairs)
-result = db.optimize_search(eval_set, budget=1000)
+# Recipes
+db.set_recipe(recipe)
+db.set_recipe(recipe, name="medical")
+db.get_recipe()
+db.get_recipe("medical")
+
+# Experiments
+winner = db.experiment(recipes, eval_set)
 
 # Configuration
 db.configure(models={...}, expansion=True, ...)
 ```
 
-Three methods. That's it.
+You can learn the entire API in 60 seconds.
 
 ---
 
