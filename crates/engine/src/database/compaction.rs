@@ -3,7 +3,6 @@
 use std::sync::Arc;
 use strata_core::types::{Key, TypeTag};
 use strata_core::{StrataError, StrataResult};
-use strata_durability::codec::IdentityCodec;
 use strata_durability::{
     BranchSnapshotEntry, CheckpointCoordinator, CheckpointData, CheckpointError, CompactionError,
     EventSnapshotEntry, JsonSnapshotEntry, KvSnapshotEntry, ManifestError, ManifestManager,
@@ -83,18 +82,16 @@ impl Database {
             }
         };
 
-        // Create CheckpointCoordinator with the database's persisted UUID
+        // Create CheckpointCoordinator with the configured codec and database UUID
         let db_uuid = self.database_uuid;
+        let codec_id = self.config.read().storage.codec.clone();
+        let codec = strata_durability::get_codec(&codec_id)
+            .map_err(|e| StrataError::internal(format!("checkpoint codec: {}", e)))?;
         let mut coordinator = if let Some(wm) = existing_watermark {
-            CheckpointCoordinator::with_watermark(
-                snapshots_dir,
-                Box::new(IdentityCodec),
-                db_uuid,
-                wm,
-            )
-            .map_err(|e| StrataError::internal(format!("checkpoint coordinator: {}", e)))?
+            CheckpointCoordinator::with_watermark(snapshots_dir, codec, db_uuid, wm)
+                .map_err(|e| StrataError::internal(format!("checkpoint coordinator: {}", e)))?
         } else {
-            CheckpointCoordinator::new(snapshots_dir, Box::new(IdentityCodec), db_uuid)
+            CheckpointCoordinator::new(snapshots_dir, codec, db_uuid)
                 .map_err(|e| StrataError::internal(format!("checkpoint coordinator: {}", e)))?
         };
 
