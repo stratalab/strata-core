@@ -442,6 +442,7 @@ impl KVSegment {
             block_data: None,
             done,
             prev_key: Vec::new(),
+            corruption_detected: false,
         }
     }
 
@@ -723,6 +724,7 @@ impl KVSegment {
             block_data: None,
             done: self.index.is_empty(),
             prev_key: Vec::new(),
+            corruption_detected: false,
         }
     }
 }
@@ -902,6 +904,15 @@ pub struct SegmentIter<'a> {
     done: bool,
     /// Buffer for v4 prefix-compressed key reconstruction (reused across entries).
     prev_key: Vec<u8>,
+    /// Set to true if iteration was stopped by a corruption error (#1749).
+    corruption_detected: bool,
+}
+
+impl SegmentIter<'_> {
+    /// Returns true if iteration was stopped early due to data block corruption.
+    pub fn corruption_detected(&self) -> bool {
+        self.corruption_detected
+    }
 }
 
 impl<'a> Iterator for SegmentIter<'a> {
@@ -932,6 +943,7 @@ impl<'a> Iterator for SegmentIter<'a> {
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "segment iterator stopping due to corruption");
+                        self.corruption_detected = true;
                         self.done = true;
                         return None;
                     }
