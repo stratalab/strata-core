@@ -252,6 +252,76 @@ fn expand_tilde(path: &str) -> PathBuf {
 // =========================================================================
 
 #[cfg(feature = "embed")]
+fn pull_with_bar(
+    registry: &strata_intelligence::ModelRegistry,
+    name: &str,
+    display_name: &str,
+) -> Result<std::path::PathBuf, strata_inference::InferenceError> {
+    use std::time::Instant;
+
+    let start = Instant::now();
+    let result = registry.pull_with_progress(name, |downloaded, total| {
+        if total == 0 {
+            eprint!("\r  Downloading {}... ", display_name);
+            io::stderr().flush().unwrap();
+            return;
+        }
+        let pct = (downloaded as f64 / total as f64 * 100.0).min(100.0);
+        let bar_width = 25;
+        let filled = (pct / 100.0 * bar_width as f64) as usize;
+        let empty = bar_width - filled;
+        let dl_mb = downloaded / 1_000_000;
+        let total_mb = total / 1_000_000;
+        eprint!(
+            "\r  Downloading {}  [{}>{}] {:3.0}% ({}/{} MB)  ",
+            display_name,
+            "\u{2588}".repeat(filled),
+            " ".repeat(empty),
+            pct,
+            dl_mb,
+            total_mb,
+        );
+        io::stderr().flush().unwrap();
+    });
+
+    let elapsed = start.elapsed().as_secs();
+    // Clear the progress line (ANSI erase-line + carriage return)
+    eprint!("\x1B[2K\r");
+    io::stderr().flush().unwrap();
+
+    match &result {
+        Ok(_) => {
+            if elapsed > 1 {
+                eprintln!("  \u{2713} {} downloaded ({}s)", display_name, elapsed);
+            } else {
+                eprintln!("  \u{2713} {} downloaded", display_name);
+            }
+        }
+        Err(_) => {} // caller handles errors
+    }
+    result
+}
+
+/// Try downloading a model, retrying once on failure.
+#[cfg(feature = "embed")]
+fn pull_with_retry(
+    registry: &strata_intelligence::ModelRegistry,
+    name: &str,
+    display_name: &str,
+) -> Result<std::path::PathBuf, strata_inference::InferenceError> {
+    match pull_with_bar(registry, name, display_name) {
+        Ok(path) => Ok(path),
+        Err(first_err) => {
+            eprintln!("  \u{26a0} Download failed: {}. Retrying...", first_err);
+            match pull_with_bar(registry, name, display_name) {
+                Ok(path) => Ok(path),
+                Err(second_err) => Err(second_err),
+            }
+        }
+    }
+}
+
+#[cfg(feature = "embed")]
 fn offer_model_downloads(config_path: &Path, hw: &HardwareInfo, non_interactive: bool) {
     use strata_intelligence::ModelRegistry;
 
@@ -265,12 +335,9 @@ fn offer_model_downloads(config_path: &Path, hw: &HardwareInfo, non_interactive:
     if minilm_available {
         eprintln!("  \u{2713} MiniLM already downloaded — auto-embedding enabled");
     } else if non_interactive || prompt_yes_no("Download MiniLM-L6-v2? (45 MB)", true) {
-        eprint!("  Downloading MiniLM-L6-v2...");
-        io::stderr().flush().unwrap();
-        match registry.pull("miniLM") {
+        match pull_with_retry(&registry, "miniLM", "MiniLM-L6-v2") {
             Ok(_) => {
-                eprintln!(" done");
-                eprintln!("  \u{2713} MiniLM ready \u{2014} auto-embedding enabled");
+                eprintln!("  \u{2713} Auto-embedding enabled");
                 // Enable auto_embed in config
                 if let Ok(mut cfg) = strata_executor::StrataConfig::from_file(config_path) {
                     cfg.auto_embed = true;
@@ -278,7 +345,7 @@ fn offer_model_downloads(config_path: &Path, hw: &HardwareInfo, non_interactive:
                 }
             }
             Err(e) => {
-                eprintln!(" failed: {}", e);
+                eprintln!("  \u{2717} Download failed: {}", e);
                 eprintln!("  \u{2139} Run 'strata models pull miniLM' to try again later.");
             }
         }
@@ -323,11 +390,15 @@ fn offer_model_downloads(config_path: &Path, hw: &HardwareInfo, non_interactive:
     if non_interactive {
         // Auto-pick the first (smallest) model
         let pick = &candidates[0];
-        eprint!("  Downloading {}...", pick.name);
-        io::stderr().flush().unwrap();
-        match registry.pull(&pick.name) {
-            Ok(_) => eprintln!(" done\n  \u{2713} {} ready", pick.name),
-            Err(e) => eprintln!(" failed: {}", e),
+        match pull_with_retry(&registry, &pick.name, &pick.name) {
+            Ok(_) => eprintln!("  \u{2713} {} ready", pick.name),
+            Err(e) => {
+                eprintln!("  \u{2717} Download failed: {}", e);
+                eprintln!(
+                    "  \u{2139} Run 'strata models pull {}' to try again later.",
+                    pick.name
+                );
+            }
         }
         return;
     }
@@ -358,11 +429,15 @@ fn offer_model_downloads(config_path: &Path, hw: &HardwareInfo, non_interactive:
     if let Ok(idx) = trimmed.parse::<usize>() {
         if idx >= 1 && idx <= candidates.len() {
             let pick = &candidates[idx - 1];
-            eprint!("  Downloading {}...", pick.name);
-            io::stderr().flush().unwrap();
-            match registry.pull(&pick.name) {
-                Ok(_) => eprintln!(" done\n  \u{2713} {} ready", pick.name),
-                Err(e) => eprintln!(" failed: {}", e),
+            match pull_with_retry(&registry, &pick.name, &pick.name) {
+                Ok(_) => eprintln!("  \u{2713} {} ready", pick.name),
+                Err(e) => {
+                    eprintln!("  \u{2717} Download failed: {}", e);
+                    eprintln!(
+                        "  \u{2139} Run 'strata models pull {}' to try again later.",
+                        pick.name
+                    );
+                }
             }
             return;
         }
@@ -583,6 +658,32 @@ fn create_and_open_db(
 }
 
 // =========================================================================
+// Telemetry opt-in
+// =========================================================================
+
+fn offer_telemetry_opt_in(config_path: &Path, non_interactive: bool) {
+    if non_interactive {
+        return; // Telemetry defaults to off; don't enable silently
+    }
+
+    eprintln!();
+    if prompt_yes_no(
+        "Help improve Strata by sending anonymous usage data?",
+        false,
+    ) {
+        eprintln!(
+            "  \u{2713} Telemetry enabled \u{2014} thank you! (disable anytime in strata.toml)"
+        );
+        if let Ok(mut cfg) = strata_executor::StrataConfig::from_file(config_path) {
+            cfg.telemetry = true;
+            let _ = cfg.write_to_file(config_path);
+        }
+    } else {
+        eprintln!("  \u{2713} No telemetry \u{2014} no data will be sent.");
+    }
+}
+
+// =========================================================================
 // `strata init` — explicit setup, asks for path, does NOT enter REPL
 // =========================================================================
 
@@ -610,6 +711,7 @@ pub fn run_init(default_path: &str, non_interactive: bool) -> Result<(), String>
 
     let config_path = db_path.join("strata.toml");
     offer_model_downloads(&config_path, &hw, non_interactive);
+    offer_telemetry_opt_in(&config_path, non_interactive);
 
     offer_sample_dataset(&db, non_interactive);
 
@@ -650,16 +752,12 @@ pub fn run_init_in_place(non_interactive: bool) -> Result<Strata, String> {
 
     let config_path = db_path.join("strata.toml");
     offer_model_downloads(&config_path, &hw, non_interactive);
+    offer_telemetry_opt_in(&config_path, non_interactive);
 
     offer_sample_dataset(&db, non_interactive);
 
     eprintln!();
-    eprintln!("  You're all set. Try these commands:");
-    eprintln!();
-    eprintln!("    kv get greeting              Retrieve a stored value");
-    eprintln!("    json get user:1 $.name       Query a JSON document");
-    eprintln!("    search \"hello\"               Semantic search across all data");
-    eprintln!("    help                         See all commands");
+    eprintln!("  You're all set. Launching the REPL...");
     eprintln!();
 
     Ok(db)

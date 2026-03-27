@@ -1691,8 +1691,7 @@ mod tests {
             baseline.records.len(),
         );
         assert!(
-            lossy_result.records.len()
-                >= seg1_count_before + seg_last_count_before,
+            lossy_result.records.len() >= seg1_count_before + seg_last_count_before,
             "Should recover at least all records from uncorrupted segments"
         );
     }

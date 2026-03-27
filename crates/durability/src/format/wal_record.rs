@@ -1089,7 +1089,7 @@ mod tests {
         bytes[4..8].copy_from_slice(&99u32.to_le_bytes()); // future version
         bytes[8..16].copy_from_slice(&1u64.to_le_bytes()); // segment_number
         bytes[16..32].copy_from_slice(&[0xAA; 16]); // database_uuid
-        // CRC of first 32 bytes (would be valid if version were accepted)
+                                                    // CRC of first 32 bytes (would be valid if version were accepted)
         let crc = {
             let mut hasher = Hasher::new();
             hasher.update(&bytes[0..SEGMENT_HEADER_SIZE]);

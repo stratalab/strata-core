@@ -272,6 +272,10 @@ pub struct StrataConfig {
     /// Default: false (refuse to open — safer).
     #[serde(default)]
     pub allow_lossy_recovery: bool,
+    /// Whether the user opted in to anonymous usage telemetry.
+    /// Default: false (opt-in, never on by default).
+    #[serde(default)]
+    pub telemetry: bool,
     /// Default storage data type for new vector collections.
     /// "f32" (default) or "int8" (scalar quantization, 4x memory savings).
     /// Individual collections can override via VectorConfig.
@@ -316,6 +320,7 @@ impl Default for StrataConfig {
             google_api_key: None,
             storage: StorageConfig::default(),
             allow_lossy_recovery: false,
+            telemetry: false,
             default_vector_dtype: default_vector_dtype(),
         }
     }
