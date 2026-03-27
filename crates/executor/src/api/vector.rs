@@ -210,6 +210,51 @@ impl Strata {
         }
     }
 
+    /// Batch get multiple vectors by key.
+    ///
+    /// Returns per-item results positionally mapped to the input keys.
+    /// Missing keys yield `None`.
+    pub fn vector_batch_get(
+        &self,
+        collection: &str,
+        keys: Vec<String>,
+    ) -> Result<Vec<Option<VersionedVectorData>>> {
+        match self.execute_cmd(Command::VectorBatchGet {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            collection: collection.to_string(),
+            keys,
+        })? {
+            Output::BatchVectorGetResults(results) => Ok(results),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for VectorBatchGet".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
+
+    /// Batch delete multiple vectors by key.
+    ///
+    /// Returns per-item results positionally mapped to the input keys.
+    pub fn vector_batch_delete(
+        &self,
+        collection: &str,
+        keys: Vec<String>,
+    ) -> Result<Vec<crate::types::BatchItemResult>> {
+        match self.execute_cmd(Command::VectorBatchDelete {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            collection: collection.to_string(),
+            keys,
+        })? {
+            Output::BatchResults(results) => Ok(results),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for VectorBatchDelete".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
+
     /// Get a vector by key at a specific point in time.
     ///
     /// `as_of` is a timestamp in microseconds since epoch.

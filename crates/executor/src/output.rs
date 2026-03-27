@@ -154,6 +154,12 @@ pub enum Output {
     /// Per-item results for batch get operations (includes values)
     BatchGetResults(Vec<BatchGetItemResult>),
 
+    /// List of booleans (for batch exists operations)
+    BoolList(Vec<bool>),
+
+    /// Per-item results for batch vector get operations
+    BatchVectorGetResults(Vec<Option<VersionedVectorData>>),
+
     // ==================== Branch-specific ====================
     /// Optional versioned branch info (for branch_get which may not find a branch)
     MaybeBranchInfo(Option<VersionedBranchInfo>),

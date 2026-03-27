@@ -208,4 +208,62 @@ impl Strata {
             }),
         }
     }
+
+    /// Batch get multiple values by key in a single transaction.
+    ///
+    /// Returns per-item results positionally mapped to the input keys.
+    /// Missing keys have `value: None`.
+    pub fn kv_batch_get(
+        &self,
+        keys: Vec<String>,
+    ) -> Result<Vec<crate::types::BatchGetItemResult>> {
+        match self.execute_cmd(Command::KvBatchGet {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            keys,
+        })? {
+            Output::BatchGetResults(results) => Ok(results),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for KvBatchGet".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
+
+    /// Batch delete multiple keys in a single transaction.
+    ///
+    /// Returns per-item results positionally mapped to the input keys.
+    pub fn kv_batch_delete(
+        &self,
+        keys: Vec<String>,
+    ) -> Result<Vec<crate::types::BatchItemResult>> {
+        match self.execute_cmd(Command::KvBatchDelete {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            keys,
+        })? {
+            Output::BatchResults(results) => Ok(results),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for KvBatchDelete".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
+
+    /// Batch check existence of multiple keys in a single transaction.
+    ///
+    /// Returns a `Vec<bool>` where `results[i]` is `true` if `keys[i]` exists.
+    pub fn kv_batch_exists(&self, keys: Vec<String>) -> Result<Vec<bool>> {
+        match self.execute_cmd(Command::KvBatchExists {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            keys,
+        })? {
+            Output::BoolList(results) => Ok(results),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for KvBatchExists".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
 }

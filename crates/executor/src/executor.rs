@@ -334,6 +334,43 @@ impl Executor {
                 self.ensure_space_registered(&branch, &space)?;
                 crate::handlers::kv::kv_batch_put(&self.primitives, branch, space, entries)
             }
+            Command::KvBatchGet {
+                branch,
+                space,
+                keys,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::kv::kv_batch_get(&self.primitives, branch, space, keys)
+            }
+            Command::KvBatchDelete {
+                branch,
+                space,
+                keys,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                self.ensure_space_registered(&branch, &space)?;
+                crate::handlers::kv::kv_batch_delete(&self.primitives, branch, space, keys)
+            }
+            Command::KvBatchExists {
+                branch,
+                space,
+                keys,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::kv::kv_batch_exists(&self.primitives, branch, space, keys)
+            }
             Command::KvGet {
                 branch,
                 space,
@@ -842,6 +879,45 @@ impl Executor {
                     space,
                     collection,
                     entries,
+                )
+            }
+            Command::VectorBatchGet {
+                branch,
+                space,
+                collection,
+                keys,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::vector::vector_batch_get(
+                    &self.primitives,
+                    branch,
+                    space,
+                    collection,
+                    keys,
+                )
+            }
+            Command::VectorBatchDelete {
+                branch,
+                space,
+                collection,
+                keys,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                self.ensure_space_registered(&branch, &space)?;
+                crate::handlers::vector::vector_batch_delete(
+                    &self.primitives,
+                    branch,
+                    space,
+                    collection,
+                    keys,
                 )
             }
 
