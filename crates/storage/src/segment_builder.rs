@@ -1293,7 +1293,26 @@ pub(crate) fn parse_header(data: &[u8; KV_HEADER_SIZE]) -> Option<KVHeader> {
         return None;
     }
     let format_version = u16::from_le_bytes(data[8..10].try_into().ok()?);
-    if !(4..=FORMAT_VERSION).contains(&format_version) {
+    if format_version > FORMAT_VERSION {
+        tracing::error!(
+            target: "strata::format",
+            format_version,
+            max_supported = FORMAT_VERSION,
+            "KV segment format version {} is newer than this build supports (max {}). \
+             Upgrade Strata to read this segment.",
+            format_version,
+            FORMAT_VERSION,
+        );
+        return None;
+    }
+    if format_version < 4 {
+        tracing::error!(
+            target: "strata::format",
+            format_version,
+            min_supported = 4,
+            "KV segment format version {} is too old (minimum supported is 4).",
+            format_version,
+        );
         return None;
     }
     let commit_min = u64::from_le_bytes(data[16..24].try_into().ok()?);

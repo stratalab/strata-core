@@ -136,6 +136,12 @@ impl Manifest {
 
         // Format version
         let format_version = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap());
+        if format_version > MANIFEST_FORMAT_VERSION {
+            return Err(ManifestError::UnsupportedVersion {
+                version: format_version,
+                max_supported: MANIFEST_FORMAT_VERSION,
+            });
+        }
         cursor += 4;
 
         // Database UUID
@@ -321,6 +327,15 @@ pub enum ManifestError {
     /// Invalid magic bytes
     #[error("Invalid magic bytes")]
     InvalidMagic,
+
+    /// Unsupported format version (created by a newer version of Strata)
+    #[error("unsupported MANIFEST format version {version} (this build supports up to {max_supported})")]
+    UnsupportedVersion {
+        /// Version found in the file
+        version: u32,
+        /// Maximum version this build can read
+        max_supported: u32,
+    },
 
     /// Invalid codec ID (not valid UTF-8)
     #[error("Invalid codec ID")]
@@ -633,5 +648,30 @@ mod tests {
         // Verify persistence
         let loaded = ManifestManager::load(manifest_path).unwrap();
         assert_eq!(loaded.manifest().snapshot_id, None);
+    }
+
+    #[test]
+    fn test_manifest_rejects_future_version() {
+        // Build a manifest with format_version = 99 (far beyond current)
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MANIFEST_MAGIC);
+        bytes.extend_from_slice(&99u32.to_le_bytes()); // future version
+        bytes.extend_from_slice(&test_uuid());
+        let codec = b"identity";
+        bytes.extend_from_slice(&(codec.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(codec);
+        bytes.extend_from_slice(&1u64.to_le_bytes()); // active_wal_segment
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // snapshot_watermark
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // snapshot_id
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // flushed_through
+        let crc = crc32fast::hash(&bytes);
+        bytes.extend_from_slice(&crc.to_le_bytes());
+
+        let result = Manifest::from_bytes(&bytes);
+        assert!(
+            matches!(result, Err(ManifestError::UnsupportedVersion { version: 99, max_supported: 2 })),
+            "Expected UnsupportedVersion error for future format version, got: {:?}",
+            result,
+        );
     }
 }
