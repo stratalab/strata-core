@@ -14,10 +14,14 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::distance::{compute_asymmetric_similarity, compute_similarity_cached};
+use std::cell::RefCell;
+
+use crate::distance::{
+    compute_asymmetric_similarity, compute_binary_similarity, compute_similarity_cached,
+};
 use crate::error::{VectorError, VectorResult};
 use crate::mmap::{self, MmapVectorData};
-use crate::quantize::{self, QuantizationParams};
+use crate::quantize::{self, QuantizationParams, RaBitQParams};
 use crate::types::{DistanceMetric, InlineMeta, StorageDtype, VectorConfig, VectorId};
 
 /// Backing storage for vector embeddings.
@@ -44,6 +48,17 @@ pub(crate) enum VectorData {
     /// Quantized u8 storage (SQ8). Each vector is `dimension` bytes.
     /// Offsets in id_to_offset are in u8 elements (= byte offsets within the Vec).
     InMemoryQuantized(Vec<u8>),
+    /// Binary quantization via RaBitQ. Each vector stored as:
+    /// - Binary code: ceil(dim/8) bytes in `codes`
+    /// - Centroid distance: f32 in `centroid_dists`
+    /// - Quantized dot product (x0): f32 in `quantized_dots`
+    ///
+    /// Offsets in id_to_offset store byte offsets into `codes` (= slot * code_size).
+    InMemoryBinary {
+        codes: Vec<u8>,
+        centroid_dists: Vec<f32>,
+        quantized_dots: Vec<f32>,
+    },
 }
 
 /// Sentinel value indicating absent entry in dense_offsets.
@@ -123,9 +138,25 @@ pub struct VectorHeap {
     /// None for F32 heaps.
     quant_params: Option<QuantizationParams>,
 
-    /// Number of calibration samples seen (Int8 only, pre-calibration).
+    /// RaBitQ parameters (only used when config.storage_dtype == Binary).
+    rabitq_params: Option<RaBitQParams>,
+
+    /// Number of calibration samples seen (Int8/Binary only, pre-calibration).
     /// None for F32 heaps or after calibration completes.
     calibration_samples: Option<usize>,
+}
+
+/// Thread-local cache for RaBitQ query preprocessing.
+/// Avoids O(D^2) rotation per distance_to() call by caching the preprocessed query.
+/// Cache key is the query slice pointer -- valid within a single search call.
+struct BinaryQueryCache {
+    query_ptr: usize,
+    q_rotated: Vec<f32>,
+    q_dist: f32,
+}
+
+thread_local! {
+    static BINARY_QUERY_CACHE: RefCell<Option<BinaryQueryCache>> = const { RefCell::new(None) };
 }
 
 impl VectorHeap {
@@ -135,13 +166,19 @@ impl VectorHeap {
     /// where IDs are positive integers.
     pub fn new(config: VectorConfig) -> Self {
         let is_int8 = config.storage_dtype == StorageDtype::Int8;
+        let is_binary = config.storage_dtype == StorageDtype::Binary;
         VectorHeap {
             quant_params: if is_int8 {
                 Some(QuantizationParams::new(config.dimension))
             } else {
                 None
             },
-            calibration_samples: if is_int8 { Some(0) } else { None },
+            rabitq_params: if is_binary {
+                Some(RaBitQParams::new(config.dimension))
+            } else {
+                None
+            },
+            calibration_samples: if is_int8 || is_binary { Some(0) } else { None },
             config,
             data: VectorData::InMemory(Vec::new()),
             id_to_offset: BTreeMap::new(),
@@ -161,21 +198,23 @@ impl VectorHeap {
     pub fn from_snapshot(
         config: VectorConfig,
         data: Vec<f32>,
-        id_to_offset: BTreeMap<VectorId, usize>,
+        mut id_to_offset: BTreeMap<VectorId, usize>,
         free_slots: Vec<usize>,
         next_id: u64,
     ) -> Self {
         let is_int8 = config.storage_dtype == StorageDtype::Int8;
+        let is_binary = config.storage_dtype == StorageDtype::Binary;
 
         // For Int8: quantize the f32 snapshot data into u8 storage.
         // If the collection is empty, stay in calibration mode so new inserts work.
-        let (vector_data, quant_params, cal_samples) = if is_int8 {
+        let (vector_data, quant_params, rabitq_params, cal_samples) = if is_int8 {
             let dim = config.dimension;
             if id_to_offset.is_empty() {
-                // Empty collection — stay in f32 calibration mode
+                // Empty collection -- stay in f32 calibration mode
                 (
                     VectorData::InMemory(data),
                     Some(QuantizationParams::new(dim)),
+                    None,
                     Some(0),
                 )
             } else {
@@ -190,17 +229,72 @@ impl VectorHeap {
                 let mut q_data = vec![0u8; total_slots * dim];
                 for (&_id, &offset) in &id_to_offset {
                     if offset + dim <= data.len() {
-                        // Offset is slot_number * dim — same for both f32 and u8 layouts
+                        // Offset is slot_number * dim -- same for both f32 and u8 layouts
                         params.quantize_into(
                             &data[offset..offset + dim],
                             &mut q_data[offset..offset + dim],
                         );
                     }
                 }
-                (VectorData::InMemoryQuantized(q_data), Some(params), None)
+                (
+                    VectorData::InMemoryQuantized(q_data),
+                    Some(params),
+                    None,
+                    None,
+                )
+            }
+        } else if is_binary {
+            let dim = config.dimension;
+            let code_size = RaBitQParams::code_size(dim);
+            if id_to_offset.is_empty() {
+                // Empty collection -- stay in f32 calibration mode
+                (
+                    VectorData::InMemory(data),
+                    None,
+                    Some(RaBitQParams::new(dim)),
+                    Some(0),
+                )
+            } else {
+                let mut params = RaBitQParams::new(dim);
+                for &offset in id_to_offset.values() {
+                    if offset + dim <= data.len() {
+                        params.update_calibration(&data[offset..offset + dim]);
+                    }
+                }
+                params.finalize_calibration();
+                let total_slots = data.len() / dim;
+                let mut codes = vec![0u8; total_slots * code_size];
+                let mut centroid_dists = vec![0.0f32; total_slots];
+                let mut quantized_dots = vec![0.0f32; total_slots];
+                for (&_id, &offset) in &id_to_offset {
+                    if offset + dim <= data.len() {
+                        let slot = offset / dim;
+                        let (cd, x0) = params.encode_into(
+                            &data[offset..offset + dim],
+                            &mut codes[slot * code_size..(slot + 1) * code_size],
+                        );
+                        centroid_dists[slot] = cd;
+                        quantized_dots[slot] = x0;
+                    }
+                }
+                // Remap id_to_offset from f32 offsets (slot * dim) to code offsets (slot * code_size)
+                for (_id, offset) in id_to_offset.iter_mut() {
+                    let slot = *offset / dim;
+                    *offset = slot * code_size;
+                }
+                (
+                    VectorData::InMemoryBinary {
+                        codes,
+                        centroid_dists,
+                        quantized_dots,
+                    },
+                    None,
+                    Some(params),
+                    None,
+                )
             }
         } else {
-            (VectorData::InMemory(data), None, None)
+            (VectorData::InMemory(data), None, None, None)
         };
 
         let mut heap = VectorHeap {
@@ -214,6 +308,7 @@ impl VectorHeap {
             version: AtomicU64::new(0),
             inline_meta: BTreeMap::new(),
             quant_params,
+            rabitq_params,
             calibration_samples: cal_samples,
         };
         heap.rebuild_dense_index();
@@ -241,6 +336,7 @@ impl VectorHeap {
             version: AtomicU64::new(0),
             inline_meta: BTreeMap::new(),
             quant_params,
+            rabitq_params: None,
             calibration_samples: None,
         };
         heap.rebuild_dense_index();
@@ -445,24 +541,96 @@ impl VectorHeap {
                     self.norms[idx] = compute_l2_norm(embedding);
                 }
             }
+            VectorData::InMemoryBinary {
+                codes,
+                centroid_dists,
+                quantized_dots,
+            } => {
+                let params = self
+                    .rabitq_params
+                    .as_ref()
+                    .expect("InMemoryBinary requires rabitq_params");
+                let code_size = RaBitQParams::code_size(dim);
+                if let Some(&offset) = self.id_to_offset.get(&id) {
+                    // Update in place
+                    let (cd, x0) =
+                        params.encode_into(embedding, &mut codes[offset..offset + code_size]);
+                    let slot = offset / code_size;
+                    centroid_dists[slot] = cd;
+                    quantized_dots[slot] = x0;
+                    let idx = id.0 as usize;
+                    if idx < self.norms.len() {
+                        self.norms[idx] = compute_l2_norm(embedding);
+                    }
+                } else {
+                    let offset = if let Some(slot_offset) = self.free_slots.pop() {
+                        let (cd, x0) = params.encode_into(
+                            embedding,
+                            &mut codes[slot_offset..slot_offset + code_size],
+                        );
+                        let slot = slot_offset / code_size;
+                        centroid_dists[slot] = cd;
+                        quantized_dots[slot] = x0;
+                        slot_offset
+                    } else {
+                        let offset = codes.len();
+                        let (new_code, cd, x0) = params.encode(embedding);
+                        codes.extend_from_slice(&new_code);
+                        centroid_dists.push(cd);
+                        quantized_dots.push(x0);
+                        offset
+                    };
+                    self.id_to_offset.insert(id, offset);
+                    let idx = id.0 as usize;
+                    let slot_number = (offset / code_size) as u32;
+                    if idx >= self.dense_offsets.len() {
+                        self.dense_offsets.resize(idx + 1, DENSE_ABSENT);
+                    }
+                    self.dense_offsets[idx] = slot_number;
+                    if idx >= self.norms.len() {
+                        self.norms.resize(idx + 1, 0.0);
+                    }
+                    self.norms[idx] = compute_l2_norm(embedding);
+                }
+            }
         }
 
-        // Int8 calibration tracking: during calibration phase (data is still InMemory),
-        // update calibration params and count. Auto-finalize when threshold reached.
-        if self.config.storage_dtype == StorageDtype::Int8 {
-            if let Some(ref mut count) = self.calibration_samples {
-                if let Some(ref mut params) = self.quant_params {
-                    if !params.calibrated {
-                        params.update_calibration(embedding);
-                        *count += 1;
-                        if *count >= quantize::DEFAULT_CALIBRATION_THRESHOLD {
-                            // Auto-finalize — this transitions data to InMemoryQuantized
-                            self.version.fetch_add(1, Ordering::Release);
-                            self.finalize_calibration_inner();
-                            return Ok(());
+        // Calibration tracking: during calibration phase (data is still InMemory),
+        // update params and count. Auto-finalize when threshold reached.
+        if let Some(ref mut count) = self.calibration_samples {
+            let needs_finalize = match self.config.storage_dtype {
+                StorageDtype::Int8 => {
+                    if let Some(ref mut params) = self.quant_params {
+                        if !params.calibrated {
+                            params.update_calibration(embedding);
+                            *count += 1;
+                            *count >= quantize::DEFAULT_CALIBRATION_THRESHOLD
+                        } else {
+                            false
                         }
+                    } else {
+                        false
                     }
                 }
+                StorageDtype::Binary => {
+                    if let Some(ref mut params) = self.rabitq_params {
+                        if !params.calibrated {
+                            params.update_calibration(embedding);
+                            *count += 1;
+                            *count >= quantize::DEFAULT_CALIBRATION_THRESHOLD
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+            if needs_finalize {
+                self.version.fetch_add(1, Ordering::Release);
+                self.finalize_calibration();
+                return Ok(());
             }
         }
 
@@ -596,6 +764,31 @@ impl VectorHeap {
                     false
                 }
             }
+            VectorData::InMemoryBinary {
+                codes,
+                centroid_dists,
+                quantized_dots,
+            } => {
+                if let Some(offset) = self.id_to_offset.remove(&id) {
+                    self.free_slots.push(offset);
+                    let code_size = RaBitQParams::code_size(self.config.dimension);
+                    codes[offset..offset + code_size].fill(0);
+                    let slot = offset / code_size;
+                    centroid_dists[slot] = 0.0;
+                    quantized_dots[slot] = 0.0;
+                    let idx = id.0 as usize;
+                    if idx < self.dense_offsets.len() {
+                        self.dense_offsets[idx] = DENSE_ABSENT;
+                    }
+                    if idx < self.norms.len() {
+                        self.norms[idx] = 0.0;
+                    }
+                    self.version.fetch_add(1, Ordering::Release);
+                    true
+                } else {
+                    false
+                }
+            }
         }
     }
 
@@ -618,6 +811,10 @@ impl VectorHeap {
             self.quant_params = Some(QuantizationParams::new(self.config.dimension));
             self.calibration_samples = Some(0);
         }
+        if self.config.storage_dtype == StorageDtype::Binary {
+            self.rabitq_params = Some(RaBitQParams::new(self.config.dimension));
+            self.calibration_samples = Some(0);
+        }
         // Note: next_id is NOT reset — IDs are never reused
         self.version.fetch_add(1, Ordering::Release);
     }
@@ -627,18 +824,26 @@ impl VectorHeap {
     // ========================================================================
 
     /// Finalize calibration: quantize all buffered vectors and transition
-    /// from InMemory(f32) to InMemoryQuantized(u8).
+    /// from InMemory(f32) to InMemoryQuantized(u8) or InMemoryBinary.
     ///
     /// Called automatically when calibration sample count reaches the threshold,
     /// or explicitly (e.g., when sealing active buffer or on first search).
     pub fn finalize_calibration(&mut self) {
-        if self.config.storage_dtype != StorageDtype::Int8 {
-            return;
+        match self.config.storage_dtype {
+            StorageDtype::Int8 => {
+                if self.quant_params.as_ref().is_none_or(|p| p.calibrated) {
+                    return;
+                }
+                self.finalize_calibration_inner();
+            }
+            StorageDtype::Binary => {
+                if self.rabitq_params.as_ref().is_none_or(|p| p.calibrated) {
+                    return;
+                }
+                self.finalize_calibration_binary();
+            }
+            _ => {}
         }
-        if self.quant_params.as_ref().is_none_or(|p| p.calibrated) {
-            return; // Already calibrated or no params
-        }
-        self.finalize_calibration_inner();
     }
 
     fn finalize_calibration_inner(&mut self) {
@@ -680,10 +885,63 @@ impl VectorHeap {
         self.rebuild_dense_index();
     }
 
-    /// Whether calibration is in progress (Int8 only).
+    fn finalize_calibration_binary(&mut self) {
+        let params = self
+            .rabitq_params
+            .as_mut()
+            .expect("must have rabitq_params");
+        params.finalize_calibration();
+
+        let dim = self.config.dimension;
+        let code_size = RaBitQParams::code_size(dim);
+        match &self.data {
+            VectorData::InMemory(f32_data) => {
+                let slot_count = f32_data.len() / dim;
+                let mut codes = vec![0u8; slot_count * code_size];
+                let mut centroid_dists = vec![0.0f32; slot_count];
+                let mut quantized_dots = vec![0.0f32; slot_count];
+                let params_ref = self.rabitq_params.as_ref().unwrap();
+                for (&_id, &offset) in &self.id_to_offset {
+                    if offset + dim <= f32_data.len() {
+                        let slot = offset / dim;
+                        let (cd, x0) = params_ref.encode_into(
+                            &f32_data[offset..offset + dim],
+                            &mut codes[slot * code_size..(slot + 1) * code_size],
+                        );
+                        centroid_dists[slot] = cd;
+                        quantized_dots[slot] = x0;
+                    }
+                }
+                // Remap id_to_offset from f32 offsets to code offsets
+                for (_id, offset) in self.id_to_offset.iter_mut() {
+                    let slot = *offset / dim;
+                    *offset = slot * code_size;
+                }
+                self.data = VectorData::InMemoryBinary {
+                    codes,
+                    centroid_dists,
+                    quantized_dots,
+                };
+            }
+            _ => {
+                debug_assert!(
+                    false,
+                    "finalize_calibration_binary called on non-InMemory heap"
+                );
+            }
+        }
+        self.calibration_samples = None;
+        self.rebuild_dense_index();
+    }
+
+    /// Whether calibration is in progress (Int8 or Binary).
     pub fn is_calibrating(&self) -> bool {
         self.calibration_samples.is_some()
-            && self.quant_params.as_ref().is_some_and(|p| !p.calibrated)
+            && match self.config.storage_dtype {
+                StorageDtype::Int8 => self.quant_params.as_ref().is_some_and(|p| !p.calibrated),
+                StorageDtype::Binary => self.rabitq_params.as_ref().is_some_and(|p| !p.calibrated),
+                _ => false,
+            }
     }
 
     /// Get quantization parameters (if Int8).
@@ -751,6 +1009,65 @@ impl VectorHeap {
                     self.get_norm(id),
                 ))
             }
+            VectorData::InMemoryBinary {
+                codes,
+                centroid_dists,
+                quantized_dots,
+            } => {
+                let params = self.rabitq_params.as_ref()?;
+                let code_size = RaBitQParams::code_size(self.config.dimension);
+                let dim = self.config.dimension;
+
+                // Resolve the binary code and slot
+                let idx = id.0 as usize;
+                let (code, slot) = if idx < self.dense_offsets.len() {
+                    let s = self.dense_offsets[idx];
+                    if s == DENSE_ABSENT {
+                        return None;
+                    }
+                    let offset = s as usize * code_size;
+                    if offset + code_size > codes.len() {
+                        return None;
+                    }
+                    (&codes[offset..offset + code_size], s as usize)
+                } else {
+                    let offset = *self.id_to_offset.get(&id)?;
+                    if offset + code_size > codes.len() {
+                        return None;
+                    }
+                    (&codes[offset..offset + code_size], offset / code_size)
+                };
+
+                let cd = centroid_dists[slot];
+                let x0 = quantized_dots[slot];
+                let norm_stored = self.get_norm(id);
+
+                // Compute similarity inside the thread-local cache borrow to avoid cloning
+                BINARY_QUERY_CACHE.with(|cache| {
+                    let mut cache = cache.borrow_mut();
+                    let ptr = query.as_ptr() as usize;
+                    if cache.as_ref().is_none_or(|c| c.query_ptr != ptr) {
+                        let (qr, qd) = params.preprocess_query(query);
+                        *cache = Some(BinaryQueryCache {
+                            query_ptr: ptr,
+                            q_rotated: qr,
+                            q_dist: qd,
+                        });
+                    }
+                    let c = cache.as_ref().unwrap();
+                    Some(compute_binary_similarity(
+                        &c.q_rotated,
+                        c.q_dist,
+                        code,
+                        cd,
+                        x0,
+                        dim,
+                        metric,
+                        norm_query,
+                        norm_stored,
+                    ))
+                })
+            }
         }
     }
 
@@ -808,6 +1125,48 @@ impl VectorHeap {
                 ))
             }
             VectorData::Tiered { .. } => None, // Slot-based not supported for Tiered
+            VectorData::InMemoryBinary {
+                codes,
+                centroid_dists,
+                quantized_dots,
+            } => {
+                let params = self.rabitq_params.as_ref()?;
+                let code_size = RaBitQParams::code_size(self.config.dimension);
+                let byte_offset = slot as usize * code_size;
+                if byte_offset + code_size > codes.len() {
+                    return None;
+                }
+
+                let code = &codes[byte_offset..byte_offset + code_size];
+                let cd = centroid_dists[slot as usize];
+                let x0 = quantized_dots[slot as usize];
+                let dim = self.config.dimension;
+
+                BINARY_QUERY_CACHE.with(|cache| {
+                    let mut cache = cache.borrow_mut();
+                    let ptr = query.as_ptr() as usize;
+                    if cache.as_ref().is_none_or(|c| c.query_ptr != ptr) {
+                        let (qr, qd) = params.preprocess_query(query);
+                        *cache = Some(BinaryQueryCache {
+                            query_ptr: ptr,
+                            q_rotated: qr,
+                            q_dist: qd,
+                        });
+                    }
+                    let c = cache.as_ref().unwrap();
+                    Some(compute_binary_similarity(
+                        &c.q_rotated,
+                        c.q_dist,
+                        code,
+                        cd,
+                        x0,
+                        dim,
+                        metric,
+                        norm_query,
+                        norm_stored,
+                    ))
+                })
+            }
         }
     }
 
@@ -828,6 +1187,24 @@ impl VectorHeap {
                     return None;
                 }
                 Some(params.dequantize(&vec[offset..offset + dim]))
+            }
+            VectorData::InMemoryBinary {
+                codes,
+                centroid_dists,
+                quantized_dots,
+            } => {
+                let params = self.rabitq_params.as_ref()?;
+                let code_size = RaBitQParams::code_size(self.config.dimension);
+                let offset = *self.id_to_offset.get(&id)?;
+                if offset + code_size > codes.len() {
+                    return None;
+                }
+                let slot = offset / code_size;
+                Some(params.dequantize(
+                    &codes[offset..offset + code_size],
+                    centroid_dists[slot],
+                    quantized_dots[slot],
+                ))
             }
         }
     }
@@ -884,9 +1261,14 @@ impl VectorHeap {
             }
         }
         // Fallback for Mmap/Tiered: derive from id_to_offset BTreeMap
-        self.id_to_offset
-            .get(&id)
-            .map(|&off| (off / self.config.dimension) as u32)
+        self.id_to_offset.get(&id).map(|&off| {
+            let unit_size = if self.config.storage_dtype == StorageDtype::Binary {
+                RaBitQParams::code_size(self.config.dimension)
+            } else {
+                self.config.dimension
+            };
+            (off / unit_size) as u32
+        })
     }
 
     /// O(1) embedding lookup by pre-resolved slot number.
@@ -923,6 +1305,7 @@ impl VectorHeap {
                 // For quantized heaps, use distance_to_by_slot() instead
                 None
             }
+            VectorData::InMemoryBinary { .. } => None,
         }
     }
 
@@ -987,6 +1370,14 @@ impl VectorHeap {
                                     }
                                 }
                             }
+                        }
+                    }
+                    VectorData::InMemoryBinary { codes, .. } => {
+                        let code_size = RaBitQParams::code_size(self.config.dimension);
+                        let byte_offset = slot as usize * code_size;
+                        if byte_offset < codes.len() {
+                            let ptr = codes[byte_offset..].as_ptr();
+                            crate::distance::prefetch_read(ptr);
                         }
                     }
                     _ => {} // Mmap/Tiered: no prefetch from dense path
@@ -1076,6 +1467,14 @@ impl VectorHeap {
                     }
                 }
             }
+            VectorData::InMemoryBinary { .. } => {
+                let code_size = RaBitQParams::code_size(dim);
+                for (idx, offset) in entries {
+                    let slot = (offset / code_size) as u32;
+                    self.dense_offsets[idx] = slot;
+                    // Norms already populated from upsert() calls
+                }
+            }
         }
     }
 
@@ -1148,6 +1547,7 @@ impl VectorHeap {
                 // Use get_f32_owned() or get_quantized() instead.
                 None
             }
+            VectorData::InMemoryBinary { .. } => None,
         }
     }
 
@@ -1189,6 +1589,9 @@ impl VectorHeap {
                 VectorData::InMemoryQuantized(_) => {
                     panic!("iter() not supported on quantized heap — use ids() + distance_to()")
                 }
+                VectorData::InMemoryBinary { .. } => {
+                    panic!("iter() not supported on binary heap — use ids() + distance_to()")
+                }
             };
             (id, embedding)
         })
@@ -1213,6 +1616,9 @@ impl VectorHeap {
             VectorData::Tiered { .. } => panic!("raw_data() not available on tiered heap"),
             VectorData::InMemoryQuantized(_) => {
                 panic!("raw_data() not available on quantized heap")
+            }
+            VectorData::InMemoryBinary { .. } => {
+                panic!("raw_data() not available on binary heap")
             }
         }
     }
@@ -1334,6 +1740,45 @@ impl VectorHeap {
                     &f32_data,
                 )
             }
+            VectorData::InMemoryBinary {
+                codes,
+                centroid_dists,
+                quantized_dots,
+            } => {
+                let params = self
+                    .rabitq_params
+                    .as_ref()
+                    .expect("Binary requires rabitq_params");
+                let dim = self.config.dimension;
+                let code_size = RaBitQParams::code_size(dim);
+                let total_slots = codes.len() / code_size;
+                let mut f32_data = vec![0.0f32; total_slots * dim];
+                let mut f32_offsets = BTreeMap::new();
+                for (&id, &offset) in &self.id_to_offset {
+                    let slot = offset / code_size;
+                    if offset + code_size <= codes.len() {
+                        let approx = params.dequantize(
+                            &codes[offset..offset + code_size],
+                            centroid_dists[slot],
+                            quantized_dots[slot],
+                        );
+                        f32_data[slot * dim..(slot + 1) * dim].copy_from_slice(&approx);
+                        f32_offsets.insert(id, slot * dim);
+                    }
+                }
+                mmap::write_mmap_file(
+                    path,
+                    dim,
+                    self.next_id.load(Ordering::Relaxed),
+                    &f32_offsets,
+                    &self
+                        .free_slots
+                        .iter()
+                        .map(|&s| (s / code_size) * dim)
+                        .collect::<Vec<_>>(),
+                    &f32_data,
+                )
+            }
         }
     }
 
@@ -1395,6 +1840,14 @@ impl VectorHeap {
             VectorData::Mmap(_) => 0,
             VectorData::Tiered { overlay, .. } => overlay.len() * std::mem::size_of::<f32>(),
             VectorData::InMemoryQuantized(v) => v.len(), // 1 byte per element
+            VectorData::InMemoryBinary {
+                codes,
+                centroid_dists,
+                quantized_dots,
+            } => {
+                codes.len()
+                    + (centroid_dists.len() + quantized_dots.len()) * std::mem::size_of::<f32>()
+            }
         }
     }
 

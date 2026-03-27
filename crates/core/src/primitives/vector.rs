@@ -92,6 +92,11 @@ pub enum StorageDtype {
     /// Queries remain f32 (asymmetric distance computation).
     /// 4x memory savings vs F32 with ~1-2% recall loss.
     Int8,
+    /// Binary quantization via RaBitQ (SIGMOD 2024).
+    ///
+    /// D-dimensional vectors → D bits using random orthogonal rotation + sign encoding.
+    /// 32x compression from F32 with ~5% recall loss.
+    Binary,
 }
 
 impl StorageDtype {
@@ -100,6 +105,7 @@ impl StorageDtype {
         match self {
             StorageDtype::F32 => 0,
             StorageDtype::Int8 => 2,
+            StorageDtype::Binary => 3,
         }
     }
 
@@ -108,6 +114,7 @@ impl StorageDtype {
         match b {
             0 => Some(StorageDtype::F32),
             2 => Some(StorageDtype::Int8),
+            3 => Some(StorageDtype::Binary),
             _ => None,
         }
     }
@@ -117,6 +124,7 @@ impl StorageDtype {
         match self {
             StorageDtype::F32 => 4,
             StorageDtype::Int8 => 1,
+            StorageDtype::Binary => 1, // notional; binary uses ceil(dim/8) per vector
         }
     }
 }
@@ -1279,8 +1287,10 @@ mod tests {
         assert!(StorageDtype::from_byte(1).is_none());
         // Byte 2 is Int8
         assert_eq!(StorageDtype::from_byte(2), Some(StorageDtype::Int8));
-        // Bytes 3+ are reserved
-        for b in 3..=255u8 {
+        // Byte 3 is Binary
+        assert_eq!(StorageDtype::from_byte(3), Some(StorageDtype::Binary));
+        // Bytes 4+ are reserved
+        for b in 4..=255u8 {
             assert!(
                 StorageDtype::from_byte(b).is_none(),
                 "Byte {} should not map to a dtype",

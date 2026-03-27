@@ -348,6 +348,7 @@ impl StrataConfig {
     pub fn vector_storage_dtype(&self) -> strata_core::primitives::StorageDtype {
         match self.default_vector_dtype.to_lowercase().as_str() {
             "int8" | "sq8" => strata_core::primitives::StorageDtype::Int8,
+            "binary" | "rabitq" => strata_core::primitives::StorageDtype::Binary,
             _ => strata_core::primitives::StorageDtype::F32,
         }
     }
@@ -426,8 +427,9 @@ auto_embed = false
 # openai_api_key = "sk-..."
 # google_api_key = "AIza..."
 
-# Default storage type for new vector collections: "f32" (default) or "int8".
+# Default storage type for new vector collections: "f32" (default), "int8", or "binary".
 # "int8" uses scalar quantization (SQ8) for 4x memory savings (~1-2% recall loss).
+# "binary" uses RaBitQ binary quantization for 32x compression (~5% recall loss).
 # Embedded profile auto-sets "int8". Individual collections can override.
 # default_vector_dtype = "f32"
 

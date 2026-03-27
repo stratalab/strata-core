@@ -588,16 +588,14 @@ impl VectorStore {
 
         // Update backend after KV commit succeeds
         let ts = now_micros();
-        for vid in &vector_ids {
-            if let Some(vector_id) = vid {
-                match backend.delete_with_timestamp(*vector_id, ts) {
-                    Ok(_) => {
-                        backend.remove_inline_meta(*vector_id);
-                    }
-                    Err(e) => {
-                        warn!(target: "strata::vector", collection, error = %e,
-                            "Backend delete failed after KV delete in batch; search will filter via KV check");
-                    }
+        for vector_id in vector_ids.iter().flatten() {
+            match backend.delete_with_timestamp(*vector_id, ts) {
+                Ok(_) => {
+                    backend.remove_inline_meta(*vector_id);
+                }
+                Err(e) => {
+                    warn!(target: "strata::vector", collection, error = %e,
+                        "Backend delete failed after KV delete in batch; search will filter via KV check");
                 }
             }
         }

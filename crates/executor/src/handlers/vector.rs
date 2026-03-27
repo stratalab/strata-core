@@ -486,8 +486,7 @@ pub fn vector_batch_delete(
     }
 
     let engine_results = convert_vector_result(
-        p.vector
-            .batch_delete(branch_id, &space, &collection, &keys),
+        p.vector.batch_delete(branch_id, &space, &collection, &keys),
         branch_id,
     )?;
 

@@ -213,10 +213,7 @@ impl Strata {
     ///
     /// Returns per-item results positionally mapped to the input keys.
     /// Missing keys have `value: None`.
-    pub fn kv_batch_get(
-        &self,
-        keys: Vec<String>,
-    ) -> Result<Vec<crate::types::BatchGetItemResult>> {
+    pub fn kv_batch_get(&self, keys: Vec<String>) -> Result<Vec<crate::types::BatchGetItemResult>> {
         match self.execute_cmd(Command::KvBatchGet {
             branch: self.branch_id(),
             space: self.space_id(),
@@ -233,10 +230,7 @@ impl Strata {
     /// Batch delete multiple keys in a single transaction.
     ///
     /// Returns per-item results positionally mapped to the input keys.
-    pub fn kv_batch_delete(
-        &self,
-        keys: Vec<String>,
-    ) -> Result<Vec<crate::types::BatchItemResult>> {
+    pub fn kv_batch_delete(&self, keys: Vec<String>) -> Result<Vec<crate::types::BatchItemResult>> {
         match self.execute_cmd(Command::KvBatchDelete {
             branch: self.branch_id(),
             space: self.space_id(),
