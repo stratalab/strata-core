@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use strata_concurrency::RecoveryCoordinator;
-use strata_durability::codec::IdentityCodec;
 use strata_durability::wal::{DurabilityMode, WalConfig, WalWriter};
 use strata_durability::ManifestManager;
 use strata_storage::SegmentedStore;
@@ -398,6 +397,28 @@ impl Database {
         cfg: StrataConfig,
         lock_file: Option<std::fs::File>,
     ) -> StrataResult<Arc<Self>> {
+        // Validate the configured codec exists before touching any state.
+        // This prevents creating a MANIFEST with an invalid codec_id.
+        strata_durability::get_codec(&cfg.storage.codec).map_err(|e| {
+            StrataError::internal(format!(
+                "invalid storage codec '{}': {}",
+                cfg.storage.codec, e
+            ))
+        })?;
+
+        // WAL recovery does not yet support non-identity codecs — the WalReader
+        // parses raw bytes without codec decoding. Encrypted WAL records would be
+        // unreadable on restart, causing data loss. Block until WAL codec support
+        // is implemented (requires length-prefix envelope + reader codec threading).
+        if cfg.storage.codec != "identity" && durability_mode.requires_wal() {
+            return Err(StrataError::internal(format!(
+                "codec '{}' is not yet supported with WAL-based durability (Standard/Always). \
+                 Encryption at rest requires WAL reader codec support (tracked). \
+                 Use durability = \"cache\" for encrypted in-memory databases.",
+                cfg.storage.codec
+            )));
+        }
+
         // Create WAL directory
         let wal_dir = canonical_path.join("wal");
         std::fs::create_dir_all(&wal_dir).map_err(StrataError::from)?;
@@ -440,19 +461,32 @@ impl Database {
         );
 
         // Load or create MANIFEST to get the database UUID.
-        // On first open: generate a new UUID and persist it.
-        // On subsequent opens: load the existing UUID from disk.
+        // On first open: generate a new UUID and persist it with the configured codec.
+        // On subsequent opens: load the existing UUID and validate codec matches.
         let manifest_path = canonical_path.join("MANIFEST");
         let database_uuid = if ManifestManager::exists(&manifest_path) {
             let m = ManifestManager::load(manifest_path)
                 .map_err(|e| StrataError::internal(format!("failed to load MANIFEST: {}", e)))?;
+            let stored_codec = &m.manifest().codec_id;
+            if stored_codec != &cfg.storage.codec {
+                return Err(StrataError::internal(format!(
+                    "codec mismatch: database was created with '{}' but config specifies '{}'. \
+                     A database cannot be reopened with a different codec.",
+                    stored_codec, cfg.storage.codec
+                )));
+            }
             m.manifest().database_uuid
         } else {
             let uuid = *uuid::Uuid::new_v4().as_bytes();
-            ManifestManager::create(manifest_path, uuid, "identity".to_string())
+            ManifestManager::create(manifest_path, uuid, cfg.storage.codec.clone())
                 .map_err(|e| StrataError::internal(format!("failed to create MANIFEST: {}", e)))?;
             uuid
         };
+
+        // Instantiate the configured storage codec (identity or aes-gcm-256)
+        let codec = strata_durability::get_codec(&cfg.storage.codec).map_err(|e| {
+            StrataError::internal(format!("failed to initialize storage codec: {}", e))
+        })?;
 
         // Open segmented WAL writer for appending
         let wal_writer = WalWriter::new(
@@ -460,7 +494,7 @@ impl Database {
             database_uuid,
             durability_mode,
             WalConfig::default(),
-            Box::new(IdentityCodec),
+            codec,
         )?;
 
         let wal_watermark = AtomicU64::new(result.stats.max_txn_id);

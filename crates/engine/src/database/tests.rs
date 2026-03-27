@@ -2411,3 +2411,99 @@ fn test_issue_1924_write_stall_timeout_manual_commit() {
         db.storage().max_l0_segment_count()
     );
 }
+
+#[test]
+fn test_issue_1380_default_codec_is_identity() {
+    // Verify that the default codec is "identity" and the MANIFEST records it.
+    let temp_dir = TempDir::new().unwrap();
+    let db = Database::open(temp_dir.path()).unwrap();
+    drop(db);
+
+    // Verify MANIFEST stores "identity" codec
+    let manifest_path = temp_dir.path().join("MANIFEST");
+    let m = strata_durability::ManifestManager::load(manifest_path).unwrap();
+    assert_eq!(m.manifest().codec_id, "identity");
+}
+
+#[test]
+fn test_issue_1380_codec_mismatch_rejected() {
+    // A database created with "identity" must reject reopen with a different codec.
+    // Use Cache mode to bypass the WAL-not-supported guard (encryption works in
+    // Cache mode, WAL codec support is pending).
+    let temp_dir = TempDir::new().unwrap();
+
+    // First open with Cache mode: creates MANIFEST with "identity"
+    {
+        let cfg = StrataConfig::default();
+        let db = Database::open_internal(temp_dir.path(), DurabilityMode::Cache, cfg).unwrap();
+        drop(db);
+    }
+
+    // Second open with mismatched codec in Cache mode: must fail with codec mismatch
+    // (We need the env var set so get_codec validation passes before hitting the
+    // MANIFEST mismatch check)
+    std::env::set_var(
+        "STRATA_ENCRYPTION_KEY",
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    );
+    let cfg = StrataConfig {
+        storage: StorageConfig {
+            codec: "aes-gcm-256".to_string(),
+            ..StorageConfig::default()
+        },
+        ..StrataConfig::default()
+    };
+    let result = Database::open_internal(temp_dir.path(), DurabilityMode::Cache, cfg);
+    std::env::remove_var("STRATA_ENCRYPTION_KEY");
+
+    match result {
+        Err(e) => {
+            let err = e.to_string();
+            assert!(
+                err.contains("codec mismatch"),
+                "error should mention codec mismatch: {}",
+                err
+            );
+        }
+        Ok(_) => panic!("should reject codec mismatch"),
+    }
+}
+
+#[test]
+fn test_issue_1380_encryption_rejected_with_wal() {
+    // Non-identity codecs must be rejected when WAL recovery is required,
+    // because the WalReader does not yet support codec decoding.
+    let temp_dir = TempDir::new().unwrap();
+    std::env::set_var(
+        "STRATA_ENCRYPTION_KEY",
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    );
+    let cfg = StrataConfig {
+        storage: StorageConfig {
+            codec: "aes-gcm-256".to_string(),
+            ..StorageConfig::default()
+        },
+        ..StrataConfig::default()
+    };
+    let result = Database::open_internal(
+        temp_dir.path(),
+        DurabilityMode::Standard {
+            interval_ms: 100,
+            batch_size: 1000,
+        },
+        cfg,
+    );
+    std::env::remove_var("STRATA_ENCRYPTION_KEY");
+
+    match result {
+        Err(e) => {
+            let err = e.to_string();
+            assert!(
+                err.contains("not yet supported with WAL"),
+                "error should mention WAL limitation: {}",
+                err
+            );
+        }
+        Ok(_) => panic!("should reject encryption with WAL-based durability"),
+    }
+}

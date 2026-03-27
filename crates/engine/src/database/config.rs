@@ -115,6 +115,15 @@ pub struct StorageConfig {
     /// Default: 30000 (30 seconds). Set to 0 for unlimited (not recommended).
     #[serde(default = "default_write_stall_timeout_ms")]
     pub write_stall_timeout_ms: u64,
+    /// Storage codec for encryption at rest. Default: "identity" (no encryption).
+    /// Set to "aes-gcm-256" for AES-256-GCM authenticated encryption.
+    /// When using "aes-gcm-256", set the `STRATA_ENCRYPTION_KEY` environment
+    /// variable to a 64-character hex string (32 bytes).
+    ///
+    /// **Warning:** A database created with one codec cannot be opened with a
+    /// different codec — the MANIFEST records the codec ID and validates on open.
+    #[serde(default = "default_codec")]
+    pub codec: String,
 }
 
 fn default_max_branches() -> usize {
@@ -167,6 +176,10 @@ fn default_write_stall_timeout_ms() -> u64 {
     30_000 // 30 seconds
 }
 
+fn default_codec() -> String {
+    "identity".to_string()
+}
+
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
@@ -185,6 +198,7 @@ impl Default for StorageConfig {
             bloom_bits_per_key: default_bloom_bits_per_key(),
             compaction_rate_limit: 0,
             write_stall_timeout_ms: default_write_stall_timeout_ms(),
+            codec: default_codec(),
         }
     }
 }
