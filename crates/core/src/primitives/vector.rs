@@ -1275,8 +1275,12 @@ mod tests {
 
     #[test]
     fn test_storage_dtype_from_byte_reserved_values() {
-        // Bytes 1+ are reserved for future F16/Int8
-        for b in 1..=255u8 {
+        // Byte 1 is reserved for future F16
+        assert!(StorageDtype::from_byte(1).is_none());
+        // Byte 2 is Int8
+        assert_eq!(StorageDtype::from_byte(2), Some(StorageDtype::Int8));
+        // Bytes 3+ are reserved
+        for b in 3..=255u8 {
             assert!(
                 StorageDtype::from_byte(b).is_none(),
                 "Byte {} should not map to a dtype",
