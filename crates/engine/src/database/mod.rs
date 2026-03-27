@@ -253,6 +253,11 @@ pub struct Database {
     /// Data directory path (empty for ephemeral databases)
     data_dir: PathBuf,
 
+    /// Unique identifier for this database instance, persisted in MANIFEST.
+    /// Used by WAL and checkpoint to detect cross-database file contamination.
+    /// Ephemeral databases use all-zeros (no persistence).
+    database_uuid: [u8; 16],
+
     /// Segmented storage with O(1) lazy snapshots (thread-safe)
     storage: Arc<SegmentedStore>,
 
@@ -497,6 +502,11 @@ impl Database {
     /// Returns an empty path for ephemeral (cache) databases.
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    /// Returns the unique database identifier persisted in MANIFEST.
+    pub fn database_uuid(&self) -> [u8; 16] {
+        self.database_uuid
     }
 
     /// Returns `true` if this database was opened in read-only follower mode.

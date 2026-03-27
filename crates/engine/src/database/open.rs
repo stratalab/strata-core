@@ -12,6 +12,7 @@ use std::time::Instant;
 use strata_concurrency::RecoveryCoordinator;
 use strata_durability::codec::IdentityCodec;
 use strata_durability::wal::{DurabilityMode, WalConfig, WalWriter};
+use strata_durability::ManifestManager;
 use strata_storage::SegmentedStore;
 use tracing::{info, warn};
 
@@ -269,8 +270,19 @@ impl Database {
 
         Self::recover_segments_and_bump(&storage, &coordinator, cfg.allow_lossy_recovery)?;
 
+        // Load database UUID from MANIFEST if it exists (read-only, no create)
+        let manifest_path = canonical_path.join("MANIFEST");
+        let database_uuid = if ManifestManager::exists(&manifest_path) {
+            ManifestManager::load(manifest_path)
+                .map(|m| m.manifest().database_uuid)
+                .unwrap_or([0u8; 16])
+        } else {
+            [0u8; 16]
+        };
+
         let db = Arc::new(Self {
             data_dir: canonical_path,
+            database_uuid,
             storage,
             wal_writer: None, // No WAL writer — read-only
             persistence_mode: PersistenceMode::Disk,
@@ -427,10 +439,25 @@ impl Database {
             "Recovery complete"
         );
 
+        // Load or create MANIFEST to get the database UUID.
+        // On first open: generate a new UUID and persist it.
+        // On subsequent opens: load the existing UUID from disk.
+        let manifest_path = canonical_path.join("MANIFEST");
+        let database_uuid = if ManifestManager::exists(&manifest_path) {
+            let m = ManifestManager::load(manifest_path)
+                .map_err(|e| StrataError::internal(format!("failed to load MANIFEST: {}", e)))?;
+            m.manifest().database_uuid
+        } else {
+            let uuid = *uuid::Uuid::new_v4().as_bytes();
+            ManifestManager::create(manifest_path, uuid, "identity".to_string())
+                .map_err(|e| StrataError::internal(format!("failed to create MANIFEST: {}", e)))?;
+            uuid
+        };
+
         // Open segmented WAL writer for appending
         let wal_writer = WalWriter::new(
             wal_dir.clone(),
-            [0u8; 16], // database UUID placeholder
+            database_uuid,
             durability_mode,
             WalConfig::default(),
             Box::new(IdentityCodec),
@@ -473,6 +500,7 @@ impl Database {
 
         let db = Arc::new(Self {
             data_dir: canonical_path.clone(),
+            database_uuid,
             storage,
             wal_writer: Some(wal_arc),
             persistence_mode: PersistenceMode::Disk,
@@ -553,6 +581,7 @@ impl Database {
 
         let db = Arc::new(Self {
             data_dir: PathBuf::new(), // Empty path for ephemeral
+            database_uuid: [0u8; 16], // No persistence — UUID not needed
             storage: Arc::new(storage),
             wal_writer: None, // No WAL for ephemeral
             persistence_mode: PersistenceMode::Ephemeral,

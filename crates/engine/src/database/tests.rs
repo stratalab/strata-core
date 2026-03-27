@@ -2266,3 +2266,41 @@ fn test_issue_1914_sequence_from_persisted_meta() {
     }
     db.end_transaction(txn3);
 }
+
+#[test]
+fn test_issue_1551_database_uuid_is_nonzero() {
+    // Verify that a disk-backed database gets a real UUID, not all-zeros.
+    let temp_dir = TempDir::new().unwrap();
+    let db = Database::open(temp_dir.path()).unwrap();
+    let uuid = db.database_uuid();
+    assert_ne!(
+        uuid, [0u8; 16],
+        "disk-backed database must have a non-zero UUID"
+    );
+}
+
+#[test]
+fn test_issue_1551_database_uuid_persists_across_reopen() {
+    // Verify that the UUID is stable across close/reopen.
+    let temp_dir = TempDir::new().unwrap();
+
+    let uuid_first = {
+        let db = Database::open(temp_dir.path()).unwrap();
+        db.database_uuid()
+    };
+    assert_ne!(uuid_first, [0u8; 16]);
+
+    // Reopen — should get the same UUID from MANIFEST
+    let uuid_second = {
+        let db = Database::open(temp_dir.path()).unwrap();
+        db.database_uuid()
+    };
+    assert_eq!(uuid_first, uuid_second, "UUID must persist across reopen");
+}
+
+#[test]
+fn test_issue_1551_cache_database_uuid_is_zero() {
+    // Ephemeral databases have no persistence, so UUID is all-zeros.
+    let db = Database::cache().unwrap();
+    assert_eq!(db.database_uuid(), [0u8; 16]);
+}
