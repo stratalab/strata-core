@@ -276,7 +276,18 @@ pub trait VectorIndexBackend:
     fn config(&self) -> VectorConfig;
 
     /// Get a vector by ID (for metadata lookups after search)
+    ///
+    /// Returns None for quantized (Int8) heaps — use `get_f32_owned()` instead.
     fn get(&self, id: VectorId) -> Option<&[f32]>;
+
+    /// Get an owned f32 embedding (cold path, allocates).
+    ///
+    /// For F32 heaps: clones the stored slice.
+    /// For Int8 heaps: dequantizes u8 → f32.
+    /// Used by snapshot serialization and embedding retrieval APIs.
+    fn get_f32_owned(&self, id: VectorId) -> Option<Vec<f32>> {
+        self.get(id).map(|s| s.to_vec())
+    }
 
     /// Check if a vector exists
     fn contains(&self, id: VectorId) -> bool;

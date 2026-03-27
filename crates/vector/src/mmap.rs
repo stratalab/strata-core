@@ -32,6 +32,7 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::error::VectorError;
+use crate::quantize::QuantizationParams;
 use crate::types::VectorId;
 
 /// Magic bytes identifying a Strata vector mmap file
@@ -337,6 +338,14 @@ impl MmapVectorData {
     pub(crate) fn dimension(&self) -> usize {
         self.dimension
     }
+
+    /// Get quantization parameters (if stored in the mmap file).
+    ///
+    /// Currently always returns None — quantized mmap format will be
+    /// implemented in Phase 6.
+    pub(crate) fn quant_params(&self) -> Option<QuantizationParams> {
+        None
+    }
 }
 
 /// Write a vector heap to an mmap-compatible file.
@@ -404,6 +413,89 @@ pub(crate) fn write_mmap_file(
     fs::rename(&temp_path, path).map_err(|e| VectorError::Io(e.to_string()))?;
 
     // fsync parent directory so the rename is durable on Linux/ext4
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+
+    Ok(())
+}
+
+/// Write a quantized (Int8) vector heap to an mmap-compatible file.
+///
+/// Format is similar to the F32 version but stores u8 embeddings and
+/// includes quantization parameters after the free slots section:
+/// ```text
+/// [header: same as F32]
+/// [id_to_offset entries]
+/// [free_slots]
+/// [quant_params_len u32 LE] [quant_params bytes]
+/// [embeddings: contiguous u8 data]
+/// ```
+pub(crate) fn write_mmap_file_quantized(
+    path: &Path,
+    dimension: usize,
+    next_id: u64,
+    id_to_offset: &BTreeMap<VectorId, usize>,
+    free_slots: &[usize],
+    raw_data: &[u8],
+    quant_params: &QuantizationParams,
+) -> Result<(), VectorError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| VectorError::Io(e.to_string()))?;
+    }
+
+    let temp_path = path.with_extension("vec.tmp");
+    let mut file = File::create(&temp_path).map_err(|e| VectorError::Io(e.to_string()))?;
+    fs2::FileExt::lock_exclusive(&file)
+        .map_err(|e| VectorError::Io(format!("failed to lock {}: {e}", temp_path.display())))?;
+
+    // Header (same layout as F32)
+    file.write_all(MAGIC)
+        .map_err(|e| VectorError::Io(e.to_string()))?;
+    file.write_all(&VERSION.to_le_bytes())
+        .map_err(|e| VectorError::Io(e.to_string()))?;
+    file.write_all(&(dimension as u32).to_le_bytes())
+        .map_err(|e| VectorError::Io(e.to_string()))?;
+    file.write_all(&(id_to_offset.len() as u64).to_le_bytes())
+        .map_err(|e| VectorError::Io(e.to_string()))?;
+    file.write_all(&next_id.to_le_bytes())
+        .map_err(|e| VectorError::Io(e.to_string()))?;
+
+    // id_to_offset entries
+    for (&id, &offset) in id_to_offset {
+        file.write_all(&id.as_u64().to_le_bytes())
+            .map_err(|e| VectorError::Io(e.to_string()))?;
+        file.write_all(&(offset as u64).to_le_bytes())
+            .map_err(|e| VectorError::Io(e.to_string()))?;
+    }
+
+    // Free slots
+    file.write_all(&(free_slots.len() as u32).to_le_bytes())
+        .map_err(|e| VectorError::Io(e.to_string()))?;
+    for &slot in free_slots {
+        file.write_all(&(slot as u64).to_le_bytes())
+            .map_err(|e| VectorError::Io(e.to_string()))?;
+    }
+
+    // Quantization parameters
+    let qp_bytes = quant_params.to_bytes();
+    file.write_all(&(qp_bytes.len() as u32).to_le_bytes())
+        .map_err(|e| VectorError::Io(e.to_string()))?;
+    file.write_all(&qp_bytes)
+        .map_err(|e| VectorError::Io(e.to_string()))?;
+
+    // Embeddings (raw u8 data)
+    file.write_all(raw_data)
+        .map_err(|e| VectorError::Io(e.to_string()))?;
+
+    file.sync_all()
+        .map_err(|e| VectorError::Io(e.to_string()))?;
+    drop(file);
+
+    fs::rename(&temp_path, path).map_err(|e| VectorError::Io(e.to_string()))?;
+
     if let Some(parent) = path.parent() {
         if let Ok(dir) = fs::File::open(parent) {
             let _ = dir.sync_all();

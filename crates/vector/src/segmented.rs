@@ -27,7 +27,6 @@ use once_cell::sync::Lazy;
 use rayon::prelude::*;
 
 use crate::backend::{InlineMetaCapable, MmapCapable, SegmentCapable, VectorIndexBackend};
-use crate::distance::compute_similarity_cached;
 use crate::heap::VectorHeap;
 use crate::hnsw::{CompactHnswGraph, HnswConfig, HnswGraph};
 use crate::types::InlineMeta;
@@ -331,8 +330,7 @@ impl SegmentedHnswBackend {
                     "Sealing active buffer"
                 );
             }
-            if let Some(embedding) = self.heap.get(id) {
-                let embedding = embedding.to_vec();
+            if let Some(embedding) = self.heap.get_f32_owned(id) {
                 let created_at = timestamps.get(&id).map(|t| t.0).unwrap_or(0);
                 graph.insert_into_graph(id, &embedding, created_at, &self.heap);
                 // Apply soft-delete if marked
@@ -499,14 +497,7 @@ impl SegmentedHnswBackend {
             if idx + 1 < ids.len() {
                 self.heap.prefetch_embedding(ids[idx + 1]);
             }
-            if let Some(embedding) = self.heap.get(id) {
-                let score = compute_similarity_cached(
-                    query,
-                    embedding,
-                    metric,
-                    q_norm,
-                    self.heap.get_norm(id),
-                );
+            if let Some(score) = self.heap.distance_to(query, id, metric, q_norm) {
                 let entry = ActiveScored { score, id };
                 if top_k.len() < k {
                     top_k.push(Reverse(entry));
@@ -560,14 +551,7 @@ impl SegmentedHnswBackend {
                     continue;
                 }
             }
-            if let Some(embedding) = self.heap.get(id) {
-                let score = compute_similarity_cached(
-                    query,
-                    embedding,
-                    metric,
-                    q_norm,
-                    self.heap.get_norm(id),
-                );
+            if let Some(score) = self.heap.distance_to(query, id, metric, q_norm) {
                 let entry = ActiveScored { score, id };
                 if top_k.len() < k {
                     top_k.push(Reverse(entry));
@@ -622,14 +606,7 @@ impl SegmentedHnswBackend {
             if deleted_at.is_some() {
                 continue;
             }
-            if let Some(embedding) = self.heap.get(id) {
-                let score = compute_similarity_cached(
-                    query,
-                    embedding,
-                    metric,
-                    q_norm,
-                    self.heap.get_norm(id),
-                );
+            if let Some(score) = self.heap.distance_to(query, id, metric, q_norm) {
                 let entry = ActiveScored { score, id };
                 if top_k.len() < k {
                     top_k.push(Reverse(entry));
@@ -1039,8 +1016,7 @@ impl SegmentCapable for SegmentedHnswBackend {
                                 "Rebuilding index segment"
                             );
                         }
-                        if let Some(embedding) = self.heap.get(id) {
-                            let embedding = embedding.to_vec();
+                        if let Some(embedding) = self.heap.get_f32_owned(id) {
                             let created_at = all_timestamps.get(&id).map(|t| t.0).unwrap_or(0);
                             graph.insert_into_graph(id, &embedding, created_at, &self.heap);
                             if let Some(&(_, Some(deleted_at))) = all_timestamps.get(&id) {
@@ -1091,8 +1067,7 @@ impl SegmentCapable for SegmentedHnswBackend {
         let mut live_count = 0;
 
         for &id in &live_ids {
-            if let Some(embedding) = self.heap.get(id) {
-                let embedding = embedding.to_vec();
+            if let Some(embedding) = self.heap.get_f32_owned(id) {
                 let created_at = timestamps.get(&id).map(|t| t.0).unwrap_or(0);
                 graph.insert_into_graph(id, &embedding, created_at, &self.heap);
                 if let Some(&(_, Some(deleted_at))) = timestamps.get(&id) {
@@ -1151,8 +1126,7 @@ impl SegmentCapable for SegmentedHnswBackend {
                     "Compacting segments"
                 );
             }
-            if let Some(emb) = self.heap.get(id) {
-                let emb = emb.to_vec();
+            if let Some(emb) = self.heap.get_f32_owned(id) {
                 let created_at = timestamps.get(&id).copied().unwrap_or(0);
                 graph.insert_into_graph(id, &emb, created_at, &self.heap);
                 live_count += 1;
@@ -1431,6 +1405,10 @@ impl VectorIndexBackend for SegmentedHnswBackend {
 
     fn get(&self, id: VectorId) -> Option<&[f32]> {
         self.heap.get(id)
+    }
+
+    fn get_f32_owned(&self, id: VectorId) -> Option<Vec<f32>> {
+        self.heap.get_f32_owned(id)
     }
 
     fn contains(&self, id: VectorId) -> bool {

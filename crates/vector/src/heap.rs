@@ -14,9 +14,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::distance::{compute_asymmetric_similarity, compute_similarity_cached};
 use crate::error::{VectorError, VectorResult};
 use crate::mmap::{self, MmapVectorData};
-use crate::types::{DistanceMetric, InlineMeta, VectorConfig, VectorId};
+use crate::quantize::{self, QuantizationParams};
+use crate::types::{DistanceMetric, InlineMeta, StorageDtype, VectorConfig, VectorId};
 
 /// Backing storage for vector embeddings.
 ///
@@ -39,6 +41,9 @@ pub(crate) enum VectorData {
         /// Free slots within the overlay Vec.
         overlay_free_slots: Vec<usize>,
     },
+    /// Quantized u8 storage (SQ8). Each vector is `dimension` bytes.
+    /// Offsets in id_to_offset are in u8 elements (= byte offsets within the Vec).
+    InMemoryQuantized(Vec<u8>),
 }
 
 /// Sentinel value indicating absent entry in dense_offsets.
@@ -113,6 +118,14 @@ pub struct VectorHeap {
     /// Inline metadata for O(1) search resolution (VectorId → key + source_ref).
     /// Populated during insert and recovery, queried during search.
     inline_meta: BTreeMap<VectorId, InlineMeta>,
+
+    /// Quantization parameters (only used when config.storage_dtype == Int8).
+    /// None for F32 heaps.
+    quant_params: Option<QuantizationParams>,
+
+    /// Number of calibration samples seen (Int8 only, pre-calibration).
+    /// None for F32 heaps or after calibration completes.
+    calibration_samples: Option<usize>,
 }
 
 impl VectorHeap {
@@ -121,7 +134,14 @@ impl VectorHeap {
     /// Note: next_id starts at 1, not 0, to match expected VectorId semantics
     /// where IDs are positive integers.
     pub fn new(config: VectorConfig) -> Self {
+        let is_int8 = config.storage_dtype == StorageDtype::Int8;
         VectorHeap {
+            quant_params: if is_int8 {
+                Some(QuantizationParams::new(config.dimension))
+            } else {
+                None
+            },
+            calibration_samples: if is_int8 { Some(0) } else { None },
             config,
             data: VectorData::InMemory(Vec::new()),
             id_to_offset: BTreeMap::new(),
@@ -145,9 +165,47 @@ impl VectorHeap {
         free_slots: Vec<usize>,
         next_id: u64,
     ) -> Self {
+        let is_int8 = config.storage_dtype == StorageDtype::Int8;
+
+        // For Int8: quantize the f32 snapshot data into u8 storage.
+        // If the collection is empty, stay in calibration mode so new inserts work.
+        let (vector_data, quant_params, cal_samples) = if is_int8 {
+            let dim = config.dimension;
+            if id_to_offset.is_empty() {
+                // Empty collection — stay in f32 calibration mode
+                (
+                    VectorData::InMemory(data),
+                    Some(QuantizationParams::new(dim)),
+                    Some(0),
+                )
+            } else {
+                let mut params = QuantizationParams::new(dim);
+                for &offset in id_to_offset.values() {
+                    if offset + dim <= data.len() {
+                        params.update_calibration(&data[offset..offset + dim]);
+                    }
+                }
+                params.finalize_calibration();
+                let total_slots = data.len() / dim;
+                let mut q_data = vec![0u8; total_slots * dim];
+                for (&_id, &offset) in &id_to_offset {
+                    if offset + dim <= data.len() {
+                        // Offset is slot_number * dim — same for both f32 and u8 layouts
+                        params.quantize_into(
+                            &data[offset..offset + dim],
+                            &mut q_data[offset..offset + dim],
+                        );
+                    }
+                }
+                (VectorData::InMemoryQuantized(q_data), Some(params), None)
+            }
+        } else {
+            (VectorData::InMemory(data), None, None)
+        };
+
         let mut heap = VectorHeap {
             config,
-            data: VectorData::InMemory(data),
+            data: vector_data,
             id_to_offset,
             dense_offsets: Vec::new(),
             norms: Vec::new(),
@@ -155,6 +213,8 @@ impl VectorHeap {
             next_id: AtomicU64::new(next_id),
             version: AtomicU64::new(0),
             inline_meta: BTreeMap::new(),
+            quant_params,
+            calibration_samples: cal_samples,
         };
         heap.rebuild_dense_index();
         heap
@@ -169,6 +229,7 @@ impl VectorHeap {
         let id_to_offset = mmap_data.id_to_offset(); // returns owned BTreeMap
         let free_slots = mmap_data.free_slots().to_vec();
         let next_id = mmap_data.next_id();
+        let quant_params = mmap_data.quant_params();
         let mut heap = VectorHeap {
             config,
             data: VectorData::Mmap(mmap_data),
@@ -179,6 +240,8 @@ impl VectorHeap {
             next_id: AtomicU64::new(next_id),
             version: AtomicU64::new(0),
             inline_meta: BTreeMap::new(),
+            quant_params,
+            calibration_samples: None,
         };
         heap.rebuild_dense_index();
         Ok(heap)
@@ -346,6 +409,61 @@ impl VectorHeap {
                 }
                 self.norms[idx] = compute_l2_norm(embedding);
             }
+            VectorData::InMemoryQuantized(vec) => {
+                let params = self
+                    .quant_params
+                    .as_ref()
+                    .expect("InMemoryQuantized requires quant_params");
+                if let Some(&offset) = self.id_to_offset.get(&id) {
+                    // Update in place
+                    params.quantize_into(embedding, &mut vec[offset..offset + dim]);
+                    let idx = id.0 as usize;
+                    if idx < self.norms.len() {
+                        self.norms[idx] = compute_l2_norm(embedding);
+                    }
+                } else {
+                    let offset = if let Some(slot) = self.free_slots.pop() {
+                        params.quantize_into(embedding, &mut vec[slot..slot + dim]);
+                        slot
+                    } else {
+                        let offset = vec.len();
+                        let mut buf = vec![0u8; dim];
+                        params.quantize_into(embedding, &mut buf);
+                        vec.extend_from_slice(&buf);
+                        offset
+                    };
+                    self.id_to_offset.insert(id, offset);
+                    let idx = id.0 as usize;
+                    let slot_number = (offset / dim) as u32;
+                    if idx >= self.dense_offsets.len() {
+                        self.dense_offsets.resize(idx + 1, DENSE_ABSENT);
+                    }
+                    self.dense_offsets[idx] = slot_number;
+                    if idx >= self.norms.len() {
+                        self.norms.resize(idx + 1, 0.0);
+                    }
+                    self.norms[idx] = compute_l2_norm(embedding);
+                }
+            }
+        }
+
+        // Int8 calibration tracking: during calibration phase (data is still InMemory),
+        // update calibration params and count. Auto-finalize when threshold reached.
+        if self.config.storage_dtype == StorageDtype::Int8 {
+            if let Some(ref mut count) = self.calibration_samples {
+                if let Some(ref mut params) = self.quant_params {
+                    if !params.calibrated {
+                        params.update_calibration(embedding);
+                        *count += 1;
+                        if *count >= quantize::DEFAULT_CALIBRATION_THRESHOLD {
+                            // Auto-finalize — this transitions data to InMemoryQuantized
+                            self.version.fetch_add(1, Ordering::Release);
+                            self.finalize_calibration_inner();
+                            return Ok(());
+                        }
+                    }
+                }
+            }
         }
 
         self.version.fetch_add(1, Ordering::Release);
@@ -460,6 +578,24 @@ impl VectorHeap {
                 self.version.fetch_add(1, Ordering::Release);
                 true
             }
+            VectorData::InMemoryQuantized(v) => {
+                if let Some(offset) = self.id_to_offset.remove(&id) {
+                    self.free_slots.push(offset);
+                    let dim = self.config.dimension;
+                    v[offset..offset + dim].fill(0);
+                    let idx = id.0 as usize;
+                    if idx < self.dense_offsets.len() {
+                        self.dense_offsets[idx] = DENSE_ABSENT;
+                    }
+                    if idx < self.norms.len() {
+                        self.norms[idx] = 0.0;
+                    }
+                    self.version.fetch_add(1, Ordering::Release);
+                    true
+                } else {
+                    false
+                }
+            }
         }
     }
 
@@ -478,8 +614,237 @@ impl VectorHeap {
         self.norms.clear();
         self.free_slots.clear();
         self.inline_meta.clear();
+        if self.config.storage_dtype == StorageDtype::Int8 {
+            self.quant_params = Some(QuantizationParams::new(self.config.dimension));
+            self.calibration_samples = Some(0);
+        }
         // Note: next_id is NOT reset — IDs are never reused
         self.version.fetch_add(1, Ordering::Release);
+    }
+
+    // ========================================================================
+    // Quantization Calibration
+    // ========================================================================
+
+    /// Finalize calibration: quantize all buffered vectors and transition
+    /// from InMemory(f32) to InMemoryQuantized(u8).
+    ///
+    /// Called automatically when calibration sample count reaches the threshold,
+    /// or explicitly (e.g., when sealing active buffer or on first search).
+    pub fn finalize_calibration(&mut self) {
+        if self.config.storage_dtype != StorageDtype::Int8 {
+            return;
+        }
+        if self.quant_params.as_ref().map_or(true, |p| p.calibrated) {
+            return; // Already calibrated or no params
+        }
+        self.finalize_calibration_inner();
+    }
+
+    fn finalize_calibration_inner(&mut self) {
+        let params = self.quant_params.as_mut().expect("must have quant_params");
+        params.finalize_calibration();
+
+        // Quantize all existing vectors from the f32 data
+        let dim = self.config.dimension;
+        match &self.data {
+            VectorData::InMemory(f32_data) => {
+                let total_elements = f32_data.len();
+                // f32 data has N slots of `dim` f32 each.
+                // Quantized data has N slots of `dim` u8 each.
+                let slot_count = total_elements / dim;
+                let mut q_data = vec![0u8; slot_count * dim];
+                let params_ref = self.quant_params.as_ref().unwrap();
+                for (&_id, &offset) in &self.id_to_offset {
+                    if offset + dim <= f32_data.len() {
+                        params_ref.quantize_into(
+                            &f32_data[offset..offset + dim],
+                            &mut q_data[offset..offset + dim],
+                        );
+                    }
+                }
+                self.data = VectorData::InMemoryQuantized(q_data);
+            }
+            _ => {
+                // Only InMemory → InMemoryQuantized transition is supported.
+                // Mmap/Tiered heaps should not reach this path.
+                debug_assert!(
+                    false,
+                    "finalize_calibration_inner called on non-InMemory heap"
+                );
+            }
+        }
+
+        self.calibration_samples = None;
+        // Rebuild dense index + norms for the new quantized data
+        self.rebuild_dense_index();
+    }
+
+    /// Whether calibration is in progress (Int8 only).
+    pub fn is_calibrating(&self) -> bool {
+        self.calibration_samples.is_some()
+            && self
+                .quant_params
+                .as_ref()
+                .map_or(false, |p| !p.calibrated)
+    }
+
+    /// Get quantization parameters (if Int8).
+    pub fn quant_params(&self) -> Option<&QuantizationParams> {
+        self.quant_params.as_ref()
+    }
+
+    // ========================================================================
+    // Distance Computation (dtype-aware)
+    // ========================================================================
+
+    /// Compute similarity between a query vector and a stored vector.
+    ///
+    /// For F32 heaps: uses cached norms for cosine.
+    /// For Int8 heaps: uses asymmetric distance (f32 query vs u8 stored).
+    ///
+    /// Encapsulates storage format so callers don't need to know the dtype.
+    #[inline]
+    pub fn distance_to(
+        &self,
+        query: &[f32],
+        id: VectorId,
+        metric: DistanceMetric,
+        norm_query: Option<f32>,
+    ) -> Option<f32> {
+        match &self.data {
+            VectorData::InMemory(_) | VectorData::Mmap(_) | VectorData::Tiered { .. } => {
+                let embedding = self.get(id)?;
+                Some(compute_similarity_cached(
+                    query,
+                    embedding,
+                    metric,
+                    norm_query,
+                    self.get_norm(id),
+                ))
+            }
+            VectorData::InMemoryQuantized(vec) => {
+                let params = self.quant_params.as_ref()?;
+                let dim = self.config.dimension;
+                let idx = id.0 as usize;
+                let quantized = if idx < self.dense_offsets.len() {
+                    let slot = self.dense_offsets[idx];
+                    if slot == DENSE_ABSENT {
+                        return None;
+                    }
+                    let offset = slot as usize * dim;
+                    if offset + dim > vec.len() {
+                        return None;
+                    }
+                    &vec[offset..offset + dim]
+                } else {
+                    let offset = *self.id_to_offset.get(&id)?;
+                    if offset + dim > vec.len() {
+                        return None;
+                    }
+                    &vec[offset..offset + dim]
+                };
+                Some(compute_asymmetric_similarity(
+                    query,
+                    quantized,
+                    &params.mins,
+                    &params.scales,
+                    metric,
+                    norm_query,
+                    self.get_norm(id),
+                ))
+            }
+        }
+    }
+
+    /// Distance computation using pre-resolved slot (for CompactHnswGraph).
+    #[inline]
+    pub fn distance_to_by_slot(
+        &self,
+        query: &[f32],
+        slot: u32,
+        metric: DistanceMetric,
+        norm_query: Option<f32>,
+        norm_stored: Option<f32>,
+    ) -> Option<f32> {
+        if slot == DENSE_ABSENT {
+            return None;
+        }
+        let dim = self.config.dimension;
+        let offset = slot as usize * dim;
+        match &self.data {
+            VectorData::InMemory(vec) => {
+                if offset + dim > vec.len() {
+                    return None;
+                }
+                Some(compute_similarity_cached(
+                    query,
+                    &vec[offset..offset + dim],
+                    metric,
+                    norm_query,
+                    norm_stored,
+                ))
+            }
+            VectorData::Mmap(mmap) => {
+                let emb = mmap.get_by_offset(offset, dim)?;
+                Some(compute_similarity_cached(
+                    query, emb, metric, norm_query, norm_stored,
+                ))
+            }
+            VectorData::InMemoryQuantized(vec) => {
+                if offset + dim > vec.len() {
+                    return None;
+                }
+                let params = self.quant_params.as_ref()?;
+                Some(compute_asymmetric_similarity(
+                    query,
+                    &vec[offset..offset + dim],
+                    &params.mins,
+                    &params.scales,
+                    metric,
+                    norm_query,
+                    norm_stored,
+                ))
+            }
+            VectorData::Tiered { .. } => None, // Slot-based not supported for Tiered
+        }
+    }
+
+    /// Get a dequantized f32 embedding (cold path, allocates).
+    ///
+    /// For F32 heaps: clones the slice.
+    /// For Int8 heaps: dequantizes u8 → f32.
+    pub fn get_f32_owned(&self, id: VectorId) -> Option<Vec<f32>> {
+        match &self.data {
+            VectorData::InMemory(_) | VectorData::Mmap(_) | VectorData::Tiered { .. } => {
+                self.get(id).map(|s| s.to_vec())
+            }
+            VectorData::InMemoryQuantized(vec) => {
+                let params = self.quant_params.as_ref()?;
+                let dim = self.config.dimension;
+                let offset = *self.id_to_offset.get(&id)?;
+                if offset + dim > vec.len() {
+                    return None;
+                }
+                Some(params.dequantize(&vec[offset..offset + dim]))
+            }
+        }
+    }
+
+    /// Get quantized u8 embedding slice (for Int8 heaps only).
+    #[inline]
+    pub fn get_quantized(&self, id: VectorId) -> Option<&[u8]> {
+        match &self.data {
+            VectorData::InMemoryQuantized(vec) => {
+                let dim = self.config.dimension;
+                let offset = *self.id_to_offset.get(&id)?;
+                if offset + dim > vec.len() {
+                    return None;
+                }
+                Some(&vec[offset..offset + dim])
+            }
+            _ => None,
+        }
     }
 
     // ========================================================================
@@ -553,6 +918,10 @@ impl VectorHeap {
                 let _ = (base, overlay, overlay_id_to_offset);
                 None
             }
+            VectorData::InMemoryQuantized(_) => {
+                // For quantized heaps, use distance_to_by_slot() instead
+                None
+            }
         }
     }
 
@@ -581,29 +950,45 @@ impl VectorHeap {
             let slot = self.dense_offsets[idx];
             if slot != DENSE_ABSENT {
                 let offset = slot as usize * self.config.dimension;
-                if let VectorData::InMemory(vec) = &self.data {
-                    if offset < vec.len() {
-                        let ptr = vec[offset..].as_ptr() as *const u8;
-                        let embedding_bytes = self.config.dimension * 4; // f32 = 4 bytes
-                        crate::distance::prefetch_read(ptr);
-                        // Issue multiple cache line hints (64 bytes each) for large embeddings.
-                        // At 384d, each embedding is 1536 bytes (24 cache lines). Prefetching
-                        // the first 256 bytes gives the hardware prefetcher a head start.
-                        if embedding_bytes > 64 {
-                            // SAFETY: ptr points to an embedding of `embedding_bytes` size.
-                            // Each ptr.add(N) is guarded by `embedding_bytes > N`, ensuring
-                            // the target is within the embedding's allocation.
-                            unsafe {
-                                crate::distance::prefetch_read(ptr.add(64));
-                                if embedding_bytes > 128 {
-                                    crate::distance::prefetch_read(ptr.add(128));
-                                }
-                                if embedding_bytes > 192 {
-                                    crate::distance::prefetch_read(ptr.add(192));
+                match &self.data {
+                    VectorData::InMemory(vec) => {
+                        if offset < vec.len() {
+                            let ptr = vec[offset..].as_ptr() as *const u8;
+                            let embedding_bytes = self.config.dimension * 4; // f32 = 4 bytes
+                            crate::distance::prefetch_read(ptr);
+                            if embedding_bytes > 64 {
+                                unsafe {
+                                    crate::distance::prefetch_read(ptr.add(64));
+                                    if embedding_bytes > 128 {
+                                        crate::distance::prefetch_read(ptr.add(128));
+                                    }
+                                    if embedding_bytes > 192 {
+                                        crate::distance::prefetch_read(ptr.add(192));
+                                    }
                                 }
                             }
                         }
                     }
+                    VectorData::InMemoryQuantized(vec) => {
+                        // Quantized: dimension bytes (not dimension*4)
+                        if offset < vec.len() {
+                            let ptr = vec[offset..].as_ptr() as *const u8;
+                            crate::distance::prefetch_read(ptr);
+                            let embedding_bytes = self.config.dimension; // u8 = 1 byte
+                            if embedding_bytes > 64 {
+                                unsafe {
+                                    crate::distance::prefetch_read(ptr.add(64));
+                                    if embedding_bytes > 128 {
+                                        crate::distance::prefetch_read(ptr.add(128));
+                                    }
+                                    if embedding_bytes > 192 {
+                                        crate::distance::prefetch_read(ptr.add(192));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {} // Mmap/Tiered: no prefetch from dense path
                 }
             }
         }
@@ -678,6 +1063,18 @@ impl VectorHeap {
                     // dense_offsets stay DENSE_ABSENT for Tiered (not used)
                 }
             }
+            VectorData::InMemoryQuantized(vec) => {
+                let params = self.quant_params.as_ref();
+                for (idx, offset) in entries {
+                    let slot = (offset / dim) as u32;
+                    self.dense_offsets[idx] = slot;
+                    if let Some(p) = params {
+                        if offset + dim <= vec.len() {
+                            self.norms[idx] = p.quantized_l2_norm(&vec[offset..offset + dim]);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -745,6 +1142,11 @@ impl VectorHeap {
                 }
                 base.get(id)
             }
+            VectorData::InMemoryQuantized(_) => {
+                // Quantized heaps don't have f32 data.
+                // Use get_f32_owned() or get_quantized() instead.
+                None
+            }
         }
     }
 
@@ -783,6 +1185,9 @@ impl VectorHeap {
                             .expect("id_to_offset has stale entry (tiered base)")
                     }
                 }
+                VectorData::InMemoryQuantized(_) => {
+                    panic!("iter() not supported on quantized heap — use ids() + distance_to()")
+                }
             };
             (id, embedding)
         })
@@ -805,6 +1210,17 @@ impl VectorHeap {
             VectorData::InMemory(vec) => vec,
             VectorData::Mmap(_) => panic!("raw_data() not available on mmap-backed heap"),
             VectorData::Tiered { .. } => panic!("raw_data() not available on tiered heap"),
+            VectorData::InMemoryQuantized(_) => {
+                panic!("raw_data() not available on quantized heap")
+            }
+        }
+    }
+
+    /// Get raw quantized u8 data (for mmap serialization).
+    pub fn raw_quantized_data(&self) -> Option<&[u8]> {
+        match &self.data {
+            VectorData::InMemoryQuantized(vec) => Some(vec),
+            _ => None,
         }
     }
 
@@ -899,6 +1315,32 @@ impl VectorHeap {
                     &merged_data,
                 )
             }
+            VectorData::InMemoryQuantized(q_vec) => {
+                // Dequantize to f32 for mmap persistence — MmapVectorData::open()
+                // only reads f32 format. On reload, from_mmap() will re-quantize.
+                let params = self
+                    .quant_params
+                    .as_ref()
+                    .expect("Int8 requires quant_params");
+                let dim = self.config.dimension;
+                let mut f32_data = vec![0.0f32; q_vec.len()];
+                for (&_id, &offset) in &self.id_to_offset {
+                    if offset + dim <= q_vec.len() {
+                        params.dequantize_into(
+                            &q_vec[offset..offset + dim],
+                            &mut f32_data[offset..offset + dim],
+                        );
+                    }
+                }
+                mmap::write_mmap_file(
+                    path,
+                    dim,
+                    self.next_id.load(Ordering::Relaxed),
+                    &self.id_to_offset,
+                    &self.free_slots,
+                    &f32_data,
+                )
+            }
         }
     }
 
@@ -959,6 +1401,7 @@ impl VectorHeap {
             VectorData::InMemory(v) => v.len() * std::mem::size_of::<f32>(),
             VectorData::Mmap(_) => 0,
             VectorData::Tiered { overlay, .. } => overlay.len() * std::mem::size_of::<f32>(),
+            VectorData::InMemoryQuantized(v) => v.len(), // 1 byte per element
         }
     }
 

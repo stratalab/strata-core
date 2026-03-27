@@ -28,7 +28,6 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
 use crate::backend::{InlineMetaCapable, MmapCapable, SegmentCapable, VectorIndexBackend};
-use crate::distance::{compute_similarity, compute_similarity_cached};
 use crate::heap::VectorHeap;
 use crate::types::InlineMeta;
 use crate::{DistanceMetric, VectorConfig, VectorError, VectorId};
@@ -315,11 +314,10 @@ impl HnswGraph {
     ) -> Vec<ScoredId> {
         let metric = self.vector_config.metric;
 
-        let entry_embedding = match heap.get(entry_id) {
-            Some(e) => e,
+        let entry_score = match heap.distance_to(query, entry_id, metric, None) {
+            Some(s) => s,
             None => return Vec::new(),
         };
-        let entry_score = compute_similarity(query, entry_embedding, metric);
 
         let mut visited = VisitedSet::new();
         visited.mark(entry_id.0 as usize);
@@ -364,8 +362,7 @@ impl HnswGraph {
                         }
                         visited.mark(neighbor_id.0 as usize);
 
-                        if let Some(neighbor_embedding) = heap.get(neighbor_id) {
-                            let score = compute_similarity(query, neighbor_embedding, metric);
+                        if let Some(score) = heap.distance_to(query, neighbor_id, metric, None) {
 
                             let worst_result_score = results
                                 .peek()
@@ -434,11 +431,10 @@ impl HnswGraph {
             let mut improved = true;
             while improved {
                 improved = false;
-                let current_embedding = match heap.get(current) {
-                    Some(e) => e,
+                let current_score = match heap.distance_to(query, current, metric, None) {
+                    Some(s) => s,
                     None => break,
                 };
-                let current_score = compute_similarity(query, current_embedding, metric);
 
                 // Find the globally best neighbor (not just the first improvement)
                 let mut best_score = current_score;
@@ -452,8 +448,7 @@ impl HnswGraph {
                             if i + 1 < neighbors.len() {
                                 heap.prefetch_embedding(neighbors[i + 1]);
                             }
-                            if let Some(neighbor_embedding) = heap.get(neighbor_id) {
-                                let score = compute_similarity(query, neighbor_embedding, metric);
+                            if let Some(score) = heap.distance_to(query, neighbor_id, metric, None) {
                                 if score > best_score
                                     || (score == best_score && neighbor_id < best_id)
                                 {
@@ -500,16 +495,16 @@ impl HnswGraph {
                 break;
             }
 
-            let cand_emb = match heap.get(cand.id) {
+            let cand_emb_owned = match heap.get_f32_owned(cand.id) {
                 Some(e) => e,
                 None => continue,
             };
+            let cand_emb = &cand_emb_owned;
 
             // Check if candidate is closer to query than to any already-selected neighbor
             let mut is_diverse = true;
             for &sel_id in &selected {
-                if let Some(sel_emb) = heap.get(sel_id) {
-                    let dist_to_selected = compute_similarity(cand_emb, sel_emb, metric);
+                if let Some(dist_to_selected) = heap.distance_to(cand_emb, sel_id, metric, None) {
                     if dist_to_selected > cand.score {
                         // Candidate is more similar to an existing neighbor than to the query
                         is_diverse = false;
@@ -546,8 +541,8 @@ impl HnswGraph {
     ) {
         let metric = self.vector_config.metric;
 
-        let embedding = match heap.get(id) {
-            Some(e) => e.to_vec(),
+        let embedding = match heap.get_f32_owned(id) {
+            Some(e) => e,
             None => return,
         };
 
@@ -565,10 +560,8 @@ impl HnswGraph {
         let mut scored: Vec<ScoredId> = neighbors
             .iter()
             .filter_map(|&nid| {
-                heap.get(nid).map(|n_emb| ScoredId {
-                    score: compute_similarity(&embedding, n_emb, metric),
-                    id: nid,
-                })
+                heap.distance_to(&embedding, nid, metric, None)
+                    .map(|score| ScoredId { score, id: nid })
             })
             .collect();
 
@@ -618,8 +611,8 @@ impl HnswGraph {
 
         // Re-insert each vector in ID order (deterministic)
         for id in ids {
-            let embedding = match heap.get(id) {
-                Some(e) => e.to_vec(),
+            let embedding = match heap.get_f32_owned(id) {
+                Some(e) => e,
                 None => continue,
             };
             let created_at = pending_timestamps.remove(&id).unwrap_or(0);
@@ -1365,17 +1358,10 @@ impl CompactHnswGraph {
     ) -> Vec<ScoredId> {
         let metric = self.vector_config.metric;
 
-        let entry_embedding = match heap.get(entry_id) {
-            Some(e) => e,
+        let entry_score = match heap.distance_to(query, entry_id, metric, q_norm) {
+            Some(s) => s,
             None => return Vec::new(),
         };
-        let entry_score = compute_similarity_cached(
-            query,
-            entry_embedding,
-            metric,
-            q_norm,
-            heap.get_norm(entry_id),
-        );
 
         visited.mark(entry_id.0 as usize);
 
@@ -1415,14 +1401,7 @@ impl CompactHnswGraph {
                 }
                 visited.mark(neighbor_id.0 as usize);
 
-                if let Some(neighbor_embedding) = heap.get(neighbor_id) {
-                    let score = compute_similarity_cached(
-                        query,
-                        neighbor_embedding,
-                        metric,
-                        q_norm,
-                        heap.get_norm(neighbor_id),
-                    );
+                if let Some(score) = heap.distance_to(query, neighbor_id, metric, q_norm) {
 
                     let worst_result_score = results
                         .peek()
@@ -1476,17 +1455,10 @@ impl CompactHnswGraph {
             let mut improved = true;
             while improved {
                 improved = false;
-                let current_embedding = match heap.get(current) {
-                    Some(e) => e,
+                let current_score = match heap.distance_to(query, current, metric, q_norm) {
+                    Some(s) => s,
                     None => break,
                 };
-                let current_score = compute_similarity_cached(
-                    query,
-                    current_embedding,
-                    metric,
-                    q_norm,
-                    heap.get_norm(current),
-                );
 
                 let mut best_score = current_score;
                 let mut best_id = current;
@@ -1498,14 +1470,7 @@ impl CompactHnswGraph {
                         heap.prefetch_embedding(VectorId::new(neighbors[i + 1]));
                     }
                     let neighbor_id = VectorId::new(neighbor_u64);
-                    if let Some(neighbor_embedding) = heap.get(neighbor_id) {
-                        let score = compute_similarity_cached(
-                            query,
-                            neighbor_embedding,
-                            metric,
-                            q_norm,
-                            heap.get_norm(neighbor_id),
-                        );
+                    if let Some(score) = heap.distance_to(query, neighbor_id, metric, q_norm) {
                         if score > best_score || (score == best_score && neighbor_id < best_id) {
                             best_score = score;
                             best_id = neighbor_id;
@@ -1905,6 +1870,10 @@ impl VectorIndexBackend for HnswBackend {
 
     fn get(&self, id: VectorId) -> Option<&[f32]> {
         self.heap.get(id)
+    }
+
+    fn get_f32_owned(&self, id: VectorId) -> Option<Vec<f32>> {
+        self.heap.get_f32_owned(id)
     }
 
     fn contains(&self, id: VectorId) -> bool {
@@ -2705,6 +2674,7 @@ mod tests {
 #[cfg(test)]
 mod profiling_tests {
     use super::*;
+    use crate::distance::compute_similarity;
     use std::collections::HashMap as StdHashMap;
     use std::time::Instant;
 

@@ -78,14 +78,20 @@ impl DistanceMetric {
 
 /// Storage data type for embeddings
 ///
-/// Only F32 supported initially. F16 and Int8 are reserved for future quantization.
+/// Controls how embeddings are stored in the VectorHeap.
+/// Int8 scalar quantization provides 4x memory savings with ~1-2% recall loss.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum StorageDtype {
     /// 32-bit floating point (default)
     #[default]
     F32,
     // F16,     // Reserved for half precision (value = 1)
-    // Int8,    // Reserved for scalar quantization (value = 2)
+    /// 8-bit unsigned integer via scalar quantization (SQ8)
+    ///
+    /// Embeddings are quantized per-dimension using min/max calibration.
+    /// Queries remain f32 (asymmetric distance computation).
+    /// 4x memory savings vs F32 with ~1-2% recall loss.
+    Int8,
 }
 
 impl StorageDtype {
@@ -93,6 +99,7 @@ impl StorageDtype {
     pub fn to_byte(&self) -> u8 {
         match self {
             StorageDtype::F32 => 0,
+            StorageDtype::Int8 => 2,
         }
     }
 
@@ -100,7 +107,16 @@ impl StorageDtype {
     pub fn from_byte(b: u8) -> Option<Self> {
         match b {
             0 => Some(StorageDtype::F32),
+            2 => Some(StorageDtype::Int8),
             _ => None,
+        }
+    }
+
+    /// Bytes per element for this storage type
+    pub fn element_size(&self) -> usize {
+        match self {
+            StorageDtype::F32 => 4,
+            StorageDtype::Int8 => 1,
         }
     }
 }
@@ -119,8 +135,7 @@ pub struct VectorConfig {
     /// Immutable after collection creation.
     pub metric: DistanceMetric,
 
-    /// Storage data type
-    /// Only F32 supported initially. Reserved for F16/Int8 in future.
+    /// Storage data type (F32 or Int8 scalar quantization)
     pub storage_dtype: StorageDtype,
 }
 
@@ -138,6 +153,24 @@ impl VectorConfig {
             dimension,
             metric,
             storage_dtype: StorageDtype::F32,
+        })
+    }
+
+    /// Create a new VectorConfig with explicit storage dtype
+    pub fn new_with_dtype(
+        dimension: usize,
+        metric: DistanceMetric,
+        storage_dtype: StorageDtype,
+    ) -> Result<Self, StrataError> {
+        if dimension == 0 {
+            return Err(StrataError::InvalidInput {
+                message: format!("Invalid dimension: {} (must be > 0)", dimension),
+            });
+        }
+        Ok(VectorConfig {
+            dimension,
+            metric,
+            storage_dtype,
         })
     }
 

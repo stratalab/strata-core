@@ -622,6 +622,87 @@ fn l2_norm(v: &[f32]) -> f32 {
     v.iter().map(|x| x * x).sum::<f32>().sqrt()
 }
 
+// ============================================================================
+// Asymmetric distance (f32 query vs u8 quantized stored vector)
+// ============================================================================
+
+/// Asymmetric similarity: f32 query vs u8 quantized stored vector.
+///
+/// Dequantizes the stored vector on-the-fly: `stored[i] = quantized[i] * scale[i] + min[i]`.
+/// Single-pass: no intermediate f32 vector is materialized.
+///
+/// All scores are normalized to "higher = more similar" (Invariant R2).
+#[inline]
+pub fn compute_asymmetric_similarity(
+    query: &[f32],
+    quantized: &[u8],
+    mins: &[f32],
+    scales: &[f32],
+    metric: DistanceMetric,
+    norm_query: Option<f32>,
+    norm_stored: Option<f32>,
+) -> f32 {
+    match metric {
+        DistanceMetric::Cosine => {
+            let dot = asymmetric_dot_product(query, quantized, mins, scales);
+            let nq = norm_query
+                .unwrap_or_else(|| query.iter().map(|x| x * x).sum::<f32>().sqrt());
+            let ns = norm_stored
+                .unwrap_or_else(|| asymmetric_l2_norm(quantized, mins, scales));
+            let denom = nq * ns;
+            if denom == 0.0 {
+                0.0
+            } else {
+                dot / denom
+            }
+        }
+        DistanceMetric::Euclidean => {
+            let dist = asymmetric_euclidean_distance(query, quantized, mins, scales);
+            1.0 / (1.0 + dist)
+        }
+        DistanceMetric::DotProduct => asymmetric_dot_product(query, quantized, mins, scales),
+    }
+}
+
+/// Asymmetric dot product: sum(query[i] * dequant(quantized[i]))
+#[inline]
+fn asymmetric_dot_product(query: &[f32], quantized: &[u8], mins: &[f32], scales: &[f32]) -> f32 {
+    let mut sum = 0.0f32;
+    for i in 0..query.len() {
+        let dequantized = quantized[i] as f32 * scales[i] + mins[i];
+        sum += query[i] * dequantized;
+    }
+    sum
+}
+
+/// Asymmetric L2 distance: sqrt(sum((query[i] - dequant(quantized[i]))^2))
+#[inline]
+fn asymmetric_euclidean_distance(
+    query: &[f32],
+    quantized: &[u8],
+    mins: &[f32],
+    scales: &[f32],
+) -> f32 {
+    let mut sum = 0.0f32;
+    for i in 0..query.len() {
+        let dequantized = quantized[i] as f32 * scales[i] + mins[i];
+        let diff = query[i] - dequantized;
+        sum += diff * diff;
+    }
+    sum.sqrt()
+}
+
+/// L2 norm of a dequantized vector: sqrt(sum(dequant(quantized[i])^2))
+#[inline]
+fn asymmetric_l2_norm(quantized: &[u8], mins: &[f32], scales: &[f32]) -> f32 {
+    let mut sum = 0.0f32;
+    for i in 0..quantized.len() {
+        let val = quantized[i] as f32 * scales[i] + mins[i];
+        sum += val * val;
+    }
+    sum.sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -965,6 +1046,125 @@ mod tests {
         let a = vec![1.0, 0.0, 0.0];
         let b = vec![1.0, 0.0];
         compute_similarity(&a, &b, DistanceMetric::Cosine);
+    }
+
+    // ================================================================
+    // Asymmetric distance tests
+    // ================================================================
+
+    /// Helper: quantize f32 → u8 manually for testing
+    fn test_quantize(vals: &[f32], mins: &[f32], scales: &[f32]) -> Vec<u8> {
+        vals.iter()
+            .enumerate()
+            .map(|(i, &v)| ((v - mins[i]) / scales[i]).round().clamp(0.0, 255.0) as u8)
+            .collect()
+    }
+
+    #[test]
+    fn test_asymmetric_dot_matches_f32() {
+        let query = vec![0.3, 0.7, -0.2, 0.5];
+        let stored = vec![0.1, -0.4, 0.8, 0.6];
+        let mins = vec![-1.0, -1.0, -1.0, -1.0];
+        let scales: Vec<f32> = vec![2.0 / 255.0; 4]; // range [-1, 1]
+
+        let quantized = test_quantize(&stored, &mins, &scales);
+
+        let asymmetric = asymmetric_dot_product(&query, &quantized, &mins, &scales);
+        let exact = dot_product(&query, &stored);
+
+        assert!(
+            (asymmetric - exact).abs() < 0.05,
+            "asymmetric={}, exact={}",
+            asymmetric,
+            exact
+        );
+    }
+
+    #[test]
+    fn test_asymmetric_euclidean_matches_f32() {
+        let query = vec![0.3, 0.7, -0.2, 0.5];
+        let stored = vec![0.1, -0.4, 0.8, 0.6];
+        let mins = vec![-1.0, -1.0, -1.0, -1.0];
+        let scales: Vec<f32> = vec![2.0 / 255.0; 4];
+
+        let quantized = test_quantize(&stored, &mins, &scales);
+
+        let asymmetric = asymmetric_euclidean_distance(&query, &quantized, &mins, &scales);
+        let exact = euclidean_distance(&query, &stored);
+
+        assert!(
+            (asymmetric - exact).abs() < 0.05,
+            "asymmetric={}, exact={}",
+            asymmetric,
+            exact
+        );
+    }
+
+    #[test]
+    fn test_asymmetric_cosine_matches_f32() {
+        let query = vec![0.3, 0.7, -0.2, 0.5];
+        let stored = vec![0.1, -0.4, 0.8, 0.6];
+        let mins = vec![-1.0, -1.0, -1.0, -1.0];
+        let scales: Vec<f32> = vec![2.0 / 255.0; 4];
+
+        let quantized = test_quantize(&stored, &mins, &scales);
+
+        let asymmetric = compute_asymmetric_similarity(
+            &query,
+            &quantized,
+            &mins,
+            &scales,
+            DistanceMetric::Cosine,
+            None,
+            None,
+        );
+        let exact = compute_similarity(&query, &stored, DistanceMetric::Cosine);
+
+        assert!(
+            (asymmetric - exact).abs() < 0.02,
+            "asymmetric={}, exact={}",
+            asymmetric,
+            exact
+        );
+    }
+
+    #[test]
+    fn test_asymmetric_with_cached_norms() {
+        let query = vec![0.6, 0.8];
+        let stored = vec![0.3, 0.4];
+        let mins = vec![0.0, 0.0];
+        let scales = vec![1.0 / 255.0, 1.0 / 255.0];
+
+        let quantized = test_quantize(&stored, &mins, &scales);
+
+        let nq = query.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let ns = asymmetric_l2_norm(&quantized, &mins, &scales);
+
+        let with_norms = compute_asymmetric_similarity(
+            &query,
+            &quantized,
+            &mins,
+            &scales,
+            DistanceMetric::Cosine,
+            Some(nq),
+            Some(ns),
+        );
+        let without_norms = compute_asymmetric_similarity(
+            &query,
+            &quantized,
+            &mins,
+            &scales,
+            DistanceMetric::Cosine,
+            None,
+            None,
+        );
+
+        assert!(
+            (with_norms - without_norms).abs() < 1e-6,
+            "with_norms={}, without_norms={}",
+            with_norms,
+            without_norms
+        );
     }
 }
 

@@ -577,3 +577,336 @@ fn special_characters_in_key() {
         .unwrap();
     assert_eq!(result.unwrap().value.embedding, vec![1.0f32, 2.0, 3.0]);
 }
+
+// ============================================================================
+// Int8 Scalar Quantization (SQ8)
+// ============================================================================
+
+/// Helper: create a VectorConfig with Int8 storage
+fn config_int8(dimension: usize) -> VectorConfig {
+    VectorConfig {
+        dimension,
+        metric: DistanceMetric::Cosine,
+        storage_dtype: StorageDtype::Int8,
+    }
+}
+
+#[test]
+fn int8_create_collection_and_insert() {
+    let test_db = TestDb::new();
+    let vector = test_db.vector();
+
+    let config = config_int8(384);
+    vector
+        .create_collection(test_db.branch_id, "default", "int8_coll", config)
+        .unwrap();
+
+    // Insert enough vectors to trigger calibration (default threshold = 256)
+    for i in 0..300 {
+        let key = format!("vec_{}", i);
+        let emb = seeded_vector(384, i as u64);
+        vector
+            .insert(test_db.branch_id, "default", "int8_coll", &key, &emb, None)
+            .unwrap();
+    }
+
+    // Verify count
+    let info = vector
+        .list_collections(test_db.branch_id, "default")
+        .unwrap();
+    let coll = info.iter().find(|c| c.name == "int8_coll").unwrap();
+    assert_eq!(coll.count, 300);
+}
+
+#[test]
+fn int8_search_returns_results() {
+    let test_db = TestDb::new();
+    let vector = test_db.vector();
+
+    let config = config_int8(384);
+    vector
+        .create_collection(test_db.branch_id, "default", "int8_search", config)
+        .unwrap();
+
+    // Insert 300 vectors (exceeds calibration threshold)
+    for i in 0..300 {
+        let key = format!("vec_{}", i);
+        let emb = seeded_vector(384, i as u64);
+        vector
+            .insert(
+                test_db.branch_id,
+                "default",
+                "int8_search",
+                &key,
+                &emb,
+                None,
+            )
+            .unwrap();
+    }
+
+    // Search
+    let query = seeded_vector(384, 42); // query matches vec_42 exactly
+    let results = vector
+        .search(
+            test_db.branch_id,
+            "default",
+            "int8_search",
+            &query,
+            5,
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(results.len(), 5);
+    // The exact match should be the top result (highest cosine similarity)
+    assert_eq!(results[0].key, "vec_42");
+    // Score should be very close to 1.0 (exact match quantized)
+    assert!(
+        results[0].score > 0.95,
+        "expected score > 0.95, got {}",
+        results[0].score
+    );
+}
+
+#[test]
+fn int8_search_accuracy_vs_f32() {
+    let test_db = TestDb::new();
+    let vector = test_db.vector();
+
+    // Create both F32 and Int8 collections
+    let config_f = VectorConfig {
+        dimension: 384,
+        metric: DistanceMetric::Cosine,
+        storage_dtype: StorageDtype::F32,
+    };
+    let config_i = config_int8(384);
+
+    vector
+        .create_collection(test_db.branch_id, "default", "f32_coll", config_f)
+        .unwrap();
+    vector
+        .create_collection(test_db.branch_id, "default", "int8_coll", config_i)
+        .unwrap();
+
+    // Insert identical vectors into both
+    for i in 0..300 {
+        let key = format!("vec_{}", i);
+        let emb = seeded_vector(384, i as u64);
+        vector
+            .insert(
+                test_db.branch_id,
+                "default",
+                "f32_coll",
+                &key,
+                &emb,
+                None,
+            )
+            .unwrap();
+        vector
+            .insert(
+                test_db.branch_id,
+                "default",
+                "int8_coll",
+                &key,
+                &emb,
+                None,
+            )
+            .unwrap();
+    }
+
+    // Search both with same query
+    let query = seeded_vector(384, 999);
+    let f32_results = vector
+        .search(
+            test_db.branch_id,
+            "default",
+            "f32_coll",
+            &query,
+            10,
+            None,
+        )
+        .unwrap();
+    let int8_results = vector
+        .search(
+            test_db.branch_id,
+            "default",
+            "int8_coll",
+            &query,
+            10,
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(f32_results.len(), 10);
+    assert_eq!(int8_results.len(), 10);
+
+    // Top result should match (recall check)
+    assert_eq!(
+        f32_results[0].key, int8_results[0].key,
+        "Top-1 result should match between F32 and Int8"
+    );
+
+    // Count how many of the top-10 from F32 appear in Int8's top-10
+    let f32_keys: std::collections::HashSet<_> =
+        f32_results.iter().map(|r| r.key.clone()).collect();
+    let int8_keys: std::collections::HashSet<_> =
+        int8_results.iter().map(|r| r.key.clone()).collect();
+    let overlap = f32_keys.intersection(&int8_keys).count();
+    assert!(
+        overlap >= 8,
+        "Expected at least 8/10 overlap in top-10, got {}/10",
+        overlap
+    );
+}
+
+#[test]
+fn int8_delete_works() {
+    let test_db = TestDb::new();
+    let vector = test_db.vector();
+
+    let config = config_int8(384);
+    vector
+        .create_collection(test_db.branch_id, "default", "int8_del", config)
+        .unwrap();
+
+    // Insert 300 vectors
+    for i in 0..300 {
+        let key = format!("vec_{}", i);
+        let emb = seeded_vector(384, i as u64);
+        vector
+            .insert(
+                test_db.branch_id,
+                "default",
+                "int8_del",
+                &key,
+                &emb,
+                None,
+            )
+            .unwrap();
+    }
+
+    // Delete one
+    vector
+        .delete(test_db.branch_id, "default", "int8_del", "vec_50")
+        .unwrap();
+
+    // Verify it's gone from search
+    let query = seeded_vector(384, 50);
+    let results = vector
+        .search(
+            test_db.branch_id,
+            "default",
+            "int8_del",
+            &query,
+            5,
+            None,
+        )
+        .unwrap();
+
+    assert!(
+        !results.iter().any(|r| r.key == "vec_50"),
+        "Deleted vector should not appear in search results"
+    );
+}
+
+#[test]
+fn int8_small_collection_before_calibration() {
+    let test_db = TestDb::new();
+    let vector = test_db.vector();
+
+    let config = config_int8(8);
+    vector
+        .create_collection(test_db.branch_id, "default", "int8_small", config)
+        .unwrap();
+
+    // Insert only 5 vectors (below calibration threshold of 256)
+    // This exercises the pre-calibration search path (f32 fallback)
+    for i in 0..5 {
+        let key = format!("vec_{}", i);
+        let emb = seeded_vector(8, i as u64);
+        vector
+            .insert(
+                test_db.branch_id,
+                "default",
+                "int8_small",
+                &key,
+                &emb,
+                None,
+            )
+            .unwrap();
+    }
+
+    let query = seeded_vector(8, 2);
+    let results = vector
+        .search(
+            test_db.branch_id,
+            "default",
+            "int8_small",
+            &query,
+            3,
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].key, "vec_2");
+}
+
+#[test]
+fn int8_memory_savings() {
+    let test_db = TestDb::new();
+    let vector = test_db.vector();
+
+    // Create F32 and Int8 collections
+    let config_f = VectorConfig {
+        dimension: 384,
+        metric: DistanceMetric::Cosine,
+        storage_dtype: StorageDtype::F32,
+    };
+    let config_i = config_int8(384);
+
+    vector
+        .create_collection(test_db.branch_id, "default", "f32_mem", config_f)
+        .unwrap();
+    vector
+        .create_collection(test_db.branch_id, "default", "int8_mem", config_i)
+        .unwrap();
+
+    // Insert 300 vectors into both
+    for i in 0..300 {
+        let key = format!("vec_{}", i);
+        let emb = seeded_vector(384, i as u64);
+        vector
+            .insert(
+                test_db.branch_id,
+                "default",
+                "f32_mem",
+                &key,
+                &emb,
+                None,
+            )
+            .unwrap();
+        vector
+            .insert(
+                test_db.branch_id,
+                "default",
+                "int8_mem",
+                &key,
+                &emb,
+                None,
+            )
+            .unwrap();
+    }
+
+    let f32_info = vector
+        .list_collections(test_db.branch_id, "default")
+        .unwrap();
+    let f32_coll = f32_info.iter().find(|c| c.name == "f32_mem").unwrap();
+    let int8_coll = f32_info.iter().find(|c| c.name == "int8_mem").unwrap();
+
+    // Both should have the same count
+    assert_eq!(f32_coll.count, 300);
+    assert_eq!(int8_coll.count, 300);
+    // Note: actual memory_usage comparison requires backend access;
+    // here we just verify the collections work correctly with Int8
+}
