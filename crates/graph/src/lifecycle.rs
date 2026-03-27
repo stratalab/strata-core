@@ -676,4 +676,69 @@ mod tests {
         assert!(page.items.is_empty());
         assert!(page.next_cursor.is_none());
     }
+
+    // =========================================================================
+    // Scale tests (Issue #1983)
+    // =========================================================================
+
+    /// Delete a graph with 10K nodes and edges — exercises batched deletion.
+    #[test]
+    fn scale_delete_graph_10k_nodes() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "big", None).unwrap();
+
+        // Bulk insert 10K nodes with entity_refs (exercises ref index cleanup)
+        let nodes: Vec<(String, NodeData)> = (0..10_000)
+            .map(|i| {
+                (
+                    format!("n{:05}", i),
+                    NodeData {
+                        entity_ref: Some(format!("kv://main/entity{}", i)),
+                        properties: Some(serde_json::json!({"idx": i})),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        let edges: Vec<(String, String, String, EdgeData)> = (0..9_999)
+            .map(|i| {
+                (
+                    format!("n{:05}", i),
+                    format!("n{:05}", i + 1),
+                    "NEXT".to_string(),
+                    EdgeData::default(),
+                )
+            })
+            .collect();
+
+        gs.bulk_insert(b, "big", &nodes, &edges, Some(5_000))
+            .unwrap();
+
+        // Verify graph exists
+        assert_eq!(gs.snapshot_stats(b, "big").unwrap().node_count, 10_000);
+
+        // Delete — this triggers batched node deletion + ref index cleanup + prefix batched delete
+        gs.delete_graph(b, "big").unwrap();
+
+        // Verify everything is gone
+        assert!(gs.get_graph_meta(b, "big").unwrap().is_none());
+        assert!(gs.list_nodes(b, "big").unwrap().is_empty());
+        assert!(gs.list_graphs(b).unwrap().is_empty());
+
+        // Verify ref index entries are cleaned up (spot check)
+        assert!(gs
+            .nodes_for_entity(b, "kv://main/entity0")
+            .unwrap()
+            .is_empty());
+        assert!(gs
+            .nodes_for_entity(b, "kv://main/entity5000")
+            .unwrap()
+            .is_empty());
+        assert!(gs
+            .nodes_for_entity(b, "kv://main/entity9999")
+            .unwrap()
+            .is_empty());
+    }
 }

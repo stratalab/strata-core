@@ -879,4 +879,85 @@ mod tests {
         assert_eq!(gs.count_edges_by_type(b, "g", "KNOWS").unwrap(), 2);
         assert_eq!(gs.count_edges_by_type(b, "g", "TRUSTS").unwrap(), 1);
     }
+
+    // =========================================================================
+    // Concurrency tests (Issue #1983)
+    // =========================================================================
+
+    /// Concurrent add_edge to the same source node from multiple threads.
+    ///
+    /// Each thread adds edges from the same hub node to different targets.
+    /// The packed adjacency list is RMW (read-modify-write), so concurrent
+    /// writers will hit OCC conflicts. All edges should eventually succeed
+    /// (via OCC retry at the GraphStore level or serialized execution).
+    #[test]
+    fn concurrent_add_edge_same_source() {
+        use std::sync::Arc;
+
+        let db = Database::cache().unwrap();
+        let gs = Arc::new(GraphStore::new(db));
+        let b = BranchId::from_bytes([0u8; 16]);
+
+        gs.create_graph(b, "g", None).unwrap();
+
+        // Create hub + 40 target nodes
+        gs.add_node(b, "g", "hub", NodeData::default()).unwrap();
+        for i in 0..40 {
+            gs.add_node(b, "g", &format!("t{}", i), NodeData::default())
+                .unwrap();
+        }
+
+        // 4 threads, each adding 10 edges from hub to different targets.
+        // Since all threads write to hub's adjacency list, OCC conflicts are expected.
+        // Retry with exponential backoff to handle contention.
+        let handles: Vec<_> = (0..4)
+            .map(|thread_id| {
+                let gs = Arc::clone(&gs);
+                std::thread::spawn(move || {
+                    let start = thread_id * 10;
+                    for i in start..start + 10 {
+                        let target = format!("t{}", i);
+                        let edge_type = format!("E{}", i);
+                        let mut attempts = 0;
+                        loop {
+                            match gs.add_edge(
+                                b,
+                                "g",
+                                "hub",
+                                &target,
+                                &edge_type,
+                                EdgeData::default(),
+                            ) {
+                                Ok(_) => break,
+                                Err(_) if attempts < 20 => {
+                                    attempts += 1;
+                                    // Exponential backoff: 10µs, 20µs, 40µs, ...
+                                    std::thread::sleep(std::time::Duration::from_micros(
+                                        10 << attempts.min(10),
+                                    ));
+                                }
+                                Err(e) => panic!(
+                                    "Thread {} failed to add edge to {} after {} retries: {}",
+                                    thread_id, target, attempts, e
+                                ),
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // All 40 edges should exist
+        let out = gs.outgoing_neighbors(b, "g", "hub", None).unwrap();
+        assert_eq!(
+            out.len(),
+            40,
+            "All 40 concurrent edges should be present, got {}",
+            out.len()
+        );
+    }
 }
