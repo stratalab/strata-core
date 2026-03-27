@@ -539,6 +539,20 @@ fn format_raw(output: &Output) -> String {
         Output::MaybeTag(tag) => serde_json::to_string(&tag).unwrap_or_default(),
         Output::NoteAdded(note) => serde_json::to_string(&note).unwrap_or_default(),
         Output::NoteList(notes) => serde_json::to_string(&notes).unwrap_or_default(),
+        Output::EventRangeResult {
+            events,
+            has_more,
+            next_cursor,
+        } => serde_json::to_string(&serde_json::json!({
+            "events": events,
+            "has_more": has_more,
+            "next_cursor": next_cursor,
+        }))
+        .unwrap_or_default(),
+        Output::BoolList(bools) => serde_json::to_string(&bools).unwrap_or_default(),
+        Output::BatchVectorGetResults(results) => {
+            serde_json::to_string(&results).unwrap_or_default()
+        }
     }
 }
 
@@ -1445,6 +1459,63 @@ fn format_human(output: &Output) -> String {
                                 .map(|a| format!(" [{}]", a))
                                 .unwrap_or_default()
                         )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+        Output::EventRangeResult {
+            events,
+            has_more,
+            next_cursor,
+        } => {
+            let count = events.len();
+            let mut lines: Vec<String> = events
+                .iter()
+                .enumerate()
+                .map(|(i, e)| {
+                    format!(
+                        "{}) v{}: {}",
+                        i + 1,
+                        e.version,
+                        format_value_human(&e.value)
+                    )
+                })
+                .collect();
+            if *has_more {
+                lines.push(format!(
+                    "(has_more, next_cursor={})",
+                    next_cursor.as_deref().unwrap_or("none")
+                ));
+            }
+            if count == 0 {
+                "(empty range)".to_string()
+            } else {
+                lines.join("\n")
+            }
+        }
+        Output::BoolList(bools) => {
+            if bools.is_empty() {
+                "(empty list)".to_string()
+            } else {
+                bools
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| format!("{}) {}", i + 1, b))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+        Output::BatchVectorGetResults(results) => {
+            if results.is_empty() {
+                "(empty list)".to_string()
+            } else {
+                results
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| match r {
+                        Some(vd) => format!("{}) key={} (v{})", i + 1, vd.key, vd.version),
+                        None => format!("{}) (nil)", i + 1),
                     })
                     .collect::<Vec<_>>()
                     .join("\n")

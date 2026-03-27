@@ -304,9 +304,12 @@ fn batch_get_returns_values_in_order() {
     let test_db = TestDb::new();
     let kv = test_db.kv();
 
-    kv.put(&test_db.branch_id, "default", "a", Value::Int(1)).unwrap();
-    kv.put(&test_db.branch_id, "default", "b", Value::Int(2)).unwrap();
-    kv.put(&test_db.branch_id, "default", "c", Value::Int(3)).unwrap();
+    kv.put(&test_db.branch_id, "default", "a", Value::Int(1))
+        .unwrap();
+    kv.put(&test_db.branch_id, "default", "b", Value::Int(2))
+        .unwrap();
+    kv.put(&test_db.branch_id, "default", "c", Value::Int(3))
+        .unwrap();
 
     let keys = vec!["c".to_string(), "a".to_string(), "b".to_string()];
     let results = kv.batch_get(&test_db.branch_id, "default", &keys).unwrap();
@@ -322,7 +325,8 @@ fn batch_get_missing_keys_return_none() {
     let test_db = TestDb::new();
     let kv = test_db.kv();
 
-    kv.put(&test_db.branch_id, "default", "exists", Value::Int(1)).unwrap();
+    kv.put(&test_db.branch_id, "default", "exists", Value::Int(1))
+        .unwrap();
 
     let keys = vec!["exists".to_string(), "missing".to_string()];
     let results = kv.batch_get(&test_db.branch_id, "default", &keys).unwrap();
@@ -349,11 +353,15 @@ fn batch_delete_returns_existed_flags() {
     let test_db = TestDb::new();
     let kv = test_db.kv();
 
-    kv.put(&test_db.branch_id, "default", "a", Value::Int(1)).unwrap();
-    kv.put(&test_db.branch_id, "default", "b", Value::Int(2)).unwrap();
+    kv.put(&test_db.branch_id, "default", "a", Value::Int(1))
+        .unwrap();
+    kv.put(&test_db.branch_id, "default", "b", Value::Int(2))
+        .unwrap();
 
     let keys = vec!["a".to_string(), "missing".to_string(), "b".to_string()];
-    let results = kv.batch_delete(&test_db.branch_id, "default", &keys).unwrap();
+    let results = kv
+        .batch_delete(&test_db.branch_id, "default", &keys)
+        .unwrap();
 
     assert_eq!(results, vec![true, false, true]);
 }
@@ -363,14 +371,23 @@ fn batch_delete_actually_removes_keys() {
     let test_db = TestDb::new();
     let kv = test_db.kv();
 
-    kv.put(&test_db.branch_id, "default", "x", Value::Int(10)).unwrap();
-    kv.put(&test_db.branch_id, "default", "y", Value::Int(20)).unwrap();
+    kv.put(&test_db.branch_id, "default", "x", Value::Int(10))
+        .unwrap();
+    kv.put(&test_db.branch_id, "default", "y", Value::Int(20))
+        .unwrap();
 
     let keys = vec!["x".to_string(), "y".to_string()];
-    kv.batch_delete(&test_db.branch_id, "default", &keys).unwrap();
+    kv.batch_delete(&test_db.branch_id, "default", &keys)
+        .unwrap();
 
-    assert!(kv.get(&test_db.branch_id, "default", "x").unwrap().is_none());
-    assert!(kv.get(&test_db.branch_id, "default", "y").unwrap().is_none());
+    assert!(kv
+        .get(&test_db.branch_id, "default", "x")
+        .unwrap()
+        .is_none());
+    assert!(kv
+        .get(&test_db.branch_id, "default", "y")
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -390,11 +407,15 @@ fn batch_exists_returns_correct_flags() {
     let test_db = TestDb::new();
     let kv = test_db.kv();
 
-    kv.put(&test_db.branch_id, "default", "a", Value::Int(1)).unwrap();
-    kv.put(&test_db.branch_id, "default", "c", Value::Int(3)).unwrap();
+    kv.put(&test_db.branch_id, "default", "a", Value::Int(1))
+        .unwrap();
+    kv.put(&test_db.branch_id, "default", "c", Value::Int(3))
+        .unwrap();
 
     let keys = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-    let results = kv.batch_exists(&test_db.branch_id, "default", &keys).unwrap();
+    let results = kv
+        .batch_exists(&test_db.branch_id, "default", &keys)
+        .unwrap();
 
     assert_eq!(results, vec![true, false, true]);
 }
@@ -412,7 +433,8 @@ fn batch_get_returns_version_and_timestamp() {
     let test_db = TestDb::new();
     let kv = test_db.kv();
 
-    kv.put(&test_db.branch_id, "default", "key1", Value::Int(1)).unwrap();
+    kv.put(&test_db.branch_id, "default", "key1", Value::Int(1))
+        .unwrap();
 
     let keys = vec!["key1".to_string()];
     let results = kv.batch_get(&test_db.branch_id, "default", &keys).unwrap();
@@ -428,13 +450,18 @@ fn batch_delete_then_batch_exists_returns_false() {
     let test_db = TestDb::new();
     let kv = test_db.kv();
 
-    kv.put(&test_db.branch_id, "default", "a", Value::Int(1)).unwrap();
-    kv.put(&test_db.branch_id, "default", "b", Value::Int(2)).unwrap();
+    kv.put(&test_db.branch_id, "default", "a", Value::Int(1))
+        .unwrap();
+    kv.put(&test_db.branch_id, "default", "b", Value::Int(2))
+        .unwrap();
 
     let keys = vec!["a".to_string(), "b".to_string()];
-    kv.batch_delete(&test_db.branch_id, "default", &keys).unwrap();
+    kv.batch_delete(&test_db.branch_id, "default", &keys)
+        .unwrap();
 
-    let exists = kv.batch_exists(&test_db.branch_id, "default", &keys).unwrap();
+    let exists = kv
+        .batch_exists(&test_db.branch_id, "default", &keys)
+        .unwrap();
     assert_eq!(exists, vec![false, false]);
 }
 
@@ -443,7 +470,8 @@ fn batch_get_duplicate_keys_returns_same_value() {
     let test_db = TestDb::new();
     let kv = test_db.kv();
 
-    kv.put(&test_db.branch_id, "default", "dup", Value::Int(42)).unwrap();
+    kv.put(&test_db.branch_id, "default", "dup", Value::Int(42))
+        .unwrap();
 
     let keys = vec!["dup".to_string(), "dup".to_string()];
     let results = kv.batch_get(&test_db.branch_id, "default", &keys).unwrap();
@@ -458,10 +486,13 @@ fn batch_delete_duplicate_key_first_true_second_false() {
     let test_db = TestDb::new();
     let kv = test_db.kv();
 
-    kv.put(&test_db.branch_id, "default", "dup", Value::Int(1)).unwrap();
+    kv.put(&test_db.branch_id, "default", "dup", Value::Int(1))
+        .unwrap();
 
     let keys = vec!["dup".to_string(), "dup".to_string()];
-    let results = kv.batch_delete(&test_db.branch_id, "default", &keys).unwrap();
+    let results = kv
+        .batch_delete(&test_db.branch_id, "default", &keys)
+        .unwrap();
 
     // First delete finds the key, second sees it already deleted within the same txn
     assert_eq!(results, vec![true, false]);

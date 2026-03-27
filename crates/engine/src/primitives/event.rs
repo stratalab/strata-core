@@ -731,6 +731,7 @@ impl EventLog {
     /// If `reverse` is true, iterates from high to low sequence numbers.
     /// If `event_type` is Some, only returns events matching that type.
     /// Results are ordered by sequence number (ascending or descending).
+    #[allow(clippy::too_many_arguments)]
     pub fn range(
         &self,
         branch_id: &BranchId,
@@ -823,6 +824,7 @@ impl EventLog {
     /// If `end_ts` is None, reads all events from `start_ts` onwards.
     /// If `reverse` is true, returns results in descending timestamp order.
     /// If `event_type` is Some, only returns events matching that type.
+    #[allow(clippy::too_many_arguments)]
     pub fn range_by_time(
         &self,
         branch_id: &BranchId,
@@ -883,10 +885,8 @@ impl EventLog {
                     ));
 
                     // For forward scans, apply limit eagerly to bound memory
-                    if !reverse {
-                        if limit.is_some_and(|l| matching.len() >= l) {
-                            break;
-                        }
+                    if !reverse && limit.is_some_and(|l| matching.len() >= l) {
+                        break;
                     }
                 }
             }

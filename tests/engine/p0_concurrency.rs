@@ -519,7 +519,9 @@ fn test_issue_1910_event_hash_chain_under_contention() {
     );
 
     // 2. Verify hash chain integrity: every event's prev_hash == predecessor's hash
-    let all_events = event.range(&branch_id, "default", 0, None, None, false, None).unwrap();
+    let all_events = event
+        .range(&branch_id, "default", 0, None, None, false, None)
+        .unwrap();
     assert_eq!(all_events.len(), total_events);
 
     let mut prev_hash = [0u8; 32]; // First event's prev_hash should be zeros
@@ -632,7 +634,9 @@ fn test_issue_1910_event_hash_chain_concurrent() {
     );
 
     // Verify chain integrity
-    let all_events = event.range(&branch_id, "default", 0, None, None, false, None).unwrap();
+    let all_events = event
+        .range(&branch_id, "default", 0, None, None, false, None)
+        .unwrap();
     assert_eq!(
         all_events.len(),
         total_events,

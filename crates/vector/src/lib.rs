@@ -48,7 +48,7 @@ pub use error::{VectorError, VectorResult};
 pub use filter::{FilterCondition, FilterOp, JsonScalar, MetadataFilter};
 pub use heap::VectorHeap;
 pub use hnsw::{HnswBackend, HnswConfig};
-pub use quantize::QuantizationParams;
+pub use quantize::{QuantizationParams, RaBitQParams};
 pub use recovery::{register_vector_recovery, VectorSubsystem};
 pub use segmented::{SegmentedHnswBackend, SegmentedHnswConfig};
 pub use snapshot::{CollectionSnapshotHeader, VECTOR_SNAPSHOT_VERSION};

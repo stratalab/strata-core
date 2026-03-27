@@ -259,6 +259,7 @@ pub fn event_batch_append(
 }
 
 /// Handle EventRange command — sequence-based range query with pagination.
+#[allow(clippy::too_many_arguments)]
 pub fn event_range(
     p: &Arc<Primitives>,
     branch: BranchId,
@@ -329,6 +330,7 @@ pub fn event_range(
 }
 
 /// Handle EventRangeByTime command — timestamp-based range query with pagination.
+#[allow(clippy::too_many_arguments)]
 pub fn event_range_by_time(
     p: &Arc<Primitives>,
     branch: BranchId,
