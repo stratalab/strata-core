@@ -257,6 +257,213 @@ pub fn extract_field_value(doc_value: &JsonValue, field_path: &str) -> Option<Js
 }
 
 // =============================================================================
+// Index Lookup (for query execution)
+// =============================================================================
+
+use std::collections::HashSet;
+use strata_concurrency::TransactionContext;
+
+/// Look up all doc_ids matching an exact value in an index.
+pub fn lookup_eq(
+    txn: &mut TransactionContext,
+    branch_id: &BranchId,
+    space: &str,
+    index_name: &str,
+    encoded_value: &[u8],
+) -> StrataResult<Vec<String>> {
+    // Scan with the encoded value as prefix — matches all doc_ids with this value
+    let prefix = index_value_prefix(branch_id, space, index_name, encoded_value);
+    let entries = txn.scan_prefix(&prefix)?;
+    Ok(entries
+        .iter()
+        .filter_map(|(k, _)| extract_doc_id_from_index_key(&k.user_key))
+        .collect())
+}
+
+/// Look up all doc_ids in a value range [lower, upper].
+///
+/// Scans the full index and filters by encoded value bounds.
+/// Both bounds are optional (None = unbounded on that side).
+#[allow(clippy::too_many_arguments)]
+pub fn lookup_range(
+    txn: &mut TransactionContext,
+    branch_id: &BranchId,
+    space: &str,
+    index_name: &str,
+    lower: Option<&[u8]>,
+    upper: Option<&[u8]>,
+    lower_inclusive: bool,
+    upper_inclusive: bool,
+) -> StrataResult<Vec<String>> {
+    let prefix = index_scan_prefix(branch_id, space, index_name);
+    let entries = txn.scan_prefix(&prefix)?;
+
+    let mut doc_ids = Vec::new();
+    for (key, _) in &entries {
+        let user_key = &key.user_key;
+        // Find the separator to split value from doc_id
+        let sep_pos = match user_key.iter().rposition(|&b| b == INDEX_KEY_SEPARATOR) {
+            Some(pos) => pos,
+            None => continue,
+        };
+        let value_bytes = &user_key[..sep_pos];
+
+        // Check lower bound
+        if let Some(lo) = lower {
+            if lower_inclusive {
+                if value_bytes < lo {
+                    continue;
+                }
+            } else if value_bytes <= lo {
+                continue;
+            }
+        }
+
+        // Check upper bound
+        if let Some(hi) = upper {
+            if upper_inclusive {
+                if value_bytes > hi {
+                    continue;
+                }
+            } else if value_bytes >= hi {
+                continue;
+            }
+        }
+
+        if let Some(doc_id) = extract_doc_id_from_index_key(user_key) {
+            doc_ids.push(doc_id);
+        }
+    }
+    Ok(doc_ids)
+}
+
+/// Look up all doc_ids matching a text prefix in an index.
+pub fn lookup_prefix(
+    txn: &mut TransactionContext,
+    branch_id: &BranchId,
+    space: &str,
+    index_name: &str,
+    prefix_bytes: &[u8],
+) -> StrataResult<Vec<String>> {
+    let prefix = index_value_prefix(branch_id, space, index_name, prefix_bytes);
+    let entries = txn.scan_prefix(&prefix)?;
+    Ok(entries
+        .iter()
+        .filter_map(|(k, _)| extract_doc_id_from_index_key(&k.user_key))
+        .collect())
+}
+
+/// Resolve a FieldFilter against available indexes, returning matching doc_ids.
+///
+/// Returns an error if a predicate references a field with no corresponding index.
+pub fn resolve_filter(
+    txn: &mut TransactionContext,
+    branch_id: &BranchId,
+    space: &str,
+    filter: &crate::search::FieldFilter,
+    indexes: &[IndexDef],
+) -> StrataResult<HashSet<String>> {
+    use crate::search::FieldFilter;
+
+    match filter {
+        FieldFilter::Predicate(pred) => resolve_predicate(txn, branch_id, space, pred, indexes),
+        FieldFilter::And(filters) => {
+            let mut result: Option<HashSet<String>> = None;
+            for f in filters {
+                let set = resolve_filter(txn, branch_id, space, f, indexes)?;
+                result = Some(match result {
+                    Some(acc) => acc.intersection(&set).cloned().collect(),
+                    None => set,
+                });
+            }
+            Ok(result.unwrap_or_default())
+        }
+    }
+}
+
+/// Resolve a single predicate against indexes.
+fn resolve_predicate(
+    txn: &mut TransactionContext,
+    branch_id: &BranchId,
+    space: &str,
+    pred: &crate::search::FieldPredicate,
+    indexes: &[IndexDef],
+) -> StrataResult<HashSet<String>> {
+    use crate::search::FieldPredicate;
+
+    match pred {
+        FieldPredicate::Eq { field, value } => {
+            let idx = find_index_for_field(field, indexes)?;
+            let encoded = encode_value(value, idx.index_type).ok_or_else(|| {
+                StrataError::invalid_input(format!(
+                    "Value type mismatch for index '{}' (expected {})",
+                    idx.name, idx.index_type
+                ))
+            })?;
+            let doc_ids = lookup_eq(txn, branch_id, space, &idx.name, &encoded)?;
+            Ok(doc_ids.into_iter().collect())
+        }
+        FieldPredicate::Range {
+            field,
+            lower,
+            upper,
+            lower_inclusive,
+            upper_inclusive,
+        } => {
+            let idx = find_index_for_field(field, indexes)?;
+            let lo = match lower {
+                Some(v) => Some(encode_value(v, idx.index_type).ok_or_else(|| {
+                    StrataError::invalid_input(format!(
+                        "Lower bound type mismatch for index '{}'",
+                        idx.name
+                    ))
+                })?),
+                None => None,
+            };
+            let hi = match upper {
+                Some(v) => Some(encode_value(v, idx.index_type).ok_or_else(|| {
+                    StrataError::invalid_input(format!(
+                        "Upper bound type mismatch for index '{}'",
+                        idx.name
+                    ))
+                })?),
+                None => None,
+            };
+            let doc_ids = lookup_range(
+                txn,
+                branch_id,
+                space,
+                &idx.name,
+                lo.as_deref(),
+                hi.as_deref(),
+                *lower_inclusive,
+                *upper_inclusive,
+            )?;
+            Ok(doc_ids.into_iter().collect())
+        }
+        FieldPredicate::Prefix { field, prefix } => {
+            let idx = find_index_for_field(field, indexes)?;
+            let prefix_bytes = encode_text(prefix);
+            let doc_ids = lookup_prefix(txn, branch_id, space, &idx.name, &prefix_bytes)?;
+            Ok(doc_ids.into_iter().collect())
+        }
+    }
+}
+
+/// Find the index definition that covers a given field path.
+fn find_index_for_field<'a>(field: &str, indexes: &'a [IndexDef]) -> StrataResult<&'a IndexDef> {
+    indexes
+        .iter()
+        .find(|idx| idx.field_path == field)
+        .ok_or_else(|| {
+            StrataError::invalid_input(format!(
+                "No index found for field '{}'. Create one with create_index()",
+                field
+            ))
+        })
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 

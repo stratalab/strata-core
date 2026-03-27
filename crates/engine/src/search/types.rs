@@ -12,6 +12,7 @@
 //! See `the architecture documentation` for authoritative specification.
 
 use std::collections::HashMap;
+use strata_core::primitives::json::JsonValue;
 use strata_core::types::BranchId;
 
 // Re-export contract types
@@ -170,6 +171,10 @@ pub struct SearchRequest {
     /// snapshot. Primitives that support versioned reads use this bound; the
     /// inverted index scoring is not yet version-bounded (future work).
     pub snapshot_version: Option<u64>,
+
+    /// Optional: field filter for secondary index queries on JsonStore.
+    /// When present, only documents matching the filter are returned.
+    pub field_filter: Option<FieldFilter>,
 }
 
 impl SearchRequest {
@@ -196,7 +201,14 @@ impl SearchRequest {
             precomputed_embedding: None,
             space: "default".to_string(),
             snapshot_version: None,
+            field_filter: None,
         }
+    }
+
+    /// Builder: set field filter for secondary index queries
+    pub fn with_field_filter(mut self, filter: FieldFilter) -> Self {
+        self.field_filter = Some(filter);
+        self
     }
 
     /// Builder: set top-k results count
@@ -403,6 +415,58 @@ impl SearchResponse {
     pub fn len(&self) -> usize {
         self.hits.len()
     }
+}
+
+// ============================================================================
+// Field Filter Types (for secondary index queries)
+// ============================================================================
+
+/// A predicate on an indexed JSON field.
+///
+/// Each predicate maps to a scan on a secondary index.
+/// The `field` is the `field_path` from the index definition (e.g., "$.price").
+#[derive(Debug, Clone)]
+pub enum FieldPredicate {
+    /// Exact match: `@status:{active}`
+    Eq {
+        /// Field path (e.g., "$.status")
+        field: String,
+        /// Value to match
+        value: JsonValue,
+    },
+
+    /// Range query: `@price:[100 200]`
+    Range {
+        /// Field path (e.g., "$.price")
+        field: String,
+        /// Lower bound (None = unbounded)
+        lower: Option<JsonValue>,
+        /// Upper bound (None = unbounded)
+        upper: Option<JsonValue>,
+        /// Whether lower bound is inclusive
+        lower_inclusive: bool,
+        /// Whether upper bound is inclusive
+        upper_inclusive: bool,
+    },
+
+    /// Prefix match on text: `@name:wire*`
+    Prefix {
+        /// Field path (e.g., "$.name")
+        field: String,
+        /// Prefix to match
+        prefix: String,
+    },
+}
+
+/// Compound filter with boolean logic over field predicates.
+///
+/// Used to narrow the candidate set before text scoring.
+#[derive(Debug, Clone)]
+pub enum FieldFilter {
+    /// A single predicate
+    Predicate(FieldPredicate),
+    /// All sub-filters must match (intersection)
+    And(Vec<FieldFilter>),
 }
 
 // ============================================================================
