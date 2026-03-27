@@ -1,25 +1,107 @@
 # Intelligence Layer
 
-The optional layer between the user and the retrieval substrate. Powered by a local LLM (Qwen3 via strata-inference). Three features, each building on the substrate.
+The optional layer between the user and the retrieval substrate. Powered by strata-inference, which supports any GGUF model locally AND any OpenAI/Anthropic/Google-compatible API endpoint. The user assigns different models to different operations — cheap and fast where volume is high, expensive and smart where quality matters.
 
 For the retrieval substrate spec, see [`retrieval-substrate.md`](retrieval-substrate.md).
 For the overall strategy, see [`search-strategy.md`](search-strategy.md).
 
 ---
 
-## 1. Three Features
+## 1. Three Features, Two Knobs
 
-| Feature | What it does | Why it's unique |
-|---------|-------------|-----------------|
-| **RAG** | Ask a question, get a grounded answer with citations | Built into the database. One call. Zero infra. |
-| **Temporal Search** | Search at any point in time. Diff results across time. Explain what changed. | Requires MVCC + deterministic search + in-process LLM. No other database has all three. |
-| **AutoResearch** | The database tunes its own search recipe to your dataset | O(1) branching makes 1000s of experiments feasible. Architecturally impossible elsewhere. |
+| | Name | What it does |
+|---|------|-------------|
+| **Feature** | RAG | Ask a question, get a grounded answer with citations |
+| **Feature** | Temporal Search | Search at any point in time. Diff results across time. Explain what changed. |
+| **Feature** | AutoResearch | The database tunes its own search recipe to your dataset |
+| **Knob** | Query expansion | Generates query variants before retrieval. Improves recall. |
+| **Knob** | Reranking | Re-scores top-N results after retrieval. Improves precision. |
 
-Everything else — query expansion, reranking, auto-tagging, summarization, iterative refinement, data profiling — is future work. Get these three right first.
+Features are public API. Knobs are configuration — turn them on, search gets better, no new API surface.
 
 ---
 
-## 2. RAG
+## 2. Multi-Model Routing
+
+This is the biggest unlock.
+
+Every intelligence layer operation has a different cost/quality/latency profile. Embedding needs to be fast and run on every query. RAG generation needs to be smart and produce high-quality answers. AutoResearch planning needs to be smart but only runs occasionally. There is no single model that's optimal for all of these.
+
+Most RAG frameworks force you to pick one model. Strata lets you assign a different model to each operation:
+
+```python
+db.configure(
+    models={
+        "embed":        "local:miniLM",
+        "expansion":    "local:qwen3:1.7b",
+        "rerank":       "local:qwen3:1.7b",
+        "rag":          "anthropic:claude-sonnet-4-6",
+        "autoresearch": "anthropic:claude-haiku-4-5",
+    }
+)
+```
+
+### 2.1 Why this matters
+
+| Operation | Volume | Latency requirement | Quality requirement | Best fit |
+|-----------|--------|--------------------|--------------------|----------|
+| Embedding | Every query + every document | <10ms | Moderate | Local small model (MiniLM, nomic) |
+| Expansion | Every query (if enabled) | <100ms | Moderate | Local small LLM (Qwen3 1.7B) |
+| Reranking | Every query (if enabled) | <200ms | Moderate-high | Local cross-encoder or small LLM |
+| RAG generation | Per query (when mode="rag") | <2s | High | Cloud model (Claude, GPT-4) |
+| Temporal RAG | Per temporal query | <3s | High | Cloud model |
+| AutoResearch planning | Per experiment round | <5s | High | Cloud model (smart, not fast) |
+
+A single `db.search("query", mode="rag")` call might use three different models:
+1. Local MiniLM embeds the query (5ms, free)
+2. Local Qwen3 expands the query (100ms, free)
+3. Substrate executes the recipe (15ms, deterministic)
+4. Local Qwen3 reranks top-20 (200ms, free)
+5. Claude Sonnet generates the answer (1s, $0.003)
+
+Total: ~1.3s, $0.003. The answer is Claude-quality. Everything else is free.
+
+### 2.2 Model specification
+
+Models are specified as `provider:model_name`:
+
+| Provider | Format | Examples |
+|----------|--------|---------|
+| `local` | `local:model_name` | `local:miniLM`, `local:qwen3:1.7b`, `local:ms-marco-MiniLM` |
+| `anthropic` | `anthropic:model_id` | `anthropic:claude-sonnet-4-6`, `anthropic:claude-haiku-4-5` |
+| `openai` | `openai:model_id` | `openai:gpt-4o`, `openai:gpt-4o-mini` |
+| `google` | `google:model_id` | `google:gemini-2.5-flash` |
+| Any OpenAI-compatible | `endpoint:model_id` | `ollama:llama3.1`, `together:meta-llama/Llama-3-8b` |
+
+Local models are GGUF files loaded via llama.cpp (strata-inference). Zero network overhead, zero API cost. Cloud models call the provider's API.
+
+### 2.3 Defaults
+
+If `models` is not configured, all operations use local models:
+
+| Operation | Default model |
+|-----------|--------------|
+| `embed` | `local:miniLM` |
+| `expansion` | `local:qwen3:1.7b` |
+| `rerank` | `local:qwen3:1.7b` |
+| `rag` | `local:qwen3:1.7b` |
+| `autoresearch` | `local:qwen3:1.7b` |
+
+Everything works out of the box with local models. Zero cost. The user upgrades specific operations to cloud models when they want better quality for that operation.
+
+### 2.4 AutoResearch can tune model assignment
+
+Model assignment is another parameter AutoResearch can optimize. Given eval pairs, it can discover:
+
+- "Switching RAG from local Qwen3 to Claude improves answer quality by 40%"
+- "Switching expansion from Qwen3 to GPT-4o-mini doesn't improve NDCG — not worth the cost"
+- "Cross-encoder reranking outperforms LLM-as-judge reranking on this dataset"
+
+The model assignment becomes part of the optimized recipe output.
+
+---
+
+## 3. RAG
 
 ### What the user sees
 
@@ -36,7 +118,7 @@ results = db.search(
 # results.hits → [...full ranked results...]
 ```
 
-One call. The user gets a grounded answer with source citations AND the ranked hits. No external APIs, no pipeline of tools, no infrastructure.
+One call. Grounded answer with citations AND ranked hits.
 
 ### How it works
 
@@ -44,14 +126,14 @@ One call. The user gets a grounded answer with source citations AND the ranked h
 User: db.search("What are the side effects of metformin?", mode="rag")
   │
   ▼
-1. EMBED query (intelligence layer, ~5ms)
+1. EMBED query (embed model, ~5ms)
   │
   ▼
 2. SUBSTRATE executes recipe (deterministic, ~15ms)
    Returns ranked hits with snippets.
   │
   ▼
-3. GENERATE answer from top hits (Qwen3, ~200ms)
+3. GENERATE answer from top hits (rag model, ~200ms local / ~1s cloud)
    Prompt: system instructions + retrieved snippets + user question.
    Output: grounded answer with [N] citations.
   │
@@ -78,36 +160,31 @@ Question: {user's query}
 
 ### Key properties
 
-- **Grounded** — the answer comes from retrieved context, not model knowledge
+- **Grounded** — answer comes from retrieved context, not model knowledge
 - **Cited** — every claim references a source hit by index
 - **Honest** — if the context doesn't answer the question, it says so
-- **Deterministic retrieval** — the hits are always the same (substrate invariant). The generated answer may vary slightly (LLM is non-deterministic). This is acceptable — the user cares about answer quality, not byte-identical answers.
+- **Model-flexible** — local model for cost-sensitive use, cloud model for quality-sensitive use. Same prompt, same format, different quality/cost.
+- **Deterministic retrieval** — hits are always the same (substrate invariant). The generated answer may vary slightly (LLM is non-deterministic).
 
 ### Configuration
 
 | Param | Default | What it controls |
 |-------|---------|-----------------|
+| `models.rag` | `local:qwen3:1.7b` | Model used for answer generation |
 | `rag_context_hits` | 5 | How many hits to include in the prompt |
 | `rag_max_tokens` | 500 | Maximum answer length |
 
 ### Graceful degradation
 
-If Qwen3 is unavailable or inference fails: `answer` is `null`, hits are still returned. The user gets standard search results. RAG enhances but never blocks.
+If the RAG model is unavailable or inference fails: `answer` is `null`, hits still returned.
 
 ### Future: RLM evolution
 
-RAG is a single pass: retrieve → generate. In the future, this evolves naturally to RLM Tier 1 (iterative refinement): retrieve → generate → examine → refine query → retrieve again. The substrate doesn't change. The intelligence layer just calls it in a loop. The upgrade path is:
-
-```
-RAG (v1):  retrieve once → generate
-RLM (v2):  retrieve → examine → refine → retrieve → ... → generate
-```
-
-No architectural changes needed. The loop wraps around the same substrate call.
+RAG is a single pass: retrieve → generate. This evolves naturally to iterative refinement: retrieve → generate → examine → refine → retrieve again. No architectural changes — the loop wraps around the same substrate call.
 
 ---
 
-## 3. Temporal Search
+## 4. Temporal Search
 
 ### What the user sees
 
@@ -130,97 +207,51 @@ results = db.search(
 ### How it works
 
 **Point-in-time search (`as_of`):**
-
-```
-1. Set snapshot_version to the MVCC version at the given timestamp
+1. Resolve timestamp to MVCC snapshot version
 2. Execute recipe at that snapshot (substrate, deterministic)
 3. Return results as they would have appeared at that time
-```
-
-This is straightforward — the substrate already supports `snapshot_version` in the recipe's control section. The intelligence layer just resolves a timestamp to a snapshot version.
 
 **Temporal diff (`diff`):**
-
-```
 1. Execute recipe at snapshot T1 → results_before
 2. Execute recipe at snapshot T2 → results_after
-3. Compute diff:
-   - new_hits: in results_after but not results_before
-   - removed_hits: in results_before but not results_after
-   - changed_hits: in both but score changed significantly
-   - stable_hits: in both with similar scores
+3. Compute diff: new hits, removed hits, changed hits, stable hits
 4. Return structured diff
-```
 
 **Temporal RAG (`diff` + `mode="rag"`):**
-
-```
 1. Compute diff (as above)
-2. Construct prompt with diff context:
-   "These results are NEW since {T1}: [snippets]"
-   "These results were REMOVED since {T1}: [snippets]"
-   "These results CHANGED in ranking: [snippets]"
-3. Qwen3 generates explanation of what changed
+2. Construct prompt with diff context (new/removed/changed snippets)
+3. RAG model generates explanation of what changed
 4. Return: answer + diff + hits from both snapshots
-```
 
 ### Response format
 
-Same fixed structure, with temporal fields populated:
-
-```json
-{
-  "hits": [/* results at T2 (latest snapshot) */],
-
-  "answer": {
-    "text": "Since January 2024, two new studies on metformin side effects have been added [1][2]. The GI-related side effects remain the most documented [3], but a new finding on vitamin B12 deficiency [1] has entered the top results.",
-    "sources": [1, 2, 3]
-  },
-
-  "diff": {
-    "before_snapshot": 38201,
-    "after_snapshot": 42891,
-    "new_hits": [
-      {"entity_ref": {...}, "score": 0.82, "rank": 2}
-    ],
-    "removed_hits": [
-      {"entity_ref": {...}, "previous_score": 0.65, "previous_rank": 4}
-    ],
-    "changed_hits": [
-      {"entity_ref": {...}, "score": 0.91, "previous_score": 0.78, "rank": 1, "previous_rank": 3}
-    ]
-  },
-
-  "aggregations": null,
-  "groups": null,
-  "stats": {/* includes timing for both snapshot queries */}
-}
-```
-
-Wait — this adds a `diff` field to the response. That breaks the "fixed structure" rule.
-
-**Resolution:** `diff` is always present in the response, `null` when not a temporal query. Same as `answer`, `aggregations`, `groups`. The fixed structure becomes:
+Same fixed structure. `diff` field populated when temporal:
 
 ```json
 {
   "hits": [],
-  "answer": null,
-  "diff": null,
+  "answer": {
+    "text": "Since January 2024, two new studies on metformin side effects have been added [1][2]. A new finding on vitamin B12 deficiency [1] has entered the top results.",
+    "sources": [1, 2]
+  },
+  "diff": {
+    "before_snapshot": 38201,
+    "after_snapshot": 42891,
+    "new_hits": [{"entity_ref": {}, "score": 0.82, "rank": 2}],
+    "removed_hits": [{"entity_ref": {}, "previous_score": 0.65, "previous_rank": 4}],
+    "changed_hits": [{"entity_ref": {}, "score": 0.91, "previous_score": 0.78}]
+  },
   "aggregations": null,
   "groups": null,
   "stats": {}
 }
 ```
 
-Six fields. Always present. Populated or null.
-
 ### Why only Strata can do this
 
-1. **MVCC snapshots at every write** — Strata can search at any historical state, not just "now"
-2. **Deterministic recipes** — the same recipe at two snapshots produces a meaningful diff. If search were non-deterministic, the diff would be noise.
-3. **In-process LLM** — Qwen3 explains the diff in natural language. Without it, the user gets raw before/after lists and has to interpret them.
-
-No other database has all three. Elasticsearch doesn't snapshot. Pinecone doesn't do time-travel. Even databases with MVCC (Postgres) don't have search recipes or in-process LLMs.
+1. **MVCC snapshots at every write** — search at any historical state
+2. **Deterministic recipes** — same recipe at two snapshots produces a meaningful diff
+3. **In-process or cloud LLM** — explains the diff in natural language
 
 ### Use cases
 
@@ -234,19 +265,17 @@ No other database has all three. Elasticsearch doesn't snapshot. Pinecone doesn'
 
 ---
 
-## 4. AutoResearch
+## 5. AutoResearch
 
 ### What the user sees
 
 ```python
-# User provides evaluation pairs (what good results look like)
 eval_set = [
     {"query": "metformin side effects", "relevant": ["doc:123", "doc:456"]},
     {"query": "drug interactions warfarin", "relevant": ["doc:789"]},
     # ... 50-100 pairs
 ]
 
-# One call. Database optimizes its own search.
 result = db.optimize_search(eval_set, budget=1000)
 
 # result.baseline_ndcg → 0.42
@@ -261,73 +290,66 @@ result = db.optimize_search(eval_set, budget=1000)
 1. User provides eval_set (query → relevant docs pairs)
 2. Evaluate current recipe → baseline metrics
 3. Loop:
-   a. Qwen3 proposes N recipe variants (mutations of current best)
-   b. For each variant:
-      - Fork a branch
-      - Store variant recipe
-      - substrate.evaluate(variant, eval_set) → metrics
+   a. AutoResearch model proposes N recipe variants
+   b. For each variant: fork branch → evaluate → record metrics
    c. If best variant > current best → adopt it
    d. If no improvement for 5 rounds → stop
 4. Save winning recipe as database default
-5. Return results: baseline → optimized metrics, experiments run, winning recipe
+5. Return: baseline → optimized metrics, experiments run, winning recipe
 ```
 
 ### What gets tuned
 
-Every parameter in the recipe is a candidate:
+Every substrate parameter plus model assignments:
 
-| Parameter | Range | What it affects |
-|-----------|-------|----------------|
-| `bm25.k1` | 0.5 — 2.0 | Term frequency saturation |
-| `bm25.b` | 0.1 — 1.0 | Document length normalization |
-| `bm25.field_weights.*` | 0.0 — 5.0 | Per-field importance |
-| `bm25.stemmer` | porter / snowball / none | Tokenization |
-| `bm25.stopwords` | lucene33 / smart571 / none | Term filtering |
-| `bm25.phrase_boost` | 0.0 — 5.0 | Exact phrase importance |
-| `bm25.proximity_boost` | 0.0 — 2.0 | Term proximity importance |
-| `vector.k` | 10 — 200 | Vector candidate count |
-| `vector.ef_search` | 50 — 500 | HNSW recall vs speed |
-| `graph.damping` | 0.1 — 0.9 | PPR exploration depth |
-| `graph.max_hops` | 1 — 5 | Neighborhood traversal depth |
-| `fusion.k` | 10 — 200 | RRF smoothing constant |
-| `fusion.weights.*` | 0.0 — 3.0 | Per-source importance |
+| Parameter | Range |
+|-----------|-------|
+| `bm25.k1` | 0.5 — 2.0 |
+| `bm25.b` | 0.1 — 1.0 |
+| `bm25.field_weights.*` | 0.0 — 5.0 |
+| `bm25.stemmer` | porter / snowball / none |
+| `bm25.stopwords` | lucene33 / smart571 / none |
+| `bm25.phrase_boost` | 0.0 — 5.0 |
+| `bm25.proximity_boost` | 0.0 — 2.0 |
+| `vector.k` | 10 — 200 |
+| `vector.ef_search` | 50 — 500 |
+| `graph.damping` | 0.1 — 0.9 |
+| `graph.max_hops` | 1 — 5 |
+| `fusion.k` | 10 — 200 |
+| `fusion.weights.*` | 0.0 — 3.0 |
+| `models.expansion` | local vs cloud options |
+| `models.rerank` | local vs cloud options |
+| `expansion on/off` | enabled / disabled |
+| `reranking on/off` | enabled / disabled |
 
-### Experiment planning (Qwen3's role)
+### Experiment planning
 
-Qwen3 doesn't do random search. It reads previous experiment results and plans the next batch intelligently:
+The AutoResearch model reads previous experiment results and plans the next batch:
 
-- **Round 1:** Broad exploration — sweep major parameters (k1, b, fusion weights)
-- **Round 5:** Narrow in — focus on parameters that showed sensitivity
+- **Round 1:** Broad sweep — major parameters (k1, b, fusion weights)
+- **Round 5:** Narrow in — parameters that showed sensitivity
 - **Round 10:** Fine-tune — small adjustments around the current best
 - **Ablation:** Periodically disable one component to measure its contribution
 
-The prompt includes the experiment history and asks: "Given these results, what should we try next?"
+A smarter model (Claude Haiku/Sonnet) produces better experiment plans than a local 1.7B model. This is where the multi-model routing pays off — use a cheap local model for high-volume operations, a smart cloud model for the planning step that runs once per round.
 
 ### Why it requires user-provided eval pairs
 
-The database doesn't know what "good results" means for your data. A medical corpus needs different relevance judgments than a legal corpus. The user provides 50-100 (query, relevant_docs) pairs that define their quality standard. This is the only human input required.
-
-AutoResearch optimizes the recipe to maximize NDCG@10 (or another metric) on these eval pairs.
-
-### Cost
-
-- Each experiment: one `evaluate()` call (~100 queries × ~50ms = ~5 seconds)
-- 1000 experiments: ~80 minutes sequential, faster with CPU parallelism
-- Qwen3 planning: ~3 seconds per round, negligible vs experiment time
+The database doesn't know what "good results" means for your data. The user provides 50-100 (query, relevant_docs) pairs that define their quality standard. This is the only human input required.
 
 ### Graceful degradation
 
-If Qwen3 is unavailable: fall back to grid search over the parameter space (no intelligent planning, but still works). If evaluate() fails: abort and return the best recipe found so far.
+If AutoResearch model unavailable: fall back to grid search (no intelligent planning, still works). If `evaluate()` fails: abort, return best recipe found so far.
 
 ---
 
-## 5. Search Quality Knobs
+## 6. Search Quality Knobs
 
-Query expansion and reranking are not features — they're tunable configuration that makes search better. No new API. The user turns them on, `db.search()` returns better results.
+Not features — configuration. Turn them on, `db.search()` returns better results.
 
-### 5.1 Query Expansion
+### 6.1 Query Expansion
 
-When enabled, the intelligence layer expands the query before calling the substrate.
+Generates query variants before calling the substrate.
 
 | Strategy | What it does | Routed to |
 |----------|-------------|-----------|
@@ -335,95 +357,98 @@ When enabled, the intelligence layer expands the query before calling the substr
 | `vec` | Semantic variants ("side effects" → "adverse reactions") | Vector |
 | `hyde` | Hypothetical document | Vector |
 
-**Strong signal skip:** BM25 probe first. If top score ≥ threshold with clear gap → skip expansion. Saves ~100ms on easy queries.
+**Strong signal skip:** BM25 probe first. If confident match → skip expansion.
 
-**Hallucination guard:** Discard variants sharing fewer than 2 stemmed terms with the original query.
+**Hallucination guard:** Discard variants sharing fewer than 2 stemmed terms with original query.
 
-### 5.2 Reranking
+### 6.2 Reranking
 
-When enabled, the intelligence layer re-scores the top-N results after the substrate returns them.
+Re-scores top-N results after the substrate returns them.
 
-- **Cross-encoder:** Feed (query, passage) pairs to a cross-encoder model. Deterministic, fast (~100ms for 20 candidates).
-- **LLM-as-judge:** Feed all candidates to Qwen3, ask for relevance scores. Less calibrated but doesn't need a separate model (~200ms).
+- **Cross-encoder:** Feed (query, passage) pairs to a cross-encoder model. Fast (~100ms).
+- **LLM-as-judge:** Feed all candidates to the rerank model. Flexible (~200ms).
 
-### 5.3 Configuration
+### 6.3 Configuration
 
 ```python
 db.configure(
-    expansion=True,           # on/off
-    expansion_strategy="lex", # lex, vec, hyde, full
-    reranking=True,           # on/off
-    rerank_top_n=20,          # how many to rerank
+    expansion=True,
+    expansion_strategy="lex",
+    reranking=True,
+    rerank_top_n=20,
 )
 ```
 
-These knobs are also tunable by AutoResearch — it can discover whether expansion helps on your specific dataset and which strategy works best.
+AutoResearch can discover whether these knobs help on your specific dataset and which strategies work best.
 
 ---
 
-## 6. What's NOT in v1
-
-These come later, once the core features and knobs are solid:
+## 7. What's NOT in v1
 
 | Feature | Why not now |
 |---------|-----------|
-| Auto-tagging | Requires user-defined tag categories. Extra configuration surface. |
-| Summarization | Useful for long docs but not critical path. |
-| Iterative refinement (RLM) | Natural evolution of RAG. Single-pass must work first. |
-| Data profiling | Nice-to-have. Manual recipes work fine. |
+| Auto-tagging | Extra configuration surface. |
+| Summarization | Not critical path. |
+| Iterative refinement (RLM) | Single-pass RAG must work first. |
+| Data profiling | Nice-to-have. Will be killer later. |
 | Recipe suggestion | User can start with defaults. |
-| Synthetic eval generation | LLM-generated evals at 1.7B quality are too pattern-y to trust. |
+| Synthetic eval generation | LLM-generated evals at 1.7B are too pattern-y. |
 
-The upgrade path is additive. Each feature wraps around the existing flow without changing the substrate or the response format.
+Upgrade path is additive. No substrate or response format changes needed.
 
 ---
 
-## 7. Graceful Degradation
+## 8. Graceful Degradation
 
-The intelligence layer never blocks search. Every feature fails silently.
+Every feature fails silently. The substrate always works.
 
 | If this fails... | What happens |
 |-----------------|-------------|
-| Qwen3 unavailable | RAG returns `answer: null`. Temporal diff returns raw diff, no explanation. AutoResearch falls back to grid search. |
+| Any model unavailable | That operation skipped. Results returned without it. |
+| Cloud API timeout | Fall back to local model if configured, otherwise skip. |
 | Embedding model unavailable | Vector search disabled. BM25 still works. |
-| Inference timeout | Feature skipped. Results returned without that enhancement. |
-| Everything fails | You get substrate-only results. Same as if intelligence layer wasn't installed. |
-
-**Principle:** The substrate always works. The intelligence layer enhances but never blocks.
+| Everything fails | Substrate-only results. Same as if intelligence layer wasn't installed. |
 
 ---
 
-## 8. Configuration
-
-Minimal for v1.
+## 9. Configuration
 
 ```python
 db.configure(
-    # Auto-embedding (already exists, on by default)
+    # Model routing — the key configuration
+    models={
+        "embed":        "local:miniLM",
+        "expansion":    "local:qwen3:1.7b",
+        "rerank":       "local:qwen3:1.7b",
+        "rag":          "anthropic:claude-sonnet-4-6",
+        "autoresearch": "anthropic:claude-haiku-4-5",
+    },
+
+    # Auto-embedding (exists today)
     auto_embed=True,
-    embed_model="miniLM",
 
     # Search quality knobs
-    expansion=False,          # off by default
+    expansion=False,
     expansion_strategy="lex",
-    reranking=False,          # off by default
+    reranking=False,
     rerank_top_n=20,
 
     # RAG
-    rag_context_hits=5,       # hits included in RAG prompt
-    rag_max_tokens=500,       # max answer length
-
-    # AutoResearch — no config needed, just call db.optimize_search()
+    rag_context_hits=5,
+    rag_max_tokens=500,
 )
 ```
 
 Feature gating:
-- `cargo build` — substrate only. `db.search()` works. No RAG, no AutoResearch.
-- `cargo build --features embed` — intelligence layer available. All three features work.
+- `cargo build` — substrate only. `db.search()` works. No intelligence layer.
+- `cargo build --features embed` — intelligence layer with local models.
+- `cargo build --features embed,anthropic` — add Anthropic cloud models.
+- `cargo build --features embed,openai` — add OpenAI cloud models.
+- `cargo build --features embed,google` — add Google cloud models.
 
 ---
 
-## 9. API Summary
+## 10. API Summary
 
 ```python
 # Search (always available)
@@ -436,13 +461,16 @@ results = db.search("query", mode="rag", diff=("2024-01-01", "2025-06-01"))
 
 # AutoResearch (requires eval pairs)
 result = db.optimize_search(eval_set, budget=1000)
+
+# Configuration
+db.configure(models={...}, expansion=True, ...)
 ```
 
-Two methods. That's it.
+Three methods. That's it.
 
 ---
 
-## 10. Response Format
+## 11. Response Format
 
 Fixed structure. Six fields. Always present. Populated or null.
 
@@ -461,7 +489,7 @@ One parser for every mode, every recipe, every feature combination.
 
 ---
 
-## 11. References
+## 12. References
 
 - [`retrieval-substrate.md`](retrieval-substrate.md) — Recipe schema, pipeline, invariants
 - [`search-strategy.md`](search-strategy.md) — Overall strategy, architecture, ablation study
