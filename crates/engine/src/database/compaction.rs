@@ -83,17 +83,18 @@ impl Database {
             }
         };
 
-        // Create CheckpointCoordinator
+        // Create CheckpointCoordinator with the database's persisted UUID
+        let db_uuid = self.database_uuid;
         let mut coordinator = if let Some(wm) = existing_watermark {
             CheckpointCoordinator::with_watermark(
                 snapshots_dir,
                 Box::new(IdentityCodec),
-                [0u8; 16],
+                db_uuid,
                 wm,
             )
             .map_err(|e| StrataError::internal(format!("checkpoint coordinator: {}", e)))?
         } else {
-            CheckpointCoordinator::new(snapshots_dir, Box::new(IdentityCodec), [0u8; 16])
+            CheckpointCoordinator::new(snapshots_dir, Box::new(IdentityCodec), db_uuid)
                 .map_err(|e| StrataError::internal(format!("checkpoint coordinator: {}", e)))?
         };
 
@@ -393,7 +394,7 @@ impl Database {
                 StrataError::internal(format!("failed to load MANIFEST: {}", e))
             })?
         } else {
-            ManifestManager::create(manifest_path, [0u8; 16], "identity".to_string()).map_err(
+            ManifestManager::create(manifest_path, self.database_uuid, "identity".to_string()).map_err(
                 |e: ManifestError| {
                     StrataError::internal(format!("failed to create MANIFEST: {}", e))
                 },
