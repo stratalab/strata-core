@@ -833,3 +833,205 @@ fn int8_memory_savings() {
     // Note: actual memory_usage comparison requires backend access;
     // here we just verify the collections work correctly with Int8
 }
+
+// ============================================================================
+// Batch Get
+// ============================================================================
+
+#[test]
+fn batch_get_returns_vectors_in_order() {
+    let test_db = TestDb::new();
+    let vector = test_db.vector();
+
+    let config = config_small();
+    vector
+        .create_collection(test_db.branch_id, "default", "coll", config)
+        .unwrap();
+
+    vector
+        .insert(test_db.branch_id, "default", "coll", "a", &[1.0, 0.0, 0.0], None)
+        .unwrap();
+    vector
+        .insert(test_db.branch_id, "default", "coll", "b", &[0.0, 1.0, 0.0], None)
+        .unwrap();
+    vector
+        .insert(test_db.branch_id, "default", "coll", "c", &[0.0, 0.0, 1.0], None)
+        .unwrap();
+
+    let keys = vec!["c".to_string(), "a".to_string(), "b".to_string()];
+    let results = vector
+        .batch_get(test_db.branch_id, "default", "coll", &keys)
+        .unwrap();
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].as_ref().unwrap().value.embedding, vec![0.0, 0.0, 1.0]);
+    assert_eq!(results[1].as_ref().unwrap().value.embedding, vec![1.0, 0.0, 0.0]);
+    assert_eq!(results[2].as_ref().unwrap().value.embedding, vec![0.0, 1.0, 0.0]);
+}
+
+#[test]
+fn batch_get_missing_keys_return_none() {
+    let test_db = TestDb::new();
+    let vector = test_db.vector();
+
+    let config = config_small();
+    vector
+        .create_collection(test_db.branch_id, "default", "coll", config)
+        .unwrap();
+
+    vector
+        .insert(test_db.branch_id, "default", "coll", "exists", &[1.0, 2.0, 3.0], None)
+        .unwrap();
+
+    let keys = vec!["exists".to_string(), "missing".to_string()];
+    let results = vector
+        .batch_get(test_db.branch_id, "default", "coll", &keys)
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert!(results[0].is_some());
+    assert!(results[1].is_none());
+}
+
+#[test]
+fn batch_get_empty_keys_returns_empty() {
+    let test_db = TestDb::new();
+    let vector = test_db.vector();
+
+    let config = config_small();
+    vector
+        .create_collection(test_db.branch_id, "default", "coll", config)
+        .unwrap();
+
+    let results = vector
+        .batch_get(test_db.branch_id, "default", "coll", &[])
+        .unwrap();
+    assert!(results.is_empty());
+}
+
+// ============================================================================
+// Batch Delete
+// ============================================================================
+
+#[test]
+fn batch_delete_returns_existed_flags() {
+    let test_db = TestDb::new();
+    let vector = test_db.vector();
+
+    let config = config_small();
+    vector
+        .create_collection(test_db.branch_id, "default", "coll", config)
+        .unwrap();
+
+    vector
+        .insert(test_db.branch_id, "default", "coll", "a", &[1.0, 0.0, 0.0], None)
+        .unwrap();
+    vector
+        .insert(test_db.branch_id, "default", "coll", "b", &[0.0, 1.0, 0.0], None)
+        .unwrap();
+
+    let keys = vec!["a".to_string(), "missing".to_string(), "b".to_string()];
+    let results = vector
+        .batch_delete(test_db.branch_id, "default", "coll", &keys)
+        .unwrap();
+
+    assert_eq!(results, vec![true, false, true]);
+}
+
+#[test]
+fn batch_delete_actually_removes_vectors() {
+    let test_db = TestDb::new();
+    let vector = test_db.vector();
+
+    let config = config_small();
+    vector
+        .create_collection(test_db.branch_id, "default", "coll", config)
+        .unwrap();
+
+    vector
+        .insert(test_db.branch_id, "default", "coll", "x", &[1.0, 0.0, 0.0], None)
+        .unwrap();
+    vector
+        .insert(test_db.branch_id, "default", "coll", "y", &[0.0, 1.0, 0.0], None)
+        .unwrap();
+
+    let keys = vec!["x".to_string(), "y".to_string()];
+    vector
+        .batch_delete(test_db.branch_id, "default", "coll", &keys)
+        .unwrap();
+
+    assert!(vector.get(test_db.branch_id, "default", "coll", "x").unwrap().is_none());
+    assert!(vector.get(test_db.branch_id, "default", "coll", "y").unwrap().is_none());
+}
+
+#[test]
+fn batch_delete_empty_keys_returns_empty() {
+    let test_db = TestDb::new();
+    let vector = test_db.vector();
+
+    let config = config_small();
+    vector
+        .create_collection(test_db.branch_id, "default", "coll", config)
+        .unwrap();
+
+    let results = vector
+        .batch_delete(test_db.branch_id, "default", "coll", &[])
+        .unwrap();
+    assert!(results.is_empty());
+}
+
+#[test]
+fn batch_get_preserves_metadata() {
+    let test_db = TestDb::new();
+    let vector = test_db.vector();
+
+    let config = config_small();
+    vector
+        .create_collection(test_db.branch_id, "default", "coll", config)
+        .unwrap();
+
+    let meta = serde_json::json!({"tag": "important", "score": 42});
+    vector
+        .insert(
+            test_db.branch_id,
+            "default",
+            "coll",
+            "with_meta",
+            &[1.0, 2.0, 3.0],
+            Some(meta.clone()),
+        )
+        .unwrap();
+
+    let keys = vec!["with_meta".to_string()];
+    let results = vector
+        .batch_get(test_db.branch_id, "default", "coll", &keys)
+        .unwrap();
+
+    let entry = results[0].as_ref().unwrap();
+    assert_eq!(entry.value.metadata, Some(meta));
+}
+
+#[test]
+fn batch_delete_then_get_returns_none() {
+    let test_db = TestDb::new();
+    let vector = test_db.vector();
+
+    let config = config_small();
+    vector
+        .create_collection(test_db.branch_id, "default", "coll", config)
+        .unwrap();
+
+    vector
+        .insert(test_db.branch_id, "default", "coll", "a", &[1.0, 0.0, 0.0], None)
+        .unwrap();
+
+    let keys = vec!["a".to_string()];
+    vector
+        .batch_delete(test_db.branch_id, "default", "coll", &keys)
+        .unwrap();
+
+    let results = vector
+        .batch_get(test_db.branch_id, "default", "coll", &keys)
+        .unwrap();
+    assert!(results[0].is_none());
+}

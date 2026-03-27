@@ -334,6 +334,43 @@ impl Executor {
                 self.ensure_space_registered(&branch, &space)?;
                 crate::handlers::kv::kv_batch_put(&self.primitives, branch, space, entries)
             }
+            Command::KvBatchGet {
+                branch,
+                space,
+                keys,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::kv::kv_batch_get(&self.primitives, branch, space, keys)
+            }
+            Command::KvBatchDelete {
+                branch,
+                space,
+                keys,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                self.ensure_space_registered(&branch, &space)?;
+                crate::handlers::kv::kv_batch_delete(&self.primitives, branch, space, keys)
+            }
+            Command::KvBatchExists {
+                branch,
+                space,
+                keys,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::kv::kv_batch_exists(&self.primitives, branch, space, keys)
+            }
             Command::KvGet {
                 branch,
                 space,
@@ -642,6 +679,66 @@ impl Executor {
                 let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::event::event_len(&self.primitives, branch, space)
             }
+            Command::EventRange {
+                branch,
+                space,
+                start_seq,
+                end_seq,
+                limit,
+                direction,
+                event_type,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                let reverse = direction == crate::types::ScanDirection::Reverse;
+                crate::handlers::event::event_range(
+                    &self.primitives,
+                    branch,
+                    space,
+                    start_seq,
+                    end_seq,
+                    limit,
+                    reverse,
+                    event_type,
+                )
+            }
+            Command::EventRangeByTime {
+                branch,
+                space,
+                start_ts,
+                end_ts,
+                limit,
+                direction,
+                event_type,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                let reverse = direction == crate::types::ScanDirection::Reverse;
+                crate::handlers::event::event_range_by_time(
+                    &self.primitives,
+                    branch,
+                    space,
+                    start_ts,
+                    end_ts,
+                    limit,
+                    reverse,
+                    event_type,
+                )
+            }
+            Command::EventListTypes { branch, space } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::event::event_list_types(&self.primitives, branch, space)
+            }
 
             // Vector commands
             Command::VectorUpsert {
@@ -842,6 +939,45 @@ impl Executor {
                     space,
                     collection,
                     entries,
+                )
+            }
+            Command::VectorBatchGet {
+                branch,
+                space,
+                collection,
+                keys,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::vector::vector_batch_get(
+                    &self.primitives,
+                    branch,
+                    space,
+                    collection,
+                    keys,
+                )
+            }
+            Command::VectorBatchDelete {
+                branch,
+                space,
+                collection,
+                keys,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                self.ensure_space_registered(&branch, &space)?;
+                crate::handlers::vector::vector_batch_delete(
+                    &self.primitives,
+                    branch,
+                    space,
+                    collection,
+                    keys,
                 )
             }
 

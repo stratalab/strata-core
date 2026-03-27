@@ -31,7 +31,7 @@ use std::time::Duration;
 use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{BranchId, Key, TypeTag};
 use strata_core::value::Value;
-use strata_core::{StrataResult, Timestamp, VersionedValue};
+use strata_core::{StrataError, StrataResult, Timestamp, VersionedValue};
 
 // ---------------------------------------------------------------------------
 // Level configuration constants
@@ -1698,7 +1698,7 @@ impl SegmentedStore {
             Some(b) => b,
             None => return Ok(None),
         };
-        let all_versions = Self::get_all_versions_from_branch(&branch, key);
+        let all_versions = Self::get_all_versions_from_branch(&branch, key)?;
         for (commit_id, entry) in all_versions {
             if entry.timestamp.as_micros() > max_timestamp {
                 continue;
@@ -1746,10 +1746,16 @@ impl SegmentedStore {
                 if !segment_overlaps_prefix(seg, &prefix_bytes) {
                     continue;
                 }
-                let entries: Vec<_> = seg
-                    .iter_seek(prefix)
+                let mut iter = seg.iter_seek(prefix);
+                let entries: Vec<_> = iter
+                    .by_ref()
                     .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
                     .collect();
+                if iter.corruption_detected() {
+                    return Err(StrataError::corruption(
+                        "segment scan stopped due to data block corruption",
+                    ));
+                }
                 sources.push(Box::new(entries.into_iter()));
             }
         }
@@ -1766,10 +1772,16 @@ impl SegmentedStore {
                     if !segment_overlaps_prefix(seg, &src_prefix_bytes) {
                         continue;
                     }
-                    let entries: Vec<_> = seg
-                        .iter_seek(&src_prefix)
+                    let mut iter = seg.iter_seek(&src_prefix);
+                    let entries: Vec<_> = iter
+                        .by_ref()
                         .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
                         .collect();
+                    if iter.corruption_detected() {
+                        return Err(StrataError::corruption(
+                            "segment scan stopped due to data block corruption",
+                        ));
+                    }
                     sources.push(Box::new(RewritingIterator::new(
                         entries.into_iter(),
                         prefix.namespace.branch_id,
@@ -2771,7 +2783,10 @@ impl SegmentedStore {
     }
 
     /// Collect all versions of a key across all sources in a branch.
-    fn get_all_versions_from_branch(branch: &BranchState, key: &Key) -> Vec<(u64, MemtableEntry)> {
+    fn get_all_versions_from_branch(
+        branch: &BranchState,
+        key: &Key,
+    ) -> StrataResult<Vec<(u64, MemtableEntry)>> {
         let mut all_versions = Vec::new();
 
         // Active memtable
@@ -2787,11 +2802,17 @@ impl SegmentedStore {
         let ver = branch.version.load();
         for level in &ver.levels {
             for seg in level {
-                for (ik, se) in seg.iter_seek(key) {
+                let mut iter = seg.iter_seek(key);
+                for (ik, se) in iter.by_ref() {
                     if ik.typed_key_prefix() != typed_key.as_slice() {
                         break;
                     }
                     all_versions.push((se.commit_id, segment_entry_to_memtable_entry(se)));
+                }
+                if iter.corruption_detected() {
+                    return Err(StrataError::corruption(
+                        "segment scan stopped due to data block corruption",
+                    ));
                 }
             }
         }
@@ -2805,13 +2826,19 @@ impl SegmentedStore {
             let src_typed_key = encode_typed_key(&src_key);
             for level in &layer.segments.levels {
                 for seg in level {
-                    for (ik, se) in seg.iter_seek(&src_key) {
+                    let mut iter = seg.iter_seek(&src_key);
+                    for (ik, se) in iter.by_ref() {
                         if ik.typed_key_prefix() != src_typed_key.as_slice() {
                             break;
                         }
                         if se.commit_id <= layer.fork_version {
                             all_versions.push((se.commit_id, segment_entry_to_memtable_entry(se)));
                         }
+                    }
+                    if iter.corruption_detected() {
+                        return Err(StrataError::corruption(
+                            "segment scan stopped due to data block corruption",
+                        ));
                     }
                 }
             }
@@ -2822,7 +2849,7 @@ impl SegmentedStore {
         // (from WAL replay) and segments (from disk), producing duplicates (#1733).
         all_versions.sort_by(|a, b| b.0.cmp(&a.0));
         all_versions.dedup_by_key(|entry| entry.0);
-        all_versions
+        Ok(all_versions)
     }
 
     /// Build an MVCC-deduplicated prefix scan across all sources in a branch.
@@ -2830,7 +2857,7 @@ impl SegmentedStore {
         branch: &BranchState,
         prefix: &Key,
         max_version: u64,
-    ) -> Vec<(Key, VersionedValue)> {
+    ) -> StrataResult<Vec<(Key, VersionedValue)>> {
         let mut sources: Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> = Vec::new();
 
         // Active memtable
@@ -2853,10 +2880,16 @@ impl SegmentedStore {
                 if !segment_overlaps_prefix(seg, &prefix_bytes) {
                     continue;
                 }
-                let entries: Vec<_> = seg
-                    .iter_seek(prefix)
+                let mut iter = seg.iter_seek(prefix);
+                let entries: Vec<_> = iter
+                    .by_ref()
                     .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
                     .collect();
+                if iter.corruption_detected() {
+                    return Err(StrataError::corruption(
+                        "segment scan stopped due to data block corruption",
+                    ));
+                }
                 sources.push(Box::new(entries.into_iter()));
             }
         }
@@ -2873,10 +2906,16 @@ impl SegmentedStore {
                     if !segment_overlaps_prefix(seg, &src_prefix_bytes) {
                         continue;
                     }
-                    let entries: Vec<_> = seg
-                        .iter_seek(&src_prefix)
+                    let mut iter = seg.iter_seek(&src_prefix);
+                    let entries: Vec<_> = iter
+                        .by_ref()
                         .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
                         .collect();
+                    if iter.corruption_detected() {
+                        return Err(StrataError::corruption(
+                            "segment scan stopped due to data block corruption",
+                        ));
+                    }
                     sources.push(Box::new(RewritingIterator::new(
                         entries.into_iter(),
                         prefix.namespace.branch_id,
@@ -2889,14 +2928,15 @@ impl SegmentedStore {
         let merge = MergeIterator::new(sources);
         let mvcc = MvccIterator::new(merge, max_version);
 
-        mvcc.filter_map(|(ik, entry)| {
-            if entry.is_tombstone || entry.is_expired() {
-                return None;
-            }
-            let (key, commit_id) = ik.decode()?;
-            Some((key, entry.to_versioned(commit_id)))
-        })
-        .collect()
+        Ok(mvcc
+            .filter_map(|(ik, entry)| {
+                if entry.is_tombstone || entry.is_expired() {
+                    return None;
+                }
+                let (key, commit_id) = ik.decode()?;
+                Some((key, entry.to_versioned(commit_id)))
+            })
+            .collect())
     }
 
     /// Write the manifest file for a branch, reflecting current level assignments
@@ -3064,7 +3104,7 @@ impl Storage for SegmentedStore {
             None => return Ok(Vec::new()),
         };
 
-        let all_versions = Self::get_all_versions_from_branch(&branch, key);
+        let all_versions = Self::get_all_versions_from_branch(&branch, key)?;
 
         let results: Vec<VersionedValue> = all_versions
             .into_iter()
@@ -3099,7 +3139,7 @@ impl Storage for SegmentedStore {
             None => return Ok(Vec::new()),
         };
 
-        Ok(Self::scan_prefix_from_branch(&branch, prefix, max_version))
+        Self::scan_prefix_from_branch(&branch, prefix, max_version)
     }
 
     fn current_version(&self) -> u64 {

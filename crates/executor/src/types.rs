@@ -230,6 +230,17 @@ pub struct BatchKvEntry {
     pub value: Value,
 }
 
+/// Direction for scanning/iterating over ordered results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanDirection {
+    /// Scan from lowest to highest (default).
+    #[default]
+    Forward,
+    /// Scan from highest to lowest.
+    Reverse,
+}
+
 /// Entry for batch event append operations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BatchEventEntry {

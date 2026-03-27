@@ -263,6 +263,146 @@ pub fn kv_batch_put(
     Ok(Output::BatchResults(results))
 }
 
+/// Handle KvBatchGet command — get multiple values in a single transaction.
+pub fn kv_batch_get(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    keys: Vec<String>,
+) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+
+    if keys.is_empty() {
+        return Ok(Output::BatchGetResults(Vec::new()));
+    }
+
+    let n = keys.len();
+    let mut results: Vec<crate::types::BatchGetItemResult> = Vec::with_capacity(n);
+
+    // Pre-validate keys, tracking which are valid
+    let mut valid_keys: Vec<(usize, String)> = Vec::with_capacity(n);
+    for (i, key) in keys.into_iter().enumerate() {
+        if let Err(e) = validate_key(&key) {
+            results.push(crate::types::BatchGetItemResult {
+                value: None,
+                version: None,
+                timestamp: None,
+                error: Some(e.to_string()),
+            });
+        } else {
+            results.push(crate::types::BatchGetItemResult {
+                value: None,
+                version: None,
+                timestamp: None,
+                error: None,
+            });
+            valid_keys.push((i, key));
+        }
+    }
+
+    if valid_keys.is_empty() {
+        return Ok(Output::BatchGetResults(results));
+    }
+
+    let engine_keys: Vec<String> = valid_keys.iter().map(|(_, k)| k.clone()).collect();
+    let engine_results = convert_result(p.kv.batch_get(&branch_id, &space, &engine_keys))?;
+
+    for (j, (orig_idx, _)) in valid_keys.iter().enumerate() {
+        if let Some(vv) = &engine_results[j] {
+            let converted = to_versioned_value(vv.clone());
+            results[*orig_idx].value = Some(converted.value);
+            results[*orig_idx].version = Some(converted.version);
+            results[*orig_idx].timestamp = Some(converted.timestamp);
+        }
+    }
+
+    Ok(Output::BatchGetResults(results))
+}
+
+/// Handle KvBatchDelete command — delete multiple keys in a single transaction.
+pub fn kv_batch_delete(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    keys: Vec<String>,
+) -> Result<Output> {
+    require_branch_exists(p, &branch)?;
+    let branch_id = to_core_branch_id(&branch)?;
+
+    if keys.is_empty() {
+        return Ok(Output::BatchResults(Vec::new()));
+    }
+
+    let n = keys.len();
+    let mut results: Vec<crate::types::BatchItemResult> = vec![
+        crate::types::BatchItemResult {
+            version: None,
+            error: None,
+        };
+        n
+    ];
+
+    // Pre-validate keys
+    let mut valid_keys: Vec<(usize, String)> = Vec::with_capacity(n);
+    for (i, key) in keys.into_iter().enumerate() {
+        if let Err(e) = validate_key(&key) {
+            results[i].error = Some(e.to_string());
+        } else {
+            valid_keys.push((i, key));
+        }
+    }
+
+    if valid_keys.is_empty() {
+        return Ok(Output::BatchResults(results));
+    }
+
+    let engine_keys: Vec<String> = valid_keys.iter().map(|(_, k)| k.clone()).collect();
+    let engine_results = convert_result(p.kv.batch_delete(&branch_id, &space, &engine_keys))?;
+
+    for (j, (orig_idx, key)) in valid_keys.iter().enumerate() {
+        let deleted = engine_results[j];
+        // Use version 0 to indicate success (no new version created by delete)
+        if deleted {
+            results[*orig_idx].version = Some(0);
+        }
+
+        // Best-effort remove shadow embedding
+        if deleted {
+            super::embed_hook::maybe_remove_embedding(
+                p,
+                branch_id,
+                &space,
+                super::embed_hook::SHADOW_KV,
+                key,
+            );
+        }
+    }
+
+    Ok(Output::BatchResults(results))
+}
+
+/// Handle KvBatchExists command — check existence of multiple keys.
+pub fn kv_batch_exists(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    keys: Vec<String>,
+) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+
+    if keys.is_empty() {
+        return Ok(Output::BoolList(Vec::new()));
+    }
+
+    // Validate all keys first
+    for key in &keys {
+        convert_result(validate_key(key))?;
+    }
+
+    let results = convert_result(p.kv.batch_exists(&branch_id, &space, &keys))?;
+    Ok(Output::BoolList(results))
+}
+
 /// Handle KvCount command — count keys matching a prefix.
 ///
 /// Delegates to `KVStore::count()` which counts scan results without

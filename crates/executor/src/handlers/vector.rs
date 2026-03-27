@@ -424,6 +424,84 @@ pub fn vector_batch_upsert(
     Ok(Output::Versions(version_nums))
 }
 
+/// Handle VectorBatchGet command — get multiple vectors by key.
+pub fn vector_batch_get(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    collection: String,
+    keys: Vec<String>,
+) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+    convert_result(validate_not_internal_collection(&collection))?;
+
+    if keys.is_empty() {
+        return Ok(Output::BatchVectorGetResults(Vec::new()));
+    }
+
+    // Pre-validate all keys
+    for key in &keys {
+        convert_result(validate_key(key))?;
+    }
+
+    let engine_results = convert_vector_result(
+        p.vector.batch_get(branch_id, &space, &collection, &keys),
+        branch_id,
+    )?;
+
+    let mut results = Vec::with_capacity(engine_results.len());
+    for result in engine_results {
+        match result {
+            Some(versioned) => {
+                let version = extract_version(&versioned.version);
+                let timestamp: u64 = versioned.timestamp.into();
+                let data = to_versioned_vector_data(&versioned.value, version, timestamp)?;
+                results.push(Some(data));
+            }
+            None => results.push(None),
+        }
+    }
+
+    Ok(Output::BatchVectorGetResults(results))
+}
+
+/// Handle VectorBatchDelete command — delete multiple vectors by key.
+pub fn vector_batch_delete(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    collection: String,
+    keys: Vec<String>,
+) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+    convert_result(validate_not_internal_collection(&collection))?;
+
+    if keys.is_empty() {
+        return Ok(Output::BatchResults(Vec::new()));
+    }
+
+    // Pre-validate all keys
+    for key in &keys {
+        convert_result(validate_key(key))?;
+    }
+
+    let engine_results = convert_vector_result(
+        p.vector
+            .batch_delete(branch_id, &space, &collection, &keys),
+        branch_id,
+    )?;
+
+    let results: Vec<crate::types::BatchItemResult> = engine_results
+        .into_iter()
+        .map(|deleted| crate::types::BatchItemResult {
+            version: if deleted { Some(0) } else { None },
+            error: None,
+        })
+        .collect();
+
+    Ok(Output::BatchResults(results))
+}
+
 /// Handle VectorSearch with as_of timestamp (time-travel search).
 #[allow(clippy::too_many_arguments)]
 pub fn vector_search_at(

@@ -735,7 +735,7 @@ fn range_query_returns_correct_slice() {
 
     // Range [3, 7) should return sequences 3, 4, 5, 6
     let results = event
-        .range(&test_db.branch_id, "default", 3, Some(7), None)
+        .range(&test_db.branch_id, "default", 3, Some(7), None, false, None)
         .unwrap();
     assert_eq!(results.len(), 4);
     assert_eq!(results[0].value.payload, payload_int(3));
@@ -743,7 +743,7 @@ fn range_query_returns_correct_slice() {
 
     // Range with limit
     let results = event
-        .range(&test_db.branch_id, "default", 0, None, Some(2))
+        .range(&test_db.branch_id, "default", 0, None, Some(2), false, None)
         .unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].value.payload, payload_int(0));
@@ -751,19 +751,19 @@ fn range_query_returns_correct_slice() {
 
     // Empty range (start >= end)
     let results = event
-        .range(&test_db.branch_id, "default", 5, Some(5), None)
+        .range(&test_db.branch_id, "default", 5, Some(5), None, false, None)
         .unwrap();
     assert!(results.is_empty());
 
     // Range past end of log is clamped
     let results = event
-        .range(&test_db.branch_id, "default", 8, Some(100), None)
+        .range(&test_db.branch_id, "default", 8, Some(100), None, false, None)
         .unwrap();
     assert_eq!(results.len(), 2); // sequences 8, 9
 
     // Open-ended range (no end_seq)
     let results = event
-        .range(&test_db.branch_id, "default", 7, None, None)
+        .range(&test_db.branch_id, "default", 7, None, None, false, None)
         .unwrap();
     assert_eq!(results.len(), 3); // sequences 7, 8, 9
 }
@@ -818,4 +818,356 @@ fn get_by_type_at_filters_by_timestamp() {
         .get_by_type_at(&test_db.branch_id, "default", "other", ts0)
         .unwrap();
     assert!(results.is_empty());
+}
+
+// ============================================================================
+// Range Queries — Direction, Type Filter, Pagination (#1882)
+// ============================================================================
+
+#[test]
+fn range_empty_log_returns_empty() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    let results = event
+        .range(&test_db.branch_id, "default", 0, None, None, false, None)
+        .unwrap();
+    assert!(results.is_empty());
+
+    // Also reverse on empty
+    let results = event
+        .range(&test_db.branch_id, "default", 0, None, None, true, None)
+        .unwrap();
+    assert!(results.is_empty());
+}
+
+#[test]
+fn range_zero_limit_returns_empty() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    event
+        .append(&test_db.branch_id, "default", "type", payload_int(1))
+        .unwrap();
+
+    let results = event
+        .range(&test_db.branch_id, "default", 0, None, Some(0), false, None)
+        .unwrap();
+    assert!(results.is_empty());
+}
+
+#[test]
+fn range_reverse_returns_descending_order() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    for i in 0..5 {
+        event
+            .append(&test_db.branch_id, "default", "type", payload_int(i))
+            .unwrap();
+    }
+
+    let results = event
+        .range(&test_db.branch_id, "default", 0, None, None, true, None)
+        .unwrap();
+    assert_eq!(results.len(), 5);
+    // Reverse: sequences should be 4, 3, 2, 1, 0
+    assert_eq!(results[0].value.payload, payload_int(4));
+    assert_eq!(results[4].value.payload, payload_int(0));
+}
+
+#[test]
+fn range_reverse_with_limit() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    for i in 0..10 {
+        event
+            .append(&test_db.branch_id, "default", "type", payload_int(i))
+            .unwrap();
+    }
+
+    // Last 3 events in reverse
+    let results = event
+        .range(&test_db.branch_id, "default", 0, None, Some(3), true, None)
+        .unwrap();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].value.payload, payload_int(9));
+    assert_eq!(results[1].value.payload, payload_int(8));
+    assert_eq!(results[2].value.payload, payload_int(7));
+}
+
+#[test]
+fn range_with_type_filter() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    event
+        .append(&test_db.branch_id, "default", "audit", payload_int(1))
+        .unwrap();
+    event
+        .append(&test_db.branch_id, "default", "metric", payload_int(2))
+        .unwrap();
+    event
+        .append(&test_db.branch_id, "default", "audit", payload_int(3))
+        .unwrap();
+    event
+        .append(&test_db.branch_id, "default", "metric", payload_int(4))
+        .unwrap();
+    event
+        .append(&test_db.branch_id, "default", "audit", payload_int(5))
+        .unwrap();
+
+    // Range [0, 5) filtered by "audit" should return 3 events
+    let results = event
+        .range(
+            &test_db.branch_id,
+            "default",
+            0,
+            None,
+            None,
+            false,
+            Some("audit"),
+        )
+        .unwrap();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].value.payload, payload_int(1));
+    assert_eq!(results[1].value.payload, payload_int(3));
+    assert_eq!(results[2].value.payload, payload_int(5));
+}
+
+#[test]
+fn range_with_type_filter_and_limit() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    for i in 0..10 {
+        let et = if i % 2 == 0 { "even" } else { "odd" };
+        event
+            .append(&test_db.branch_id, "default", et, payload_int(i))
+            .unwrap();
+    }
+
+    // Get first 2 "even" events
+    let results = event
+        .range(
+            &test_db.branch_id,
+            "default",
+            0,
+            None,
+            Some(2),
+            false,
+            Some("even"),
+        )
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].value.payload, payload_int(0));
+    assert_eq!(results[1].value.payload, payload_int(2));
+}
+
+#[test]
+fn range_reverse_with_type_filter() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    event
+        .append(&test_db.branch_id, "default", "a", payload_int(1))
+        .unwrap();
+    event
+        .append(&test_db.branch_id, "default", "b", payload_int(2))
+        .unwrap();
+    event
+        .append(&test_db.branch_id, "default", "a", payload_int(3))
+        .unwrap();
+
+    // Reverse, filter "a" — should get seq 2 then seq 0
+    let results = event
+        .range(
+            &test_db.branch_id,
+            "default",
+            0,
+            None,
+            None,
+            true,
+            Some("a"),
+        )
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].value.payload, payload_int(3)); // seq 2
+    assert_eq!(results[1].value.payload, payload_int(1)); // seq 0
+}
+
+// ============================================================================
+// Range By Time (#1882)
+// ============================================================================
+
+#[test]
+fn range_by_time_returns_events_in_window() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    // Append events and capture timestamps
+    event
+        .append(&test_db.branch_id, "default", "type", payload_int(1))
+        .unwrap();
+    let e0 = event.get(&test_db.branch_id, "default", 0).unwrap().unwrap();
+    let ts0 = e0.value.timestamp.as_micros();
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    event
+        .append(&test_db.branch_id, "default", "type", payload_int(2))
+        .unwrap();
+    let e1 = event.get(&test_db.branch_id, "default", 1).unwrap().unwrap();
+    let ts1 = e1.value.timestamp.as_micros();
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    event
+        .append(&test_db.branch_id, "default", "type", payload_int(3))
+        .unwrap();
+
+    // Query range [ts0, ts1] should return events 0 and 1
+    let results = event
+        .range_by_time(&test_db.branch_id, "default", ts0, Some(ts1), None, false, None)
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].value.payload, payload_int(1));
+    assert_eq!(results[1].value.payload, payload_int(2));
+}
+
+#[test]
+fn range_by_time_reverse() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    for i in 0..5 {
+        event
+            .append(&test_db.branch_id, "default", "type", payload_int(i))
+            .unwrap();
+    }
+
+    // Open-ended time range, reversed
+    let results = event
+        .range_by_time(&test_db.branch_id, "default", 0, None, None, true, None)
+        .unwrap();
+    assert_eq!(results.len(), 5);
+    assert_eq!(results[0].value.payload, payload_int(4));
+    assert_eq!(results[4].value.payload, payload_int(0));
+}
+
+#[test]
+fn range_by_time_with_limit() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    for i in 0..5 {
+        event
+            .append(&test_db.branch_id, "default", "type", payload_int(i))
+            .unwrap();
+    }
+
+    let results = event
+        .range_by_time(&test_db.branch_id, "default", 0, None, Some(2), false, None)
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].value.payload, payload_int(0));
+    assert_eq!(results[1].value.payload, payload_int(1));
+}
+
+#[test]
+fn range_by_time_with_type_filter() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    event
+        .append(&test_db.branch_id, "default", "audit", payload_int(1))
+        .unwrap();
+    event
+        .append(&test_db.branch_id, "default", "metric", payload_int(2))
+        .unwrap();
+    event
+        .append(&test_db.branch_id, "default", "audit", payload_int(3))
+        .unwrap();
+
+    let results = event
+        .range_by_time(
+            &test_db.branch_id,
+            "default",
+            0,
+            None,
+            None,
+            false,
+            Some("audit"),
+        )
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].value.payload, payload_int(1));
+    assert_eq!(results[1].value.payload, payload_int(3));
+}
+
+#[test]
+fn range_by_time_empty_log() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    let results = event
+        .range_by_time(&test_db.branch_id, "default", 0, None, None, false, None)
+        .unwrap();
+    assert!(results.is_empty());
+}
+
+#[test]
+fn range_by_time_zero_limit() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    event
+        .append(&test_db.branch_id, "default", "type", payload_int(1))
+        .unwrap();
+
+    let results = event
+        .range_by_time(&test_db.branch_id, "default", 0, None, Some(0), false, None)
+        .unwrap();
+    assert!(results.is_empty());
+}
+
+// ============================================================================
+// List Types (#1882)
+// ============================================================================
+
+#[test]
+fn list_types_returns_all_event_types() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    event
+        .append(&test_db.branch_id, "default", "audit", payload_int(1))
+        .unwrap();
+    event
+        .append(&test_db.branch_id, "default", "metric", payload_int(2))
+        .unwrap();
+    event
+        .append(&test_db.branch_id, "default", "audit", payload_int(3))
+        .unwrap();
+    event
+        .append(&test_db.branch_id, "default", "error", payload_int(4))
+        .unwrap();
+
+    let mut types = event
+        .list_types(&test_db.branch_id, "default")
+        .unwrap();
+    types.sort();
+    assert_eq!(types, vec!["audit", "error", "metric"]);
+}
+
+#[test]
+fn list_types_empty_log() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    let types = event
+        .list_types(&test_db.branch_id, "default")
+        .unwrap();
+    assert!(types.is_empty());
 }

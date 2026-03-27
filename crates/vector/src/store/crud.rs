@@ -289,8 +289,14 @@ impl VectorStore {
         let collection_id = CollectionId::new(branch_id, collection);
         let kv_key = Key::new_vector(self.namespace_for(branch_id, space), collection, key);
 
-        // Hold per-collection lock for entire check-then-delete (mirrors insert_inner fix #936)
+        // Hold per-collection write lock for entire check-then-delete to prevent
+        // TOCTOU race with concurrent insert (fixes #1572, mirrors insert_inner #936).
         let state = self.state()?;
+        let mut backend = state.backends.get_mut(&collection_id).ok_or_else(|| {
+            VectorError::CollectionNotFound {
+                name: collection.to_string(),
+            }
+        })?;
 
         let Some(record) = self.get_vector_record_by_key(&kv_key)? else {
             return Ok(false);
@@ -305,15 +311,13 @@ impl VectorStore {
 
         // Backend after KV succeeds. Non-fatal since KV is already deleted and
         // search verifies KV existence for candidates (Issue #1731).
-        if let Some(mut backend) = state.backends.get_mut(&collection_id) {
-            match backend.delete_with_timestamp(vector_id, now_micros()) {
-                Ok(_) => {
-                    backend.remove_inline_meta(vector_id);
-                }
-                Err(e) => {
-                    warn!(target: "strata::vector", collection, key, error = %e,
-                        "Backend delete failed after KV delete; search will filter via KV check");
-                }
+        match backend.delete_with_timestamp(vector_id, now_micros()) {
+            Ok(_) => {
+                backend.remove_inline_meta(vector_id);
+            }
+            Err(e) => {
+                warn!(target: "strata::vector", collection, key, error = %e,
+                    "Backend delete failed after KV delete; search will filter via KV check");
             }
         }
 
@@ -435,6 +439,171 @@ impl VectorStore {
         debug!(target: "strata::vector", collection, count = batch_count, branch_id = %branch_id, "Batch upsert completed");
 
         Ok(versions)
+    }
+
+    /// Batch get multiple vectors by key.
+    ///
+    /// Returns a `Vec` whose i-th element corresponds to `keys[i]`.
+    /// Missing keys yield `None`. All reads share one collection lock acquisition.
+    pub fn batch_get(
+        &self,
+        branch_id: BranchId,
+        space: &str,
+        collection: &str,
+        keys: &[String],
+    ) -> VectorResult<Vec<Option<Versioned<VectorEntry>>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Ensure collection is loaded
+        self.ensure_collection_loaded(branch_id, space, collection)?;
+
+        let collection_id = CollectionId::new(branch_id, collection);
+
+        use strata_core::traits::Storage;
+        let version = self.db.storage().version();
+
+        let state = self.state()?;
+        let backend =
+            state
+                .backends
+                .get(&collection_id)
+                .ok_or_else(|| VectorError::CollectionNotFound {
+                    name: collection.to_string(),
+                })?;
+
+        let mut results = Vec::with_capacity(keys.len());
+        for key in keys {
+            let kv_key = Key::new_vector(self.namespace_for(branch_id, space), collection, key);
+
+            let versioned_value = self
+                .db
+                .storage()
+                .get_versioned(&kv_key, version)
+                .map_err(|e| VectorError::Storage(e.to_string()))?;
+
+            let entry = match versioned_value {
+                Some(vv) => {
+                    let bytes = match &vv.value {
+                        Value::Bytes(b) => b,
+                        _ => {
+                            return Err(VectorError::Serialization(
+                                "Expected Bytes value for vector record".to_string(),
+                            ))
+                        }
+                    };
+                    let record = VectorRecord::from_bytes(bytes)?;
+                    let vector_id = VectorId(record.vector_id);
+
+                    let embedding = if !record.embedding.is_empty() {
+                        record.embedding
+                    } else {
+                        backend.get(vector_id).map(|e| e.to_vec()).ok_or_else(|| {
+                            VectorError::Internal(
+                                "Embedding missing from both backend and KV record".to_string(),
+                            )
+                        })?
+                    };
+
+                    Some(Versioned::with_timestamp(
+                        VectorEntry {
+                            key: key.to_string(),
+                            embedding,
+                            metadata: record.metadata,
+                            vector_id,
+                            version: Version::counter(record.version),
+                            source_ref: record.source_ref,
+                        },
+                        vv.version,
+                        vv.timestamp,
+                    ))
+                }
+                None => None,
+            };
+            results.push(entry);
+        }
+
+        Ok(results)
+    }
+
+    /// Batch delete multiple vectors by key.
+    ///
+    /// Returns a `Vec<bool>` where `results[i]` is `true` if `keys[i]` existed
+    /// and was deleted. All deletes share one collection lock for atomicity.
+    pub fn batch_delete(
+        &self,
+        branch_id: BranchId,
+        space: &str,
+        collection: &str,
+        keys: &[String],
+    ) -> VectorResult<Vec<bool>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Ensure collection is loaded
+        self.ensure_collection_loaded(branch_id, space, collection)?;
+
+        let collection_id = CollectionId::new(branch_id, collection);
+
+        // Hold per-collection write lock for entire check-then-delete batch to
+        // prevent TOCTOU race with concurrent insert (fixes #1572).
+        let state = self.state()?;
+        let mut backend = state.backends.get_mut(&collection_id).ok_or_else(|| {
+            VectorError::CollectionNotFound {
+                name: collection.to_string(),
+            }
+        })?;
+
+        // Check existence and collect records before committing
+        let mut kv_keys = Vec::with_capacity(keys.len());
+        let mut vector_ids: Vec<Option<VectorId>> = Vec::with_capacity(keys.len());
+
+        for key in keys {
+            let kv_key = Key::new_vector(self.namespace_for(branch_id, space), collection, key);
+            match self.get_vector_record_by_key(&kv_key)? {
+                Some(record) => {
+                    let vector_id = VectorId(record.vector_id);
+                    kv_keys.push(kv_key);
+                    vector_ids.push(Some(vector_id));
+                }
+                None => {
+                    vector_ids.push(None);
+                }
+            }
+        }
+
+        // Commit all deletes in a single transaction
+        if !kv_keys.is_empty() {
+            self.db
+                .transaction(branch_id, |txn| {
+                    for kv_key in &kv_keys {
+                        txn.delete(kv_key.clone())?;
+                    }
+                    Ok(())
+                })
+                .map_err(|e| VectorError::Storage(e.to_string()))?;
+        }
+
+        // Update backend after KV commit succeeds
+        let ts = now_micros();
+        for vid in &vector_ids {
+            if let Some(vector_id) = vid {
+                match backend.delete_with_timestamp(*vector_id, ts) {
+                    Ok(_) => {
+                        backend.remove_inline_meta(*vector_id);
+                    }
+                    Err(e) => {
+                        warn!(target: "strata::vector", collection, error = %e,
+                            "Backend delete failed after KV delete in batch; search will filter via KV check");
+                    }
+                }
+            }
+        }
+
+        let results: Vec<bool> = vector_ids.iter().map(|v| v.is_some()).collect();
+        Ok(results)
     }
 
     /// List all vector keys in a collection.

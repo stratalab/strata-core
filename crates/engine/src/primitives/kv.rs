@@ -401,6 +401,97 @@ impl KVStore {
         Ok(results)
     }
 
+    /// Get multiple values by key in a single transaction.
+    ///
+    /// Returns a `Vec` whose i-th element corresponds to `keys[i]`.
+    /// Missing keys yield `None`. All reads share one snapshot for consistency.
+    pub fn batch_get(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        keys: &[String],
+    ) -> StrataResult<Vec<Option<strata_core::VersionedValue>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.db.transaction(*branch_id, |txn| {
+            let mut results = Vec::with_capacity(keys.len());
+            for key in keys {
+                let storage_key = self.key_for(branch_id, space, key);
+                results.push(txn.get_versioned(&storage_key)?);
+            }
+            Ok(results)
+        })
+    }
+
+    /// Delete multiple keys in a single transaction.
+    ///
+    /// Returns a `Vec<bool>` where `results[i]` is `true` if `keys[i]` existed
+    /// and was deleted, `false` if it was not found. All deletes are atomic.
+    pub fn batch_delete(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        keys: &[String],
+    ) -> StrataResult<Vec<bool>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let results = self.db.transaction(*branch_id, |txn| {
+            let mut existed = Vec::with_capacity(keys.len());
+            for key in keys {
+                let storage_key = self.key_for(branch_id, space, key);
+                let exists = txn.get(&storage_key)?.is_some();
+                if exists {
+                    txn.delete(storage_key)?;
+                }
+                existed.push(exists);
+            }
+            Ok(existed)
+        })?;
+
+        // Post-commit: remove deleted keys from inverted index
+        if let Ok(index) = self.db.extension::<crate::search::InvertedIndex>() {
+            if index.is_enabled() {
+                for (i, key) in keys.iter().enumerate() {
+                    if results[i] {
+                        let entity_ref = crate::search::EntityRef::Kv {
+                            branch_id: *branch_id,
+                            key: key.clone(),
+                        };
+                        index.remove_document(&entity_ref);
+                    }
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Check existence of multiple keys in a single transaction.
+    ///
+    /// Returns a `Vec<bool>` where `results[i]` is `true` if `keys[i]` exists.
+    /// All checks share one snapshot for consistency.
+    pub fn batch_exists(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        keys: &[String],
+    ) -> StrataResult<Vec<bool>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.db.transaction(*branch_id, |txn| {
+            let mut results = Vec::with_capacity(keys.len());
+            for key in keys {
+                let storage_key = self.key_for(branch_id, space, key);
+                results.push(txn.get(&storage_key)?.is_some());
+            }
+            Ok(results)
+        })
+    }
+
     // ========== Time-Travel API ==========
 
     /// Get a value by key as of a past timestamp (microseconds since epoch).

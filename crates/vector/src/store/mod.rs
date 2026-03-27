@@ -3546,4 +3546,176 @@ mod tests {
             total_expected
         );
     }
+
+    /// Issue #1572: delete() does not hold the per-collection write lock during
+    /// KV existence check and KV delete, allowing a concurrent insert to be
+    /// silently clobbered.
+    ///
+    /// Scenario: Thread A deletes "key" while Thread B inserts "key".
+    /// If delete's KV read + KV delete happen without the write lock, the delete
+    /// can race ahead and delete the record that insert just committed.
+    ///
+    /// After both threads complete, KV and backend must agree: either both
+    /// see the key (insert serialized last) or neither does (delete serialized
+    /// last). A mismatch indicates a TOCTOU race.
+    #[test]
+    fn test_issue_1572_delete_insert_toctou() {
+        let db = Database::cache().unwrap();
+        let store = VectorStore::new(db);
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(4, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "race", config)
+            .unwrap();
+
+        let num_rounds = 100;
+        let mut inconsistencies = 0u32;
+
+        for _round in 0..num_rounds {
+            // Seed the key so delete has something to find
+            let emb_v1 = [1.0_f32, 0.0, 0.0, 0.0];
+            store
+                .insert(branch_id, "default", "race", "key", &emb_v1, None)
+                .unwrap();
+
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+            // Thread A: delete
+            let store_a = store.clone();
+            let barrier_a = barrier.clone();
+            let handle_a = std::thread::spawn(move || {
+                barrier_a.wait();
+                store_a.delete(branch_id, "default", "race", "key")
+            });
+
+            // Thread B: insert (upsert with new embedding)
+            let store_b = store.clone();
+            let barrier_b = barrier.clone();
+            let emb_v2 = [0.0_f32, 1.0, 0.0, 0.0];
+            let handle_b = std::thread::spawn(move || {
+                barrier_b.wait();
+                store_b.insert(branch_id, "default", "race", "key", &emb_v2, None)
+            });
+
+            let delete_result = handle_a.join().unwrap();
+            let insert_result = handle_b.join().unwrap();
+
+            // Both operations must succeed (no panics, no errors)
+            delete_result.unwrap();
+            insert_result.unwrap();
+
+            // KV and backend must agree on existence.
+            let kv_exists = store
+                .get(branch_id, "default", "race", "key")
+                .unwrap()
+                .is_some();
+            let search_results = store
+                .search(
+                    branch_id,
+                    "default",
+                    "race",
+                    &[0.0, 1.0, 0.0, 0.0],
+                    10,
+                    None,
+                )
+                .unwrap();
+            let search_finds_key = search_results.iter().any(|m| m.key == "key");
+
+            if kv_exists != search_finds_key {
+                inconsistencies += 1;
+            }
+        }
+
+        assert_eq!(
+            inconsistencies, 0,
+            "KV/backend inconsistency detected in {inconsistencies}/{num_rounds} rounds — TOCTOU race in delete"
+        );
+    }
+
+    /// Issue #1572 stress test: concurrent delete + insert on the SAME key.
+    ///
+    /// Under correct locking, exactly one serialization order applies per
+    /// iteration. If the TOCTOU bug is present, a significant fraction of
+    /// iterations will lose the insert's KV record while the backend retains
+    /// the entry (phantom) or vice versa.
+    #[test]
+    fn test_issue_1572_delete_insert_toctou_concurrent() {
+        let db = Database::cache().unwrap();
+        let store = VectorStore::new(db);
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(4, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "stress", config)
+            .unwrap();
+
+        let num_rounds = 100;
+        let num_threads = 4; // 2 inserters + 2 deleters per round
+        let mut inconsistencies = 0u32;
+
+        for _round in 0..num_rounds {
+            // Seed a vector
+            let seed_emb = [1.0_f32, 0.0, 0.0, 0.0];
+            store
+                .insert(branch_id, "default", "stress", "target", &seed_emb, None)
+                .unwrap();
+
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(num_threads));
+            let mut handles = Vec::new();
+
+            // 2 deleters
+            for _ in 0..2 {
+                let s = store.clone();
+                let b = barrier.clone();
+                handles.push(std::thread::spawn(move || {
+                    b.wait();
+                    let _ = s.delete(branch_id, "default", "stress", "target");
+                }));
+            }
+
+            // 2 inserters
+            for t in 0..2 {
+                let s = store.clone();
+                let b = barrier.clone();
+                let emb = [0.0, t as f32 + 1.0, 0.0, 0.0];
+                handles.push(std::thread::spawn(move || {
+                    b.wait();
+                    let _ = s.insert(branch_id, "default", "stress", "target", &emb, None);
+                }));
+            }
+
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            // After all threads complete, check consistency between KV and backend.
+            let kv_exists = store
+                .get(branch_id, "default", "stress", "target")
+                .unwrap()
+                .is_some();
+            let search_results = store
+                .search(
+                    branch_id,
+                    "default",
+                    "stress",
+                    &[0.0, 1.0, 0.0, 0.0],
+                    10,
+                    None,
+                )
+                .unwrap();
+            let search_finds_target = search_results.iter().any(|m| m.key == "target");
+
+            // KV and search must agree: if KV says it exists, search should find it.
+            // If KV says it doesn't exist, search should not find it.
+            if kv_exists != search_finds_target {
+                inconsistencies += 1;
+            }
+        }
+
+        assert_eq!(
+            inconsistencies, 0,
+            "KV/backend inconsistency detected in {inconsistencies}/{num_rounds} rounds — TOCTOU race in delete"
+        );
+    }
 }
