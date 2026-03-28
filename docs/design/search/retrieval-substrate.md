@@ -112,6 +112,11 @@ A recipe is a JSON document. **Presence of a key means enabled. Absence means di
     "offset": 0
   },
 
+  "version": {
+    "include_history": false,
+    "depth": 3
+  },
+
   "control": {
     "budget_ms": 5000,
     "snapshot_version": null,
@@ -143,6 +148,8 @@ Scoping: `scan` and `bm25` accept `sources` (which primitives) and `spaces` (whi
 **`fusion`** — Merges candidate lists from multiple retrieval operators into one ranked list. Only meaningful when multiple operators are enabled. Defaults to RRF with k=60 and equal weights.
 
 **`transform`** — Post-processing on the result set: sorting, grouping, aggregation, deduplication, pagination.
+
+**`version`** — Temporal output: whether to include version history per hit, and how deep.
 
 **`control`** — Execution parameters: time budget, explicit snapshot version.
 
@@ -253,6 +260,8 @@ When a section or field is omitted at all levels, these built-in defaults apply:
 | `transform.deduplicate` | `"entity_ref"` |
 | `transform.limit` | 10 |
 | `transform.offset` | 0 |
+| `version.include_history` | `false` |
+| `version.depth` | 3 (when include_history is true) |
 | `control.budget_ms` | 5000 |
 | `control.snapshot_version` | Latest |
 | `control.include_metadata` | `true` |
@@ -549,8 +558,13 @@ The response has a **fixed structure**. Every field is always present. Unpopulat
       "entity_ref": {"type": "json", "branch": "main", "space": "default", "key": "doc:123"},
       "score": 0.847,
       "rank": 1,
-      "snippet": "Common side effects include nausea...",
-      "metadata": {"category": "pharmacology", "year": 2024}
+      "snippet": "Current dosage is 1000mg...",
+      "metadata": {"category": "pharmacology", "year": 2024},
+      "versions": [
+        {"version": 3, "timestamp": "2025-06-01T00:00:00Z", "snippet": "Current dosage is 1000mg..."},
+        {"version": 2, "timestamp": "2024-09-15T00:00:00Z", "snippet": "Recommended dosage is 500mg..."},
+        {"version": 1, "timestamp": "2024-01-10T00:00:00Z", "snippet": "Initial dosage is 250mg..."}
+      ]
     }
   ],
 
@@ -586,7 +600,7 @@ The response has a **fixed structure**. Every field is always present. Unpopulat
 
 | Field | Type | When populated |
 |-------|------|---------------|
-| `hits` | array | Always (empty if `limit: 0` or results grouped) |
+| `hits` | array | Always (empty if `limit: 0` or results grouped). Each hit includes `versions` array when `version.include_history` is true. |
 | `answer` | object or null | When `mode: "rag"` and intelligence layer available |
 | `diff` | object or null | When `diff` parameter provided (temporal search) |
 | `aggregations` | object or null | When `transform.aggregate` in recipe |
