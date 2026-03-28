@@ -14,6 +14,9 @@
 | [`v0.4-implementation.md`](v0.4-implementation.md) | Implementation plan: graph-augmented retrieval (PPR, typed traversal). |
 | [`v0.5-implementation.md`](v0.5-implementation.md) | Implementation plan: filter + budget + pagination (production readiness). |
 | [`v0.6-implementation.md`](v0.6-implementation.md) | Implementation plan: RAG (grounded answers, single model, citations). |
+| [`v0.7-implementation.md`](v0.7-implementation.md) | Implementation plan: AutoResearch (db.experiment, metrics, branch-per-recipe). |
+| [`v0.8-implementation.md`](v0.8-implementation.md) | Implementation plan: multi-model routing (provider:model per operation). |
+| [`v0.9-implementation.md`](v0.9-implementation.md) | Implementation plan: agent hints (describe, recipe schema, actionable hints). |
 
 ## Related
 
