@@ -488,29 +488,33 @@ pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> Strat
         ));
     }
 
-    // Quiesce in-flight commits before forking (#2105/#2110).
+    // Quiesce in-flight commits before forking (#2105/#2110, #2108).
     //
-    // The global storage version is shared across branches. Without quiescing,
-    // a concurrent commit to ANY branch can advance storage.version while a
-    // commit to the SOURCE branch hasn't applied its writes yet. Fork would
-    // read the advanced version but miss the source's pending data.
+    // The quiesce write guard drains ALL in-flight commits (they hold the
+    // shared read side of commit_quiesce) and prevents new ones from starting.
+    // This protects against two distinct bugs:
     //
-    // The write guard drains all in-flight commits (they hold the shared read
-    // side) and prevents new ones from starting until the storage fork completes.
+    //   1. Version gap (#2105/#2110): A concurrent commit to any branch can
+    //      advance the global storage version while the source branch's
+    //      pending writes haven't landed. The quiesce guard ensures all
+    //      pending writes are applied before we read the version.
     //
-    // Additionally, hold the source branch's commit lock (#2108).
-    // delete_branch also holds this lock, and its delete transaction writes
-    // tombstones to the source's storage (via apply_batch grouping by
-    // key.namespace.branch_id). Without this lock, fork's inline-flush can
-    // capture those tombstones, causing the child to see all keys as deleted.
+    //   2. Delete tombstone capture (#2108): delete_branch's transaction
+    //      writes tombstones to the source's storage inside commit(), which
+    //      holds quiesce.read(). The write guard here waits for that commit
+    //      to finish, so fork either sees the branch already marked as
+    //      deleting (and rejects) or the delete hasn't started yet.
     //
-    // Re-check is_deleting under the lock to close the TOCTOU window.
-    // Both guards scoped to just the storage fork — metadata and space
-    // operations below don't need protection.
+    // Re-check is_deleting under the quiesce guard to close the TOCTOU
+    // window — if delete's transaction committed before we acquired the
+    // write lock, the deleting flag is set and we bail.
+    //
+    // Note: we intentionally do NOT hold the branch commit lock here.
+    // commit() acquires quiesce.read() → branch_commit_lock, so nesting
+    // branch_commit_lock inside quiesce.write() would invert the lock order
+    // and deadlock with concurrent commits on the source branch.
     let (fork_version, _segments_shared) = {
         let _quiesce_guard = db.quiesce_commits();
-        let source_commit_lock = db.branch_commit_lock(&source_id);
-        let _source_guard = source_commit_lock.lock();
         if db.is_branch_deleting(&source_id) {
             return Err(StrataError::invalid_input(format!(
                 "Source branch '{}' is being deleted",
