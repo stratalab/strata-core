@@ -7,6 +7,13 @@
 | [`search-strategy.md`](search-strategy.md) | **Start here.** Philosophy, three-layer architecture, ablation study, implementation roadmap. |
 | [`retrieval-substrate.md`](retrieval-substrate.md) | Layer 1: Recipe schema, pipeline, invariants, operators, predicates, aggregations. |
 | [`intelligence-layer.md`](intelligence-layer.md) | Layer 2: Query-time flow, write-time enrichment, RAG, AutoResearch, Qwen3 usage. |
+| [`v0.0-prerequisites.md`](v0.0-prerequisites.md) | Prerequisites: _system_ space, recipe types, config migration, primitive fixes. |
+| [`v0.1-implementation.md`](v0.1-implementation.md) | Implementation plan: minimal substrate (BM25 + vector + RRF + limit). |
+| [`v0.2-implementation.md`](v0.2-implementation.md) | Implementation plan: query expansion + reranking (qmd parity). |
+| [`v0.3-implementation.md`](v0.3-implementation.md) | Implementation plan: temporal search (as_of, diff, version history). |
+| [`v0.4-implementation.md`](v0.4-implementation.md) | Implementation plan: graph-augmented retrieval (PPR, typed traversal). |
+| [`v0.5-implementation.md`](v0.5-implementation.md) | Implementation plan: filter + budget + pagination (production readiness). |
+| [`v0.6-implementation.md`](v0.6-implementation.md) | Implementation plan: RAG (grounded answers, single model, citations). |
 
 ## Related
 
