@@ -270,76 +270,136 @@ Same fixed structure. `diff` field populated when temporal:
 ### What the user sees
 
 ```python
-eval_set = [
+# Store eval data however you want — it's a database
+db.json.set("eval/medical", [
     {"query": "metformin side effects", "relevant": ["doc:123", "doc:456"]},
     {"query": "drug interactions warfarin", "relevant": ["doc:789"]},
-    # ... 50-100 pairs
-]
+])
 
-result = db.optimize_search(eval_set, budget=1000)
+# Compare recipes. Sync. Returns rich results in seconds.
+result = db.experiment(
+    recipes={
+        "baseline": {"retrieve": {"bm25": {}}},
+        "tuned":    {"retrieve": {"bm25": {"k1": 1.2, "b": 0.65}}, "fusion": {"k": 45}},
+        "hybrid":   {"retrieve": {"bm25": {}, "vector": {}}},
+    },
+    eval_set=db.json.get("eval/medical"),
+    metric="ndcg@10"
+)
 
-# result.baseline_ndcg → 0.42
-# result.optimized_ndcg → 0.68
-# result.experiments_run → 847
-# result.winning_recipe → {...}  (automatically saved as default)
+# Grab the winner, set it as production
+db.set_recipe(result.winner)
 ```
 
-### How it works
+### Experiment output
+
+`db.experiment()` returns a rich result with everything the agent needs:
+
+```python
+result.winner
+# → {"retrieve": {"bm25": {"k1": 1.2, "b": 0.65}}, "fusion": {"k": 45}}
+
+result.rankings
+# → [
+#      {"name": "tuned",    "ndcg@10": 0.71, "recall@10": 0.83, "mrr": 0.69, "precision@10": 0.45, "elapsed_ms": 3800},
+#      {"name": "hybrid",   "ndcg@10": 0.68, "recall@10": 0.80, "mrr": 0.65, "precision@10": 0.42, "elapsed_ms": 4200},
+#      {"name": "baseline", "ndcg@10": 0.63, "recall@10": 0.75, "mrr": 0.58, "precision@10": 0.38, "elapsed_ms": 2800},
+#   ]
+
+result.details["tuned"]
+# → {
+#      "ndcg@10": 0.71,
+#      "per_query": [
+#          {"query": "metformin side effects", "ndcg@10": 0.85, "relevant_found": 2, "relevant_total": 2},
+#          {"query": "warfarin interactions",  "ndcg@10": 0.42, "relevant_found": 1, "relevant_total": 2},
+#      ]
+#   }
+```
+
+- `result.winner` — the winning recipe, ready to pass to `db.set_recipe()`
+- `result.rankings` — all recipes ranked by the chosen metric, with all metrics computed
+- `result.details[name]` — per-query breakdown per recipe, so the agent can see exactly which queries each recipe struggles on
+
+### Metrics
+
+All computed for every recipe. The `metric` parameter controls sort order and `.winner`.
+
+| Metric | What it measures | Default |
+|--------|-----------------|---------|
+| `ndcg@10` | Rank-aware relevance | **Yes** |
+| `recall@10` | Coverage at shallow depth | |
+| `recall@100` | Coverage at deep depth | |
+| `mrr` | First relevant result position | |
+| `map` | Precision across all recall levels | |
+| `precision@10` | Fraction of top-10 that are relevant | |
+| `hit_rate@10` | At least one relevant in top-10 (binary) | |
+| `f1@10` | Harmonic mean of precision and recall | |
+
+### Model variants
+
+Recipes can include `models` to test different model assignments:
+
+```python
+result = db.experiment(
+    recipes={
+        "local_only": {
+            "retrieve": {"bm25": {}, "vector": {}},
+        },
+        "cloud_rerank": {
+            "retrieve": {"bm25": {}, "vector": {}},
+            "models": {"rerank": "anthropic:claude-sonnet-4-6"},
+        },
+    },
+    eval_set=eval_set
+)
+```
+
+If `models` is omitted, uses the `db.configure()` defaults.
+
+### How it works internally
 
 ```
-1. User provides eval_set (query → relevant docs pairs)
-2. Evaluate current recipe → baseline metrics
-3. Loop:
-   a. AutoResearch model proposes N recipe variants
-   b. For each variant: fork branch → evaluate → record metrics
-   c. If best variant > current best → adopt it
-   d. If no improvement for 5 rounds → stop
-4. Save winning recipe as database default
-5. Return: baseline → optimized metrics, experiments run, winning recipe
+For each recipe (sequential in v1):
+  1. Create a branch
+  2. Run every eval query through db.search(query, recipe=variant)
+  3. Compare results to expected relevant docs
+  4. Compute all metrics (ndcg, recall, mrr, map, precision, hit_rate, f1)
+  5. Log results on _system_ branch
+  6. Discard the branch
+Rank recipes by chosen metric
+Return result with winner, rankings, and per-query details
 ```
 
-### What gets tuned
+Three recipes × 50 eval queries × ~50ms per search = ~7.5 seconds total. Fast enough for v1. Parallel execution across branches is a future optimization.
 
-Every substrate parameter plus model assignments:
+### The AutoResearch loop
 
-| Parameter | Range |
-|-----------|-------|
-| `bm25.k1` | 0.5 — 2.0 |
-| `bm25.b` | 0.1 — 1.0 |
-| `bm25.field_weights.*` | 0.0 — 5.0 |
-| `bm25.stemmer` | porter / snowball / none |
-| `bm25.stopwords` | lucene33 / smart571 / none |
-| `bm25.phrase_boost` | 0.0 — 5.0 |
-| `bm25.proximity_boost` | 0.0 — 2.0 |
-| `vector.k` | 10 — 200 |
-| `vector.ef_search` | 50 — 500 |
-| `graph.damping` | 0.1 — 0.9 |
-| `graph.max_hops` | 1 — 5 |
-| `fusion.k` | 10 — 200 |
-| `fusion.weights.*` | 0.0 — 3.0 |
-| `models.expansion` | local vs cloud options |
-| `models.rerank` | local vs cloud options |
-| `expansion on/off` | enabled / disabled |
-| `reranking on/off` | enabled / disabled |
+The external agent drives the optimization loop. Strata provides `db.experiment()` as the primitive:
 
-### Experiment planning
+```python
+current_best = db.get_recipe()
+eval_set = db.json.get("eval/medical")
 
-The AutoResearch model reads previous experiment results and plans the next batch:
+for round in range(10):
+    # Agent proposes variants (mutates current best)
+    variants = agent.propose_variants(current_best, result.details)
 
-- **Round 1:** Broad sweep — major parameters (k1, b, fusion weights)
-- **Round 5:** Narrow in — parameters that showed sensitivity
-- **Round 10:** Fine-tune — small adjustments around the current best
-- **Ablation:** Periodically disable one component to measure its contribution
+    # Strata compares them
+    result = db.experiment(recipes=variants, eval_set=eval_set)
 
-A smarter model (Claude Haiku/Sonnet) produces better experiment plans than a local 1.7B model. This is where the multi-model routing pays off — use a cheap local model for high-volume operations, a smart cloud model for the planning step that runs once per round.
+    # Agent decides whether to keep
+    if result.rankings[0]["ndcg@10"] > current_best_score:
+        current_best = result.winner
+        current_best_score = result.rankings[0]["ndcg@10"]
+
+db.set_recipe(current_best)
+```
+
+The per-query details feed back into the agent's next round — it can see which queries the winner still struggles on and target those specifically.
 
 ### Why it requires user-provided eval pairs
 
 The database doesn't know what "good results" means for your data. The user provides 50-100 (query, relevant_docs) pairs that define their quality standard. This is the only human input required.
-
-### Graceful degradation
-
-If AutoResearch model unavailable: fall back to grid search (no intelligent planning, still works). If `evaluate()` fails: abort, return best recipe found so far.
 
 ---
 
@@ -451,22 +511,31 @@ Feature gating:
 ## 10. API Summary
 
 ```python
-# Search (always available)
-results = db.search("query")
-results = db.search("query", recipe="custom")
-results = db.search("query", mode="rag")
-results = db.search("query", as_of="2025-01-01")
-results = db.search("query", diff=("2024-01-01", "2025-06-01"))
-results = db.search("query", mode="rag", diff=("2024-01-01", "2025-06-01"))
+# Search
+db.search("query")
+db.search("query", recipe="custom")
+db.search("query", mode="rag")
+db.search("query", as_of="2025-01-01")
+db.search("query", diff=("2024-01-01", "2025-06-01"))
+db.search("query", mode="rag", diff=("2024-01-01", "2025-06-01"))
 
-# AutoResearch (requires eval pairs)
-result = db.optimize_search(eval_set, budget=1000)
+# Recipes
+db.set_recipe(recipe)
+db.set_recipe(recipe, name="medical")
+db.get_recipe()
+db.get_recipe("medical")
+
+# Experiments
+result = db.experiment(recipes, eval_set, metric="ndcg@10")
+result.winner      # winning recipe
+result.rankings    # all recipes ranked with all metrics
+result.details     # per-recipe, per-query breakdown
 
 # Configuration
 db.configure(models={...}, expansion=True, ...)
 ```
 
-Three methods. That's it.
+You can learn the entire API in 60 seconds.
 
 ---
 
