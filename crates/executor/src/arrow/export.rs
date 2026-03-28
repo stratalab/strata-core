@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use arrow::array::{StringBuilder, UInt64Builder};
+use arrow::array::{Float32Builder, Float64Builder, FixedSizeListBuilder, StringBuilder, UInt64Builder};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
@@ -11,6 +11,14 @@ use strata_core::primitives::json::JsonPath;
 use crate::bridge::{extract_version, Primitives};
 use crate::convert::convert_result;
 use crate::{Error, Result};
+
+/// Convert a VectorResult to an executor Result.
+fn convert_vector_result<T>(
+    r: std::result::Result<T, strata_vector::VectorError>,
+    branch_id: strata_core::types::BranchId,
+) -> Result<T> {
+    convert_result(r.map_err(|e| e.into_strata_error(branch_id)))
+}
 
 /// Which primitive to export and any filtering options.
 pub enum ExportSource {
@@ -29,17 +37,17 @@ pub enum ExportSource {
         /// Optional event type to filter by.
         event_type: Option<String>,
     },
-    /// Vector collection (implemented in Epic 3).
+    /// Vector collection export.
     Vector {
         /// Name of the vector collection.
         collection: String,
     },
-    /// Graph nodes (implemented in Epic 3).
+    /// Graph nodes export.
     GraphNodes {
         /// Name of the graph.
         graph: String,
     },
-    /// Graph edges (implemented in Epic 3).
+    /// Graph edges export.
     GraphEdges {
         /// Name of the graph.
         graph: String,
@@ -63,18 +71,15 @@ pub fn export_to_batches(
         ExportSource::Event { event_type } => {
             export_event(primitives, branch_id, space, event_type, limit)
         }
-        ExportSource::Vector { collection } => Err(Error::NotImplemented {
-            feature: "Arrow vector export".into(),
-            reason: format!("vector collection '{collection}' export is planned for Epic 3"),
-        }),
-        ExportSource::GraphNodes { graph } => Err(Error::NotImplemented {
-            feature: "Arrow graph export".into(),
-            reason: format!("graph '{graph}' node export is planned for Epic 3"),
-        }),
-        ExportSource::GraphEdges { graph } => Err(Error::NotImplemented {
-            feature: "Arrow graph export".into(),
-            reason: format!("graph '{graph}' edge export is planned for Epic 3"),
-        }),
+        ExportSource::Vector { collection } => {
+            export_vector(primitives, branch_id, space, &collection, limit)
+        }
+        ExportSource::GraphNodes { graph } => {
+            export_graph_nodes(primitives, branch_id, &graph, limit)
+        }
+        ExportSource::GraphEdges { graph } => {
+            export_graph_edges(primitives, branch_id, &graph, limit)
+        }
     }
 }
 
@@ -318,6 +323,214 @@ fn export_event(
     )
     .map_err(|e| Error::Internal {
         reason: format!("failed to build Event RecordBatch: {e}"),
+        hint: None,
+    })?;
+
+    if batch.num_rows() == 0 {
+        return Ok((schema, vec![]));
+    }
+    Ok((schema, vec![batch]))
+}
+
+// =============================================================================
+// Vector export
+// =============================================================================
+
+fn export_vector(
+    p: &Arc<Primitives>,
+    branch_id: strata_core::types::BranchId,
+    space: &str,
+    collection: &str,
+    limit: Option<usize>,
+) -> Result<(Schema, Vec<RecordBatch>)> {
+    // Get collection info for the dimension
+    let collections =
+        convert_vector_result(p.vector.list_collections(branch_id, space), branch_id)?;
+    let info = collections
+        .iter()
+        .find(|c| c.name == collection)
+        .ok_or_else(|| Error::CollectionNotFound {
+            collection: collection.to_string(),
+            hint: None,
+        })?;
+    let dim = info.config.dimension as i32;
+
+    let schema = Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new(
+            "embedding",
+            DataType::FixedSizeList(
+                Arc::new(Field::new("item", DataType::Float32, true)),
+                dim,
+            ),
+            false,
+        ),
+        Field::new("metadata", DataType::Utf8, true),
+    ]);
+
+    let keys = convert_vector_result(p.vector.list_keys(branch_id, space, collection), branch_id)?;
+    let max = limit.unwrap_or(usize::MAX);
+
+    let mut key_builder = StringBuilder::new();
+    let mut embedding_builder =
+        FixedSizeListBuilder::new(Float32Builder::new(), dim);
+    let mut metadata_builder = StringBuilder::new();
+
+    for key in keys.into_iter().take(max) {
+        if let Some(versioned) =
+            convert_vector_result(p.vector.get(branch_id, space, collection, &key), branch_id)?
+        {
+            let entry = &versioned.value;
+            key_builder.append_value(&entry.key);
+
+            let values = embedding_builder.values();
+            for &f in &entry.embedding {
+                values.append_value(f);
+            }
+            embedding_builder.append(true);
+
+            match &entry.metadata {
+                Some(meta) => {
+                    metadata_builder.append_value(
+                        serde_json::to_string(meta).unwrap_or_else(|_| "null".to_string()),
+                    );
+                }
+                None => metadata_builder.append_null(),
+            }
+        }
+    }
+
+    let batch = RecordBatch::try_new(
+        Arc::new(schema.clone()),
+        vec![
+            Arc::new(key_builder.finish()),
+            Arc::new(embedding_builder.finish()),
+            Arc::new(metadata_builder.finish()),
+        ],
+    )
+    .map_err(|e| Error::Internal {
+        reason: format!("failed to build Vector RecordBatch: {e}"),
+        hint: None,
+    })?;
+
+    if batch.num_rows() == 0 {
+        return Ok((schema, vec![]));
+    }
+    Ok((schema, vec![batch]))
+}
+
+// =============================================================================
+// Graph nodes export
+// =============================================================================
+
+fn export_graph_nodes(
+    p: &Arc<Primitives>,
+    branch_id: strata_core::types::BranchId,
+    graph: &str,
+    limit: Option<usize>,
+) -> Result<(Schema, Vec<RecordBatch>)> {
+    let schema = Schema::new(vec![
+        Field::new("node_id", DataType::Utf8, false),
+        Field::new("object_type", DataType::Utf8, true),
+        Field::new("properties", DataType::Utf8, true),
+    ]);
+
+    let nodes = convert_result(p.graph.all_nodes(branch_id, graph))?;
+    let max = limit.unwrap_or(usize::MAX);
+
+    let mut id_builder = StringBuilder::new();
+    let mut type_builder = StringBuilder::new();
+    let mut props_builder = StringBuilder::new();
+
+    for (node_id, data) in nodes.iter().take(max) {
+        id_builder.append_value(node_id);
+        match &data.object_type {
+            Some(t) => type_builder.append_value(t),
+            None => type_builder.append_null(),
+        }
+        match &data.properties {
+            Some(props) => {
+                props_builder.append_value(
+                    serde_json::to_string(props).unwrap_or_else(|_| "null".to_string()),
+                );
+            }
+            None => props_builder.append_null(),
+        }
+    }
+
+    let batch = RecordBatch::try_new(
+        Arc::new(schema.clone()),
+        vec![
+            Arc::new(id_builder.finish()),
+            Arc::new(type_builder.finish()),
+            Arc::new(props_builder.finish()),
+        ],
+    )
+    .map_err(|e| Error::Internal {
+        reason: format!("failed to build GraphNodes RecordBatch: {e}"),
+        hint: None,
+    })?;
+
+    if batch.num_rows() == 0 {
+        return Ok((schema, vec![]));
+    }
+    Ok((schema, vec![batch]))
+}
+
+// =============================================================================
+// Graph edges export
+// =============================================================================
+
+fn export_graph_edges(
+    p: &Arc<Primitives>,
+    branch_id: strata_core::types::BranchId,
+    graph: &str,
+    limit: Option<usize>,
+) -> Result<(Schema, Vec<RecordBatch>)> {
+    let schema = Schema::new(vec![
+        Field::new("source", DataType::Utf8, false),
+        Field::new("target", DataType::Utf8, false),
+        Field::new("edge_type", DataType::Utf8, false),
+        Field::new("weight", DataType::Float64, false),
+        Field::new("properties", DataType::Utf8, true),
+    ]);
+
+    let edges = convert_result(p.graph.all_edges(branch_id, graph))?;
+    let max = limit.unwrap_or(usize::MAX);
+
+    let mut src_builder = StringBuilder::new();
+    let mut dst_builder = StringBuilder::new();
+    let mut type_builder = StringBuilder::new();
+    let mut weight_builder = Float64Builder::new();
+    let mut props_builder = StringBuilder::new();
+
+    for edge in edges.iter().take(max) {
+        src_builder.append_value(&edge.src);
+        dst_builder.append_value(&edge.dst);
+        type_builder.append_value(&edge.edge_type);
+        weight_builder.append_value(edge.data.weight);
+        match &edge.data.properties {
+            Some(props) => {
+                props_builder.append_value(
+                    serde_json::to_string(props).unwrap_or_else(|_| "null".to_string()),
+                );
+            }
+            None => props_builder.append_null(),
+        }
+    }
+
+    let batch = RecordBatch::try_new(
+        Arc::new(schema.clone()),
+        vec![
+            Arc::new(src_builder.finish()),
+            Arc::new(dst_builder.finish()),
+            Arc::new(type_builder.finish()),
+            Arc::new(weight_builder.finish()),
+            Arc::new(props_builder.finish()),
+        ],
+    )
+    .map_err(|e| Error::Internal {
+        reason: format!("failed to build GraphEdges RecordBatch: {e}"),
         hint: None,
     })?;
 
@@ -576,6 +789,167 @@ mod tests {
 
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].num_rows(), 3);
+    }
+
+    #[test]
+    fn test_vector_export() {
+        use arrow::array::{Float32Array, FixedSizeListArray};
+        use crate::types::DistanceMetric;
+
+        let (p, branch_id) = setup_with(|db| {
+            db.vector_create_collection("docs", 3, DistanceMetric::Cosine)
+                .unwrap();
+            db.vector_upsert("docs", "v1", vec![1.0, 2.0, 3.0], Some(Value::String(r#"{"tag":"a"}"#.into())))
+                .unwrap();
+            db.vector_upsert("docs", "v2", vec![4.0, 5.0, 6.0], None)
+                .unwrap();
+            db.vector_upsert("docs", "v3", vec![7.0, 8.0, 9.0], Some(Value::String(r#"{"tag":"c"}"#.into())))
+                .unwrap();
+        });
+
+        let (schema, batches) = export_to_batches(
+            &p,
+            branch_id,
+            "default",
+            ExportSource::Vector { collection: "docs".into() },
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(schema.fields().len(), 3);
+        assert_eq!(schema.field(0).name(), "key");
+        assert_eq!(schema.field(1).name(), "embedding");
+        assert_eq!(schema.field(2).name(), "metadata");
+
+        let batch = &batches[0];
+        assert_eq!(batch.num_rows(), 3);
+
+        let keys = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let embeddings = batch.column(1).as_any().downcast_ref::<FixedSizeListArray>().unwrap();
+        let metadata = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+
+        // Verify embedding dimension
+        assert_eq!(embeddings.value_length(), 3);
+
+        // Find v1 and check its embedding values
+        let key_set: Vec<&str> = (0..keys.len()).map(|i| keys.value(i)).collect();
+        let idx = key_set.iter().position(|k| *k == "v1").unwrap();
+        let emb = embeddings.value(idx);
+        let floats = emb.as_any().downcast_ref::<Float32Array>().unwrap();
+        assert!((floats.value(0) - 1.0).abs() < f32::EPSILON);
+        assert!((floats.value(1) - 2.0).abs() < f32::EPSILON);
+        assert!((floats.value(2) - 3.0).abs() < f32::EPSILON);
+
+        // v1 has metadata, v2 does not
+        assert!(!metadata.is_null(idx));
+        let idx2 = key_set.iter().position(|k| *k == "v2").unwrap();
+        assert!(metadata.is_null(idx2));
+    }
+
+    #[test]
+    fn test_graph_nodes_export() {
+        let (p, branch_id) = setup_with(|db| {
+            db.graph_create("social").unwrap();
+            db.graph_add_node_typed(
+                "social", "alice", None,
+                Some(Value::String(r#"{"age":30}"#.into())),
+                Some("Person"),
+            ).unwrap();
+            db.graph_add_node_typed(
+                "social", "bob", None,
+                Some(Value::String(r#"{"age":25}"#.into())),
+                Some("Person"),
+            ).unwrap();
+            db.graph_add_node("social", "acme", None, None).unwrap();
+        });
+
+        let (schema, batches) = export_to_batches(
+            &p,
+            branch_id,
+            "default",
+            ExportSource::GraphNodes { graph: "social".into() },
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(schema.fields().len(), 3);
+        assert_eq!(schema.field(0).name(), "node_id");
+        assert_eq!(schema.field(1).name(), "object_type");
+        assert_eq!(schema.field(2).name(), "properties");
+
+        let batch = &batches[0];
+        assert_eq!(batch.num_rows(), 3);
+
+        let ids = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let types = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+        let props = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+
+        let id_set: Vec<&str> = (0..ids.len()).map(|i| ids.value(i)).collect();
+        assert!(id_set.contains(&"alice"));
+        assert!(id_set.contains(&"bob"));
+        assert!(id_set.contains(&"acme"));
+
+        // alice has type "Person" and properties, acme has neither
+        let alice_idx = id_set.iter().position(|k| *k == "alice").unwrap();
+        assert_eq!(types.value(alice_idx), "Person");
+        assert!(!props.is_null(alice_idx));
+
+        let acme_idx = id_set.iter().position(|k| *k == "acme").unwrap();
+        assert!(types.is_null(acme_idx));
+        assert!(props.is_null(acme_idx));
+    }
+
+    #[test]
+    fn test_graph_edges_export() {
+        use arrow::array::Float64Array;
+
+        let (p, branch_id) = setup_with(|db| {
+            db.graph_create("social").unwrap();
+            db.graph_add_node("social", "alice", None, None).unwrap();
+            db.graph_add_node("social", "bob", None, None).unwrap();
+            db.graph_add_node("social", "carol", None, None).unwrap();
+            db.graph_add_edge("social", "alice", "bob", "knows", Some(0.9), None).unwrap();
+            db.graph_add_edge("social", "bob", "carol", "knows", Some(0.5), None).unwrap();
+        });
+
+        let (schema, batches) = export_to_batches(
+            &p,
+            branch_id,
+            "default",
+            ExportSource::GraphEdges { graph: "social".into() },
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(schema.fields().len(), 5);
+        assert_eq!(schema.field(0).name(), "source");
+        assert_eq!(schema.field(1).name(), "target");
+        assert_eq!(schema.field(2).name(), "edge_type");
+        assert_eq!(schema.field(3).name(), "weight");
+        assert_eq!(schema.field(4).name(), "properties");
+
+        let batch = &batches[0];
+        assert_eq!(batch.num_rows(), 2);
+
+        let sources = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let targets = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+        let edge_types = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+        let weights = batch.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+
+        // Verify both edges (order may vary)
+        let src_set: Vec<&str> = (0..sources.len()).map(|i| sources.value(i)).collect();
+        assert!(src_set.contains(&"alice"));
+        assert!(src_set.contains(&"bob"));
+
+        let alice_idx = src_set.iter().position(|k| *k == "alice").unwrap();
+        assert_eq!(targets.value(alice_idx), "bob");
+        assert_eq!(edge_types.value(alice_idx), "knows");
+        assert!((weights.value(alice_idx) - 0.9).abs() < f64::EPSILON);
+
+        let bob_idx = src_set.iter().position(|k| *k == "bob").unwrap();
+        assert_eq!(targets.value(bob_idx), "carol");
+        assert_eq!(edge_types.value(bob_idx), "knows");
+        assert!((weights.value(bob_idx) - 0.5).abs() < f64::EPSILON);
     }
 
     #[test]
