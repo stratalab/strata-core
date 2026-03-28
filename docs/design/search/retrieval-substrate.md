@@ -266,10 +266,12 @@ db.experiment(
 | Level | Where it lives | Who sets it |
 |-------|---------------|-------------|
 | Built-in defaults | Hardcoded in Strata | Strata developers |
-| Stored recipe | `_system_` branch (`search/recipes/default`) | User via `db.set_recipe()` |
+| Branch recipe | `_system_` space on the current branch | User via `db.set_recipe()` |
 | Per-call override | Not stored — ephemeral | User via `db.search(recipe=...)` |
 
-Named recipes are also stored on `_system_`: `db.set_recipe(recipe, name="medical")` writes to `search/recipes/medical`. When referenced by name in `db.search(recipe="medical")`, the named recipe replaces the default at Level 2 — the per-call override (Level 3) still applies on top.
+Recipes live in the `_system_` space on the user's branch (see #2119). This means recipes **fork with the branch** — fork a branch, the recipe comes along via COW. Override it on the fork, the parent is unaffected. Exactly like git.
+
+Named recipes: `db.set_recipe(recipe, name="medical")` writes to `_system_` space on the current branch. When referenced by name in `db.search(recipe="medical")`, the named recipe replaces the default at Level 2.
 
 ### 3.5 Built-in Defaults
 
