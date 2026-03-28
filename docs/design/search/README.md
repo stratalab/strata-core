@@ -10,6 +10,7 @@
 | [`v0.0-prerequisites.md`](v0.0-prerequisites.md) | Prerequisites: _system_ space, recipe types, config migration, primitive fixes. |
 | [`v0.1-implementation.md`](v0.1-implementation.md) | Implementation plan: minimal substrate (BM25 + vector + RRF + limit). |
 | [`v0.2-implementation.md`](v0.2-implementation.md) | Implementation plan: query expansion + reranking (qmd parity). |
+| [`v0.3-implementation.md`](v0.3-implementation.md) | Implementation plan: temporal search (as_of, diff, version history). |
 
 ## Related
 
