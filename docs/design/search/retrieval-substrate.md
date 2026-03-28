@@ -840,21 +840,24 @@ result = db.experiment(recipes, eval_set, metric="ndcg@10")
 
 ## 12. Graph Anchor Node Resolution
 
-When the graph operator is enabled, the substrate needs to determine which graph nodes correspond to the query. The recipe controls this via the `strategy` field:
+When the graph operator is enabled, the substrate resolves the query text to graph seed nodes using **BM25 over the graph's node text**. The graph already indexes node labels, properties, aliases, and descriptions via the InvertedIndex (GraphStore implements Searchable).
 
-**PPR strategy:**
-1. Tokenize the query text using the same tokenizer config as BM25 (stemmer, stopwords)
-2. Match tokens against node labels in the named graph (case-insensitive, stemmed match)
-3. Matched nodes become PPR seed nodes
-4. Run Personalized PageRank from seeds with configured damping
-5. Score documents connected to high-PPR nodes
+**How it works:**
+1. Run BM25 query against the graph's indexed node text (same InvertedIndex used by keyword search)
+2. Top `anchor_k` nodes (default 10) become PPR seeds, weighted by BM25 score
+3. Run Personalized PageRank from weighted seeds
+4. Score documents connected to high-PPR nodes
 
-**Neighborhood strategy:**
-1. Same token-to-node matching as PPR
-2. BFS expansion from matched nodes up to `max_hops`
-3. Score documents by hop distance (closer = higher score)
+**Why BM25 over node text (not token matching):**
+- Handles vocabulary mismatch: "heart attack" matches a node labeled "myocardial_infarction" if the node has `aliases: ["heart attack", "MI"]` or a description mentioning "heart attack"
+- BM25 handles stemming, partial matching, and TF-IDF weighting
+- Deterministic: same query → same seeds → same PPR results
+- Zero new infrastructure: calls `GraphStore::search()` which already exists
+- The user controls what text is indexed per node — richer node text = better anchor resolution
 
-If no nodes match the query terms, the graph operator returns zero candidates. Fusion proceeds with the other operators only.
+**Recipe parameter:** `graph.anchor_k` (default 10). Higher = more diverse seeds, noisier PPR. Lower = more focused. Tunable via `db.experiment()`.
+
+If BM25 finds zero matching nodes, the graph operator returns zero candidates. Fusion proceeds with the other operators only.
 
 ---
 
