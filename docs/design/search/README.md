@@ -12,6 +12,7 @@
 | [`v0.2-implementation.md`](v0.2-implementation.md) | Implementation plan: query expansion + reranking (qmd parity). |
 | [`v0.3-implementation.md`](v0.3-implementation.md) | Implementation plan: temporal search (as_of, diff, version history). |
 | [`v0.4-implementation.md`](v0.4-implementation.md) | Implementation plan: graph-augmented retrieval (PPR, typed traversal). |
+| [`v0.5-implementation.md`](v0.5-implementation.md) | Implementation plan: filter + budget + pagination (production readiness). |
 
 ## Related
 
