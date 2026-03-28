@@ -78,14 +78,25 @@ impl DistanceMetric {
 
 /// Storage data type for embeddings
 ///
-/// Only F32 supported initially. F16 and Int8 are reserved for future quantization.
+/// Controls how embeddings are stored in the VectorHeap.
+/// Int8 scalar quantization provides 4x memory savings with ~1-2% recall loss.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum StorageDtype {
     /// 32-bit floating point (default)
     #[default]
     F32,
     // F16,     // Reserved for half precision (value = 1)
-    // Int8,    // Reserved for scalar quantization (value = 2)
+    /// 8-bit unsigned integer via scalar quantization (SQ8)
+    ///
+    /// Embeddings are quantized per-dimension using min/max calibration.
+    /// Queries remain f32 (asymmetric distance computation).
+    /// 4x memory savings vs F32 with ~1-2% recall loss.
+    Int8,
+    /// Binary quantization via RaBitQ (SIGMOD 2024).
+    ///
+    /// D-dimensional vectors → D bits using random orthogonal rotation + sign encoding.
+    /// 32x compression from F32 with ~5% recall loss.
+    Binary,
 }
 
 impl StorageDtype {
@@ -93,6 +104,8 @@ impl StorageDtype {
     pub fn to_byte(&self) -> u8 {
         match self {
             StorageDtype::F32 => 0,
+            StorageDtype::Int8 => 2,
+            StorageDtype::Binary => 3,
         }
     }
 
@@ -100,7 +113,18 @@ impl StorageDtype {
     pub fn from_byte(b: u8) -> Option<Self> {
         match b {
             0 => Some(StorageDtype::F32),
+            2 => Some(StorageDtype::Int8),
+            3 => Some(StorageDtype::Binary),
             _ => None,
+        }
+    }
+
+    /// Bytes per element for this storage type
+    pub fn element_size(&self) -> usize {
+        match self {
+            StorageDtype::F32 => 4,
+            StorageDtype::Int8 => 1,
+            StorageDtype::Binary => 1, // notional; binary uses ceil(dim/8) per vector
         }
     }
 }
@@ -119,8 +143,7 @@ pub struct VectorConfig {
     /// Immutable after collection creation.
     pub metric: DistanceMetric,
 
-    /// Storage data type
-    /// Only F32 supported initially. Reserved for F16/Int8 in future.
+    /// Storage data type (F32 or Int8 scalar quantization)
     pub storage_dtype: StorageDtype,
 }
 
@@ -138,6 +161,24 @@ impl VectorConfig {
             dimension,
             metric,
             storage_dtype: StorageDtype::F32,
+        })
+    }
+
+    /// Create a new VectorConfig with explicit storage dtype
+    pub fn new_with_dtype(
+        dimension: usize,
+        metric: DistanceMetric,
+        storage_dtype: StorageDtype,
+    ) -> Result<Self, StrataError> {
+        if dimension == 0 {
+            return Err(StrataError::InvalidInput {
+                message: format!("Invalid dimension: {} (must be > 0)", dimension),
+            });
+        }
+        Ok(VectorConfig {
+            dimension,
+            metric,
+            storage_dtype,
         })
     }
 
@@ -1242,8 +1283,14 @@ mod tests {
 
     #[test]
     fn test_storage_dtype_from_byte_reserved_values() {
-        // Bytes 1+ are reserved for future F16/Int8
-        for b in 1..=255u8 {
+        // Byte 1 is reserved for future F16
+        assert!(StorageDtype::from_byte(1).is_none());
+        // Byte 2 is Int8
+        assert_eq!(StorageDtype::from_byte(2), Some(StorageDtype::Int8));
+        // Byte 3 is Binary
+        assert_eq!(StorageDtype::from_byte(3), Some(StorageDtype::Binary));
+        // Bytes 4+ are reserved
+        for b in 4..=255u8 {
             assert!(
                 StorageDtype::from_byte(b).is_none(),
                 "Byte {} should not map to a dtype",

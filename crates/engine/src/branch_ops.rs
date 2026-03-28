@@ -488,17 +488,27 @@ pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> Strat
         ));
     }
 
-    // Hold the source branch's commit lock during the storage fork (#2108).
+    // Quiesce in-flight commits before forking (#2105/#2110).
     //
+    // The global storage version is shared across branches. Without quiescing,
+    // a concurrent commit to ANY branch can advance storage.version while a
+    // commit to the SOURCE branch hasn't applied its writes yet. Fork would
+    // read the advanced version but miss the source's pending data.
+    //
+    // The write guard drains all in-flight commits (they hold the shared read
+    // side) and prevents new ones from starting until the storage fork completes.
+    //
+    // Additionally, hold the source branch's commit lock (#2108).
     // delete_branch also holds this lock, and its delete transaction writes
     // tombstones to the source's storage (via apply_batch grouping by
     // key.namespace.branch_id). Without this lock, fork's inline-flush can
     // capture those tombstones, causing the child to see all keys as deleted.
     //
     // Re-check is_deleting under the lock to close the TOCTOU window.
-    // Scope the lock to just the storage fork — metadata and space operations
-    // below don't need protection against source deletion.
+    // Both guards scoped to just the storage fork — metadata and space
+    // operations below don't need protection.
     let (fork_version, _segments_shared) = {
+        let _quiesce_guard = db.quiesce_commits();
         let source_commit_lock = db.branch_commit_lock(&source_id);
         let _source_guard = source_commit_lock.lock();
         if db.is_branch_deleting(&source_id) {

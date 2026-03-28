@@ -757,7 +757,15 @@ fn range_query_returns_correct_slice() {
 
     // Range past end of log is clamped
     let results = event
-        .range(&test_db.branch_id, "default", 8, Some(100), None, false, None)
+        .range(
+            &test_db.branch_id,
+            "default",
+            8,
+            Some(100),
+            None,
+            false,
+            None,
+        )
         .unwrap();
     assert_eq!(results.len(), 2); // sequences 8, 9
 
@@ -1010,7 +1018,10 @@ fn range_by_time_returns_events_in_window() {
     event
         .append(&test_db.branch_id, "default", "type", payload_int(1))
         .unwrap();
-    let e0 = event.get(&test_db.branch_id, "default", 0).unwrap().unwrap();
+    let e0 = event
+        .get(&test_db.branch_id, "default", 0)
+        .unwrap()
+        .unwrap();
     let ts0 = e0.value.timestamp.as_micros();
 
     std::thread::sleep(std::time::Duration::from_millis(5));
@@ -1018,7 +1029,10 @@ fn range_by_time_returns_events_in_window() {
     event
         .append(&test_db.branch_id, "default", "type", payload_int(2))
         .unwrap();
-    let e1 = event.get(&test_db.branch_id, "default", 1).unwrap().unwrap();
+    let e1 = event
+        .get(&test_db.branch_id, "default", 1)
+        .unwrap()
+        .unwrap();
     let ts1 = e1.value.timestamp.as_micros();
 
     std::thread::sleep(std::time::Duration::from_millis(5));
@@ -1029,7 +1043,15 @@ fn range_by_time_returns_events_in_window() {
 
     // Query range [ts0, ts1] should return events 0 and 1
     let results = event
-        .range_by_time(&test_db.branch_id, "default", ts0, Some(ts1), None, false, None)
+        .range_by_time(
+            &test_db.branch_id,
+            "default",
+            ts0,
+            Some(ts1),
+            None,
+            false,
+            None,
+        )
         .unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].value.payload, payload_int(1));
@@ -1154,9 +1176,7 @@ fn list_types_returns_all_event_types() {
         .append(&test_db.branch_id, "default", "error", payload_int(4))
         .unwrap();
 
-    let mut types = event
-        .list_types(&test_db.branch_id, "default")
-        .unwrap();
+    let mut types = event.list_types(&test_db.branch_id, "default").unwrap();
     types.sort();
     assert_eq!(types, vec!["audit", "error", "metric"]);
 }
@@ -1166,8 +1186,6 @@ fn list_types_empty_log() {
     let test_db = TestDb::new();
     let event = test_db.event();
 
-    let types = event
-        .list_types(&test_db.branch_id, "default")
-        .unwrap();
+    let types = event.list_types(&test_db.branch_id, "default").unwrap();
     assert!(types.is_empty());
 }

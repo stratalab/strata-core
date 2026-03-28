@@ -9,7 +9,6 @@
 use std::cmp::Ordering;
 
 use crate::backend::{InlineMetaCapable, MmapCapable, SegmentCapable, VectorIndexBackend};
-use crate::distance::compute_similarity;
 use crate::types::InlineMeta;
 use crate::{DistanceMetric, VectorConfig, VectorError, VectorHeap, VectorId};
 
@@ -99,14 +98,15 @@ impl VectorIndexBackend for BruteForceBackend {
         let metric = self.heap.metric();
 
         // Compute similarities for all vectors
-        // IMPORTANT: heap.iter() returns vectors in VectorId order (BTreeMap)
+        // IMPORTANT: heap.ids() returns vectors in VectorId order (BTreeMap)
         // This ensures deterministic iteration before scoring
         let mut results: Vec<(VectorId, f32)> = self
             .heap
-            .iter()
-            .map(|(id, embedding)| {
-                let score = compute_similarity(query, embedding, metric);
-                (id, score)
+            .ids()
+            .filter_map(|id| {
+                self.heap
+                    .distance_to(query, id, metric, None)
+                    .map(|score| (id, score))
             })
             .collect();
 
@@ -144,6 +144,10 @@ impl VectorIndexBackend for BruteForceBackend {
 
     fn get(&self, id: VectorId) -> Option<&[f32]> {
         self.heap.get(id)
+    }
+
+    fn get_f32_owned(&self, id: VectorId) -> Option<Vec<f32>> {
+        self.heap.get_f32_owned(id)
     }
 
     fn contains(&self, id: VectorId) -> bool {

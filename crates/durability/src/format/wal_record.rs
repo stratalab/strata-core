@@ -125,7 +125,22 @@ impl SegmentHeader {
         }
 
         let magic: [u8; 4] = bytes[0..4].try_into().ok()?;
+        if magic != SEGMENT_MAGIC {
+            return None;
+        }
         let format_version = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+        if format_version > SEGMENT_FORMAT_VERSION {
+            tracing::error!(
+                target: "strata::format",
+                format_version,
+                max_supported = SEGMENT_FORMAT_VERSION,
+                "WAL segment format version {} is newer than this build supports (max {}). \
+                 Upgrade Strata to read this database.",
+                format_version,
+                SEGMENT_FORMAT_VERSION,
+            );
+            return None;
+        }
         let segment_number = u64::from_le_bytes(bytes[8..16].try_into().ok()?);
         let database_uuid: [u8; 16] = bytes[16..32].try_into().ok()?;
 
@@ -1064,5 +1079,28 @@ mod tests {
         assert_eq!(header.segment_number, 7);
         // v1 path — trailing bytes ignored, CRC set to 0
         assert_eq!(header.header_crc, 0);
+    }
+
+    #[test]
+    fn test_segment_header_rejects_future_version() {
+        // Build a header with format_version = 99 (far beyond current)
+        let mut bytes = [0u8; SEGMENT_HEADER_SIZE_V2];
+        bytes[0..4].copy_from_slice(&SEGMENT_MAGIC);
+        bytes[4..8].copy_from_slice(&99u32.to_le_bytes()); // future version
+        bytes[8..16].copy_from_slice(&1u64.to_le_bytes()); // segment_number
+        bytes[16..32].copy_from_slice(&[0xAA; 16]); // database_uuid
+                                                    // CRC of first 32 bytes (would be valid if version were accepted)
+        let crc = {
+            let mut hasher = Hasher::new();
+            hasher.update(&bytes[0..SEGMENT_HEADER_SIZE]);
+            hasher.finalize()
+        };
+        bytes[32..36].copy_from_slice(&crc.to_le_bytes());
+
+        let result = SegmentHeader::from_bytes_slice(&bytes);
+        assert!(
+            result.is_none(),
+            "Expected None for future segment format version 99",
+        );
     }
 }

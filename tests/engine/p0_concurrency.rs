@@ -829,3 +829,260 @@ fn test_issue_2108_fork_races_delete_source_branch_concurrent() {
         }
     }
 }
+
+// ============================================================================
+// Test 4: Fork version gap — child misses inflight writes (#2110 / #2105)
+// ============================================================================
+
+/// Verifies that fork_branch does not produce a child that is missing data
+/// the parent has at versions <= fork_version.
+///
+/// The bug (#2105): The global storage version is shared across all branches.
+/// A commit to branch B can advance the global version while a concurrent
+/// commit to the source branch hasn't applied its writes yet. Fork reads
+/// the advanced version (which includes B's commit) but the source branch's
+/// pending commit hasn't materialized in the memtable. Result: fork_version
+/// claims to include a version whose data for the source branch is missing.
+///
+/// Race scenario:
+///   1. Commit A (source): allocates version V, begins apply_writes
+///   2. Commit B (other):  allocates V+1, applies, fetch_max(V+1) → storage.version = V+1
+///   3. Fork: reads storage.version = V+1, acquires DashMap guard on source
+///   4. Commit A: blocked on DashMap guard (fork holds it)
+///   5. Fork: flushes memtable (V's data not yet present), fork_version = V+1
+///   6. Commit A: applies after fork releases → data at V in parent only
+///
+/// Invariants tested: COW-003, MVCC-001, ARCH-002
+#[test]
+fn test_issue_2110_fork_version_gap() {
+    let mut failures = Vec::new();
+
+    for iteration in 0..100 {
+        let test_db = TestDb::new();
+        let branch_index = test_db.branch_index();
+        let kv = test_db.kv();
+
+        // Create source + other branches
+        branch_index.create_branch("source").unwrap();
+        branch_index.create_branch("other").unwrap();
+        let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+        let other_id = strata_engine::primitives::branch::resolve_branch_name("other");
+
+        // Seed source branch
+        for i in 0..5 {
+            kv.put(&source_id, "default", &format!("seed_{}", i), Value::Int(i))
+                .unwrap();
+        }
+
+        let db = test_db.db.clone();
+        let barrier = Arc::new(Barrier::new(3));
+        let fork_version_slot = Arc::new(AtomicU64::new(0));
+
+        // Thread 1: writes to SOURCE branch
+        let db1 = db.clone();
+        let barrier1 = barrier.clone();
+        let write_source_handle = thread::spawn(move || {
+            let kv1 = KVStore::new(db1);
+            barrier1.wait();
+            for i in 0..50 {
+                let key = format!("src_{}", i);
+                let _ = kv1.put(&source_id, "default", &key, Value::Int(1000 + i));
+            }
+        });
+
+        // Thread 2: writes to OTHER branch (advances global version)
+        let db2 = db.clone();
+        let barrier2 = barrier.clone();
+        let write_other_handle = thread::spawn(move || {
+            let kv2 = KVStore::new(db2);
+            barrier2.wait();
+            for i in 0..50 {
+                let key = format!("oth_{}", i);
+                let _ = kv2.put(&other_id, "default", &key, Value::Int(2000 + i));
+            }
+        });
+
+        // Thread 3: fork SOURCE while both writers are active
+        let db3 = db.clone();
+        let barrier3 = barrier.clone();
+        let fv_slot = fork_version_slot.clone();
+        let fork_name = format!("child_{}", iteration);
+        let fork_handle = thread::spawn(move || {
+            barrier3.wait();
+            thread::yield_now();
+            match branch_ops::fork_branch(&db3, "source", &fork_name) {
+                Ok(info) => {
+                    fv_slot.store(info.fork_version.unwrap_or(0), Ordering::Release);
+                    true
+                }
+                Err(_) => false,
+            }
+        });
+
+        write_source_handle.join().unwrap();
+        write_other_handle.join().unwrap();
+        let fork_ok = fork_handle.join().unwrap();
+
+        if !fork_ok {
+            continue;
+        }
+
+        let fork_version = fork_version_slot.load(Ordering::Acquire);
+        if fork_version == 0 {
+            continue;
+        }
+
+        let child_name = format!("child_{}", iteration);
+        let child_id = strata_engine::primitives::branch::resolve_branch_name(&child_name);
+
+        // Verify: every key committed to SOURCE at version <= fork_version
+        // must be visible in the child through inherited layers.
+        for i in 0..50 {
+            let key = format!("src_{}", i);
+            let parent_versioned = kv.get_versioned(&source_id, "default", &key).unwrap();
+
+            if let Some(pv) = parent_versioned {
+                if pv.version <= Version::Txn(fork_version) {
+                    let child_val = kv.get(&child_id, "default", &key).unwrap();
+                    if child_val.is_none() {
+                        failures.push(format!(
+                            "iteration {}: key '{}' in source@{:?} (fork_version={}) MISSING in child",
+                            iteration, key, pv.version, fork_version
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Seed keys must always be visible
+        for i in 0..5 {
+            let key = format!("seed_{}", i);
+            let child_val = kv.get(&child_id, "default", &key).unwrap();
+            if child_val.is_none() {
+                failures.push(format!(
+                    "iteration {}: seed key '{}' MISSING in child (fork_version={})",
+                    iteration, key, fork_version
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "Fork version gap detected in {} cases:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// Stress variant: higher contention with cross-branch writes.
+#[test]
+fn test_issue_2110_fork_version_gap_concurrent() {
+    let mut failures = Vec::new();
+
+    for iteration in 0..50 {
+        let test_db = TestDb::new();
+        let branch_index = test_db.branch_index();
+        let kv = test_db.kv();
+
+        branch_index.create_branch("source").unwrap();
+        let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+        // Create multiple other branches for cross-branch version advancement
+        let mut other_ids = Vec::new();
+        for t in 0..3u8 {
+            let name = format!("other_{}", t);
+            branch_index.create_branch(&name).unwrap();
+            other_ids.push(strata_engine::primitives::branch::resolve_branch_name(
+                &name,
+            ));
+        }
+
+        // Seed source
+        for i in 0..5 {
+            kv.put(&source_id, "default", &format!("base_{}", i), Value::Int(i))
+                .unwrap();
+        }
+
+        let db = test_db.db.clone();
+        let barrier = Arc::new(Barrier::new(5)); // 1 source writer + 3 other writers + 1 forker
+        let fork_version_slot = Arc::new(AtomicU64::new(0));
+
+        let mut handles = Vec::new();
+
+        // Source writer
+        let db_s = db.clone();
+        let barrier_s = barrier.clone();
+        handles.push(thread::spawn(move || {
+            let kv_s = KVStore::new(db_s);
+            barrier_s.wait();
+            for i in 0..30 {
+                let key = format!("src_{}", i);
+                let _ = kv_s.put(&source_id, "default", &key, Value::Int(1000 + i));
+            }
+        }));
+
+        // Other-branch writers (advance global version concurrently)
+        for (t, other_id) in other_ids.iter().enumerate() {
+            let db_o = db.clone();
+            let barrier_o = barrier.clone();
+            let oid = *other_id;
+            handles.push(thread::spawn(move || {
+                let kv_o = KVStore::new(db_o);
+                barrier_o.wait();
+                for i in 0..30 {
+                    let key = format!("o{}_{}", t, i);
+                    let _ = kv_o.put(&oid, "default", &key, Value::Int((t as i64) * 1000 + i));
+                }
+            }));
+        }
+
+        // Forker
+        let db_f = db.clone();
+        let barrier_f = barrier.clone();
+        let fv_slot = fork_version_slot.clone();
+        let fork_name = format!("child_{}", iteration);
+        handles.push(thread::spawn(move || {
+            barrier_f.wait();
+            thread::yield_now();
+            if let Ok(info) = branch_ops::fork_branch(&db_f, "source", &fork_name) {
+                fv_slot.store(info.fork_version.unwrap_or(0), Ordering::Release);
+            }
+        }));
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let fork_version = fork_version_slot.load(Ordering::Acquire);
+        if fork_version == 0 {
+            continue;
+        }
+
+        let child_id =
+            strata_engine::primitives::branch::resolve_branch_name(&format!("child_{}", iteration));
+
+        for i in 0..30 {
+            let key = format!("src_{}", i);
+            let parent_versioned = kv.get_versioned(&source_id, "default", &key).unwrap();
+            if let Some(pv) = parent_versioned {
+                if pv.version <= Version::Txn(fork_version) {
+                    let child_val = kv.get(&child_id, "default", &key).unwrap();
+                    if child_val.is_none() {
+                        failures.push(format!(
+                            "iteration {}: key '{}' source@{:?} (fork_version={}) MISSING in child",
+                            iteration, key, pv.version, fork_version
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "Fork version gap detected in {} cases:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}

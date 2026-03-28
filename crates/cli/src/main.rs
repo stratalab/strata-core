@@ -93,7 +93,7 @@ fn main() {
         match init::run_init_in_place(false) {
             Ok(db) => {
                 let mut state = SessionState::new(db, "default".into(), "default".into());
-                repl::run_repl(&mut state, output_mode, ".strata");
+                repl::run_repl(&mut state, output_mode, ".strata", true);
                 return;
             }
             Err(e) => {
@@ -131,7 +131,7 @@ fn main() {
         process::exit(exit_code);
     } else if std::io::stdin().is_terminal() {
         // REPL mode
-        repl::run_repl(&mut state, output_mode, db_path);
+        repl::run_repl(&mut state, output_mode, db_path, false);
     } else {
         // Pipe mode
         let exit_code = repl::run_pipe(&mut state, output_mode);

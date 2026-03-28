@@ -1568,6 +1568,134 @@ mod tests {
         assert_eq!(txn_ids, vec![1, 2, 4, 5, 6]);
     }
 
+    /// Issue #1556: Multi-segment WAL corruption recovery.
+    ///
+    /// Write records across multiple segments (via tiny segment size), corrupt
+    /// a record payload in the middle segment (preserving the length field so
+    /// it triggers CRC mismatch, not InsufficientData), and verify:
+    /// - Strict reader returns an error
+    /// - Lossy reader recovers records from all segments, skipping corrupted ones
+    #[test]
+    fn test_issue_1556_multi_segment_corruption_recovery() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        // Use tiny segments to force rotation
+        let config = WalConfig::new()
+            .with_segment_size(100)
+            .with_buffered_sync_bytes(50);
+
+        let mut writer = WalWriter::new(
+            wal_dir.to_path_buf(),
+            [1u8; 16],
+            DurabilityMode::Always,
+            config,
+            make_codec(),
+        )
+        .unwrap();
+
+        // Write 10 records with large enough payloads to spread across segments
+        for i in 1..=10u64 {
+            writer
+                .append(&WalRecord::new(i, [1u8; 16], i * 1000, vec![0xAA; 40]))
+                .unwrap();
+        }
+        writer.close().unwrap();
+
+        let reader = WalReader::new();
+        let segments = reader.list_segments(&wal_dir).unwrap();
+        assert!(
+            segments.len() >= 3,
+            "Expected at least 3 segments, got {}",
+            segments.len()
+        );
+
+        // Read all records before corruption to get baseline
+        let baseline = reader.read_all(&wal_dir).unwrap();
+        assert_eq!(baseline.records.len(), 10);
+
+        // Count records in each segment before corruption
+        let seg1_count_before = reader.read_segment(&wal_dir, segments[0]).unwrap().0.len();
+        let seg_last_count_before = reader
+            .read_segment(&wal_dir, *segments.last().unwrap())
+            .unwrap()
+            .0
+            .len();
+
+        // Corrupt the second segment's record payload (not the length field).
+        // The v2 header is 36 bytes. The first record starts at offset 36.
+        // Record format: [length: 4 bytes] [payload] [crc: 4 bytes]
+        // Corrupt a byte inside the payload (offset 36 + 4 + 5 = 45) so
+        // the length is valid but CRC mismatches.
+        let seg2_path = WalSegment::segment_path(&wal_dir, segments[1]);
+        {
+            let mut data = std::fs::read(&seg2_path).unwrap();
+            // XOR-flip a byte in the payload area of the first record
+            let corrupt_offset = 36 + 4 + 5; // past header + length + 5 bytes into payload
+            if corrupt_offset < data.len() {
+                data[corrupt_offset] ^= 0xFF;
+            }
+            std::fs::write(&seg2_path, &data).unwrap();
+        }
+
+        // Strict reader should fail on the corrupted segment
+        let strict_result = reader.read_all(&wal_dir);
+        assert!(
+            strict_result.is_err(),
+            "Strict reader should fail on corrupted segment"
+        );
+
+        // Lossy reader should recover records from all segments,
+        // skipping only the corrupted records in segment 2
+        let lossy_reader = WalReader::new().with_lossy_recovery();
+        let lossy_result = lossy_reader.read_all(&wal_dir).unwrap();
+
+        // We should get records from the uncorrupted segments
+        assert!(
+            !lossy_result.records.is_empty(),
+            "Lossy reader should recover some records"
+        );
+
+        // With tiny segments (1 record each), corrupting the only record
+        // in a segment means there's no next record to scan to, so
+        // skipped_corrupted may be 0. The key guarantee is that records
+        // from OTHER segments are still recovered.
+
+        // Segment 1 and last segment should be fully readable
+        let seg1_count_after = lossy_reader
+            .read_segment(&wal_dir, segments[0])
+            .unwrap()
+            .0
+            .len();
+        assert_eq!(
+            seg1_count_after, seg1_count_before,
+            "First segment should be fully intact"
+        );
+
+        let seg_last_count_after = lossy_reader
+            .read_segment(&wal_dir, *segments.last().unwrap())
+            .unwrap()
+            .0
+            .len();
+        assert_eq!(
+            seg_last_count_after, seg_last_count_before,
+            "Last segment should be fully intact"
+        );
+
+        // Total recovered should be fewer than the baseline (some records lost
+        // from the corrupted segment) but non-zero
+        assert!(
+            lossy_result.records.len() < baseline.records.len(),
+            "Should recover fewer records than baseline ({} vs {})",
+            lossy_result.records.len(),
+            baseline.records.len(),
+        );
+        assert!(
+            lossy_result.records.len() >= seg1_count_before + seg_last_count_before,
+            "Should recover at least all records from uncorrupted segments"
+        );
+    }
+
     /// Issue #1577: A torn write to the 4-byte length prefix produces a garbage
     /// length. The reader trusts this length, skips forward past all remaining
     /// valid records, hits InsufficientData, and stops — losing every record
