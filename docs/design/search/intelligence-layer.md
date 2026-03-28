@@ -168,11 +168,47 @@ Question: {user's query}
 
 ### Configuration
 
+All RAG config lives in the recipe — experimentable via `db.experiment()`:
+
+```json
+{
+  "retrieve": {"bm25": {}, "vector": {}},
+  "prompt": "Answer using only the provided context. Cite sources with [N].",
+  "rag_context_hits": 5,
+  "rag_max_tokens": 500,
+  "models": {"rag": "anthropic:claude-sonnet-4-6"}
+}
+```
+
 | Param | Default | What it controls |
 |-------|---------|-----------------|
 | `models.rag` | `local:qwen3:1.7b` | Model used for answer generation |
+| `prompt` | `"Answer using only the provided context. Cite sources with [N]."` | System prompt for generation |
 | `rag_context_hits` | 5 | How many hits to include in the prompt |
 | `rag_max_tokens` | 500 | Maximum answer length |
+
+Three-level merge applies. Set baseline prompt/model via `db.set_recipe()`, experiment with variations as deltas.
+
+### Graph RAG
+
+Not a separate feature. A recipe with the graph operator enabled + `mode="rag"`:
+
+```json
+{
+  "retrieve": {
+    "bm25": {},
+    "vector": {},
+    "graph": {"graph": "medical_ontology", "strategy": "ppr", "damping": 0.5}
+  },
+  "prompt": "Answer using the provided context. Cite sources with [N]."
+}
+```
+
+```python
+db.search("What drugs interact with metformin?", mode="rag")
+```
+
+The substrate retrieves from BM25 + vector + graph, fuses via RRF. The intelligence layer generates the answer from the fused hits. Some hits came from keywords, some from embeddings, some from graph traversal. The prompt sees snippets with citations — it doesn't know or care which retrieval operator produced them.
 
 ### Graceful degradation
 
@@ -475,29 +511,16 @@ Every feature fails silently. The substrate always works.
 
 ```python
 db.configure(
-    # Model routing — the key configuration
-    models={
-        "embed":        "local:miniLM",
-        "expansion":    "local:qwen3:1.7b",
-        "rerank":       "local:qwen3:1.7b",
-        "rag":          "anthropic:claude-sonnet-4-6",
-        "autoresearch": "anthropic:claude-haiku-4-5",
-    },
-
     # Auto-embedding (exists today)
     auto_embed=True,
 
     # Search quality knobs
     expansion=False,
-    expansion_strategy="lex",
     reranking=False,
-    rerank_top_n=20,
-
-    # RAG
-    rag_context_hits=5,
-    rag_max_tokens=500,
 )
 ```
+
+Everything else — models, prompts, RAG settings, BM25 params, fusion weights — lives in the recipe. `db.configure()` only controls the intelligence layer knobs that wrap around the substrate (expansion on/off, reranking on/off, auto-embed on/off). See `retrieval-substrate.md` section 3.4 for recipe three-level merge.
 
 Feature gating:
 - `cargo build` — substrate only. `db.search()` works. No intelligence layer.
