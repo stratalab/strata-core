@@ -18,6 +18,8 @@ rerank = ["strata-search/rerank"]
 anthropic = ["embed", "strata-intelligence/anthropic"]
 openai = ["embed", "strata-intelligence/openai"]
 google = ["embed", "strata-intelligence/google"]
+# Arrow-based import/export (Parquet, CSV, JSONL)
+arrow = ["dep:arrow", "dep:parquet"]
 
 [dependencies]
 # Internal crates
@@ -54,6 +56,10 @@ tracing = { workspace = true }
 
 # Unix signals for IPC server
 libc = "0.2"
+
+# Arrow interoperability (optional)
+arrow = { workspace = true, optional = true }
+parquet = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

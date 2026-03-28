@@ -63,6 +63,10 @@ mod types;
 // Handler modules
 mod handlers;
 
+// Arrow interoperability layer (optional)
+#[cfg(feature = "arrow")]
+pub mod arrow;
+
 // Test modules
 #[cfg(test)]
 mod tests;
