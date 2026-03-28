@@ -84,6 +84,14 @@ A recipe is a JSON document. **Presence of a key means enabled. Absence means di
     }
   },
 
+  "expansion": {
+    "strategy": "full",
+    "strong_signal_threshold": 0.85,
+    "strong_signal_gap": 0.15,
+    "min_shared_stems": 2,
+    "original_weight": 2.0
+  },
+
   "filter": {
     "predicates": [
       {"field": "year", "op": "gte", "value": 2020},
@@ -100,6 +108,15 @@ A recipe is a JSON document. **Presence of a key means enabled. Absence means di
     "weights": {"bm25": 1.0, "vector": 1.0, "graph": 0.3, "scan": 1.0}
   },
 
+  "rerank": {
+    "top_n": 20,
+    "blending": {
+      "rank_1_3": 0.75,
+      "rank_4_10": 0.60,
+      "rank_11_plus": 0.40
+    }
+  },
+
   "transform": {
     "sort": [{"by": "score", "order": "desc"}],
     "group_by": {"field": "category", "top_k_per_group": 3},
@@ -110,6 +127,17 @@ A recipe is a JSON document. **Presence of a key means enabled. Absence means di
     "deduplicate": "entity_ref",
     "limit": 10,
     "offset": 0
+  },
+
+  "prompt": "Answer using only the provided context. Cite sources with [N].",
+  "rag_context_hits": 5,
+  "rag_max_tokens": 500,
+
+  "models": {
+    "embed": "local:miniLM",
+    "expansion": "local:qwen3:1.7b",
+    "rerank": "local:qwen3-reranker:0.6b",
+    "rag": "anthropic:claude-sonnet-4-6"
   },
 
   "version": {
@@ -143,11 +171,21 @@ If a key is absent, that operator doesn't run. An empty object (`"bm25": {}`) en
 
 Scoping: `scan` and `bm25` accept `sources` (which primitives) and `spaces` (which spaces). `vector` accepts `collections` (which vector collections). `graph` accepts `graph` (which named graph). Defaults: all primitives, all spaces, all `_system_embed_*` collections.
 
+**`expansion`** — Query expansion before retrieval. Generates typed variants: `lex` (keyword synonyms → BM25), `vec` (semantic reformulations → vector), `hyde` (hypothetical document → vector). Includes strong signal detection — skip expansion if BM25 is already confident. Presence = enabled, absence = disabled.
+
 **`filter`** — Post-retrieval predicate filtering. Applied after fusion. Removes candidates that don't match. Separate from `scan` because `scan` is a retrieval operator (produces candidates), while `filter` is a narrowing step (removes candidates).
 
 **`fusion`** — Merges candidate lists from multiple retrieval operators into one ranked list. Only meaningful when multiple operators are enabled. Defaults to RRF with k=60 and equal weights.
 
+**`rerank`** — Re-scores top-N results after fusion using a cross-encoder or LLM. Position-aware blending protects top-ranked retrieval results from noisy reranker disagreement. Presence = enabled, absence = disabled.
+
 **`transform`** — Post-processing on the result set: sorting, grouping, aggregation, deduplication, pagination.
+
+**`prompt`** — System prompt for RAG generation. Only used when `mode="rag"`.
+
+**`rag_context_hits`** / **`rag_max_tokens`** — RAG output parameters.
+
+**`models`** — Model assignments per operation. Local GGUF or cloud API. Different models for different cost/quality tradeoffs.
 
 **`version`** — Temporal output: whether to include version history per hit, and how deep.
 
@@ -156,22 +194,31 @@ Scoping: `scan` and `bm25` accept `sources` (which primitives) and `spaces` (whi
 ### 3.3 The pipeline
 
 ```
-1. Retrieve (parallel)
+1. Expand (if expansion section present)
+   └─ Generate lex/vec/hyde variants, skip if strong signal detected
+
+2. Retrieve (parallel)
    ├─ scan    → unranked candidates
-   ├─ bm25   → ranked candidates
-   ├─ vector  → ranked candidates
+   ├─ bm25   → ranked candidates (original query + lex expansions)
+   ├─ vector  → ranked candidates (original embedding + vec/hyde embeddings)
    └─ graph   → ranked candidates
 
-2. Fuse → single ranked list
+3. Fuse → single ranked list (original query results weighted higher)
 
-3. Filter → narrow by predicates
+4. Filter → narrow by predicates
 
-4. Transform → sort, group, aggregate, deduplicate, paginate
+5. Rerank (if rerank section present)
+   └─ Re-score top-N with cross-encoder, blend with fusion scores
 
-5. Return
+6. Transform → sort, group, aggregate, deduplicate, paginate
+
+7. Generate (if mode="rag")
+   └─ Feed top hits to RAG model, produce grounded answer
+
+8. Return
 ```
 
-Every step except "return" is optional. A scan-only recipe skips fusion. A BM25-only recipe has trivial fusion (one list, nothing to merge). The pipeline is the same; the recipe controls which steps run.
+Every step except "return" is optional. Presence of the recipe section enables the step. A minimal recipe `{"retrieve": {"bm25": {}}}` runs steps 2, 6, 8 only.
 
 ### 3.4 Recipe Resolution: Three-Level Deep Merge
 
@@ -219,10 +266,12 @@ db.experiment(
 | Level | Where it lives | Who sets it |
 |-------|---------------|-------------|
 | Built-in defaults | Hardcoded in Strata | Strata developers |
-| Stored recipe | `_system_` branch (`search/recipes/default`) | User via `db.set_recipe()` |
+| Branch recipe | `_system_` space on the current branch | User via `db.set_recipe()` |
 | Per-call override | Not stored — ephemeral | User via `db.search(recipe=...)` |
 
-Named recipes are also stored on `_system_`: `db.set_recipe(recipe, name="medical")` writes to `search/recipes/medical`. When referenced by name in `db.search(recipe="medical")`, the named recipe replaces the default at Level 2 — the per-call override (Level 3) still applies on top.
+Recipes live in the `_system_` space on the user's branch (see #2119). This means recipes **fork with the branch** — fork a branch, the recipe comes along via COW. Override it on the fork, the parent is unaffected. Exactly like git.
+
+Named recipes: `db.set_recipe(recipe, name="medical")` writes to `_system_` space on the current branch. When referenced by name in `db.search(recipe="medical")`, the named recipe replaces the default at Level 2.
 
 ### 3.5 Built-in Defaults
 
@@ -250,12 +299,30 @@ When a section or field is omitted at all levels, these built-in defaults apply:
 | `retrieve.graph.max_hops` | 2 |
 | `retrieve.graph.max_neighbors_per_hop` | 50 |
 | `retrieve.scan.logic` | `"and"` |
+| `expansion` | Disabled (absent = off) |
+| `expansion.strategy` | `"full"` (options: `"lex"`, `"vec"`, `"hyde"`, `"full"`) |
+| `expansion.strong_signal_threshold` | 0.85 |
+| `expansion.strong_signal_gap` | 0.15 |
+| `expansion.min_shared_stems` | 2 |
+| `expansion.original_weight` | 2.0 |
 | `filter` | No filtering |
 | `filter.logic` | `"and"` |
 | `filter.score_threshold` | None (return all results regardless of score) |
 | `fusion.method` | `"rrf"` |
 | `fusion.k` | 60 |
 | `fusion.weights` | Equal weight (1.0) for all enabled operators |
+| `rerank` | Disabled (absent = off) |
+| `rerank.top_n` | 20 |
+| `rerank.blending.rank_1_3` | 0.75 |
+| `rerank.blending.rank_4_10` | 0.60 |
+| `rerank.blending.rank_11_plus` | 0.40 |
+| `prompt` | `"Answer using only the provided context. Cite sources with [N]."` |
+| `rag_context_hits` | 5 |
+| `rag_max_tokens` | 500 |
+| `models.embed` | `"local:miniLM"` |
+| `models.expansion` | `"local:qwen3:1.7b"` |
+| `models.rerank` | `"local:qwen3-reranker:0.6b"` |
+| `models.rag` | `"local:qwen3:1.7b"` |
 | `transform.sort` | `[{"by": "score", "order": "desc"}]` |
 | `transform.deduplicate` | `"entity_ref"` |
 | `transform.limit` | 10 |

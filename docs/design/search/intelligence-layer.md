@@ -466,16 +466,27 @@ Re-scores top-N results after the substrate returns them.
 
 ### 6.3 Configuration
 
+Expansion and reranking are recipe sections — presence = enabled, absence = disabled:
+
+```json
+{"expansion": {"strategy": "lex"}, "rerank": {"top_n": 20}}
+```
+
+Every parameter is experimentable via `db.experiment()`:
+
 ```python
-db.configure(
-    expansion=True,
-    expansion_strategy="lex",
-    reranking=True,
-    rerank_top_n=20,
+db.experiment(
+    recipes={
+        "no_expansion":   {},
+        "lex_only":       {"expansion": {"strategy": "lex"}},
+        "full_expansion": {"expansion": {"strategy": "full"}},
+        "with_rerank":    {"expansion": {"strategy": "lex"}, "rerank": {}},
+    },
+    eval_set=eval_set
 )
 ```
 
-AutoResearch can discover whether these knobs help on your specific dataset and which strategies work best.
+AutoResearch discovers whether expansion/reranking help on your specific dataset and which strategies work best.
 
 ---
 
@@ -510,17 +521,10 @@ Every feature fails silently. The substrate always works.
 ## 9. Configuration
 
 ```python
-db.configure(
-    # Auto-embedding (exists today)
-    auto_embed=True,
-
-    # Search quality knobs
-    expansion=False,
-    reranking=False,
-)
+db.configure(auto_embed=True)
 ```
 
-Everything else — models, prompts, RAG settings, BM25 params, fusion weights — lives in the recipe. `db.configure()` only controls the intelligence layer knobs that wrap around the substrate (expansion on/off, reranking on/off, auto-embed on/off). See `retrieval-substrate.md` section 3.4 for recipe three-level merge.
+That's it. `db.configure()` only controls write-time behavior (auto-embed on/off). Everything that happens at query time — retrieval, expansion, reranking, fusion, RAG, models — lives in the recipe. One place for all search behavior. See `retrieval-substrate.md` section 3.4 for recipe three-level merge.
 
 Feature gating:
 - `cargo build` — substrate only. `db.search()` works. No intelligence layer.
