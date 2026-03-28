@@ -979,6 +979,12 @@ pub enum Command {
         /// File path to write to. If omitted, data is returned inline.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        /// Vector collection name (required when primitive is Vector).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        collection: Option<String>,
+        /// Graph name (required when primitive is Graph).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graph: Option<String>,
     },
 
     // ==================== Bundle (3) ====================

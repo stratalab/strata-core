@@ -284,6 +284,8 @@ fn test_read_only_allows_all_reads() {
             prefix: None,
             limit: None,
             path: None,
+            collection: None,
+            graph: None,
         },
     ];
 
@@ -600,6 +602,8 @@ fn test_is_write_classification() {
             prefix: None,
             limit: None,
             path: None,
+            collection: None,
+            graph: None,
         },
     ];
 

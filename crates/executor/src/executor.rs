@@ -1172,6 +1172,8 @@ impl Executor {
                 prefix,
                 limit,
                 path,
+                collection,
+                graph,
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
@@ -1190,6 +1192,8 @@ impl Executor {
                     prefix,
                     limit,
                     path,
+                    collection,
+                    graph,
                 )
             }
 

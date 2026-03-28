@@ -371,29 +371,86 @@ pub fn db_export(
     prefix: Option<String>,
     limit: Option<u64>,
     path: Option<String>,
+    collection: Option<String>,
+    graph: Option<String>,
 ) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;
 
-    // 1. Collect rows
+    // Validate required fields for specific primitives
+    if primitive == ExportPrimitive::Vector && collection.is_none() {
+        return Err(Error::InvalidInput {
+            reason: "--collection is required for vector export".into(),
+            hint: None,
+        });
+    }
+    if primitive == ExportPrimitive::Graph && graph.is_none() {
+        return Err(Error::InvalidInput {
+            reason: "--graph is required for graph export".into(),
+            hint: None,
+        });
+    }
+
+    // Arrow file export path: Parquet always, or CSV/JSONL when --output is provided
+    // and the arrow feature is enabled.
+    #[cfg(feature = "arrow")]
+    {
+        let use_arrow = match format {
+            ExportFormat::Parquet => true,
+            ExportFormat::Csv | ExportFormat::Jsonl => path.is_some(),
+            ExportFormat::Json => false, // JSON array format uses existing renderer
+        };
+
+        if use_arrow {
+            let file_path = match &path {
+                Some(p) => p.clone(),
+                None if format == ExportFormat::Parquet => {
+                    return Err(Error::InvalidInput {
+                        reason: "Parquet export requires --output <FILE>".into(),
+                        hint: None,
+                    });
+                }
+                None => unreachable!(), // CSV/JSONL use_arrow requires path.is_some()
+            };
+
+            return arrow_export(
+                p, branch_id, &space, primitive, format, prefix, limit, &file_path, collection,
+                graph,
+            );
+        }
+    }
+
+    #[cfg(not(feature = "arrow"))]
+    if format == ExportFormat::Parquet {
+        return Err(Error::Internal {
+            reason: "Parquet export requires the 'arrow' feature".into(),
+            hint: Some("Rebuild with: cargo build --features arrow".into()),
+        });
+    }
+
+    // Existing string-based rendering path (inline output or file without arrow)
     let rows = match primitive {
         ExportPrimitive::Kv => collect_kv(p, branch_id, &space, prefix.as_deref(), limit)?,
         ExportPrimitive::Json => collect_json(p, branch_id, &space, prefix.as_deref(), limit)?,
         ExportPrimitive::Events => collect_events(p, branch_id, &space, limit)?,
         ExportPrimitive::Graph => collect_graph(p, branch_id, prefix.as_deref(), limit)?,
+        ExportPrimitive::Vector => {
+            return Err(Error::InvalidInput {
+                reason: "Vector export requires the 'arrow' feature and --output <FILE>".into(),
+                hint: Some("Rebuild with: cargo build --features arrow".into()),
+            });
+        }
     };
 
-    // 2. Render
     let rendered = match format {
         ExportFormat::Csv => render_csv(&rows),
         ExportFormat::Json => render_json(&rows),
         ExportFormat::Jsonl => render_jsonl(&rows),
+        ExportFormat::Parquet => unreachable!(), // handled above
     };
 
     let row_count = rows.len() as u64;
 
-    // 3. Output destination: file if path provided, otherwise inline
     if let Some(file_path) = path {
-        // Validate parent directory exists for explicit paths
         if let Some(parent) = std::path::Path::new(&file_path).parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
                 return Err(Error::Io {
@@ -425,6 +482,145 @@ pub fn db_export(
             path: None,
             size_bytes: None,
         }))
+    }
+}
+
+/// Arrow-based file export (Parquet, CSV, JSONL).
+#[cfg(feature = "arrow")]
+#[allow(clippy::too_many_arguments)]
+fn arrow_export(
+    p: &Arc<Primitives>,
+    branch_id: strata_core::types::BranchId,
+    space: &str,
+    primitive: ExportPrimitive,
+    format: ExportFormat,
+    prefix: Option<String>,
+    limit: Option<u64>,
+    file_path: &str,
+    collection: Option<String>,
+    graph: Option<String>,
+) -> Result<Output> {
+    use crate::arrow::{export_to_batches, write_file, ExportSource};
+
+    // Validate parent directory exists
+    if let Some(parent) = std::path::Path::new(file_path).parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            return Err(Error::Io {
+                reason: format!("Parent directory '{}' does not exist", parent.display()),
+                hint: None,
+            });
+        }
+    }
+
+    let limit = limit.map(|l| l as usize);
+
+    // Build ExportSource from primitive + options
+    let source = match primitive {
+        ExportPrimitive::Kv => ExportSource::Kv { prefix },
+        ExportPrimitive::Json => ExportSource::Json { prefix },
+        ExportPrimitive::Events => ExportSource::Event { event_type: None },
+        ExportPrimitive::Vector => ExportSource::Vector {
+            collection: collection.unwrap(), // validated above
+        },
+        ExportPrimitive::Graph => {
+            let graph_name = graph.unwrap(); // validated above
+
+            // Graph exports produce two files: nodes + edges
+            let path = std::path::Path::new(file_path);
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("graph");
+            let ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("parquet");
+            let parent = path.parent().unwrap_or(std::path::Path::new("."));
+
+            let nodes_path = parent.join(format!("{stem}_nodes.{ext}"));
+            let edges_path = parent.join(format!("{stem}_edges.{ext}"));
+
+            let arrow_format = to_arrow_format(format)?;
+
+            // Export nodes
+            let (_, node_batches) = export_to_batches(
+                p,
+                branch_id,
+                space,
+                ExportSource::GraphNodes {
+                    graph: graph_name.clone(),
+                },
+                limit,
+            )?;
+            let node_bytes = if node_batches.is_empty() {
+                0
+            } else {
+                write_file(&nodes_path, arrow_format, &node_batches)?
+            };
+
+            // Export edges
+            let (_, edge_batches) = export_to_batches(
+                p,
+                branch_id,
+                space,
+                ExportSource::GraphEdges { graph: graph_name },
+                limit,
+            )?;
+            let edge_bytes = if edge_batches.is_empty() {
+                0
+            } else {
+                write_file(&edges_path, arrow_format, &edge_batches)?
+            };
+
+            let node_rows = node_batches
+                .iter()
+                .map(|b| b.num_rows() as u64)
+                .sum::<u64>();
+            let edge_rows = edge_batches
+                .iter()
+                .map(|b| b.num_rows() as u64)
+                .sum::<u64>();
+
+            return Ok(Output::Exported(ExportResult {
+                row_count: node_rows + edge_rows,
+                format,
+                primitive,
+                data: None,
+                path: Some(file_path.to_string()),
+                size_bytes: Some(node_bytes + edge_bytes),
+            }));
+        }
+    };
+
+    let (_, batches) = export_to_batches(p, branch_id, space, source, limit)?;
+    let row_count: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
+
+    let arrow_format = to_arrow_format(format)?;
+    let size_bytes = if batches.is_empty() {
+        0
+    } else {
+        write_file(std::path::Path::new(file_path), arrow_format, &batches)?
+    };
+
+    Ok(Output::Exported(ExportResult {
+        row_count,
+        format,
+        primitive,
+        data: None,
+        path: Some(file_path.to_string()),
+        size_bytes: Some(size_bytes),
+    }))
+}
+
+/// Map ExportFormat to Arrow FileFormat.
+#[cfg(feature = "arrow")]
+fn to_arrow_format(format: ExportFormat) -> Result<crate::arrow::FileFormat> {
+    use crate::arrow::FileFormat;
+    match format {
+        ExportFormat::Parquet => Ok(FileFormat::Parquet),
+        ExportFormat::Csv => Ok(FileFormat::Csv),
+        ExportFormat::Jsonl => Ok(FileFormat::Jsonl),
+        ExportFormat::Json => Err(Error::InvalidInput {
+            reason: "JSON array format is not supported for Arrow file export".into(),
+            hint: Some("Use --format parquet, csv, or jsonl".into()),
+        }),
     }
 }
 

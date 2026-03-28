@@ -12,7 +12,8 @@ use std::io::Read;
 use clap::ArgMatches;
 use strata_executor::{
     BatchVectorEntry, BranchId, BulkGraphEdge, BulkGraphNode, Command, DistanceMetric,
-    MergeStrategy, MetadataFilter, SearchQuery, TimeRangeInput, TxnOptions, Value,
+    ExportFormat, ExportPrimitive, MergeStrategy, MetadataFilter, SearchQuery, TimeRangeInput,
+    TxnOptions, Value,
 };
 
 use crate::state::SessionState;
@@ -178,6 +179,7 @@ pub fn matches_to_action(matches: &ArgMatches, state: &SessionState) -> Result<C
         "generate" => parse_generate(sub_matches),
         "tokenize" => parse_tokenize(sub_matches),
         "detokenize" => parse_detokenize(sub_matches),
+        "export" => parse_db_export(sub_matches, state),
         other => Err(unknown_subcommand(
             "",
             other,
@@ -209,6 +211,7 @@ pub fn matches_to_action(matches: &ArgMatches, state: &SessionState) -> Result<C
                 "generate",
                 "tokenize",
                 "detokenize",
+                "export",
             ],
         )),
     }
@@ -1467,6 +1470,50 @@ fn parse_search(matches: &ArgMatches, state: &SessionState) -> Result<CliAction,
             rerank,
             precomputed_embedding: None,
         },
+    }))
+}
+
+fn parse_db_export(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
+    let primitive_str = matches.get_one::<String>("primitive").unwrap();
+    let primitive = match primitive_str.as_str() {
+        "kv" => ExportPrimitive::Kv,
+        "json" => ExportPrimitive::Json,
+        "events" => ExportPrimitive::Events,
+        "vector" => ExportPrimitive::Vector,
+        "graph" => ExportPrimitive::Graph,
+        other => {
+            return Err(format!(
+                "Unknown primitive '{other}'. Expected: kv, json, events, vector, graph"
+            ))
+        }
+    };
+
+    let format_str = matches
+        .get_one::<String>("format")
+        .map(|s| s.as_str())
+        .unwrap_or("csv");
+    let format = match format_str {
+        "csv" => ExportFormat::Csv,
+        "json" => ExportFormat::Json,
+        "jsonl" => ExportFormat::Jsonl,
+        "parquet" => ExportFormat::Parquet,
+        other => {
+            return Err(format!(
+                "Unknown format '{other}'. Expected: parquet, csv, jsonl, json"
+            ))
+        }
+    };
+
+    Ok(CliAction::Execute(Command::DbExport {
+        branch: branch(state),
+        space: space(state),
+        primitive,
+        format,
+        prefix: matches.get_one::<String>("prefix").cloned(),
+        limit: matches.get_one::<u64>("limit").copied(),
+        path: matches.get_one::<String>("output").cloned(),
+        collection: matches.get_one::<String>("collection").cloned(),
+        graph: matches.get_one::<String>("graph").cloned(),
     }))
 }
 
