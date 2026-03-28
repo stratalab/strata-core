@@ -407,6 +407,15 @@ impl TransactionCoordinator {
         self.manager.quiesced_version()
     }
 
+    /// Acquire the commit quiesce lock (#2105).
+    ///
+    /// Blocks until all in-flight commits complete, then prevents new
+    /// commits from starting. Hold the guard across operations that
+    /// require a stable storage version (e.g., fork_branch).
+    pub fn quiesce_commits(&self) -> parking_lot::RwLockWriteGuard<'_, ()> {
+        self.manager.quiesce_commits()
+    }
+
     /// Get next transaction ID (for internal use).
     pub fn next_txn_id(&self) -> StrataResult<u64> {
         self.manager.next_txn_id().map_err(StrataError::from)

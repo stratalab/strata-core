@@ -391,6 +391,15 @@ impl Database {
         self.coordinator.unmark_branch_deleting(branch_id);
     }
 
+    /// Acquire the commit quiesce lock (#2105).
+    ///
+    /// Blocks until all in-flight commits complete, then prevents new
+    /// commits from starting. Hold the guard across operations that
+    /// require a stable storage version (e.g., fork_branch).
+    pub fn quiesce_commits(&self) -> parking_lot::RwLockWriteGuard<'_, ()> {
+        self.coordinator.quiesce_commits()
+    }
+
     /// Get the commit lock Arc for a branch (#1916).
     ///
     /// Locking this serializes with in-flight commits on the branch.

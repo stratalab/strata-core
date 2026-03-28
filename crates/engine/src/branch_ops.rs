@@ -480,9 +480,22 @@ pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> Strat
         ));
     }
 
-    let (fork_version, _segments_shared) = storage
-        .fork_branch(&source_id, &dest_id)
-        .map_err(|e| StrataError::storage(format!("fork failed: {}", e)))?;
+    // Quiesce in-flight commits before forking (#2105).
+    //
+    // The global storage version is shared across branches. Without quiescing,
+    // a concurrent commit to ANY branch can advance storage.version while a
+    // commit to the SOURCE branch hasn't applied its writes yet. Fork would
+    // read the advanced version but miss the source's pending data.
+    //
+    // The write guard drains all in-flight commits (they hold the shared read
+    // side) and prevents new ones from starting until the storage fork completes.
+    // Scoped tightly: released before create_branch (which itself commits).
+    let (fork_version, _segments_shared) = {
+        let _quiesce_guard = db.quiesce_commits();
+        storage
+            .fork_branch(&source_id, &dest_id)
+            .map_err(|e| StrataError::storage(format!("fork failed: {}", e)))?
+    };
 
     // 5. Create destination branch in KV metadata (WAL-protected).
     //    If this fails, rollback the storage fork.

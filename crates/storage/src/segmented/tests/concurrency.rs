@@ -1390,3 +1390,131 @@ fn test_issue_1734_apply_recovery_atomic_does_not_bump_version() {
     );
     assert_eq!(visible.unwrap().value, Value::String("hello".into()));
 }
+
+// =====================================================================
+// Issue #2110 / #2105: Fork version gap — deterministic reproduction
+// =====================================================================
+
+/// Deterministic proof that fork_branch can produce a child whose
+/// fork_version includes a version whose data was never captured.
+///
+/// Uses `mpsc` channels to force this exact interleaving:
+///
+///   1. Writer: next_version()            → allocates V, global counter = V
+///   2. Writer: signals "allocated"
+///   3. Fork:   receives signal
+///   4. Fork:   fork_branch(parent, child)
+///              → acquires DashMap lock
+///              → inline-flushes memtable (does NOT contain V's data)
+///              → fork_version = self.version.load() = V
+///              → captures snapshot, releases lock
+///   5. Fork:   signals "forked"
+///   6. Writer: receives signal
+///   7. Writer: put_with_version_mode(V)  → data at V enters parent's memtable
+///
+/// Result: fork_version >= V but child is missing V's data.
+///
+/// NOTE: This test asserts the BUG exists at the storage level. When the
+/// engine-level fix (#2105) is applied (quiescing commits before fork),
+/// this storage-level race is prevented by the engine, but the raw
+/// storage API still exhibits it.
+#[test]
+fn test_issue_2110_fork_version_gap_deterministic() {
+    use std::sync::mpsc;
+    use std::sync::Arc;
+    use std::thread;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(SegmentedStore::with_dir(dir.path().to_path_buf(), 0));
+
+    // Seed parent branch with initial data so it exists with segments
+    seed(&store, parent_kv("init"), Value::Int(0), 1);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    // Channels for deterministic ordering
+    let (tx_allocated, rx_allocated) = mpsc::channel::<u64>();
+    let (tx_forked, rx_forked) = mpsc::channel::<()>();
+
+    let store_writer = Arc::clone(&store);
+    let store_forker = Arc::clone(&store);
+
+    // Writer thread: allocate version, signal, wait for fork, then write data
+    let writer = thread::spawn(move || {
+        // Step 1: allocate version (advances self.version but no data yet)
+        let v = store_writer.next_version();
+        // Step 2: signal the forker that version is allocated
+        tx_allocated.send(v).unwrap();
+        // Step 6: wait for fork to complete
+        rx_forked.recv().unwrap();
+        // Step 7: NOW write the data (too late for the fork to capture)
+        store_writer
+            .put_with_version_mode(
+                parent_kv("gap_key"),
+                Value::Int(999),
+                v,
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
+        v
+    });
+
+    // Forker thread: wait for version allocation, then fork
+    let fork_branch_id = BranchId::from_bytes([77; 16]);
+    let forker = thread::spawn(move || {
+        store_forker
+            .branches
+            .entry(fork_branch_id)
+            .or_insert_with(BranchState::new);
+
+        // Step 3: wait for writer to allocate version
+        let allocated_version = rx_allocated.recv().unwrap();
+        // Step 4: fork (captures memtable that does NOT contain gap_key)
+        let (fork_version, _) = store_forker
+            .fork_branch(&parent_branch(), &fork_branch_id)
+            .unwrap();
+        // Step 5: signal writer that fork is done
+        tx_forked.send(()).unwrap();
+        (fork_version, allocated_version)
+    });
+
+    let writer_version = writer.join().unwrap();
+    let (fork_version, allocated_version) = forker.join().unwrap();
+
+    assert_eq!(writer_version, allocated_version);
+
+    // The bug: fork_version >= allocated_version because next_version()
+    // bumped self.version BEFORE put_with_version_mode wrote the data.
+    assert!(
+        fork_version >= allocated_version,
+        "fork_version ({}) should be >= allocated version ({}) — \
+         next_version() bumps the counter before data is written",
+        fork_version,
+        allocated_version,
+    );
+
+    // Parent has the data (writer wrote it after fork)
+    let parent_val = store
+        .get_versioned(&parent_kv("gap_key"), u64::MAX)
+        .unwrap();
+    assert_eq!(
+        parent_val.map(|e| e.value),
+        Some(Value::Int(999)),
+        "parent must have the gap_key data"
+    );
+
+    // Child is MISSING the data — this is the version gap bug.
+    // fork_version claims to include allocated_version, but the data
+    // was not in the memtable when the fork captured it.
+    let child_ns = Arc::new(Namespace::new(fork_branch_id, "default".to_string()));
+    let child_key = Key::new(child_ns, TypeTag::KV, b"gap_key".to_vec());
+    let child_val = store.get_versioned(&child_key, u64::MAX).unwrap();
+    assert!(
+        child_val.is_none(),
+        "child should be MISSING gap_key — this proves the version gap bug: \
+         fork_version={} >= allocated_version={} but data is absent",
+        fork_version,
+        allocated_version,
+    );
+}
