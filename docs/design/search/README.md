@@ -17,6 +17,7 @@
 | [`v0.7-implementation.md`](v0.7-implementation.md) | Implementation plan: AutoResearch (db.experiment, metrics, branch-per-recipe). |
 | [`v0.8-implementation.md`](v0.8-implementation.md) | Implementation plan: multi-model routing (provider:model per operation). |
 | [`v0.9-implementation.md`](v0.9-implementation.md) | Implementation plan: agent hints (describe, recipe schema, actionable hints). |
+| [`known-gaps.md`](known-gaps.md) | Known gaps and future optimizations. None are blockers. |
 
 ## Related
 
