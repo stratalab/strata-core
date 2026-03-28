@@ -674,6 +674,41 @@ The response has a **fixed structure**. Every field is always present. Unpopulat
 | `groups` | array or null | When `transform.group_by` in recipe |
 | `stats` | object | Always |
 
+### Arrow Output Format
+
+Search results are Arrow-compatible. The `hits` array maps to an Arrow RecordBatch for zero-copy transfer to Pandas, Polars, DuckDB, and any Arrow-native tool. See `docs/design/rfc-arrow-interoperability.md` for Strata's overall Arrow strategy.
+
+**Hits Arrow Schema:**
+
+```
+entity_type:    utf8 (not null)
+entity_branch:  utf8 (not null)
+entity_space:   utf8 (not null)
+entity_key:     utf8 (not null)
+score:          float64 (not null)
+rank:           uint32 (not null)
+snippet:        utf8 (nullable)
+metadata:       utf8 (JSON string, nullable)
+```
+
+**Python usage:**
+
+```python
+results = db.search("metformin side effects")
+
+# Zero-copy to PyArrow
+table = results.to_arrow()
+
+# Use with any Arrow-native tool
+import polars as pl
+df = pl.from_arrow(table)
+
+import duckdb
+duckdb.sql("SELECT * FROM table WHERE score > 0.5 ORDER BY score DESC")
+```
+
+The `answer`, `diff`, `aggregations`, `groups`, and `stats` fields are returned as structured metadata alongside the RecordBatch — they don't map to columnar format. The `hits` are the columnar payload; everything else is per-query metadata.
+
 ---
 
 ## 7. The Evaluate Primitive
