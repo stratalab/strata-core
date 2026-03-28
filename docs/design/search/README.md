@@ -8,6 +8,7 @@
 | [`retrieval-substrate.md`](retrieval-substrate.md) | Layer 1: Recipe schema, pipeline, invariants, operators, predicates, aggregations. |
 | [`intelligence-layer.md`](intelligence-layer.md) | Layer 2: Query-time flow, write-time enrichment, RAG, AutoResearch, Qwen3 usage. |
 | [`v0.1-implementation.md`](v0.1-implementation.md) | Implementation plan: minimal substrate (BM25 + vector + RRF + limit). |
+| [`v0.2-implementation.md`](v0.2-implementation.md) | Implementation plan: query expansion + reranking (qmd parity). |
 
 ## Related
 
