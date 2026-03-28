@@ -232,6 +232,16 @@ impl TransactionManager {
         self.version.load(Ordering::Acquire)
     }
 
+    /// Acquire the commit quiesce lock, blocking until all in-flight commits
+    /// have finished their `apply_writes`.
+    ///
+    /// The returned guard prevents new commits from starting (they need the
+    /// shared read side). Hold it across operations that require a stable
+    /// storage version, such as `fork_branch` (#2105).
+    pub fn quiesce_commits(&self) -> parking_lot::RwLockWriteGuard<'_, ()> {
+        self.commit_quiesce.write()
+    }
+
     /// Allocate next transaction ID
     ///
     /// Uses a single `fetch_add` (LOCK XADD on x86) instead of a CAS loop.
