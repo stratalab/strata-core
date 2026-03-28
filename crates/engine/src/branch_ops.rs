@@ -464,6 +464,14 @@ pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> Strat
     let source_id = resolve_branch_name(source);
     let dest_id = resolve_branch_name(destination);
 
+    // 3b. Reject fork if source is being deleted (#2108).
+    if db.is_branch_deleting(&source_id) {
+        return Err(StrataError::invalid_input(format!(
+            "Source branch '{}' is being deleted",
+            source
+        )));
+    }
+
     // 4. COW fork via storage layer — BEFORE creating KV metadata (#1724).
     //
     //    The storage fork writes durable manifests. By doing this before
@@ -480,9 +488,29 @@ pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> Strat
         ));
     }
 
-    let (fork_version, _segments_shared) = storage
-        .fork_branch(&source_id, &dest_id)
-        .map_err(|e| StrataError::storage(format!("fork failed: {}", e)))?;
+    // Hold the source branch's commit lock during the storage fork (#2108).
+    //
+    // delete_branch also holds this lock, and its delete transaction writes
+    // tombstones to the source's storage (via apply_batch grouping by
+    // key.namespace.branch_id). Without this lock, fork's inline-flush can
+    // capture those tombstones, causing the child to see all keys as deleted.
+    //
+    // Re-check is_deleting under the lock to close the TOCTOU window.
+    // Scope the lock to just the storage fork — metadata and space operations
+    // below don't need protection against source deletion.
+    let (fork_version, _segments_shared) = {
+        let source_commit_lock = db.branch_commit_lock(&source_id);
+        let _source_guard = source_commit_lock.lock();
+        if db.is_branch_deleting(&source_id) {
+            return Err(StrataError::invalid_input(format!(
+                "Source branch '{}' is being deleted",
+                source
+            )));
+        }
+        storage
+            .fork_branch(&source_id, &dest_id)
+            .map_err(|e| StrataError::storage(format!("fork failed: {}", e)))?
+    };
 
     // 5. Create destination branch in KV metadata (WAL-protected).
     //    If this fails, rollback the storage fork.

@@ -386,6 +386,11 @@ impl Database {
         self.coordinator.mark_branch_deleting(branch_id);
     }
 
+    /// Check if a branch is currently marked as deleting (#2108).
+    pub fn is_branch_deleting(&self, branch_id: &BranchId) -> bool {
+        self.coordinator.is_branch_deleting(branch_id)
+    }
+
     /// Remove the deleting mark for a branch (#1916).
     pub fn unmark_branch_deleting(&self, branch_id: &BranchId) {
         self.coordinator.unmark_branch_deleting(branch_id);

@@ -519,7 +519,9 @@ fn test_issue_1910_event_hash_chain_under_contention() {
     );
 
     // 2. Verify hash chain integrity: every event's prev_hash == predecessor's hash
-    let all_events = event.range(&branch_id, "default", 0, None, None, false, None).unwrap();
+    let all_events = event
+        .range(&branch_id, "default", 0, None, None, false, None)
+        .unwrap();
     assert_eq!(all_events.len(), total_events);
 
     let mut prev_hash = [0u8; 32]; // First event's prev_hash should be zeros
@@ -632,7 +634,9 @@ fn test_issue_1910_event_hash_chain_concurrent() {
     );
 
     // Verify chain integrity
-    let all_events = event.range(&branch_id, "default", 0, None, None, false, None).unwrap();
+    let all_events = event
+        .range(&branch_id, "default", 0, None, None, false, None)
+        .unwrap();
     assert_eq!(
         all_events.len(),
         total_events,
@@ -654,4 +658,174 @@ fn test_issue_1910_event_hash_chain_concurrent() {
         "Expected OCC conflicts with {} concurrent writers, got 0",
         num_threads
     );
+}
+
+// ============================================================================
+// Issue #2108: fork_branch succeeds with missing data when source is
+//              concurrently deleted
+// ============================================================================
+
+/// Race fork_branch against delete_branch on the same source.
+///
+/// The root cause is that `flush_oldest_frozen` resurrects a deleted branch
+/// as an empty BranchState via `entry().or_insert_with()`. Fork then captures
+/// this empty ghost and returns Ok with no inherited data.
+///
+/// This test verifies:
+///   - No panics
+///   - If fork succeeds, the child is fully readable (all source keys present)
+///   - No zombie branches
+#[test]
+fn test_issue_2108_fork_races_delete_source_branch() {
+    let mut fork_rejected = 0u32;
+
+    for iteration in 0..100 {
+        let test_db = TestDb::new();
+        let branch_index = test_db.branch_index();
+        let kv = test_db.kv();
+
+        // Create and populate source branch
+        branch_index.create_branch("source").unwrap();
+        let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+        for i in 0..20 {
+            kv.put(&source_id, "default", &format!("key_{}", i), Value::Int(i))
+                .unwrap();
+        }
+
+        let db = test_db.db.clone();
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Thread A: fork source -> child
+        let db1 = db.clone();
+        let b1 = barrier.clone();
+        let fork_handle = thread::spawn(move || {
+            b1.wait();
+            branch_ops::fork_branch(&db1, "source", &format!("child_{}", iteration))
+        });
+
+        // Thread B: delete source
+        let db2 = db.clone();
+        let b2 = barrier.clone();
+        let delete_handle = thread::spawn(move || {
+            b2.wait();
+            let bi = BranchIndex::new(db2);
+            bi.delete_branch("source")
+        });
+
+        let fork_result = fork_handle.join().unwrap();
+        let delete_result = delete_handle.join().unwrap();
+
+        let child_name = format!("child_{}", iteration);
+
+        if let Ok(_fork_info) = &fork_result {
+            // Fork succeeded — child MUST be fully readable
+            let child_id = strata_engine::primitives::branch::resolve_branch_name(&child_name);
+            for i in 0..20 {
+                let val = kv.get(&child_id, "default", &format!("key_{}", i)).unwrap();
+                assert!(
+                    val.is_some(),
+                    "iteration {}: child missing key_{} after successful fork",
+                    iteration,
+                    i
+                );
+            }
+        } else {
+            fork_rejected += 1;
+        }
+
+        // Source should be gone if delete succeeded
+        if delete_result.is_ok() {
+            let branches = branch_index.list_branches().unwrap();
+            assert!(
+                !branches.iter().any(|b| b == "source"),
+                "iteration {}: delete succeeded but source still listed",
+                iteration
+            );
+        }
+    }
+
+    // Verify the is_deleting rejection path was exercised
+    assert!(
+        fork_rejected > 0,
+        "Expected at least one fork rejection due to concurrent delete, got 0 in 100 iterations"
+    );
+}
+
+/// Stress variant: more iterations with concurrent writes to increase
+/// the probability of hitting the flush-resurrects-deleted-branch window.
+#[test]
+fn test_issue_2108_fork_races_delete_source_branch_concurrent() {
+    for iteration in 0..50 {
+        let test_db = TestDb::new();
+        let branch_index = test_db.branch_index();
+        let kv = test_db.kv();
+
+        branch_index.create_branch("src").unwrap();
+        let src_id = strata_engine::primitives::branch::resolve_branch_name("src");
+
+        // Write enough data to ensure memtable flush during fork
+        for i in 0..50 {
+            kv.put(
+                &src_id,
+                "default",
+                &format!("data_{}", i),
+                Value::String(format!("value_{}", i)),
+            )
+            .unwrap();
+        }
+
+        let db = test_db.db.clone();
+        let barrier = Arc::new(Barrier::new(3));
+
+        // Thread A: continuous writes to source (increases flush contention)
+        let db_w = db.clone();
+        let bw = barrier.clone();
+        let writer = thread::spawn(move || {
+            let kv_w = KVStore::new(db_w);
+            bw.wait();
+            for i in 0..20 {
+                let _ = kv_w.put(&src_id, "default", &format!("extra_{}", i), Value::Int(i));
+                thread::yield_now();
+            }
+        });
+
+        // Thread B: fork
+        let db1 = db.clone();
+        let b1 = barrier.clone();
+        let child_name = format!("child_{}", iteration);
+        let cn = child_name.clone();
+        let fork_handle = thread::spawn(move || {
+            b1.wait();
+            branch_ops::fork_branch(&db1, "src", &cn)
+        });
+
+        // Thread C: delete
+        let db2 = db.clone();
+        let b2 = barrier.clone();
+        let delete_handle = thread::spawn(move || {
+            b2.wait();
+            let bi = BranchIndex::new(db2);
+            bi.delete_branch("src")
+        });
+
+        let fork_result = fork_handle.join().unwrap();
+        let _delete_result = delete_handle.join().unwrap();
+        writer.join().unwrap();
+
+        if let Ok(_) = &fork_result {
+            // If fork succeeded, the original 50 keys MUST be present
+            let child_id = strata_engine::primitives::branch::resolve_branch_name(&child_name);
+            for i in 0..50 {
+                let val = kv
+                    .get(&child_id, "default", &format!("data_{}", i))
+                    .unwrap();
+                assert!(
+                    val.is_some(),
+                    "iteration {}: child missing data_{} after successful fork",
+                    iteration,
+                    i
+                );
+            }
+        }
+    }
 }
