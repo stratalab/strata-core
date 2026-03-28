@@ -86,6 +86,10 @@ memmap2 = "0.9"
 # Parallel iteration
 rayon = "1.10"
 
+# Arrow interoperability (optional, for import/export)
+arrow = { version = "54", default-features = false, features = ["prettyprint", "csv", "json"] }
+parquet = { version = "54", default-features = false, features = ["arrow", "snap", "zstd", "lz4"] }
+
 [profile.dev]
 opt-level = 0
 debug = true
@@ -113,6 +117,8 @@ embed = ["strata-executor/embed"]
 anthropic = ["strata-executor/anthropic"]
 openai = ["strata-executor/openai"]
 google = ["strata-executor/google"]
+# Arrow-based import/export (Parquet, CSV, JSONL)
+arrow = ["strata-executor/arrow"]
 
 [dependencies]
 strata-executor = { path = "crates/executor" }

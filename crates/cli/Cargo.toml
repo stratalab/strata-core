@@ -16,6 +16,8 @@ anthropic = ["embed", "strata-executor/anthropic"]
 openai = ["embed", "strata-executor/openai"]
 google = ["embed", "strata-executor/google"]
 cloud = ["anthropic", "openai", "google"]
+# Arrow-based import/export (Parquet, CSV, JSONL)
+arrow = ["strata-executor/arrow"]
 
 [dependencies]
 strata-executor = { path = "../executor" }
