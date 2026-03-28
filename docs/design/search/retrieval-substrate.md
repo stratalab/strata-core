@@ -166,9 +166,60 @@ Scoping: `scan` and `bm25` accept `sources` (which primitives) and `spaces` (whi
 
 Every step except "return" is optional. A scan-only recipe skips fusion. A BM25-only recipe has trivial fusion (one list, nothing to merge). The pipeline is the same; the recipe controls which steps run.
 
-### 3.4 Defaults
+### 3.4 Recipe Resolution: Three-Level Deep Merge
 
-When a section or field is omitted:
+Recipes are resolved through a three-level merge. The user never constructs the full spec — they only specify what's different from the level below.
+
+```
+Level 1: Built-in defaults (hardcoded in Strata, always present)
+    ↓ deep merge
+Level 2: Stored recipe (on _system_ branch, set via db.set_recipe())
+    ↓ deep merge
+Level 3: Per-call override (inline recipe in db.search() or db.experiment())
+```
+
+Narrowest scope wins. Each level overrides only the fields it specifies. Everything else inherits.
+
+**Example:**
+
+```python
+# Built-in: bm25 with k1=0.9, b=0.4, stemmer=porter, limit=10, etc.
+
+# User stores their baseline — only what they changed from built-in
+db.set_recipe({"retrieve": {"bm25": {"k1": 1.2}, "vector": {}}})
+# Resolved: bm25 with k1=1.2 (overridden), b=0.4 (inherited), vector enabled, limit=10
+
+# Per-call override — only what's different from stored recipe
+db.search("query", recipe={"retrieve": {"bm25": {"k1": 1.5}}})
+# Resolved: k1=1.5 (call override), vector enabled (from stored), b=0.4 (from built-in)
+```
+
+**For experiments**, each variant is a delta from the stored recipe:
+
+```python
+db.experiment(
+    recipes={
+        "low":  {"retrieve": {"bm25": {"k1": 0.7}}},   # only k1 differs
+        "high": {"retrieve": {"bm25": {"k1": 1.5}}},   # only k1 differs
+    },
+    eval_set=eval_set
+)
+# Both variants inherit everything else from the stored recipe
+```
+
+**Storage:**
+
+| Level | Where it lives | Who sets it |
+|-------|---------------|-------------|
+| Built-in defaults | Hardcoded in Strata | Strata developers |
+| Stored recipe | `_system_` branch (`search/recipes/default`) | User via `db.set_recipe()` |
+| Per-call override | Not stored — ephemeral | User via `db.search(recipe=...)` |
+
+Named recipes are also stored on `_system_`: `db.set_recipe(recipe, name="medical")` writes to `search/recipes/medical`. When referenced by name in `db.search(recipe="medical")`, the named recipe replaces the default at Level 2 — the per-call override (Level 3) still applies on top.
+
+### 3.5 Built-in Defaults
+
+When a section or field is omitted at all levels, these built-in defaults apply:
 
 | Field | Default |
 |-------|---------|
@@ -209,7 +260,7 @@ When a section or field is omitted:
 | `control.include_stage_scores` | `false` |
 | `control.snippet_length` | 200 |
 
-### 3.5 Predicate operators
+### 3.6 Predicate operators
 
 Used in both `scan` and `filter`:
 
@@ -226,7 +277,7 @@ Used in both `scan` and `filter`:
 
 Predicate logic: `"and"` (default) or `"or"`.
 
-### 3.6 Aggregation types
+### 3.7 Aggregation types
 
 | Type | Output |
 |------|--------|
@@ -642,30 +693,32 @@ Note: graph retrieval does NOT involve the intelligence layer. The user builds t
 
 ## 10. User API
 
-Two entry points, both producing the same substrate call:
-
 ```python
-# Simple — BM25-only, default recipe
-results = db.search("metformin side effects")
+# Search — uses stored default recipe
+db.search("query")
 
-# Full control — any recipe
-results = db.search("metformin side effects", recipe=recipe)
-results = db.retrieve("metformin side effects", recipe="medical_hybrid_v2")
+# Search with named recipe
+db.search("query", recipe="medical")
+
+# Search with per-call override (delta, merged with stored recipe)
+db.search("query", recipe={"retrieve": {"bm25": {"k1": 1.5}}})
+
+# RAG mode
+db.search("query", mode="rag")
+
+# Temporal
+db.search("query", as_of="2025-01-01")
+db.search("query", diff=("2024-01-01", "2025-06-01"))
+
+# Recipe management
+db.set_recipe(recipe)                    # set the default
+db.set_recipe(recipe, name="medical")    # set a named recipe
+db.get_recipe()                          # get the default
+db.get_recipe("medical")                 # get a named one
+
+# Experiments
+result = db.experiment(recipes, eval_set, metric="ndcg@10")
 ```
-
-`db.search(query)` is sugar for `db.retrieve(query, recipe=None)` which uses the baseline BM25 recipe.
-
-`db.retrieve(query, recipe)` accepts a recipe name (string) or inline recipe (dict/JSON). The intelligence layer handles query embedding for vector search and optional expansion/reranking. The user sends a query string and gets results.
-
----
-
-## 11. Recipe Storage
-
-Recipes are stored as JSON documents on the `_system_` branch under `search/recipes/`. They are:
-
-- **Named** — each recipe has a unique name (e.g., `"default"`, `"medical_hybrid_v2"`)
-- **Versioned** — stored via normal Strata writes, so MVCC version history applies
-- **Portable** — a recipe is a JSON file that can be exported, shared, or committed to source control
 
 ---
 
