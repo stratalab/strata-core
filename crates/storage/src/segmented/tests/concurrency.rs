@@ -7,6 +7,12 @@ use super::*;
 /// Concurrent stress test: continuously write to a parent branch while calling
 /// fork_branch(). The child must see every version <= fork_version with
 /// no omissions.
+///
+/// Writers hold a shared (read) barrier across next_version() + put() to
+/// mirror the engine layer's quiesce_commits() protocol (see branch_ops.rs
+/// #2105/#2110).  Without this barrier, a writer can allocate version V,
+/// get preempted while another writer commits V+1, then fork captures
+/// fork_version = V+1 without V in the snapshot — a version-gap race.
 #[test]
 fn test_issue_1679_fork_concurrent_write_visibility() {
     use std::sync::atomic::AtomicBool;
@@ -25,15 +31,25 @@ fn test_issue_1679_fork_concurrent_write_visibility() {
 
     let stop = Arc::new(AtomicBool::new(false));
 
+    // Barrier that mirrors the engine's commit_quiesce RwLock:
+    // writers hold read(), fork acquires write() to drain in-flight writers
+    // before snapshotting.  This ensures no version <= fork_version is
+    // allocated-but-unapplied when the snapshot is taken.
+    let barrier = Arc::new(parking_lot::RwLock::new(()));
+
     // Spawn writer threads that continuously write to the parent branch.
     // Each thread writes sequentially named keys so we can enumerate them.
     let mut writers = Vec::new();
     for t in 0..2u8 {
         let store_c = Arc::clone(&store);
         let stop_c = Arc::clone(&stop);
+        let barrier_c = Arc::clone(&barrier);
         writers.push(thread::spawn(move || {
             let mut i = 0u64;
             while !stop_c.load(std::sync::atomic::Ordering::Relaxed) {
+                // Hold read barrier across version allocation + write so
+                // fork's write barrier drains us before snapshotting.
+                let _guard = barrier_c.read();
                 let v = store_c.next_version();
                 let key_name = format!("w{}_k{}", t, i);
                 store_c
@@ -45,6 +61,7 @@ fn test_issue_1679_fork_concurrent_write_visibility() {
                         WriteMode::Append,
                     )
                     .unwrap();
+                drop(_guard);
                 i += 1;
                 if i % 3 == 0 {
                     thread::yield_now();
@@ -62,12 +79,23 @@ fn test_issue_1679_fork_concurrent_write_visibility() {
             .entry(fork_branch_id)
             .or_insert_with(BranchState::new);
 
+        // Drain in-flight writers before forking — mirrors
+        // db.quiesce_commits() in the engine layer.  After this
+        // returns, every allocated version has been applied, so
+        // fork_version will be an accurate upper bound.
+        let _quiesce = barrier.write();
         let (fork_version, _) = store
             .fork_branch(&parent_branch(), &fork_branch_id)
             .unwrap();
+        drop(_quiesce);
 
         // For each key visible in the parent at fork_version, verify the
         // child also sees it through inheritance.
+        //
+        // Post-fork writes all have version > fork_version (next_version
+        // is monotonically increasing), so get_versioned(parent,
+        // fork_version) cannot see them — the comparison is safe even
+        // while writers resume concurrently.
         let child_ns = Arc::new(Namespace::new(fork_branch_id, "default".to_string()));
 
         for t in 0..2u8 {
