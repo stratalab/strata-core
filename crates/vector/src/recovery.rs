@@ -87,199 +87,204 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
 
     // Iterate all branch_ids in storage
     for branch_id in db.storage().branch_ids() {
-        let ns = Arc::new(Namespace::for_branch_space(branch_id, "default"));
+        // Scan both "default" (user collections) and "_system_" (shadow collections)
+        let spaces = ["default", strata_engine::system_space::SYSTEM_SPACE];
+        for space in spaces {
+            let ns = Arc::new(Namespace::for_branch_space(branch_id, space));
 
-        // Scan for vector config entries in this run
-        let config_prefix = Key::new_vector_config_prefix(ns.clone());
-        let config_entries = match db.storage().scan_prefix(&config_prefix, snapshot_version) {
-            Ok(entries) => entries,
-            Err(e) => {
-                tracing::warn!(
-                    target: "strata::vector",
-                    branch_id = ?branch_id,
-                    error = %e,
-                    "Failed to scan vector configs during recovery"
-                );
-                continue;
-            }
-        };
-
-        for (key, versioned) in &config_entries {
-            // Parse the collection config from the KV value
-            let config_bytes = match &versioned.value {
-                Value::Bytes(b) => b,
-                _ => continue,
-            };
-
-            // Decode the CollectionRecord
-            let record = match super::CollectionRecord::from_bytes(config_bytes) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(
-                        target: "strata::vector",
-                        key = ?key,
-                        error = %e,
-                        "Failed to decode collection record during recovery, skipping"
-                    );
-                    continue;
-                }
-            };
-
-            // Extract collection name from the key's user_key ("__config__/{name}")
-            let collection_name = match key.user_key_string() {
-                Some(raw) => raw.strip_prefix("__config__/").unwrap_or(&raw).to_string(),
-                None => continue,
-            };
-
-            // Read backend type before consuming record.config (Issue #1964)
-            let backend_type = record.backend_type();
-
-            let config: VectorConfig = match record.config.try_into() {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(
-                        target: "strata::vector",
-                        collection = %collection_name,
-                        error = %e,
-                        "Failed to convert collection config during recovery, skipping"
-                    );
-                    continue;
-                }
-            };
-            let collection_id = CollectionId::new(branch_id, &collection_name);
-
-            let factory = IndexBackendFactory::from_type(backend_type);
-            let mut backend = factory.create(&config);
-
-            // -----------------------------------------------------------
-            // Try mmap-accelerated recovery: load heap from disk cache.
-            // -----------------------------------------------------------
-            let mut loaded_from_mmap = false;
-            if use_mmap {
-                let vec_path = mmap_path(data_dir, branch_id, &collection_name);
-                if vec_path.exists() {
-                    match VectorHeap::from_mmap(&vec_path, config.clone()) {
-                        Ok(heap) => {
-                            if heap.is_empty() {
-                                tracing::debug!(
-                                    target: "strata::vector",
-                                    collection = %collection_name,
-                                    "Mmap cache is empty, falling back to KV"
-                                );
-                            } else {
-                                backend.replace_heap(heap);
-                                loaded_from_mmap = true;
-                                tracing::debug!(
-                                    target: "strata::vector",
-                                    collection = %collection_name,
-                                    "Loaded heap from mmap cache"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "strata::vector",
-                                collection = %collection_name,
-                                error = %e,
-                                "Failed to load mmap cache, falling back to KV"
-                            );
-                        }
-                    }
-                }
-            }
-
-            // -----------------------------------------------------------
-            // Scan KV for vector entries
-            // -----------------------------------------------------------
-            let vector_prefix = Key::new_vector(ns.clone(), &collection_name, "");
-            let vector_entries = match db.storage().scan_prefix(&vector_prefix, snapshot_version) {
+            // Scan for vector config entries in this run
+            let config_prefix = Key::new_vector_config_prefix(ns.clone());
+            let config_entries = match db.storage().scan_prefix(&config_prefix, snapshot_version) {
                 Ok(entries) => entries,
                 Err(e) => {
                     tracing::warn!(
                         target: "strata::vector",
-                        collection = %collection_name,
+                        branch_id = ?branch_id,
                         error = %e,
-                        "Failed to scan vectors during recovery"
+                        "Failed to scan vector configs during recovery"
                     );
-                    // If mmap loaded, the backend has embeddings but no timestamps;
-                    // proceed anyway so rebuild_index() at least builds the graph.
-                    state.backends.insert(collection_id.clone(), backend);
-                    stats.collections_created += 1;
                     continue;
                 }
             };
 
-            let collection_prefix = format!("{}/", collection_name);
-            for (vec_key, vec_versioned) in &vector_entries {
-                let vec_bytes = match &vec_versioned.value {
+            for (key, versioned) in &config_entries {
+                // Parse the collection config from the KV value
+                let config_bytes = match &versioned.value {
                     Value::Bytes(b) => b,
                     _ => continue,
                 };
 
-                // Decode the VectorRecord
-                let vec_record = match super::VectorRecord::from_bytes(vec_bytes) {
+                // Decode the CollectionRecord
+                let record = match super::CollectionRecord::from_bytes(config_bytes) {
                     Ok(r) => r,
                     Err(e) => {
                         tracing::warn!(
                             target: "strata::vector",
+                            key = ?key,
                             error = %e,
-                            "Failed to decode vector record during recovery, skipping"
+                            "Failed to decode collection record during recovery, skipping"
                         );
                         continue;
                     }
                 };
 
-                let vid = VectorId::new(vec_record.vector_id);
+                // Extract collection name from the key's user_key ("__config__/{name}")
+                let collection_name = match key.user_key_string() {
+                    Some(raw) => raw.strip_prefix("__config__/").unwrap_or(&raw).to_string(),
+                    None => continue,
+                };
 
-                if loaded_from_mmap && backend.get(vid).is_some() {
-                    // Heap already has the embedding — just register ID + timestamp
-                    backend.register_mmap_vector(vid, vec_record.created_at);
-                    stats.vectors_mmap_registered += 1;
-                } else if loaded_from_mmap && !vec_record.embedding.is_empty() {
-                    // Vector in KV but not in mmap (added after last freeze) — insert from KV
-                    let _ = backend.insert_with_id_and_timestamp(
-                        vid,
-                        &vec_record.embedding,
-                        vec_record.created_at,
-                    );
-                    stats.vectors_upserted += 1;
-                } else if vec_record.embedding.is_empty() {
-                    // Legacy record with no embedding (pre-#1962 lite mode or
-                    // old records deserialized via #[serde(default)]). Cannot
-                    // recover without the embedding — skip.
-                    tracing::warn!(
-                        target: "strata::vector",
-                        vector_id = vec_record.vector_id,
-                        "Skipping record with empty embedding during recovery"
-                    );
-                    continue;
-                } else {
-                    // Full KV-based recovery: insert embedding + timestamp
-                    let _ = backend.insert_with_id_and_timestamp(
-                        vid,
-                        &vec_record.embedding,
-                        vec_record.created_at,
-                    );
-                    stats.vectors_upserted += 1;
+                // Read backend type before consuming record.config (Issue #1964)
+                let backend_type = record.backend_type();
+
+                let config: VectorConfig = match record.config.try_into() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "strata::vector",
+                            collection = %collection_name,
+                            error = %e,
+                            "Failed to convert collection config during recovery, skipping"
+                        );
+                        continue;
+                    }
+                };
+                let collection_id = CollectionId::new(branch_id, &collection_name);
+
+                let factory = IndexBackendFactory::from_type(backend_type);
+                let mut backend = factory.create(&config);
+
+                // -----------------------------------------------------------
+                // Try mmap-accelerated recovery: load heap from disk cache.
+                // -----------------------------------------------------------
+                let mut loaded_from_mmap = false;
+                if use_mmap {
+                    let vec_path = mmap_path(data_dir, branch_id, &collection_name);
+                    if vec_path.exists() {
+                        match VectorHeap::from_mmap(&vec_path, config.clone()) {
+                            Ok(heap) => {
+                                if heap.is_empty() {
+                                    tracing::debug!(
+                                        target: "strata::vector",
+                                        collection = %collection_name,
+                                        "Mmap cache is empty, falling back to KV"
+                                    );
+                                } else {
+                                    backend.replace_heap(heap);
+                                    loaded_from_mmap = true;
+                                    tracing::debug!(
+                                        target: "strata::vector",
+                                        collection = %collection_name,
+                                        "Loaded heap from mmap cache"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "strata::vector",
+                                    collection = %collection_name,
+                                    error = %e,
+                                    "Failed to load mmap cache, falling back to KV"
+                                );
+                            }
+                        }
+                    }
                 }
 
-                // Populate inline metadata for O(1) search resolution
-                let vector_key = String::from_utf8(vec_key.user_key.to_vec())
-                    .ok()
-                    .and_then(|uk| uk.strip_prefix(&collection_prefix).map(|s| s.to_string()))
-                    .unwrap_or_default();
-                backend.set_inline_meta(
-                    vid,
-                    super::types::InlineMeta {
-                        key: vector_key,
-                        source_ref: vec_record.source_ref.clone(),
-                    },
-                );
-            }
+                // -----------------------------------------------------------
+                // Scan KV for vector entries
+                // -----------------------------------------------------------
+                let vector_prefix = Key::new_vector(ns.clone(), &collection_name, "");
+                let vector_entries =
+                    match db.storage().scan_prefix(&vector_prefix, snapshot_version) {
+                        Ok(entries) => entries,
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "strata::vector",
+                                collection = %collection_name,
+                                error = %e,
+                                "Failed to scan vectors during recovery"
+                            );
+                            // If mmap loaded, the backend has embeddings but no timestamps;
+                            // proceed anyway so rebuild_index() at least builds the graph.
+                            state.backends.insert(collection_id.clone(), backend);
+                            stats.collections_created += 1;
+                            continue;
+                        }
+                    };
 
-            state.backends.insert(collection_id.clone(), backend);
-            stats.collections_created += 1;
-        }
+                let collection_prefix = format!("{}/", collection_name);
+                for (vec_key, vec_versioned) in &vector_entries {
+                    let vec_bytes = match &vec_versioned.value {
+                        Value::Bytes(b) => b,
+                        _ => continue,
+                    };
+
+                    // Decode the VectorRecord
+                    let vec_record = match super::VectorRecord::from_bytes(vec_bytes) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "strata::vector",
+                                error = %e,
+                                "Failed to decode vector record during recovery, skipping"
+                            );
+                            continue;
+                        }
+                    };
+
+                    let vid = VectorId::new(vec_record.vector_id);
+
+                    if loaded_from_mmap && backend.get(vid).is_some() {
+                        // Heap already has the embedding — just register ID + timestamp
+                        backend.register_mmap_vector(vid, vec_record.created_at);
+                        stats.vectors_mmap_registered += 1;
+                    } else if loaded_from_mmap && !vec_record.embedding.is_empty() {
+                        // Vector in KV but not in mmap (added after last freeze) — insert from KV
+                        let _ = backend.insert_with_id_and_timestamp(
+                            vid,
+                            &vec_record.embedding,
+                            vec_record.created_at,
+                        );
+                        stats.vectors_upserted += 1;
+                    } else if vec_record.embedding.is_empty() {
+                        // Legacy record with no embedding (pre-#1962 lite mode or
+                        // old records deserialized via #[serde(default)]). Cannot
+                        // recover without the embedding — skip.
+                        tracing::warn!(
+                            target: "strata::vector",
+                            vector_id = vec_record.vector_id,
+                            "Skipping record with empty embedding during recovery"
+                        );
+                        continue;
+                    } else {
+                        // Full KV-based recovery: insert embedding + timestamp
+                        let _ = backend.insert_with_id_and_timestamp(
+                            vid,
+                            &vec_record.embedding,
+                            vec_record.created_at,
+                        );
+                        stats.vectors_upserted += 1;
+                    }
+
+                    // Populate inline metadata for O(1) search resolution
+                    let vector_key = String::from_utf8(vec_key.user_key.to_vec())
+                        .ok()
+                        .and_then(|uk| uk.strip_prefix(&collection_prefix).map(|s| s.to_string()))
+                        .unwrap_or_default();
+                    backend.set_inline_meta(
+                        vid,
+                        super::types::InlineMeta {
+                            key: vector_key,
+                            source_ref: vec_record.source_ref.clone(),
+                        },
+                    );
+                }
+
+                state.backends.insert(collection_id.clone(), backend);
+                stats.collections_created += 1;
+            }
+        } // for space in spaces
     }
 
     // -----------------------------------------------------------
