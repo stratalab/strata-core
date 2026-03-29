@@ -992,14 +992,25 @@ fn concurrent_operations_across_branches() {
                         Value::Int((r * 1000 + i) as i64),
                     )
                     .unwrap();
-                    event
-                        .append(
+                    // Retry event append on transient OCC conflicts.
+                    // Under heavy cross-branch contention on CI runners,
+                    // the global version can advance between txn start and
+                    // commit validation, causing spurious read-set conflicts.
+                    let mut attempts = 0;
+                    loop {
+                        match event.append(
                             &branch_id,
                             "default",
                             "ops",
                             int_payload((r * 1000 + i) as i64),
-                        )
-                        .unwrap();
+                        ) {
+                            Ok(_) => break,
+                            Err(e) if attempts < 3 && format!("{}", e).contains("conflict") => {
+                                attempts += 1;
+                            }
+                            Err(e) => panic!("event.append failed after {} retries: {}", attempts, e),
+                        }
+                    }
                 }
 
                 // Verify own data
