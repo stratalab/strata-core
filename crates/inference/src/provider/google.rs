@@ -995,4 +995,17 @@ mod tests {
         let err = parse_batch_embed_response_json("{bad}").unwrap_err();
         assert!(err.to_string().contains("invalid JSON"));
     }
+
+    #[test]
+    fn batch_embed_response_api_error() {
+        let body = r#"{
+            "error": {
+                "code": 429,
+                "message": "Resource exhausted"
+            }
+        }"#;
+        let err = parse_batch_embed_response_json(body).unwrap_err();
+        assert!(err.to_string().contains("Resource exhausted"));
+        assert!(err.to_string().contains("429"));
+    }
 }
