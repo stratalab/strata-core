@@ -1484,12 +1484,14 @@ fn test_issue_2110_fork_version_gap_deterministic() {
 
     assert_eq!(writer_version, allocated_version);
 
-    // The bug: fork_version >= allocated_version because next_version()
-    // bumped self.version BEFORE put_with_version_mode wrote the data.
+    // After the fix: fork_version uses source.max_version (the highest
+    // version actually applied to the branch), NOT the global counter.
+    // The writer allocated a version via next_version() but hadn't applied
+    // it yet, so fork_version correctly excludes it.
     assert!(
-        fork_version >= allocated_version,
-        "fork_version ({}) should be >= allocated version ({}) — \
-         next_version() bumps the counter before data is written",
+        fork_version < allocated_version,
+        "fork_version ({}) should be < allocated version ({}) — \
+         fork_branch now uses per-branch max_version, not the global counter",
         fork_version,
         allocated_version,
     );
@@ -1504,16 +1506,14 @@ fn test_issue_2110_fork_version_gap_deterministic() {
         "parent must have the gap_key data"
     );
 
-    // Child is MISSING the data — this is the version gap bug.
-    // fork_version claims to include allocated_version, but the data
-    // was not in the memtable when the fork captured it.
+    // Child correctly does NOT include gap_key — fork_version < allocated_version,
+    // so the fork doesn't claim to include data it doesn't have.
     let child_ns = Arc::new(Namespace::new(fork_branch_id, "default".to_string()));
     let child_key = Key::new(child_ns, TypeTag::KV, b"gap_key".to_vec());
     let child_val = store.get_versioned(&child_key, u64::MAX).unwrap();
     assert!(
         child_val.is_none(),
-        "child should be MISSING gap_key — this proves the version gap bug: \
-         fork_version={} >= allocated_version={} but data is absent",
+        "child should not have gap_key (fork_version={} < allocated_version={})",
         fork_version,
         allocated_version,
     );
