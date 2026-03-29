@@ -110,6 +110,10 @@ pub(crate) fn build_request_json(request: &GenerateRequest) -> String {
     // seed: silently ignored (not supported by Gemini)
     // stop_tokens: silently ignored (token-level, local only)
 
+    // Disable thinking for Gemini 2.5+ models — without this, the model
+    // spends the entire token budget on internal reasoning and returns no text.
+    gen_config["thinkingConfig"] = serde_json::json!({"thinkingBudget": 0});
+
     let obj = serde_json::json!({
         "contents": [
             {
