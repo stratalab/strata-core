@@ -313,29 +313,20 @@ impl KVStore {
         })
     }
 
-    /// Count keys matching an optional prefix without allocating user-key strings.
+    /// Count keys matching an optional prefix without materializing entries.
     ///
-    /// Uses UTF-8 validity check directly on the raw key bytes instead of
-    /// calling `user_key_string()`, which avoids one `String` allocation per
-    /// scanned entry.
+    /// Bypasses the transaction layer (read-only) and delegates to the
+    /// storage engine's `count_prefix`, which runs the merge/MVCC pipeline
+    /// and counts live entries instead of collecting them into a Vec.
     pub fn count(
         &self,
         branch_id: &BranchId,
         space: &str,
         prefix: Option<&str>,
     ) -> StrataResult<u64> {
-        self.db.transaction(*branch_id, |txn| {
-            let ns = self.namespace_for(branch_id, space);
-            let scan_prefix = Key::new_kv(ns, prefix.unwrap_or(""));
-
-            let results = txn.scan_prefix(&scan_prefix)?;
-
-            // Check UTF-8 validity without allocating a String per key
-            Ok(results
-                .into_iter()
-                .filter(|(key, _)| std::str::from_utf8(&key.user_key).is_ok())
-                .count() as u64)
-        })
+        let ns = self.namespace_for(branch_id, space);
+        let scan_prefix = Key::new_kv(ns, prefix.unwrap_or(""));
+        self.db.count_prefix(&scan_prefix, u64::MAX)
     }
 
     /// Sample key-value pairs with evenly-spaced selection from a single scan.
