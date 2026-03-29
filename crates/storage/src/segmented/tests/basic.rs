@@ -664,3 +664,66 @@ fn test_issue_1749_get_history_returns_error_on_corruption() {
         result.unwrap().len(),
     );
 }
+
+// ===== count_prefix tests =====
+
+#[test]
+fn count_prefix_matches_scan_prefix() {
+    let store = SegmentedStore::new();
+    seed(&store, kv_key("a"), Value::Int(1), 1);
+    seed(&store, kv_key("b"), Value::Int(2), 2);
+    seed(&store, kv_key("c"), Value::Int(3), 3);
+
+    let prefix = Key::new(ns(), TypeTag::KV, vec![]);
+    let scan_count = store.scan_prefix(&prefix, u64::MAX).unwrap().len() as u64;
+    let direct_count = store.count_prefix(&prefix, u64::MAX).unwrap();
+    assert_eq!(scan_count, direct_count);
+    assert_eq!(direct_count, 3);
+}
+
+#[test]
+fn count_prefix_excludes_tombstones() {
+    let store = SegmentedStore::new();
+    seed(&store, kv_key("a"), Value::Int(1), 1);
+    seed(&store, kv_key("b"), Value::Int(2), 2);
+    seed(&store, kv_key("c"), Value::Int(3), 3);
+    store.delete_with_version(&kv_key("b"), 4).unwrap();
+
+    let prefix = Key::new(ns(), TypeTag::KV, vec![]);
+    let count = store.count_prefix(&prefix, u64::MAX).unwrap();
+    assert_eq!(count, 2, "deleted key must not be counted");
+}
+
+#[test]
+fn count_prefix_respects_version_snapshot() {
+    let store = SegmentedStore::new();
+    seed(&store, kv_key("k1"), Value::Int(10), 1);
+    seed(&store, kv_key("k2"), Value::Int(20), 3);
+
+    // At version 2, only k1 exists
+    let prefix = Key::new(ns(), TypeTag::KV, vec![]);
+    assert_eq!(store.count_prefix(&prefix, 2).unwrap(), 1);
+    // At version 3, both exist
+    assert_eq!(store.count_prefix(&prefix, u64::MAX).unwrap(), 2);
+}
+
+#[test]
+fn count_prefix_empty_store() {
+    let store = SegmentedStore::new();
+    let prefix = Key::new(ns(), TypeTag::KV, vec![]);
+    assert_eq!(store.count_prefix(&prefix, u64::MAX).unwrap(), 0);
+}
+
+#[test]
+fn count_prefix_with_key_filter() {
+    let store = SegmentedStore::new();
+    seed(&store, kv_key("user:1"), Value::Int(1), 1);
+    seed(&store, kv_key("user:2"), Value::Int(2), 2);
+    seed(&store, kv_key("task:1"), Value::Int(3), 3);
+
+    let user_prefix = Key::new(ns(), TypeTag::KV, "user:".as_bytes().to_vec());
+    assert_eq!(store.count_prefix(&user_prefix, u64::MAX).unwrap(), 2);
+
+    let task_prefix = Key::new(ns(), TypeTag::KV, "task:".as_bytes().to_vec());
+    assert_eq!(store.count_prefix(&task_prefix, u64::MAX).unwrap(), 1);
+}

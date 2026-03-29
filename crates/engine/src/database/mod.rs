@@ -486,6 +486,15 @@ impl Database {
         self.storage.get_at_timestamp(key, max_timestamp)
     }
 
+    /// Count entries matching a prefix directly from storage.
+    ///
+    /// Bypasses the transaction layer (read-only, no conflict tracking needed).
+    /// Uses the same MVCC pipeline as scan_prefix but counts instead of
+    /// collecting, avoiding the O(N) Vec allocation.
+    pub(crate) fn count_prefix(&self, prefix: &Key, max_version: u64) -> StrataResult<u64> {
+        self.storage.count_prefix(prefix, max_version)
+    }
+
     /// Scan keys matching a prefix at or before the given timestamp.
     ///
     /// This is a non-transactional read for time-travel queries.

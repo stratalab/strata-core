@@ -2968,6 +2968,100 @@ impl SegmentedStore {
             .collect())
     }
 
+    /// Count entries matching a prefix without collecting into a Vec.
+    ///
+    /// Uses the same merge/MVCC pipeline as `scan_prefix` but only counts
+    /// the live (non-tombstone, non-expired) entries, avoiding the O(N)
+    /// `Vec<(Key, VersionedValue)>` allocation.
+    pub fn count_prefix(&self, prefix: &Key, max_version: u64) -> StrataResult<u64> {
+        let branch_id = prefix.namespace.branch_id;
+        let branch = match self.branches.get(&branch_id) {
+            Some(b) => b,
+            None => return Ok(0),
+        };
+        Self::count_prefix_from_branch(&branch, prefix, max_version)
+    }
+
+    /// Count MVCC-deduplicated entries in a branch without collecting.
+    fn count_prefix_from_branch(
+        branch: &BranchState,
+        prefix: &Key,
+        max_version: u64,
+    ) -> StrataResult<u64> {
+        let mut sources: Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> = Vec::new();
+
+        // Active memtable
+        let active_entries: Vec<_> = branch.active.iter_prefix(prefix).collect();
+        sources.push(Box::new(active_entries.into_iter()));
+
+        // Frozen memtables (newest first)
+        for frozen in &branch.frozen {
+            let entries: Vec<_> = frozen.iter_prefix(prefix).collect();
+            sources.push(Box::new(entries.into_iter()));
+        }
+
+        // On-disk segments
+        let prefix_bytes = encode_typed_key_prefix(prefix);
+        let ver = branch.version.load();
+        for level in &ver.levels {
+            for seg in level {
+                if !segment_overlaps_prefix(seg, &prefix_bytes) {
+                    continue;
+                }
+                let mut iter = seg.iter_seek(prefix);
+                let entries: Vec<_> = iter
+                    .by_ref()
+                    .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
+                    .collect();
+                if iter.corruption_detected() {
+                    return Err(StrataError::corruption(
+                        "segment scan stopped due to data block corruption",
+                    ));
+                }
+                sources.push(Box::new(entries.into_iter()));
+            }
+        }
+
+        // Inherited layers (COW branching)
+        for layer in &branch.inherited_layers {
+            if layer.status == LayerStatus::Materialized {
+                continue;
+            }
+            let src_prefix = prefix.with_branch_id(layer.source_branch_id);
+            let src_prefix_bytes = encode_typed_key_prefix(&src_prefix);
+            for level in &layer.segments.levels {
+                for seg in level {
+                    if !segment_overlaps_prefix(seg, &src_prefix_bytes) {
+                        continue;
+                    }
+                    let mut iter = seg.iter_seek(&src_prefix);
+                    let entries: Vec<_> = iter
+                        .by_ref()
+                        .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
+                        .collect();
+                    if iter.corruption_detected() {
+                        return Err(StrataError::corruption(
+                            "segment scan stopped due to data block corruption",
+                        ));
+                    }
+                    sources.push(Box::new(RewritingIterator::new(
+                        entries.into_iter(),
+                        prefix.namespace.branch_id,
+                        layer.fork_version,
+                    )));
+                }
+            }
+        }
+
+        let merge = MergeIterator::new(sources);
+        let mvcc = MvccIterator::new(merge, max_version);
+
+        Ok(mvcc
+            .filter(|(_, entry)| !entry.is_tombstone && !entry.is_expired())
+            .filter(|(ik, _)| ik.decode().is_some())
+            .count() as u64)
+    }
+
     /// Write the manifest file for a branch, reflecting current level assignments
     /// and inherited layers.
     fn write_branch_manifest(&self, branch_id: &BranchId) {
