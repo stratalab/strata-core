@@ -1,10 +1,8 @@
 //! Handler for the `ArrowImport` command.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use crate::bridge::Primitives;
-use crate::handlers::require_branch_exists;
 use crate::types::BranchId;
 use crate::{Error, Output, Result};
 
@@ -22,8 +20,11 @@ pub fn arrow_import(
     collection: Option<String>,
     format: Option<String>,
 ) -> Result<Output> {
+    use std::path::Path;
+
     use crate::arrow::{detect_format, read_file, resolve_mapping, ImportPrimitive};
     use crate::bridge::to_core_branch_id;
+    use crate::handlers::require_branch_exists;
 
     require_branch_exists(p, &branch)?;
     let branch_id = to_core_branch_id(&branch)?;

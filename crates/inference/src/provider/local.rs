@@ -161,7 +161,7 @@ impl LocalProvider {
                 .ctx
                 .api
                 .sampler_init_grammar(self.ctx.vocab, grammar, "root")
-                .map_err(|e| crate::InferenceError::LlamaCpp(e))?;
+                .map_err(crate::InferenceError::LlamaCpp)?;
             self.ctx.api.sampler_chain_add(chain, grammar_sampler);
         }
 
