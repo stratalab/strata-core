@@ -228,6 +228,11 @@ extern "C" {
     pub fn llama_sampler_init_top_p(p: f32, min_keep: usize) -> LlamaSampler;
     pub fn llama_sampler_init_temp(t: f32) -> LlamaSampler;
     pub fn llama_sampler_init_min_p(p: f32, min_keep: usize) -> LlamaSampler;
+    pub fn llama_sampler_init_grammar(
+        vocab: LlamaVocab,
+        grammar_str: *const c_char,
+        grammar_root: *const c_char,
+    ) -> LlamaSampler;
 }
 
 // ---------------------------------------------------------------------------
@@ -570,6 +575,24 @@ impl LlamaCppApi {
 
     pub fn sampler_init_min_p(&self, p: f32, min_keep: usize) -> LlamaSampler {
         unsafe { llama_sampler_init_min_p(p, min_keep) }
+    }
+
+    pub fn sampler_init_grammar(
+        &self,
+        vocab: LlamaVocab,
+        grammar_str: &str,
+        grammar_root: &str,
+    ) -> Result<LlamaSampler, String> {
+        let c_grammar = std::ffi::CString::new(grammar_str)
+            .map_err(|e| format!("grammar string contains null byte: {e}"))?;
+        let c_root = std::ffi::CString::new(grammar_root)
+            .map_err(|e| format!("grammar root contains null byte: {e}"))?;
+        let sampler =
+            unsafe { llama_sampler_init_grammar(vocab, c_grammar.as_ptr(), c_root.as_ptr()) };
+        if sampler.is_null() {
+            return Err("llama_sampler_init_grammar returned null (invalid grammar?)".to_string());
+        }
+        Ok(sampler)
     }
 }
 

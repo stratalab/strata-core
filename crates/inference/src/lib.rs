@@ -51,6 +51,12 @@ pub struct GenerateRequest {
     pub seed: Option<u64>,
     pub stop_sequences: Vec<String>,
     pub stop_tokens: Vec<u32>,
+    /// Optional GBNF grammar string for constrained generation.
+    ///
+    /// For local models, this is passed to llama.cpp's grammar sampler.
+    /// For OpenAI, this enables JSON mode (`response_format: json_object`).
+    /// For Anthropic/Google, this field is silently ignored.
+    pub grammar: Option<String>,
 }
 
 impl Default for GenerateRequest {
@@ -64,6 +70,7 @@ impl Default for GenerateRequest {
             seed: None,
             stop_sequences: Vec::new(),
             stop_tokens: Vec::new(),
+            grammar: None,
         }
     }
 }
@@ -301,6 +308,40 @@ mod tests {
         assert!(req.stop_sequences.is_empty());
         assert!(req.stop_tokens.is_empty());
         assert!(req.prompt.is_empty());
+        assert!(req.grammar.is_none());
+    }
+
+    #[test]
+    fn grammar_field_default_is_none() {
+        let req = GenerateRequest::default();
+        assert!(req.grammar.is_none());
+    }
+
+    #[test]
+    fn grammar_field_can_be_set() {
+        let req = GenerateRequest {
+            prompt: "List colors as JSON".into(),
+            grammar: Some(
+                r#"root ::= "{" ws "\"colors\"" ws ":" ws "[" ws string ("," ws string)* "]" ws "}"
+ws ::= [ \t\n]*
+string ::= "\"" [a-zA-Z]+ "\""
+"#
+                .into(),
+            ),
+            ..Default::default()
+        };
+        assert!(req.grammar.is_some());
+        assert!(req.grammar.as_ref().unwrap().contains("root"));
+    }
+
+    #[test]
+    fn grammar_field_survives_clone() {
+        let req = GenerateRequest {
+            grammar: Some("root ::= \"hello\"".into()),
+            ..Default::default()
+        };
+        let cloned = req.clone();
+        assert_eq!(cloned.grammar, Some("root ::= \"hello\"".into()));
     }
 
     #[test]
@@ -314,6 +355,7 @@ mod tests {
             seed: Some(42),
             stop_sequences: vec!["STOP".into(), "\n\n".into()],
             stop_tokens: vec![1, 2, 50256],
+            grammar: Some("root ::= \"test\"".into()),
         };
         let cloned = req.clone();
         assert_eq!(cloned.prompt, "test prompt");
