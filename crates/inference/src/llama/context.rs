@@ -21,7 +21,6 @@ pub(crate) struct LlamaCppContext {
     pub n_ctx: usize,
     pub n_seq_max: usize,
     pub vocab_size: usize,
-    #[allow(dead_code)]
     pub bos_id: LlamaToken,
     #[allow(dead_code)]
     pub eos_id: LlamaToken,
@@ -34,14 +33,34 @@ unsafe impl Send for LlamaCppContext {}
 impl LlamaCppContext {
     /// Load a model configured for embedding (pooling enabled).
     pub fn load_for_embedding(path: &Path) -> Result<Self, InferenceError> {
+        Self::load_pooled(path, LLAMA_POOLING_TYPE_MEAN, 512, "embedding")
+    }
+
+    /// Load a model configured for cross-encoder ranking.
+    ///
+    /// Uses `LLAMA_POOLING_TYPE_RANK`, which causes `get_embeddings_seq` to
+    /// return a single relevance score instead of an embedding vector.
+    pub fn load_for_ranking(path: &Path) -> Result<Self, InferenceError> {
+        // One (query, passage) pair at a time. Batched ranking (multiple
+        // pairs per encode call) would need n_seq_max > 1 plus per-token
+        // seq_id assignment in rank_single.
+        Self::load_pooled(path, LLAMA_POOLING_TYPE_RANK, 1, "ranking")
+    }
+
+    /// Shared loader for embedding and ranking models.
+    fn load_pooled(
+        path: &Path,
+        pooling_type: i32,
+        n_seq_max: u32,
+        mode: &str,
+    ) -> Result<Self, InferenceError> {
         let api = Arc::new(LlamaCppApi::load().map_err(InferenceError::LlamaCpp)?);
 
         let c_path = path_to_cstring(path)?;
 
-        // Model params: default (use mmap, no GPU layers needed for small models)
         let mparams = api.model_default_params();
 
-        info!(path = %path.display(), "Loading model via llama.cpp");
+        info!(path = %path.display(), mode = mode, "Loading model via llama.cpp");
         let model = api
             .model_load_from_file(&c_path, mparams)
             .map_err(InferenceError::LlamaCpp)?;
@@ -62,18 +81,14 @@ impl LlamaCppContext {
         let n_embd = n_embd_raw as usize;
         let vocab_size = vocab_size_raw as usize;
 
-        // Context params: enable embeddings, set pooling to MEAN
         let mut cparams = api.context_default_params();
         cparams.embeddings = true;
-        cparams.pooling_type = LLAMA_POOLING_TYPE_MEAN;
-        // Use model's training context size
-        cparams.n_ctx = 0; // 0 = from model
-                           // Allow batched embedding with multiple sequences per encode call
-        cparams.n_seq_max = 512;
+        cparams.pooling_type = pooling_type;
+        cparams.n_ctx = 0; // from model
+        cparams.n_seq_max = n_seq_max;
         let n_seq_max = cparams.n_seq_max as usize;
 
         let ctx = api.init_from_model(model, cparams).map_err(|e| {
-            // Free model on context creation failure to avoid leak
             api.model_free(model);
             InferenceError::LlamaCpp(e)
         })?;
@@ -97,7 +112,8 @@ impl LlamaCppContext {
             n_ctx = n_ctx,
             n_seq_max = n_seq_max,
             has_encoder = has_encoder,
-            "llama.cpp embedding context created"
+            mode = mode,
+            "llama.cpp {mode} context created"
         );
 
         Ok(Self {
