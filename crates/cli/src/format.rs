@@ -322,6 +322,11 @@ fn format_raw(output: &Output) -> String {
         }
         Output::KeysPage { keys, .. } => keys.join("\n"),
         Output::Keys(keys) => keys.join("\n"),
+        Output::KvScanResult(pairs) => pairs
+            .iter()
+            .map(|(k, v)| format!("{}\t{}", k, format_value_raw(v)))
+            .collect::<Vec<_>>()
+            .join("\n"),
         Output::JsonListResult { keys, .. } => keys.join("\n"),
         Output::VectorMatches(matches) => matches
             .iter()
@@ -685,6 +690,18 @@ fn format_human(output: &Output) -> String {
             out
         }
         Output::Keys(keys) => format_string_list(keys),
+        Output::KvScanResult(pairs) => {
+            if pairs.is_empty() {
+                "(empty list)".to_string()
+            } else {
+                pairs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (k, v))| format!("{}) {} = {}", i + 1, k, format_value_human(v)))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
         Output::JsonListResult {
             keys,
             has_more,

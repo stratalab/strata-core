@@ -417,3 +417,75 @@ fn test_event_append_in_txn() {
 
     session.execute(Command::TxnCommit).unwrap();
 }
+
+#[test]
+fn test_kv_scan_sees_uncommitted_writes_in_txn() {
+    let mut session = create_test_session();
+
+    // Write some data before the transaction
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "a".to_string(),
+            value: Value::String("alpha".into()),
+        })
+        .unwrap();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    // Write inside the transaction
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "b".to_string(),
+            value: Value::String("bravo".into()),
+        })
+        .unwrap();
+
+    // KvScan should see both the committed "a" and uncommitted "b"
+    let result = session
+        .execute(Command::KvScan {
+            branch: None,
+            space: None,
+            start: None,
+            limit: None,
+        })
+        .unwrap();
+
+    match result {
+        Output::KvScanResult(pairs) => {
+            assert_eq!(pairs.len(), 2, "should see both committed and uncommitted");
+            assert_eq!(pairs[0].0, "a");
+            assert_eq!(pairs[1].0, "b");
+            assert_eq!(pairs[1].1, Value::String("bravo".into()));
+        }
+        other => panic!("Expected KvScanResult, got {:?}", other),
+    }
+
+    // KvScan with start key
+    let result = session
+        .execute(Command::KvScan {
+            branch: None,
+            space: None,
+            start: Some("b".to_string()),
+            limit: None,
+        })
+        .unwrap();
+
+    match result {
+        Output::KvScanResult(pairs) => {
+            assert_eq!(pairs.len(), 1);
+            assert_eq!(pairs[0].0, "b");
+        }
+        other => panic!("Expected KvScanResult, got {:?}", other),
+    }
+
+    session.execute(Command::TxnCommit).unwrap();
+}

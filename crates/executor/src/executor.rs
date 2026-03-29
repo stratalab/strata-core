@@ -423,6 +423,19 @@ impl Executor {
                     )
                 }
             }
+            Command::KvScan {
+                branch,
+                space,
+                start,
+                limit,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::kv::kv_scan(&self.primitives, branch, space, start, limit)
+            }
             // Note: as_of is intentionally ignored for getv — version history
             // always returns all versions, not a point-in-time snapshot.
             Command::KvGetv {

@@ -276,6 +276,43 @@ impl KVStore {
         })
     }
 
+    /// Scan key-value pairs starting from a cursor key.
+    ///
+    /// Returns up to `limit` pairs where key >= start_key, sorted by key.
+    /// If `start` is None, scans from the beginning. If `limit` is None,
+    /// returns all matching pairs.
+    pub fn scan(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        start: Option<&str>,
+        limit: Option<usize>,
+    ) -> StrataResult<Vec<(String, Value)>> {
+        self.db.transaction(*branch_id, |txn| {
+            let ns = self.namespace_for(branch_id, space);
+            let scan_prefix = Key::new_kv(ns, "");
+
+            let results = txn.scan_prefix(&scan_prefix)?;
+
+            let iter = results
+                .into_iter()
+                .filter_map(|(key, value)| key.user_key_string().map(|k| (k, value)));
+
+            let iter: Box<dyn Iterator<Item = (String, Value)>> = if let Some(s) = start {
+                let s_owned = s.to_string();
+                Box::new(iter.skip_while(move |(k, _)| k.as_str() < s_owned.as_str()))
+            } else {
+                Box::new(iter)
+            };
+
+            if let Some(lim) = limit {
+                Ok(iter.take(lim).collect())
+            } else {
+                Ok(iter.collect())
+            }
+        })
+    }
+
     /// Count keys matching an optional prefix without allocating user-key strings.
     ///
     /// Uses UTF-8 validity check directly on the raw key bytes instead of

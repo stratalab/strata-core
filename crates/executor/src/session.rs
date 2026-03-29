@@ -336,6 +336,7 @@ impl Session {
             | Command::KvDelete { space, .. }
             | Command::KvList { space, .. }
             | Command::KvGetv { space, .. }
+            | Command::KvScan { space, .. }
             | Command::EventAppend { space, .. }
             | Command::EventGet { space, .. }
             | Command::EventGetByType { space, .. }
@@ -402,6 +403,28 @@ impl Session {
                 } else {
                     Ok(Output::Keys(keys))
                 }
+            }
+
+            Command::KvScan { start, limit, .. } => {
+                let prefix_key = Key::new(ns, TypeTag::KV, vec![]);
+                let entries = ctx.scan_prefix(&prefix_key).map_err(Error::from)?;
+                let iter = entries
+                    .into_iter()
+                    .filter_map(|(k, v)| k.user_key_string().map(|key| (key, v)));
+
+                let iter: Box<dyn Iterator<Item = (String, strata_core::value::Value)>> =
+                    if let Some(s) = start {
+                        Box::new(iter.skip_while(move |(k, _)| k.as_str() < s.as_str()))
+                    } else {
+                        Box::new(iter)
+                    };
+
+                let pairs: Vec<(String, strata_core::value::Value)> = if let Some(lim) = limit {
+                    iter.take(lim as usize).collect()
+                } else {
+                    iter.collect()
+                };
+                Ok(Output::KvScanResult(pairs))
             }
 
             // === JSON reads — via ctx for snapshot fallback ===

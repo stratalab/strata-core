@@ -2245,4 +2245,63 @@ mod tests {
         assert!(types.contains(&"Person".to_string()));
         assert!(types.contains(&"knows".to_string()));
     }
+
+    #[test]
+    fn test_kv_scan_returns_key_value_pairs() {
+        let db = create_strata();
+
+        // Insert 5 keys in sorted order
+        db.kv_put("a", "alpha").unwrap();
+        db.kv_put("b", "bravo").unwrap();
+        db.kv_put("c", "charlie").unwrap();
+        db.kv_put("d", "delta").unwrap();
+        db.kv_put("e", "echo").unwrap();
+
+        // Scan all — returns key-value pairs sorted by key
+        let pairs = db.kv_scan(None, None).unwrap();
+        assert_eq!(pairs.len(), 5);
+        assert_eq!(pairs[0].0, "a");
+        assert_eq!(pairs[0].1, Value::String("alpha".into()));
+        assert_eq!(pairs[4].0, "e");
+        assert_eq!(pairs[4].1, Value::String("echo".into()));
+
+        // Scan with start key — returns pairs where key >= start
+        let pairs = db.kv_scan(Some("c"), None).unwrap();
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(pairs[0].0, "c");
+        assert_eq!(pairs[0].1, Value::String("charlie".into()));
+        assert_eq!(pairs[2].0, "e");
+
+        // Scan with limit — returns at most N pairs
+        let pairs = db.kv_scan(None, Some(2)).unwrap();
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0].0, "a");
+        assert_eq!(pairs[1].0, "b");
+
+        // Scan with start + limit
+        let pairs = db.kv_scan(Some("b"), Some(2)).unwrap();
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0].0, "b");
+        assert_eq!(pairs[0].1, Value::String("bravo".into()));
+        assert_eq!(pairs[1].0, "c");
+
+        // Scan on empty DB
+        let db2 = create_strata();
+        let pairs = db2.kv_scan(None, None).unwrap();
+        assert!(pairs.is_empty());
+
+        // Scan with start key beyond all keys returns empty
+        let pairs = db.kv_scan(Some("z"), None).unwrap();
+        assert!(pairs.is_empty());
+
+        // Scan with limit=0 returns empty
+        let pairs = db.kv_scan(None, Some(0)).unwrap();
+        assert!(pairs.is_empty());
+
+        // Deleted keys are not returned
+        db.kv_delete("c").unwrap();
+        let pairs = db.kv_scan(None, None).unwrap();
+        assert_eq!(pairs.len(), 4);
+        assert!(pairs.iter().all(|(k, _)| k != "c"));
+    }
 }
