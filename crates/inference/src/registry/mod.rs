@@ -31,6 +31,7 @@ use crate::error::InferenceError;
 pub enum ModelTask {
     Embed,
     Generate,
+    Rank,
 }
 
 impl std::fmt::Display for ModelTask {
@@ -38,6 +39,7 @@ impl std::fmt::Display for ModelTask {
         match self {
             ModelTask::Embed => write!(f, "embed"),
             ModelTask::Generate => write!(f, "generate"),
+            ModelTask::Rank => write!(f, "rank"),
         }
     }
 }
@@ -73,7 +75,7 @@ pub struct CatalogEntry {
     pub variants: &'static [QuantVariant],
     /// Model architecture: "qwen3", "llama", "bert"
     pub architecture: &'static str,
-    /// Embedding dimension (0 for generation models).
+    /// Embedding dimension (0 for generation and ranking models).
     pub embedding_dim: usize,
 }
 
@@ -914,13 +916,17 @@ mod tests {
     fn model_task_display() {
         assert_eq!(ModelTask::Embed.to_string(), "embed");
         assert_eq!(ModelTask::Generate.to_string(), "generate");
+        assert_eq!(ModelTask::Rank.to_string(), "rank");
     }
 
     #[test]
     fn model_task_equality() {
         assert_eq!(ModelTask::Embed, ModelTask::Embed);
         assert_eq!(ModelTask::Generate, ModelTask::Generate);
+        assert_eq!(ModelTask::Rank, ModelTask::Rank);
         assert_ne!(ModelTask::Embed, ModelTask::Generate);
+        assert_ne!(ModelTask::Embed, ModelTask::Rank);
+        assert_ne!(ModelTask::Generate, ModelTask::Rank);
     }
 
     #[test]

@@ -10,6 +10,9 @@ mod embed;
 #[cfg(any(feature = "openai", feature = "google"))]
 mod cloud_embed;
 
+#[cfg(feature = "local")]
+mod rank;
+
 #[cfg(any(
     feature = "local",
     feature = "anthropic",
@@ -34,6 +37,9 @@ pub use embed::EmbeddingEngine;
 
 #[cfg(any(feature = "openai", feature = "google"))]
 pub use cloud_embed::CloudEmbeddingEngine;
+
+#[cfg(feature = "local")]
+pub use rank::RankingEngine;
 
 #[cfg(any(
     feature = "local",
@@ -186,6 +192,22 @@ pub trait InferenceEngine: Send + std::fmt::Debug {
     fn supports_embed(&self) -> bool {
         false
     }
+
+    /// Score passages against a query using cross-encoder reranking.
+    ///
+    /// Returns one relevance score per passage. Higher scores indicate
+    /// greater relevance. `scores[i]` corresponds to `passages[i]`.
+    fn rank(&self, query: &str, passages: &[&str]) -> Result<Vec<f32>, InferenceError> {
+        let _ = (query, passages);
+        Err(InferenceError::NotSupported(
+            "this engine does not support ranking".to_string(),
+        ))
+    }
+
+    /// Whether this engine supports ranking/reranking.
+    fn supports_rank(&self) -> bool {
+        false
+    }
 }
 
 /// Parse a `"provider:model_name"` spec into its components.
@@ -331,6 +353,29 @@ pub fn load_embedder(model_spec: &str) -> Result<Box<dyn InferenceEngine>, Infer
                 "cloud embedding requires 'openai' or 'google' feature (provider: {other})"
             )))
         }
+    }
+}
+
+/// Load a ranking engine from a `"provider:model_name"` spec.
+///
+/// Currently only local cross-encoder models are supported.
+///
+/// # Examples
+///
+/// ```ignore
+/// let engine = strata_inference::load_ranker("local:jina-reranker-v1-tiny")?;
+/// let scores = engine.rank("query", &["passage 1", "passage 2"])?;
+/// ```
+#[cfg(feature = "local")]
+pub fn load_ranker(model_spec: &str) -> Result<Box<dyn InferenceEngine>, InferenceError> {
+    let (provider, model) = parse_model_spec(model_spec)?;
+
+    match provider {
+        ProviderKind::Local => Ok(Box::new(RankingEngine::from_registry(&model)?)),
+        other => Err(InferenceError::NotSupported(format!(
+            "cloud ranking not yet supported (provider: {})",
+            other
+        ))),
     }
 }
 
@@ -845,6 +890,44 @@ string ::= "\"" [a-zA-Z]+ "\""
             matches!(err, InferenceError::NotSupported(_)),
             "should be NotSupported: {err}"
         );
+    }
+
+    // --- load_ranker ---
+
+    #[cfg(feature = "local")]
+    #[test]
+    fn load_ranker_cloud_not_supported() {
+        let err = load_ranker("openai:some-reranker").unwrap_err();
+        assert!(
+            err.to_string().contains("not yet supported"),
+            "cloud ranker should fail: {err}"
+        );
+    }
+
+    #[cfg(feature = "local")]
+    #[test]
+    fn load_ranker_unknown_model_returns_error() {
+        let err = load_ranker("local:nonexistent-reranker").unwrap_err();
+        assert!(
+            matches!(err, InferenceError::Registry(_)),
+            "should be Registry error, got: {err}"
+        );
+    }
+
+    // --- InferenceEngine rank defaults ---
+
+    #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
+    #[test]
+    fn trait_rank_default_returns_not_supported() {
+        std::env::set_var("OPENAI_API_KEY", "sk-test-key");
+        let engine: Box<dyn InferenceEngine> = load("openai:gpt-4o-mini").unwrap();
+        std::env::remove_var("OPENAI_API_KEY");
+        let err = engine.rank("query", &["passage"]).unwrap_err();
+        assert!(
+            err.to_string().contains("not supported"),
+            "rank on generation engine should be NotSupported: {err}"
+        );
+        assert!(!engine.supports_rank());
     }
 
     #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
