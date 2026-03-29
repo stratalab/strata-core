@@ -433,20 +433,40 @@ impl Database {
     pub fn begin_transaction(&self, branch_id: BranchId) -> StrataResult<TransactionContext> {
         self.check_accepting()?;
         let txn_id = self.coordinator.next_txn_id()?;
-        // Use storage.version() as the snapshot. This reflects the highest
-        // version with data fully installed in the memtable (apply_writes_atomic
-        // calls fetch_max only after all entries are written). Same-thread
-        // sequential operations always see their own prior commits because
-        // apply_writes runs synchronously before the previous transaction returns.
-        //
-        // We do NOT fall back to visible_version here (#1913). The visible_version
-        // watermark can lag behind storage.version() when other threads have
-        // allocated but not yet applied versions. Falling back to visible_version
-        // can regress the snapshot below this thread's own prior commits, causing
-        // spurious OCC conflicts on isolated branches (the commit lock prevents
-        // interleaved writes on the same branch, but the version-bounded read
-        // would miss data that the unbounded validation check sees).
+        // Use storage.version() as the snapshot (includes own thread's commits),
+        // but wait for visible_version to catch up so all data at versions
+        // ≤ snapshot is fully applied. This prevents the cross-branch snapshot
+        // gap (#1913) without breaking same-thread sequential operations.
         let snapshot_version = self.storage.version();
+        let mut spins = 0u32;
+        while self.coordinator.visible_version() < snapshot_version {
+            spins += 1;
+            if spins < 16 {
+                std::hint::spin_loop();
+            } else if spins < 1000 {
+                std::thread::yield_now();
+            } else {
+                // Safety valve: a panicked commit thread could leave a version
+                // permanently pending, stalling visible_version forever.
+                //
+                // IMPORTANT: we must NOT fall back to visible_version here.
+                // visible_version can lag behind storage.version() due to
+                // slow (not panicked) commits on other branches. Regressing
+                // the snapshot below our own prior commits causes spurious
+                // OCC conflicts — the version-bounded snapshot read returns
+                // an older version than the unbounded validation check sees,
+                // breaking branch isolation.
+                //
+                // Instead, keep the original snapshot_version. The gap only
+                // affects cross-branch reads where some version V < snapshot
+                // hasn't been applied yet. Per-branch transactions (the common
+                // case) are unaffected because our own branch's data is fully
+                // applied synchronously. Cross-branch transactions (delete,
+                // fork) hold the commit lock or quiesce guard, which drains
+                // all pending versions before proceeding.
+                break;
+            }
+        }
         self.coordinator.record_start(txn_id, snapshot_version);
 
         let mut txn = TransactionPool::acquire(txn_id, branch_id, Some(Arc::clone(&self.storage)));
