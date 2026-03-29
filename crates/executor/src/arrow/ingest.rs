@@ -143,13 +143,16 @@ pub fn ingest_json(
             };
 
             // Parse JSON string into JsonValue, upsert document.
-            let json_val: serde_json::Value =
-                serde_json::from_str(&doc_str).unwrap_or(serde_json::Value::String(doc_str.clone()));
+            let json_val: serde_json::Value = serde_json::from_str(&doc_str)
+                .unwrap_or(serde_json::Value::String(doc_str.clone()));
             let json_value = JsonValue::from(json_val);
 
             // Try create first; if doc already exists, overwrite at root.
             if convert_result(p.json.create(&branch_id, space, &key, json_value.clone())).is_err() {
-                convert_result(p.json.set(&branch_id, space, &key, &JsonPath::root(), json_value))?;
+                convert_result(
+                    p.json
+                        .set(&branch_id, space, &key, &JsonPath::root(), json_value),
+                )?;
             }
             result.rows_imported += 1;
         }
@@ -228,13 +231,14 @@ pub fn ingest_vector(
                 let cols_ref: Vec<(usize, &str)> =
                     extra_cols.iter().map(|(i, n)| (*i, n.as_str())).collect();
                 let json_str = row_to_json(batch, row, &cols_ref)?;
-                let val: serde_json::Value = serde_json::from_str(&json_str)
-                    .unwrap_or(serde_json::Value::Null);
+                let val: serde_json::Value =
+                    serde_json::from_str(&json_str).unwrap_or(serde_json::Value::Null);
                 Some(val)
             };
 
             convert_vector_result(
-                p.vector.insert(branch_id, space, collection, &key, &embedding, metadata),
+                p.vector
+                    .insert(branch_id, space, collection, &key, &embedding, metadata),
                 branch_id,
             )?;
             result.rows_imported += 1;
@@ -276,9 +280,7 @@ fn extract_embedding(col: &dyn Array, row: usize) -> Option<Vec<f32>> {
 
     let inner = match col.data_type() {
         arrow::datatypes::DataType::FixedSizeList(_, _) => {
-            let list = col
-                .as_any()
-                .downcast_ref::<array::FixedSizeListArray>()?;
+            let list = col.as_any().downcast_ref::<array::FixedSizeListArray>()?;
             list.value(row)
         }
         arrow::datatypes::DataType::List(_) => {
@@ -307,10 +309,8 @@ fn auto_create_collection(
     dimension: usize,
 ) -> Result<()> {
     // Check if collection already exists.
-    let collections = convert_vector_result(
-        p.vector.list_collections(branch_id, space),
-        branch_id,
-    )?;
+    let collections =
+        convert_vector_result(p.vector.list_collections(branch_id, space), branch_id)?;
     if collections.iter().any(|c| c.name == collection) {
         return Ok(());
     }
@@ -322,7 +322,8 @@ fn auto_create_collection(
     };
 
     convert_vector_result(
-        p.vector.create_collection(branch_id, space, collection, config),
+        p.vector
+            .create_collection(branch_id, space, collection, config),
         branch_id,
     )?;
 
@@ -426,7 +427,9 @@ mod tests {
         let result = ingest_kv(&p, branch_id, "default", &[batch], &mapping).unwrap();
         assert_eq!(result.rows_imported, 2);
 
-        let v = convert_result(p.kv.get(&branch_id, "default", "u1")).unwrap().unwrap();
+        let v = convert_result(p.kv.get(&branch_id, "default", "u1"))
+            .unwrap()
+            .unwrap();
         if let Value::String(s) = &v {
             let parsed: serde_json::Value = serde_json::from_str(s).unwrap();
             assert_eq!(parsed["name"], "Alice");
@@ -466,11 +469,9 @@ mod tests {
         let result = ingest_json(&p, branch_id, "default", &[batch], &mapping).unwrap();
         assert_eq!(result.rows_imported, 2);
 
-        let doc = convert_result(
-            p.json.get(&branch_id, "default", "doc1", &JsonPath::root()),
-        )
-        .unwrap()
-        .unwrap();
+        let doc = convert_result(p.json.get(&branch_id, "default", "doc1", &JsonPath::root()))
+            .unwrap()
+            .unwrap();
         let s = doc.to_string();
         assert!(s.contains("Hello"), "got: {s}");
     }
@@ -504,11 +505,9 @@ mod tests {
         let result = ingest_json(&p, branch_id, "default", &[batch], &mapping).unwrap();
         assert_eq!(result.rows_imported, 1);
 
-        let doc = convert_result(
-            p.json.get(&branch_id, "default", "u1", &JsonPath::root()),
-        )
-        .unwrap()
-        .unwrap();
+        let doc = convert_result(p.json.get(&branch_id, "default", "u1", &JsonPath::root()))
+            .unwrap()
+            .unwrap();
         let s = doc.to_string();
         assert!(s.contains("Alice"), "got: {s}");
         assert!(s.contains("alice@example.com"), "got: {s}");
@@ -522,10 +521,7 @@ mod tests {
             Field::new("key", DataType::Utf8, false),
             Field::new(
                 "embedding",
-                DataType::FixedSizeList(
-                    Arc::new(Field::new("item", DataType::Float32, true)),
-                    3,
-                ),
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 3),
                 false,
             ),
         ]));
@@ -579,10 +575,7 @@ mod tests {
             Field::new("key", DataType::Utf8, false),
             Field::new(
                 "embedding",
-                DataType::FixedSizeList(
-                    Arc::new(Field::new("item", DataType::Float32, true)),
-                    4,
-                ),
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 4),
                 false,
             ),
         ]));
@@ -598,10 +591,7 @@ mod tests {
 
         let batch = RecordBatch::try_new(
             schema,
-            vec![
-                Arc::new(StringArray::from(vec!["vec1"])),
-                Arc::new(list),
-            ],
+            vec![Arc::new(StringArray::from(vec!["vec1"])), Arc::new(list)],
         )
         .unwrap();
 
@@ -618,11 +608,9 @@ mod tests {
         assert_eq!(result.rows_imported, 1);
 
         // Verify collection was created with dimension 4.
-        let collections = convert_vector_result(
-            p.vector.list_collections(branch_id, "default"),
-            branch_id,
-        )
-        .unwrap();
+        let collections =
+            convert_vector_result(p.vector.list_collections(branch_id, "default"), branch_id)
+                .unwrap();
         assert!(
             collections.iter().any(|c| c.name == "auto_col"),
             "collection should have been auto-created"

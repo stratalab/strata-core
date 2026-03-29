@@ -1197,6 +1197,37 @@ impl Executor {
                 )
             }
 
+            Command::ArrowImport {
+                branch,
+                space,
+                file_path,
+                target,
+                key_column,
+                value_column,
+                collection,
+                format,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.ok_or(Error::InvalidInput {
+                    reason: "Space must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                crate::handlers::arrow_import::arrow_import(
+                    &self.primitives,
+                    branch,
+                    space,
+                    file_path,
+                    target,
+                    key_column,
+                    value_column,
+                    collection,
+                    format,
+                )
+            }
+
             // Bundle commands
             Command::BranchExport { branch_id, path } => {
                 crate::handlers::branch::branch_export(&self.primitives, branch_id, path)

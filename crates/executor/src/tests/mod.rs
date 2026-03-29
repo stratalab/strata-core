@@ -1,6 +1,8 @@
 //! Test modules for the executor crate.
 
 pub mod access_mode;
+#[cfg(feature = "arrow")]
+pub mod arrow_import;
 pub mod config;
 pub mod describe;
 pub mod determinism;

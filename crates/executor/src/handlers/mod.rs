@@ -13,6 +13,7 @@
 //! | `retention` | 3 | RetentionSubstrate |
 //! | `database` | 4 | Database-level |
 
+pub mod arrow_import;
 pub mod branch;
 pub mod config;
 pub mod configure_model;
