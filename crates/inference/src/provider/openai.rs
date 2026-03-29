@@ -6,6 +6,7 @@
 use crate::{GenerateRequest, GenerateResponse, InferenceError, StopReason};
 
 const API_URL: &str = "https://api.openai.com/v1/chat/completions";
+pub(crate) const EMBED_API_URL: &str = "https://api.openai.com/v1/embeddings";
 
 /// OpenAI cloud provider state.
 pub(crate) struct OpenAIProvider {
@@ -185,6 +186,76 @@ pub(crate) fn parse_response_json(body: &str) -> Result<GenerateResponse, Infere
         prompt_tokens,
         completion_tokens,
     })
+}
+
+// =========================================================================
+// Embedding API
+// =========================================================================
+
+/// Build the OpenAI Embeddings API request JSON.
+///
+/// Uses the array `input` format for native batch support.
+pub(crate) fn build_embed_request_json(model: &str, texts: &[&str]) -> String {
+    serde_json::json!({
+        "model": model,
+        "input": texts
+    })
+    .to_string()
+}
+
+/// Parse the OpenAI Embeddings API response JSON into embedding vectors.
+///
+/// Returns embeddings sorted by `index` (OpenAI may return out of order).
+pub(crate) fn parse_embed_response_json(body: &str) -> Result<Vec<Vec<f32>>, InferenceError> {
+    let json: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| InferenceError::Provider(format!("OpenAI: invalid JSON response: {e}")))?;
+
+    // Check for API error response
+    if let Some(error) = json.get("error") {
+        let msg = error
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown error");
+        return Err(InferenceError::Provider(format!(
+            "OpenAI embedding API error: {msg}"
+        )));
+    }
+
+    let data = json.get("data").and_then(|d| d.as_array()).ok_or_else(|| {
+        InferenceError::Provider(
+            "OpenAI: missing or invalid 'data' array in embedding response".to_string(),
+        )
+    })?;
+
+    if data.is_empty() {
+        return Err(InferenceError::Provider(
+            "OpenAI: empty data array in embedding response".to_string(),
+        ));
+    }
+
+    // Collect (index, embedding) pairs and sort by index
+    let mut indexed: Vec<(usize, Vec<f32>)> = data
+        .iter()
+        .map(|item| {
+            let index = item.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+            let embedding = item
+                .get("embedding")
+                .and_then(|e| e.as_array())
+                .ok_or_else(|| {
+                    InferenceError::Provider(
+                        "OpenAI: data item missing 'embedding' array".to_string(),
+                    )
+                })?
+                .iter()
+                .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+                .collect();
+            Ok((index, embedding))
+        })
+        .collect::<Result<Vec<_>, InferenceError>>()?;
+
+    indexed.sort_by_key(|(idx, _)| *idx);
+
+    Ok(indexed.into_iter().map(|(_, emb)| emb).collect())
 }
 
 /// Map ureq HTTP errors to InferenceError::Provider with descriptive messages.
@@ -635,5 +706,121 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         assert!(json.get("response_format").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Embedding request JSON building
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn embed_request_single_text() {
+        let json_str = build_embed_request_json("text-embedding-3-small", &["hello world"]);
+        let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(json["model"], "text-embedding-3-small");
+        let input = json["input"].as_array().unwrap();
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0], "hello world");
+    }
+
+    #[test]
+    fn embed_request_batch() {
+        let texts = &["hello", "world", "foo"];
+        let json_str = build_embed_request_json("text-embedding-3-large", texts);
+        let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(json["model"], "text-embedding-3-large");
+        let input = json["input"].as_array().unwrap();
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0], "hello");
+        assert_eq!(input[1], "world");
+        assert_eq!(input[2], "foo");
+    }
+
+    #[test]
+    fn embed_request_special_chars() {
+        let json_str = build_embed_request_json("model", &["Hello \"world\" \n\ttab & <html>"]);
+        let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(json["input"][0], "Hello \"world\" \n\ttab & <html>");
+    }
+
+    // -----------------------------------------------------------------------
+    // Embedding response JSON parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn embed_response_single_embedding() {
+        let body = r#"{
+            "data": [
+                {"embedding": [0.1, 0.2, 0.3], "index": 0}
+            ],
+            "usage": {"prompt_tokens": 2, "total_tokens": 2}
+        }"#;
+        let embeddings = parse_embed_response_json(body).unwrap();
+        assert_eq!(embeddings.len(), 1);
+        assert_eq!(embeddings[0].len(), 3);
+        assert!((embeddings[0][0] - 0.1).abs() < 1e-6);
+        assert!((embeddings[0][1] - 0.2).abs() < 1e-6);
+        assert!((embeddings[0][2] - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn embed_response_batch_preserves_order() {
+        // OpenAI may return embeddings out of order — we must sort by index
+        let body = r#"{
+            "data": [
+                {"embedding": [0.9, 0.9], "index": 1},
+                {"embedding": [0.1, 0.1], "index": 0}
+            ],
+            "usage": {"prompt_tokens": 4, "total_tokens": 4}
+        }"#;
+        let embeddings = parse_embed_response_json(body).unwrap();
+        assert_eq!(embeddings.len(), 2);
+        // index 0 should be first
+        assert!((embeddings[0][0] - 0.1).abs() < 1e-6);
+        // index 1 should be second
+        assert!((embeddings[1][0] - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn embed_response_api_error() {
+        let body = r#"{
+            "error": {
+                "message": "Invalid model specified",
+                "type": "invalid_request_error"
+            }
+        }"#;
+        let err = parse_embed_response_json(body).unwrap_err();
+        assert!(err.to_string().contains("Invalid model"));
+    }
+
+    #[test]
+    fn embed_response_missing_data_returns_error() {
+        let body = r#"{"usage": {"prompt_tokens": 1}}"#;
+        let err = parse_embed_response_json(body).unwrap_err();
+        assert!(err.to_string().contains("data"));
+    }
+
+    #[test]
+    fn embed_response_empty_data_returns_error() {
+        let body = r#"{"data": [], "usage": {"prompt_tokens": 0}}"#;
+        let err = parse_embed_response_json(body).unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn embed_response_invalid_json() {
+        let err = parse_embed_response_json("{not json}").unwrap_err();
+        assert!(err.to_string().contains("invalid JSON"));
+    }
+
+    #[test]
+    fn embed_response_missing_embedding_field() {
+        let body = r#"{
+            "data": [{"index": 0}],
+            "usage": {"prompt_tokens": 1}
+        }"#;
+        let err = parse_embed_response_json(body).unwrap_err();
+        assert!(err.to_string().contains("embedding"));
     }
 }
