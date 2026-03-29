@@ -17,6 +17,8 @@
 | [`v0.7-implementation.md`](v0.7-implementation.md) | Implementation plan: AutoResearch (db.experiment, metrics, branch-per-recipe). |
 | [`v0.8-implementation.md`](v0.8-implementation.md) | Implementation plan: multi-model routing (provider:model per operation). |
 | [`v0.9-implementation.md`](v0.9-implementation.md) | Implementation plan: agent hints (describe, recipe schema, actionable hints). |
+| [`epics-v0.0.md`](epics-v0.0.md) | Detailed implementation specs for v0.0 issues #2139–#2146. |
+| [`elasticsearch-comparison.md`](elasticsearch-comparison.md) | ES knobs vs Strata recipe: what's covered, missing, unnecessary. |
 | [`known-gaps.md`](known-gaps.md) | Known gaps and future optimizations. None are blockers. |
 
 ## Related
