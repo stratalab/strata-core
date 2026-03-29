@@ -53,6 +53,7 @@ pub mod branch_ops;
 pub mod bundle;
 pub mod primitives;
 pub mod search;
+pub mod system_space;
 
 // Re-export search types at crate root for convenience
 pub use search::{SearchBudget, SearchHit, SearchMode, SearchRequest, SearchResponse, SearchStats};

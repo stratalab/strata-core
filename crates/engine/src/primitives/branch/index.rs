@@ -369,6 +369,7 @@ impl BranchIndex {
         // Evict cached namespaces for the deleted branch to prevent unbounded
         // growth of the global NS_CACHE (SCALE-001).
         crate::primitives::kv::invalidate_kv_namespace_cache(&executor_branch_id);
+        crate::system_space::invalidate_cache(&executor_branch_id);
 
         // Clean up storage-layer segments, manifest, and refcounts (#1702).
         // Must happen after logical deletion so in-progress reads see the
