@@ -2185,10 +2185,18 @@ impl SegmentedStore {
 
         // Atomically: remove the frozen memtable we just flushed and install
         // the segment, under a single DashMap guard.
-        let mut branch = self
-            .branches
-            .entry(*branch_id)
-            .or_insert_with(BranchState::new);
+        //
+        // Use get_mut (not entry().or_insert_with) to avoid resurrecting a
+        // branch that was concurrently deleted by clear_branch (#2108).
+        let mut branch = match self.branches.get_mut(branch_id) {
+            Some(b) => b,
+            None => {
+                // Branch was deleted between Phase 1 and Phase 3.
+                // Clean up the orphan segment file we just built.
+                let _ = std::fs::remove_file(&seg_path);
+                return Ok(true);
+            }
+        };
         let popped = if let Some(last) = branch.frozen.last() {
             if last.id() == frozen_mt.id() {
                 branch.frozen.pop();

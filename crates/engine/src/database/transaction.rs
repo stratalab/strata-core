@@ -437,7 +437,7 @@ impl Database {
         // but wait for visible_version to catch up so all data at versions
         // ≤ snapshot is fully applied. This prevents the cross-branch snapshot
         // gap (#1913) without breaking same-thread sequential operations.
-        let mut snapshot_version = self.storage.version();
+        let snapshot_version = self.storage.version();
         let mut spins = 0u32;
         while self.coordinator.visible_version() < snapshot_version {
             spins += 1;
@@ -447,9 +447,23 @@ impl Database {
                 std::thread::yield_now();
             } else {
                 // Safety valve: a panicked commit thread could leave a version
-                // permanently pending. Fall back to visible_version to avoid
-                // deadlock. This is strictly safe (more conservative snapshot).
-                snapshot_version = self.coordinator.visible_version();
+                // permanently pending, stalling visible_version forever.
+                //
+                // IMPORTANT: we must NOT fall back to visible_version here.
+                // visible_version can lag behind storage.version() due to
+                // slow (not panicked) commits on other branches. Regressing
+                // the snapshot below our own prior commits causes spurious
+                // OCC conflicts — the version-bounded snapshot read returns
+                // an older version than the unbounded validation check sees,
+                // breaking branch isolation.
+                //
+                // Instead, keep the original snapshot_version. The gap only
+                // affects cross-branch reads where some version V < snapshot
+                // hasn't been applied yet. Per-branch transactions (the common
+                // case) are unaffected because our own branch's data is fully
+                // applied synchronously. Cross-branch transactions (delete,
+                // fork) hold the commit lock or quiesce guard, which drains
+                // all pending versions before proceeding.
                 break;
             }
         }
