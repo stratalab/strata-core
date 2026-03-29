@@ -136,6 +136,40 @@ impl Strata {
     }
 
     // =========================================================================
+    // KV Range Scan
+    // =========================================================================
+
+    /// Scan key-value pairs starting from a cursor key.
+    ///
+    /// Returns up to `limit` pairs where key >= start, sorted by key.
+    /// If `start` is None, scans from the beginning. If `limit` is None,
+    /// returns all pairs.
+    ///
+    /// # Example
+    ///
+    /// ```text
+    /// // Scan all pairs
+    /// let pairs = db.kv_scan(None, None)?;
+    ///
+    /// // Scan from "c" onwards, max 10 results
+    /// let pairs = db.kv_scan(Some("c"), Some(10))?;
+    /// ```
+    pub fn kv_scan(&self, start: Option<&str>, limit: Option<u64>) -> Result<Vec<(String, Value)>> {
+        match self.execute_cmd(Command::KvScan {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            start: start.map(|s| s.to_string()),
+            limit,
+        })? {
+            Output::KvScanResult(pairs) => Ok(pairs),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for KvScan".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
+
+    // =========================================================================
     // KV as_of Variants
     // =========================================================================
 

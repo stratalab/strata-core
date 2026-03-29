@@ -134,6 +134,9 @@ pub enum Output {
         cursor: Option<String>,
     },
 
+    /// Key-value scan result (range query returning pairs)
+    KvScanResult(Vec<(String, Value)>),
+
     /// JSON list result with cursor
     JsonListResult {
         /// Matching document keys.

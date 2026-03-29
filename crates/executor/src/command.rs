@@ -132,6 +132,24 @@ pub enum Command {
         as_of: Option<u64>,
     },
 
+    /// Scan key-value pairs starting from a cursor key.
+    /// Returns up to `limit` pairs where key >= start, sorted by key.
+    /// Returns: `Output::KvScanResult`
+    KvScan {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Start key (inclusive). If None, scans from the beginning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start: Option<String>,
+        /// Maximum number of pairs to return.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u64>,
+    },
+
     /// Batch put multiple key-value pairs in a single transaction.
     /// Returns: `Output::BatchResults`
     KvBatchPut {
@@ -1875,6 +1893,7 @@ impl Command {
             Command::KvDelete { .. } => "KvDelete",
             Command::KvList { .. } => "KvList",
             Command::KvGetv { .. } => "KvGetv",
+            Command::KvScan { .. } => "KvScan",
             Command::JsonSet { .. } => "JsonSet",
             Command::JsonBatchSet { .. } => "JsonBatchSet",
             Command::JsonBatchGet { .. } => "JsonBatchGet",
@@ -2038,6 +2057,7 @@ impl Command {
             | Command::KvDelete { branch, space, .. }
             | Command::KvList { branch, space, .. }
             | Command::KvGetv { branch, space, .. }
+            | Command::KvScan { branch, space, .. }
             // JSON
             | Command::JsonSet { branch, space, .. }
             | Command::JsonBatchSet { branch, space, .. }
@@ -2215,6 +2235,7 @@ impl Command {
             | Command::KvDelete { branch, .. }
             | Command::KvList { branch, .. }
             | Command::KvGetv { branch, .. }
+            | Command::KvScan { branch, .. }
             | Command::JsonSet { branch, .. }
             | Command::JsonBatchSet { branch, .. }
             | Command::JsonBatchGet { branch, .. }

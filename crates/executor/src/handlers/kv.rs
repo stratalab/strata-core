@@ -487,6 +487,29 @@ fn enrich_kv_error(
     }
 }
 
+/// Handle KvScan command — range query returning key-value pairs.
+pub fn kv_scan(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    start: Option<String>,
+    limit: Option<u64>,
+) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+    if let Some(ref s) = start {
+        if !s.is_empty() {
+            convert_result(validate_key(s))?;
+        }
+    }
+    let pairs = convert_result(p.kv.scan(
+        &branch_id,
+        &space,
+        start.as_deref(),
+        limit.map(|l| l as usize),
+    ))?;
+    Ok(Output::KvScanResult(pairs))
+}
+
 /// Handle KvList with as_of timestamp (time-travel read).
 pub fn kv_list_at(
     p: &Arc<Primitives>,
