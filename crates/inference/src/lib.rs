@@ -134,6 +134,47 @@ impl FromStr for ProviderKind {
     }
 }
 
+/// Unified inference trait for generation and embedding.
+///
+/// Implementors override the methods they support. Default implementations
+/// return `NotSupported`, so a generation-only engine can be held as
+/// `Box<dyn InferenceEngine>` without implementing `embed()`.
+pub trait InferenceEngine: Send + std::fmt::Debug {
+    /// Generate text from a prompt.
+    fn generate(&mut self, request: &GenerateRequest) -> Result<GenerateResponse, InferenceError> {
+        let _ = request;
+        Err(InferenceError::NotSupported(
+            "this engine does not support generation".to_string(),
+        ))
+    }
+
+    /// Embed a single text into a dense vector.
+    fn embed(&self, text: &str) -> Result<Vec<f32>, InferenceError> {
+        let _ = text;
+        Err(InferenceError::NotSupported(
+            "this engine does not support embedding".to_string(),
+        ))
+    }
+
+    /// Embed a batch of texts into dense vectors.
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
+        let _ = texts;
+        Err(InferenceError::NotSupported(
+            "this engine does not support embedding".to_string(),
+        ))
+    }
+
+    /// Whether this engine supports generation.
+    fn supports_generate(&self) -> bool {
+        false
+    }
+
+    /// Whether this engine supports embedding.
+    fn supports_embed(&self) -> bool {
+        false
+    }
+}
+
 /// Parse a `"provider:model_name"` spec into its components.
 ///
 /// Format: `"provider:model_name"` where provider is one of: local, anthropic, openai, google.
@@ -175,17 +216,16 @@ fn api_key_env_var(provider: ProviderKind) -> &'static str {
     }
 }
 
-/// Load a generation engine from a `"provider:model_name"` spec.
+/// Load an inference engine from a `"provider:model_name"` spec.
 ///
-/// Parses the spec, reads the API key from the environment for cloud providers,
-/// and returns the appropriate `GenerationEngine`.
+/// Returns a trait object supporting generation. For cloud providers, reads
+/// the API key from environment variables (`ANTHROPIC_API_KEY`, etc.).
 ///
 /// # Examples
 ///
 /// ```ignore
-/// let engine = strata_inference::load("local:qwen3:1.7b")?;
-/// let engine = strata_inference::load("anthropic:claude-sonnet-4-6")?;
-/// let engine = strata_inference::load("miniLM")?;  // defaults to local
+/// let mut engine = strata_inference::load("local:qwen3:1.7b")?;
+/// let mut engine = strata_inference::load("anthropic:claude-sonnet-4-6")?;
 /// ```
 #[cfg(any(
     feature = "local",
@@ -193,12 +233,12 @@ fn api_key_env_var(provider: ProviderKind) -> &'static str {
     feature = "openai",
     feature = "google"
 ))]
-pub fn load(model_spec: &str) -> Result<GenerationEngine, InferenceError> {
+pub fn load(model_spec: &str) -> Result<Box<dyn InferenceEngine>, InferenceError> {
     let (provider, model) = parse_model_spec(model_spec)?;
 
     match provider {
         #[cfg(feature = "local")]
-        ProviderKind::Local => GenerationEngine::from_registry(&model),
+        ProviderKind::Local => Ok(Box::new(GenerationEngine::from_registry(&model)?)),
         #[cfg(not(feature = "local"))]
         ProviderKind::Local => Err(InferenceError::NotSupported(
             "local provider requires the 'local' feature".to_string(),
@@ -211,8 +251,36 @@ pub fn load(model_spec: &str) -> Result<GenerationEngine, InferenceError> {
                     env_var, cloud_provider, model
                 ))
             })?;
-            GenerationEngine::cloud(cloud_provider, api_key, model)
+            Ok(Box::new(GenerationEngine::cloud(
+                cloud_provider,
+                api_key,
+                model,
+            )?))
         }
+    }
+}
+
+/// Load an embedding engine from a `"provider:model_name"` spec.
+///
+/// Currently only local embedding models are supported. Cloud embedding
+/// providers (OpenAI, Google) are tracked in #2171.
+///
+/// # Examples
+///
+/// ```ignore
+/// let engine = strata_inference::load_embedder("local:miniLM")?;
+/// let embedding = engine.embed("hello world")?;
+/// ```
+#[cfg(feature = "local")]
+pub fn load_embedder(model_spec: &str) -> Result<Box<dyn InferenceEngine>, InferenceError> {
+    let (provider, model) = parse_model_spec(model_spec)?;
+
+    match provider {
+        ProviderKind::Local => Ok(Box::new(EmbeddingEngine::from_registry(&model)?)),
+        other => Err(InferenceError::NotSupported(format!(
+            "cloud embedding not yet supported (provider: {}). See #2171",
+            other
+        ))),
     }
 }
 
@@ -606,5 +674,47 @@ mod tests {
             "load should succeed with API key set: {:?}",
             result.err()
         );
+    }
+
+    // --- InferenceEngine trait ---
+
+    #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
+    #[test]
+    fn trait_load_returns_box_dyn() {
+        // load() should return Box<dyn InferenceEngine>
+        std::env::set_var("OPENAI_API_KEY", "sk-test-fake-key");
+        let engine: Box<dyn InferenceEngine> = load("openai:gpt-4o-mini").unwrap();
+        std::env::remove_var("OPENAI_API_KEY");
+        // Cloud engine should not support embed
+        let err = engine.embed("test").unwrap_err();
+        assert!(
+            err.to_string().contains("not supported"),
+            "embed on cloud should be NotSupported: {err}"
+        );
+    }
+
+    #[cfg(feature = "local")]
+    #[test]
+    fn trait_load_embedder_cloud_not_supported() {
+        // Cloud embedding is not supported yet (#2171)
+        let err = load_embedder("openai:text-embedding-3-small").unwrap_err();
+        assert!(
+            err.to_string().contains("not yet supported"),
+            "cloud embedder should fail: {err}"
+        );
+    }
+
+    #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
+    #[test]
+    fn trait_generation_engine_generate_not_supported_default() {
+        // Cloud GenerationEngine via trait should support generate (not return NotSupported)
+        // We can't actually call generate without a real API key hitting the server,
+        // but we can verify the trait object is constructable
+        std::env::set_var("OPENAI_API_KEY", "sk-test-key");
+        let engine: Box<dyn InferenceEngine> = load("openai:gpt-4o-mini").unwrap();
+        std::env::remove_var("OPENAI_API_KEY");
+        // Verify it's a trait object we can hold
+        assert!(!engine.supports_embed());
+        assert!(engine.supports_generate());
     }
 }

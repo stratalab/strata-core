@@ -352,6 +352,20 @@ fn l2_normalize(v: &[f32]) -> Vec<f32> {
     }
 }
 
+impl crate::InferenceEngine for EmbeddingEngine {
+    fn embed(&self, text: &str) -> Result<Vec<f32>, crate::InferenceError> {
+        EmbeddingEngine::embed(self, text)
+    }
+
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, crate::InferenceError> {
+        EmbeddingEngine::embed_batch(self, texts)
+    }
+
+    fn supports_embed(&self) -> bool {
+        true
+    }
+}
+
 // Compile-time verify Send + Sync.
 const _: () = {
     fn assert_send<T: Send>() {}
