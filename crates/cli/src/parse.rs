@@ -180,6 +180,7 @@ pub fn matches_to_action(matches: &ArgMatches, state: &SessionState) -> Result<C
         "tokenize" => parse_tokenize(sub_matches),
         "detokenize" => parse_detokenize(sub_matches),
         "export" => parse_db_export(sub_matches, state),
+        "import" => parse_db_import(sub_matches, state),
         other => Err(unknown_subcommand(
             "",
             other,
@@ -212,6 +213,7 @@ pub fn matches_to_action(matches: &ArgMatches, state: &SessionState) -> Result<C
                 "tokenize",
                 "detokenize",
                 "export",
+                "import",
             ],
         )),
     }
@@ -1514,6 +1516,22 @@ fn parse_db_export(matches: &ArgMatches, state: &SessionState) -> Result<CliActi
         path: matches.get_one::<String>("output").cloned(),
         collection: matches.get_one::<String>("collection").cloned(),
         graph: matches.get_one::<String>("graph").cloned(),
+    }))
+}
+
+fn parse_db_import(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
+    let file_path = matches.get_one::<String>("file").unwrap().clone();
+    let target = matches.get_one::<String>("into").unwrap().clone();
+
+    Ok(CliAction::Execute(Command::ArrowImport {
+        branch: branch(state),
+        space: space(state),
+        file_path,
+        target,
+        key_column: matches.get_one::<String>("key-column").cloned(),
+        value_column: matches.get_one::<String>("value-column").cloned(),
+        collection: matches.get_one::<String>("collection").cloned(),
+        format: matches.get_one::<String>("format").cloned(),
     }))
 }
 

@@ -108,31 +108,19 @@ pub fn arrow_to_value(col: &dyn Array, row: usize) -> Result<Value> {
             Ok(Value::Int(arr.value(row) as i64))
         }
         DataType::Float32 => {
-            let arr = col
-                .as_any()
-                .downcast_ref::<array::Float32Array>()
-                .unwrap();
+            let arr = col.as_any().downcast_ref::<array::Float32Array>().unwrap();
             Ok(Value::Float(arr.value(row) as f64))
         }
         DataType::Float64 => {
-            let arr = col
-                .as_any()
-                .downcast_ref::<array::Float64Array>()
-                .unwrap();
+            let arr = col.as_any().downcast_ref::<array::Float64Array>().unwrap();
             Ok(Value::Float(arr.value(row)))
         }
         DataType::Boolean => {
-            let arr = col
-                .as_any()
-                .downcast_ref::<array::BooleanArray>()
-                .unwrap();
+            let arr = col.as_any().downcast_ref::<array::BooleanArray>().unwrap();
             Ok(Value::Bool(arr.value(row)))
         }
         DataType::Binary => {
-            let arr = col
-                .as_any()
-                .downcast_ref::<array::BinaryArray>()
-                .unwrap();
+            let arr = col.as_any().downcast_ref::<array::BinaryArray>().unwrap();
             Ok(Value::Bytes(arr.value(row).to_vec()))
         }
         DataType::LargeBinary => {
@@ -156,11 +144,7 @@ pub fn arrow_to_value(col: &dyn Array, row: usize) -> Result<Value> {
 }
 
 /// Serialize specified columns of a row as a JSON object string.
-pub fn row_to_json(
-    batch: &RecordBatch,
-    row: usize,
-    columns: &[(usize, &str)],
-) -> Result<String> {
+pub fn row_to_json(batch: &RecordBatch, row: usize, columns: &[(usize, &str)]) -> Result<String> {
     let mut map = serde_json::Map::new();
     for &(idx, name) in columns {
         let col = batch.column(idx);
@@ -296,29 +280,25 @@ fn resolve_vector_embedding(
                 "no embedding column found. Available columns: {}",
                 format_columns(schema)
             ),
-            hint: Some(
-                "Specify --value-column <COL> pointing to a float list column".into(),
-            ),
+            hint: Some("Specify --value-column <COL> pointing to a float list column".into()),
         })?
     };
 
     // Validate that the column is a list of floats.
     let field = schema.field(idx);
     match field.data_type() {
-        DataType::FixedSizeList(inner, _) | DataType::List(inner) => {
-            match inner.data_type() {
-                DataType::Float32 | DataType::Float64 => {}
-                dt => {
-                    return Err(Error::InvalidInput {
-                        reason: format!(
-                            "embedding column '{}' has inner type {dt}, expected Float32 or Float64",
-                            field.name()
-                        ),
-                        hint: None,
-                    });
-                }
+        DataType::FixedSizeList(inner, _) | DataType::List(inner) => match inner.data_type() {
+            DataType::Float32 | DataType::Float64 => {}
+            dt => {
+                return Err(Error::InvalidInput {
+                    reason: format!(
+                        "embedding column '{}' has inner type {dt}, expected Float32 or Float64",
+                        field.name()
+                    ),
+                    hint: None,
+                });
             }
-        }
+        },
         dt => {
             return Err(Error::InvalidInput {
                 reason: format!(
@@ -406,24 +386,15 @@ fn array_value_to_json(col: &dyn Array, row: usize) -> Result<serde_json::Value>
             Ok(serde_json::json!(arr.value(row)))
         }
         DataType::Float32 => {
-            let arr = col
-                .as_any()
-                .downcast_ref::<array::Float32Array>()
-                .unwrap();
+            let arr = col.as_any().downcast_ref::<array::Float32Array>().unwrap();
             Ok(serde_json::json!(arr.value(row)))
         }
         DataType::Float64 => {
-            let arr = col
-                .as_any()
-                .downcast_ref::<array::Float64Array>()
-                .unwrap();
+            let arr = col.as_any().downcast_ref::<array::Float64Array>().unwrap();
             Ok(serde_json::json!(arr.value(row)))
         }
         DataType::Boolean => {
-            let arr = col
-                .as_any()
-                .downcast_ref::<array::BooleanArray>()
-                .unwrap();
+            let arr = col.as_any().downcast_ref::<array::BooleanArray>().unwrap();
             Ok(serde_json::json!(arr.value(row)))
         }
         _ => {
@@ -479,10 +450,7 @@ mod tests {
 
     #[test]
     fn test_resolve_key_column_explicit() {
-        let s = schema(vec![
-            ("user_id", DataType::Utf8),
-            ("value", DataType::Utf8),
-        ]);
+        let s = schema(vec![("user_id", DataType::Utf8), ("value", DataType::Utf8)]);
         let m = resolve_mapping(&s, ImportPrimitive::Kv, Some("user_id"), None).unwrap();
         assert_eq!(m.key_idx, 0);
     }
@@ -493,7 +461,10 @@ mod tests {
         let err = resolve_mapping(&s, ImportPrimitive::Kv, None, None).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("no key column found"), "got: {msg}");
-        assert!(msg.contains("name"), "should list available columns, got: {msg}");
+        assert!(
+            msg.contains("name"),
+            "should list available columns, got: {msg}"
+        );
     }
 
     #[test]
@@ -510,10 +481,7 @@ mod tests {
             Field::new("key", DataType::Utf8, false),
             Field::new(
                 "embedding",
-                DataType::FixedSizeList(
-                    Arc::new(Field::new("item", DataType::Float32, true)),
-                    3,
-                ),
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 3),
                 false,
             ),
         ]);
@@ -523,10 +491,7 @@ mod tests {
 
     #[test]
     fn test_resolve_embedding_wrong_type() {
-        let s = schema(vec![
-            ("key", DataType::Utf8),
-            ("embedding", DataType::Utf8),
-        ]);
+        let s = schema(vec![("key", DataType::Utf8), ("embedding", DataType::Utf8)]);
         let err = resolve_mapping(&s, ImportPrimitive::Vector, None, None).unwrap_err();
         let msg = err.to_string();
         assert!(

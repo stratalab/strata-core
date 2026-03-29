@@ -33,13 +33,11 @@ pub fn read_file(path: &Path, format: FileFormat) -> Result<(Schema, Vec<RecordB
 
 fn read_parquet(path: &Path) -> Result<(Schema, Vec<RecordBatch>)> {
     let file = open_file(path)?;
-    let builder =
-        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).map_err(
-            |e| Error::Io {
-                reason: format!("failed to open Parquet file: {e}"),
-                hint: None,
-            },
-        )?;
+    let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| Error::Io {
+            reason: format!("failed to open Parquet file: {e}"),
+            hint: None,
+        })?;
 
     let schema = builder.schema().as_ref().clone();
     let reader = builder.build().map_err(|e| Error::Io {
@@ -107,10 +105,12 @@ fn read_jsonl(path: &Path) -> Result<(Schema, Vec<RecordBatch>)> {
     let schema = Arc::new(schema);
 
     // Rewind and build reader with inferred schema.
-    buf_reader.seek(std::io::SeekFrom::Start(0)).map_err(|e| Error::Io {
-        reason: format!("failed to seek JSONL file: {e}"),
-        hint: None,
-    })?;
+    buf_reader
+        .seek(std::io::SeekFrom::Start(0))
+        .map_err(|e| Error::Io {
+            reason: format!("failed to seek JSONL file: {e}"),
+            hint: None,
+        })?;
 
     let reader = arrow::json::ReaderBuilder::new(schema.clone())
         .build(buf_reader)
@@ -270,7 +270,10 @@ mod tests {
 
     #[test]
     fn test_read_file_not_found() {
-        let result = read_file(Path::new("/tmp/nonexistent_12345.parquet"), FileFormat::Parquet);
+        let result = read_file(
+            Path::new("/tmp/nonexistent_12345.parquet"),
+            FileFormat::Parquet,
+        );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("file not found"), "got: {err}");

@@ -532,6 +532,13 @@ fn format_raw(output: &Output) -> String {
             serde_json::to_string(&page).unwrap_or_default()
         }
         Output::Exported(r) => r.data.clone().unwrap_or_default(),
+        Output::ArrowImported {
+            rows_imported,
+            rows_skipped,
+            ..
+        } => {
+            format!("{rows_imported}\t{rows_skipped}")
+        }
         Output::ThreeWayDiff(result) => serde_json::to_string(&result).unwrap_or_default(),
         Output::MergeBaseInfo(info) => serde_json::to_string(&info).unwrap_or_default(),
         Output::TagCreated(info) => serde_json::to_string(&info).unwrap_or_default(),
@@ -1380,6 +1387,16 @@ fn format_human(output: &Output) -> String {
                 items.len(),
                 cursor_info,
                 items.join("\n")
+            )
+        }
+        Output::ArrowImported {
+            rows_imported,
+            rows_skipped,
+            target,
+            file_path,
+        } => {
+            format!(
+                "Imported {rows_imported} row(s) into {target} from {file_path} ({rows_skipped} skipped)"
             )
         }
         Output::Exported(r) => match (&r.data, &r.path) {

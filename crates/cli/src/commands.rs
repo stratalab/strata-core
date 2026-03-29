@@ -107,6 +107,7 @@ pub fn build_cli() -> Command {
         .subcommand(build_up())
         .subcommand(build_down())
         .subcommand(build_db_export())
+        .subcommand(build_db_import())
 }
 
 /// Build a command tree for REPL mode (no global flags).
@@ -140,6 +141,7 @@ pub fn build_repl_cmd() -> Command {
         .subcommand(build_graph())
         .subcommand(build_config())
         .subcommand(build_db_export())
+        .subcommand(build_db_import())
 }
 
 // =========================================================================
@@ -1422,5 +1424,47 @@ fn build_db_export() -> Command {
                 .value_name("N")
                 .value_parser(clap::value_parser!(u64))
                 .help("Maximum rows to export"),
+        )
+}
+
+fn build_db_import() -> Command {
+    Command::new("import")
+        .about("Import data from a file into a primitive")
+        .arg(
+            Arg::new("file")
+                .required(true)
+                .help("Input file path (Parquet, CSV, or JSONL)"),
+        )
+        .arg(
+            Arg::new("into")
+                .long("into")
+                .required(true)
+                .value_name("PRIMITIVE")
+                .help("Target primitive: kv, json, vector"),
+        )
+        .arg(
+            Arg::new("key-column")
+                .long("key-column")
+                .value_name("COL")
+                .help("Column to use as key (auto-detected if omitted)"),
+        )
+        .arg(
+            Arg::new("value-column")
+                .long("value-column")
+                .value_name("COL")
+                .help("Column to use as value/document/embedding"),
+        )
+        .arg(
+            Arg::new("collection")
+                .long("collection")
+                .value_name("NAME")
+                .help("Vector collection name (required for vector)"),
+        )
+        .arg(
+            Arg::new("format")
+                .long("format")
+                .short('f')
+                .value_name("FMT")
+                .help("Override format detection (parquet, csv, jsonl)"),
         )
 }
