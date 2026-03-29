@@ -65,6 +65,37 @@ pub static CATALOG: &[CatalogEntry] = &[
         architecture: "gemma3",
         embedding_dim: 768,
     },
+    // ===== Ranking Models =====
+    CatalogEntry {
+        name: "jina-reranker-v1-tiny",
+        aliases: &["jina-reranker-tiny", "jina-reranker"],
+        task: ModelTask::Rank,
+        hf_repo: "stratalab-org/jina-reranker-v1-tiny-en-GGUF",
+        default_quant: "f16",
+        variants: &[QuantVariant {
+            name: "f16",
+            hf_file: "jina-reranker-v1-tiny-en.F16.gguf",
+            size_bytes: 66_000_000,
+            sha256: None,
+        }],
+        architecture: "jina-bert-v2",
+        embedding_dim: 0,
+    },
+    CatalogEntry {
+        name: "bge-reranker-v2-m3",
+        aliases: &["bge-reranker"],
+        task: ModelTask::Rank,
+        hf_repo: "stratalab-org/bge-reranker-v2-m3-GGUF",
+        default_quant: "q8_0",
+        variants: &[QuantVariant {
+            name: "q8_0",
+            hf_file: "bge-reranker-v2-m3-Q8_0.gguf",
+            size_bytes: 580_000_000,
+            sha256: None,
+        }],
+        architecture: "xlm-roberta",
+        embedding_dim: 0,
+    },
     // ===== Generation Models =====
     CatalogEntry {
         name: "gpt2",
@@ -400,6 +431,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn ranking_models_have_zero_embedding_dim() {
+        for entry in CATALOG {
+            if entry.task == ModelTask::Rank {
+                assert_eq!(
+                    entry.embedding_dim, 0,
+                    "Ranking model '{}' should have embedding_dim=0",
+                    entry.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ranking_models_exist_in_catalog() {
+        let rank_count = CATALOG.iter().filter(|e| e.task == ModelTask::Rank).count();
+        assert!(
+            rank_count >= 1,
+            "catalog should have at least one ranking model"
+        );
+    }
+
+    #[test]
+    fn find_entry_jina_reranker() {
+        let entry = find_entry("jina-reranker-v1-tiny").unwrap();
+        assert_eq!(entry.task, ModelTask::Rank);
+    }
+
+    #[test]
+    fn find_entry_jina_reranker_alias() {
+        let entry = find_entry("jina-reranker").unwrap();
+        assert_eq!(entry.name, "jina-reranker-v1-tiny");
+        assert_eq!(entry.task, ModelTask::Rank);
+    }
+
+    #[test]
+    fn find_entry_bge_reranker() {
+        let entry = find_entry("bge-reranker-v2-m3").unwrap();
+        assert_eq!(entry.task, ModelTask::Rank);
+    }
+
+    #[test]
+    fn find_entry_bge_reranker_alias() {
+        let entry = find_entry("bge-reranker").unwrap();
+        assert_eq!(entry.name, "bge-reranker-v2-m3");
+        assert_eq!(entry.task, ModelTask::Rank);
     }
 
     #[test]

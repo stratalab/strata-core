@@ -31,6 +31,7 @@ pub const LLAMA_POOLING_TYPE_NONE: i32 = 0;
 pub const LLAMA_POOLING_TYPE_MEAN: i32 = 1;
 pub const LLAMA_POOLING_TYPE_CLS: i32 = 2;
 pub const LLAMA_POOLING_TYPE_LAST: i32 = 3;
+pub const LLAMA_POOLING_TYPE_RANK: i32 = 4;
 
 // ---------------------------------------------------------------------------
 // #[repr(C)] struct definitions matching llama.h
@@ -649,6 +650,7 @@ mod tests {
         assert_eq!(LLAMA_POOLING_TYPE_MEAN, 1);
         assert_eq!(LLAMA_POOLING_TYPE_CLS, 2);
         assert_eq!(LLAMA_POOLING_TYPE_LAST, 3);
+        assert_eq!(LLAMA_POOLING_TYPE_RANK, 4);
     }
 
     #[test]
@@ -698,6 +700,7 @@ mod tests {
         assert_eq!(LLAMA_POOLING_TYPE_NONE + 1, LLAMA_POOLING_TYPE_MEAN);
         assert_eq!(LLAMA_POOLING_TYPE_MEAN + 1, LLAMA_POOLING_TYPE_CLS);
         assert_eq!(LLAMA_POOLING_TYPE_CLS + 1, LLAMA_POOLING_TYPE_LAST);
+        assert_eq!(LLAMA_POOLING_TYPE_LAST + 1, LLAMA_POOLING_TYPE_RANK);
     }
 
     #[test]
