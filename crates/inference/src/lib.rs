@@ -134,6 +134,88 @@ impl FromStr for ProviderKind {
     }
 }
 
+/// Parse a `"provider:model_name"` spec into its components.
+///
+/// Format: `"provider:model_name"` where provider is one of: local, anthropic, openai, google.
+/// A bare name without a colon (e.g., `"miniLM"`) defaults to `local`.
+/// For local models with colons in the name (e.g., `"local:qwen3:1.7b:q8_0"`), only the
+/// first colon separates provider from model — the rest is part of the model name.
+pub fn parse_model_spec(spec: &str) -> Result<(ProviderKind, String), InferenceError> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err(InferenceError::Provider("model spec is empty".to_string()));
+    }
+
+    // Split on first colon only
+    let (provider_str, model) = match spec.find(':') {
+        Some(idx) => (&spec[..idx], &spec[idx + 1..]),
+        None => return Ok((ProviderKind::Local, spec.to_string())),
+    };
+
+    let provider: ProviderKind = provider_str.parse()?;
+
+    let model = model.trim();
+    if model.is_empty() {
+        return Err(InferenceError::Provider(format!(
+            "model name is empty in spec {:?}",
+            spec
+        )));
+    }
+
+    Ok((provider, model.to_string()))
+}
+
+/// Environment variable name for a provider's API key.
+fn api_key_env_var(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
+        ProviderKind::OpenAI => "OPENAI_API_KEY",
+        ProviderKind::Google => "GOOGLE_API_KEY",
+        ProviderKind::Local => "STRATA_LOCAL_API_KEY", // unused, but complete
+    }
+}
+
+/// Load a generation engine from a `"provider:model_name"` spec.
+///
+/// Parses the spec, reads the API key from the environment for cloud providers,
+/// and returns the appropriate `GenerationEngine`.
+///
+/// # Examples
+///
+/// ```ignore
+/// let engine = strata_inference::load("local:qwen3:1.7b")?;
+/// let engine = strata_inference::load("anthropic:claude-sonnet-4-6")?;
+/// let engine = strata_inference::load("miniLM")?;  // defaults to local
+/// ```
+#[cfg(any(
+    feature = "local",
+    feature = "anthropic",
+    feature = "openai",
+    feature = "google"
+))]
+pub fn load(model_spec: &str) -> Result<GenerationEngine, InferenceError> {
+    let (provider, model) = parse_model_spec(model_spec)?;
+
+    match provider {
+        #[cfg(feature = "local")]
+        ProviderKind::Local => GenerationEngine::from_registry(&model),
+        #[cfg(not(feature = "local"))]
+        ProviderKind::Local => Err(InferenceError::NotSupported(
+            "local provider requires the 'local' feature".to_string(),
+        )),
+        cloud_provider => {
+            let env_var = api_key_env_var(cloud_provider);
+            let api_key = std::env::var(env_var).map_err(|_| {
+                InferenceError::Provider(format!(
+                    "{} not set (required for {}:{})",
+                    env_var, cloud_provider, model
+                ))
+            })?;
+            GenerationEngine::cloud(cloud_provider, api_key, model)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,5 +509,102 @@ mod tests {
                 }
             }
         }
+    }
+
+    // --- parse_model_spec ---
+
+    #[test]
+    fn model_spec_parse_local_model() {
+        let (provider, model) = parse_model_spec("local:qwen3:1.7b").unwrap();
+        assert_eq!(provider, ProviderKind::Local);
+        assert_eq!(model, "qwen3:1.7b");
+    }
+
+    #[test]
+    fn model_spec_parse_anthropic_model() {
+        let (provider, model) = parse_model_spec("anthropic:claude-sonnet-4-6").unwrap();
+        assert_eq!(provider, ProviderKind::Anthropic);
+        assert_eq!(model, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn model_spec_parse_openai_model() {
+        let (provider, model) = parse_model_spec("openai:gpt-4o-mini").unwrap();
+        assert_eq!(provider, ProviderKind::OpenAI);
+        assert_eq!(model, "gpt-4o-mini");
+    }
+
+    #[test]
+    fn model_spec_parse_google_model() {
+        let (provider, model) = parse_model_spec("google:gemini-2.5-flash").unwrap();
+        assert_eq!(provider, ProviderKind::Google);
+        assert_eq!(model, "gemini-2.5-flash");
+    }
+
+    #[test]
+    fn model_spec_parse_bare_name_defaults_to_local() {
+        let (provider, model) = parse_model_spec("miniLM").unwrap();
+        assert_eq!(provider, ProviderKind::Local);
+        assert_eq!(model, "miniLM");
+    }
+
+    #[test]
+    fn model_spec_parse_empty_string_error() {
+        assert!(parse_model_spec("").is_err());
+    }
+
+    #[test]
+    fn model_spec_parse_whitespace_only_error() {
+        assert!(parse_model_spec("  ").is_err());
+    }
+
+    #[test]
+    fn model_spec_parse_unknown_provider_error() {
+        let err = parse_model_spec("azure:gpt-4").unwrap_err();
+        assert!(
+            err.to_string().contains("azure"),
+            "error should mention bad provider: {err}"
+        );
+    }
+
+    #[test]
+    fn model_spec_parse_provider_colon_empty_model_error() {
+        assert!(parse_model_spec("anthropic:").is_err());
+    }
+
+    #[test]
+    fn model_spec_parse_local_with_quant_variant() {
+        // "local:qwen3:1.7b:q8_0" — provider is "local", model is "qwen3:1.7b:q8_0"
+        let (provider, model) = parse_model_spec("local:qwen3:1.7b:q8_0").unwrap();
+        assert_eq!(provider, ProviderKind::Local);
+        assert_eq!(model, "qwen3:1.7b:q8_0");
+    }
+
+    // --- load ---
+
+    #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
+    #[test]
+    fn model_spec_load_cloud_missing_api_key() {
+        // Ensure the env var is unset for this test
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        let err = load("anthropic:claude-sonnet-4-6").unwrap_err();
+        assert!(
+            err.to_string().contains("ANTHROPIC_API_KEY"),
+            "error should mention env var: {err}"
+        );
+    }
+
+    #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
+    #[test]
+    fn model_spec_load_cloud_with_api_key_constructs() {
+        // Set a fake key — construction should succeed (actual API call isn't made)
+        std::env::set_var("OPENAI_API_KEY", "sk-test-fake-key-12345");
+        let result = load("openai:gpt-4o-mini");
+        std::env::remove_var("OPENAI_API_KEY");
+        assert!(
+            result.is_ok(),
+            "load should succeed with API key set: {:?}",
+            result.err()
+        );
     }
 }
