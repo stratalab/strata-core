@@ -56,12 +56,10 @@ pub fn write_file(path: &Path, format: FileFormat, batches: &[RecordBatch]) -> R
             let props = parquet::file::properties::WriterProperties::builder()
                 .set_compression(parquet::basic::Compression::SNAPPY)
                 .build();
-            let mut writer =
-                parquet::arrow::ArrowWriter::try_new(file, schema, Some(props)).map_err(|e| {
-                    Error::Io {
-                        reason: format!("failed to create Parquet writer: {e}"),
-                        hint: None,
-                    }
+            let mut writer = parquet::arrow::ArrowWriter::try_new(file, schema, Some(props))
+                .map_err(|e| Error::Io {
+                    reason: format!("failed to create Parquet writer: {e}"),
+                    hint: None,
                 })?;
             for batch in batches {
                 writer.write(batch).map_err(|e| Error::Io {

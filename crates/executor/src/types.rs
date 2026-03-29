@@ -802,6 +802,8 @@ pub enum ExportFormat {
     Json,
     /// Newline-delimited JSON (one object per line).
     Jsonl,
+    /// Apache Parquet (columnar, compressed). Requires `--features arrow`.
+    Parquet,
 }
 
 /// Which primitive to export data from.
@@ -816,6 +818,8 @@ pub enum ExportPrimitive {
     Events,
     /// Graph store.
     Graph,
+    /// Vector store.
+    Vector,
 }
 
 impl ExportPrimitive {
@@ -826,6 +830,7 @@ impl ExportPrimitive {
             ExportPrimitive::Json => "json",
             ExportPrimitive::Events => "events",
             ExportPrimitive::Graph => "graph",
+            ExportPrimitive::Vector => "vector",
         }
     }
 }

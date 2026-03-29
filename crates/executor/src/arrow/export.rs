@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Float32Builder, Float64Builder, FixedSizeListBuilder, StringBuilder, UInt64Builder};
+use arrow::array::{
+    FixedSizeListBuilder, Float32Builder, Float64Builder, StringBuilder, UInt64Builder,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
@@ -123,8 +125,10 @@ fn value_to_json(v: &strata_core::Value) -> serde_json::Value {
             serde_json::Value::Array(arr.iter().map(value_to_json).collect())
         }
         strata_core::Value::Object(obj) => {
-            let map: serde_json::Map<String, serde_json::Value> =
-                obj.iter().map(|(k, v)| (k.clone(), value_to_json(v))).collect();
+            let map: serde_json::Map<String, serde_json::Value> = obj
+                .iter()
+                .map(|(k, v)| (k.clone(), value_to_json(v)))
+                .collect();
             serde_json::Value::Object(map)
         }
     }
@@ -217,18 +221,20 @@ fn export_json(
     let mut cursor: Option<String> = None;
 
     loop {
-        let result = convert_result(
-            p.json
-                .list(&branch_id, space, prefix.as_deref(), cursor.as_deref(), 1000),
-        )?;
+        let result = convert_result(p.json.list(
+            &branch_id,
+            space,
+            prefix.as_deref(),
+            cursor.as_deref(),
+            1000,
+        ))?;
         let page_empty = result.doc_ids.is_empty();
 
         for doc_id in result.doc_ids {
             if count >= max {
                 break;
             }
-            if let Some(json_val) = convert_result(p.json.get(&branch_id, space, &doc_id, &root))?
-            {
+            if let Some(json_val) = convert_result(p.json.get(&branch_id, space, &doc_id, &root))? {
                 let doc_str =
                     serde_json::to_string(&json_val).unwrap_or_else(|_| "null".to_string());
                 key_builder.append_value(&doc_id);
@@ -306,8 +312,8 @@ fn export_event(
         let event = &versioned.value;
         seq_builder.append_value(event.sequence);
         type_builder.append_value(&event.event_type);
-        let payload_str =
-            serde_json::to_string(&value_to_json(&event.payload)).unwrap_or_else(|_| "null".to_string());
+        let payload_str = serde_json::to_string(&value_to_json(&event.payload))
+            .unwrap_or_else(|_| "null".to_string());
         payload_builder.append_value(&payload_str);
         ts_builder.append_value(event.timestamp.as_micros());
     }
@@ -359,10 +365,7 @@ fn export_vector(
         Field::new("key", DataType::Utf8, false),
         Field::new(
             "embedding",
-            DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::Float32, true)),
-                dim,
-            ),
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), dim),
             false,
         ),
         Field::new("metadata", DataType::Utf8, true),
@@ -372,8 +375,7 @@ fn export_vector(
     let max = limit.unwrap_or(usize::MAX);
 
     let mut key_builder = StringBuilder::new();
-    let mut embedding_builder =
-        FixedSizeListBuilder::new(Float32Builder::new(), dim);
+    let mut embedding_builder = FixedSizeListBuilder::new(Float32Builder::new(), dim);
     let mut metadata_builder = StringBuilder::new();
 
     for key in keys.into_iter().take(max) {
@@ -650,10 +652,18 @@ mod tests {
     #[test]
     fn test_json_export() {
         let (p, branch_id) = setup_with(|db| {
-            db.json_set("u1", "$", Value::String(r#"{"name":"Alice","age":30}"#.into()))
-                .unwrap();
-            db.json_set("u2", "$", Value::String(r#"{"name":"Bob","age":25}"#.into()))
-                .unwrap();
+            db.json_set(
+                "u1",
+                "$",
+                Value::String(r#"{"name":"Alice","age":30}"#.into()),
+            )
+            .unwrap();
+            db.json_set(
+                "u2",
+                "$",
+                Value::String(r#"{"name":"Bob","age":25}"#.into()),
+            )
+            .unwrap();
         });
 
         let (schema, batches) = export_to_batches(
@@ -697,23 +707,32 @@ mod tests {
     #[test]
     fn test_event_export() {
         let (p, branch_id) = setup_with(|db| {
-            db.event_append("click", Value::object({
-                let mut m = std::collections::HashMap::new();
-                m.insert("page".to_string(), Value::String("home".into()));
-                m
-            }))
+            db.event_append(
+                "click",
+                Value::object({
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("page".to_string(), Value::String("home".into()));
+                    m
+                }),
+            )
             .unwrap();
-            db.event_append("view", Value::object({
-                let mut m = std::collections::HashMap::new();
-                m.insert("page".to_string(), Value::String("about".into()));
-                m
-            }))
+            db.event_append(
+                "view",
+                Value::object({
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("page".to_string(), Value::String("about".into()));
+                    m
+                }),
+            )
             .unwrap();
-            db.event_append("click", Value::object({
-                let mut m = std::collections::HashMap::new();
-                m.insert("page".to_string(), Value::String("contact".into()));
-                m
-            }))
+            db.event_append(
+                "click",
+                Value::object({
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("page".to_string(), Value::String("contact".into()));
+                    m
+                }),
+            )
             .unwrap();
         });
 
@@ -793,25 +812,37 @@ mod tests {
 
     #[test]
     fn test_vector_export() {
-        use arrow::array::{Float32Array, FixedSizeListArray};
         use crate::types::DistanceMetric;
+        use arrow::array::{FixedSizeListArray, Float32Array};
 
         let (p, branch_id) = setup_with(|db| {
             db.vector_create_collection("docs", 3, DistanceMetric::Cosine)
                 .unwrap();
-            db.vector_upsert("docs", "v1", vec![1.0, 2.0, 3.0], Some(Value::String(r#"{"tag":"a"}"#.into())))
-                .unwrap();
+            db.vector_upsert(
+                "docs",
+                "v1",
+                vec![1.0, 2.0, 3.0],
+                Some(Value::String(r#"{"tag":"a"}"#.into())),
+            )
+            .unwrap();
             db.vector_upsert("docs", "v2", vec![4.0, 5.0, 6.0], None)
                 .unwrap();
-            db.vector_upsert("docs", "v3", vec![7.0, 8.0, 9.0], Some(Value::String(r#"{"tag":"c"}"#.into())))
-                .unwrap();
+            db.vector_upsert(
+                "docs",
+                "v3",
+                vec![7.0, 8.0, 9.0],
+                Some(Value::String(r#"{"tag":"c"}"#.into())),
+            )
+            .unwrap();
         });
 
         let (schema, batches) = export_to_batches(
             &p,
             branch_id,
             "default",
-            ExportSource::Vector { collection: "docs".into() },
+            ExportSource::Vector {
+                collection: "docs".into(),
+            },
             None,
         )
         .unwrap();
@@ -824,9 +855,21 @@ mod tests {
         let batch = &batches[0];
         assert_eq!(batch.num_rows(), 3);
 
-        let keys = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-        let embeddings = batch.column(1).as_any().downcast_ref::<FixedSizeListArray>().unwrap();
-        let metadata = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+        let keys = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let embeddings = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<FixedSizeListArray>()
+            .unwrap();
+        let metadata = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
 
         // Verify embedding dimension
         assert_eq!(embeddings.value_length(), 3);
@@ -851,15 +894,21 @@ mod tests {
         let (p, branch_id) = setup_with(|db| {
             db.graph_create("social").unwrap();
             db.graph_add_node_typed(
-                "social", "alice", None,
+                "social",
+                "alice",
+                None,
                 Some(Value::String(r#"{"age":30}"#.into())),
                 Some("Person"),
-            ).unwrap();
+            )
+            .unwrap();
             db.graph_add_node_typed(
-                "social", "bob", None,
+                "social",
+                "bob",
+                None,
                 Some(Value::String(r#"{"age":25}"#.into())),
                 Some("Person"),
-            ).unwrap();
+            )
+            .unwrap();
             db.graph_add_node("social", "acme", None, None).unwrap();
         });
 
@@ -867,7 +916,9 @@ mod tests {
             &p,
             branch_id,
             "default",
-            ExportSource::GraphNodes { graph: "social".into() },
+            ExportSource::GraphNodes {
+                graph: "social".into(),
+            },
             None,
         )
         .unwrap();
@@ -880,9 +931,21 @@ mod tests {
         let batch = &batches[0];
         assert_eq!(batch.num_rows(), 3);
 
-        let ids = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-        let types = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
-        let props = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let types = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let props = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
 
         let id_set: Vec<&str> = (0..ids.len()).map(|i| ids.value(i)).collect();
         assert!(id_set.contains(&"alice"));
@@ -908,15 +971,19 @@ mod tests {
             db.graph_add_node("social", "alice", None, None).unwrap();
             db.graph_add_node("social", "bob", None, None).unwrap();
             db.graph_add_node("social", "carol", None, None).unwrap();
-            db.graph_add_edge("social", "alice", "bob", "knows", Some(0.9), None).unwrap();
-            db.graph_add_edge("social", "bob", "carol", "knows", Some(0.5), None).unwrap();
+            db.graph_add_edge("social", "alice", "bob", "knows", Some(0.9), None)
+                .unwrap();
+            db.graph_add_edge("social", "bob", "carol", "knows", Some(0.5), None)
+                .unwrap();
         });
 
         let (schema, batches) = export_to_batches(
             &p,
             branch_id,
             "default",
-            ExportSource::GraphEdges { graph: "social".into() },
+            ExportSource::GraphEdges {
+                graph: "social".into(),
+            },
             None,
         )
         .unwrap();
@@ -931,10 +998,26 @@ mod tests {
         let batch = &batches[0];
         assert_eq!(batch.num_rows(), 2);
 
-        let sources = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-        let targets = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
-        let edge_types = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
-        let weights = batch.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        let sources = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let targets = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let edge_types = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let weights = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
 
         // Verify both edges (order may vary)
         let src_set: Vec<&str> = (0..sources.len()).map(|i| sources.value(i)).collect();

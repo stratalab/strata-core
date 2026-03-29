@@ -106,6 +106,7 @@ pub fn build_cli() -> Command {
         .subcommand(build_config())
         .subcommand(build_up())
         .subcommand(build_down())
+        .subcommand(build_db_export())
 }
 
 /// Build a command tree for REPL mode (no global flags).
@@ -138,6 +139,7 @@ pub fn build_repl_cmd() -> Command {
         .subcommand(build_detokenize())
         .subcommand(build_graph())
         .subcommand(build_config())
+        .subcommand(build_db_export())
 }
 
 // =========================================================================
@@ -1367,5 +1369,58 @@ fn build_down() -> Command {
         .long_about(
             "Stop a running Strata IPC server by reading the PID file and sending SIGTERM.\n\
              Cleans up the socket and PID files.",
+        )
+}
+
+// =========================================================================
+// Data Export
+// =========================================================================
+
+fn build_db_export() -> Command {
+    Command::new("export")
+        .about("Export data from a primitive to a file")
+        .arg(
+            Arg::new("primitive")
+                .required(true)
+                .help("Primitive to export: kv, json, events, vector, graph"),
+        )
+        .arg(
+            Arg::new("format")
+                .long("format")
+                .short('f')
+                .value_name("FMT")
+                .help("Output format: parquet, csv, jsonl, json (default: csv)"),
+        )
+        .arg(
+            Arg::new("output")
+                .long("output")
+                .short('o')
+                .value_name("FILE")
+                .help("Output file path (required for parquet)"),
+        )
+        .arg(
+            Arg::new("prefix")
+                .long("prefix")
+                .value_name("PREFIX")
+                .help("Key prefix filter (kv, json)"),
+        )
+        .arg(
+            Arg::new("collection")
+                .long("collection")
+                .value_name("NAME")
+                .help("Vector collection name (required for vector)"),
+        )
+        .arg(
+            Arg::new("graph")
+                .long("graph")
+                .value_name("NAME")
+                .help("Graph name (required for graph)"),
+        )
+        .arg(
+            Arg::new("limit")
+                .long("limit")
+                .value_name("N")
+                .value_parser(clap::value_parser!(u64))
+                .help("Maximum rows to export"),
         )
 }
