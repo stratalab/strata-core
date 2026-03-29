@@ -59,7 +59,7 @@ impl SpaceIndex {
     ///
     /// Returns `true` for "default" without hitting storage.
     pub fn exists(&self, branch_id: BranchId, space: &str) -> StrataResult<bool> {
-        if space == "default" {
+        if space == "default" || space == crate::system_space::SYSTEM_SPACE {
             return Ok(true);
         }
         self.db.transaction(branch_id, |txn| {
@@ -79,6 +79,7 @@ impl SpaceIndex {
             let mut spaces: Vec<String> = results
                 .into_iter()
                 .filter_map(|(k, _)| String::from_utf8(k.user_key.to_vec()).ok())
+                .filter(|s| s != crate::system_space::SYSTEM_SPACE)
                 .collect();
 
             // Always include "default"
@@ -239,5 +240,44 @@ mod tests {
         assert!(spaces.contains(&"alpha".to_string()));
         assert!(spaces.contains(&"beta".to_string()));
         assert!(spaces.contains(&"gamma".to_string()));
+    }
+
+    #[test]
+    fn test_system_space_exists() {
+        let (_temp, _db, si) = setup();
+        let bid = default_branch();
+
+        // _system_ should always exist without explicit registration
+        assert!(si.exists(bid, crate::system_space::SYSTEM_SPACE).unwrap());
+    }
+
+    #[test]
+    fn test_system_space_hidden_from_list() {
+        let (_temp, _db, si) = setup();
+        let bid = default_branch();
+
+        let spaces = si.list(bid).unwrap();
+        assert!(!spaces.contains(&crate::system_space::SYSTEM_SPACE.to_string()));
+    }
+
+    #[test]
+    fn test_internal_write_to_system_space() {
+        let (_temp, db, _si) = setup();
+        let bid = default_branch();
+
+        // Internal code can write to _system_ via system_kv_key
+        let key = crate::system_space::system_kv_key(bid, "recipe:default");
+        db.transaction(bid, |txn| {
+            txn.put(key.clone(), Value::String("{\"version\":1}".into()))?;
+            Ok(())
+        })
+        .unwrap();
+
+        // Read it back and verify content
+        let val = db
+            .transaction(bid, |txn| Ok(txn.get(&key)?))
+            .unwrap()
+            .expect("system space value should be readable");
+        assert_eq!(val.as_str().unwrap(), "{\"version\":1}");
     }
 }

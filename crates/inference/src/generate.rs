@@ -358,6 +358,16 @@ impl GenerationEngine {
     }
 }
 
+impl crate::InferenceEngine for GenerationEngine {
+    fn generate(&mut self, request: &GenerateRequest) -> Result<GenerateResponse, InferenceError> {
+        GenerationEngine::generate(self, request)
+    }
+
+    fn supports_generate(&self) -> bool {
+        true
+    }
+}
+
 // Compile-time verify Send (not Sync — &mut self API).
 const _: () = {
     fn assert_send<T: Send>() {}

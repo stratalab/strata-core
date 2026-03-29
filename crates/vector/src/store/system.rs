@@ -1,6 +1,9 @@
 //! System collection operations (internal use only).
+//!
+//! All system collections live in the `_system_` space, invisible to users.
 
 use super::*;
+use strata_engine::system_space::SYSTEM_SPACE;
 
 impl VectorStore {
     pub fn create_system_collection(
@@ -22,7 +25,7 @@ impl VectorStore {
 
         let collection_id = CollectionId::new(branch_id, name);
 
-        if self.collection_exists(branch_id, "default", name)? {
+        if self.collection_exists(branch_id, SYSTEM_SPACE, name)? {
             return Err(VectorError::CollectionAlreadyExists {
                 name: name.to_string(),
             });
@@ -30,7 +33,7 @@ impl VectorStore {
 
         let now = now_micros();
         let record = CollectionRecord::new(&config);
-        let config_key = Key::new_vector_config(Arc::new(Namespace::for_branch(branch_id)), name);
+        let config_key = Key::new_vector_config(self.namespace_for(branch_id, SYSTEM_SPACE), name);
         let config_bytes = record.to_bytes()?;
 
         self.db
@@ -66,8 +69,14 @@ impl VectorStore {
     ) -> VectorResult<Version> {
         use crate::collection::validate_system_collection_name;
         validate_system_collection_name(collection)?;
-        // Delegate to the normal insert path (which doesn't re-check collection name)
-        self.insert(branch_id, "default", collection, key, embedding, metadata)
+        self.insert(
+            branch_id,
+            SYSTEM_SPACE,
+            collection,
+            key,
+            embedding,
+            metadata,
+        )
     }
 
     /// Insert into a system collection with a source reference (internal use only)
@@ -87,7 +96,7 @@ impl VectorStore {
         validate_system_collection_name(collection)?;
         self.insert_inner(
             branch_id,
-            "default",
+            SYSTEM_SPACE,
             collection,
             key,
             embedding,
@@ -112,13 +121,13 @@ impl VectorStore {
         use crate::collection::validate_system_collection_name;
         validate_system_collection_name(name)?;
 
-        if !self.collection_exists(branch_id, "default", name)? {
+        if !self.collection_exists(branch_id, SYSTEM_SPACE, name)? {
             return Ok(());
         }
 
-        self.delete_all_vectors(branch_id, "default", name)?;
+        self.delete_all_vectors(branch_id, SYSTEM_SPACE, name)?;
 
-        let config_key = Key::new_vector_config(self.namespace_for(branch_id, "default"), name);
+        let config_key = Key::new_vector_config(self.namespace_for(branch_id, SYSTEM_SPACE), name);
         self.db
             .transaction(branch_id, |txn| txn.delete(config_key.clone()))
             .map_err(|e| VectorError::Storage(e.to_string()))?;
@@ -140,7 +149,7 @@ impl VectorStore {
         collection: &str,
     ) -> VectorResult<Option<usize>> {
         Ok(self
-            .get_collection(branch_id, "default", collection)?
+            .get_collection(branch_id, SYSTEM_SPACE, collection)?
             .map(|v| v.value.config.dimension))
     }
 
@@ -155,7 +164,7 @@ impl VectorStore {
     ) -> VectorResult<Vec<VectorMatch>> {
         use crate::collection::validate_system_collection_name;
         validate_system_collection_name(collection)?;
-        self.search(branch_id, "default", collection, query, k, filter)
+        self.search(branch_id, SYSTEM_SPACE, collection, query, k, filter)
     }
 
     /// Search a system collection returning results with source references (internal use only)
@@ -172,7 +181,7 @@ impl VectorStore {
     ) -> VectorResult<Vec<VectorMatchWithSource>> {
         use crate::collection::validate_system_collection_name;
         validate_system_collection_name(collection)?;
-        self.search_with_sources(branch_id, "default", collection, query, k)
+        self.search_with_sources(branch_id, SYSTEM_SPACE, collection, query, k)
     }
 
     /// System search with sources, filtered by time range.
@@ -191,7 +200,13 @@ impl VectorStore {
         use crate::collection::validate_system_collection_name;
         validate_system_collection_name(collection)?;
         self.search_with_sources_in_range(
-            branch_id, "default", collection, query, k, start_ts, end_ts,
+            branch_id,
+            SYSTEM_SPACE,
+            collection,
+            query,
+            k,
+            start_ts,
+            end_ts,
         )
     }
 
@@ -204,6 +219,6 @@ impl VectorStore {
     ) -> VectorResult<bool> {
         use crate::collection::validate_system_collection_name;
         validate_system_collection_name(collection)?;
-        self.delete(branch_id, "default", collection, key)
+        self.delete(branch_id, SYSTEM_SPACE, collection, key)
     }
 }

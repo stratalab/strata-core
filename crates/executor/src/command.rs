@@ -979,6 +979,39 @@ pub enum Command {
         /// File path to write to. If omitted, data is returned inline.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        /// Vector collection name (required when primitive is Vector).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        collection: Option<String>,
+        /// Graph name (required when primitive is Graph).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graph: Option<String>,
+    },
+
+    /// Import data from a file (Parquet, CSV, JSONL) into a primitive.
+    /// Returns: `Output::ArrowImported`
+    ArrowImport {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Path to the input file.
+        file_path: String,
+        /// Target primitive: "kv", "json", "vector".
+        target: String,
+        /// Column to use as key (auto-detected if omitted).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_column: Option<String>,
+        /// Column to use as value/document/embedding.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value_column: Option<String>,
+        /// Vector collection name (required for vector target).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        collection: Option<String>,
+        /// Override file format detection (parquet, csv, jsonl).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
     },
 
     // ==================== Bundle (3) ====================
@@ -1938,6 +1971,7 @@ impl Command {
             Command::Describe { .. } => "Describe",
             Command::TimeRange { .. } => "TimeRange",
             Command::DbExport { .. } => "DbExport",
+            Command::ArrowImport { .. } => "ArrowImport",
             Command::BranchExport { .. } => "BranchExport",
             Command::BranchImport { .. } => "BranchImport",
             Command::BranchBundleValidate { .. } => "BranchBundleValidate",
@@ -2079,8 +2113,9 @@ impl Command {
             | Command::JsonDropIndex { branch, space, .. }
             | Command::JsonListIndexes { branch, space, .. }
             | Command::VectorSample { branch, space, .. }
-            // Export
-            | Command::DbExport { branch, space, .. } => {
+            // Export / Import
+            | Command::DbExport { branch, space, .. }
+            | Command::ArrowImport { branch, space, .. } => {
                 resolve_branch!(branch);
                 resolve_space!(space);
             }
@@ -2251,7 +2286,8 @@ impl Command {
             | Command::JsonDropIndex { branch, .. }
             | Command::JsonListIndexes { branch, .. }
             | Command::VectorSample { branch, .. }
-            | Command::DbExport { branch, .. } => branch.as_ref(),
+            | Command::DbExport { branch, .. }
+            | Command::ArrowImport { branch, .. } => branch.as_ref(),
 
             // Commands with branch only (no space)
             Command::RetentionApply { branch, .. }

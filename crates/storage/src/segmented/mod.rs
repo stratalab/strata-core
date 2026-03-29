@@ -264,6 +264,11 @@ struct BranchState {
     min_timestamp: AtomicU64,
     /// Maximum timestamp seen across all writes (for O(1) time_range).
     max_timestamp: AtomicU64,
+    /// Highest commit_id (version) applied to this branch.
+    /// Used by fork_branch to compute fork_version from actual branch data
+    /// rather than the global counter (which may include allocated-but-not-yet-applied
+    /// versions from other branches).
+    max_version: AtomicU64,
     /// Per-level compact pointer for round-robin file selection.
     /// Each entry is the largest typed_key_prefix of the last compaction input.
     compact_pointers: Vec<Option<Vec<u8>>>,
@@ -282,6 +287,7 @@ impl BranchState {
             version: ArcSwap::from_pointee(SegmentVersion::new()),
             min_timestamp: AtomicU64::new(u64::MAX),
             max_timestamp: AtomicU64::new(0),
+            max_version: AtomicU64::new(0),
             compact_pointers: vec![None; NUM_LEVELS],
             level_targets: compaction::recalculate_level_targets(
                 &[0u64; NUM_LEVELS],
@@ -296,6 +302,12 @@ impl BranchState {
     fn track_timestamp(&self, ts: u64) {
         self.min_timestamp.fetch_min(ts, Ordering::Relaxed);
         self.max_timestamp.fetch_max(ts, Ordering::Relaxed);
+    }
+
+    /// Update max applied version for this branch.
+    #[inline]
+    fn track_version(&self, version: u64) {
+        self.max_version.fetch_max(version, Ordering::Release);
     }
 }
 
@@ -1207,10 +1219,12 @@ impl SegmentedStore {
                 }
             }
 
-            // All source data is now in segments.  Capture fork_version
-            // under the exclusive guard — no concurrent writes can advance
-            // it before we snapshot.
-            let fork_version = self.version.load(Ordering::Acquire);
+            // Capture fork_version from the source branch's max applied version,
+            // NOT the global counter. The global counter may include versions
+            // allocated by concurrent writers (via next_version()) that haven't
+            // applied their writes yet. Using the global counter would claim
+            // the fork includes data that isn't actually in the snapshot.
+            let fork_version = source.max_version.load(Ordering::Acquire);
 
             let source_segments = source.version.load_full();
             let source_inherited: Vec<InheritedLayer> = source
@@ -1283,6 +1297,9 @@ impl SegmentedStore {
             ));
         }
         dest.inherited_layers = dest_layers;
+        // Propagate fork_version so subsequent forks from this child
+        // correctly report the inherited data's version range.
+        dest.max_version.fetch_max(fork_version, Ordering::Release);
         drop(dest);
 
         // 7. Write manifest
@@ -1906,6 +1923,7 @@ impl SegmentedStore {
         let ts = entry.timestamp.as_micros();
         branch.active.put_entry(&key, version, entry);
         branch.track_timestamp(ts);
+        branch.track_version(version);
 
         self.maybe_rotate_branch(branch_id, &mut branch);
         self.version.fetch_max(version, Ordering::AcqRel);
@@ -1937,6 +1955,7 @@ impl SegmentedStore {
         let ts = entry.timestamp.as_micros();
         branch.active.put_entry(key, version, entry);
         branch.track_timestamp(ts);
+        branch.track_version(version);
 
         self.maybe_rotate_branch(branch_id, &mut branch);
         self.version.fetch_max(version, Ordering::AcqRel);
@@ -2000,6 +2019,7 @@ impl SegmentedStore {
                 branch.active.put_entry(&key, version, entry);
             }
             branch.track_timestamp(ts);
+            branch.track_version(version);
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
@@ -2020,6 +2040,7 @@ impl SegmentedStore {
                 branch.active.put_entry(&key, version, entry);
             }
             branch.track_timestamp(ts);
+            branch.track_version(version);
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
@@ -2185,10 +2206,18 @@ impl SegmentedStore {
 
         // Atomically: remove the frozen memtable we just flushed and install
         // the segment, under a single DashMap guard.
-        let mut branch = self
-            .branches
-            .entry(*branch_id)
-            .or_insert_with(BranchState::new);
+        //
+        // Use get_mut (not entry().or_insert_with) to avoid resurrecting a
+        // branch that was concurrently deleted by clear_branch (#2108).
+        let mut branch = match self.branches.get_mut(branch_id) {
+            Some(b) => b,
+            None => {
+                // Branch was deleted between Phase 1 and Phase 3.
+                // Clean up the orphan segment file we just built.
+                let _ = std::fs::remove_file(&seg_path);
+                return Ok(true);
+            }
+        };
         let popped = if let Some(last) = branch.frozen.last() {
             if last.id() == frozen_mt.id() {
                 branch.frozen.pop();
@@ -3174,6 +3203,7 @@ impl Storage for SegmentedStore {
         branch.active.put_entry(&key, version, entry);
         // Track timestamp for O(1) time_range
         branch.track_timestamp(ts);
+        branch.track_version(version);
 
         // Rotate if active memtable exceeds threshold
         self.maybe_rotate_branch(branch_id, &mut branch);
@@ -3203,6 +3233,7 @@ impl Storage for SegmentedStore {
         branch.active.put_entry(key, version, entry);
         // Track timestamp for O(1) time_range
         branch.track_timestamp(ts);
+        branch.track_version(version);
 
         // Rotate if active memtable exceeds threshold
         self.maybe_rotate_branch(branch_id, &mut branch);
@@ -3249,6 +3280,7 @@ impl Storage for SegmentedStore {
             }
             // Track timestamp for O(1) time_range
             branch.track_timestamp(ts);
+            branch.track_version(version);
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
@@ -3289,6 +3321,7 @@ impl Storage for SegmentedStore {
             }
             // Track timestamp for O(1) time_range
             branch.track_timestamp(ts);
+            branch.track_version(version);
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
@@ -3347,6 +3380,7 @@ impl Storage for SegmentedStore {
                 branch.active.put_entry(&key, version, entry);
             }
             branch.track_timestamp(ts);
+            branch.track_version(version);
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
@@ -3367,6 +3401,7 @@ impl Storage for SegmentedStore {
                 branch.active.put_entry(&key, version, entry);
             }
             branch.track_timestamp(ts);
+            branch.track_version(version);
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 

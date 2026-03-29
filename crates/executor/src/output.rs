@@ -406,6 +406,18 @@ pub enum Output {
 
     /// Data export result (CSV/JSON/JSONL).
     Exported(ExportResult),
+
+    /// Arrow import result.
+    ArrowImported {
+        /// Number of rows imported.
+        rows_imported: u64,
+        /// Number of rows skipped.
+        rows_skipped: u64,
+        /// Target primitive.
+        target: String,
+        /// Source file path.
+        file_path: String,
+    },
 }
 
 /// Snapshot of the embedding pipeline status.

@@ -32,10 +32,10 @@ pub fn space_delete(
     space: String,
     force: bool,
 ) -> Result<Output> {
-    // Cannot delete the default space
-    if space == "default" {
+    // Cannot delete the default or _system_ space
+    if space == "default" || space == strata_engine::system_space::SYSTEM_SPACE {
         return Err(Error::ConstraintViolation {
-            reason: "Cannot delete the default space".into(),
+            reason: format!("Cannot delete the '{}' space", space),
         });
     }
 

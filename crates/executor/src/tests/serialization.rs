@@ -1324,6 +1324,8 @@ fn test_command_db_export() {
         prefix: Some("user:".to_string()),
         limit: Some(100),
         path: Some("/tmp/export.csv".to_string()),
+        collection: None,
+        graph: None,
     });
     test_command_round_trip(Command::DbExport {
         branch: None,
@@ -1333,6 +1335,8 @@ fn test_command_db_export() {
         prefix: None,
         limit: None,
         path: None,
+        collection: None,
+        graph: None,
     });
     test_command_round_trip(Command::DbExport {
         branch: None,
@@ -1342,6 +1346,8 @@ fn test_command_db_export() {
         prefix: None,
         limit: Some(50),
         path: None,
+        collection: None,
+        graph: None,
     });
 }
 

@@ -33,6 +33,8 @@ fn export_kv_csv_inline() {
             prefix: None,
             limit: None,
             path: None,
+            collection: None,
+            graph: None,
         })
         .unwrap();
 
@@ -64,6 +66,8 @@ fn export_kv_json_inline() {
             prefix: None,
             limit: None,
             path: None,
+            collection: None,
+            graph: None,
         })
         .unwrap();
 
@@ -95,6 +99,8 @@ fn export_kv_jsonl_inline() {
             prefix: None,
             limit: None,
             path: None,
+            collection: None,
+            graph: None,
         })
         .unwrap();
 
@@ -126,6 +132,8 @@ fn export_kv_with_prefix() {
             prefix: Some("user:".to_string()),
             limit: None,
             path: None,
+            collection: None,
+            graph: None,
         })
         .unwrap();
 
@@ -149,6 +157,8 @@ fn export_kv_with_limit() {
             prefix: None,
             limit: Some(1),
             path: None,
+            collection: None,
+            graph: None,
         })
         .unwrap();
 
@@ -175,6 +185,8 @@ fn export_kv_to_file() {
             prefix: None,
             limit: None,
             path: Some(path.clone()),
+            collection: None,
+            graph: None,
         })
         .unwrap();
 
@@ -212,6 +224,8 @@ fn export_empty_kv() {
             prefix: None,
             limit: None,
             path: None,
+            collection: None,
+            graph: None,
         })
         .unwrap();
 
@@ -238,6 +252,8 @@ fn export_empty_json_format() {
             prefix: None,
             limit: None,
             path: None,
+            collection: None,
+            graph: None,
         })
         .unwrap();
 
@@ -264,6 +280,8 @@ fn export_empty_jsonl_format() {
             prefix: None,
             limit: None,
             path: None,
+            collection: None,
+            graph: None,
         })
         .unwrap();
 
@@ -300,6 +318,8 @@ fn export_events_json() {
             prefix: None,
             limit: None,
             path: None,
+            collection: None,
+            graph: None,
         })
         .unwrap();
 
@@ -338,6 +358,8 @@ fn export_events_with_limit() {
             prefix: None,
             limit: Some(2),
             path: None,
+            collection: None,
+            graph: None,
         })
         .unwrap();
 
@@ -387,6 +409,8 @@ fn export_json_docs() {
             prefix: None,
             limit: None,
             path: None,
+            collection: None,
+            graph: None,
         })
         .unwrap();
 
@@ -419,6 +443,8 @@ fn export_is_not_a_write() {
         prefix: None,
         limit: None,
         path: None,
+        collection: None,
+        graph: None,
     };
     assert!(!cmd.is_write());
 }
@@ -440,7 +466,207 @@ fn export_to_nonexistent_directory_fails() {
         prefix: None,
         limit: None,
         path: Some("/nonexistent/dir/file.csv".to_string()),
+        collection: None,
+        graph: None,
     });
 
     assert!(result.is_err());
+}
+
+// =============================================================================
+// Arrow export integration tests (feature-gated)
+// =============================================================================
+
+#[cfg(feature = "arrow")]
+mod arrow_integration {
+    use crate::types::*;
+    use crate::Value;
+    use crate::{Command, Executor, Output, Strata};
+
+    #[test]
+    fn test_kv_export_parquet_roundtrip() {
+        let strata = Strata::cache().unwrap();
+        strata.kv_put("u1", Value::String("Alice".into())).unwrap();
+        strata.kv_put("u2", Value::Int(42)).unwrap();
+        strata.kv_put("u3", Value::Bool(true)).unwrap();
+        let executor = Executor::new(strata.database());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kv.parquet");
+        let path_str = path.to_str().unwrap().to_string();
+
+        let result = executor
+            .execute(Command::DbExport {
+                branch: None,
+                space: None,
+                primitive: ExportPrimitive::Kv,
+                format: ExportFormat::Parquet,
+                prefix: None,
+                limit: None,
+                path: Some(path_str.clone()),
+                collection: None,
+                graph: None,
+            })
+            .unwrap();
+
+        match result {
+            Output::Exported(r) => {
+                assert_eq!(r.row_count, 3);
+                assert_eq!(r.format, ExportFormat::Parquet);
+                assert!(r.size_bytes.unwrap() > 0);
+                assert_eq!(r.path.unwrap(), path_str);
+            }
+            other => panic!("expected Exported, got {:?}", other),
+        }
+
+        // Verify the file is valid Parquet
+        let file = std::fs::File::open(&path).unwrap();
+        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+        let batches: Vec<_> = reader.map(|r| r.unwrap()).collect();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 3);
+    }
+
+    #[test]
+    fn test_json_export_csv_file() {
+        let strata = Strata::cache().unwrap();
+        strata
+            .json_set("d1", "$", Value::String(r#"{"name":"Alice"}"#.into()))
+            .unwrap();
+        strata
+            .json_set("d2", "$", Value::String(r#"{"name":"Bob"}"#.into()))
+            .unwrap();
+        let executor = Executor::new(strata.database());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("docs.csv");
+
+        let result = executor
+            .execute(Command::DbExport {
+                branch: None,
+                space: None,
+                primitive: ExportPrimitive::Json,
+                format: ExportFormat::Csv,
+                prefix: None,
+                limit: None,
+                path: Some(path.to_str().unwrap().to_string()),
+                collection: None,
+                graph: None,
+            })
+            .unwrap();
+
+        match result {
+            Output::Exported(r) => {
+                assert_eq!(r.row_count, 2);
+                assert!(r.size_bytes.unwrap() > 0);
+            }
+            other => panic!("expected Exported, got {:?}", other),
+        }
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("key"));
+        assert!(content.contains("document"));
+    }
+
+    #[test]
+    fn test_event_export_jsonl_file() {
+        let strata = Strata::cache().unwrap();
+        strata
+            .event_append(
+                "click",
+                Value::object({
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("page".to_string(), Value::String("home".into()));
+                    m
+                }),
+            )
+            .unwrap();
+        let executor = Executor::new(strata.database());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+
+        let result = executor
+            .execute(Command::DbExport {
+                branch: None,
+                space: None,
+                primitive: ExportPrimitive::Events,
+                format: ExportFormat::Jsonl,
+                prefix: None,
+                limit: None,
+                path: Some(path.to_str().unwrap().to_string()),
+                collection: None,
+                graph: None,
+            })
+            .unwrap();
+
+        match result {
+            Output::Exported(r) => {
+                assert_eq!(r.row_count, 1);
+            }
+            other => panic!("expected Exported, got {:?}", other),
+        }
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 1);
+        let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(parsed["event_type"], "click");
+    }
+
+    #[test]
+    fn test_parquet_requires_output_flag() {
+        let strata = Strata::cache().unwrap();
+        let executor = Executor::new(strata.database());
+
+        let result = executor.execute(Command::DbExport {
+            branch: None,
+            space: None,
+            primitive: ExportPrimitive::Kv,
+            format: ExportFormat::Parquet,
+            prefix: None,
+            limit: None,
+            path: None, // no --output
+            collection: None,
+            graph: None,
+        });
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("--output") || err.contains("Parquet"),
+            "error should mention --output or Parquet, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_vector_requires_collection() {
+        let strata = Strata::cache().unwrap();
+        let executor = Executor::new(strata.database());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vec.parquet");
+
+        let result = executor.execute(Command::DbExport {
+            branch: None,
+            space: None,
+            primitive: ExportPrimitive::Vector,
+            format: ExportFormat::Parquet,
+            prefix: None,
+            limit: None,
+            path: Some(path.to_str().unwrap().to_string()),
+            collection: None, // missing --collection
+            graph: None,
+        });
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("--collection"),
+            "error should mention --collection, got: {err}"
+        );
+    }
 }
