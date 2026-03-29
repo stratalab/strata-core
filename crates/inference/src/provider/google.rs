@@ -215,6 +215,137 @@ pub(crate) fn parse_response_json(body: &str) -> Result<GenerateResponse, Infere
     })
 }
 
+// =========================================================================
+// Embedding API
+// =========================================================================
+
+/// Build the URL for the Google embedContent API (single text).
+pub(crate) fn build_embed_url(model: &str) -> String {
+    format!("{API_BASE}/{model}:embedContent")
+}
+
+/// Build the URL for the Google batchEmbedContents API (multiple texts).
+pub(crate) fn build_batch_embed_url(model: &str) -> String {
+    format!("{API_BASE}/{model}:batchEmbedContents")
+}
+
+/// Build the Google embedContent request JSON for a single text.
+pub(crate) fn build_embed_request_json(text: &str) -> String {
+    serde_json::json!({
+        "content": {
+            "parts": [{"text": text}]
+        }
+    })
+    .to_string()
+}
+
+/// Build the Google batchEmbedContents request JSON for multiple texts.
+pub(crate) fn build_batch_embed_request_json(model: &str, texts: &[&str]) -> String {
+    let requests: Vec<serde_json::Value> = texts
+        .iter()
+        .map(|text| {
+            serde_json::json!({
+                "model": format!("models/{model}"),
+                "content": {
+                    "parts": [{"text": text}]
+                }
+            })
+        })
+        .collect();
+
+    serde_json::json!({ "requests": requests }).to_string()
+}
+
+/// Parse the Google embedContent response JSON into a single embedding vector.
+pub(crate) fn parse_embed_response_json(body: &str) -> Result<Vec<f32>, InferenceError> {
+    let json: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| InferenceError::Provider(format!("Google: invalid JSON response: {e}")))?;
+
+    // Check for API error response
+    if let Some(error) = json.get("error") {
+        let msg = error
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown error");
+        let code = error
+            .get("code")
+            .and_then(|c| c.as_u64())
+            .map(|c| format!(" (code {c})"))
+            .unwrap_or_default();
+        return Err(InferenceError::Provider(format!(
+            "Google embedding API error{code}: {msg}"
+        )));
+    }
+
+    let values = json
+        .get("embedding")
+        .and_then(|e| e.get("values"))
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            InferenceError::Provider("Google: missing 'embedding.values' in response".to_string())
+        })?;
+
+    Ok(values
+        .iter()
+        .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+        .collect())
+}
+
+/// Parse the Google batchEmbedContents response JSON into embedding vectors.
+pub(crate) fn parse_batch_embed_response_json(body: &str) -> Result<Vec<Vec<f32>>, InferenceError> {
+    let json: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| InferenceError::Provider(format!("Google: invalid JSON response: {e}")))?;
+
+    // Check for API error response
+    if let Some(error) = json.get("error") {
+        let msg = error
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown error");
+        let code = error
+            .get("code")
+            .and_then(|c| c.as_u64())
+            .map(|c| format!(" (code {c})"))
+            .unwrap_or_default();
+        return Err(InferenceError::Provider(format!(
+            "Google embedding API error{code}: {msg}"
+        )));
+    }
+
+    let embeddings = json
+        .get("embeddings")
+        .and_then(|e| e.as_array())
+        .ok_or_else(|| {
+            InferenceError::Provider(
+                "Google: missing or invalid 'embeddings' array in batch response".to_string(),
+            )
+        })?;
+
+    if embeddings.is_empty() {
+        return Err(InferenceError::Provider(
+            "Google: empty embeddings array in batch response".to_string(),
+        ));
+    }
+
+    embeddings
+        .iter()
+        .map(|item| {
+            let values = item
+                .get("values")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| {
+                    InferenceError::Provider(
+                        "Google: batch embedding item missing 'values'".to_string(),
+                    )
+                })?;
+            Ok(values
+                .iter()
+                .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+                .collect())
+        })
+        .collect()
+}
+
 /// Map ureq HTTP errors to InferenceError::Provider with descriptive messages.
 fn map_http_error(provider: &str, err: ureq::Error) -> InferenceError {
     match &err {
@@ -732,5 +863,136 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         assert_eq!(json["generationConfig"]["temperature"], 0.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Embedding URL building
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn embed_url_single_contains_model() {
+        let url = build_embed_url("text-embedding-004");
+        assert!(url.contains("text-embedding-004"));
+        assert!(url.contains("embedContent"));
+        assert!(!url.contains("batch"));
+    }
+
+    #[test]
+    fn batch_embed_url_contains_model() {
+        let url = build_batch_embed_url("text-embedding-004");
+        assert!(url.contains("text-embedding-004"));
+        assert!(url.contains("batchEmbedContents"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Embedding request JSON building
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn embed_request_single_text() {
+        let json_str = build_embed_request_json("hello world");
+        let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(json["content"]["parts"][0]["text"], "hello world");
+    }
+
+    #[test]
+    fn batch_embed_request_multiple_texts() {
+        let texts = &["hello", "world"];
+        let json_str = build_batch_embed_request_json("text-embedding-004", texts);
+        let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        let requests = json["requests"].as_array().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["model"], "models/text-embedding-004");
+        assert_eq!(requests[0]["content"]["parts"][0]["text"], "hello");
+        assert_eq!(requests[1]["content"]["parts"][0]["text"], "world");
+    }
+
+    #[test]
+    fn embed_request_special_chars() {
+        let json_str = build_embed_request_json("Hello \"world\" \n\ttab");
+        let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(
+            json["content"]["parts"][0]["text"],
+            "Hello \"world\" \n\ttab"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Embedding response JSON parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn embed_response_single() {
+        let body = r#"{
+            "embedding": {
+                "values": [0.1, 0.2, 0.3]
+            }
+        }"#;
+        let embedding = parse_embed_response_json(body).unwrap();
+        assert_eq!(embedding.len(), 3);
+        assert!((embedding[0] - 0.1).abs() < 1e-6);
+        assert!((embedding[1] - 0.2).abs() < 1e-6);
+        assert!((embedding[2] - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn batch_embed_response_preserves_order() {
+        let body = r#"{
+            "embeddings": [
+                {"values": [0.1, 0.1]},
+                {"values": [0.9, 0.9]}
+            ]
+        }"#;
+        let embeddings = parse_batch_embed_response_json(body).unwrap();
+        assert_eq!(embeddings.len(), 2);
+        assert!((embeddings[0][0] - 0.1).abs() < 1e-6);
+        assert!((embeddings[1][0] - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn embed_response_api_error() {
+        let body = r#"{
+            "error": {
+                "code": 400,
+                "message": "Invalid model"
+            }
+        }"#;
+        let err = parse_embed_response_json(body).unwrap_err();
+        assert!(err.to_string().contains("Invalid model"));
+    }
+
+    #[test]
+    fn embed_response_missing_embedding_returns_error() {
+        let body = r#"{}"#;
+        let err = parse_embed_response_json(body).unwrap_err();
+        assert!(err.to_string().contains("embedding"));
+    }
+
+    #[test]
+    fn embed_response_invalid_json() {
+        let err = parse_embed_response_json("not json").unwrap_err();
+        assert!(err.to_string().contains("invalid JSON"));
+    }
+
+    #[test]
+    fn batch_embed_response_missing_embeddings_returns_error() {
+        let body = r#"{}"#;
+        let err = parse_batch_embed_response_json(body).unwrap_err();
+        assert!(err.to_string().contains("embeddings"));
+    }
+
+    #[test]
+    fn batch_embed_response_empty_embeddings_returns_error() {
+        let body = r#"{"embeddings": []}"#;
+        let err = parse_batch_embed_response_json(body).unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn batch_embed_response_invalid_json() {
+        let err = parse_batch_embed_response_json("{bad}").unwrap_err();
+        assert!(err.to_string().contains("invalid JSON"));
     }
 }

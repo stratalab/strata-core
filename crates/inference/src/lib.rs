@@ -7,6 +7,9 @@ pub mod llama;
 #[cfg(feature = "local")]
 mod embed;
 
+#[cfg(any(feature = "openai", feature = "google"))]
+mod cloud_embed;
+
 #[cfg(any(
     feature = "local",
     feature = "anthropic",
@@ -28,6 +31,9 @@ pub use registry::{ModelInfo, ModelRegistry, ModelTask};
 
 #[cfg(feature = "local")]
 pub use embed::EmbeddingEngine;
+
+#[cfg(any(feature = "openai", feature = "google"))]
+pub use cloud_embed::CloudEmbeddingEngine;
 
 #[cfg(any(
     feature = "local",
@@ -269,25 +275,62 @@ pub fn load(model_spec: &str) -> Result<Box<dyn InferenceEngine>, InferenceError
 
 /// Load an embedding engine from a `"provider:model_name"` spec.
 ///
-/// Currently only local embedding models are supported. Cloud embedding
-/// providers (OpenAI, Google) are tracked in #2171.
+/// Supports local models (via llama.cpp), OpenAI, and Google embedding APIs.
+/// Anthropic does not offer an embedding API and returns `NotSupported`.
 ///
 /// # Examples
 ///
 /// ```ignore
 /// let engine = strata_inference::load_embedder("local:miniLM")?;
 /// let embedding = engine.embed("hello world")?;
+///
+/// let engine = strata_inference::load_embedder("openai:text-embedding-3-small")?;
+/// let embedding = engine.embed("hello world")?;
 /// ```
-#[cfg(feature = "local")]
+#[cfg(any(
+    feature = "local",
+    feature = "openai",
+    feature = "google",
+    feature = "anthropic"
+))]
 pub fn load_embedder(model_spec: &str) -> Result<Box<dyn InferenceEngine>, InferenceError> {
     let (provider, model) = parse_model_spec(model_spec)?;
 
     match provider {
+        #[cfg(feature = "local")]
         ProviderKind::Local => Ok(Box::new(EmbeddingEngine::from_registry(&model)?)),
-        other => Err(InferenceError::NotSupported(format!(
-            "cloud embedding not yet supported (provider: {}). See #2171",
-            other
-        ))),
+        #[cfg(not(feature = "local"))]
+        ProviderKind::Local => Err(InferenceError::NotSupported(
+            "local provider requires the 'local' feature".to_string(),
+        )),
+
+        ProviderKind::Anthropic => Err(InferenceError::NotSupported(
+            "Anthropic does not offer an embedding API".to_string(),
+        )),
+
+        #[cfg(any(feature = "openai", feature = "google"))]
+        cloud_provider => {
+            let env_var = api_key_env_var(cloud_provider);
+            let api_key = std::env::var(env_var).map_err(|_| {
+                InferenceError::Provider(format!(
+                    "{} not set (required for {}:{})",
+                    env_var, cloud_provider, model
+                ))
+            })?;
+            Ok(Box::new(CloudEmbeddingEngine::new(
+                cloud_provider,
+                api_key,
+                model,
+            )?))
+        }
+
+        #[cfg(not(any(feature = "openai", feature = "google")))]
+        other => {
+            let _ = model;
+            Err(InferenceError::NotSupported(format!(
+                "cloud embedding requires 'openai' or 'google' feature (provider: {other})"
+            )))
+        }
     }
 }
 
@@ -735,14 +778,72 @@ string ::= "\"" [a-zA-Z]+ "\""
         );
     }
 
-    #[cfg(feature = "local")]
+    #[cfg(feature = "openai")]
     #[test]
-    fn trait_load_embedder_cloud_not_supported() {
-        // Cloud embedding is not supported yet (#2171)
+    fn load_embedder_openai_constructs_with_api_key() {
+        std::env::set_var("OPENAI_API_KEY", "sk-test-embed-key");
+        let result = load_embedder("openai:text-embedding-3-small");
+        std::env::remove_var("OPENAI_API_KEY");
+        assert!(
+            result.is_ok(),
+            "load_embedder should succeed for OpenAI: {:?}",
+            result.err()
+        );
+        let engine = result.unwrap();
+        assert!(engine.supports_embed());
+        assert!(!engine.supports_generate());
+    }
+
+    #[cfg(feature = "openai")]
+    #[test]
+    fn load_embedder_openai_missing_api_key() {
+        std::env::remove_var("OPENAI_API_KEY");
         let err = load_embedder("openai:text-embedding-3-small").unwrap_err();
         assert!(
-            err.to_string().contains("not yet supported"),
-            "cloud embedder should fail: {err}"
+            err.to_string().contains("OPENAI_API_KEY"),
+            "error should mention env var: {err}"
+        );
+    }
+
+    #[cfg(feature = "google")]
+    #[test]
+    fn load_embedder_google_constructs_with_api_key() {
+        std::env::set_var("GOOGLE_API_KEY", "AIza-test-embed-key");
+        let result = load_embedder("google:text-embedding-004");
+        std::env::remove_var("GOOGLE_API_KEY");
+        assert!(
+            result.is_ok(),
+            "load_embedder should succeed for Google: {:?}",
+            result.err()
+        );
+        let engine = result.unwrap();
+        assert!(engine.supports_embed());
+    }
+
+    #[cfg(feature = "google")]
+    #[test]
+    fn load_embedder_google_missing_api_key() {
+        std::env::remove_var("GOOGLE_API_KEY");
+        let err = load_embedder("google:text-embedding-004").unwrap_err();
+        assert!(
+            err.to_string().contains("GOOGLE_API_KEY"),
+            "error should mention env var: {err}"
+        );
+    }
+
+    #[cfg(feature = "anthropic")]
+    #[test]
+    fn load_embedder_anthropic_returns_not_supported() {
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
+        let err = load_embedder("anthropic:some-model").unwrap_err();
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        assert!(
+            err.to_string().contains("Anthropic"),
+            "error should mention Anthropic: {err}"
+        );
+        assert!(
+            matches!(err, InferenceError::NotSupported(_)),
+            "should be NotSupported: {err}"
         );
     }
 
