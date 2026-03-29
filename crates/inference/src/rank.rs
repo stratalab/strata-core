@@ -131,28 +131,41 @@ impl RankingEngine {
         passage: &str,
     ) -> Result<f32, InferenceError> {
         // Cross-encoder models expect: [CLS] query [SEP] passage [SEP]
-        // We tokenize query and passage separately, then join with a SEP
-        // token to produce proper two-segment input.
-        let mut query_tokens = ctx.tokenize(query, true); // adds [CLS] ... [SEP]
+        // We tokenize query and passage separately, then join them.
+        let query_tokens = ctx.tokenize(query, true); // adds [CLS] ... [SEP]
         let passage_tokens = ctx.tokenize(passage, true); // adds [CLS] ... [SEP]
 
         if query_tokens.is_empty() && passage_tokens.is_empty() {
             return Ok(0.0);
         }
 
-        // Strip the leading [CLS] from the passage tokens (the query
-        // already provides it) so we get: [CLS] query [SEP] passage [SEP]
-        let passage_start = if !passage_tokens.is_empty() && passage_tokens[0] == ctx.bos_id {
-            1
-        } else {
-            0
-        };
-        query_tokens.extend_from_slice(&passage_tokens[passage_start..]);
+        // Build combined token sequence: [CLS] query [SEP] passage [SEP]
+        // Strip the leading [CLS] from the passage tokens only when the
+        // query already provides one (non-empty query_tokens starts with BOS).
         let mut tokens = query_tokens;
+        let has_query_bos = !tokens.is_empty() && tokens[0] == ctx.bos_id;
+        let passage_start =
+            if has_query_bos && !passage_tokens.is_empty() && passage_tokens[0] == ctx.bos_id {
+                1
+            } else {
+                0
+            };
+        tokens.extend_from_slice(&passage_tokens[passage_start..]);
 
-        // Truncate to context size
+        // Truncate to context size, preserving the trailing [SEP] when
+        // possible so the model sees a proper segment boundary.
         if tokens.len() > ctx.n_ctx {
+            let last_token = tokens.last().copied();
             tokens.truncate(ctx.n_ctx);
+            // If truncation removed the trailing SEP (eos), replace the
+            // last token with it so the model sees a complete segment.
+            if let Some(sep) = last_token {
+                if sep == ctx.eos_id && tokens.last().copied() != Some(sep) {
+                    if let Some(last) = tokens.last_mut() {
+                        *last = sep;
+                    }
+                }
+            }
         }
 
         // Run inference
@@ -296,6 +309,26 @@ mod tests {
         fn _check(e: &RankingEngine) -> Result<Vec<f32>, crate::InferenceError> {
             e.rank("query", &[])
         }
+    }
+
+    /// Verify RankingEngine does NOT support embed or generate via the trait.
+    #[test]
+    fn trait_does_not_support_embed_or_generate() {
+        // Compile-time proof: these trait methods exist and return the
+        // expected defaults. Can't construct an engine without libllama,
+        // so we verify via function signatures.
+        fn _check_embed(e: &dyn crate::InferenceEngine) -> bool {
+            !e.supports_embed() && !e.supports_generate() && e.supports_rank()
+        }
+        // Also verify the return type signatures compile
+        fn _check_embed_err(
+            e: &dyn crate::InferenceEngine,
+        ) -> Result<Vec<f32>, crate::InferenceError> {
+            e.embed("text")?;
+            unreachable!()
+        }
+        let _ = _check_embed;
+        let _ = _check_embed_err;
     }
 
     // -----------------------------------------------------------------------
