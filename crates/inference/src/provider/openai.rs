@@ -104,8 +104,14 @@ pub(crate) fn build_request_json(model: &str, request: &GenerateRequest) -> Stri
         obj["stop"] = serde_json::json!(request.stop_sequences);
     }
 
+    // Enable JSON mode when grammar is specified
+    if request.grammar.is_some() {
+        obj["response_format"] = serde_json::json!({"type": "json_object"});
+    }
+
     // top_k: silently ignored (not supported by OpenAI)
     // stop_tokens: silently ignored (token-level, local only)
+    // grammar: mapped to response_format above (GBNF string itself is not sent)
 
     obj.to_string()
 }
@@ -604,5 +610,30 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         assert!(json.get("stop_tokens").is_none());
+    }
+
+    #[test]
+    fn request_json_grammar_enables_json_mode() {
+        let req = GenerateRequest {
+            prompt: "test".into(),
+            grammar: Some("root ::= \"{\" ... \"}\"".into()),
+            ..Default::default()
+        };
+        let json_str = build_request_json("gpt-4", &req);
+        let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(json["response_format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn request_json_no_grammar_no_response_format() {
+        let req = GenerateRequest {
+            prompt: "test".into(),
+            ..Default::default()
+        };
+        let json_str = build_request_json("gpt-4", &req);
+        let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert!(json.get("response_format").is_none());
     }
 }

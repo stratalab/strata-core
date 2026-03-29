@@ -72,7 +72,7 @@ impl LocalProvider {
         self.ctx.clear_memory();
 
         // 4. Build sampler chain
-        let sampler = self.build_sampler(request);
+        let sampler = self.build_sampler(request)?;
 
         // 5. Prefill: decode all prompt tokens at once
         let batch = self.ctx.api.batch_get_one(&mut prompt_tokens);
@@ -146,11 +146,24 @@ impl LocalProvider {
 
     /// Build a llama.cpp sampler chain from request parameters.
     ///
-    /// - `temperature <= 0.0` → greedy (argmax)
-    /// - `temperature > 0.0` → optional top_k + optional top_p + temp + dist(seed)
-    fn build_sampler(&self, request: &GenerateRequest) -> LlamaSampler {
+    /// - Grammar constraint first (masks invalid tokens)
+    /// - Then sampling strategy: greedy or top_k + top_p + temp + dist
+    fn build_sampler(
+        &self,
+        request: &GenerateRequest,
+    ) -> Result<LlamaSampler, crate::InferenceError> {
         let chain_params = self.ctx.api.sampler_chain_default_params();
         let chain = self.ctx.api.sampler_chain_init(chain_params);
+
+        // Grammar constraint first — masks tokens that violate the grammar
+        if let Some(grammar) = &request.grammar {
+            let grammar_sampler = self
+                .ctx
+                .api
+                .sampler_init_grammar(self.ctx.vocab, grammar, "root")
+                .map_err(|e| crate::InferenceError::LlamaCpp(e))?;
+            self.ctx.api.sampler_chain_add(chain, grammar_sampler);
+        }
 
         if request.temperature <= 0.0 {
             // Greedy sampling
@@ -179,7 +192,7 @@ impl LocalProvider {
                 .sampler_chain_add(chain, self.ctx.api.sampler_init_dist(seed));
         }
 
-        chain
+        Ok(chain)
     }
 
     /// Encode text to token IDs using the model's tokenizer.
