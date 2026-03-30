@@ -457,6 +457,18 @@ impl Database {
         self.storage.get_value_direct(key)
     }
 
+    /// Direct single-key read returning full VersionedValue metadata.
+    ///
+    /// Bypasses the transaction layer (no coordinator mutex, no read-set
+    /// tracking). Provides per-key read consistency; for multi-key snapshot
+    /// isolation use `Database::transaction()`.
+    pub fn get_versioned_direct(
+        &self,
+        key: &Key,
+    ) -> strata_core::StrataResult<Option<strata_core::VersionedValue>> {
+        self.storage.get_versioned_direct(key)
+    }
+
     /// Get version history for a key directly from storage.
     ///
     /// History reads bypass the transaction layer because they are

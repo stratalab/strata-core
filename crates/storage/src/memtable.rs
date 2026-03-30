@@ -77,6 +77,15 @@ impl MemtableEntry {
             timestamp: self.timestamp,
         }
     }
+
+    /// Convert to a `VersionedValue` by moving the value (avoids clone).
+    pub fn into_versioned(self, commit_id: u64) -> VersionedValue {
+        VersionedValue {
+            value: self.value,
+            version: Version::txn(commit_id),
+            timestamp: self.timestamp,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -115,6 +115,21 @@ impl KVStore {
         })
     }
 
+    /// Get a value with version metadata, bypassing the transaction layer.
+    ///
+    /// Provides per-key read consistency without coordinator mutex or
+    /// read-set tracking overhead. For multi-key snapshot isolation,
+    /// use `get_versioned()` which goes through `Database::transaction()`.
+    pub fn get_versioned_direct(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        key: &str,
+    ) -> StrataResult<Option<strata_core::VersionedValue>> {
+        let storage_key = self.key_for(branch_id, space, key);
+        self.db.get_versioned_direct(&storage_key)
+    }
+
     /// Get full version history for a key.
     ///
     /// Returns `None` if the key doesn't exist. Index with `[0]` = latest,

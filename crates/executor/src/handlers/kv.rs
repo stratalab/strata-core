@@ -83,7 +83,7 @@ pub fn kv_put(
 pub fn kv_get(p: &Arc<Primitives>, branch: BranchId, space: String, key: String) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;
     convert_result(validate_key(&key))?;
-    let result = convert_result(p.kv.get_versioned(&branch_id, &space, &key))
+    let result = convert_result(p.kv.get_versioned_direct(&branch_id, &space, &key))
         .map_err(|e| enrich_kv_error(p, &branch_id, &space, e))?;
     Ok(Output::MaybeVersioned(result.map(to_versioned_value)))
 }

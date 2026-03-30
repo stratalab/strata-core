@@ -303,6 +303,54 @@ fn get_value_direct_nonexistent() {
 }
 
 #[test]
+fn get_versioned_direct_returns_latest() {
+    let store = SegmentedStore::new();
+    seed(&store, kv_key("k"), Value::Int(10), 1);
+    seed(&store, kv_key("k"), Value::Int(20), 2);
+    let vv = store.get_versioned_direct(&kv_key("k")).unwrap().unwrap();
+    assert_eq!(vv.value, Value::Int(20));
+    assert_eq!(vv.version, strata_core::Version::txn(2));
+}
+
+#[test]
+fn get_versioned_direct_skips_tombstone() {
+    let store = SegmentedStore::new();
+    seed(&store, kv_key("k"), Value::Int(10), 1);
+    store.delete_with_version(&kv_key("k"), 2).unwrap();
+    assert!(store.get_versioned_direct(&kv_key("k")).unwrap().is_none());
+}
+
+#[test]
+fn get_versioned_direct_nonexistent() {
+    let store = SegmentedStore::new();
+    assert!(store.get_versioned_direct(&kv_key("k")).unwrap().is_none());
+}
+
+#[test]
+fn get_versioned_direct_preserves_timestamp() {
+    let store = SegmentedStore::new();
+    seed(&store, kv_key("k"), Value::String("hello".into()), 5);
+    let vv = store.get_versioned_direct(&kv_key("k")).unwrap().unwrap();
+    assert_eq!(vv.value, Value::String("hello".into()));
+    assert_eq!(vv.version, strata_core::Version::txn(5));
+    // Timestamp should be non-zero (set by Memtable::put)
+    assert!(vv.timestamp > 0.into());
+}
+
+#[test]
+fn get_versioned_direct_moves_bytes_value() {
+    let store = SegmentedStore::new();
+    let data = vec![0xDE, 0xAD, 0xBE, 0xEF];
+    seed(&store, kv_key("bin"), Value::Bytes(data.clone()), 3);
+    let vv = store
+        .get_versioned_direct(&kv_key("bin"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(vv.value, Value::Bytes(data));
+    assert_eq!(vv.version, strata_core::Version::txn(3));
+}
+
+#[test]
 fn list_by_type_filters_correctly() {
     let store = SegmentedStore::new();
     let b = branch();
