@@ -261,14 +261,10 @@ where
     F: FnOnce(&T, &T) -> T,
 {
     match (base, overlay) {
-        (_, Some(o)) if overlay.is_some() => match base {
-            Some(b) => Some(merge_fn(b, o)),
-            None => Some(o.clone()),
-        },
+        (Some(b), Some(o)) => Some(merge_fn(b, o)),
+        (None, Some(o)) => Some(o.clone()),
         (Some(b), None) => Some(b.clone()),
         (None, None) => None,
-        // Covered by the first arm, but needed for exhaustiveness
-        (_, Some(o)) => Some(o.clone()),
     }
 }
 

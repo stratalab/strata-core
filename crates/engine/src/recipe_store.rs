@@ -150,4 +150,25 @@ mod tests {
         // Not visible on other branch
         assert!(get_recipe(&db, b2, "private").unwrap().is_none());
     }
+
+    #[test]
+    fn test_recipe_overwrite() {
+        let (_dir, db) = setup_db();
+        let bid = BranchId::new();
+
+        let v1 = Recipe {
+            version: Some(1),
+            ..Default::default()
+        };
+        let v2 = Recipe {
+            version: Some(2),
+            ..Default::default()
+        };
+
+        set_recipe(&db, bid, "test", &v1).unwrap();
+        set_recipe(&db, bid, "test", &v2).unwrap();
+
+        let loaded = get_recipe(&db, bid, "test").unwrap().unwrap();
+        assert_eq!(loaded.version, Some(2), "Last write should win");
+    }
 }
