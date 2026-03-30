@@ -993,10 +993,74 @@ impl EventLog {
 impl crate::search::Searchable for EventLog {
     fn search(
         &self,
-        _req: &crate::SearchRequest,
+        req: &crate::SearchRequest,
     ) -> strata_core::StrataResult<crate::SearchResponse> {
-        // Search is handled by the intelligence layer, not the primitive
-        Ok(crate::SearchResponse::empty())
+        use crate::search::{truncate_text, EntityRef, InvertedIndex, SearchHit, SearchStats};
+        use std::time::Instant;
+
+        let start = Instant::now();
+        let index = self.db.extension::<InvertedIndex>()?;
+
+        if !index.is_enabled() || index.total_docs() == 0 {
+            return Ok(crate::SearchResponse::empty());
+        }
+
+        let query_terms = crate::search::tokenize(&req.query);
+        let scorer = self.db.config().bm25_scorer();
+
+        let top_k = index.score_top_k(&query_terms, &req.branch_id, req.k, scorer.k1, scorer.b);
+
+        let hits: Vec<SearchHit> = top_k
+            .into_iter()
+            .filter_map(|scored| {
+                let entity_ref = index.resolve_doc_id(scored.doc_id)?;
+                // Only include Event results from this primitive
+                if let EntityRef::Event {
+                    ref branch_id,
+                    sequence,
+                } = entity_ref
+                {
+                    let snippet = self
+                        .get(branch_id, &req.space, sequence)
+                        .ok()
+                        .flatten()
+                        .map(|v| {
+                            let event = v.value();
+                            truncate_text(
+                                &format!(
+                                    "[{}] {}",
+                                    event.event_type,
+                                    serde_json::to_string(&event.payload).unwrap_or_default()
+                                ),
+                                100,
+                            )
+                        });
+                    Some(SearchHit {
+                        doc_ref: entity_ref,
+                        score: scored.score,
+                        rank: 0,
+                        snippet,
+                    })
+                } else {
+                    None
+                }
+            })
+            .enumerate()
+            .map(|(i, mut hit)| {
+                hit.rank = (i + 1) as u32;
+                hit
+            })
+            .collect();
+
+        let elapsed = start.elapsed().as_micros() as u64;
+        let mut stats = SearchStats::new(elapsed, hits.len());
+        stats = stats.with_index_used(true);
+
+        Ok(crate::SearchResponse {
+            hits,
+            truncated: false,
+            stats,
+        })
     }
 
     fn primitive_kind(&self) -> strata_core::PrimitiveType {
@@ -1740,5 +1804,124 @@ mod tests {
 
         // Only 2 events should be persisted
         assert_eq!(log.len(&branch_id, "default").unwrap(), 2);
+    }
+
+    // ========== EventLog::search() BM25 integration tests ==========
+
+    #[test]
+    fn test_event_search_bm25() {
+        use crate::search::Searchable;
+
+        let (_temp, db, log) = setup();
+        let branch_id = BranchId::new();
+
+        // Verify index is enabled
+        let index = db.extension::<crate::search::InvertedIndex>().unwrap();
+        assert!(index.is_enabled());
+
+        log.append(
+            &branch_id,
+            "default",
+            "user.login",
+            payload_with("user", Value::String("alice logged in successfully".into())),
+        )
+        .unwrap();
+        log.append(
+            &branch_id,
+            "default",
+            "user.logout",
+            payload_with("user", Value::String("bob logged out".into())),
+        )
+        .unwrap();
+        log.append(
+            &branch_id,
+            "default",
+            "system.error",
+            payload_with("msg", Value::String("disk full error detected".into())),
+        )
+        .unwrap();
+
+        let req = crate::SearchRequest::new(branch_id, "logged");
+        let response = log.search(&req).unwrap();
+
+        assert!(
+            !response.is_empty(),
+            "Should find events containing 'logged'"
+        );
+        assert!(response.stats.index_used);
+        // Both login and logout events contain "logged"
+        assert_eq!(response.len(), 2);
+        assert_eq!(response.hits[0].rank, 1);
+        assert_eq!(response.hits[1].rank, 2);
+    }
+
+    #[test]
+    fn test_event_search_type_boost() {
+        use crate::search::Searchable;
+
+        let (_temp, _db, log) = setup();
+        let branch_id = BranchId::new();
+
+        // Event type "error" should be findable via BM25
+        log.append(
+            &branch_id,
+            "default",
+            "error",
+            payload_with("msg", Value::String("something went wrong".into())),
+        )
+        .unwrap();
+        log.append(
+            &branch_id,
+            "default",
+            "info",
+            payload_with("msg", Value::String("all systems normal".into())),
+        )
+        .unwrap();
+
+        // Search for "error" — should match the event with type "error"
+        let req = crate::SearchRequest::new(branch_id, "error");
+        let response = log.search(&req).unwrap();
+
+        assert!(!response.is_empty(), "Should find event with type 'error'");
+        // Only the "error" event contains the term "error"
+        assert_eq!(response.len(), 1, "Only one event should match 'error'");
+        // The event with type "error" should be the top hit
+        if let crate::search::EntityRef::Event { sequence, .. } = &response.hits[0].doc_ref {
+            assert_eq!(*sequence, 0, "First event (type=error) should be top hit");
+        } else {
+            panic!("Expected EntityRef::Event");
+        }
+    }
+
+    #[test]
+    fn test_event_search_empty_index() {
+        use crate::search::Searchable;
+
+        let (_temp, _db, log) = setup();
+        let branch_id = BranchId::new();
+
+        let req = crate::SearchRequest::new(branch_id, "anything");
+        let response = log.search(&req).unwrap();
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn test_event_search_no_match() {
+        use crate::search::Searchable;
+
+        let (_temp, _db, log) = setup();
+        let branch_id = BranchId::new();
+
+        log.append(
+            &branch_id,
+            "default",
+            "ping",
+            payload_with("status", Value::String("ok".into())),
+        )
+        .unwrap();
+
+        let req = crate::SearchRequest::new(branch_id, "nonexistent");
+        let response = log.search(&req).unwrap();
+        assert!(response.is_empty());
     }
 }
