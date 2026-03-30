@@ -2861,6 +2861,7 @@ impl SegmentedStore {
     }
 
     /// Build a lazy `MergeIterator` over all sources in a branch.
+    #[allow(clippy::type_complexity)]
     ///
     /// Sources are added in read-path order (LSM-003): active memtable →
     /// frozen memtables (newest first) → L0-L6 segments → inherited COW layers.
@@ -2901,13 +2902,9 @@ impl SegmentedStore {
                 let flag = Arc::new(AtomicBool::new(false));
                 corruption_flags.push(Arc::clone(&flag));
                 sources.push(Box::new(
-                    OwnedSegmentIter::new_seek(
-                        Arc::clone(seg),
-                        start_key,
-                        prefix_bytes.clone(),
-                    )
-                    .with_corruption_flag(flag)
-                    .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se))),
+                    OwnedSegmentIter::new_seek(Arc::clone(seg), start_key, prefix_bytes.clone())
+                        .with_corruption_flag(flag)
+                        .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se))),
                 ));
             }
         }
@@ -2962,6 +2959,54 @@ impl SegmentedStore {
                 Some((key, entry.to_versioned(commit_id)))
             })
             .collect();
+        check_corruption(&flags)?;
+        Ok(results)
+    }
+
+    /// Scan entries starting from `start_key` within `prefix`, with optional limit.
+    ///
+    /// Uses the lazy merge pipeline with seek pushdown: sources start from
+    /// `start_key` (not the beginning of the prefix), and `.take(limit)` stops
+    /// iteration early. For `kv_scan(start, limit=10)` on 50K records, this
+    /// reduces work from O(N) to O(log N + limit).
+    pub fn scan_range(
+        &self,
+        prefix: &Key,
+        start_key: &Key,
+        max_version: u64,
+        limit: Option<usize>,
+    ) -> StrataResult<Vec<(Key, VersionedValue)>> {
+        let branch_id = prefix.namespace.branch_id;
+        let branch = match self.branches.get(&branch_id) {
+            Some(b) => b,
+            None => return Ok(Vec::new()),
+        };
+        Self::scan_range_from_branch(&branch, prefix, start_key, max_version, limit)
+    }
+
+    /// Bounded range scan with seek + limit pushdown.
+    fn scan_range_from_branch(
+        branch: &BranchState,
+        prefix: &Key,
+        start_key: &Key,
+        max_version: u64,
+        limit: Option<usize>,
+    ) -> StrataResult<Vec<(Key, VersionedValue)>> {
+        let (merge, flags) = Self::build_branch_merge_iter(branch, prefix, start_key)?;
+        let mvcc = MvccIterator::new(merge, max_version);
+        let filtered = mvcc
+            .filter_map(|(ik, entry)| {
+                if entry.is_tombstone || entry.is_expired() {
+                    return None;
+                }
+                let (key, commit_id) = ik.decode()?;
+                Some((key, entry.to_versioned(commit_id)))
+            })
+            .filter(|(key, _)| key >= start_key); // block seek imprecision
+        let results: Vec<_> = match limit {
+            Some(n) => filtered.take(n).collect(),
+            None => filtered.collect(),
+        };
         check_corruption(&flags)?;
         Ok(results)
     }

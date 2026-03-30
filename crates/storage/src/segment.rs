@@ -1157,7 +1157,7 @@ impl OwnedSegmentIter {
     pub fn corruption_detected(&self) -> bool {
         self.corruption_detected
             .as_ref()
-            .map_or(false, |f| f.load(std::sync::atomic::Ordering::Relaxed))
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
 
