@@ -23,7 +23,7 @@ pub fn embed(p: &Arc<Primitives>, text: String) -> Result<Output> {
             })?;
 
     let shared = state
-        .get_or_load(&model_dir, &model_name)
+        .get_or_load(&model_dir, &model_name, None)
         .map_err(|e| Error::Internal {
             reason: format!("Failed to load embedding model: {}", e),
             hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
@@ -53,7 +53,7 @@ pub fn embed_batch(p: &Arc<Primitives>, texts: Vec<String>) -> Result<Output> {
             })?;
 
     let shared = state
-        .get_or_load(&model_dir, &model_name)
+        .get_or_load(&model_dir, &model_name, None)
         .map_err(|e| Error::Internal {
             reason: format!("Failed to load embedding model: {}", e),
             hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),

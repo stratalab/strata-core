@@ -262,7 +262,8 @@ pub fn flush_embed_buffer(p: &Arc<Primitives>) {
     };
 
     let model_name = p.db.embed_model();
-    let shared = match embed_state.get_or_load(&model_dir, &model_name) {
+    let api_key = strata_intelligence::embed::resolve_api_key_for_model(&p.db, &model_name);
+    let shared = match embed_state.get_or_load(&model_dir, &model_name, api_key.as_deref()) {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!(target: "strata::embed", error = %e, "Failed to load embedding model");

@@ -58,6 +58,7 @@ impl EmbedModelState {
         &self,
         _model_dir: &std::path::Path,
         model_name: &str,
+        api_key: Option<&str>,
     ) -> Result<SharedEngine, String> {
         // Fast path: engine already loaded, healthy, and matches requested model.
         {
@@ -100,7 +101,7 @@ impl EmbedModelState {
         }
 
         // Attempt to load the model (handles both local and cloud providers).
-        match strata_inference::load_embedder(model_name) {
+        match strata_inference::load_embedder(model_name, api_key) {
             Ok(engine) => {
                 let shared: SharedEngine = Arc::new(Mutex::new(engine));
                 {
@@ -139,6 +140,27 @@ impl EmbedModelState {
     }
 }
 
+/// Resolve the API key for a model spec from the database config.
+///
+/// Reads `openai_api_key` or `google_api_key` from `StrataConfig` based on the
+/// provider prefix. Returns `None` for local models or if no key is configured.
+pub fn resolve_api_key_for_model(db: &strata_engine::Database, model_spec: &str) -> Option<String> {
+    let cfg = db.config();
+    if model_spec.starts_with("openai:") {
+        cfg.openai_api_key
+            .as_ref()
+            .filter(|k| !k.as_str().is_empty())
+            .map(|k| k.as_str().to_string())
+    } else if model_spec.starts_with("google:") {
+        cfg.google_api_key
+            .as_ref()
+            .filter(|k| !k.as_str().is_empty())
+            .map(|k| k.as_str().to_string())
+    } else {
+        None
+    }
+}
+
 /// Embed a query string using the cached embedding engine from the database.
 ///
 /// Uses the database's configured `embed_model` to choose the engine.
@@ -152,13 +174,15 @@ pub fn embed_query(db: &strata_engine::Database, text: &str) -> Option<Vec<f32>>
 /// Embed a query string using a specific model spec (e.g., `"openai:text-embedding-3-small"`).
 ///
 /// The model spec is passed to `strata_inference::load_embedder()` which handles
-/// both local GGUF models and cloud API providers.
+/// both local GGUF models and cloud API providers. For cloud providers, the API
+/// key is read from the database config (e.g., `openai_api_key`).
 pub fn embed_query_with_model(
     db: &strata_engine::Database,
     text: &str,
     model_spec: &str,
 ) -> Option<Vec<f32>> {
     let model_dir = db.model_dir();
+    let api_key = resolve_api_key_for_model(db, model_spec);
     let state = match db.extension::<EmbedModelState>() {
         Ok(s) => s,
         Err(e) => {
@@ -166,7 +190,7 @@ pub fn embed_query_with_model(
             return None;
         }
     };
-    let shared = match state.get_or_load(&model_dir, model_spec) {
+    let shared = match state.get_or_load(&model_dir, model_spec, api_key.as_deref()) {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!(target: "strata::hybrid", error = %e, "Failed to load embed model for hybrid search");
@@ -196,6 +220,7 @@ pub fn embed_batch_queries(db: &strata_engine::Database, texts: &[&str]) -> Vec<
     }
     let model_dir = db.model_dir();
     let model_name = db.embed_model();
+    let api_key = resolve_api_key_for_model(db, &model_name);
     let state = match db.extension::<EmbedModelState>() {
         Ok(s) => s,
         Err(e) => {
@@ -203,7 +228,7 @@ pub fn embed_batch_queries(db: &strata_engine::Database, texts: &[&str]) -> Vec<
             return vec![None; texts.len()];
         }
     };
-    let shared = match state.get_or_load(&model_dir, &model_name) {
+    let shared = match state.get_or_load(&model_dir, &model_name, api_key.as_deref()) {
         Ok(m) => m,
         Err(e) => {
             tracing::warn!(target: "strata::hybrid", error = %e, "Failed to load embed model for batch query embedding");
@@ -253,13 +278,13 @@ mod tests {
     #[test]
     fn test_get_or_load_returns_deterministic_result() {
         let state = EmbedModelState::default();
-        let result = state.get_or_load(Path::new("/nonexistent/path"), DEFAULT_MODEL);
+        let result = state.get_or_load(Path::new("/nonexistent/path"), DEFAULT_MODEL, None);
         // On CI without model files this will be Err; locally with model it may be Ok.
         // With retry semantics, the result may change between calls if one fails
         // and a later one retries. But for a consistent environment (same model
         // availability), calling with the same model name should yield the same
         // Ok/Err variant once the state stabilizes.
-        let result2 = state.get_or_load(Path::new("/different/path"), DEFAULT_MODEL);
+        let result2 = state.get_or_load(Path::new("/different/path"), DEFAULT_MODEL, None);
         assert_eq!(
             result.is_ok(),
             result2.is_ok(),
@@ -273,13 +298,13 @@ mod tests {
         // Exhaust all retries so the error is cached.
         let mut last_err = None;
         for _ in 0..MAX_RETRIES {
-            let r = state.get_or_load(Path::new("/nonexistent"), DEFAULT_MODEL);
+            let r = state.get_or_load(Path::new("/nonexistent"), DEFAULT_MODEL, None);
             if let Err(e) = r {
                 last_err = Some(e);
             }
         }
         // After MAX_RETRIES, additional calls should return the cached error.
-        let r_after = state.get_or_load(Path::new("/nonexistent"), DEFAULT_MODEL);
+        let r_after = state.get_or_load(Path::new("/nonexistent"), DEFAULT_MODEL, None);
         if let (Some(cached), Err(returned)) = (&last_err, &r_after) {
             assert_eq!(cached, returned, "cached error message must be identical");
             assert!(
@@ -295,7 +320,7 @@ mod tests {
     fn test_embedding_dim_none_after_failed_load() {
         let state = EmbedModelState::default();
         // Trigger a load attempt (may fail if model not installed).
-        let _ = state.get_or_load(Path::new("/nonexistent"), DEFAULT_MODEL);
+        let _ = state.get_or_load(Path::new("/nonexistent"), DEFAULT_MODEL, None);
         // If load failed, dim should still be None.
         if state
             .get_or_load(Path::new("/unused"), DEFAULT_MODEL)
@@ -311,7 +336,7 @@ mod tests {
     #[test]
     fn test_custom_model_name_in_error() {
         let state = EmbedModelState::default();
-        let result = state.get_or_load(Path::new("/nonexistent"), "nomic-embed");
+        let result = state.get_or_load(Path::new("/nonexistent"), "nomic-embed", None);
         // Whether OK or Err depends on model availability. If Err, the error
         // should mention the custom model name, not DEFAULT_MODEL.
         if let Err(e) = result {
@@ -330,8 +355,8 @@ mod tests {
         // both calls attempt loading with the same model name and should
         // converge to the same outcome in a consistent environment.
         let state = EmbedModelState::default();
-        let r1 = state.get_or_load(Path::new("/path/a"), DEFAULT_MODEL);
-        let r2 = state.get_or_load(Path::new("/path/b"), DEFAULT_MODEL);
+        let r1 = state.get_or_load(Path::new("/path/a"), DEFAULT_MODEL, None);
+        let r2 = state.get_or_load(Path::new("/path/b"), DEFAULT_MODEL, None);
         match (&r1, &r2) {
             (Ok(a), Ok(b)) => assert!(Arc::ptr_eq(a, b), "same Arc regardless of path"),
             (Err(_), Err(_)) => {
@@ -355,7 +380,7 @@ mod tests {
         // the engine being cached and error state being None.
         let state = EmbedModelState::default();
         // First, attempt a load (will fail on CI without model).
-        let r1 = state.get_or_load(Path::new("/nonexistent"), DEFAULT_MODEL);
+        let r1 = state.get_or_load(Path::new("/nonexistent"), DEFAULT_MODEL, None);
         if r1.is_ok() {
             // Model is available — verify engine is cached and error is clear.
             let err_guard = state.load_error.lock().unwrap_or_else(|e| e.into_inner());
@@ -375,7 +400,7 @@ mod tests {
             assert_eq!(*attempts, 1, "first failure should record 1 attempt");
             drop(err_guard);
             // A second call should retry (attempt count < MAX_RETRIES).
-            let r2 = state.get_or_load(Path::new("/nonexistent"), DEFAULT_MODEL);
+            let r2 = state.get_or_load(Path::new("/nonexistent"), DEFAULT_MODEL, None);
             if r2.is_err() {
                 let err_guard = state.load_error.lock().unwrap_or_else(|e| e.into_inner());
                 let (_, attempts) = err_guard.as_ref().expect("error should be tracked");
@@ -390,7 +415,7 @@ mod tests {
         // Exhaust all retries.
         let mut errors = Vec::new();
         for i in 0..MAX_RETRIES {
-            let r = state.get_or_load(Path::new("/nonexistent"), DEFAULT_MODEL);
+            let r = state.get_or_load(Path::new("/nonexistent"), DEFAULT_MODEL, None);
             if let Err(e) = r {
                 errors.push(e);
             } else {
@@ -406,7 +431,7 @@ mod tests {
         // without incrementing the attempt count.
         let cached_error = errors.last().unwrap().clone();
         for _ in 0..5 {
-            let r = state.get_or_load(Path::new("/nonexistent"), DEFAULT_MODEL);
+            let r = state.get_or_load(Path::new("/nonexistent"), DEFAULT_MODEL, None);
             assert!(r.is_err(), "should still be Err after retries exhausted");
             assert_eq!(
                 r.unwrap_err(),
@@ -463,11 +488,11 @@ mod tests {
 
         // Exhaust retries with a model name that definitely doesn't exist.
         for _ in 0..MAX_RETRIES {
-            let _ = state.get_or_load(Path::new("/nonexistent"), bogus_model);
+            let _ = state.get_or_load(Path::new("/nonexistent"), bogus_model, None);
         }
 
         // Confirm retries are exhausted — returns cached error.
-        let r = state.get_or_load(Path::new("/nonexistent"), bogus_model);
+        let r = state.get_or_load(Path::new("/nonexistent"), bogus_model, None);
         assert!(r.is_err(), "retries should be exhausted");
         let cached_err = r.unwrap_err();
 
@@ -483,7 +508,7 @@ mod tests {
         }
 
         // Should be able to retry now (not blocked by stale error state).
-        let r = state.get_or_load(Path::new("/nonexistent"), bogus_model);
+        let r = state.get_or_load(Path::new("/nonexistent"), bogus_model, None);
         assert!(r.is_err(), "bogus model should still fail");
         let fresh_err = r.unwrap_err();
 
