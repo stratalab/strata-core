@@ -333,6 +333,73 @@ pub(crate) struct BranchSnapshot {
     pub(crate) inherited_layers: Vec<InheritedLayer>,
 }
 
+/// Persistent, seekable iterator over a branch snapshot.
+///
+/// Analogous to RocksDB's `ArenaWrappedDBIter`. Supports multiple
+/// `seek()` + `next()` cycles without re-acquiring the DashMap guard.
+/// The [`BranchSnapshot`] pins memtables and segments for the iterator's
+/// lifetime.
+///
+/// Pipeline is rebuilt on each `seek()` — memtable entries collected
+/// (bounded by write_buffer_size from seek position), segments lazy
+/// via `OwnedSegmentIter`.
+pub struct StorageIterator {
+    snapshot: BranchSnapshot,
+    prefix: Key,
+    snapshot_version: u64,
+    pipeline: Option<Box<dyn Iterator<Item = (Key, VersionedValue)>>>,
+    corruption_flags: Vec<Arc<AtomicBool>>,
+}
+
+impl StorageIterator {
+    fn new(snapshot: BranchSnapshot, prefix: Key, snapshot_version: u64) -> Self {
+        Self {
+            snapshot,
+            prefix,
+            snapshot_version,
+            pipeline: None,
+            corruption_flags: Vec::new(),
+        }
+    }
+
+    /// Seek to first entry >= `target` within the prefix.
+    ///
+    /// Rebuilds the merge pipeline from the seek position. O(log N) per source.
+    /// Previous pipeline state is discarded.
+    pub fn seek(&mut self, target: &Key) -> StrataResult<()> {
+        let (merge, flags) =
+            SegmentedStore::build_snapshot_merge_iter(&self.snapshot, &self.prefix, target)?;
+        self.corruption_flags = flags;
+        let mvcc = MvccIterator::new(merge, self.snapshot_version);
+        let target_owned = target.clone();
+        self.pipeline = Some(Box::new(
+            mvcc.filter_map(|(ik, entry)| {
+                if entry.is_tombstone || entry.is_expired() {
+                    return None;
+                }
+                let (key, commit_id) = ik.decode()?;
+                Some((key, entry.to_versioned(commit_id)))
+            })
+            .filter(move |(key, _)| key >= &target_owned),
+        ));
+        Ok(())
+    }
+
+    /// Advance to the next live entry. O(log K) per call where K = source count.
+    ///
+    /// Returns `None` when exhausted. Call `check_corruption()` after iteration
+    /// to detect any segment data block corruption encountered during reads.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Option<(Key, VersionedValue)> {
+        self.pipeline.as_mut()?.next()
+    }
+
+    /// Check if any segment reported corruption during iteration.
+    pub fn check_corruption(&self) -> StrataResult<()> {
+        check_corruption(&self.corruption_flags)
+    }
+}
+
 /// Recompute cached level targets from the current segment version.
 fn refresh_level_targets(branch: &mut BranchState, max_base_bytes: u64) {
     let ver = branch.version.load();
@@ -3079,6 +3146,20 @@ impl SegmentedStore {
             segments: branch.version.load_full(),
             inherited_layers: branch.inherited_layers.clone(),
         })
+    }
+
+    /// Create a persistent [`StorageIterator`] for a branch.
+    ///
+    /// Captures a [`BranchSnapshot`] and returns an iterator that supports
+    /// `seek()` + `next()` cycles for cursor-based pagination.
+    pub fn new_storage_iterator(
+        &self,
+        branch_id: &BranchId,
+        prefix: Key,
+        snapshot_version: u64,
+    ) -> Option<StorageIterator> {
+        let snapshot = self.snapshot_branch(branch_id)?;
+        Some(StorageIterator::new(snapshot, prefix, snapshot_version))
     }
 
     /// Scan entries starting from `start_key` within `prefix`, with optional limit.

@@ -765,3 +765,121 @@ fn snapshot_branch_returns_none_for_missing() {
     let missing = BranchId::from_bytes([99; 16]);
     assert!(store.snapshot_branch(&missing).is_none());
 }
+
+// ===== StorageIterator tests =====
+
+#[test]
+fn storage_iterator_seek_next() {
+    let store = SegmentedStore::new();
+    for i in 0..10u64 {
+        seed(
+            &store,
+            kv_key(&format!("key_{:02}", i)),
+            Value::Int(i as i64),
+            i + 1,
+        );
+    }
+
+    let prefix = Key::new(ns(), TypeTag::KV, vec![]);
+    let mut iter = store
+        .new_storage_iterator(&branch(), prefix, u64::MAX)
+        .unwrap();
+
+    // Seek to key_05
+    iter.seek(&kv_key("key_05")).unwrap();
+    let mut keys = Vec::new();
+    while let Some((key, _)) = iter.next() {
+        keys.push(key.user_key_string().unwrap());
+    }
+    iter.check_corruption().unwrap();
+    assert_eq!(keys, vec!["key_05", "key_06", "key_07", "key_08", "key_09"]);
+}
+
+#[test]
+fn storage_iterator_reseek() {
+    let store = SegmentedStore::new();
+    for c in ['a', 'b', 'c', 'd', 'e'] {
+        let v = c as i64;
+        seed(&store, kv_key(&c.to_string()), Value::Int(v), v as u64);
+    }
+
+    let prefix = Key::new(ns(), TypeTag::KV, vec![]);
+    let mut iter = store
+        .new_storage_iterator(&branch(), prefix, u64::MAX)
+        .unwrap();
+
+    // First seek to "c", read 2
+    iter.seek(&kv_key("c")).unwrap();
+    let k1 = iter.next().unwrap().0.user_key_string().unwrap();
+    let k2 = iter.next().unwrap().0.user_key_string().unwrap();
+    assert_eq!(k1, "c");
+    assert_eq!(k2, "d");
+
+    // Re-seek to "a", should restart from beginning
+    iter.seek(&kv_key("a")).unwrap();
+    let k3 = iter.next().unwrap().0.user_key_string().unwrap();
+    assert_eq!(k3, "a");
+    iter.check_corruption().unwrap();
+}
+
+#[test]
+fn storage_iterator_seek_past_end() {
+    let store = SegmentedStore::new();
+    seed(&store, kv_key("a"), Value::Int(1), 1);
+    seed(&store, kv_key("b"), Value::Int(2), 2);
+
+    let prefix = Key::new(ns(), TypeTag::KV, vec![]);
+    let mut iter = store
+        .new_storage_iterator(&branch(), prefix, u64::MAX)
+        .unwrap();
+
+    iter.seek(&kv_key("z")).unwrap();
+    assert!(iter.next().is_none(), "seek past end should yield nothing");
+    iter.check_corruption().unwrap();
+}
+
+#[test]
+fn storage_iterator_pagination() {
+    let store = SegmentedStore::new();
+    // 15 keys: key_00 through key_14
+    for i in 0..15u64 {
+        seed(
+            &store,
+            kv_key(&format!("key_{:02}", i)),
+            Value::Int(i as i64),
+            i + 1,
+        );
+    }
+
+    let prefix = Key::new(ns(), TypeTag::KV, vec![]);
+    let mut iter = store
+        .new_storage_iterator(&branch(), prefix, u64::MAX)
+        .unwrap();
+
+    // Paginate: 5 pages of 3 entries
+    let mut all_keys = Vec::new();
+    let mut cursor = kv_key("");
+    for _ in 0..5 {
+        iter.seek(&cursor).unwrap();
+        let mut page = Vec::new();
+        for _ in 0..3 {
+            if let Some((key, _)) = iter.next() {
+                page.push(key);
+            }
+        }
+        if page.is_empty() {
+            break;
+        }
+        // Next cursor is one past the last key in this page.
+        // For simplicity, use the last key's user_key + "\0" as next cursor.
+        let last = page.last().unwrap();
+        let mut next_user_key = last.user_key.to_vec();
+        next_user_key.push(0);
+        cursor = Key::new_kv(ns(), next_user_key);
+        all_keys.extend(page.iter().filter_map(|k| k.user_key_string()));
+    }
+    iter.check_corruption().unwrap();
+    assert_eq!(all_keys.len(), 15, "should paginate through all 15 keys");
+    assert_eq!(all_keys[0], "key_00");
+    assert_eq!(all_keys[14], "key_14");
+}

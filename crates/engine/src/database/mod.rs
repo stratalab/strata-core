@@ -38,7 +38,7 @@ use std::time::Instant;
 use strata_core::types::{BranchId, Key};
 use strata_core::{StrataError, StrataResult, VersionedValue};
 use strata_durability::wal::{DurabilityMode, WalWriter};
-use strata_storage::SegmentedStore;
+use strata_storage::{SegmentedStore, StorageIterator};
 
 // ============================================================================
 // Persistence Mode (Storage/Durability Split)
@@ -508,6 +508,20 @@ impl Database {
     ) -> StrataResult<Vec<(Key, VersionedValue)>> {
         self.storage
             .scan_range(prefix, start_key, max_version, limit)
+    }
+
+    /// Create a persistent [`StorageIterator`] for cursor-based pagination.
+    ///
+    /// Captures a branch snapshot and returns an iterator supporting
+    /// `seek()` + `next()` cycles.
+    pub(crate) fn storage_iterator(
+        &self,
+        branch_id: &BranchId,
+        prefix: Key,
+        snapshot_version: u64,
+    ) -> Option<StorageIterator> {
+        self.storage
+            .new_storage_iterator(branch_id, prefix, snapshot_version)
     }
 
     /// Scan keys matching a prefix at or before the given timestamp.
