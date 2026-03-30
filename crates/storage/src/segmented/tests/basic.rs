@@ -727,3 +727,41 @@ fn count_prefix_with_key_filter() {
     let task_prefix = Key::new(ns(), TypeTag::KV, "task:".as_bytes().to_vec());
     assert_eq!(store.count_prefix(&task_prefix, u64::MAX).unwrap(), 1);
 }
+
+// ===== BranchSnapshot tests =====
+
+#[test]
+fn snapshot_survives_rotation() {
+    use crate::merge_iter::MvccIterator;
+
+    let store = SegmentedStore::new();
+    seed(&store, kv_key("a"), Value::Int(1), 1);
+    seed(&store, kv_key("b"), Value::Int(2), 2);
+    seed(&store, kv_key("c"), Value::Int(3), 3);
+
+    // Capture snapshot while keys are in active memtable
+    let snapshot = store.snapshot_branch(&branch()).unwrap();
+
+    // Rotate memtable and write new keys
+    store.rotate_memtable(&branch());
+    seed(&store, kv_key("d"), Value::Int(4), 4);
+
+    // Snapshot should still see original keys (a, b, c) but NOT d
+    let prefix = Key::new(ns(), TypeTag::KV, vec![]);
+    let (merge, flags) =
+        SegmentedStore::build_snapshot_merge_iter(&snapshot, &prefix, &prefix).unwrap();
+    let mvcc = MvccIterator::new(merge, 3); // snapshot at version 3
+    let count = mvcc
+        .filter(|(_, entry)| !entry.is_tombstone)
+        .filter(|(ik, _)| ik.decode().is_some())
+        .count();
+    super::check_corruption(&flags).unwrap();
+    assert_eq!(count, 3, "snapshot should see a, b, c");
+}
+
+#[test]
+fn snapshot_branch_returns_none_for_missing() {
+    let store = SegmentedStore::new();
+    let missing = BranchId::from_bytes([99; 16]);
+    assert!(store.snapshot_branch(&missing).is_none());
+}
