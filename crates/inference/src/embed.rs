@@ -364,6 +364,14 @@ impl crate::InferenceEngine for EmbeddingEngine {
     fn supports_embed(&self) -> bool {
         true
     }
+
+    fn embedding_dim(&self) -> usize {
+        EmbeddingEngine::embedding_dim(self)
+    }
+
+    fn is_healthy(&self) -> bool {
+        EmbeddingEngine::is_healthy(self)
+    }
 }
 
 // Compile-time verify Send + Sync.

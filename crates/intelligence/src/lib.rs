@@ -17,6 +17,8 @@ pub use strata_inference::EmbeddingEngine;
 #[cfg(feature = "embed")]
 pub use strata_inference::GenerationEngine;
 #[cfg(feature = "embed")]
+pub use strata_inference::InferenceEngine;
+#[cfg(feature = "embed")]
 pub use strata_inference::InferenceError;
 #[cfg(feature = "embed")]
 pub use strata_inference::ModelRegistry;

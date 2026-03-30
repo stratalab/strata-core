@@ -22,13 +22,14 @@ pub fn embed(p: &Arc<Primitives>, text: String) -> Result<Output> {
                 hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             })?;
 
-    let engine = state
+    let shared = state
         .get_or_load(&model_dir, &model_name)
         .map_err(|e| Error::Internal {
             reason: format!("Failed to load embedding model: {}", e),
             hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
         })?;
 
+    let engine = shared.lock().unwrap_or_else(|e| e.into_inner());
     let embedding = engine.embed(&text).map_err(|e| Error::Internal {
         reason: format!("Embedding failed: {}", e),
         hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
@@ -51,13 +52,14 @@ pub fn embed_batch(p: &Arc<Primitives>, texts: Vec<String>) -> Result<Output> {
                 hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             })?;
 
-    let engine = state
+    let shared = state
         .get_or_load(&model_dir, &model_name)
         .map_err(|e| Error::Internal {
             reason: format!("Failed to load embedding model: {}", e),
             hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
         })?;
 
+    let engine = shared.lock().unwrap_or_else(|e| e.into_inner());
     let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
     let embeddings = engine.embed_batch(&refs).map_err(|e| Error::Internal {
         reason: format!("Batch embedding failed: {}", e),

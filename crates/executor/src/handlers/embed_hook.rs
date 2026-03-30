@@ -262,7 +262,7 @@ pub fn flush_embed_buffer(p: &Arc<Primitives>) {
     };
 
     let model_name = p.db.embed_model();
-    let engine = match embed_state.get_or_load(&model_dir, &model_name) {
+    let shared = match embed_state.get_or_load(&model_dir, &model_name) {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!(target: "strata::embed", error = %e, "Failed to load embedding model");
@@ -274,6 +274,7 @@ pub fn flush_embed_buffer(p: &Arc<Primitives>) {
 
     // Compute all embeddings in one Rust call (back-to-back forward passes).
     let texts: Vec<&str> = batch.iter().map(|pe| pe.text.as_str()).collect();
+    let engine = shared.lock().unwrap_or_else(|e| e.into_inner());
     let embeddings = match engine.embed_batch(&texts) {
         Ok(e) => e,
         Err(e) => {
