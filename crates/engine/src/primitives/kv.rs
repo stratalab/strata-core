@@ -30,8 +30,9 @@ use std::sync::Arc;
 use strata_concurrency::TransactionContext;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
-use strata_core::StrataResult;
+use strata_core::{StrataError, StrataResult};
 use strata_core::{Version, VersionedHistory};
+use strata_storage::StorageIterator;
 
 /// Global cache of `Arc<Namespace>` per (branch, space) pair. One heap allocation
 /// per unique combination, ever — subsequent calls return `Arc::clone()`.
@@ -303,6 +304,20 @@ impl KVStore {
             .into_iter()
             .filter_map(|(key, vv)| key.user_key_string().map(|k| (k, vv.value)))
             .collect())
+    }
+
+    /// Create a persistent iterator for cursor-based pagination.
+    ///
+    /// Returns a [`StorageIterator`] positioned at the branch. Call `seek()`
+    /// to position, then `next()` to advance. The iterator holds a snapshot
+    /// of the branch — memtable rotation and compaction don't affect it.
+    pub fn scan_iter(&self, branch_id: &BranchId, space: &str) -> StrataResult<StorageIterator> {
+        let ns = self.namespace_for(branch_id, space);
+        let prefix = Key::new_kv(ns, "");
+        let snapshot_version = self.db.current_version();
+        self.db
+            .storage_iterator(branch_id, prefix, snapshot_version)
+            .ok_or_else(|| StrataError::branch_not_found(*branch_id))
     }
 
     /// Count keys matching an optional prefix without materializing entries.
