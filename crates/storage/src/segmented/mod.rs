@@ -180,7 +180,7 @@ pub struct OwnEntry {
 ///
 /// Wrapped in `ArcSwap` so that segment list mutations (flush, compaction)
 /// are atomic single-pointer swaps — readers never see a partial state.
-struct SegmentVersion {
+pub(crate) struct SegmentVersion {
     /// Per-level segment lists.
     /// - `levels[0]` (L0): overlapping, newest first.
     /// - `levels[1..=6]` (L1–L6): non-overlapping, sorted by key range.
@@ -237,7 +237,8 @@ enum LayerStatus {
 /// the child holds an `Arc<SegmentVersion>` pointing at the parent's
 /// segments at fork time. Reads fall through to these inherited segments
 /// until materialization copies them into the child's own segments.
-struct InheritedLayer {
+#[derive(Clone)]
+pub(crate) struct InheritedLayer {
     /// Branch ID of the source (parent) branch.
     source_branch_id: BranchId,
     /// Version counter of the source branch at fork time.
@@ -255,7 +256,9 @@ struct InheritedLayer {
 /// Per-branch state: active memtable, frozen memtables, and on-disk segments.
 struct BranchState {
     /// Writable memtable — all new writes go here.
-    active: Memtable,
+    /// Wrapped in `Arc` to enable `BranchSnapshot` capture without holding
+    /// the DashMap guard (analogous to RocksDB's SuperVersion pinning).
+    active: Arc<Memtable>,
     /// Frozen memtables, newest first.  Immutable, pending flush.
     frozen: Vec<Arc<Memtable>>,
     /// On-disk segment version (atomic swap for lock-free reads).
@@ -282,7 +285,7 @@ struct BranchState {
 impl BranchState {
     fn new() -> Self {
         Self {
-            active: Memtable::new(0),
+            active: Arc::new(Memtable::new(0)),
             frozen: Vec::new(),
             version: ArcSwap::from_pointee(SegmentVersion::new()),
             min_timestamp: AtomicU64::new(u64::MAX),
@@ -309,6 +312,25 @@ impl BranchState {
     fn track_version(&self, version: u64) {
         self.max_version.fetch_max(version, Ordering::Release);
     }
+}
+
+/// Captured state of a branch at a point in time.
+///
+/// Holds `Arc` references to prevent memtable rotation and compaction from
+/// invalidating the data. Analogous to RocksDB's `SuperVersion`.
+///
+/// Captured under a short DashMap read guard via `Arc` clones. The guard
+/// is released immediately — the snapshot remains valid independently.
+#[allow(dead_code)]
+pub(crate) struct BranchSnapshot {
+    /// Active memtable at capture time.
+    pub(crate) active: Arc<Memtable>,
+    /// Frozen memtables at capture time (newest first).
+    pub(crate) frozen: Vec<Arc<Memtable>>,
+    /// Segment version at capture time.
+    pub(crate) segments: Arc<SegmentVersion>,
+    /// Inherited COW layers at capture time.
+    pub(crate) inherited_layers: Vec<InheritedLayer>,
 }
 
 /// Recompute cached level targets from the current segment version.
@@ -1169,9 +1191,9 @@ impl SegmentedStore {
             // Inline-rotate: move straggler writes from active to frozen.
             if !source.active.is_empty() {
                 let next_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
-                let old = std::mem::replace(&mut source.active, Memtable::new(next_id));
+                let old = std::mem::replace(&mut source.active, Arc::new(Memtable::new(next_id)));
                 old.freeze();
-                source.frozen.insert(0, Arc::new(old));
+                source.frozen.insert(0, old);
                 self.total_frozen_count.fetch_add(1, Ordering::Relaxed);
             }
 
@@ -2102,9 +2124,9 @@ impl SegmentedStore {
             None => return false,
         };
         let next_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
-        let old = std::mem::replace(&mut branch.active, Memtable::new(next_id));
+        let old = std::mem::replace(&mut branch.active, Arc::new(Memtable::new(next_id)));
         old.freeze();
-        branch.frozen.insert(0, Arc::new(old));
+        branch.frozen.insert(0, old);
         self.total_frozen_count.fetch_add(1, Ordering::Relaxed);
         true
     }
@@ -2592,9 +2614,9 @@ impl SegmentedStore {
             }
 
             let next_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
-            let old = std::mem::replace(&mut branch.active, Memtable::new(next_id));
+            let old = std::mem::replace(&mut branch.active, Arc::new(Memtable::new(next_id)));
             old.freeze();
-            branch.frozen.insert(0, Arc::new(old));
+            branch.frozen.insert(0, old);
             self.total_frozen_count.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -2942,6 +2964,86 @@ impl SegmentedStore {
         Ok((MergeIterator::new(sources), corruption_flags))
     }
 
+    /// Build an owned `MergeIterator` from a [`BranchSnapshot`].
+    ///
+    /// Unlike [`build_branch_merge_iter`] (which borrows from `&BranchState`),
+    /// this collects memtable entries into owned `Vec`s so the resulting iterator
+    /// has no lifetime ties to the DashMap guard. Used by `StorageIterator` (Epic 5).
+    ///
+    /// Memtable collection is bounded by write_buffer_size from the seek position.
+    /// Segment iteration is lazy via `OwnedSegmentIter`.
+    #[allow(clippy::type_complexity, dead_code)]
+    pub(crate) fn build_snapshot_merge_iter(
+        snapshot: &BranchSnapshot,
+        prefix: &Key,
+        start_key: &Key,
+    ) -> StrataResult<(
+        MergeIterator<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>>,
+        Vec<Arc<AtomicBool>>,
+    )> {
+        let mut sources: Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> = Vec::new();
+        let mut corruption_flags: Vec<Arc<AtomicBool>> = Vec::new();
+
+        // Active memtable — collected (owned)
+        let active_entries: Vec<_> = snapshot.active.iter_range(start_key, prefix).collect();
+        sources.push(Box::new(active_entries.into_iter()));
+
+        // Frozen memtables — collected (owned)
+        for frozen in &snapshot.frozen {
+            let entries: Vec<_> = frozen.iter_range(start_key, prefix).collect();
+            sources.push(Box::new(entries.into_iter()));
+        }
+
+        // Segments — lazy via OwnedSegmentIter
+        let prefix_bytes = encode_typed_key_prefix(prefix);
+        for level in &snapshot.segments.levels {
+            for seg in level {
+                if !segment_overlaps_prefix(seg, &prefix_bytes) {
+                    continue;
+                }
+                let flag = Arc::new(AtomicBool::new(false));
+                corruption_flags.push(Arc::clone(&flag));
+                sources.push(Box::new(
+                    OwnedSegmentIter::new_seek(Arc::clone(seg), start_key, prefix_bytes.clone())
+                        .with_corruption_flag(flag)
+                        .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se))),
+                ));
+            }
+        }
+
+        // Inherited layers
+        for layer in &snapshot.inherited_layers {
+            if layer.status == LayerStatus::Materialized {
+                continue;
+            }
+            let src_start = start_key.with_branch_id(layer.source_branch_id);
+            let src_prefix = prefix.with_branch_id(layer.source_branch_id);
+            let src_prefix_bytes = encode_typed_key_prefix(&src_prefix);
+            for level in &layer.segments.levels {
+                for seg in level {
+                    if !segment_overlaps_prefix(seg, &src_prefix_bytes) {
+                        continue;
+                    }
+                    let flag = Arc::new(AtomicBool::new(false));
+                    corruption_flags.push(Arc::clone(&flag));
+                    sources.push(Box::new(RewritingIterator::new(
+                        OwnedSegmentIter::new_seek(
+                            Arc::clone(seg),
+                            &src_start,
+                            src_prefix_bytes.clone(),
+                        )
+                        .with_corruption_flag(flag)
+                        .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se))),
+                        prefix.namespace.branch_id,
+                        layer.fork_version,
+                    )));
+                }
+            }
+        }
+
+        Ok((MergeIterator::new(sources), corruption_flags))
+    }
+
     /// Build an MVCC-deduplicated prefix scan across all sources in a branch.
     fn scan_prefix_from_branch(
         branch: &BranchState,
@@ -2961,6 +3063,22 @@ impl SegmentedStore {
             .collect();
         check_corruption(&flags)?;
         Ok(results)
+    }
+
+    /// Capture a point-in-time snapshot of a branch.
+    ///
+    /// The DashMap read guard is held only for the duration of the `Arc` clones
+    /// (nanoseconds). The returned snapshot is valid independently — memtable
+    /// rotation and compaction create new versions without invalidating it.
+    #[allow(dead_code)]
+    pub(crate) fn snapshot_branch(&self, branch_id: &BranchId) -> Option<BranchSnapshot> {
+        let branch = self.branches.get(branch_id)?;
+        Some(BranchSnapshot {
+            active: Arc::clone(&branch.active),
+            frozen: branch.frozen.clone(),
+            segments: branch.version.load_full(),
+            inherited_layers: branch.inherited_layers.clone(),
+        })
     }
 
     /// Scan entries starting from `start_key` within `prefix`, with optional limit.
