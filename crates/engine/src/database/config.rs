@@ -406,9 +406,9 @@ auto_embed = false
 # Increase for bulk ingestion, decrease for interactive use.
 # embed_batch_size = 512
 
-# BM25 scoring parameters (defaults: k1=0.9, b=0.4 per Anserini/Pyserini).
-# Increase k1 for more term-frequency sensitivity, increase b for more
-# length normalization. Lucene defaults are k1=1.2, b=0.75.
+# DEPRECATED: BM25 parameters have moved to the recipe system.
+# Use `RECIPE SET '{"retrieve":{"bm25":{"k1":0.9,"b":0.4}}}'` instead.
+# These values are auto-migrated to the default recipe on first open.
 # bm25_k1 = 0.9
 # bm25_b = 0.4
 

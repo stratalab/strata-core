@@ -218,6 +218,9 @@ impl Database {
         }
         db.set_subsystems(vec![Box::new(crate::search::SearchSubsystem)]);
 
+        // Migrate BM25/embed config from strata.toml to recipe (one-time, idempotent).
+        migrate_config_to_recipe(&db)?;
+
         Ok(db)
     }
 
@@ -678,5 +681,157 @@ impl Database {
         index.enable();
 
         Ok(db)
+    }
+}
+
+// ============================================================================
+// Config-to-Recipe Migration
+// ============================================================================
+
+/// Migrate BM25 and embed_model settings from strata.toml to the default recipe.
+///
+/// Runs on every database open but is idempotent: if a default recipe already
+/// exists (from a prior migration or user action), this is a no-op.
+fn migrate_config_to_recipe(db: &Arc<super::Database>) -> strata_core::StrataResult<()> {
+    use crate::recipe_store;
+    use crate::search::recipe::{builtin_defaults, ModelsConfig};
+    use strata_core::types::BranchId;
+
+    let default_branch = BranchId::from_bytes([0u8; 16]);
+
+    // Skip if recipe already exists (already migrated or user-created)
+    if recipe_store::get_recipe(db, default_branch, "default")?.is_some() {
+        return Ok(());
+    }
+
+    let cfg = db.config();
+    let mut recipe = builtin_defaults();
+
+    // Override BM25 parameters if configured in strata.toml
+    if let Some(k1) = cfg.bm25_k1 {
+        recipe.retrieve.as_mut().unwrap().bm25.as_mut().unwrap().k1 = Some(k1);
+    }
+    if let Some(b) = cfg.bm25_b {
+        recipe.retrieve.as_mut().unwrap().bm25.as_mut().unwrap().b = Some(b);
+    }
+
+    // Override embed model if non-default
+    if cfg.embed_model != "miniLM" {
+        recipe.models = Some(ModelsConfig {
+            embed: Some(format!("local:{}", cfg.embed_model)),
+            ..Default::default()
+        });
+    }
+
+    recipe_store::set_recipe(db, default_branch, "default", &recipe)?;
+    info!(target: "strata::config", "Migrated search config from strata.toml to default recipe");
+    Ok(())
+}
+
+// ============================================================================
+// Migration Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::recipe_store;
+    use crate::search::recipe::builtin_defaults;
+    use crate::Database;
+    use strata_core::types::BranchId;
+
+    fn default_branch() -> BranchId {
+        BranchId::from_bytes([0u8; 16])
+    }
+
+    #[test]
+    fn test_migrate_config_creates_recipe_from_config() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut cfg = super::super::config::StrataConfig::default();
+        cfg.bm25_k1 = Some(1.2);
+        cfg.bm25_b = Some(0.7);
+
+        let db = Database::open_with_config(dir.path(), cfg).unwrap();
+
+        let recipe = recipe_store::get_recipe(&db, default_branch(), "default")
+            .unwrap()
+            .expect("Recipe should exist after migration");
+        let bm25 = recipe.retrieve.unwrap().bm25.unwrap();
+        assert_eq!(bm25.k1, Some(1.2));
+        assert_eq!(bm25.b, Some(0.7));
+    }
+
+    #[test]
+    fn test_migrate_config_skips_when_recipe_exists() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut cfg = super::super::config::StrataConfig::default();
+        cfg.bm25_k1 = Some(1.2);
+
+        let db = Database::open_with_config(dir.path(), cfg).unwrap();
+
+        // Manually overwrite recipe with a different value
+        let mut custom = builtin_defaults();
+        custom.retrieve.as_mut().unwrap().bm25.as_mut().unwrap().k1 = Some(99.0);
+        recipe_store::set_recipe(&db, default_branch(), "default", &custom).unwrap();
+        drop(db);
+
+        // Re-open — migration should NOT overwrite the existing recipe
+        let db2 = Database::open(dir.path()).unwrap();
+        let recipe = recipe_store::get_recipe(&db2, default_branch(), "default")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recipe.retrieve.unwrap().bm25.unwrap().k1,
+            Some(99.0),
+            "Migration must not overwrite existing recipe"
+        );
+    }
+
+    #[test]
+    fn test_migrate_config_default_uses_builtin_defaults() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+
+        let recipe = recipe_store::get_recipe(&db, default_branch(), "default")
+            .unwrap()
+            .expect("Default recipe should be auto-created");
+        let bm25 = recipe.retrieve.unwrap().bm25.unwrap();
+        assert_eq!(bm25.k1, Some(0.9));
+        assert_eq!(bm25.b, Some(0.4));
+    }
+
+    #[test]
+    fn test_migrate_config_custom_embed_model() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut cfg = super::super::config::StrataConfig::default();
+        cfg.embed_model = "nomic-embed".to_string();
+
+        let db = Database::open_with_config(dir.path(), cfg).unwrap();
+
+        let recipe = recipe_store::get_recipe(&db, default_branch(), "default")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recipe.models.unwrap().embed,
+            Some("local:nomic-embed".to_string())
+        );
+    }
+
+    #[test]
+    fn test_migrate_config_idempotent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+
+        let r1 = recipe_store::get_recipe(&db, default_branch(), "default")
+            .unwrap()
+            .unwrap();
+
+        // Call migration again — should be no-op
+        migrate_config_to_recipe(&db).unwrap();
+
+        let r2 = recipe_store::get_recipe(&db, default_branch(), "default")
+            .unwrap()
+            .unwrap();
+        assert_eq!(r1, r2);
     }
 }
