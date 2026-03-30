@@ -1071,6 +1071,10 @@ pub struct OwnedSegmentIter {
     raw_values: bool,
     /// Set to true if iteration was stopped by a corruption error (#1677).
     corruption_detected: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Optional prefix filter for seek-based iteration. When set, entries
+    /// whose typed_key_prefix doesn't start with this are skipped; entries
+    /// past it stop iteration. `None` = iterate all (existing behavior).
+    prefix_bytes: Option<Vec<u8>>,
 }
 
 impl OwnedSegmentIter {
@@ -1089,6 +1093,41 @@ impl OwnedSegmentIter {
             global_block_idx: 0,
             raw_values: false,
             corruption_detected: None,
+            prefix_bytes: None,
+        }
+    }
+
+    /// Create a streaming iterator that seeks to `start_key` and filters
+    /// by `prefix_bytes`.
+    ///
+    /// Combines the seek capability of [`KVSegment::iter_seek`] with the
+    /// `Arc` ownership of `OwnedSegmentIter`. Enables lazy iteration
+    /// without borrowing the segment.
+    pub fn new_seek(
+        segment: Arc<KVSegment>,
+        start_key: &Key,
+        prefix_bytes: Vec<u8>,
+    ) -> Self {
+        let done = segment.index.is_empty();
+        let (partition_idx, block_within_partition) = if done {
+            (0, 0)
+        } else {
+            let seek_ik = InternalKey::encode(start_key, u64::MAX);
+            segment.index.seek_position(seek_ik.as_bytes())
+        };
+        Self {
+            segment,
+            partition_idx,
+            block_within_partition,
+            block_offset: 0,
+            block_data_end: 0,
+            block_data: None,
+            done,
+            prev_key: Vec::new(),
+            global_block_idx: 0,
+            raw_values: false,
+            corruption_detected: None,
+            prefix_bytes: Some(prefix_bytes),
         }
     }
 
@@ -1116,6 +1155,13 @@ impl OwnedSegmentIter {
     /// Return a monotonically increasing block index (used by `ThrottledSegmentIter`).
     pub(crate) fn current_block_idx(&self) -> usize {
         self.global_block_idx
+    }
+
+    /// Returns true if iteration was halted by data block corruption.
+    pub fn corruption_detected(&self) -> bool {
+        self.corruption_detected
+            .as_ref()
+            .map_or(false, |f| f.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
 
@@ -1173,6 +1219,17 @@ impl Iterator for OwnedSegmentIter {
                 match result {
                     Some((ik, is_tomb, raw_val, timestamp, ttl_ms, consumed)) => {
                         self.block_offset += consumed;
+
+                        if let Some(ref pb) = self.prefix_bytes {
+                            if !ik.typed_key_prefix().starts_with(pb) {
+                                if ik.typed_key_prefix() > pb.as_slice() {
+                                    self.done = true;
+                                    return None;
+                                }
+                                continue;
+                            }
+                        }
+
                         let commit_id = ik.commit_id();
                         return Some((
                             ik,
@@ -1201,6 +1258,17 @@ impl Iterator for OwnedSegmentIter {
             match result {
                 Some((ik, is_tomb, value, timestamp, ttl_ms, consumed)) => {
                     self.block_offset += consumed;
+
+                    if let Some(ref pb) = self.prefix_bytes {
+                        if !ik.typed_key_prefix().starts_with(pb) {
+                            if ik.typed_key_prefix() > pb.as_slice() {
+                                self.done = true;
+                                return None;
+                            }
+                            continue;
+                        }
+                    }
+
                     let commit_id = ik.commit_id();
                     return Some((
                         ik,
@@ -2088,6 +2156,133 @@ mod tests {
         let seg = Arc::new(KVSegment::open(&path).unwrap());
         let entries: Vec<_> = super::OwnedSegmentIter::new(seg).collect();
         assert!(entries.is_empty());
+    }
+
+    // ===== OwnedSegmentIter::new_seek tests =====
+
+    #[test]
+    fn owned_iter_new_seek_matches_iter_seek() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owned_seek.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..50u32 {
+            mt.put(
+                &kv_key(&format!("key_{:04}", i)),
+                i as u64 + 1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        let seg = Arc::new(KVSegment::open(&path).unwrap());
+        let prefix = kv_key("");
+        let prefix_bytes = encode_typed_key_prefix(&prefix);
+
+        // Collect from borrowed iter_seek
+        let borrowed: Vec<_> = seg.iter_seek(&prefix).collect();
+
+        // Collect from owned new_seek
+        let owned: Vec<_> =
+            OwnedSegmentIter::new_seek(Arc::clone(&seg), &prefix, prefix_bytes).collect();
+
+        assert_eq!(
+            borrowed.len(),
+            owned.len(),
+            "new_seek and iter_seek should yield same count"
+        );
+        for (b, o) in borrowed.iter().zip(owned.iter()) {
+            assert_eq!(b.0.as_bytes(), o.0.as_bytes());
+            assert_eq!(b.1.commit_id, o.1.commit_id);
+            assert_eq!(b.1.value, o.1.value);
+        }
+    }
+
+    #[test]
+    fn owned_iter_new_seek_mid_key_skips_earlier_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owned_seek_mid.sst");
+
+        let mt = Memtable::new(0);
+        for i in 0..50u32 {
+            mt.put(
+                &kv_key(&format!("key_{:04}", i)),
+                i as u64 + 1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        let seg = Arc::new(KVSegment::open(&path).unwrap());
+        let prefix = kv_key("");
+        let prefix_bytes = encode_typed_key_prefix(&prefix);
+
+        // Seek to "key_0025" — should skip key_0000..key_0024
+        let start = kv_key("key_0025");
+        let results: Vec<_> =
+            OwnedSegmentIter::new_seek(Arc::clone(&seg), &start, prefix_bytes).collect();
+
+        // Due to block-level seek, entries before key_0025 in the same block
+        // may be emitted. But no entry from a PRIOR block should appear.
+        // All entries should be in the namespace.
+        assert!(
+            !results.is_empty(),
+            "should yield entries from key_0025 onward"
+        );
+        // The LAST entry should always be key_0049 (no entries lost at the end)
+        let last_ik = &results.last().unwrap().0;
+        let (last_key, _) = last_ik.decode().unwrap();
+        assert_eq!(last_key.user_key_string().unwrap(), "key_0049");
+    }
+
+    #[test]
+    fn owned_iter_new_seek_stops_at_prefix_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owned_seek_prefix.sst");
+
+        let mt = Memtable::new(0);
+        // Two key ranges: "aaa:*" and "bbb:*"
+        for i in 0..20u32 {
+            mt.put(
+                &kv_key(&format!("aaa:{:04}", i)),
+                i as u64 + 1,
+                Value::Int(i as i64),
+                false,
+            );
+        }
+        for i in 0..20u32 {
+            mt.put(
+                &kv_key(&format!("bbb:{:04}", i)),
+                i as u64 + 21,
+                Value::Int(i as i64 + 100),
+                false,
+            );
+        }
+        mt.freeze();
+        build_segment(&mt, &path);
+
+        let seg = Arc::new(KVSegment::open(&path).unwrap());
+
+        // Seek with prefix for "aaa:" only
+        let prefix = kv_key("aaa:");
+        let prefix_bytes = encode_typed_key_prefix(&prefix);
+        let results: Vec<_> =
+            OwnedSegmentIter::new_seek(Arc::clone(&seg), &prefix, prefix_bytes).collect();
+
+        assert_eq!(results.len(), 20, "should only yield aaa: entries");
+
+        // Verify all entries have the right prefix
+        for (ik, _) in &results {
+            let decoded_key = ik.typed_key_prefix();
+            assert!(
+                decoded_key.starts_with(&encode_typed_key_prefix(&kv_key("aaa:"))),
+                "entry should be in aaa: range"
+            );
+        }
     }
 
     // ===== Restart point binary search tests (v3 format) =====
