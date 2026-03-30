@@ -495,6 +495,21 @@ impl Database {
         self.storage.count_prefix(prefix, max_version)
     }
 
+    /// Scan entries in a range directly from storage.
+    ///
+    /// Bypasses the transaction layer (read-only, no conflict tracking needed).
+    /// Uses the lazy merge pipeline with seek pushdown and optional limit.
+    pub(crate) fn scan_range(
+        &self,
+        prefix: &Key,
+        start_key: &Key,
+        max_version: u64,
+        limit: Option<usize>,
+    ) -> StrataResult<Vec<(Key, VersionedValue)>> {
+        self.storage
+            .scan_range(prefix, start_key, max_version, limit)
+    }
+
     /// Scan keys matching a prefix at or before the given timestamp.
     ///
     /// This is a non-transactional read for time-travel queries.

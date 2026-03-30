@@ -281,6 +281,10 @@ impl KVStore {
     /// Returns up to `limit` pairs where key >= start_key, sorted by key.
     /// If `start` is None, scans from the beginning. If `limit` is None,
     /// returns all matching pairs.
+    ///
+    /// Bypasses the transaction layer (read-only) and uses the lazy merge
+    /// pipeline with seek + limit pushdown. Uses `current_version()` for
+    /// snapshot isolation.
     pub fn scan(
         &self,
         branch_id: &BranchId,
@@ -288,29 +292,17 @@ impl KVStore {
         start: Option<&str>,
         limit: Option<usize>,
     ) -> StrataResult<Vec<(String, Value)>> {
-        self.db.transaction(*branch_id, |txn| {
-            let ns = self.namespace_for(branch_id, space);
-            let scan_prefix = Key::new_kv(ns, "");
-
-            let results = txn.scan_prefix(&scan_prefix)?;
-
-            let iter = results
-                .into_iter()
-                .filter_map(|(key, value)| key.user_key_string().map(|k| (k, value)));
-
-            let iter: Box<dyn Iterator<Item = (String, Value)>> = if let Some(s) = start {
-                let s_owned = s.to_string();
-                Box::new(iter.skip_while(move |(k, _)| k.as_str() < s_owned.as_str()))
-            } else {
-                Box::new(iter)
-            };
-
-            if let Some(lim) = limit {
-                Ok(iter.take(lim).collect())
-            } else {
-                Ok(iter.collect())
-            }
-        })
+        let ns = self.namespace_for(branch_id, space);
+        let scan_prefix = Key::new_kv(Arc::clone(&ns), "");
+        let start_key = Key::new_kv(ns, start.unwrap_or(""));
+        let snapshot = self.db.current_version();
+        let results = self
+            .db
+            .scan_range(&scan_prefix, &start_key, snapshot, limit)?;
+        Ok(results
+            .into_iter()
+            .filter_map(|(key, vv)| key.user_key_string().map(|k| (k, vv.value)))
+            .collect())
     }
 
     /// Count keys matching an optional prefix without materializing entries.

@@ -1103,11 +1103,7 @@ impl OwnedSegmentIter {
     /// Combines the seek capability of [`KVSegment::iter_seek`] with the
     /// `Arc` ownership of `OwnedSegmentIter`. Enables lazy iteration
     /// without borrowing the segment.
-    pub fn new_seek(
-        segment: Arc<KVSegment>,
-        start_key: &Key,
-        prefix_bytes: Vec<u8>,
-    ) -> Self {
+    pub fn new_seek(segment: Arc<KVSegment>, start_key: &Key, prefix_bytes: Vec<u8>) -> Self {
         let done = segment.index.is_empty();
         let (partition_idx, block_within_partition) = if done {
             (0, 0)
@@ -1161,7 +1157,7 @@ impl OwnedSegmentIter {
     pub fn corruption_detected(&self) -> bool {
         self.corruption_detected
             .as_ref()
-            .map_or(false, |f| f.load(std::sync::atomic::Ordering::Relaxed))
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
 
