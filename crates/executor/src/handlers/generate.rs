@@ -110,6 +110,7 @@ pub fn generate(
         seed,
         stop_sequences: stop_sequences.unwrap_or_default(),
         stop_tokens: stop_tokens.unwrap_or_default(),
+        grammar: None,
     };
 
     // Use the resolved model name in the output (may differ from input for cloud)

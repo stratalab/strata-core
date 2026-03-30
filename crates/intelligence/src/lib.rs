@@ -21,6 +21,8 @@ pub use strata_inference::InferenceError;
 #[cfg(feature = "embed")]
 pub use strata_inference::ModelRegistry;
 #[cfg(feature = "embed")]
+pub use strata_inference::ModelTask;
+#[cfg(feature = "embed")]
 pub use strata_inference::ProviderKind;
 #[cfg(feature = "embed")]
 pub use strata_inference::{GenerateRequest, GenerateResponse, StopReason};
