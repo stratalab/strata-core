@@ -2670,12 +2670,45 @@ impl SegmentedStore {
         total
     }
 
+    /// Sum of `metadata_bytes()` across all open segments in all branches.
+    ///
+    /// This accounts for eagerly-loaded bloom filter partitions and index
+    /// blocks that are pinned in heap memory outside the block cache.
+    pub fn total_segment_metadata_bytes(&self) -> u64 {
+        let mut total: u64 = 0;
+        for entry in self.branches.iter() {
+            let version = entry.value().version.load();
+            for level in &version.levels {
+                for seg in level {
+                    total += seg.metadata_bytes();
+                }
+            }
+            // Include inherited COW layers — their segments are also in memory.
+            for layer in &entry.value().inherited_layers {
+                for level in &layer.segments.levels {
+                    for seg in level {
+                        total += seg.metadata_bytes();
+                    }
+                }
+            }
+        }
+        total
+    }
+
+    /// Total tracked memory: memtable bytes + segment metadata bytes.
+    ///
+    /// This is the correct input for memory pressure evaluation — it accounts
+    /// for ALL major heap consumers outside the block cache.
+    pub fn total_tracked_bytes(&self) -> u64 {
+        self.total_memtable_bytes() + self.total_segment_metadata_bytes()
+    }
+
     /// Check the current memory pressure level.
     ///
-    /// Currently unused in production — will be wired into the background
-    /// flush/compaction scheduler to trigger adaptive write stalling.
+    /// Includes both memtable bytes and segment metadata (bloom + index) in
+    /// the pressure calculation, ensuring segment accumulation is visible.
     pub fn pressure_level(&self) -> PressureLevel {
-        self.pressure.level(self.total_memtable_bytes())
+        self.pressure.level(self.total_tracked_bytes())
     }
 
     /// Returns `true` if any branch has frozen memtables pending flush.

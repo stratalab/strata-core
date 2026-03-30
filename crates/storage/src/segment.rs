@@ -479,6 +479,48 @@ impl KVSegment {
         &self.file_path
     }
 
+    /// Approximate heap bytes used by eagerly-loaded segment metadata
+    /// (bloom filter partitions + index blocks). These are NOT tracked by
+    /// the block cache and contribute to RSS outside any configured budget.
+    pub fn metadata_bytes(&self) -> u64 {
+        let bloom: u64 = self
+            .bloom
+            .partitions
+            .iter()
+            .map(|p| p.len() as u64 + std::mem::size_of::<Arc<Vec<u8>>>() as u64)
+            .sum::<u64>()
+            + self
+                .bloom
+                .index
+                .iter()
+                .map(|e| e.max_key.len() as u64 + std::mem::size_of::<FilterIndexEntry>() as u64)
+                .sum::<u64>();
+
+        let index: u64 = match &self.index {
+            SegmentIndex::Monolithic(entries) => entries
+                .iter()
+                .map(|e| e.key.len() as u64 + std::mem::size_of::<IndexEntry>() as u64)
+                .sum(),
+            SegmentIndex::Partitioned {
+                top_level,
+                sub_indexes,
+            } => {
+                let top: u64 = top_level
+                    .iter()
+                    .map(|e| e.key.len() as u64 + std::mem::size_of::<IndexEntry>() as u64)
+                    .sum();
+                let subs: u64 = sub_indexes
+                    .iter()
+                    .flat_map(|sub| sub.iter())
+                    .map(|e| e.key.len() as u64 + std::mem::size_of::<IndexEntry>() as u64)
+                    .sum();
+                top + subs
+            }
+        };
+
+        bloom + index
+    }
+
     /// Format version from the segment header.
     #[cfg(test)]
     pub(crate) fn format_version(&self) -> u16 {

@@ -463,6 +463,11 @@ pub fn global_cache() -> &'static BlockCache {
     GLOBAL_CACHE.get_or_init(|| BlockCache::new(GLOBAL_CAPACITY.load(Ordering::Relaxed)))
 }
 
+/// Return the configured global block cache capacity in bytes.
+pub fn global_capacity() -> usize {
+    GLOBAL_CAPACITY.load(Ordering::Relaxed)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

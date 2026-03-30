@@ -396,6 +396,113 @@ fn pressure_level_tracks_growth() {
 }
 
 #[test]
+fn pressure_includes_segment_metadata() {
+    use crate::pressure::MemoryPressure;
+    let dir = tempfile::tempdir().unwrap();
+    // Budget: 100 bytes — any segment's bloom + index metadata will exceed this.
+    let store = SegmentedStore::with_dir_and_pressure(
+        dir.path().to_path_buf(),
+        0,
+        MemoryPressure::new(100, 0.7, 0.9),
+    );
+    let b = branch();
+
+    // Write enough entries to produce a segment with non-trivial bloom/index metadata.
+    for i in 0..100u64 {
+        seed(
+            &store,
+            kv_key(&format!("key_{:04}", i)),
+            Value::String("x".repeat(100)),
+            i + 1,
+        );
+    }
+    store.rotate_memtable(&b);
+    store.flush_oldest_frozen(&b).unwrap();
+
+    // After flush, memtable is nearly empty. But segment bloom + index metadata
+    // (loaded eagerly at open time) should be tracked. With a 100-byte budget,
+    // segment metadata (~500 bytes of bloom/index data) should push pressure up.
+    let level = store.pressure_level();
+    assert!(
+        level >= PressureLevel::Warning,
+        "pressure_level ignores segment metadata — reports {:?} even though \
+         segment bloom+index metadata far exceeds the 100-byte budget",
+        level
+    );
+}
+
+mod segment_metadata_tracking {
+    use super::*;
+
+    #[test]
+    fn segment_metadata_bytes_tracked_after_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        assert_eq!(store.total_segment_metadata_bytes(), 0);
+
+        for i in 0..50u64 {
+            seed(
+                &store,
+                kv_key(&format!("key_{:04}", i)),
+                Value::String("x".repeat(100)),
+                i + 1,
+            );
+        }
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        let meta = store.total_segment_metadata_bytes();
+        assert!(
+            meta > 0,
+            "flushed segment should have non-zero metadata bytes (bloom + index)"
+        );
+    }
+
+    #[test]
+    fn total_tracked_bytes_includes_memtable_and_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        let b = branch();
+
+        // Write and flush to create segments
+        for i in 0..50u64 {
+            seed(
+                &store,
+                kv_key(&format!("key_{:04}", i)),
+                Value::String("x".repeat(100)),
+                i + 1,
+            );
+        }
+        store.rotate_memtable(&b);
+        store.flush_oldest_frozen(&b).unwrap();
+
+        // Write more to active memtable
+        for i in 50..60u64 {
+            seed(
+                &store,
+                kv_key(&format!("key_{:04}", i)),
+                Value::String("x".repeat(100)),
+                i + 1,
+            );
+        }
+
+        let memtable = store.total_memtable_bytes();
+        let seg_meta = store.total_segment_metadata_bytes();
+        let tracked = store.total_tracked_bytes();
+
+        assert!(memtable > 0, "active memtable should have data");
+        assert!(seg_meta > 0, "flushed segments should have metadata");
+        assert_eq!(
+            tracked,
+            memtable + seg_meta,
+            "total_tracked should be memtable + segment metadata"
+        );
+    }
+}
+
+#[test]
 fn branches_needing_flush_prioritization() {
     let store = SegmentedStore::new();
     let b1 = branch();
