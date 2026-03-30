@@ -10,6 +10,7 @@ pub mod execute_many;
 pub mod export;
 pub mod ipc;
 pub mod parity;
+pub mod recipe;
 pub mod search;
 pub mod serialization;
 pub mod session;

@@ -298,6 +298,41 @@ impl Executor {
             Command::DurabilityCounters => {
                 crate::handlers::config::durability_counters(&self.primitives)
             }
+
+            // ==================== Recipe Commands ====================
+            Command::RecipeSet {
+                branch,
+                name,
+                recipe_json,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                crate::handlers::recipe::recipe_set(&self.primitives, branch, name, recipe_json)
+            }
+            Command::RecipeGet { branch, name } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                crate::handlers::recipe::recipe_get(&self.primitives, branch, name)
+            }
+            Command::RecipeGetDefault { branch } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                crate::handlers::recipe::recipe_get_default(&self.primitives, branch)
+            }
+            Command::RecipeList { branch } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                crate::handlers::recipe::recipe_list(&self.primitives, branch)
+            }
+
             Command::TimeRange { branch } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),

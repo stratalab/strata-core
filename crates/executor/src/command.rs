@@ -1370,6 +1370,46 @@ pub enum Command {
     /// Returns: `Output::DurabilityCounters`
     DurabilityCounters,
 
+    /// Set a named recipe on a branch.
+    /// Returns: `Output::Unit`
+    RecipeSet {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Recipe name (defaults to "default").
+        #[serde(default = "default_recipe_name")]
+        name: String,
+        /// Recipe JSON string.
+        recipe_json: String,
+    },
+
+    /// Get a named recipe from a branch.
+    /// Returns: `Output::Maybe`
+    RecipeGet {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Recipe name (defaults to "default").
+        #[serde(default = "default_recipe_name")]
+        name: String,
+    },
+
+    /// Get the default recipe, auto-creating with built-in defaults if absent.
+    /// Returns: `Output::Maybe`
+    RecipeGetDefault {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+    },
+
+    /// List all recipe names on a branch.
+    /// Returns: `Output::Keys`
+    RecipeList {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+    },
+
     /// Delete a space (must be empty unless force=true).
     /// Returns: `Output::Unit`
     SpaceDelete {
@@ -1900,6 +1940,7 @@ impl Command {
                 | Command::GraphDeleteLinkType { .. }
                 | Command::GraphFreezeOntology { .. }
                 | Command::ReindexEmbeddings { .. }
+                | Command::RecipeSet { .. }
                 | Command::TagCreate { .. }
                 | Command::TagDelete { .. }
                 | Command::NoteAdd { .. }
@@ -2012,6 +2053,10 @@ impl Command {
             Command::ConfigSetAutoEmbed { .. } => "ConfigSetAutoEmbed",
             Command::AutoEmbedStatus => "AutoEmbedStatus",
             Command::DurabilityCounters => "DurabilityCounters",
+            Command::RecipeSet { .. } => "RecipeSet",
+            Command::RecipeGet { .. } => "RecipeGet",
+            Command::RecipeGetDefault { .. } => "RecipeGetDefault",
+            Command::RecipeList { .. } => "RecipeList",
             Command::Embed { .. } => "Embed",
             Command::EmbedBatch { .. } => "EmbedBatch",
             Command::ModelsList => "ModelsList",
@@ -2156,6 +2201,14 @@ impl Command {
             | Command::SpaceDelete { branch, .. }
             | Command::SpaceExists { branch, .. }
             | Command::ReindexEmbeddings { branch, .. } => {
+                resolve_branch!(branch);
+            }
+
+            // Recipe commands — only have branch
+            Command::RecipeSet { branch, .. }
+            | Command::RecipeGet { branch, .. }
+            | Command::RecipeGetDefault { branch, .. }
+            | Command::RecipeList { branch, .. } => {
                 resolve_branch!(branch);
             }
 
@@ -2359,8 +2412,19 @@ impl Command {
             | Command::GraphLcc { branch, .. }
             | Command::GraphSssp { branch, .. } => branch.as_ref(),
 
+            // Recipe commands
+            Command::RecipeSet { branch, .. }
+            | Command::RecipeGet { branch, .. }
+            | Command::RecipeGetDefault { branch, .. }
+            | Command::RecipeList { branch, .. } => branch.as_ref(),
+
             // Branch lifecycle, Transaction, Database — no data branch
             _ => None,
         }
     }
+}
+
+/// Default recipe name for serde deserialization.
+fn default_recipe_name() -> String {
+    "default".to_string()
 }
