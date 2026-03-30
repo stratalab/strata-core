@@ -256,7 +256,7 @@ fn pull_with_bar(
     registry: &strata_intelligence::ModelRegistry,
     name: &str,
     display_name: &str,
-) -> Result<std::path::PathBuf, strata_inference::InferenceError> {
+) -> Result<std::path::PathBuf, strata_intelligence::InferenceError> {
     use std::time::Instant;
 
     let start = Instant::now();
@@ -308,7 +308,7 @@ fn pull_with_retry(
     registry: &strata_intelligence::ModelRegistry,
     name: &str,
     display_name: &str,
-) -> Result<std::path::PathBuf, strata_inference::InferenceError> {
+) -> Result<std::path::PathBuf, strata_intelligence::InferenceError> {
     match pull_with_bar(registry, name, display_name) {
         Ok(path) => Ok(path),
         Err(first_err) => {
@@ -370,7 +370,7 @@ fn offer_model_downloads(config_path: &Path, hw: &HardwareInfo, non_interactive:
         .list_available()
         .into_iter()
         .filter(|m| {
-            m.task == strata_inference::ModelTask::Generate
+            m.task == strata_intelligence::ModelTask::Generate
                 && m.size_bytes <= budget
                 && m.name != "gpt2" // skip gpt2 — too small to be useful
         })
