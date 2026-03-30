@@ -22,7 +22,7 @@ use tracing::{info, warn};
 fn apply_storage_config(storage: &SegmentedStore, cfg: &StorageConfig) {
     storage.set_max_branches(cfg.max_branches);
     storage.set_max_versions_per_key(cfg.max_versions_per_key);
-    storage.set_max_immutable_memtables(cfg.max_immutable_memtables);
+    storage.set_max_immutable_memtables(cfg.effective_max_immutable_memtables());
     storage.set_target_file_size(cfg.target_file_size);
     storage.set_level_base_bytes(cfg.level_base_bytes);
     storage.set_data_block_size(cfg.data_block_size);
@@ -257,7 +257,7 @@ impl Database {
 
         // Recovery — purely read-only (no truncation, no file writes)
         let recovery = RecoveryCoordinator::new(wal_dir.clone())
-            .with_segments(segments_dir, cfg.storage.write_buffer_size)
+            .with_segments(segments_dir, cfg.storage.effective_write_buffer_size())
             .with_lossy_recovery(cfg.allow_lossy_recovery);
         let result = match recovery.recover() {
             Ok(result) => result,
@@ -459,7 +459,7 @@ impl Database {
         // Use RecoveryCoordinator for proper transaction-aware recovery
         // This reads all WalRecords from the segmented WAL directory
         let recovery = RecoveryCoordinator::new(wal_dir.clone())
-            .with_segments(segments_dir, cfg.storage.write_buffer_size)
+            .with_segments(segments_dir, cfg.storage.effective_write_buffer_size())
             .with_lossy_recovery(cfg.allow_lossy_recovery);
         let result = match recovery.recover() {
             Ok(result) => result,
@@ -542,12 +542,23 @@ impl Database {
         // Configure block cache capacity before any segment reads
         {
             use strata_storage::block_cache;
-            let cache_bytes = if cfg.storage.block_cache_size > 0 {
-                cfg.storage.block_cache_size
+            let effective_cache = cfg.storage.effective_block_cache_size();
+            let cache_bytes = if effective_cache > 0 {
+                effective_cache
             } else {
                 block_cache::auto_detect_capacity()
             };
             block_cache::set_global_capacity(cache_bytes);
+        }
+
+        if cfg.storage.memory_budget > 0 {
+            info!(target: "strata::db",
+                memory_budget = cfg.storage.memory_budget,
+                effective_cache = cfg.storage.effective_block_cache_size(),
+                effective_write_buffer = cfg.storage.effective_write_buffer_size(),
+                effective_max_immutable = cfg.storage.effective_max_immutable_memtables(),
+                "Memory budget active — derived storage parameters"
+            );
         }
 
         // Apply storage resource limits from config

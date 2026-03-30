@@ -37,6 +37,7 @@ memmap2 = { workspace = true }
 rayon = { workspace = true }
 unicode-segmentation = "1.12"
 chrono = { workspace = true }
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }
