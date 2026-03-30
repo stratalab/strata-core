@@ -913,9 +913,9 @@ impl Database {
         self.storage
             .set_max_versions_per_key(cfg.storage.max_versions_per_key);
         self.storage
-            .set_max_immutable_memtables(cfg.storage.max_immutable_memtables);
+            .set_max_immutable_memtables(cfg.storage.effective_max_immutable_memtables());
         self.storage
-            .set_write_buffer_size(cfg.storage.write_buffer_size);
+            .set_write_buffer_size(cfg.storage.effective_write_buffer_size());
         self.storage
             .set_target_file_size(cfg.storage.target_file_size);
         self.storage
@@ -932,8 +932,9 @@ impl Database {
 
         // Block cache
         use strata_storage::block_cache;
-        let cache_bytes = if cfg.storage.block_cache_size > 0 {
-            cfg.storage.block_cache_size
+        let effective_cache = cfg.storage.effective_block_cache_size();
+        let cache_bytes = if effective_cache > 0 {
+            effective_cache
         } else {
             block_cache::auto_detect_capacity()
         };

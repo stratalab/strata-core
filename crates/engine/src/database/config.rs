@@ -54,6 +54,19 @@ fn default_timeout_ms() -> u64 {
 /// Set to `0` for unlimited (backward-compatible default).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StorageConfig {
+    /// Unified memory budget in bytes for storage data structures.
+    ///
+    /// When set (> 0), automatically derives `block_cache_size`,
+    /// `write_buffer_size`, and `max_immutable_memtables`:
+    /// - 50% → block cache (read path)
+    /// - 25% → write buffer (×2 with 1 frozen = 50% write path)
+    ///
+    /// Individual field values are **ignored** when `memory_budget > 0`.
+    /// Actual RSS ≈ `memory_budget` + ~25 MB fixed process overhead.
+    ///
+    /// Default: 0 (disabled — individual fields take effect).
+    #[serde(default)]
+    pub memory_budget: usize,
     /// Maximum number of branches allowed. Default: 1024. Set to 0 for unlimited.
     #[serde(default = "default_max_branches")]
     pub max_branches: usize,
@@ -180,9 +193,39 @@ fn default_codec() -> String {
     "identity".to_string()
 }
 
+impl StorageConfig {
+    /// Effective block cache size, accounting for `memory_budget`.
+    pub fn effective_block_cache_size(&self) -> usize {
+        if self.memory_budget > 0 {
+            self.memory_budget / 2
+        } else {
+            self.block_cache_size
+        }
+    }
+
+    /// Effective write buffer size, accounting for `memory_budget`.
+    pub fn effective_write_buffer_size(&self) -> usize {
+        if self.memory_budget > 0 {
+            self.memory_budget / 4
+        } else {
+            self.write_buffer_size
+        }
+    }
+
+    /// Effective max immutable memtables, accounting for `memory_budget`.
+    pub fn effective_max_immutable_memtables(&self) -> usize {
+        if self.memory_budget > 0 {
+            1
+        } else {
+            self.max_immutable_memtables
+        }
+    }
+}
+
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
+            memory_budget: 0,
             max_branches: default_max_branches(),
             max_write_buffer_entries: default_max_write_buffer_entries(),
             max_versions_per_key: 0,
@@ -440,6 +483,9 @@ auto_embed = false
 
 # Storage resource limits.
 # [storage]
+# memory_budget = 0             # 0 = unlimited; e.g. 33554432 for 32 MiB.
+#                                # Derives cache/buffer/immutable automatically.
+#                                # Actual RSS ≈ memory_budget + ~25 MB overhead.
 # max_branches = 1024
 # max_write_buffer_entries = 500000
 # max_versions_per_key = 0    # 0 = unlimited; set to e.g. 100 to cap MVCC history
@@ -1198,5 +1244,74 @@ max_branches = 512
         assert_eq!(config.openai_api_key.as_deref(), Some("env-openai"));
         // Unset env var leaves file value alone
         assert!(config.google_api_key.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // memory_budget (issue #2184)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn memory_budget_default_zero() {
+        let cfg = StorageConfig::default();
+        assert_eq!(cfg.memory_budget, 0);
+    }
+
+    #[test]
+    fn memory_budget_derives_effective_values() {
+        let cfg = StorageConfig {
+            memory_budget: 32 << 20, // 32 MiB
+            ..StorageConfig::default()
+        };
+        assert_eq!(cfg.effective_block_cache_size(), 16 << 20);
+        assert_eq!(cfg.effective_write_buffer_size(), 8 << 20);
+        assert_eq!(cfg.effective_max_immutable_memtables(), 1);
+        // Total: 16 + 8*2 = 32 MiB = budget
+        let total = cfg.effective_block_cache_size()
+            + cfg.effective_write_buffer_size() * (1 + cfg.effective_max_immutable_memtables());
+        assert_eq!(total, 32 << 20);
+    }
+
+    #[test]
+    fn memory_budget_zero_uses_individual_fields() {
+        let cfg = StorageConfig {
+            memory_budget: 0,
+            block_cache_size: 64 << 20,
+            write_buffer_size: 32 << 20,
+            max_immutable_memtables: 3,
+            ..StorageConfig::default()
+        };
+        assert_eq!(cfg.effective_block_cache_size(), 64 << 20);
+        assert_eq!(cfg.effective_write_buffer_size(), 32 << 20);
+        assert_eq!(cfg.effective_max_immutable_memtables(), 3);
+    }
+
+    #[test]
+    fn memory_budget_toml_round_trip() {
+        let toml_str = r#"
+[storage]
+memory_budget = 33554432
+"#;
+        let config: StrataConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.storage.memory_budget, 32 << 20);
+
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        let reparsed: StrataConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.storage.memory_budget, 32 << 20);
+    }
+
+    #[test]
+    fn memory_budget_backward_compat() {
+        let old_toml = r#"
+durability = "standard"
+[storage]
+max_branches = 512
+"#;
+        let config: StrataConfig = toml::from_str(old_toml).unwrap();
+        assert_eq!(config.storage.memory_budget, 0);
+        // All effective values match raw fields when budget is 0
+        assert_eq!(
+            config.storage.effective_write_buffer_size(),
+            config.storage.write_buffer_size
+        );
     }
 }

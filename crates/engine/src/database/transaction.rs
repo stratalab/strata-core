@@ -14,6 +14,30 @@ use strata_storage::SegmentedStore;
 use super::Database;
 use crate::transaction::TransactionPool;
 
+/// Return freed heap pages to the OS.
+///
+/// After memtable flush or compaction, glibc's allocator retains freed
+/// SkipMap pages in its free lists — they stay in VmRSS even though they're
+/// logically freed. `malloc_trim(0)` returns those pages to the OS,
+/// immediately reducing RSS. This is critical for memory-constrained
+/// deployments (Pi Zero, drones, edge devices). See issue #2184.
+///
+/// Thread-safe: `malloc_trim` acquires arena locks internally.
+/// Cost: O(free chunks), typically ~hundreds of μs — negligible vs flush I/O.
+#[cfg(target_os = "linux")]
+fn release_freed_memory() {
+    // SAFETY: malloc_trim is a well-defined glibc function with no
+    // preconditions. The argument 0 means "return as much as possible".
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn release_freed_memory() {
+    // macOS and other allocators return pages eagerly; no action needed.
+}
+
 impl Database {
     // Transaction API
     // ========================================================================
@@ -63,7 +87,10 @@ impl Database {
             }
         }
 
-        // 2. Schedule compaction and materialization on background thread.
+        // 2. Return freed memtable pages to the OS (#2184).
+        release_freed_memory();
+
+        // 3. Schedule compaction and materialization on background thread.
         self.schedule_background_compaction();
     }
 
@@ -137,6 +164,9 @@ impl Database {
                     }
                 }
 
+                // Return freed segment pages to the OS (#2184).
+                release_freed_memory();
+
                 flag.store(false, Ordering::Release);
             })
             .is_err()
@@ -205,8 +235,8 @@ impl Database {
 
         // Memtable-based stalling (protects memory usage)
         let cfg = self.config.read();
-        let wbs = cfg.storage.write_buffer_size as u64;
-        let max_frozen = cfg.storage.max_immutable_memtables as u64;
+        let wbs = cfg.storage.effective_write_buffer_size() as u64;
+        let max_frozen = cfg.storage.effective_max_immutable_memtables() as u64;
         drop(cfg);
 
         if wbs > 0 {
