@@ -292,6 +292,25 @@ impl Memtable {
             .take_while(move |(ik, _)| ik.typed_key_prefix().starts_with(&match_prefix))
     }
 
+    /// Iterate entries starting from `start_key`, filtered by `match_prefix`.
+    ///
+    /// Unlike `iter_prefix`, this separates the seek target from the match filter,
+    /// enabling efficient range scans where `start_key` > `match_prefix`.
+    /// When `start_key` equals `match_prefix`, behavior is identical to `iter_prefix`.
+    pub fn iter_range<'a>(
+        &'a self,
+        start_key: &Key,
+        match_prefix: &Key,
+    ) -> impl Iterator<Item = (InternalKey, MemtableEntry)> + 'a {
+        let seek_key = InternalKey::encode(start_key, u64::MAX);
+        let match_prefix = encode_typed_key_prefix(match_prefix);
+
+        self.map
+            .range(seek_key..)
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .take_while(move |(ik, _)| ik.typed_key_prefix().starts_with(&match_prefix))
+    }
+
     /// Iterate ALL entries in sorted order (for flush to segment).
     pub fn iter_all(&self) -> impl Iterator<Item = (InternalKey, MemtableEntry)> + '_ {
         self.map
@@ -539,6 +558,61 @@ mod tests {
         let prefix = key_typed(TypeTag::KV, "k");
         let results: Vec<_> = mt.iter_prefix(&prefix).collect();
         assert_eq!(results.len(), 1);
+    }
+
+    // ===== Range Scan (iter_range) =====
+
+    #[test]
+    fn iter_range_seeks_to_start_key() {
+        let mt = Memtable::new(0);
+        mt.put(&key("a"), 1, Value::Int(1), false);
+        mt.put(&key("b"), 1, Value::Int(2), false);
+        mt.put(&key("c"), 1, Value::Int(3), false);
+        mt.put(&key("d"), 1, Value::Int(4), false);
+        mt.put(&key("e"), 1, Value::Int(5), false);
+
+        // Start from "c", prefix matches all KV keys in namespace
+        let start = key("c");
+        let prefix = key("");
+        let results: Vec<_> = mt.iter_range(&start, &prefix).collect();
+        assert_eq!(results.len(), 3, "should return c, d, e");
+        // Verify actual keys returned (user_key_string extracts the user key)
+        let keys: Vec<String> = results
+            .iter()
+            .filter_map(|(ik, _)| {
+                let (k, _) = ik.decode()?;
+                k.user_key_string()
+            })
+            .collect();
+        assert_eq!(keys, vec!["c", "d", "e"]);
+    }
+
+    #[test]
+    fn iter_range_with_start_equals_prefix_matches_iter_prefix() {
+        let mt = Memtable::new(0);
+        mt.put(&key("a"), 1, Value::Int(1), false);
+        mt.put(&key("b"), 1, Value::Int(2), false);
+        mt.put(&key("c"), 1, Value::Int(3), false);
+
+        let prefix = key("");
+        let range_results: Vec<_> = mt.iter_range(&prefix, &prefix).collect();
+        let prefix_results: Vec<_> = mt.iter_prefix(&prefix).collect();
+        assert_eq!(range_results.len(), prefix_results.len());
+        for (r, p) in range_results.iter().zip(prefix_results.iter()) {
+            assert_eq!(r.0.as_bytes(), p.0.as_bytes());
+        }
+    }
+
+    #[test]
+    fn iter_range_past_all_keys_returns_empty() {
+        let mt = Memtable::new(0);
+        mt.put(&key("a"), 1, Value::Int(1), false);
+        mt.put(&key("b"), 1, Value::Int(2), false);
+
+        let start = key("z");
+        let prefix = key("");
+        let results: Vec<_> = mt.iter_range(&start, &prefix).collect();
+        assert!(results.is_empty());
     }
 
     // ===== Freeze =====
