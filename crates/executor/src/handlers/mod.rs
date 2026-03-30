@@ -27,6 +27,7 @@ pub mod graph;
 pub mod json;
 pub mod kv;
 pub mod models;
+pub mod recipe;
 pub mod search;
 pub mod space;
 pub mod vector;

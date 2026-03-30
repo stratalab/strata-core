@@ -52,6 +52,7 @@ pub use transaction_ops::TransactionOps;
 pub mod branch_ops;
 pub mod bundle;
 pub mod primitives;
+pub mod recipe_store;
 pub mod search;
 pub mod system_space;
 
