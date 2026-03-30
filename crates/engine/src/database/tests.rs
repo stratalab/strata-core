@@ -2131,8 +2131,7 @@ fn test_shutdown_flush_thread_termination() {
     let db_path = temp_dir.path().join("flush_thread_db");
 
     // Standard mode spawns a background flush thread
-    let db =
-        Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
+    let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
 
     // The flush thread handle should exist before shutdown
     assert!(
