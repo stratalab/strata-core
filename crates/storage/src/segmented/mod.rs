@@ -1550,10 +1550,7 @@ impl SegmentedStore {
     /// This provides per-key read consistency without the overhead of
     /// transaction allocation, coordinator mutex, or read-set tracking.
     /// For multi-key snapshot isolation, use `Database::transaction()`.
-    pub fn get_versioned_direct(
-        &self,
-        key: &Key,
-    ) -> StrataResult<Option<VersionedValue>> {
+    pub fn get_versioned_direct(&self, key: &Key) -> StrataResult<Option<VersionedValue>> {
         let branch_id = key.namespace.branch_id;
         let branch = match self.branches.get(&branch_id) {
             Some(b) => b,

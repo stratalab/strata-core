@@ -342,10 +342,7 @@ fn get_versioned_direct_moves_bytes_value() {
     let store = SegmentedStore::new();
     let data = vec![0xDE, 0xAD, 0xBE, 0xEF];
     seed(&store, kv_key("bin"), Value::Bytes(data.clone()), 3);
-    let vv = store
-        .get_versioned_direct(&kv_key("bin"))
-        .unwrap()
-        .unwrap();
+    let vv = store.get_versioned_direct(&kv_key("bin")).unwrap().unwrap();
     assert_eq!(vv.value, Value::Bytes(data));
     assert_eq!(vv.version, strata_core::Version::txn(3));
 }
