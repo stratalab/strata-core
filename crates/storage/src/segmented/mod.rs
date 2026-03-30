@@ -1542,6 +1542,32 @@ impl SegmentedStore {
         }
     }
 
+    /// Get a versioned value directly from storage, bypassing the transaction layer.
+    ///
+    /// Like `get_value_direct` but preserves version and timestamp metadata.
+    /// Uses `u64::MAX` as the snapshot version to see all committed data.
+    ///
+    /// This provides per-key read consistency without the overhead of
+    /// transaction allocation, coordinator mutex, or read-set tracking.
+    /// For multi-key snapshot isolation, use `Database::transaction()`.
+    pub fn get_versioned_direct(&self, key: &Key) -> StrataResult<Option<VersionedValue>> {
+        let branch_id = key.namespace.branch_id;
+        let branch = match self.branches.get(&branch_id) {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        match Self::get_versioned_from_branch(&branch, key, u64::MAX)? {
+            Some((commit_id, entry)) => {
+                if entry.is_tombstone || entry.is_expired() {
+                    Ok(None)
+                } else {
+                    Ok(Some(entry.into_versioned(commit_id)))
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
     /// List all live entries for a branch filtered by type tag.
     pub fn list_by_type(
         &self,
