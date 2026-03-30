@@ -286,7 +286,7 @@ impl JsonStore {
         let key = self.key_for(branch_id, space, doc_id);
         let doc = JsonDoc::new(doc_id, value.clone());
 
-        self.db.transaction(*branch_id, |txn| {
+        let version = self.db.transaction(*branch_id, |txn| {
             // Check if document already exists
             if txn.get(&key)?.is_some() {
                 return Err(StrataError::invalid_input(format!(
@@ -313,7 +313,12 @@ impl JsonStore {
             }
 
             Ok(Version::counter(doc.version))
-        })
+        })?;
+
+        // Update inverted index for BM25 search (zero overhead when disabled)
+        Self::index_json_doc(&self.db, branch_id, doc_id, &value)?;
+
+        Ok(version)
     }
 
     // ========================================================================
@@ -438,6 +443,26 @@ impl JsonStore {
         Ok(VersionedHistory::new(versions))
     }
 
+    /// Index a JSON document into the InvertedIndex for BM25 search.
+    /// Zero overhead when the index is disabled.
+    fn index_json_doc(
+        db: &Arc<Database>,
+        branch_id: &BranchId,
+        doc_id: &str,
+        value: &JsonValue,
+    ) -> StrataResult<()> {
+        let idx = db.extension::<crate::search::InvertedIndex>()?;
+        if idx.is_enabled() {
+            let text = serde_json::to_string(value.as_inner()).unwrap_or_default();
+            let entity_ref = crate::search::EntityRef::Json {
+                branch_id: *branch_id,
+                doc_id: doc_id.to_string(),
+            };
+            idx.index_document(&entity_ref, &text, None);
+        }
+        Ok(())
+    }
+
     /// Core read-modify-write for a single JSON document within a transaction.
     ///
     /// If the document exists, applies `set_at_path` and increments version.
@@ -540,12 +565,17 @@ impl JsonStore {
         value.validate().map_err(limit_error_to_error)?;
 
         let key = self.key_for(branch_id, space, doc_id);
-        self.db.transaction(*branch_id, |txn| {
+        let result = self.db.transaction(*branch_id, |txn| {
             let indexes = Self::load_indexes(txn, branch_id, space)?;
             Self::set_in_txn(
                 txn, &key, doc_id, path, value, true, branch_id, space, &indexes,
             )
-        })
+        })?;
+
+        // Update inverted index for BM25 search
+        Self::index_json_doc(&self.db, branch_id, doc_id, &result.1)?;
+
+        Ok(result)
     }
 
     /// Set multiple documents in a single transaction.
@@ -572,7 +602,10 @@ impl JsonStore {
             value.validate().map_err(limit_error_to_error)?;
         }
 
-        self.db.transaction(*branch_id, |txn| {
+        // Keep doc_ids for post-commit indexing
+        let doc_ids: Vec<String> = entries.iter().map(|(id, _, _)| id.clone()).collect();
+
+        let results = self.db.transaction(*branch_id, |txn| {
             let indexes = Self::load_indexes(txn, branch_id, space)?;
             let mut results = Vec::with_capacity(entries.len());
             for (doc_id, path, value) in &entries {
@@ -591,7 +624,14 @@ impl JsonStore {
                 results.push(result);
             }
             Ok(results)
-        })
+        })?;
+
+        // Post-commit: update inverted index for BM25 search
+        for (doc_id, (_, doc_value)) in doc_ids.iter().zip(results.iter()) {
+            Self::index_json_doc(&self.db, branch_id, doc_id, doc_value)?;
+        }
+
+        Ok(results)
     }
 
     /// Get multiple documents in a single transaction.
@@ -686,13 +726,17 @@ impl JsonStore {
         value.validate().map_err(limit_error_to_error)?;
 
         let key = self.key_for(branch_id, space, doc_id);
-        self.db.transaction(*branch_id, |txn| {
+        let (version, doc_value) = self.db.transaction(*branch_id, |txn| {
             let indexes = Self::load_indexes(txn, branch_id, space)?;
             Self::set_in_txn(
                 txn, &key, doc_id, path, value, false, branch_id, space, &indexes,
             )
-            .map(|(version, _)| version)
-        })
+        })?;
+
+        // Update inverted index for BM25 search
+        Self::index_json_doc(&self.db, branch_id, doc_id, &doc_value)?;
+
+        Ok(version)
     }
 
     /// Delete value at path in a document
@@ -1349,6 +1393,76 @@ impl JsonStore {
 
 // ========== Searchable Trait Implementation ==========
 
+impl JsonStore {
+    /// BM25 search via InvertedIndex — same pattern as KV.
+    fn search_bm25(
+        &self,
+        req: &crate::SearchRequest,
+    ) -> strata_core::StrataResult<crate::SearchResponse> {
+        use crate::search::{truncate_text, EntityRef, InvertedIndex, SearchHit, SearchStats};
+        use std::time::Instant;
+
+        let start = Instant::now();
+        let index = self.db.extension::<InvertedIndex>()?;
+
+        if !index.is_enabled() || index.total_docs() == 0 {
+            return Ok(crate::SearchResponse::empty());
+        }
+
+        let query_terms = crate::search::tokenize(&req.query);
+        let scorer = self.db.config().bm25_scorer();
+
+        let top_k = index.score_top_k(&query_terms, &req.branch_id, req.k, scorer.k1, scorer.b);
+
+        let hits: Vec<SearchHit> = top_k
+            .into_iter()
+            .filter_map(|scored| {
+                let entity_ref = index.resolve_doc_id(scored.doc_id)?;
+                // Only include Json results from this primitive
+                if let EntityRef::Json {
+                    ref branch_id,
+                    ref doc_id,
+                } = entity_ref
+                {
+                    let snippet = self
+                        .get(branch_id, &req.space, doc_id, &JsonPath::root())
+                        .ok()
+                        .flatten()
+                        .map(|v| {
+                            truncate_text(
+                                &serde_json::to_string(v.as_inner()).unwrap_or_default(),
+                                200,
+                            )
+                        });
+                    Some(SearchHit {
+                        doc_ref: entity_ref,
+                        score: scored.score,
+                        rank: 0,
+                        snippet,
+                    })
+                } else {
+                    None
+                }
+            })
+            .enumerate()
+            .map(|(i, mut hit)| {
+                hit.rank = (i + 1) as u32;
+                hit
+            })
+            .collect();
+
+        let elapsed = start.elapsed().as_micros() as u64;
+        let mut stats = SearchStats::new(elapsed, hits.len());
+        stats = stats.with_index_used(true);
+
+        Ok(crate::SearchResponse {
+            hits,
+            truncated: false,
+            stats,
+        })
+    }
+}
+
 impl crate::search::Searchable for JsonStore {
     fn search(
         &self,
@@ -1357,6 +1471,11 @@ impl crate::search::Searchable for JsonStore {
         use crate::search::{EntityRef, SearchHit, SearchStats, SortDirection};
         use std::collections::HashSet;
         use std::time::Instant;
+
+        // BM25 fallback: non-empty query with no field_filter → use InvertedIndex
+        if !req.query.is_empty() && req.field_filter.is_none() && req.sort_by.is_none() {
+            return self.search_bm25(req);
+        }
 
         let start = Instant::now();
 
@@ -3322,5 +3441,118 @@ mod tests {
         if let Value::Bytes(bytes) = &v2_value {
             assert_eq!(bytes[0], JsonStore::FORMAT_VERSION);
         }
+    }
+
+    // ========== JsonStore::search() BM25 integration tests ==========
+
+    #[test]
+    fn test_json_search_bm25() {
+        use crate::search::Searchable;
+        use std::str::FromStr;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let store = JsonStore::new(db.clone());
+        let branch_id = BranchId::new();
+
+        // Verify index is enabled
+        let index = db.extension::<crate::search::InvertedIndex>().unwrap();
+        assert!(index.is_enabled());
+
+        store
+            .create(
+                &branch_id,
+                "default",
+                "doc1",
+                JsonValue::from_str(r#"{"title":"rust programming","body":"learn rust basics"}"#)
+                    .unwrap(),
+            )
+            .unwrap();
+        store
+            .create(
+                &branch_id,
+                "default",
+                "doc2",
+                JsonValue::from_str(r#"{"title":"python scripting","body":"python is popular"}"#)
+                    .unwrap(),
+            )
+            .unwrap();
+        store
+            .create(
+                &branch_id,
+                "default",
+                "doc3",
+                JsonValue::from_str(
+                    r#"{"title":"go concurrency","body":"goroutines and channels"}"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let req = crate::SearchRequest::new(branch_id, "rust");
+        let response = store.search(&req).unwrap();
+
+        assert!(
+            !response.is_empty(),
+            "Should find JSON docs containing 'rust'"
+        );
+        assert!(response.stats.index_used);
+        // Only doc1 contains "rust"
+        assert_eq!(response.len(), 1);
+        if let crate::search::EntityRef::Json { ref doc_id, .. } = response.hits[0].doc_ref {
+            assert_eq!(doc_id, "doc1");
+        } else {
+            panic!("Expected EntityRef::Json");
+        }
+    }
+
+    #[test]
+    fn test_json_search_bm25_with_set_or_create() {
+        use crate::search::Searchable;
+        use std::str::FromStr;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let store = JsonStore::new(db.clone());
+        let branch_id = BranchId::new();
+
+        // Use set_or_create (creates if missing)
+        store
+            .set_or_create(
+                &branch_id,
+                "default",
+                "article1",
+                &JsonPath::root(),
+                JsonValue::from_str(r#"{"content":"database indexing techniques"}"#).unwrap(),
+            )
+            .unwrap();
+
+        let req = crate::SearchRequest::new(branch_id, "indexing");
+        let response = store.search(&req).unwrap();
+
+        assert!(
+            !response.is_empty(),
+            "set_or_create docs should be findable via BM25"
+        );
+        assert_eq!(response.len(), 1);
+        if let crate::search::EntityRef::Json { ref doc_id, .. } = response.hits[0].doc_ref {
+            assert_eq!(doc_id, "article1");
+        } else {
+            panic!("Expected EntityRef::Json");
+        }
+    }
+
+    #[test]
+    fn test_json_search_empty_index() {
+        use crate::search::Searchable;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let store = JsonStore::new(db);
+        let branch_id = BranchId::new();
+
+        let req = crate::SearchRequest::new(branch_id, "anything");
+        let response = store.search(&req).unwrap();
+        assert!(response.is_empty());
     }
 }
