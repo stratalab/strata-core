@@ -695,36 +695,95 @@ impl strata_engine::search::Searchable for VectorStore {
         req: &strata_engine::SearchRequest,
     ) -> strata_core::StrataResult<strata_engine::SearchResponse> {
         use std::time::Instant;
-        use strata_engine::search::{SearchMode, SearchResponse, SearchStats};
+        use strata_engine::search::{
+            truncate_text, SearchHit, SearchMode, SearchResponse, SearchStats,
+        };
+        use strata_engine::system_space::SYSTEM_SPACE;
 
         let start = Instant::now();
 
         // Vector primitive only responds to Vector or Hybrid mode
         // with an explicit query embedding provided externally.
-        //
-        // For Keyword mode, return empty - hybrid orchestrator handles this.
-        // For Vector/Hybrid mode without embedding, return empty -
-        // the hybrid orchestrator should call search_by_embedding() directly.
-        match req.mode {
+        let embedding = match req.mode {
             SearchMode::Keyword => {
-                // Vector does NOT do keyword search on metadata
-                Ok(SearchResponse::new(
+                return Ok(SearchResponse::new(
                     vec![],
                     false,
                     SearchStats::new(start.elapsed().as_micros() as u64, 0),
-                ))
+                ));
             }
-            SearchMode::Vector | SearchMode::Hybrid => {
-                // Requires query embedding - the orchestrator must call
-                // search_by_embedding() or search_response() directly
-                // with the actual embedding vector.
-                Ok(SearchResponse::new(
-                    vec![],
-                    false,
-                    SearchStats::new(start.elapsed().as_micros() as u64, 0),
-                ))
+            SearchMode::Vector | SearchMode::Hybrid => match &req.precomputed_embedding {
+                Some(emb) => emb,
+                None => {
+                    return Ok(SearchResponse::new(
+                        vec![],
+                        false,
+                        SearchStats::new(start.elapsed().as_micros() as u64, 0),
+                    ));
+                }
+            },
+        };
+
+        // Discover all _system_embed_* collections on this branch
+        let collections = self
+            .list_collections(req.branch_id, SYSTEM_SPACE)
+            .unwrap_or_default();
+
+        let mut all_hits: Vec<SearchHit> = Vec::new();
+
+        for col in &collections {
+            if !col.name.starts_with("_system_embed_") {
+                continue;
+            }
+            if col.count == 0 {
+                continue;
+            }
+
+            let matches =
+                match self.system_search_with_sources(req.branch_id, &col.name, embedding, req.k) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+
+            for m in matches {
+                let doc_ref = m
+                    .source_ref
+                    .unwrap_or_else(|| EntityRef::vector(req.branch_id, &col.name, &m.key));
+                let snippet = m
+                    .metadata
+                    .as_ref()
+                    .map(|meta| truncate_text(&meta.to_string(), 100));
+                all_hits.push(SearchHit {
+                    doc_ref,
+                    score: m.score,
+                    rank: 0,
+                    snippet,
+                });
             }
         }
+
+        // Sort by score descending, assign ranks
+        all_hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        all_hits.truncate(req.k);
+        for (i, hit) in all_hits.iter_mut().enumerate() {
+            hit.rank = (i + 1) as u32;
+        }
+
+        let searched_any = collections
+            .iter()
+            .any(|c| c.name.starts_with("_system_embed_") && c.count > 0);
+
+        let elapsed = start.elapsed().as_micros() as u64;
+        let mut stats = SearchStats::new(elapsed, all_hits.len());
+        if searched_any {
+            stats = stats.with_index_used(true);
+        }
+
+        Ok(SearchResponse::new(all_hits, false, stats))
     }
 
     fn primitive_kind(&self) -> strata_core::PrimitiveType {
@@ -3717,5 +3776,226 @@ mod tests {
             inconsistencies, 0,
             "KV/backend inconsistency detected in {inconsistencies}/{num_rounds} rounds — TOCTOU race in delete"
         );
+    }
+
+    // ========================================
+    // Searchable Trait Tests (#2146)
+    // ========================================
+
+    #[test]
+    fn test_searchable_vector_mode_with_embedding() {
+        use strata_engine::search::{SearchMode, Searchable};
+        use strata_engine::SearchRequest;
+
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        // Create a system embed collection and insert vectors
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_system_collection(branch_id, "_system_embed_kv", config)
+            .unwrap();
+        store
+            .system_insert(
+                branch_id,
+                "_system_embed_kv",
+                "key-a",
+                &[1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+        store
+            .system_insert(
+                branch_id,
+                "_system_embed_kv",
+                "key-b",
+                &[0.0, 1.0, 0.0],
+                None,
+            )
+            .unwrap();
+
+        // Search via Searchable trait with precomputed embedding
+        let req = SearchRequest::new(branch_id, "")
+            .with_mode(SearchMode::Vector)
+            .with_precomputed_embedding(vec![1.0, 0.0, 0.0])
+            .with_k(2);
+        let response = Searchable::search(&store, &req).unwrap();
+
+        assert_eq!(response.len(), 2);
+        assert_eq!(response.hits[0].rank, 1);
+        assert!(response.hits[0].score > response.hits[1].score);
+        assert!(response.stats.index_used);
+        // Verify doc_refs are EntityRef::Vector with correct collection/key
+        assert!(matches!(
+            &response.hits[0].doc_ref,
+            EntityRef::Vector { collection, key, .. }
+            if collection == "_system_embed_kv" && key == "key-a"
+        ));
+    }
+
+    #[test]
+    fn test_searchable_keyword_mode_returns_empty() {
+        use strata_engine::search::{SearchMode, Searchable};
+        use strata_engine::SearchRequest;
+
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_system_collection(branch_id, "_system_embed_kv", config)
+            .unwrap();
+        store
+            .system_insert(
+                branch_id,
+                "_system_embed_kv",
+                "key-a",
+                &[1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+
+        let req = SearchRequest::new(branch_id, "test query")
+            .with_mode(SearchMode::Keyword)
+            .with_k(10);
+        let response = Searchable::search(&store, &req).unwrap();
+
+        assert!(
+            response.is_empty(),
+            "Keyword mode should return empty for vectors"
+        );
+    }
+
+    #[test]
+    fn test_searchable_no_embedding_returns_empty() {
+        use strata_engine::search::{SearchMode, Searchable};
+        use strata_engine::SearchRequest;
+
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_system_collection(branch_id, "_system_embed_kv", config)
+            .unwrap();
+        store
+            .system_insert(
+                branch_id,
+                "_system_embed_kv",
+                "key-a",
+                &[1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+
+        // Vector mode but no precomputed_embedding
+        let req = SearchRequest::new(branch_id, "")
+            .with_mode(SearchMode::Vector)
+            .with_k(10);
+        let response = Searchable::search(&store, &req).unwrap();
+
+        assert!(response.is_empty(), "No embedding should return empty");
+    }
+
+    #[test]
+    fn test_searchable_multi_collection_merge() {
+        use strata_engine::search::{SearchMode, Searchable};
+        use strata_engine::SearchRequest;
+
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+
+        // Create two system embed collections
+        store
+            .create_system_collection(branch_id, "_system_embed_kv", config.clone())
+            .unwrap();
+        store
+            .create_system_collection(branch_id, "_system_embed_json", config)
+            .unwrap();
+
+        // Insert into kv collection — close to query
+        store
+            .system_insert(
+                branch_id,
+                "_system_embed_kv",
+                "kv-hit",
+                &[0.9, 0.1, 0.0],
+                None,
+            )
+            .unwrap();
+
+        // Insert into json collection — exact match to query
+        store
+            .system_insert(
+                branch_id,
+                "_system_embed_json",
+                "json-hit",
+                &[1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+
+        let req = SearchRequest::new(branch_id, "")
+            .with_mode(SearchMode::Vector)
+            .with_precomputed_embedding(vec![1.0, 0.0, 0.0])
+            .with_k(10);
+        let response = Searchable::search(&store, &req).unwrap();
+
+        assert_eq!(response.len(), 2, "Should find hits from both collections");
+        // json-hit is exact match (score=1.0), kv-hit is close (score~0.99)
+        // Both should be present, ranked by score
+        assert!(response.hits[0].score >= response.hits[1].score);
+        assert_eq!(response.hits[0].rank, 1);
+        assert_eq!(response.hits[1].rank, 2);
+        // Verify hits come from different collections
+        let collections: Vec<&str> = response
+            .hits
+            .iter()
+            .filter_map(|h| match &h.doc_ref {
+                EntityRef::Vector { collection, .. } => Some(collection.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(collections.contains(&"_system_embed_json"));
+        assert!(collections.contains(&"_system_embed_kv"));
+    }
+
+    #[test]
+    fn test_searchable_source_ref_propagation() {
+        use strata_engine::search::{SearchMode, Searchable};
+        use strata_engine::SearchRequest;
+
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_system_collection(branch_id, "_system_embed_kv", config)
+            .unwrap();
+
+        // Insert with a source_ref pointing back to a KV entity
+        let source = EntityRef::kv(branch_id, "original-key");
+        store
+            .system_insert_with_source(
+                branch_id,
+                "_system_embed_kv",
+                "shadow-key",
+                &[1.0, 0.0, 0.0],
+                None,
+                source.clone(),
+            )
+            .unwrap();
+
+        let req = SearchRequest::new(branch_id, "")
+            .with_mode(SearchMode::Vector)
+            .with_precomputed_embedding(vec![1.0, 0.0, 0.0])
+            .with_k(5);
+        let response = Searchable::search(&store, &req).unwrap();
+
+        assert_eq!(response.len(), 1);
+        // doc_ref should be the KV source_ref, not the vector key
+        assert_eq!(response.hits[0].doc_ref, source);
     }
 }
