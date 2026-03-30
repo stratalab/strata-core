@@ -2036,124 +2036,123 @@ fn test_issue_1733_tombstone_no_duplicate_after_recovery() {
             "deleted key should not be found via point read"
         );
     }
+}
 
-    // ========================================================================
-    // Shutdown lifecycle coverage (ENG-DEBT-009)
-    // ========================================================================
+// ========================================================================
+// Shutdown lifecycle coverage (ENG-DEBT-009)
+// ========================================================================
 
-    /// Verify the full shutdown lifecycle: open → write → shutdown → verify.
-    ///
-    /// Covers: transaction draining, WAL flush, flush thread join,
-    /// freeze hooks, and clean re-open after shutdown.
-    #[test]
-    fn test_shutdown_full_lifecycle() {
-        let temp_dir = TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("lifecycle_db");
-        let db = Database::open(&db_path).unwrap();
+/// Verify the full shutdown lifecycle: open → write → shutdown → verify.
+///
+/// Covers: transaction draining, WAL flush, flush thread join,
+/// freeze hooks, and clean re-open after shutdown.
+#[test]
+fn test_shutdown_full_lifecycle() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("lifecycle_db");
+    let db = Database::open(&db_path).unwrap();
 
-        let branch_id = BranchId::new();
-        let ns = create_test_namespace(branch_id);
-        let key = Key::new_kv(ns.clone(), "lifecycle_key");
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+    let key = Key::new_kv(ns.clone(), "lifecycle_key");
 
-        // Write data
-        db.transaction(branch_id, |txn| {
-            txn.put(key.clone(), Value::Bytes(b"lifecycle_value".to_vec()))?;
-            Ok(())
-        })
-        .unwrap();
+    // Write data
+    db.transaction(branch_id, |txn| {
+        txn.put(key.clone(), Value::Bytes(b"lifecycle_value".to_vec()))?;
+        Ok(())
+    })
+    .unwrap();
 
-        // Shutdown
-        db.shutdown().unwrap();
+    // Shutdown
+    db.shutdown().unwrap();
 
-        // Verify shutdown state
-        assert!(!db.is_open());
-        assert!(
-            !db.accepting_transactions
-                .load(std::sync::atomic::Ordering::Relaxed),
-            "accepting_transactions must be false after shutdown"
-        );
-        assert!(
-            db.shutdown_complete
-                .load(std::sync::atomic::Ordering::Relaxed),
-            "shutdown_complete must be true after shutdown"
-        );
+    // Verify shutdown state
+    assert!(!db.is_open());
+    assert!(
+        !db.accepting_transactions
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "accepting_transactions must be false after shutdown"
+    );
+    assert!(
+        db.shutdown_complete
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "shutdown_complete must be true after shutdown"
+    );
 
-        // Verify flush thread was joined (handle consumed)
-        assert!(
-            db.flush_handle.lock().is_none(),
-            "flush thread handle must be consumed (joined) after shutdown"
-        );
+    // Verify flush thread was joined (handle consumed)
+    assert!(
+        db.flush_handle.lock().is_none(),
+        "flush thread handle must be consumed (joined) after shutdown"
+    );
 
-        // Re-open and verify data persisted through shutdown
-        drop(db);
-        let db = Database::open(&db_path).unwrap();
-        let val = db.storage().get_versioned(&key, u64::MAX).unwrap();
-        assert!(
-            val.is_some(),
-            "Data committed before shutdown must survive re-open"
-        );
-        assert_eq!(
-            val.unwrap().value,
-            Value::Bytes(b"lifecycle_value".to_vec())
-        );
-    }
+    // Re-open and verify data persisted through shutdown
+    drop(db);
+    let db = Database::open(&db_path).unwrap();
+    let val = db.storage().get_versioned(&key, u64::MAX).unwrap();
+    assert!(
+        val.is_some(),
+        "Data committed before shutdown must survive re-open"
+    );
+    assert_eq!(
+        val.unwrap().value,
+        Value::Bytes(b"lifecycle_value".to_vec())
+    );
+}
 
-    /// Verify cache (ephemeral) database shutdown is clean.
-    #[test]
-    fn test_shutdown_cache_database() {
-        let db = Database::cache().unwrap();
-        let branch_id = BranchId::new();
-        let ns = create_test_namespace(branch_id);
-        let key = Key::new_kv(ns, "cache_key");
+/// Verify cache (ephemeral) database shutdown is clean.
+#[test]
+fn test_shutdown_cache_database() {
+    let db = Database::cache().unwrap();
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+    let key = Key::new_kv(ns, "cache_key");
 
-        db.transaction(branch_id, |txn| {
-            txn.put(key.clone(), Value::Int(99))?;
-            Ok(())
-        })
-        .unwrap();
+    db.transaction(branch_id, |txn| {
+        txn.put(key.clone(), Value::Int(99))?;
+        Ok(())
+    })
+    .unwrap();
 
-        // Shutdown should succeed on ephemeral databases
-        db.shutdown().unwrap();
-        assert!(!db.is_open());
+    // Shutdown should succeed on ephemeral databases
+    db.shutdown().unwrap();
+    assert!(!db.is_open());
 
-        // Double shutdown is safe
-        db.shutdown().unwrap();
-    }
+    // Double shutdown is safe
+    db.shutdown().unwrap();
+}
 
-    /// Verify the WAL flush thread terminates during shutdown.
-    ///
-    /// Opens with Standard durability (which spawns a flush thread),
-    /// shuts down, and verifies the thread handle was consumed.
-    #[test]
-    fn test_shutdown_flush_thread_termination() {
-        let temp_dir = TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("flush_thread_db");
+/// Verify the WAL flush thread terminates during shutdown.
+///
+/// Opens with Standard durability (which spawns a flush thread),
+/// shuts down, and verifies the thread handle was consumed.
+#[test]
+fn test_shutdown_flush_thread_termination() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("flush_thread_db");
 
-        // Standard mode spawns a background flush thread
-        let db =
-            Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
+    // Standard mode spawns a background flush thread
+    let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
 
-        // The flush thread handle should exist before shutdown
-        assert!(
-            db.flush_handle.lock().is_some(),
-            "Standard mode should have a flush thread handle"
-        );
+    // The flush thread handle should exist before shutdown
+    assert!(
+        db.flush_handle.lock().is_some(),
+        "Standard mode should have a flush thread handle"
+    );
 
-        // Signal + join happens inside shutdown
-        db.shutdown().unwrap();
+    // Signal + join happens inside shutdown
+    db.shutdown().unwrap();
 
-        // After shutdown, the flush_shutdown flag should be set
-        assert!(
-            db.flush_shutdown.load(std::sync::atomic::Ordering::Relaxed),
-            "flush_shutdown flag must be set after shutdown"
-        );
+    // After shutdown, the flush_shutdown flag should be set
+    assert!(
+        db.flush_shutdown.load(std::sync::atomic::Ordering::Relaxed),
+        "flush_shutdown flag must be set after shutdown"
+    );
 
-        // And the handle must be consumed
-        assert!(
-            db.flush_handle.lock().is_none(),
-            "flush thread handle must be joined (consumed) during shutdown"
-        );
-    }
+    // And the handle must be consumed
+    assert!(
+        db.flush_handle.lock().is_none(),
+        "flush thread handle must be joined (consumed) during shutdown"
+    );
 }
 
 // ========================================================================
