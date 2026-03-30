@@ -207,14 +207,30 @@ impl Database {
         let cfg = self.config.read();
         let wbs = cfg.storage.write_buffer_size as u64;
         let max_frozen = cfg.storage.max_immutable_memtables as u64;
-        if wbs == 0 {
-            return Ok(());
+        drop(cfg);
+
+        if wbs > 0 {
+            let threshold = wbs * (max_frozen + 2);
+            let current = self.storage.total_memtable_bytes();
+            if current > threshold {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                return Ok(());
+            }
         }
-        let threshold = wbs * (max_frozen + 2);
-        let current = self.storage.total_memtable_bytes();
-        if current > threshold {
-            std::thread::sleep(std::time::Duration::from_millis(1));
+
+        // Segment metadata stalling: bloom + index pinned outside block cache.
+        // When this overhead exceeds the block cache budget, stall to let
+        // compaction merge segments and reduce metadata footprint.
+        // Use the resolved global capacity (handles auto-detect when config is 0).
+        let cache_cap = strata_storage::block_cache::global_capacity() as u64;
+        if cache_cap > 0 {
+            let seg_meta = self.storage.total_segment_metadata_bytes();
+            if seg_meta > cache_cap {
+                self.schedule_flush_if_needed();
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
+
         Ok(())
     }
 
