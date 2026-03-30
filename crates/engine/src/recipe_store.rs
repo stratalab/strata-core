@@ -21,7 +21,7 @@ pub fn set_recipe(
     let key = system_kv_key(branch_id, &format!("recipe:{name}"));
     let json = serde_json::to_string(recipe)?;
     db.transaction(branch_id, |txn| {
-        txn.put(key.clone(), Value::String(json.clone().into()))
+        txn.put(key.clone(), Value::String(json.clone()))
     })?;
     Ok(())
 }

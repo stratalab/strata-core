@@ -42,7 +42,7 @@ pub fn recipe_get(p: &Arc<Primitives>, branch: BranchId, name: String) -> Result
                 reason: e.to_string(),
                 hint: None,
             })?;
-            Ok(Output::Maybe(Some(Value::String(json.into()))))
+            Ok(Output::Maybe(Some(Value::String(json))))
         }
         None => Ok(Output::Maybe(None)),
     }
@@ -60,7 +60,7 @@ pub fn recipe_get_default(p: &Arc<Primitives>, branch: BranchId) -> Result<Outpu
         reason: e.to_string(),
         hint: None,
     })?;
-    Ok(Output::Maybe(Some(Value::String(json.into()))))
+    Ok(Output::Maybe(Some(Value::String(json))))
 }
 
 /// List all recipe names on a branch.
