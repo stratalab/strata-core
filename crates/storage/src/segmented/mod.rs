@@ -17,14 +17,14 @@ use crate::memory_stats::{BranchMemoryStats, StorageMemoryStats};
 use crate::memtable::{Memtable, MemtableEntry};
 use crate::merge_iter::{MergeIterator, MvccIterator, RewritingIterator};
 use crate::pressure::{MemoryPressure, PressureLevel};
-use crate::segment::{KVSegment, SegmentEntry};
+use crate::segment::{KVSegment, OwnedSegmentIter, SegmentEntry};
 use crate::segment_builder::{SegmentBuilder, SplittingSegmentBuilder};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1749,66 +1749,11 @@ impl SegmentedStore {
             None => return Ok(Vec::new()),
         };
 
-        let mut sources: Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> = Vec::new();
-        let active_entries: Vec<_> = branch.active.iter_prefix(prefix).collect();
-        sources.push(Box::new(active_entries.into_iter()));
-        for frozen in &branch.frozen {
-            let entries: Vec<_> = frozen.iter_prefix(prefix).collect();
-            sources.push(Box::new(entries.into_iter()));
-        }
-        let prefix_bytes = encode_typed_key_prefix(prefix);
-        let ver = branch.version.load();
-        for level in &ver.levels {
-            for seg in level {
-                if !segment_overlaps_prefix(seg, &prefix_bytes) {
-                    continue;
-                }
-                let mut iter = seg.iter_seek(prefix);
-                let entries: Vec<_> = iter
-                    .by_ref()
-                    .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
-                    .collect();
-                if iter.corruption_detected() {
-                    return Err(StrataError::corruption(
-                        "segment scan stopped due to data block corruption",
-                    ));
-                }
-                sources.push(Box::new(entries.into_iter()));
-            }
-        }
+        let (merge, flags) = Self::build_branch_merge_iter(&branch, prefix, prefix)?;
 
-        // Inherited layers (COW branching)
-        for layer in &branch.inherited_layers {
-            if layer.status == LayerStatus::Materialized {
-                continue;
-            }
-            let src_prefix = prefix.with_branch_id(layer.source_branch_id);
-            let src_prefix_bytes = encode_typed_key_prefix(&src_prefix);
-            for level in &layer.segments.levels {
-                for seg in level {
-                    if !segment_overlaps_prefix(seg, &src_prefix_bytes) {
-                        continue;
-                    }
-                    let mut iter = seg.iter_seek(&src_prefix);
-                    let entries: Vec<_> = iter
-                        .by_ref()
-                        .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
-                        .collect();
-                    if iter.corruption_detected() {
-                        return Err(StrataError::corruption(
-                            "segment scan stopped due to data block corruption",
-                        ));
-                    }
-                    sources.push(Box::new(RewritingIterator::new(
-                        entries.into_iter(),
-                        prefix.namespace.branch_id,
-                        layer.fork_version,
-                    )));
-                }
-            }
-        }
-
-        let merge = MergeIterator::new(sources);
+        // Custom timestamp-based dedup — not MvccIterator (which filters by version,
+        // not timestamp). For each logical key, find the latest version whose
+        // timestamp ≤ max_timestamp.
         let mut results: Vec<(Key, VersionedValue)> = Vec::new();
         let mut last_typed_key: Option<Vec<u8>> = None;
         let mut found_for_current = false;
@@ -1837,6 +1782,7 @@ impl SegmentedStore {
                 results.push((key, entry.to_versioned(commit_id)));
             }
         }
+        check_corruption(&flags)?;
         Ok(results)
     }
 
@@ -2914,27 +2860,37 @@ impl SegmentedStore {
         Ok(all_versions)
     }
 
-    /// Build an MVCC-deduplicated prefix scan across all sources in a branch.
-    fn scan_prefix_from_branch(
-        branch: &BranchState,
+    /// Build a lazy `MergeIterator` over all sources in a branch.
+    ///
+    /// Sources are added in read-path order (LSM-003): active memtable →
+    /// frozen memtables (newest first) → L0-L6 segments → inherited COW layers.
+    ///
+    /// Memtable iterators borrow from `branch` (lifetime `'b`).
+    /// Segment iterators own `Arc<KVSegment>` via `OwnedSegmentIter` (`'static`).
+    ///
+    /// Returns the merge iterator and a vec of corruption flags — caller must
+    /// check flags after consuming the iterator via `check_corruption()`.
+    fn build_branch_merge_iter<'b>(
+        branch: &'b BranchState,
         prefix: &Key,
-        max_version: u64,
-    ) -> StrataResult<Vec<(Key, VersionedValue)>> {
-        let mut sources: Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> = Vec::new();
+        start_key: &Key,
+    ) -> StrataResult<(
+        MergeIterator<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)> + 'b>>,
+        Vec<Arc<AtomicBool>>,
+    )> {
+        let mut sources: Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)> + 'b>> =
+            Vec::new();
+        let mut corruption_flags: Vec<Arc<AtomicBool>> = Vec::new();
 
-        // Active memtable
-        let active_entries: Vec<_> = branch.active.iter_prefix(prefix).collect();
-        sources.push(Box::new(active_entries.into_iter()));
+        // Active memtable — lazy, borrows 'b
+        sources.push(Box::new(branch.active.iter_range(start_key, prefix)));
 
-        // Frozen memtables (newest first)
+        // Frozen memtables (newest first) — lazy, borrows 'b through Arc deref
         for frozen in &branch.frozen {
-            let entries: Vec<_> = frozen.iter_prefix(prefix).collect();
-            sources.push(Box::new(entries.into_iter()));
+            sources.push(Box::new(frozen.iter_range(start_key, prefix)));
         }
 
-        // On-disk segments — skip segments whose key range doesn't overlap
-        // with the scan prefix.  This avoids loading sub-indexes from hundreds
-        // of non-overlapping segments (the old O(total_segments) bottleneck).
+        // On-disk segments — lazy via OwnedSegmentIter::new_seek
         let prefix_bytes = encode_typed_key_prefix(prefix);
         let ver = branch.version.load();
         for level in &ver.levels {
@@ -2942,25 +2898,26 @@ impl SegmentedStore {
                 if !segment_overlaps_prefix(seg, &prefix_bytes) {
                     continue;
                 }
-                let mut iter = seg.iter_seek(prefix);
-                let entries: Vec<_> = iter
-                    .by_ref()
-                    .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
-                    .collect();
-                if iter.corruption_detected() {
-                    return Err(StrataError::corruption(
-                        "segment scan stopped due to data block corruption",
-                    ));
-                }
-                sources.push(Box::new(entries.into_iter()));
+                let flag = Arc::new(AtomicBool::new(false));
+                corruption_flags.push(Arc::clone(&flag));
+                sources.push(Box::new(
+                    OwnedSegmentIter::new_seek(
+                        Arc::clone(seg),
+                        start_key,
+                        prefix_bytes.clone(),
+                    )
+                    .with_corruption_flag(flag)
+                    .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se))),
+                ));
             }
         }
 
-        // Inherited layers (COW branching)
+        // Inherited layers (COW branching) — lazy via OwnedSegmentIter + RewritingIterator
         for layer in &branch.inherited_layers {
             if layer.status == LayerStatus::Materialized {
                 continue;
             }
+            let src_start = start_key.with_branch_id(layer.source_branch_id);
             let src_prefix = prefix.with_branch_id(layer.source_branch_id);
             let src_prefix_bytes = encode_typed_key_prefix(&src_prefix);
             for level in &layer.segments.levels {
@@ -2968,18 +2925,16 @@ impl SegmentedStore {
                     if !segment_overlaps_prefix(seg, &src_prefix_bytes) {
                         continue;
                     }
-                    let mut iter = seg.iter_seek(&src_prefix);
-                    let entries: Vec<_> = iter
-                        .by_ref()
-                        .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
-                        .collect();
-                    if iter.corruption_detected() {
-                        return Err(StrataError::corruption(
-                            "segment scan stopped due to data block corruption",
-                        ));
-                    }
+                    let flag = Arc::new(AtomicBool::new(false));
+                    corruption_flags.push(Arc::clone(&flag));
                     sources.push(Box::new(RewritingIterator::new(
-                        entries.into_iter(),
+                        OwnedSegmentIter::new_seek(
+                            Arc::clone(seg),
+                            &src_start,
+                            src_prefix_bytes.clone(),
+                        )
+                        .with_corruption_flag(flag)
+                        .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se))),
                         prefix.namespace.branch_id,
                         layer.fork_version,
                     )));
@@ -2987,10 +2942,18 @@ impl SegmentedStore {
             }
         }
 
-        let merge = MergeIterator::new(sources);
-        let mvcc = MvccIterator::new(merge, max_version);
+        Ok((MergeIterator::new(sources), corruption_flags))
+    }
 
-        Ok(mvcc
+    /// Build an MVCC-deduplicated prefix scan across all sources in a branch.
+    fn scan_prefix_from_branch(
+        branch: &BranchState,
+        prefix: &Key,
+        max_version: u64,
+    ) -> StrataResult<Vec<(Key, VersionedValue)>> {
+        let (merge, flags) = Self::build_branch_merge_iter(branch, prefix, prefix)?;
+        let mvcc = MvccIterator::new(merge, max_version);
+        let results: Vec<_> = mvcc
             .filter_map(|(ik, entry)| {
                 if entry.is_tombstone || entry.is_expired() {
                     return None;
@@ -2998,7 +2961,9 @@ impl SegmentedStore {
                 let (key, commit_id) = ik.decode()?;
                 Some((key, entry.to_versioned(commit_id)))
             })
-            .collect())
+            .collect();
+        check_corruption(&flags)?;
+        Ok(results)
     }
 
     /// Count entries matching a prefix without collecting into a Vec.
@@ -3021,78 +2986,14 @@ impl SegmentedStore {
         prefix: &Key,
         max_version: u64,
     ) -> StrataResult<u64> {
-        let mut sources: Vec<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>> = Vec::new();
-
-        // Active memtable
-        let active_entries: Vec<_> = branch.active.iter_prefix(prefix).collect();
-        sources.push(Box::new(active_entries.into_iter()));
-
-        // Frozen memtables (newest first)
-        for frozen in &branch.frozen {
-            let entries: Vec<_> = frozen.iter_prefix(prefix).collect();
-            sources.push(Box::new(entries.into_iter()));
-        }
-
-        // On-disk segments
-        let prefix_bytes = encode_typed_key_prefix(prefix);
-        let ver = branch.version.load();
-        for level in &ver.levels {
-            for seg in level {
-                if !segment_overlaps_prefix(seg, &prefix_bytes) {
-                    continue;
-                }
-                let mut iter = seg.iter_seek(prefix);
-                let entries: Vec<_> = iter
-                    .by_ref()
-                    .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
-                    .collect();
-                if iter.corruption_detected() {
-                    return Err(StrataError::corruption(
-                        "segment scan stopped due to data block corruption",
-                    ));
-                }
-                sources.push(Box::new(entries.into_iter()));
-            }
-        }
-
-        // Inherited layers (COW branching)
-        for layer in &branch.inherited_layers {
-            if layer.status == LayerStatus::Materialized {
-                continue;
-            }
-            let src_prefix = prefix.with_branch_id(layer.source_branch_id);
-            let src_prefix_bytes = encode_typed_key_prefix(&src_prefix);
-            for level in &layer.segments.levels {
-                for seg in level {
-                    if !segment_overlaps_prefix(seg, &src_prefix_bytes) {
-                        continue;
-                    }
-                    let mut iter = seg.iter_seek(&src_prefix);
-                    let entries: Vec<_> = iter
-                        .by_ref()
-                        .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se)))
-                        .collect();
-                    if iter.corruption_detected() {
-                        return Err(StrataError::corruption(
-                            "segment scan stopped due to data block corruption",
-                        ));
-                    }
-                    sources.push(Box::new(RewritingIterator::new(
-                        entries.into_iter(),
-                        prefix.namespace.branch_id,
-                        layer.fork_version,
-                    )));
-                }
-            }
-        }
-
-        let merge = MergeIterator::new(sources);
+        let (merge, flags) = Self::build_branch_merge_iter(branch, prefix, prefix)?;
         let mvcc = MvccIterator::new(merge, max_version);
-
-        Ok(mvcc
+        let count = mvcc
             .filter(|(_, entry)| !entry.is_tombstone && !entry.is_expired())
             .filter(|(ik, _)| ik.decode().is_some())
-            .count() as u64)
+            .count() as u64;
+        check_corruption(&flags)?;
+        Ok(count)
     }
 
     /// Write the manifest file for a branch, reflecting current level assignments
@@ -3666,6 +3567,21 @@ pub(crate) fn segment_entry_to_memtable_entry(se: SegmentEntry) -> MemtableEntry
         ttl_ms: se.ttl_ms,
         raw_value: se.raw_value,
     }
+}
+
+/// Check if any segment reported corruption during lazy iteration.
+///
+/// Called after consuming a `MergeIterator` whose segment sources carry
+/// `Arc<AtomicBool>` corruption flags via `OwnedSegmentIter::with_corruption_flag`.
+fn check_corruption(flags: &[Arc<AtomicBool>]) -> StrataResult<()> {
+    for flag in flags {
+        if flag.load(Ordering::Relaxed) {
+            return Err(StrataError::corruption(
+                "segment scan stopped due to data block corruption",
+            ));
+        }
+    }
+    Ok(())
 }
 
 mod compaction;
