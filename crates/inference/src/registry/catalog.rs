@@ -148,7 +148,7 @@ pub static CATALOG: &[CatalogEntry] = &[
         aliases: &["qwen3-1.7b"],
         task: ModelTask::Generate,
         hf_repo: "stratalab-org/Qwen3-1.7B-GGUF",
-        default_quant: "q4_k_m",
+        default_quant: "q8_0",
         variants: &[
             QuantVariant {
                 name: "q4_k_m",

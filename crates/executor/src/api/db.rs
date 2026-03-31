@@ -308,7 +308,7 @@ impl Strata {
             space: self.space_id(),
             search: query,
         })? {
-            Output::SearchResults { hits, stats } => Ok((hits, stats)),
+            Output::SearchResults { hits, stats, .. } => Ok((hits, stats)),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for Search".into(),
                 hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),

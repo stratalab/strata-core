@@ -10,7 +10,9 @@ use strata_engine::search::{builtin_defaults, Recipe};
 use strata_search::substrate::{self, RetrievalRequest};
 
 use crate::bridge::{to_core_branch_id, Primitives};
-use crate::types::{BranchId, SearchQuery, SearchResultHit, SearchStatsOutput};
+use crate::types::{
+    BranchId, ChangedHit, DiffOutput, SearchQuery, SearchResultHit, SearchStatsOutput, VersionInfo,
+};
 use crate::{Error, Output, Result};
 
 /// Handle Search command via the retrieval substrate.
@@ -86,6 +88,11 @@ pub fn search(
         &space,
     );
 
+    // ---- Resolve temporal context ----
+    // If diff is set, the "after" snapshot uses t2 as the as_of timestamp.
+    let as_of = sq.as_of.or(sq.diff.map(|(_, t2)| t2));
+    let time_range = resolved.filter.as_ref().and_then(|f| f.time_range);
+
     // ---- Multi-pass substrate retrieval ----
     let all_hits = multi_pass_retrieve(
         p,
@@ -96,8 +103,9 @@ pub fn search(
         &embed_model,
         core_branch_id,
         &space,
-        None, // time_range: TODO wire from recipe.filter
+        time_range,
         None, // primitive_filter: TODO wire from recipe.retrieve.bm25.sources
+        as_of,
     );
 
     // ---- Fuse expanded results ----
@@ -121,7 +129,7 @@ pub fn search(
     };
 
     // ---- Convert to Output ----
-    let hits: Vec<SearchResultHit> = final_hits
+    let mut hits: Vec<SearchResultHit> = final_hits
         .iter()
         .map(|hit| {
             let (entity, primitive) = format_entity_ref(&hit.doc_ref);
@@ -131,9 +139,62 @@ pub fn search(
                 score: hit.score,
                 rank: hit.rank,
                 snippet: hit.snippet.clone(),
+                versions: None,
             }
         })
         .collect();
+
+    // ---- Version history enrichment ----
+    let include_history = resolved
+        .version_output
+        .as_ref()
+        .and_then(|v| v.include_history)
+        .unwrap_or(false);
+    if include_history {
+        let depth = resolved
+            .version_output
+            .as_ref()
+            .and_then(|v| v.depth)
+            .unwrap_or(3);
+        enrich_versions(p, core_branch_id, &space, &mut hits, depth);
+    }
+
+    // ---- Temporal diff ----
+    let diff_output = if let Some((t1, t2)) = sq.diff {
+        // Current results are the "after" snapshot (computed with as_of = t2 or current).
+        // Re-run the pipeline at T1 to get the "before" snapshot.
+        let before_hits = multi_pass_retrieve(
+            p,
+            &sq.query,
+            &expanded_queries,
+            &resolved,
+            embedding.as_deref(),
+            &embed_model,
+            core_branch_id,
+            &space,
+            time_range,
+            None,
+            Some(t1),
+        );
+        let before_fused = fuse_multi_pass(&before_hits, original_weight, &resolved);
+        let before_results: Vec<SearchResultHit> = before_fused
+            .iter()
+            .map(|hit| {
+                let (entity, primitive) = format_entity_ref(&hit.doc_ref);
+                SearchResultHit {
+                    entity,
+                    primitive,
+                    score: hit.score,
+                    rank: hit.rank,
+                    snippet: hit.snippet.clone(),
+                    versions: None,
+                }
+            })
+            .collect();
+        Some(compute_diff(&before_results, &hits, t1, t2))
+    } else {
+        None
+    };
 
     let embed_status = crate::handlers::embed_hook::embed_status(p);
     let (embedding_pending, embedding_total) =
@@ -167,9 +228,14 @@ pub fn search(
         },
         embedding_pending,
         embedding_total,
+        snapshot_version: Some(p.db.current_version()),
     };
 
-    Ok(Output::SearchResults { hits, stats })
+    Ok(Output::SearchResults {
+        hits,
+        stats,
+        diff: diff_output,
+    })
 }
 
 // ============================================================================
@@ -221,7 +287,6 @@ fn try_expand_query(
 
     if let Ok(probe) = substrate::retrieve(&p.db, &probe_req) {
         if strata_intelligence::expand::has_strong_signal(&probe.hits, expansion_cfg) {
-            tracing::debug!(target: "strata::search", query = %query, "Strong signal, skipping expansion");
             return (
                 vec![ExpandedQuery {
                     query_type: QueryType::Lex,
@@ -230,6 +295,8 @@ fn try_expand_query(
                 false,
             );
         }
+    } else {
+        tracing::warn!(target: "strata::search", "BM25 probe for expansion failed");
     }
 
     // Generate expansions
@@ -301,6 +368,7 @@ fn multi_pass_retrieve(
     space: &str,
     time_range: Option<(u64, u64)>,
     primitive_filter: Option<&[strata_engine::search::PrimitiveType]>,
+    as_of: Option<u64>,
 ) -> Vec<(String, Vec<strata_engine::search::SearchHit>)> {
     use strata_search::expand::QueryType;
 
@@ -343,6 +411,7 @@ fn multi_pass_retrieve(
             embedding: pass_embedding,
             time_range,
             primitive_filter: primitive_filter.map(|f| f.to_vec()),
+            as_of,
         };
 
         if let Ok(response) = substrate::retrieve(&p.db, &request) {
@@ -450,6 +519,153 @@ fn embed_query_with_model(
     _model_spec: &str,
 ) -> Option<Vec<f32>> {
     None
+}
+
+// ============================================================================
+// Temporal: diff computation
+// ============================================================================
+
+/// Compute the diff between "before" and "after" search results.
+///
+/// Uses (entity, primitive) as the composite key to avoid collisions
+/// between different primitives with the same entity name.
+fn compute_diff(
+    before: &[SearchResultHit],
+    after: &[SearchResultHit],
+    t1: u64,
+    t2: u64,
+) -> DiffOutput {
+    use std::collections::HashMap;
+
+    // Composite key: (entity, primitive) to distinguish "doc1" in KV vs JSON.
+    type HitKey = (String, String);
+    fn key_of(h: &SearchResultHit) -> HitKey {
+        (h.entity.clone(), h.primitive.clone())
+    }
+
+    let before_map: HashMap<HitKey, &SearchResultHit> =
+        before.iter().map(|h| (key_of(h), h)).collect();
+    let after_map: HashMap<HitKey, &SearchResultHit> =
+        after.iter().map(|h| (key_of(h), h)).collect();
+
+    let added: Vec<SearchResultHit> = after
+        .iter()
+        .filter(|h| !before_map.contains_key(&key_of(h)))
+        .cloned()
+        .collect();
+
+    let removed: Vec<SearchResultHit> = before
+        .iter()
+        .filter(|h| !after_map.contains_key(&key_of(h)))
+        .cloned()
+        .collect();
+
+    let changed: Vec<ChangedHit> = after
+        .iter()
+        .filter_map(|h| {
+            before_map.get(&key_of(h)).and_then(|prev| {
+                let score_changed = (h.score - prev.score).abs() > 0.05;
+                let rank_changed = h.rank != prev.rank;
+                if score_changed || rank_changed {
+                    Some(ChangedHit {
+                        hit: h.clone(),
+                        previous_score: prev.score,
+                        previous_rank: prev.rank,
+                    })
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+
+    DiffOutput {
+        before_ts: t1,
+        after_ts: t2,
+        added,
+        removed,
+        changed,
+    }
+}
+
+// ============================================================================
+// Temporal: version history enrichment
+// ============================================================================
+
+/// Enrich search result hits with version history from getv().
+fn enrich_versions(
+    p: &Arc<Primitives>,
+    branch_id: strata_core::types::BranchId,
+    space: &str,
+    hits: &mut [SearchResultHit],
+    depth: usize,
+) {
+    for hit in hits.iter_mut() {
+        hit.versions = match hit.primitive.as_str() {
+            "kv" => get_kv_versions(p, branch_id, space, &hit.entity, depth),
+            "json" => get_json_versions(p, branch_id, space, &hit.entity, depth),
+            _ => None,
+        };
+    }
+}
+
+fn get_kv_versions(
+    p: &Arc<Primitives>,
+    branch_id: strata_core::types::BranchId,
+    space: &str,
+    key: &str,
+    depth: usize,
+) -> Option<Vec<VersionInfo>> {
+    let history = p.kv.getv(&branch_id, space, key).ok()??;
+    Some(
+        history
+            .versions()
+            .iter()
+            .take(depth)
+            .map(|v| {
+                let snippet = match &v.value {
+                    strata_core::Value::String(s) => Some(s.chars().take(200).collect::<String>()),
+                    other => Some(format!("{:?}", other).chars().take(200).collect()),
+                };
+                VersionInfo {
+                    version: v.version.as_u64(),
+                    timestamp: v.timestamp.as_micros(),
+                    snippet,
+                }
+            })
+            .collect(),
+    )
+}
+
+fn get_json_versions(
+    p: &Arc<Primitives>,
+    branch_id: strata_core::types::BranchId,
+    space: &str,
+    doc_id: &str,
+    depth: usize,
+) -> Option<Vec<VersionInfo>> {
+    let history = p.json.getv(&branch_id, space, doc_id).ok()??;
+    Some(
+        history
+            .versions()
+            .iter()
+            .take(depth)
+            .map(|v| {
+                let snippet = Some(
+                    serde_json::to_string(&v.value)
+                        .unwrap_or_default()
+                        .chars()
+                        .take(200)
+                        .collect(),
+                );
+                VersionInfo {
+                    version: v.version.as_u64(),
+                    timestamp: v.timestamp.as_micros(),
+                    snippet,
+                }
+            })
+            .collect(),
+    )
 }
 
 /// Format an EntityRef into (entity_string, primitive_string) for display.

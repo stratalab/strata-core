@@ -257,6 +257,8 @@ fn test_read_only_allows_all_reads() {
                 recipe: None,
                 precomputed_embedding: None,
                 k: None,
+                as_of: None,
+                diff: None,
             },
         },
         Command::BranchDiff {
@@ -571,6 +573,8 @@ fn test_is_write_classification() {
                 recipe: None,
                 precomputed_embedding: None,
                 k: None,
+                as_of: None,
+                diff: None,
             },
         },
         Command::BranchDiff {

@@ -27,6 +27,8 @@ fn test_search_empty_database() {
             recipe: None,
             precomputed_embedding: None,
             k: None,
+            as_of: None,
+            diff: None,
         },
     });
 
@@ -70,6 +72,8 @@ fn test_search_returns_empty_for_kv_primitive() {
             recipe: None,
             precomputed_embedding: None,
             k: Some(10),
+            as_of: None,
+            diff: None,
         },
     });
 
@@ -105,6 +109,8 @@ fn test_search_with_primitive_filter() {
             recipe: None,
             precomputed_embedding: None,
             k: Some(10),
+            as_of: None,
+            diff: None,
         },
     });
 
@@ -131,6 +137,8 @@ fn test_search_command_infrastructure_works() {
             recipe: None,
             precomputed_embedding: None,
             k: Some(5),
+            as_of: None,
+            diff: None,
         },
     });
 
@@ -156,6 +164,8 @@ fn test_search_with_mode_override() {
             recipe: None,
             precomputed_embedding: None,
             k: None,
+            as_of: None,
+            diff: None,
         },
     });
     assert!(result.is_ok());
@@ -169,6 +179,8 @@ fn test_search_with_mode_override() {
             recipe: None,
             precomputed_embedding: None,
             k: None,
+            as_of: None,
+            diff: None,
         },
     });
     assert!(result.is_ok());
@@ -186,6 +198,8 @@ fn test_search_with_expand_rerank_disabled() {
             recipe: None,
             precomputed_embedding: None,
             k: None,
+            as_of: None,
+            diff: None,
         },
     });
     assert!(result.is_ok());
@@ -222,6 +236,8 @@ fn test_issue_1768_search_stats_include_embedding_progress() {
             recipe: None,
             precomputed_embedding: None,
             k: None,
+            as_of: None,
+            diff: None,
         },
     });
 
@@ -262,6 +278,8 @@ fn test_issue_1768_search_stats_no_embedding_when_nothing_pending() {
             recipe: None,
             precomputed_embedding: None,
             k: None,
+            as_of: None,
+            diff: None,
         },
     });
 
@@ -294,6 +312,8 @@ fn test_issue_1768_search_stats_no_embedding_when_disabled() {
             recipe: None,
             precomputed_embedding: None,
             k: None,
+            as_of: None,
+            diff: None,
         },
     });
 

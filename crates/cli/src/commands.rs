@@ -104,6 +104,7 @@ pub fn build_cli() -> Command {
         .subcommand(build_detokenize())
         .subcommand(build_graph())
         .subcommand(build_config())
+        .subcommand(build_recipe())
         .subcommand(build_up())
         .subcommand(build_down())
         .subcommand(build_db_export())
@@ -140,6 +141,7 @@ pub fn build_repl_cmd() -> Command {
         .subcommand(build_detokenize())
         .subcommand(build_graph())
         .subcommand(build_config())
+        .subcommand(build_recipe())
         .subcommand(build_db_export())
         .subcommand(build_db_import())
 }
@@ -1347,6 +1349,33 @@ fn build_config() -> Command {
                 .arg(Arg::new("key").required(true).help("Configuration key")),
         )
         .subcommand(Command::new("list").about("Show all configuration values"))
+}
+
+fn build_recipe() -> Command {
+    Command::new("recipe")
+        .about("Search recipe operations")
+        .subcommand_required(true)
+        .subcommand(Command::new("show").about("Show the resolved default recipe"))
+        .subcommand(
+            Command::new("set")
+                .about("Set a named recipe (JSON)")
+                .arg(
+                    Arg::new("name")
+                        .long("name")
+                        .default_value("default")
+                        .help("Recipe name"),
+                )
+                .arg(Arg::new("recipe_json").required(true).help("Recipe JSON")),
+        )
+        .subcommand(
+            Command::new("get").about("Get a named recipe").arg(
+                Arg::new("name")
+                    .long("name")
+                    .default_value("default")
+                    .help("Recipe name"),
+            ),
+        )
+        .subcommand(Command::new("list").about("List all recipes"))
 }
 
 fn build_up() -> Command {
