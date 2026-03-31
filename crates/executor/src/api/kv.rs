@@ -294,4 +294,31 @@ impl Strata {
             }),
         }
     }
+
+    // =========================================================================
+    // KV Iterator (seek/next API)
+    // =========================================================================
+
+    /// Create a KV iterator for the current branch and space.
+    ///
+    /// Equivalent to RocksDB's `DB::NewIterator(ReadOptions)`. Returns a
+    /// [`StorageIterator`](strata_engine::StorageIterator) with `seek()` and
+    /// `next()` methods. The iterator captures a point-in-time snapshot —
+    /// memtable rotation and compaction don't invalidate it.
+    ///
+    /// Bypasses executor dispatch for direct storage access.
+    pub fn kv_iterator(&self) -> Result<strata_engine::StorageIterator> {
+        let branch = self.branch_id().ok_or_else(|| Error::Internal {
+            reason: "No branch set".into(),
+            hint: None,
+        })?;
+        let space = self.space_id().unwrap_or_else(|| "default".to_string());
+        let branch_id = crate::bridge::to_core_branch_id(&branch)?;
+        let p = self.executor().primitives();
+        p.kv.scan_iter(&branch_id, &space)
+            .map_err(|e| Error::Internal {
+                reason: e.to_string(),
+                hint: None,
+            })
+    }
 }

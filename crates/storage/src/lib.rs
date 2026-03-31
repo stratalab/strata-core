@@ -24,6 +24,7 @@ pub mod memtable;
 pub mod merge_iter;
 pub mod pressure;
 pub mod rate_limiter;
+pub mod seekable;
 pub mod segment;
 pub mod segment_builder;
 pub mod segmented;

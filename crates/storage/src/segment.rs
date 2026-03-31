@@ -464,6 +464,19 @@ impl KVSegment {
         (&self.props.key_min, &self.props.key_max)
     }
 
+    /// Binary search the segment index for the block containing `seek_bytes`.
+    ///
+    /// Returns `(partition_idx, block_within_partition)` for direct positioning.
+    /// Used by [`SeekableIterator`](crate::seekable::SeekableIterator) implementations.
+    pub fn index_seek_position(&self, seek_bytes: &[u8]) -> (usize, usize) {
+        self.index.seek_position(seek_bytes)
+    }
+
+    /// Whether this segment's index is empty (no blocks).
+    pub fn index_is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
     /// File size in bytes.
     pub fn file_size(&self) -> u64 {
         self.file_size
@@ -1145,9 +1158,59 @@ impl OwnedSegmentIter {
         self.corruption_detected = Some(flag);
         self
     }
+
+    /// Set a prefix filter without seeking. Used by `LevelSegmentIter` when
+    /// opening subsequent segments from the beginning (seek already done via
+    /// binary search on the segment list).
+    pub fn with_prefix_filter(mut self, prefix_bytes: Vec<u8>) -> Self {
+        self.prefix_bytes = Some(prefix_bytes);
+        self
+    }
 }
 
 impl OwnedSegmentIter {
+    /// Reposition to the first entry >= `start_key` within this segment.
+    ///
+    /// Reuses the existing `Arc<KVSegment>` — only resets the block position
+    /// via the in-memory index (O(log B) binary search, no I/O unless the
+    /// target block isn't cached). Equivalent to RocksDB's per-SST
+    /// `InternalIterator::Seek()`.
+    pub fn seek(&mut self, start_key: &Key) {
+        if self.segment.index_is_empty() {
+            self.done = true;
+            return;
+        }
+        let seek_ik = InternalKey::encode(start_key, u64::MAX);
+        let (partition_idx, block_within_partition) =
+            self.segment.index_seek_position(seek_ik.as_bytes());
+        self.partition_idx = partition_idx;
+        self.block_within_partition = block_within_partition;
+        self.block_offset = 0;
+        self.block_data_end = 0;
+        self.block_data = None; // force block reload
+        self.done = false;
+        self.prev_key.clear();
+    }
+
+    /// Reset block position directly (used by `SegmentSeekableIter`).
+    ///
+    /// Avoids the Key → InternalKey → seek_position round-trip when the
+    /// caller already has the encoded InternalKey bytes.
+    pub fn reset_position(&mut self, partition_idx: usize, block_within_partition: usize) {
+        self.partition_idx = partition_idx;
+        self.block_within_partition = block_within_partition;
+        self.block_offset = 0;
+        self.block_data_end = 0;
+        self.block_data = None;
+        self.done = false;
+        self.prev_key.clear();
+    }
+
+    /// Access the underlying segment (for index queries by seekable iterators).
+    pub fn segment(&self) -> &Arc<KVSegment> {
+        &self.segment
+    }
+
     /// Return a monotonically increasing block index (used by `ThrottledSegmentIter`).
     pub(crate) fn current_block_idx(&self) -> usize {
         self.global_block_idx
@@ -1283,6 +1346,184 @@ impl Iterator for OwnedSegmentIter {
                     return None;
                 }
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LevelSegmentIter — lazy per-level iterator (RocksDB LevelIterator pattern)
+// ---------------------------------------------------------------------------
+
+/// Lazy iterator over a sorted, non-overlapping level of segments.
+///
+/// Analogous to RocksDB's `LevelIterator` (version_set.cc). Instead of
+/// opening iterators for ALL segments at creation time, this:
+/// 1. Binary-searches the segment list by `key_range()` to find the first
+///    relevant file (O(log N), no I/O)
+/// 2. Opens only that file's `OwnedSegmentIter` (1 block read)
+/// 3. When exhausted, lazily opens the next file
+///
+/// For a 10-entry scan at L2 with 1000 segments, this opens 1-2 files
+/// instead of 1000. See issue #2213.
+pub struct LevelSegmentIter {
+    segments: Vec<Arc<KVSegment>>,
+    current_idx: usize,
+    current_iter: Option<OwnedSegmentIter>,
+    prefix_bytes: Vec<u8>,
+    corruption_flag: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl LevelSegmentIter {
+    /// Create a new level iterator. No files are opened until iteration.
+    pub fn new(
+        segments: Vec<Arc<KVSegment>>,
+        prefix_bytes: Vec<u8>,
+        corruption_flag: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self {
+            segments,
+            current_idx: 0,
+            current_iter: None,
+            prefix_bytes,
+            corruption_flag,
+        }
+    }
+
+    /// Seek to the first segment whose key range includes `start_key`.
+    ///
+    /// Uses binary search on `key_range().max` (O(log N), no I/O).
+    /// Opens only the matching segment's iterator.
+    pub fn seek(&mut self, start_key: &Key) {
+        use crate::key_encoding::{encode_typed_key, COMMIT_ID_SUFFIX_LEN};
+
+        let start_bytes = encode_typed_key(start_key);
+
+        // Binary search: find first segment whose max_key >= start_bytes.
+        // Segments are sorted by key range (non-overlapping at L1+).
+        let idx = self.segments.partition_point(|seg| {
+            let (_, max_ik) = seg.key_range();
+            if max_ik.len() >= COMMIT_ID_SUFFIX_LEN {
+                let max_typed = &max_ik[..max_ik.len() - COMMIT_ID_SUFFIX_LEN];
+                max_typed < start_bytes.as_slice()
+            } else {
+                false
+            }
+        });
+
+        self.current_idx = idx;
+        if idx < self.segments.len() {
+            self.current_iter = Some(
+                OwnedSegmentIter::new_seek(
+                    Arc::clone(&self.segments[idx]),
+                    start_key,
+                    self.prefix_bytes.clone(),
+                )
+                .with_corruption_flag(Arc::clone(&self.corruption_flag)),
+            );
+        } else {
+            self.current_iter = None;
+        }
+    }
+
+    /// Seek from raw InternalKey bytes (used by `LevelSeekableIter`).
+    ///
+    /// Includes RocksDB's same-file optimization: if target is within the
+    /// current file's key range, repositions within it (O(log B)) instead
+    /// of binary-searching the file list (O(log F) + O(log B)).
+    pub fn seek_bytes(&mut self, target: &[u8]) {
+        use crate::key_encoding::COMMIT_ID_SUFFIX_LEN;
+
+        // Extract the typed_key portion (without commit_id suffix) for comparison
+        let target_typed = if target.len() >= COMMIT_ID_SUFFIX_LEN {
+            &target[..target.len() - COMMIT_ID_SUFFIX_LEN]
+        } else {
+            target
+        };
+
+        // RocksDB optimization: check if target is within current file's
+        // [min_key, max_key] range. Must check BOTH bounds — if target is
+        // before current file's min, an earlier file may contain the entry.
+        if let Some(ref mut iter) = self.current_iter {
+            if self.current_idx < self.segments.len() {
+                let (min_ik, max_ik) = self.segments[self.current_idx].key_range();
+                let min_typed = if min_ik.len() >= COMMIT_ID_SUFFIX_LEN {
+                    &min_ik[..min_ik.len() - COMMIT_ID_SUFFIX_LEN]
+                } else {
+                    min_ik
+                };
+                let max_typed = if max_ik.len() >= COMMIT_ID_SUFFIX_LEN {
+                    &max_ik[..max_ik.len() - COMMIT_ID_SUFFIX_LEN]
+                } else {
+                    max_ik
+                };
+                if target_typed >= min_typed && target_typed <= max_typed {
+                    // Target is within current file — seek in place
+                    let (part_idx, block_idx) =
+                        self.segments[self.current_idx].index_seek_position(target);
+                    iter.reset_position(part_idx, block_idx);
+                    return;
+                }
+            }
+        }
+
+        // Target beyond current file — binary search for new file
+        let idx = self.segments.partition_point(|seg| {
+            let (_, max_ik) = seg.key_range();
+            if max_ik.len() >= COMMIT_ID_SUFFIX_LEN {
+                let max_typed = &max_ik[..max_ik.len() - COMMIT_ID_SUFFIX_LEN];
+                max_typed < target_typed
+            } else {
+                false
+            }
+        });
+
+        self.current_idx = idx;
+        if idx < self.segments.len() {
+            let (part_idx, block_idx) = self.segments[idx].index_seek_position(target);
+            self.current_iter = Some(
+                OwnedSegmentIter::new(Arc::clone(&self.segments[idx]))
+                    .with_prefix_filter(self.prefix_bytes.clone())
+                    .with_corruption_flag(Arc::clone(&self.corruption_flag)),
+            );
+            if let Some(ref mut iter) = self.current_iter {
+                iter.reset_position(part_idx, block_idx);
+            }
+        } else {
+            self.current_iter = None;
+        }
+    }
+
+    /// Open the next segment's iterator (lazy file opening).
+    fn advance_to_next_segment(&mut self) {
+        self.current_idx += 1;
+        if self.current_idx < self.segments.len() {
+            // Open from the beginning of the next segment (no seek needed —
+            // segments are sorted, so the next entry is at the start).
+            self.current_iter = Some(
+                OwnedSegmentIter::new(Arc::clone(&self.segments[self.current_idx]))
+                    .with_prefix_filter(self.prefix_bytes.clone())
+                    .with_corruption_flag(Arc::clone(&self.corruption_flag)),
+            );
+        } else {
+            self.current_iter = None;
+        }
+    }
+}
+
+impl Iterator for LevelSegmentIter {
+    type Item = (InternalKey, SegmentEntry);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(ref mut iter) = self.current_iter {
+                if let Some(item) = iter.next() {
+                    return Some(item);
+                }
+                // Current segment exhausted — try next
+            } else {
+                return None;
+            }
+            self.advance_to_next_segment();
         }
     }
 }

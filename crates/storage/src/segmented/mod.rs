@@ -17,7 +17,8 @@ use crate::memory_stats::{BranchMemoryStats, StorageMemoryStats};
 use crate::memtable::{Memtable, MemtableEntry};
 use crate::merge_iter::{MergeIterator, MvccIterator, RewritingIterator};
 use crate::pressure::{MemoryPressure, PressureLevel};
-use crate::segment::{KVSegment, OwnedSegmentIter, SegmentEntry};
+use crate::seekable::{self, SeekableIterator as _};
+use crate::segment::{KVSegment, LevelSegmentIter, OwnedSegmentIter, SegmentEntry};
 use crate::segment_builder::{SegmentBuilder, SplittingSegmentBuilder};
 
 use arc_swap::ArcSwap;
@@ -362,15 +363,18 @@ pub(crate) struct BranchSnapshot {
 /// The [`BranchSnapshot`] pins memtables and segments for the iterator's
 /// lifetime.
 ///
-/// Pipeline is rebuilt on each `seek()` — memtable entries collected
-/// (bounded by write_buffer_size from seek position), segments lazy
-/// via `OwnedSegmentIter`.
+/// On first `seek()`, builds the full seekable pipeline (memtable +
+/// segment + merge + MVCC children). On subsequent seeks, re-seeks
+/// children in place via [`SeekableIterator::seek()`] — children
+/// persist across seeks, matching RocksDB's `MergingIterator` pattern.
 pub struct StorageIterator {
     snapshot: BranchSnapshot,
     prefix: Key,
     snapshot_version: u64,
-    pipeline: Option<Box<dyn Iterator<Item = (Key, VersionedValue)>>>,
-    corruption_flags: Vec<Arc<AtomicBool>>,
+    /// Seekable pipeline: built on first seek, re-seeked on subsequent seeks.
+    pipeline: Option<seekable::MvccSeekableIter>,
+    /// Current decoded entry (tombstone/expiry filtering applied).
+    current: Option<(Key, VersionedValue)>,
 }
 
 impl StorageIterator {
@@ -380,31 +384,186 @@ impl StorageIterator {
             prefix,
             snapshot_version,
             pipeline: None,
-            corruption_flags: Vec::new(),
+            current: None,
         }
     }
 
     /// Seek to first entry >= `target` within the prefix.
     ///
-    /// Rebuilds the merge pipeline from the seek position. O(log N) per source.
-    /// Previous pipeline state is discarded.
+    /// On first call, builds the seekable pipeline from the snapshot.
+    /// On subsequent calls, re-seeks existing children in place —
+    /// segment iterators are repositioned via in-memory index (O(log B)),
+    /// memtable entries are re-collected from the seek position.
     pub fn seek(&mut self, target: &Key) -> StrataResult<()> {
-        let (merge, flags) =
-            SegmentedStore::build_snapshot_merge_iter(&self.snapshot, &self.prefix, target)?;
-        self.corruption_flags = flags;
-        let mvcc = MvccIterator::new(merge, self.snapshot_version);
-        let target_owned = target.clone();
-        self.pipeline = Some(Box::new(
-            mvcc.filter_map(|(ik, entry)| {
-                if entry.is_tombstone || entry.is_expired() {
-                    return None;
-                }
-                let (key, commit_id) = ik.decode()?;
-                Some((key, entry.to_versioned(commit_id)))
-            })
-            .filter(move |(key, _)| key >= &target_owned),
-        ));
+        let target_ik = InternalKey::encode(target, u64::MAX);
+
+        if let Some(ref mut pipeline) = self.pipeline {
+            // Re-seek existing pipeline — children persist
+            pipeline.seek(target_ik.as_bytes());
+        } else {
+            // First seek: build the pipeline
+            let mut pipeline = self.build_seekable_pipeline();
+            pipeline.seek(target_ik.as_bytes());
+            self.pipeline = Some(pipeline);
+        }
+
+        // Position at first live entry >= target
+        self.advance_to_live(target);
         Ok(())
+    }
+
+    /// Build the seekable pipeline from the snapshot.
+    fn build_seekable_pipeline(&self) -> seekable::MvccSeekableIter {
+        use seekable::*;
+
+        let mut children: Vec<Box<dyn SeekableIterator>> = Vec::new();
+        let prefix_bytes = encode_typed_key_prefix(&self.prefix);
+
+        // Active memtable
+        children.push(Box::new(MemtableSeekableIter::new(
+            Arc::clone(&self.snapshot.active),
+            self.prefix.clone(),
+        )));
+
+        // Frozen memtables (newest first)
+        for frozen in &self.snapshot.frozen {
+            children.push(Box::new(MemtableSeekableIter::new(
+                Arc::clone(frozen),
+                self.prefix.clone(),
+            )));
+        }
+
+        // L0 segments — individual iterators (overlapping)
+        if !self.snapshot.segments.levels.is_empty() {
+            for seg in &self.snapshot.segments.levels[0] {
+                if !segment_overlaps_prefix(seg, &prefix_bytes) {
+                    continue;
+                }
+                let flag = Arc::new(AtomicBool::new(false));
+                children.push(Box::new(SegmentSeekableIter::new(
+                    Arc::clone(seg),
+                    prefix_bytes.clone(),
+                    flag,
+                )));
+            }
+        }
+
+        // L1+ levels — one LevelSeekableIter per level (non-overlapping)
+        for level in self.snapshot.segments.levels.iter().skip(1) {
+            if level.is_empty() {
+                continue;
+            }
+            let level_segs: Vec<_> = level
+                .iter()
+                .filter(|s| segment_overlaps_prefix(s, &prefix_bytes))
+                .cloned()
+                .collect();
+            if level_segs.is_empty() {
+                continue;
+            }
+            let flag = Arc::new(AtomicBool::new(false));
+            children.push(Box::new(LevelSeekableIter::new(
+                level_segs,
+                prefix_bytes.clone(),
+                flag,
+            )));
+        }
+
+        // Inherited layers (COW)
+        for layer in &self.snapshot.inherited_layers {
+            if layer.status == LayerStatus::Materialized {
+                continue;
+            }
+            let src_prefix = self.prefix.with_branch_id(layer.source_branch_id);
+            let src_prefix_bytes = encode_typed_key_prefix(&src_prefix);
+
+            // L0 segments from inherited layer
+            if !layer.segments.levels.is_empty() {
+                for seg in &layer.segments.levels[0] {
+                    if !segment_overlaps_prefix(seg, &src_prefix_bytes) {
+                        continue;
+                    }
+                    let flag = Arc::new(AtomicBool::new(false));
+                    let seg_iter = Box::new(SegmentSeekableIter::new(
+                        Arc::clone(seg),
+                        src_prefix_bytes.clone(),
+                        flag,
+                    ));
+                    children.push(Box::new(RewritingSeekableIter::new(
+                        seg_iter,
+                        self.prefix.namespace.branch_id,
+                        layer.source_branch_id,
+                        layer.fork_version,
+                    )));
+                }
+            }
+
+            // L1+ segments from inherited layer
+            for level in layer.segments.levels.iter().skip(1) {
+                if level.is_empty() {
+                    continue;
+                }
+                let level_segs: Vec<_> = level
+                    .iter()
+                    .filter(|s| segment_overlaps_prefix(s, &src_prefix_bytes))
+                    .cloned()
+                    .collect();
+                if level_segs.is_empty() {
+                    continue;
+                }
+                let flag = Arc::new(AtomicBool::new(false));
+                let level_iter = Box::new(LevelSeekableIter::new(
+                    level_segs,
+                    src_prefix_bytes.clone(),
+                    flag,
+                ));
+                children.push(Box::new(RewritingSeekableIter::new(
+                    level_iter,
+                    self.prefix.namespace.branch_id,
+                    layer.source_branch_id,
+                    layer.fork_version,
+                )));
+            }
+        }
+
+        let merge = seekable::MergeSeekableIter::new(children);
+        seekable::MvccSeekableIter::new(merge, self.snapshot_version)
+    }
+
+    /// Advance the pipeline to the next live (non-tombstone, non-expired)
+    /// entry >= target.
+    fn advance_to_live(&mut self, target: &Key) {
+        match self.pipeline.as_ref() {
+            Some(p) if p.valid() => {}
+            _ => {
+                self.current = None;
+                return;
+            }
+        }
+
+        let pipeline = self.pipeline.as_mut().unwrap();
+        loop {
+            if !pipeline.valid() {
+                self.current = None;
+                return;
+            }
+            let ik = pipeline.current_key();
+            let entry = pipeline.current_entry();
+
+            if entry.is_tombstone || entry.is_expired() {
+                pipeline.advance();
+                continue;
+            }
+
+            if let Some((key, commit_id)) = ik.decode() {
+                if &key >= target {
+                    self.current = Some((key, entry.to_versioned(commit_id)));
+                    pipeline.advance();
+                    return;
+                }
+            }
+            pipeline.advance();
+        }
     }
 
     /// Advance to the next live entry. O(log K) per call where K = source count.
@@ -413,12 +572,43 @@ impl StorageIterator {
     /// to detect any segment data block corruption encountered during reads.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<(Key, VersionedValue)> {
-        self.pipeline.as_mut()?.next()
+        let result = self.current.take()?;
+
+        // Pre-load next live entry
+        let pipeline = self.pipeline.as_mut()?;
+        loop {
+            if !pipeline.valid() {
+                break;
+            }
+            let ik = pipeline.current_key();
+            let entry = pipeline.current_entry();
+
+            if entry.is_tombstone || entry.is_expired() {
+                pipeline.advance();
+                continue;
+            }
+
+            if let Some((key, commit_id)) = ik.decode() {
+                self.current = Some((key, entry.to_versioned(commit_id)));
+                pipeline.advance();
+                break;
+            }
+            pipeline.advance();
+        }
+
+        Some(result)
     }
 
     /// Check if any segment reported corruption during iteration.
     pub fn check_corruption(&self) -> StrataResult<()> {
-        check_corruption(&self.corruption_flags)
+        if let Some(ref pipeline) = self.pipeline {
+            if pipeline.corruption_detected() {
+                return Err(StrataError::corruption(
+                    "Segment data block corruption detected during iteration",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -3028,20 +3218,48 @@ impl SegmentedStore {
             sources.push(Box::new(frozen.iter_range(start_key, prefix)));
         }
 
-        // On-disk segments — lazy via OwnedSegmentIter::new_seek
+        // On-disk segments — lazy iterators
         let prefix_bytes = encode_typed_key_prefix(prefix);
         let ver = branch.version.load();
-        for level in &ver.levels {
-            for seg in level {
-                if !segment_overlaps_prefix(seg, &prefix_bytes) {
+        for (level_idx, level) in ver.levels.iter().enumerate() {
+            if level.is_empty() {
+                continue;
+            }
+            if level_idx == 0 {
+                // L0: overlapping files — individual iterators (unavoidable)
+                for seg in level {
+                    if !segment_overlaps_prefix(seg, &prefix_bytes) {
+                        continue;
+                    }
+                    let flag = Arc::new(AtomicBool::new(false));
+                    corruption_flags.push(Arc::clone(&flag));
+                    sources.push(Box::new(
+                        OwnedSegmentIter::new_seek(
+                            Arc::clone(seg),
+                            start_key,
+                            prefix_bytes.clone(),
+                        )
+                        .with_corruption_flag(flag)
+                        .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se))),
+                    ));
+                }
+            } else {
+                // L1+: non-overlapping, sorted — one LevelSegmentIter per level.
+                // Binary-searches to the relevant file, opens lazily (#2213).
+                let level_segs: Vec<Arc<KVSegment>> = level
+                    .iter()
+                    .filter(|s| segment_overlaps_prefix(s, &prefix_bytes))
+                    .cloned()
+                    .collect();
+                if level_segs.is_empty() {
                     continue;
                 }
                 let flag = Arc::new(AtomicBool::new(false));
                 corruption_flags.push(Arc::clone(&flag));
+                let mut level_iter = LevelSegmentIter::new(level_segs, prefix_bytes.clone(), flag);
+                level_iter.seek(start_key);
                 sources.push(Box::new(
-                    OwnedSegmentIter::new_seek(Arc::clone(seg), start_key, prefix_bytes.clone())
-                        .with_corruption_flag(flag)
-                        .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se))),
+                    level_iter.map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se))),
                 ));
             }
         }
