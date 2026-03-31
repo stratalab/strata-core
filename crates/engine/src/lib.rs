@@ -39,6 +39,7 @@ pub use database::{
     StorageMetricsSummary, StrataConfig, SubsystemHealth, SubsystemStatus, SystemMetrics,
 };
 pub use instrumentation::PerfTrace;
+pub use strata_storage::StorageIterator;
 pub use recovery::{
     recover_all_participants, register_recovery_participant, RecoveryFn, RecoveryParticipant,
     Subsystem,

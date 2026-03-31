@@ -89,8 +89,11 @@ pub use output::{EmbedStatusInfo, Output};
 pub use session::Session;
 pub use types::*;
 
-// Re-export Value from strata_core so users don't need to import it
-pub use strata_core::Value;
+// Re-export core types so users don't need strata-core directly
+pub use strata_core::{Key, Namespace, Value};
+
+// Re-export StorageIterator (return type of Strata::kv_iterator)
+pub use strata_engine::StorageIterator;
 
 // Re-export security types so users don't need strata-security directly
 pub use strata_security::{AccessMode, OpenOptions};
