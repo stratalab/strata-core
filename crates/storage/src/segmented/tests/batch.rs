@@ -347,6 +347,53 @@ fn get_versioned_direct_moves_bytes_value() {
     assert_eq!(vv.version, strata_core::Version::txn(3));
 }
 
+mod estimate_num_keys {
+    use super::*;
+
+    #[test]
+    fn tracks_inserts() {
+        let store = SegmentedStore::new();
+        assert_eq!(store.count_prefix(&kv_key(""), u64::MAX).unwrap(), 0);
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        seed(&store, kv_key("b"), Value::Int(2), 2);
+        seed(&store, kv_key("c"), Value::Int(3), 3);
+        assert_eq!(store.count_prefix(&kv_key(""), u64::MAX).unwrap(), 3);
+    }
+
+    #[test]
+    fn accounts_for_deletes() {
+        let store = SegmentedStore::new();
+        seed(&store, kv_key("a"), Value::Int(1), 1);
+        seed(&store, kv_key("b"), Value::Int(2), 2);
+        assert_eq!(store.count_prefix(&kv_key(""), u64::MAX).unwrap(), 2);
+        store.delete_with_version(&kv_key("a"), 3).unwrap();
+        // estimate = 2 entries - 1 deletion = 1
+        assert_eq!(store.count_prefix(&kv_key(""), u64::MAX).unwrap(), 1);
+    }
+
+    #[test]
+    fn does_not_underflow() {
+        let store = SegmentedStore::new();
+        // Delete without any prior insert
+        store.delete_with_version(&kv_key("ghost"), 1).unwrap();
+        assert_eq!(store.count_prefix(&kv_key(""), u64::MAX).unwrap(), 0);
+    }
+
+    #[test]
+    fn prefix_query_uses_exact_iterator() {
+        let store = SegmentedStore::new();
+        seed(&store, kv_key("apple"), Value::Int(1), 1);
+        seed(&store, kv_key("apricot"), Value::Int(2), 2);
+        seed(&store, kv_key("banana"), Value::Int(3), 3);
+        // Unprefixed: uses O(1) estimate
+        assert_eq!(store.count_prefix(&kv_key(""), u64::MAX).unwrap(), 3);
+        // Prefixed: uses exact O(N) iterator
+        assert_eq!(store.count_prefix(&kv_key("ap"), u64::MAX).unwrap(), 2);
+        assert_eq!(store.count_prefix(&kv_key("b"), u64::MAX).unwrap(), 1);
+        assert_eq!(store.count_prefix(&kv_key("z"), u64::MAX).unwrap(), 0);
+    }
+}
+
 #[test]
 fn list_by_type_filters_correctly() {
     let store = SegmentedStore::new();

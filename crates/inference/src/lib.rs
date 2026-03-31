@@ -208,6 +208,19 @@ pub trait InferenceEngine: Send + std::fmt::Debug {
     fn supports_rank(&self) -> bool {
         false
     }
+
+    /// Dimensionality of embedding vectors produced by this engine.
+    /// Returns 0 if unknown or engine doesn't support embedding.
+    fn embedding_dim(&self) -> usize {
+        0
+    }
+
+    /// Whether the engine is healthy and operational.
+    /// Local engines return false if their internal state is poisoned.
+    /// Cloud engines always return true (no internal state).
+    fn is_healthy(&self) -> bool {
+        true
+    }
 }
 
 /// Parse a `"provider:model_name"` spec into its components.

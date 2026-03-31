@@ -1,14 +1,17 @@
-//! Auto-embedding module: text embeddings via strata-inference GGUF engine.
+//! Auto-embedding module: text embeddings via strata-inference.
 //!
 //! Provides a lazy-loading model lifecycle via [`EmbedModelState`] and
 //! text extraction from Strata [`Value`] types.
+//!
+//! Supports both local GGUF models (e.g., `"miniLM"`) and cloud APIs
+//! (e.g., `"openai:text-embedding-3-small"`) via `strata_inference::load_embedder()`.
 
 pub mod download;
 pub mod extract;
 
 use std::sync::{Arc, Mutex};
 
-use strata_inference::EmbeddingEngine;
+use strata_inference::InferenceEngine;
 
 /// Default model name used for embedding (resolved by strata-inference registry).
 pub const DEFAULT_MODEL: &str = "miniLM";
@@ -18,11 +21,16 @@ const MAX_RETRIES: u32 = 3;
 
 /// Retry-capable model state stored as a Database extension.
 ///
-/// On first use, loads the embedding model from the strata-inference registry.
-/// If model loading fails, retries up to [`MAX_RETRIES`] times. After all
-/// retries are exhausted the cached error is returned on subsequent calls.
+/// On first use, loads the embedding engine via `strata_inference::load_embedder()`,
+/// which handles both local GGUF models and cloud API providers.
+/// If model loading fails, retries up to [`MAX_RETRIES`] times.
+/// Thread-safe wrapper around a `dyn InferenceEngine` (which is `Send` but not necessarily `Sync`).
+type SharedEngine = Arc<Mutex<Box<dyn InferenceEngine>>>;
+
 pub struct EmbedModelState {
-    engine: Mutex<Option<Arc<EmbeddingEngine>>>,
+    engine: Mutex<Option<SharedEngine>>,
+    /// The model spec that was used to load the current engine.
+    loaded_model: Mutex<Option<String>>,
     load_error: Mutex<Option<(String, u32)>>,
 }
 
@@ -30,6 +38,7 @@ impl Default for EmbedModelState {
     fn default() -> Self {
         Self {
             engine: Mutex::new(None),
+            loaded_model: Mutex::new(None),
             load_error: Mutex::new(None),
         }
     }
@@ -38,33 +47,42 @@ impl Default for EmbedModelState {
 impl EmbedModelState {
     /// Get or load the embedding engine.
     ///
-    /// Loads the model via `EmbeddingEngine::from_registry(model_name)`.
+    /// Accepts model specs in `"provider:model"` format (e.g.,
+    /// `"openai:text-embedding-3-small"`) or bare local names (e.g., `"miniLM"`).
     /// The `_model_dir` parameter is accepted for backwards compatibility but
     /// ignored — the registry manages model storage in `~/.strata/models/`.
     ///
     /// On failure, retries up to [`MAX_RETRIES`] times. Once all retries are
     /// exhausted, subsequent calls return the cached error without retrying.
-    /// If a retry succeeds, the engine is cached and the error state is cleared.
     pub fn get_or_load(
         &self,
         _model_dir: &std::path::Path,
         model_name: &str,
-    ) -> Result<Arc<EmbeddingEngine>, String> {
-        // Fast path: engine already loaded and healthy.
+    ) -> Result<SharedEngine, String> {
+        // Fast path: engine already loaded, healthy, and matches requested model.
         {
             let mut guard = self.engine.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref eng) = *guard {
-                if eng.is_healthy() {
+                let model_matches = {
+                    let m = self.loaded_model.lock().unwrap_or_else(|e| e.into_inner());
+                    m.as_deref() == Some(model_name)
+                };
+
+                let healthy = {
+                    let inner = eng.lock().unwrap_or_else(|e| e.into_inner());
+                    inner.is_healthy()
+                };
+
+                if model_matches && healthy {
                     return Ok(Arc::clone(eng));
                 }
-                // Internal llama.cpp context is poisoned — discard and reload.
-                tracing::warn!(
-                    target: "strata::embed",
-                    "Embedding engine context poisoned (likely a prior panic) \u{2014} reloading model"
-                );
+                if !healthy {
+                    tracing::warn!(
+                        target: "strata::embed",
+                        "Embedding engine context poisoned (likely a prior panic) \u{2014} reloading model"
+                    );
+                }
                 *guard = None;
-                // Also clear retry tracking so the reload isn't blocked by
-                // stale error state from a previous load cycle.
                 drop(guard);
                 let mut err_guard = self.load_error.lock().unwrap_or_else(|e| e.into_inner());
                 *err_guard = None;
@@ -81,19 +99,23 @@ impl EmbedModelState {
             }
         }
 
-        // Attempt to load the model.
-        match EmbeddingEngine::from_registry(model_name) {
+        // Attempt to load the model (handles both local and cloud providers).
+        match strata_inference::load_embedder(model_name) {
             Ok(engine) => {
-                let arc = Arc::new(engine);
+                let shared: SharedEngine = Arc::new(Mutex::new(engine));
                 {
                     let mut guard = self.engine.lock().unwrap_or_else(|e| e.into_inner());
-                    *guard = Some(Arc::clone(&arc));
+                    *guard = Some(Arc::clone(&shared));
+                }
+                {
+                    let mut m = self.loaded_model.lock().unwrap_or_else(|e| e.into_inner());
+                    *m = Some(model_name.to_string());
                 }
                 {
                     let mut err_guard = self.load_error.lock().unwrap_or_else(|e| e.into_inner());
                     *err_guard = None;
                 }
-                Ok(arc)
+                Ok(shared)
             }
             Err(e) => {
                 let msg = format!("Failed to load embedding model '{}': {}", model_name, e);
@@ -110,18 +132,33 @@ impl EmbedModelState {
     /// Returns `None` if the engine hasn't been loaded yet or failed to load.
     pub fn embedding_dim(&self) -> Option<usize> {
         let guard = self.engine.lock().unwrap_or_else(|e| e.into_inner());
-        guard.as_ref().map(|e| e.embedding_dim())
+        guard.as_ref().map(|shared| {
+            let inner = shared.lock().unwrap_or_else(|e| e.into_inner());
+            inner.embedding_dim()
+        })
     }
 }
 
 /// Embed a query string using the cached embedding engine from the database.
 ///
-/// Loads or retrieves the cached engine via [`EmbedModelState`], then embeds the
-/// given text. Returns `None` (with a warning log) if the engine cannot be loaded
+/// Uses the database's configured `embed_model` to choose the engine.
+/// Returns `None` (with a warning log) if the engine cannot be loaded
 /// or embedding fails. This is a best-effort helper for hybrid search.
 pub fn embed_query(db: &strata_engine::Database, text: &str) -> Option<Vec<f32>> {
-    let model_dir = db.model_dir();
     let model_name = db.embed_model();
+    embed_query_with_model(db, text, &model_name)
+}
+
+/// Embed a query string using a specific model spec (e.g., `"openai:text-embedding-3-small"`).
+///
+/// The model spec is passed to `strata_inference::load_embedder()` which handles
+/// both local GGUF models and cloud API providers.
+pub fn embed_query_with_model(
+    db: &strata_engine::Database,
+    text: &str,
+    model_spec: &str,
+) -> Option<Vec<f32>> {
+    let model_dir = db.model_dir();
     let state = match db.extension::<EmbedModelState>() {
         Ok(s) => s,
         Err(e) => {
@@ -129,13 +166,14 @@ pub fn embed_query(db: &strata_engine::Database, text: &str) -> Option<Vec<f32>>
             return None;
         }
     };
-    let engine = match state.get_or_load(&model_dir, &model_name) {
+    let shared = match state.get_or_load(&model_dir, model_spec) {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!(target: "strata::hybrid", error = %e, "Failed to load embed model for hybrid search");
             return None;
         }
     };
+    let engine = shared.lock().unwrap_or_else(|e| e.into_inner());
     match engine.embed(text) {
         Ok(v) => Some(v),
         Err(e) => {
@@ -165,13 +203,14 @@ pub fn embed_batch_queries(db: &strata_engine::Database, texts: &[&str]) -> Vec<
             return vec![None; texts.len()];
         }
     };
-    let model = match state.get_or_load(&model_dir, &model_name) {
+    let shared = match state.get_or_load(&model_dir, &model_name) {
         Ok(m) => m,
         Err(e) => {
             tracing::warn!(target: "strata::hybrid", error = %e, "Failed to load embed model for batch query embedding");
             return vec![None; texts.len()];
         }
     };
+    let model = shared.lock().unwrap_or_else(|e| e.into_inner());
     match model.embed_batch(texts) {
         Ok(embeddings) => {
             // Dimension validation: all vectors must have the same length.

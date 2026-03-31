@@ -151,19 +151,24 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
                 hint: None,
             });
         }
-        let canonical = match v.as_str() {
-            "minilm" => "miniLM",
-            "nomic-embed" => "nomic-embed",
-            "bge-m3" => "bge-m3",
-            "gemma-embed" => "gemma-embed",
-            _ => {
-                return Err(Error::InvalidInput {
-                    reason: format!(
-                        "Unknown embed_model: {:?}. Valid models: miniLM, nomic-embed, bge-m3, gemma-embed",
-                        value.trim()
-                    ),
-                    hint: None,
-                });
+        // Cloud model specs (e.g., "openai:text-embedding-3-small") pass through as-is.
+        let canonical = if v.contains(':') {
+            value.trim()
+        } else {
+            match v.as_str() {
+                "minilm" => "miniLM",
+                "nomic-embed" => "nomic-embed",
+                "bge-m3" => "bge-m3",
+                "gemma-embed" => "gemma-embed",
+                _ => {
+                    return Err(Error::InvalidInput {
+                        reason: format!(
+                            "Unknown embed_model: {:?}. Valid: miniLM, nomic-embed, bge-m3, gemma-embed, or provider:model (e.g., openai:text-embedding-3-small)",
+                            value.trim()
+                        ),
+                        hint: None,
+                    });
+                }
             }
         };
         canonical_embed_model = Some(canonical.to_string());

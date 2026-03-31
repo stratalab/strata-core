@@ -280,6 +280,13 @@ struct BranchState {
     /// Inherited layers from parent branches (COW fork).
     /// Empty until Epic C enables fork_branch.
     inherited_layers: Vec<InheritedLayer>,
+    /// Total non-deletion entries written to this branch (all versions).
+    /// Incremented on every put. Used with `num_deletions` to estimate
+    /// live key count in O(1) — same algorithm as RocksDB's EstimateNumKeys.
+    num_entries: AtomicU64,
+    /// Total deletion tombstones written to this branch.
+    /// Incremented on every delete. See `num_entries`.
+    num_deletions: AtomicU64,
 }
 
 impl BranchState {
@@ -297,7 +304,22 @@ impl BranchState {
                 LEVEL_BASE_BYTES,
             ),
             inherited_layers: Vec::new(),
+            num_entries: AtomicU64::new(0),
+            num_deletions: AtomicU64::new(0),
         }
+    }
+
+    /// Estimate the number of live keys.
+    ///
+    /// `result = entries - deletions` (clamped to 0).
+    /// `num_entries` counts only non-tombstone puts; `num_deletions` counts
+    /// only tombstone writes. Approximate: overcounts when the same key is
+    /// updated multiple times (each update increments `num_entries`).
+    /// Inspired by RocksDB's EstimateNumKeys.
+    fn estimate_live_keys(&self) -> u64 {
+        let entries = self.num_entries.load(Ordering::Relaxed);
+        let deletions = self.num_deletions.load(Ordering::Relaxed);
+        entries.saturating_sub(deletions)
     }
 
     /// Update min/max timestamp tracking for a single write.
@@ -3247,6 +3269,13 @@ impl SegmentedStore {
             Some(b) => b,
             None => return Ok(0),
         };
+
+        // O(1) fast path: unprefixed count at latest version uses
+        // RocksDB-style EstimateNumKeys (entries - deletions).
+        if prefix.user_key.is_empty() && max_version == u64::MAX {
+            return Ok(branch.estimate_live_keys());
+        }
+
         Self::count_prefix_from_branch(&branch, prefix, max_version)
     }
 
@@ -3490,6 +3519,10 @@ impl Storage for SegmentedStore {
             .or_insert_with(BranchState::new);
 
         let ttl_ms = ttl.map(|d| d.as_millis() as u64).unwrap_or(0);
+
+        // Track entry count for O(1) EstimateNumKeys (#2187).
+        branch.num_entries.fetch_add(1, Ordering::Relaxed);
+
         let entry = MemtableEntry {
             value,
             is_tombstone: false,
@@ -3519,6 +3552,9 @@ impl Storage for SegmentedStore {
             .branches
             .entry(branch_id)
             .or_insert_with(BranchState::new);
+
+        // Track deletion count for O(1) EstimateNumKeys (#2187).
+        branch.num_deletions.fetch_add(1, Ordering::Relaxed);
 
         let entry = MemtableEntry {
             value: Value::Null,
@@ -3667,6 +3703,7 @@ impl Storage for SegmentedStore {
                 .branches
                 .entry(branch_id)
                 .or_insert_with(BranchState::new);
+            let put_count = entries.len() as u64;
             for (key, value, ttl_ms) in entries {
                 let entry = MemtableEntry {
                     value,
@@ -3677,6 +3714,7 @@ impl Storage for SegmentedStore {
                 };
                 branch.active.put_entry(&key, version, entry);
             }
+            branch.num_entries.fetch_add(put_count, Ordering::Relaxed);
             branch.track_timestamp(ts);
             branch.track_version(version);
             self.maybe_rotate_branch(branch_id, &mut branch);
@@ -3688,6 +3726,7 @@ impl Storage for SegmentedStore {
                 .branches
                 .entry(branch_id)
                 .or_insert_with(BranchState::new);
+            let del_count = keys.len() as u64;
             for key in keys {
                 let entry = MemtableEntry {
                     value: Value::Null,
@@ -3698,6 +3737,7 @@ impl Storage for SegmentedStore {
                 };
                 branch.active.put_entry(&key, version, entry);
             }
+            branch.num_deletions.fetch_add(del_count, Ordering::Relaxed);
             branch.track_timestamp(ts);
             branch.track_version(version);
             self.maybe_rotate_branch(branch_id, &mut branch);

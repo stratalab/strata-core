@@ -226,6 +226,20 @@ impl crate::InferenceEngine for CloudEmbeddingEngine {
     fn supports_embed(&self) -> bool {
         true
     }
+
+    fn embedding_dim(&self) -> usize {
+        match self.model.as_str() {
+            "text-embedding-3-small" => 1536,
+            "text-embedding-3-large" => 3072,
+            "text-embedding-ada-002" => 1536,
+            "text-embedding-004" => 768, // Google
+            _ => 0,
+        }
+    }
+
+    fn is_healthy(&self) -> bool {
+        true
+    }
 }
 
 // Compile-time verify Send.

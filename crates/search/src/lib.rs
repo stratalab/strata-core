@@ -5,6 +5,7 @@ pub mod fuser;
 pub mod hybrid;
 pub mod llm_client;
 pub mod rerank;
+pub mod substrate;
 
 use std::sync::Arc;
 use strata_engine::Database;
