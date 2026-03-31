@@ -283,6 +283,7 @@ fn try_expand_query(
         embedding: None,
         time_range: None,
         primitive_filter: None,
+        as_of: None,
     };
 
     if let Ok(probe) = substrate::retrieve(&p.db, &probe_req) {
