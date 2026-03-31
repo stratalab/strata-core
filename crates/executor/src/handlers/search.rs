@@ -221,7 +221,6 @@ fn try_expand_query(
 
     if let Ok(probe) = substrate::retrieve(&p.db, &probe_req) {
         if strata_intelligence::expand::has_strong_signal(&probe.hits, expansion_cfg) {
-            tracing::debug!(target: "strata::search", query = %query, "Strong signal, skipping expansion");
             return (
                 vec![ExpandedQuery {
                     query_type: QueryType::Lex,
@@ -230,6 +229,8 @@ fn try_expand_query(
                 false,
             );
         }
+    } else {
+        tracing::warn!(target: "strata::search", "BM25 probe for expansion failed");
     }
 
     // Generate expansions
