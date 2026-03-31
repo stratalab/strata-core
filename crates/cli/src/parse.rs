@@ -172,6 +172,7 @@ pub fn matches_to_action(matches: &ArgMatches, state: &SessionState) -> Result<C
         })),
         "search" => parse_search(sub_matches, state),
         "config" => parse_config(sub_matches),
+        "recipe" => parse_recipe(sub_matches, state),
         "configure-model" => parse_configure_model(sub_matches),
         "embed" => parse_embed(sub_matches),
         "models" => parse_models(sub_matches),
@@ -205,6 +206,7 @@ pub fn matches_to_action(matches: &ArgMatches, state: &SessionState) -> Result<C
                 "describe",
                 "search",
                 "config",
+                "recipe",
                 "configure-model",
                 "embed",
                 "models",
@@ -1333,6 +1335,39 @@ fn parse_config(matches: &ArgMatches) -> Result<CliAction, String> {
         }
         "list" => Ok(CliAction::Execute(Command::ConfigGet)),
         other => Err(unknown_subcommand("config", other, &["set", "get", "list"])),
+    }
+}
+
+fn parse_recipe(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
+    let (sub, m) = matches.subcommand().ok_or("No recipe subcommand")?;
+    match sub {
+        "show" => Ok(CliAction::Execute(Command::RecipeGetDefault {
+            branch: branch(state),
+        })),
+        "set" => {
+            let name = m.get_one::<String>("name").unwrap().clone();
+            let json = m.get_one::<String>("recipe_json").unwrap().clone();
+            Ok(CliAction::Execute(Command::RecipeSet {
+                branch: branch(state),
+                name,
+                recipe_json: json,
+            }))
+        }
+        "get" => {
+            let name = m.get_one::<String>("name").unwrap().clone();
+            Ok(CliAction::Execute(Command::RecipeGet {
+                branch: branch(state),
+                name,
+            }))
+        }
+        "list" => Ok(CliAction::Execute(Command::RecipeList {
+            branch: branch(state),
+        })),
+        other => Err(unknown_subcommand(
+            "recipe",
+            other,
+            &["show", "set", "get", "list"],
+        )),
     }
 }
 
