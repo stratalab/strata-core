@@ -435,7 +435,11 @@ impl ControlConfig {
 
 /// The built-in default recipe (level 0 of three-level merge).
 ///
-/// These values match Anserini/Pyserini BEIR-tuned defaults.
+/// Built-in default recipe with qmd-inspired search quality defaults.
+///
+/// BM25 tuned to Anserini/Pyserini BEIR values (k1=0.9, b=0.4).
+/// Expansion and reranking enabled — gracefully degrade when models
+/// are not available (search still works, just without the quality knobs).
 pub fn builtin_defaults() -> Recipe {
     Recipe {
         version: Some(1),
@@ -451,10 +455,25 @@ pub fn builtin_defaults() -> Recipe {
             vector: Some(VectorRetrieveConfig::default()),
             ..Default::default()
         }),
+        expansion: Some(ExpansionConfig {
+            strategy: Some("full".into()),
+            strong_signal_threshold: Some(0.85),
+            strong_signal_gap: Some(0.15),
+            min_shared_stems: Some(2),
+            original_weight: Some(2.0),
+        }),
         fusion: Some(FusionConfig {
             method: Some("rrf".into()),
             k: Some(60),
             ..Default::default()
+        }),
+        rerank: Some(RerankConfig {
+            top_n: Some(20),
+            blending: Some(BlendingConfig {
+                rank_1_3: Some(0.75),
+                rank_4_10: Some(0.60),
+                rank_11_plus: Some(0.40),
+            }),
         }),
         transform: Some(TransformConfig {
             limit: Some(10),
