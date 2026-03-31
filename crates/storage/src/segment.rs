@@ -464,6 +464,19 @@ impl KVSegment {
         (&self.props.key_min, &self.props.key_max)
     }
 
+    /// Binary search the segment index for the block containing `seek_bytes`.
+    ///
+    /// Returns `(partition_idx, block_within_partition)` for direct positioning.
+    /// Used by [`SeekableIterator`](crate::seekable::SeekableIterator) implementations.
+    pub fn index_seek_position(&self, seek_bytes: &[u8]) -> (usize, usize) {
+        self.index.seek_position(seek_bytes)
+    }
+
+    /// Whether this segment's index is empty (no blocks).
+    pub fn index_is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
     /// File size in bytes.
     pub fn file_size(&self) -> u64 {
         self.file_size
@@ -1156,6 +1169,48 @@ impl OwnedSegmentIter {
 }
 
 impl OwnedSegmentIter {
+    /// Reposition to the first entry >= `start_key` within this segment.
+    ///
+    /// Reuses the existing `Arc<KVSegment>` — only resets the block position
+    /// via the in-memory index (O(log B) binary search, no I/O unless the
+    /// target block isn't cached). Equivalent to RocksDB's per-SST
+    /// `InternalIterator::Seek()`.
+    pub fn seek(&mut self, start_key: &Key) {
+        if self.segment.index_is_empty() {
+            self.done = true;
+            return;
+        }
+        let seek_ik = InternalKey::encode(start_key, u64::MAX);
+        let (partition_idx, block_within_partition) =
+            self.segment.index_seek_position(seek_ik.as_bytes());
+        self.partition_idx = partition_idx;
+        self.block_within_partition = block_within_partition;
+        self.block_offset = 0;
+        self.block_data_end = 0;
+        self.block_data = None; // force block reload
+        self.done = false;
+        self.prev_key.clear();
+    }
+
+    /// Reset block position directly (used by `SegmentSeekableIter`).
+    ///
+    /// Avoids the Key → InternalKey → seek_position round-trip when the
+    /// caller already has the encoded InternalKey bytes.
+    pub fn reset_position(&mut self, partition_idx: usize, block_within_partition: usize) {
+        self.partition_idx = partition_idx;
+        self.block_within_partition = block_within_partition;
+        self.block_offset = 0;
+        self.block_data_end = 0;
+        self.block_data = None;
+        self.done = false;
+        self.prev_key.clear();
+    }
+
+    /// Access the underlying segment (for index queries by seekable iterators).
+    pub fn segment(&self) -> &Arc<KVSegment> {
+        &self.segment
+    }
+
     /// Return a monotonically increasing block index (used by `ThrottledSegmentIter`).
     pub(crate) fn current_block_idx(&self) -> usize {
         self.global_block_idx
@@ -1365,6 +1420,74 @@ impl LevelSegmentIter {
                 )
                 .with_corruption_flag(Arc::clone(&self.corruption_flag)),
             );
+        } else {
+            self.current_iter = None;
+        }
+    }
+
+    /// Seek from raw InternalKey bytes (used by `LevelSeekableIter`).
+    ///
+    /// Includes RocksDB's same-file optimization: if target is within the
+    /// current file's key range, repositions within it (O(log B)) instead
+    /// of binary-searching the file list (O(log F) + O(log B)).
+    pub fn seek_bytes(&mut self, target: &[u8]) {
+        use crate::key_encoding::COMMIT_ID_SUFFIX_LEN;
+
+        // Extract the typed_key portion (without commit_id suffix) for comparison
+        let target_typed = if target.len() >= COMMIT_ID_SUFFIX_LEN {
+            &target[..target.len() - COMMIT_ID_SUFFIX_LEN]
+        } else {
+            target
+        };
+
+        // RocksDB optimization: check if target is within current file's
+        // [min_key, max_key] range. Must check BOTH bounds — if target is
+        // before current file's min, an earlier file may contain the entry.
+        if let Some(ref mut iter) = self.current_iter {
+            if self.current_idx < self.segments.len() {
+                let (min_ik, max_ik) = self.segments[self.current_idx].key_range();
+                let min_typed = if min_ik.len() >= COMMIT_ID_SUFFIX_LEN {
+                    &min_ik[..min_ik.len() - COMMIT_ID_SUFFIX_LEN]
+                } else {
+                    min_ik
+                };
+                let max_typed = if max_ik.len() >= COMMIT_ID_SUFFIX_LEN {
+                    &max_ik[..max_ik.len() - COMMIT_ID_SUFFIX_LEN]
+                } else {
+                    max_ik
+                };
+                if target_typed >= min_typed && target_typed <= max_typed {
+                    // Target is within current file — seek in place
+                    let (part_idx, block_idx) =
+                        self.segments[self.current_idx].index_seek_position(target);
+                    iter.reset_position(part_idx, block_idx);
+                    return;
+                }
+            }
+        }
+
+        // Target beyond current file — binary search for new file
+        let idx = self.segments.partition_point(|seg| {
+            let (_, max_ik) = seg.key_range();
+            if max_ik.len() >= COMMIT_ID_SUFFIX_LEN {
+                let max_typed = &max_ik[..max_ik.len() - COMMIT_ID_SUFFIX_LEN];
+                max_typed < target_typed
+            } else {
+                false
+            }
+        });
+
+        self.current_idx = idx;
+        if idx < self.segments.len() {
+            let (part_idx, block_idx) = self.segments[idx].index_seek_position(target);
+            self.current_iter = Some(
+                OwnedSegmentIter::new(Arc::clone(&self.segments[idx]))
+                    .with_prefix_filter(self.prefix_bytes.clone())
+                    .with_corruption_flag(Arc::clone(&self.corruption_flag)),
+            );
+            if let Some(ref mut iter) = self.current_iter {
+                iter.reset_position(part_idx, block_idx);
+            }
         } else {
             self.current_iter = None;
         }

@@ -22,6 +22,7 @@ pub mod manifest;
 pub mod memory_stats;
 pub mod memtable;
 pub mod merge_iter;
+pub mod seekable;
 pub mod pressure;
 pub mod rate_limiter;
 pub mod segment;

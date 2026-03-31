@@ -320,6 +320,24 @@ impl Memtable {
             .take_while(move |(ik, _)| ik.typed_key_prefix().starts_with(&match_prefix))
     }
 
+    /// Iterate entries from raw InternalKey bytes, filtered by prefix bytes.
+    ///
+    /// Used by [`SeekableIterator`] implementations which work with raw
+    /// encoded bytes rather than typed `Key` objects.
+    pub fn iter_range_raw<'a>(
+        &'a self,
+        seek_ik_bytes: &[u8],
+        prefix_bytes: &[u8],
+    ) -> impl Iterator<Item = (InternalKey, MemtableEntry)> + 'a {
+        let seek_key = InternalKey::from_bytes(seek_ik_bytes.to_vec());
+        let prefix_bytes = prefix_bytes.to_vec();
+
+        self.map
+            .range(seek_key..)
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .take_while(move |(ik, _)| ik.typed_key_prefix().starts_with(&prefix_bytes))
+    }
+
     /// Iterate ALL entries in sorted order (for flush to segment).
     pub fn iter_all(&self) -> impl Iterator<Item = (InternalKey, MemtableEntry)> + '_ {
         self.map
