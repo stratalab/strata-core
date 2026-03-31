@@ -330,7 +330,7 @@ pub fn load(model_spec: &str) -> Result<Box<dyn InferenceEngine>, InferenceError
 ))]
 pub fn load_embedder(
     model_spec: &str,
-    api_key: Option<&str>,
+    _api_key: Option<&str>,
 ) -> Result<Box<dyn InferenceEngine>, InferenceError> {
     let (provider, model) = parse_model_spec(model_spec)?;
 
@@ -349,7 +349,7 @@ pub fn load_embedder(
         #[cfg(any(feature = "openai", feature = "google"))]
         cloud_provider => {
             // Use provided API key, fall back to environment variable.
-            let key = match api_key.filter(|k| !k.is_empty()) {
+            let key = match _api_key.filter(|k| !k.is_empty()) {
                 Some(k) => k.to_string(),
                 None => {
                     let env_var = api_key_env_var(cloud_provider);
