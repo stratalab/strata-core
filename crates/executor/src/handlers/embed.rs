@@ -15,6 +15,7 @@ pub fn embed(p: &Arc<Primitives>, text: String) -> Result<Output> {
 
     let model_dir = p.db.model_dir();
     let model_name = p.db.embed_model();
+    let api_key = strata_intelligence::embed::resolve_api_key_for_model(&p.db, &model_name);
     let state =
         p.db.extension::<EmbedModelState>()
             .map_err(|e| Error::Internal {
@@ -23,7 +24,7 @@ pub fn embed(p: &Arc<Primitives>, text: String) -> Result<Output> {
             })?;
 
     let shared = state
-        .get_or_load(&model_dir, &model_name, None)
+        .get_or_load(&model_dir, &model_name, api_key.as_deref())
         .map_err(|e| Error::Internal {
             reason: format!("Failed to load embedding model: {}", e),
             hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
@@ -45,6 +46,7 @@ pub fn embed_batch(p: &Arc<Primitives>, texts: Vec<String>) -> Result<Output> {
 
     let model_dir = p.db.model_dir();
     let model_name = p.db.embed_model();
+    let api_key = strata_intelligence::embed::resolve_api_key_for_model(&p.db, &model_name);
     let state =
         p.db.extension::<EmbedModelState>()
             .map_err(|e| Error::Internal {
@@ -53,7 +55,7 @@ pub fn embed_batch(p: &Arc<Primitives>, texts: Vec<String>) -> Result<Output> {
             })?;
 
     let shared = state
-        .get_or_load(&model_dir, &model_name, None)
+        .get_or_load(&model_dir, &model_name, api_key.as_deref())
         .map_err(|e| Error::Internal {
             reason: format!("Failed to load embedding model: {}", e),
             hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),

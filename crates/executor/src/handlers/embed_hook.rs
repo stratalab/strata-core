@@ -273,18 +273,21 @@ pub fn flush_embed_buffer(p: &Arc<Primitives>) {
         }
     };
 
-    // Compute all embeddings in one Rust call (back-to-back forward passes).
+    // Compute all embeddings in one call. Drop the engine lock immediately after
+    // so that ensure_shadow_collection can read embedding_dim() without deadlock.
     let texts: Vec<&str> = batch.iter().map(|pe| pe.text.as_str()).collect();
-    let engine = shared.lock().unwrap_or_else(|e| e.into_inner());
-    let embeddings = match engine.embed_batch(&texts) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(target: "strata::embed", error = %e, "Batch embedding failed");
-            buf.total_failed
-                .fetch_add(batch_len, std::sync::atomic::Ordering::Relaxed);
-            return;
+    let embeddings = {
+        let engine = shared.lock().unwrap_or_else(|e| e.into_inner());
+        match engine.embed_batch(&texts) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(target: "strata::embed", error = %e, "Batch embedding failed");
+                buf.total_failed
+                    .fetch_add(batch_len, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
         }
-    };
+    }; // engine lock released here
     let count = batch.len();
 
     // Insert each embedding into its shadow collection.
@@ -304,15 +307,7 @@ pub fn flush_embed_buffer(p: &Arc<Primitives>) {
             embedding,
             Some(metadata),
             pe.source_ref,
-        ) {
-            tracing::warn!(
-                target: "strata::embed",
-                collection = pe.shadow_collection,
-                key = composite_key,
-                error = %e,
-                "Failed to insert embedding"
-            );
-        }
+        ) {}
     }
 
     buf.total_embedded

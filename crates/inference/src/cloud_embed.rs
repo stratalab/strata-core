@@ -149,14 +149,26 @@ impl CloudEmbeddingEngine {
     }
 
     /// Embed a batch of texts via the cloud API.
+    /// Maximum texts per HTTP request to avoid API limits and timeouts.
+    const CLOUD_BATCH_CHUNK_SIZE: usize = 64;
+
     fn embed_many(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
+        // Chunk large batches to stay within API limits.
+        if texts.len() > Self::CLOUD_BATCH_CHUNK_SIZE {
+            let mut all_embeddings = Vec::with_capacity(texts.len());
+            for chunk in texts.chunks(Self::CLOUD_BATCH_CHUNK_SIZE) {
+                all_embeddings.extend(self.embed_many(chunk)?);
+            }
+            return Ok(all_embeddings);
+        }
+
         match self.provider {
             #[cfg(feature = "openai")]
             ProviderKind::OpenAI => {
                 let body = crate::provider::openai::build_embed_request_json(&self.model, texts);
                 let agent = ureq::Agent::new_with_config(
                     ureq::config::Config::builder()
-                        .timeout_global(Some(std::time::Duration::from_secs(30)))
+                        .timeout_global(Some(std::time::Duration::from_secs(60)))
                         .build(),
                 );
                 let mut response = agent
@@ -182,7 +194,7 @@ impl CloudEmbeddingEngine {
                     crate::provider::google::build_batch_embed_request_json(&self.model, texts);
                 let agent = ureq::Agent::new_with_config(
                     ureq::config::Config::builder()
-                        .timeout_global(Some(std::time::Duration::from_secs(30)))
+                        .timeout_global(Some(std::time::Duration::from_secs(60)))
                         .build(),
                 );
                 let mut response = agent
