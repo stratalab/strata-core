@@ -1145,6 +1145,14 @@ impl OwnedSegmentIter {
         self.corruption_detected = Some(flag);
         self
     }
+
+    /// Set a prefix filter without seeking. Used by `LevelSegmentIter` when
+    /// opening subsequent segments from the beginning (seek already done via
+    /// binary search on the segment list).
+    pub fn with_prefix_filter(mut self, prefix_bytes: Vec<u8>) -> Self {
+        self.prefix_bytes = Some(prefix_bytes);
+        self
+    }
 }
 
 impl OwnedSegmentIter {
@@ -1283,6 +1291,116 @@ impl Iterator for OwnedSegmentIter {
                     return None;
                 }
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LevelSegmentIter — lazy per-level iterator (RocksDB LevelIterator pattern)
+// ---------------------------------------------------------------------------
+
+/// Lazy iterator over a sorted, non-overlapping level of segments.
+///
+/// Analogous to RocksDB's `LevelIterator` (version_set.cc). Instead of
+/// opening iterators for ALL segments at creation time, this:
+/// 1. Binary-searches the segment list by `key_range()` to find the first
+///    relevant file (O(log N), no I/O)
+/// 2. Opens only that file's `OwnedSegmentIter` (1 block read)
+/// 3. When exhausted, lazily opens the next file
+///
+/// For a 10-entry scan at L2 with 1000 segments, this opens 1-2 files
+/// instead of 1000. See issue #2213.
+pub struct LevelSegmentIter {
+    segments: Vec<Arc<KVSegment>>,
+    current_idx: usize,
+    current_iter: Option<OwnedSegmentIter>,
+    prefix_bytes: Vec<u8>,
+    corruption_flag: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl LevelSegmentIter {
+    /// Create a new level iterator. No files are opened until iteration.
+    pub fn new(
+        segments: Vec<Arc<KVSegment>>,
+        prefix_bytes: Vec<u8>,
+        corruption_flag: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self {
+            segments,
+            current_idx: 0,
+            current_iter: None,
+            prefix_bytes,
+            corruption_flag,
+        }
+    }
+
+    /// Seek to the first segment whose key range includes `start_key`.
+    ///
+    /// Uses binary search on `key_range().max` (O(log N), no I/O).
+    /// Opens only the matching segment's iterator.
+    pub fn seek(&mut self, start_key: &Key) {
+        use crate::key_encoding::{encode_typed_key, COMMIT_ID_SUFFIX_LEN};
+
+        let start_bytes = encode_typed_key(start_key);
+
+        // Binary search: find first segment whose max_key >= start_bytes.
+        // Segments are sorted by key range (non-overlapping at L1+).
+        let idx = self.segments.partition_point(|seg| {
+            let (_, max_ik) = seg.key_range();
+            if max_ik.len() >= COMMIT_ID_SUFFIX_LEN {
+                let max_typed = &max_ik[..max_ik.len() - COMMIT_ID_SUFFIX_LEN];
+                max_typed < start_bytes.as_slice()
+            } else {
+                false
+            }
+        });
+
+        self.current_idx = idx;
+        if idx < self.segments.len() {
+            self.current_iter = Some(
+                OwnedSegmentIter::new_seek(
+                    Arc::clone(&self.segments[idx]),
+                    start_key,
+                    self.prefix_bytes.clone(),
+                )
+                .with_corruption_flag(Arc::clone(&self.corruption_flag)),
+            );
+        } else {
+            self.current_iter = None;
+        }
+    }
+
+    /// Open the next segment's iterator (lazy file opening).
+    fn advance_to_next_segment(&mut self) {
+        self.current_idx += 1;
+        if self.current_idx < self.segments.len() {
+            // Open from the beginning of the next segment (no seek needed —
+            // segments are sorted, so the next entry is at the start).
+            self.current_iter = Some(
+                OwnedSegmentIter::new(Arc::clone(&self.segments[self.current_idx]))
+                    .with_prefix_filter(self.prefix_bytes.clone())
+                    .with_corruption_flag(Arc::clone(&self.corruption_flag)),
+            );
+        } else {
+            self.current_iter = None;
+        }
+    }
+}
+
+impl Iterator for LevelSegmentIter {
+    type Item = (InternalKey, SegmentEntry);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(ref mut iter) = self.current_iter {
+                if let Some(item) = iter.next() {
+                    return Some(item);
+                }
+                // Current segment exhausted — try next
+            } else {
+                return None;
+            }
+            self.advance_to_next_segment();
         }
     }
 }

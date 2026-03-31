@@ -17,7 +17,7 @@ use crate::memory_stats::{BranchMemoryStats, StorageMemoryStats};
 use crate::memtable::{Memtable, MemtableEntry};
 use crate::merge_iter::{MergeIterator, MvccIterator, RewritingIterator};
 use crate::pressure::{MemoryPressure, PressureLevel};
-use crate::segment::{KVSegment, OwnedSegmentIter, SegmentEntry};
+use crate::segment::{KVSegment, LevelSegmentIter, OwnedSegmentIter, SegmentEntry};
 use crate::segment_builder::{SegmentBuilder, SplittingSegmentBuilder};
 
 use arc_swap::ArcSwap;
@@ -3028,20 +3028,48 @@ impl SegmentedStore {
             sources.push(Box::new(frozen.iter_range(start_key, prefix)));
         }
 
-        // On-disk segments — lazy via OwnedSegmentIter::new_seek
+        // On-disk segments — lazy iterators
         let prefix_bytes = encode_typed_key_prefix(prefix);
         let ver = branch.version.load();
-        for level in &ver.levels {
-            for seg in level {
-                if !segment_overlaps_prefix(seg, &prefix_bytes) {
+        for (level_idx, level) in ver.levels.iter().enumerate() {
+            if level.is_empty() {
+                continue;
+            }
+            if level_idx == 0 {
+                // L0: overlapping files — individual iterators (unavoidable)
+                for seg in level {
+                    if !segment_overlaps_prefix(seg, &prefix_bytes) {
+                        continue;
+                    }
+                    let flag = Arc::new(AtomicBool::new(false));
+                    corruption_flags.push(Arc::clone(&flag));
+                    sources.push(Box::new(
+                        OwnedSegmentIter::new_seek(
+                            Arc::clone(seg),
+                            start_key,
+                            prefix_bytes.clone(),
+                        )
+                        .with_corruption_flag(flag)
+                        .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se))),
+                    ));
+                }
+            } else {
+                // L1+: non-overlapping, sorted — one LevelSegmentIter per level.
+                // Binary-searches to the relevant file, opens lazily (#2213).
+                let level_segs: Vec<Arc<KVSegment>> = level
+                    .iter()
+                    .filter(|s| segment_overlaps_prefix(s, &prefix_bytes))
+                    .cloned()
+                    .collect();
+                if level_segs.is_empty() {
                     continue;
                 }
                 let flag = Arc::new(AtomicBool::new(false));
                 corruption_flags.push(Arc::clone(&flag));
+                let mut level_iter = LevelSegmentIter::new(level_segs, prefix_bytes.clone(), flag);
+                level_iter.seek(start_key);
                 sources.push(Box::new(
-                    OwnedSegmentIter::new_seek(Arc::clone(seg), start_key, prefix_bytes.clone())
-                        .with_corruption_flag(flag)
-                        .map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se))),
+                    level_iter.map(|(ik, se)| (ik, segment_entry_to_memtable_entry(se))),
                 ));
             }
         }
