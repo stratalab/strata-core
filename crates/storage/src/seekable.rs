@@ -206,6 +206,7 @@ impl SeekableIterator for SegmentSeekableIter {
 pub struct LevelSeekableIter {
     inner: LevelSegmentIter,
     current: Option<(InternalKey, MemtableEntry)>,
+    corruption_flag: Arc<AtomicBool>,
 }
 
 impl LevelSeekableIter {
@@ -215,10 +216,11 @@ impl LevelSeekableIter {
         prefix_bytes: Vec<u8>,
         corruption_flag: Arc<AtomicBool>,
     ) -> Self {
-        let inner = LevelSegmentIter::new(segments, prefix_bytes, corruption_flag);
+        let inner = LevelSegmentIter::new(segments, prefix_bytes, Arc::clone(&corruption_flag));
         Self {
             inner,
             current: None,
+            corruption_flag,
         }
     }
 
@@ -251,6 +253,11 @@ impl SeekableIterator for LevelSeekableIter {
 
     fn current_entry(&self) -> &MemtableEntry {
         &self.current.as_ref().unwrap().1
+    }
+
+    fn corruption_detected(&self) -> bool {
+        self.corruption_flag
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
