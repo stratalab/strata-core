@@ -316,10 +316,10 @@ pub fn load(model_spec: &str) -> Result<Box<dyn InferenceEngine>, InferenceError
 /// # Examples
 ///
 /// ```ignore
-/// let engine = strata_inference::load_embedder("local:miniLM")?;
+/// let engine = strata_inference::load_embedder("local:miniLM", None)?;
 /// let embedding = engine.embed("hello world")?;
 ///
-/// let engine = strata_inference::load_embedder("openai:text-embedding-3-small")?;
+/// let engine = strata_inference::load_embedder("openai:text-embedding-3-small", Some("sk-..."))?;
 /// let embedding = engine.embed("hello world")?;
 /// ```
 #[cfg(any(
@@ -328,7 +328,10 @@ pub fn load(model_spec: &str) -> Result<Box<dyn InferenceEngine>, InferenceError
     feature = "google",
     feature = "anthropic"
 ))]
-pub fn load_embedder(model_spec: &str) -> Result<Box<dyn InferenceEngine>, InferenceError> {
+pub fn load_embedder(
+    model_spec: &str,
+    _api_key: Option<&str>,
+) -> Result<Box<dyn InferenceEngine>, InferenceError> {
     let (provider, model) = parse_model_spec(model_spec)?;
 
     match provider {
@@ -345,16 +348,22 @@ pub fn load_embedder(model_spec: &str) -> Result<Box<dyn InferenceEngine>, Infer
 
         #[cfg(any(feature = "openai", feature = "google"))]
         cloud_provider => {
-            let env_var = api_key_env_var(cloud_provider);
-            let api_key = std::env::var(env_var).map_err(|_| {
-                InferenceError::Provider(format!(
-                    "{} not set (required for {}:{})",
-                    env_var, cloud_provider, model
-                ))
-            })?;
+            // Use provided API key, fall back to environment variable.
+            let key = match _api_key.filter(|k| !k.is_empty()) {
+                Some(k) => k.to_string(),
+                None => {
+                    let env_var = api_key_env_var(cloud_provider);
+                    std::env::var(env_var).map_err(|_| {
+                        InferenceError::Provider(format!(
+                            "{} not set (required for {}:{})",
+                            env_var, cloud_provider, model
+                        ))
+                    })?
+                }
+            };
             Ok(Box::new(CloudEmbeddingEngine::new(
                 cloud_provider,
-                api_key,
+                key,
                 model,
             )?))
         }
@@ -840,7 +849,7 @@ string ::= "\"" [a-zA-Z]+ "\""
     #[test]
     fn load_embedder_openai_constructs_with_api_key() {
         std::env::set_var("OPENAI_API_KEY", "sk-test-embed-key");
-        let result = load_embedder("openai:text-embedding-3-small");
+        let result = load_embedder("openai:text-embedding-3-small", None);
         std::env::remove_var("OPENAI_API_KEY");
         assert!(
             result.is_ok(),
@@ -856,7 +865,7 @@ string ::= "\"" [a-zA-Z]+ "\""
     #[test]
     fn load_embedder_openai_missing_api_key() {
         std::env::remove_var("OPENAI_API_KEY");
-        let err = load_embedder("openai:text-embedding-3-small").unwrap_err();
+        let err = load_embedder("openai:text-embedding-3-small", None).unwrap_err();
         assert!(
             err.to_string().contains("OPENAI_API_KEY"),
             "error should mention env var: {err}"
@@ -867,7 +876,7 @@ string ::= "\"" [a-zA-Z]+ "\""
     #[test]
     fn load_embedder_google_constructs_with_api_key() {
         std::env::set_var("GOOGLE_API_KEY", "AIza-test-embed-key");
-        let result = load_embedder("google:text-embedding-004");
+        let result = load_embedder("google:text-embedding-004", None);
         std::env::remove_var("GOOGLE_API_KEY");
         assert!(
             result.is_ok(),
@@ -882,7 +891,7 @@ string ::= "\"" [a-zA-Z]+ "\""
     #[test]
     fn load_embedder_google_missing_api_key() {
         std::env::remove_var("GOOGLE_API_KEY");
-        let err = load_embedder("google:text-embedding-004").unwrap_err();
+        let err = load_embedder("google:text-embedding-004", None).unwrap_err();
         assert!(
             err.to_string().contains("GOOGLE_API_KEY"),
             "error should mention env var: {err}"
@@ -893,7 +902,7 @@ string ::= "\"" [a-zA-Z]+ "\""
     #[test]
     fn load_embedder_anthropic_returns_not_supported() {
         std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
-        let err = load_embedder("anthropic:some-model").unwrap_err();
+        let err = load_embedder("anthropic:some-model", None).unwrap_err();
         std::env::remove_var("ANTHROPIC_API_KEY");
         assert!(
             err.to_string().contains("Anthropic"),
