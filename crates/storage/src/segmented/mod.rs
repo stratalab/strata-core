@@ -16,8 +16,8 @@ use crate::key_encoding::{
 use crate::memory_stats::{BranchMemoryStats, StorageMemoryStats};
 use crate::memtable::{Memtable, MemtableEntry};
 use crate::merge_iter::{MergeIterator, MvccIterator, RewritingIterator};
-use crate::seekable::{self, SeekableIterator as _};
 use crate::pressure::{MemoryPressure, PressureLevel};
+use crate::seekable::{self, SeekableIterator as _};
 use crate::segment::{KVSegment, LevelSegmentIter, OwnedSegmentIter, SegmentEntry};
 use crate::segment_builder::{SegmentBuilder, SplittingSegmentBuilder};
 

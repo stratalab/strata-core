@@ -95,7 +95,10 @@ impl MemtableSeekableIter {
 impl SeekableIterator for MemtableSeekableIter {
     fn seek(&mut self, target: &[u8]) {
         let prefix_bytes = encode_typed_key_prefix(&self.prefix);
-        self.entries = self.memtable.iter_range_raw(target, &prefix_bytes).collect();
+        self.entries = self
+            .memtable
+            .iter_range_raw(target, &prefix_bytes)
+            .collect();
         self.pos = 0;
     }
 
@@ -167,7 +170,8 @@ impl SeekableIterator for SegmentSeekableIter {
         }
         let (partition_idx, block_within_partition) =
             self.inner.segment().index_seek_position(target);
-        self.inner.reset_position(partition_idx, block_within_partition);
+        self.inner
+            .reset_position(partition_idx, block_within_partition);
         self.load_current();
     }
 
