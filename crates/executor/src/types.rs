@@ -569,6 +569,14 @@ pub struct SearchQuery {
     /// Shorthand: number of results (maps to recipe.transform.limit).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub k: Option<u64>,
+
+    /// Point-in-time search: see database state at this timestamp (microseconds since epoch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<u64>,
+
+    /// Temporal diff: compare search results between two timestamps (start_us, end_us).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<(u64, u64)>,
 }
 
 /// Information about a model in the registry (serializable output type).
@@ -633,6 +641,47 @@ pub struct SearchResultHit {
     pub rank: u32,
     /// Optional text snippet
     pub snippet: Option<String>,
+    /// Version history (when recipe.version_output.include_history is true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub versions: Option<Vec<VersionInfo>>,
+}
+
+/// A single version entry in a hit's version history.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VersionInfo {
+    /// Version identifier (transaction ID or sequence number).
+    pub version: u64,
+    /// Timestamp in microseconds since epoch.
+    pub timestamp: u64,
+    /// Optional text snippet from this version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+}
+
+/// Diff between search results at two timestamps.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiffOutput {
+    /// Timestamp of the "before" snapshot (microseconds).
+    pub before_ts: u64,
+    /// Timestamp of the "after" snapshot (microseconds).
+    pub after_ts: u64,
+    /// Hits that appear only in the "after" results.
+    pub added: Vec<SearchResultHit>,
+    /// Hits that appear only in the "before" results.
+    pub removed: Vec<SearchResultHit>,
+    /// Hits in both snapshots with different score or rank.
+    pub changed: Vec<ChangedHit>,
+}
+
+/// A hit that appears in both snapshots but with different score/rank.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChangedHit {
+    /// The hit as it appears in the "after" snapshot.
+    pub hit: SearchResultHit,
+    /// Score in the "before" snapshot.
+    pub previous_score: f32,
+    /// Rank in the "before" snapshot.
+    pub previous_rank: u32,
 }
 
 /// Execution statistics for a search operation.
@@ -666,6 +715,9 @@ pub struct SearchStatsOutput {
     /// Total number of documents queued for embedding (when auto-embed is active).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_total: Option<u64>,
+    /// MVCC snapshot version used for this search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_version: Option<u64>,
 }
 
 /// A single sample item from a primitive (key + value for shape discovery).

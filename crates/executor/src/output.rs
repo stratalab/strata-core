@@ -286,6 +286,9 @@ pub enum Output {
         hits: Vec<SearchResultHit>,
         /// Execution statistics.
         stats: SearchStatsOutput,
+        /// Temporal diff (present when `diff` parameter was provided).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diff: Option<DiffOutput>,
     },
 
     /// Sample of entries from a primitive (keys + values for shape discovery)

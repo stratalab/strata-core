@@ -268,6 +268,12 @@ pub struct VersionOutputConfig {
     /// Include timestamps in results.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_timestamp: Option<bool>,
+    /// Include full version history per hit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_history: Option<bool>,
+    /// Maximum number of history versions to include (default 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<usize>,
 }
 
 /// Execution control.
@@ -279,6 +285,9 @@ pub struct ControlConfig {
     /// Maximum candidates per primitive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_candidates: Option<usize>,
+    /// Pin all reads to this MVCC snapshot version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_version: Option<u64>,
 }
 
 // ============================================================================
@@ -318,11 +327,11 @@ impl Recipe {
             rag_context_hits: overlay.rag_context_hits.or(base.rag_context_hits),
             rag_max_tokens: overlay.rag_max_tokens.or(base.rag_max_tokens),
             models: merge_option(&base.models, &overlay.models, ModelsConfig::merge),
-            version_output: overlay
-                .version_output
-                .as_ref()
-                .or(base.version_output.as_ref())
-                .cloned(),
+            version_output: merge_option(
+                &base.version_output,
+                &overlay.version_output,
+                VersionOutputConfig::merge,
+            ),
             control: merge_option(&base.control, &overlay.control, ControlConfig::merge),
         }
     }
@@ -425,6 +434,18 @@ impl ControlConfig {
         ControlConfig {
             budget_ms: overlay.budget_ms.or(base.budget_ms),
             max_candidates: overlay.max_candidates.or(base.max_candidates),
+            snapshot_version: overlay.snapshot_version.or(base.snapshot_version),
+        }
+    }
+}
+
+impl VersionOutputConfig {
+    fn merge(base: &Self, overlay: &Self) -> Self {
+        VersionOutputConfig {
+            include_version: overlay.include_version.or(base.include_version),
+            include_timestamp: overlay.include_timestamp.or(base.include_timestamp),
+            include_history: overlay.include_history.or(base.include_history),
+            depth: overlay.depth.or(base.depth),
         }
     }
 }
@@ -618,5 +639,55 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: Recipe = serde_json::from_str(&json).unwrap();
         assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn test_version_output_config_merge() {
+        let base = Recipe {
+            version_output: Some(VersionOutputConfig {
+                include_version: Some(true),
+                include_timestamp: Some(true),
+                include_history: None,
+                depth: None,
+            }),
+            ..Default::default()
+        };
+        let overlay = Recipe {
+            version_output: Some(VersionOutputConfig {
+                include_history: Some(true),
+                depth: Some(5),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let merged = Recipe::merge(&base, &overlay);
+        let vo = merged.version_output.unwrap();
+        assert_eq!(vo.include_version, Some(true)); // from base
+        assert_eq!(vo.include_timestamp, Some(true)); // from base
+        assert_eq!(vo.include_history, Some(true)); // from overlay
+        assert_eq!(vo.depth, Some(5)); // from overlay
+    }
+
+    #[test]
+    fn test_control_config_snapshot_version_merge() {
+        let base = Recipe {
+            control: Some(ControlConfig {
+                budget_ms: Some(5000),
+                max_candidates: None,
+                snapshot_version: None,
+            }),
+            ..Default::default()
+        };
+        let overlay = Recipe {
+            control: Some(ControlConfig {
+                snapshot_version: Some(42),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let merged = Recipe::merge(&base, &overlay);
+        let ctrl = merged.control.unwrap();
+        assert_eq!(ctrl.budget_ms, Some(5000)); // from base
+        assert_eq!(ctrl.snapshot_version, Some(42)); // from overlay
     }
 }

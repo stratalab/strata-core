@@ -1476,6 +1476,8 @@ fn parse_search(matches: &ArgMatches, state: &SessionState) -> Result<CliAction,
             recipe: None,
             precomputed_embedding: None,
             k,
+            as_of: None,
+            diff: None,
         },
     }))
 }

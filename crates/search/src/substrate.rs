@@ -17,7 +17,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
 
-use strata_core::types::BranchId;
+use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::StrataResult;
 use strata_engine::search::recipe::FusionConfig;
 use strata_engine::search::{
@@ -50,6 +50,8 @@ pub struct RetrievalRequest {
     pub time_range: Option<(u64, u64)>,
     /// Optional primitive filter (restrict which primitives are searched).
     pub primitive_filter: Option<Vec<PrimitiveType>>,
+    /// Point-in-time search: only return results visible at this timestamp (microseconds).
+    pub as_of: Option<u64>,
 }
 
 /// Fixed response format — all fields always present.
@@ -160,6 +162,27 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
         });
         bm25_hits.truncate(k);
 
+        // Temporal post-filter: discard hits not visible at as_of timestamp.
+        if let Some(as_of_ts) = request.as_of {
+            let ns = Arc::new(Namespace::new(request.branch_id, request.space.clone()));
+            bm25_hits.retain(|hit| {
+                match &hit.doc_ref {
+                    EntityRef::Kv { key, .. } => db
+                        .get_at_timestamp(&Key::new_kv(ns.clone(), key.as_bytes()), as_of_ts)
+                        .ok()
+                        .flatten()
+                        .is_some(),
+                    EntityRef::Json { doc_id, .. } => db
+                        .get_at_timestamp(&Key::new_json(ns.clone(), doc_id), as_of_ts)
+                        .ok()
+                        .flatten()
+                        .is_some(),
+                    // Events are append-only — always visible once indexed.
+                    _ => true,
+                }
+            });
+        }
+
         stages.insert(
             "bm25".into(),
             StageStats {
@@ -187,19 +210,89 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
             }
 
             let vector = VectorStore::new(db.clone());
-            match Searchable::search(&vector, &search_req) {
-                Ok(resp) => {
-                    stages.insert(
-                        "vector".into(),
-                        StageStats {
-                            elapsed_ms: vec_start.elapsed().as_secs_f64() * 1000.0,
-                            candidates: resp.hits.len(),
-                        },
-                    );
-                    candidate_lists.push(("vector".into(), resp.hits));
+
+            // When as_of is set, use temporal vector search.
+            if let Some(as_of_ts) = request.as_of {
+                // Search system embed collections at the given timestamp.
+                let collections = vec_cfg.collections.as_deref().unwrap_or(&[]).to_vec();
+                let collection_names: Vec<String> = if collections.is_empty() {
+                    // Default: search all _system_embed_ collections
+                    vec![
+                        format!("_system_embed_kv_{}", request.space),
+                        format!("_system_embed_json_{}", request.space),
+                    ]
+                } else {
+                    collections
+                };
+
+                let mut vec_hits = Vec::new();
+                for coll in &collection_names {
+                    match vector.search_at(
+                        request.branch_id,
+                        &request.space,
+                        coll,
+                        embedding,
+                        k,
+                        None,
+                        as_of_ts,
+                    ) {
+                        Ok(matches) => {
+                            for m in matches {
+                                vec_hits.push(SearchHit {
+                                    doc_ref: EntityRef::vector(request.branch_id, coll, &m.key),
+                                    score: m.score,
+                                    rank: 0,
+                                    snippet: None,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                collection = %coll,
+                                error = %e,
+                                "Temporal vector search error, skipping collection"
+                            );
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Vector retrieval error, skipping");
+
+                // Sort and truncate
+                vec_hits.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(Ordering::Equal)
+                        .then_with(|| entity_ref_order(&a.doc_ref, &b.doc_ref))
+                });
+                vec_hits.truncate(k);
+                for (i, hit) in vec_hits.iter_mut().enumerate() {
+                    hit.rank = (i + 1) as u32;
+                }
+
+                stages.insert(
+                    "vector".into(),
+                    StageStats {
+                        elapsed_ms: vec_start.elapsed().as_secs_f64() * 1000.0,
+                        candidates: vec_hits.len(),
+                    },
+                );
+                if !vec_hits.is_empty() {
+                    candidate_lists.push(("vector".into(), vec_hits));
+                }
+            } else {
+                match Searchable::search(&vector, &search_req) {
+                    Ok(resp) => {
+                        stages.insert(
+                            "vector".into(),
+                            StageStats {
+                                elapsed_ms: vec_start.elapsed().as_secs_f64() * 1000.0,
+                                candidates: resp.hits.len(),
+                            },
+                        );
+                        candidate_lists.push(("vector".into(), resp.hits));
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Vector retrieval error, skipping");
+                    }
                 }
             }
         }
@@ -364,6 +457,7 @@ mod tests {
             embedding: None,
             time_range: None,
             primitive_filter: None,
+            as_of: None,
         };
 
         let response = retrieve(&db, &request).unwrap();
@@ -407,6 +501,7 @@ mod tests {
             embedding: None,
             time_range: None,
             primitive_filter: None,
+            as_of: None,
         };
 
         let response = retrieve(&db, &request).unwrap();
@@ -425,6 +520,7 @@ mod tests {
             embedding: None,
             time_range: None,
             primitive_filter: None,
+            as_of: None,
         };
 
         let response = retrieve(&db, &request).unwrap();
@@ -449,6 +545,7 @@ mod tests {
             embedding: None,
             time_range: None,
             primitive_filter: None,
+            as_of: None,
         };
 
         let r1 = retrieve(&db, &req).unwrap();
@@ -482,6 +579,7 @@ mod tests {
             embedding: None,
             time_range: None,
             primitive_filter: None,
+            as_of: None,
         };
 
         let response = retrieve(&db, &request).unwrap();
@@ -586,5 +684,118 @@ mod tests {
         let sources: Vec<(String, Vec<SearchHit>)> = vec![];
         let result = rrf_fuse(&sources, None);
         assert!(result.is_empty());
+    }
+
+    // ---- Temporal search tests ----
+
+    #[test]
+    fn test_retrieve_with_as_of() {
+        // Insert doc at T1, sleep, insert another at T2.
+        // Search with as_of=T1 should only return the first doc.
+        let db = Database::cache().expect("Failed to create test database");
+        let branch_id = BranchId::new();
+        let kv = KVStore::new(db.clone());
+
+        // Insert first doc
+        kv.put(
+            &branch_id,
+            "default",
+            "doc_early",
+            Value::String("early document about rust".into()),
+        )
+        .expect("put");
+        db.flush().expect("flush");
+
+        // Capture timestamp after first insert
+        let t1 = strata_core::Timestamp::now().as_micros();
+
+        // Small delay to ensure distinct timestamps
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Insert second doc
+        kv.put(
+            &branch_id,
+            "default",
+            "doc_late",
+            Value::String("late document about rust".into()),
+        )
+        .expect("put");
+        db.flush().expect("flush");
+
+        let recipe = builtin_defaults();
+        let request = RetrievalRequest {
+            query: "rust".into(),
+            branch_id,
+            space: "default".into(),
+            recipe,
+            embedding: None,
+            time_range: None,
+            primitive_filter: None,
+            as_of: Some(t1),
+        };
+
+        let response = retrieve(&db, &request).unwrap();
+
+        // Only the early doc should be visible at T1
+        let keys: Vec<&str> = response
+            .hits
+            .iter()
+            .filter_map(|h| match &h.doc_ref {
+                EntityRef::Kv { key, .. } => Some(key.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            keys.contains(&"doc_early"),
+            "Early doc should be visible at T1"
+        );
+        assert!(
+            !keys.contains(&"doc_late"),
+            "Late doc should NOT be visible at T1"
+        );
+    }
+
+    #[test]
+    fn test_retrieve_as_of_before_data() {
+        // as_of before any data → empty results
+        let (db, branch_id) = setup_db_with_kv(&[("doc", "some text about testing")]);
+        let recipe = builtin_defaults();
+        let request = RetrievalRequest {
+            query: "testing".into(),
+            branch_id,
+            space: "default".into(),
+            recipe,
+            embedding: None,
+            time_range: None,
+            primitive_filter: None,
+            as_of: Some(1), // microsecond 1 — before any data
+        };
+
+        let response = retrieve(&db, &request).unwrap();
+        assert!(
+            response.hits.is_empty(),
+            "No hits should exist before data was inserted"
+        );
+    }
+
+    #[test]
+    fn test_retrieve_as_of_none_returns_all() {
+        // as_of=None should return all docs (regression test)
+        let (db, branch_id) =
+            setup_db_with_kv(&[("a", "alpha test data"), ("b", "beta test data")]);
+        let recipe = builtin_defaults();
+        let request = RetrievalRequest {
+            query: "test data".into(),
+            branch_id,
+            space: "default".into(),
+            recipe,
+            embedding: None,
+            time_range: None,
+            primitive_filter: None,
+            as_of: None,
+        };
+
+        let response = retrieve(&db, &request).unwrap();
+        assert_eq!(response.hits.len(), 2, "Both docs should be returned");
     }
 }

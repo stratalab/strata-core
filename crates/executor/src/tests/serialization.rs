@@ -485,6 +485,8 @@ fn test_command_search_minimal() {
             recipe: None,
             precomputed_embedding: None,
             k: None,
+            as_of: None,
+            diff: None,
         },
     });
 }
@@ -499,6 +501,8 @@ fn test_command_search_full() {
             recipe: None,
             precomputed_embedding: None,
             k: Some(10),
+            as_of: None,
+            diff: None,
         },
     });
 }
@@ -573,6 +577,7 @@ fn test_output_search_results_with_stats() {
             score: 0.95,
             rank: 1,
             snippet: Some("matched text".to_string()),
+            versions: None,
         }],
         stats: SearchStatsOutput {
             elapsed_ms: 12.5,
@@ -589,7 +594,9 @@ fn test_output_search_results_with_stats() {
             rerank_model: None,
             embedding_pending: None,
             embedding_total: None,
+            snapshot_version: None,
         },
+        diff: None,
     });
 }
 
@@ -610,7 +617,9 @@ fn test_output_search_results_with_model_names() {
             rerank_model: Some("qwen3:1.7b".to_string()),
             embedding_pending: None,
             embedding_total: None,
+            snapshot_version: None,
         },
+        diff: None,
     });
 }
 
@@ -631,7 +640,9 @@ fn test_output_search_results_with_embedding_progress() {
             rerank_model: None,
             embedding_pending: Some(42),
             embedding_total: Some(100),
+            snapshot_version: None,
         },
+        diff: None,
     });
 }
 

@@ -1033,7 +1033,7 @@ fn format_human(output: &Output) -> String {
             }
             lines.join("\n")
         }
-        Output::SearchResults { hits, stats } => {
+        Output::SearchResults { hits, stats, .. } => {
             let mut parts = Vec::new();
             if hits.is_empty() {
                 parts.push("(empty list)".to_string());
