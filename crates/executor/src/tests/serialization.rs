@@ -482,13 +482,9 @@ fn test_command_search_minimal() {
         space: None,
         search: SearchQuery {
             query: "user auth errors".to_string(),
-            k: None,
-            primitives: None,
-            time_range: None,
-            mode: None,
-            expand: None,
-            rerank: None,
+            recipe: None,
             precomputed_embedding: None,
+            k: None,
         },
     });
 }
@@ -500,16 +496,9 @@ fn test_command_search_full() {
         space: Some("production".to_string()),
         search: SearchQuery {
             query: "user auth errors".to_string(),
-            k: Some(10),
-            primitives: Some(vec!["kv".to_string(), "json".to_string()]),
-            time_range: Some(TimeRangeInput {
-                start: "2026-02-07T00:00:00Z".to_string(),
-                end: "2026-02-09T23:59:59Z".to_string(),
-            }),
-            mode: Some("hybrid".to_string()),
-            expand: Some(true),
-            rerank: Some(false),
+            recipe: None,
             precomputed_embedding: None,
+            k: Some(10),
         },
     });
 }

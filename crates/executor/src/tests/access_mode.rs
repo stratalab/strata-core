@@ -254,13 +254,9 @@ fn test_read_only_allows_all_reads() {
             space: None,
             search: crate::types::SearchQuery {
                 query: "test".into(),
-                k: None,
-                primitives: None,
-                time_range: None,
-                mode: None,
-                expand: None,
-                rerank: None,
+                recipe: None,
                 precomputed_embedding: None,
+                k: None,
             },
         },
         Command::BranchDiff {
@@ -572,13 +568,9 @@ fn test_is_write_classification() {
             space: None,
             search: crate::types::SearchQuery {
                 query: "".into(),
-                k: None,
-                primitives: None,
-                time_range: None,
-                mode: None,
-                expand: None,
-                rerank: None,
+                recipe: None,
                 precomputed_embedding: None,
+                k: None,
             },
         },
         Command::BranchDiff {

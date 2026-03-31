@@ -8,14 +8,42 @@
 use super::RerankScore;
 use strata_engine::search::SearchHit;
 
+/// Configurable blending weights for position-aware score blending.
+///
+/// Each value is the RRF weight for that rank tier.
+/// Reranker weight = 1.0 - rrf_weight.
+#[derive(Debug, Clone)]
+pub struct BlendWeights {
+    pub rank_1_3: f32,
+    pub rank_4_10: f32,
+    pub rank_11_plus: f32,
+}
+
+impl Default for BlendWeights {
+    fn default() -> Self {
+        Self {
+            rank_1_3: 0.75,
+            rank_4_10: 0.60,
+            rank_11_plus: 0.40,
+        }
+    }
+}
+
 /// Blend RRF scores with reranker scores using position-aware weights.
 ///
 /// Hits without a matching reranker score keep their normalized RRF score.
 /// Results are re-sorted by blended score (descending) and ranks reassigned.
-pub fn blend_scores(mut hits: Vec<SearchHit>, scores: &[RerankScore]) -> Vec<SearchHit> {
+/// Pass `None` for `weights` to use defaults (0.75 / 0.60 / 0.40).
+pub fn blend_scores(
+    mut hits: Vec<SearchHit>,
+    scores: &[RerankScore],
+    weights: Option<&BlendWeights>,
+) -> Vec<SearchHit> {
     if hits.is_empty() || scores.is_empty() {
         return hits;
     }
+
+    let w = weights.cloned().unwrap_or_default();
 
     // Normalize RRF scores to [0, 1]
     let max_rrf = hits
@@ -32,23 +60,20 @@ pub fn blend_scores(mut hits: Vec<SearchHit>, scores: &[RerankScore]) -> Vec<Sea
             1.0 // all same score → treat as 1.0
         };
 
-        // Find matching reranker score by original index
         if let Some(rerank) = scores.iter().find(|s| s.index == pos) {
-            let (w_rrf, w_rerank) = position_weights(pos);
+            let (w_rrf, w_rerank) = position_weights(pos, &w);
             hit.score = w_rrf * norm_rrf + w_rerank * rerank.relevance_score;
         } else {
             hit.score = norm_rrf;
         }
     }
 
-    // Re-sort by blended score (descending)
     hits.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // Reassign ranks (1-indexed)
     for (i, hit) in hits.iter_mut().enumerate() {
         hit.rank = (i + 1) as u32;
     }
@@ -57,14 +82,13 @@ pub fn blend_scores(mut hits: Vec<SearchHit>, scores: &[RerankScore]) -> Vec<Sea
 }
 
 /// Position-aware weights: (rrf_weight, reranker_weight).
-///
-/// Lower-ranked results give more influence to the reranker.
-fn position_weights(position: usize) -> (f32, f32) {
-    match position {
-        0..=2 => (0.75, 0.25), // ranks 1-3
-        3..=9 => (0.60, 0.40), // ranks 4-10
-        _ => (0.40, 0.60),     // ranks 11+
-    }
+fn position_weights(position: usize, w: &BlendWeights) -> (f32, f32) {
+    let rrf_w = match position {
+        0..=2 => w.rank_1_3,
+        3..=9 => w.rank_4_10,
+        _ => w.rank_11_plus,
+    };
+    (rrf_w, 1.0 - rrf_w)
 }
 
 #[cfg(test)]
@@ -87,14 +111,14 @@ mod tests {
 
     #[test]
     fn test_blend_empty_hits() {
-        let result = blend_scores(vec![], &[]);
+        let result = blend_scores(vec![], &[], None);
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_blend_empty_scores() {
         let hits = vec![make_hit(1.0, 1), make_hit(0.5, 2)];
-        let result = blend_scores(hits.clone(), &[]);
+        let result = blend_scores(hits.clone(), &[], None);
         assert_eq!(result.len(), 2);
     }
 
@@ -117,7 +141,7 @@ mod tests {
                 relevance_score: 1.0,
             }, // high reranker
         ];
-        let result = blend_scores(hits, &scores);
+        let result = blend_scores(hits, &scores, None);
         // hit11 should outrank hit10 due to high reranker score in tail tier
         let pos_hit11 = result
             .iter()
@@ -150,7 +174,7 @@ mod tests {
                 relevance_score: 0.1,
             },
         ];
-        let result = blend_scores(hits, &scores);
+        let result = blend_scores(hits, &scores, None);
         // With same RRF, reranker scores dominate
         assert_eq!(result[0].snippet.as_deref(), Some("snippet 2"));
         assert_eq!(result[1].snippet.as_deref(), Some("snippet 1"));
@@ -164,7 +188,7 @@ mod tests {
             index: 0,
             relevance_score: 0.5,
         }];
-        let result = blend_scores(hits, &scores);
+        let result = blend_scores(hits, &scores, None);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].rank, 1);
     }
@@ -184,7 +208,7 @@ mod tests {
                 relevance_score: 0.9,
             },
         ];
-        let result = blend_scores(hits, &scores);
+        let result = blend_scores(hits, &scores, None);
         assert_eq!(result.len(), 3);
         // All ranks should be assigned
         let ranks: Vec<u32> = result.iter().map(|h| h.rank).collect();
@@ -211,24 +235,43 @@ mod tests {
                 relevance_score: 0.5,
             },
         ];
-        let result = blend_scores(hits, &scores);
+        let result = blend_scores(hits, &scores, None);
         assert_eq!(result[0].snippet.as_deref(), Some("snippet 1"));
         assert_eq!(result[1].snippet.as_deref(), Some("snippet 2"));
         assert_eq!(result[2].snippet.as_deref(), Some("snippet 3"));
     }
 
+    fn assert_weights(actual: (f32, f32), expected: (f32, f32)) {
+        assert!(
+            (actual.0 - expected.0).abs() < 1e-5 && (actual.1 - expected.1).abs() < 1e-5,
+            "expected ({}, {}), got ({}, {})",
+            expected.0,
+            expected.1,
+            actual.0,
+            actual.1,
+        );
+    }
+
     #[test]
-    fn test_position_weights_tiers() {
-        // Tier 1: ranks 1-3 (positions 0-2)
-        assert_eq!(position_weights(0), (0.75, 0.25));
-        assert_eq!(position_weights(2), (0.75, 0.25));
+    fn test_position_weights_default_tiers() {
+        let w = BlendWeights::default();
+        assert_weights(position_weights(0, &w), (0.75, 0.25));
+        assert_weights(position_weights(2, &w), (0.75, 0.25));
+        assert_weights(position_weights(3, &w), (0.60, 0.40));
+        assert_weights(position_weights(9, &w), (0.60, 0.40));
+        assert_weights(position_weights(10, &w), (0.40, 0.60));
+        assert_weights(position_weights(100, &w), (0.40, 0.60));
+    }
 
-        // Tier 2: ranks 4-10 (positions 3-9)
-        assert_eq!(position_weights(3), (0.60, 0.40));
-        assert_eq!(position_weights(9), (0.60, 0.40));
-
-        // Tier 3: ranks 11+ (positions 10+)
-        assert_eq!(position_weights(10), (0.40, 0.60));
-        assert_eq!(position_weights(100), (0.40, 0.60));
+    #[test]
+    fn test_position_weights_custom() {
+        let w = BlendWeights {
+            rank_1_3: 0.90,
+            rank_4_10: 0.50,
+            rank_11_plus: 0.20,
+        };
+        assert_weights(position_weights(0, &w), (0.90, 0.10));
+        assert_weights(position_weights(5, &w), (0.50, 0.50));
+        assert_weights(position_weights(15, &w), (0.20, 0.80));
     }
 }

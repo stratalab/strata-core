@@ -151,14 +151,28 @@ pub struct GraphConfig {
 }
 
 /// Query expansion configuration.
+///
+/// Presence = enabled, absence = disabled. The intelligence layer generates
+/// typed query variants (lex/vec/hyde) that fan out to BM25 and vector search.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ExpansionConfig {
-    /// Expansion method (e.g., "lex", "vec", "hyde").
+    /// Strategy: "lex", "vec", "hyde", or "full" (default: "full").
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub method: Option<String>,
-    /// Number of expansion terms/queries.
+    pub strategy: Option<String>,
+    /// Skip expansion if top BM25 score >= this (default: 0.85).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub count: Option<usize>,
+    pub strong_signal_threshold: Option<f32>,
+    /// Top BM25 score must exceed #2 by at least this (default: 0.15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strong_signal_gap: Option<f32>,
+    /// Discard expansions sharing fewer than this many stemmed terms
+    /// with the original query (default: 2). Hyde is exempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_shared_stems: Option<usize>,
+    /// Weight for original query in RRF fusion (default: 2.0).
+    /// Expansion results use weight 1.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_weight: Option<f32>,
 }
 
 /// Pre-retrieval filter configuration.
@@ -187,17 +201,34 @@ pub struct FusionConfig {
 }
 
 /// Re-ranking configuration.
+///
+/// Presence = enabled, absence = disabled. Re-scores top-N results after
+/// fusion using a cross-encoder model with position-aware score blending.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct RerankConfig {
-    /// Whether reranking is enabled.
+    /// Number of top candidates to re-rank (default: 20).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
-    /// Model to use for reranking (e.g., "local:qwen3-reranker").
+    pub top_n: Option<usize>,
+    /// Position-aware blending weights.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// Top-k after reranking.
+    pub blending: Option<BlendingConfig>,
+}
+
+/// Position-aware blending weights for reranking.
+///
+/// Each value is the RRF weight for that rank tier.
+/// Reranker weight = 1.0 - rrf_weight.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct BlendingConfig {
+    /// RRF weight for ranks 1-3 (default: 0.75).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub top_k: Option<usize>,
+    pub rank_1_3: Option<f32>,
+    /// RRF weight for ranks 4-10 (default: 0.60).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank_4_10: Option<f32>,
+    /// RRF weight for ranks 11+ (default: 0.40).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank_11_plus: Option<f32>,
 }
 
 /// Post-retrieval transform.
@@ -417,6 +448,7 @@ pub fn builtin_defaults() -> Recipe {
                 stopwords: Some("lucene33".into()),
                 ..Default::default()
             }),
+            vector: Some(VectorRetrieveConfig::default()),
             ..Default::default()
         }),
         fusion: Some(FusionConfig {

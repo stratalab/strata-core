@@ -8,10 +8,16 @@
 #[cfg(feature = "embed")]
 pub mod embed;
 #[cfg(feature = "embed")]
+pub mod expand;
+#[cfg(feature = "embed")]
 pub mod generate;
+#[cfg(feature = "embed")]
+pub mod rerank;
 
 // Re-export key strata-inference types so that the executor depends only on
 // strata-intelligence, not directly on strata-inference.
+#[cfg(feature = "embed")]
+pub use strata_inference::load_ranker;
 #[cfg(feature = "embed")]
 pub use strata_inference::EmbeddingEngine;
 #[cfg(feature = "embed")]
