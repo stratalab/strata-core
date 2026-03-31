@@ -23,7 +23,7 @@ pub mod error;
 pub mod prompt;
 
 pub use api::ApiReranker;
-pub use blend::blend_scores;
+pub use blend::{blend_scores, BlendWeights};
 pub use error::RerankError;
 
 /// A relevance score assigned by the reranker to a search hit.

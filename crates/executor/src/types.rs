@@ -556,33 +556,19 @@ pub struct SearchQuery {
     /// Natural-language or keyword query string.
     pub query: String,
 
-    /// Number of results to return (default: 10).
+    /// Per-call recipe override (level 3 of three-level merge).
+    /// Only specify fields you want to override. Everything else inherits
+    /// from the branch recipe (level 2) and built-in defaults (level 1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub k: Option<u64>,
+    pub recipe: Option<serde_json::Value>,
 
-    /// Restrict to specific primitives (e.g. ["kv", "json", "event"]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub primitives: Option<Vec<String>>,
-
-    /// Time range filter (ISO 8601 datetime strings).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub time_range: Option<TimeRangeInput>,
-
-    /// Search mode: "keyword" or "hybrid" (default: "hybrid").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
-
-    /// Enable/disable query expansion. Absent = auto (use if model configured).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expand: Option<bool>,
-
-    /// Enable/disable reranking. Absent = auto (use if model configured).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rerank: Option<bool>,
-
-    /// Precomputed query embedding (skips embedder call in hybrid search).
+    /// Precomputed query embedding (skips embedder call for vector search).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub precomputed_embedding: Option<Vec<f32>>,
+
+    /// Shorthand: number of results (maps to recipe.transform.limit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub k: Option<u64>,
 }
 
 /// Information about a model in the registry (serializable output type).

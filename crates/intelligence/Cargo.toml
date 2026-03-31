@@ -21,6 +21,7 @@ google = ["embed", "strata-inference/google"]
 [dependencies]
 strata-core = { path = "../core" }
 strata-engine = { path = "../engine" }
+strata-search = { path = "../search" }
 tracing = { workspace = true }
 strata-inference = { path = "../inference", optional = true, features = ["local", "download"] }
 

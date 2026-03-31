@@ -12,8 +12,7 @@ use std::io::Read;
 use clap::ArgMatches;
 use strata_executor::{
     BatchVectorEntry, BranchId, BulkGraphEdge, BulkGraphNode, Command, DistanceMetric,
-    ExportFormat, ExportPrimitive, MergeStrategy, MetadataFilter, SearchQuery, TimeRangeInput,
-    TxnOptions, Value,
+    ExportFormat, ExportPrimitive, MergeStrategy, MetadataFilter, SearchQuery, TxnOptions, Value,
 };
 
 use crate::state::SessionState;
@@ -1433,44 +1432,15 @@ fn parse_detokenize(matches: &ArgMatches) -> Result<CliAction, String> {
 fn parse_search(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
     let query = matches.get_one::<String>("query").unwrap().clone();
     let k = matches.get_one::<u64>("top-k").copied();
-    let primitives = matches
-        .get_one::<String>("primitives")
-        .map(|s| s.split(',').map(|p| p.trim().to_string()).collect());
-
-    // Build time_range from --time-start and --time-end
-    // Clap's .requires() guarantees both-or-neither, so only two branches are reachable.
-    let time_range = match (
-        matches.get_one::<String>("time-start").cloned(),
-        matches.get_one::<String>("time-end").cloned(),
-    ) {
-        (Some(start), Some(end)) => Some(TimeRangeInput { start, end }),
-        _ => None,
-    };
-
-    let mode = matches.get_one::<String>("mode").cloned();
-    let expand = if matches.get_flag("expand") {
-        Some(true)
-    } else {
-        None
-    };
-    let rerank = if matches.get_flag("rerank") {
-        Some(true)
-    } else {
-        None
-    };
 
     Ok(CliAction::Execute(Command::Search {
         branch: branch(state),
         space: space(state),
         search: SearchQuery {
             query,
-            k,
-            primitives,
-            time_range,
-            mode,
-            expand,
-            rerank,
+            recipe: None,
             precomputed_embedding: None,
+            k,
         },
     }))
 }

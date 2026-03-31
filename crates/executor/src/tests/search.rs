@@ -24,13 +24,9 @@ fn test_search_empty_database() {
         space: None,
         search: SearchQuery {
             query: "nonexistent".to_string(),
-            k: None,
-            primitives: None,
-            time_range: None,
-            mode: None,
-            expand: None,
-            rerank: None,
+            recipe: None,
             precomputed_embedding: None,
+            k: None,
         },
     });
 
@@ -71,13 +67,9 @@ fn test_search_returns_empty_for_kv_primitive() {
         space: None,
         search: SearchQuery {
             query: "hello".to_string(),
-            k: Some(10),
-            primitives: Some(vec!["kv".to_string()]),
-            time_range: None,
-            mode: None,
-            expand: None,
-            rerank: None,
+            recipe: None,
             precomputed_embedding: None,
+            k: Some(10),
         },
     });
 
@@ -104,26 +96,22 @@ fn test_search_with_primitive_filter() {
         })
         .unwrap();
 
-    // Search only in event primitive
+    // Search should find the KV data
     let result = executor.execute(Command::Search {
         branch: None,
         space: None,
         search: SearchQuery {
             query: "searchable".to_string(),
-            k: Some(10),
-            primitives: Some(vec!["event".to_string()]),
-            time_range: None,
-            mode: None,
-            expand: None,
-            rerank: None,
+            recipe: None,
             precomputed_embedding: None,
+            k: Some(10),
         },
     });
 
     match result {
         Ok(Output::SearchResults { hits, .. }) => {
-            // Should not find any data from event primitive
-            assert!(hits.is_empty(), "Should not find data in event primitive");
+            assert!(!hits.is_empty(), "Should find KV data via BM25");
+            assert_eq!(hits[0].entity, "test_key");
         }
         other => panic!("Expected SearchResults, got {:?}", other),
     }
@@ -140,13 +128,9 @@ fn test_search_command_infrastructure_works() {
         space: None,
         search: SearchQuery {
             query: "test query".to_string(),
-            k: Some(5),
-            primitives: None,
-            time_range: None,
-            mode: None,
-            expand: None,
-            rerank: None,
+            recipe: None,
             precomputed_embedding: None,
+            k: Some(5),
         },
     });
 
@@ -169,13 +153,9 @@ fn test_search_with_mode_override() {
         space: None,
         search: SearchQuery {
             query: "test".to_string(),
-            k: None,
-            primitives: None,
-            time_range: None,
-            mode: Some("keyword".to_string()),
-            expand: None,
-            rerank: None,
+            recipe: None,
             precomputed_embedding: None,
+            k: None,
         },
     });
     assert!(result.is_ok());
@@ -186,13 +166,9 @@ fn test_search_with_mode_override() {
         space: None,
         search: SearchQuery {
             query: "test".to_string(),
-            k: None,
-            primitives: None,
-            time_range: None,
-            mode: Some("hybrid".to_string()),
-            expand: None,
-            rerank: None,
+            recipe: None,
             precomputed_embedding: None,
+            k: None,
         },
     });
     assert!(result.is_ok());
@@ -207,13 +183,9 @@ fn test_search_with_expand_rerank_disabled() {
         space: None,
         search: SearchQuery {
             query: "test".to_string(),
-            k: None,
-            primitives: None,
-            time_range: None,
-            mode: None,
-            expand: Some(false),
-            rerank: Some(false),
+            recipe: None,
             precomputed_embedding: None,
+            k: None,
         },
     });
     assert!(result.is_ok());
@@ -247,13 +219,9 @@ fn test_issue_1768_search_stats_include_embedding_progress() {
         space: None,
         search: SearchQuery {
             query: "test".to_string(),
-            k: None,
-            primitives: None,
-            time_range: None,
-            mode: None,
-            expand: Some(false),
-            rerank: Some(false),
+            recipe: None,
             precomputed_embedding: None,
+            k: None,
         },
     });
 
@@ -291,13 +259,9 @@ fn test_issue_1768_search_stats_no_embedding_when_nothing_pending() {
         space: None,
         search: SearchQuery {
             query: "test".to_string(),
-            k: None,
-            primitives: None,
-            time_range: None,
-            mode: None,
-            expand: Some(false),
-            rerank: Some(false),
+            recipe: None,
             precomputed_embedding: None,
+            k: None,
         },
     });
 
@@ -327,13 +291,9 @@ fn test_issue_1768_search_stats_no_embedding_when_disabled() {
         space: None,
         search: SearchQuery {
             query: "test".to_string(),
-            k: None,
-            primitives: None,
-            time_range: None,
-            mode: None,
-            expand: Some(false),
-            rerank: Some(false),
+            recipe: None,
             precomputed_embedding: None,
+            k: None,
         },
     });
 

@@ -254,7 +254,7 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
 ///
 /// Score = sum(weight / (k + rank + 1)) per source.
 /// Deterministic tie-breaking: score desc, then entity hash (INV-1).
-fn rrf_fuse(
+pub fn rrf_fuse(
     sources: &[(String, Vec<SearchHit>)],
     fusion_cfg: Option<&FusionConfig>,
 ) -> Vec<SearchHit> {
