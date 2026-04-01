@@ -56,7 +56,7 @@ pub fn search(
         .retrieve
         .as_ref()
         .and_then(|r| r.vector.as_ref())
-        .is_some();
+        .is_some_and(|v| v.is_enabled());
 
     let embed_model = resolved
         .models
@@ -122,10 +122,11 @@ pub fn search(
         .as_ref()
         .and_then(|m| m.rerank.clone())
         .unwrap_or_else(|| "jina-reranker-v1-tiny".to_string());
-    let (final_hits, rerank_used) = if let Some(ref rerank_cfg) = resolved.rerank {
-        rerank_hits(&sq.query, fused, rerank_cfg, &rerank_model)
-    } else {
-        (fused, false)
+    let (final_hits, rerank_used) = match resolved.rerank.as_ref() {
+        Some(rerank_cfg) if rerank_cfg.is_enabled() => {
+            rerank_hits(&sq.query, fused, rerank_cfg, &rerank_model)
+        }
+        _ => (fused, false),
     };
 
     // ---- Convert to Output ----
@@ -256,8 +257,8 @@ fn try_expand_query(
     use strata_search::expand::{ExpandedQuery, QueryType};
 
     let expansion_cfg = match recipe.expansion.as_ref() {
-        Some(c) => c,
-        None => {
+        Some(c) if c.is_enabled() => c,
+        _ => {
             return (
                 vec![ExpandedQuery {
                     query_type: QueryType::Lex,

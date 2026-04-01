@@ -111,7 +111,12 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
     let snapshot = db.current_version();
 
     // ---- Step 1: BM25 retrieval across primitives ----
-    if let Some(bm25_cfg) = recipe.retrieve.as_ref().and_then(|r| r.bm25.as_ref()) {
+    if let Some(bm25_cfg) = recipe
+        .retrieve
+        .as_ref()
+        .and_then(|r| r.bm25.as_ref())
+        .filter(|c| c.is_enabled())
+    {
         let bm25_start = Instant::now();
         let k = bm25_cfg.k.unwrap_or(50);
 
@@ -194,7 +199,12 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
     }
 
     // ---- Step 2: Vector retrieval ----
-    if let Some(vec_cfg) = recipe.retrieve.as_ref().and_then(|r| r.vector.as_ref()) {
+    if let Some(vec_cfg) = recipe
+        .retrieve
+        .as_ref()
+        .and_then(|r| r.vector.as_ref())
+        .filter(|c| c.is_enabled())
+    {
         if let Some(embedding) = &request.embedding {
             let vec_start = Instant::now();
             let k = vec_cfg.k.unwrap_or(50);

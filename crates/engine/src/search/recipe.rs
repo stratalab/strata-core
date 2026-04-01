@@ -90,6 +90,9 @@ pub struct RetrieveConfig {
 /// BM25 keyword retrieval parameters.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct BM25Config {
+    /// Explicitly disable this section. `false` = off, `None`/`true` = on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     /// Which primitives to search (e.g., ["kv", "json", "event"]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sources: Option<Vec<String>>,
@@ -125,6 +128,9 @@ pub struct BM25Config {
 /// Vector (embedding) retrieval parameters.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct VectorRetrieveConfig {
+    /// Explicitly disable this section. `false` = off, `None`/`true` = on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     /// Which collections to search (default: all `_system_embed_*`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collections: Option<Vec<String>>,
@@ -152,10 +158,13 @@ pub struct GraphConfig {
 
 /// Query expansion configuration.
 ///
-/// Presence = enabled, absence = disabled. The intelligence layer generates
-/// typed query variants (lex/vec/hyde) that fan out to BM25 and vector search.
+/// Presence = enabled, absence = disabled. Set `enabled: false` to explicitly
+/// disable even when inherited from builtin defaults.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ExpansionConfig {
+    /// Explicitly disable this section. `false` = off, `None`/`true` = on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     /// Strategy: "lex", "vec", "hyde", or "full" (default: "full").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy: Option<String>,
@@ -202,10 +211,13 @@ pub struct FusionConfig {
 
 /// Re-ranking configuration.
 ///
-/// Presence = enabled, absence = disabled. Re-scores top-N results after
-/// fusion using a cross-encoder model with position-aware score blending.
+/// Presence = enabled, absence = disabled. Set `enabled: false` to explicitly
+/// disable even when inherited from builtin defaults.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct RerankConfig {
+    /// Explicitly disable this section. `false` = off, `None`/`true` = on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     /// Number of top candidates to re-rank (default: 20).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_n: Option<usize>,
@@ -291,6 +303,44 @@ pub struct ControlConfig {
 }
 
 // ============================================================================
+// Enabled check
+// ============================================================================
+
+/// Check if a config section is enabled.
+/// `None` or `Some(true)` = enabled, `Some(false)` = disabled.
+fn is_section_enabled(enabled: Option<bool>) -> bool {
+    enabled.unwrap_or(true)
+}
+
+impl BM25Config {
+    /// Whether this BM25 section is enabled (default: true).
+    pub fn is_enabled(&self) -> bool {
+        is_section_enabled(self.enabled)
+    }
+}
+
+impl VectorRetrieveConfig {
+    /// Whether this vector section is enabled (default: true).
+    pub fn is_enabled(&self) -> bool {
+        is_section_enabled(self.enabled)
+    }
+}
+
+impl ExpansionConfig {
+    /// Whether expansion is enabled (default: true).
+    pub fn is_enabled(&self) -> bool {
+        is_section_enabled(self.enabled)
+    }
+}
+
+impl RerankConfig {
+    /// Whether reranking is enabled (default: true).
+    pub fn is_enabled(&self) -> bool {
+        is_section_enabled(self.enabled)
+    }
+}
+
+// ============================================================================
 // Merge
 // ============================================================================
 
@@ -314,14 +364,10 @@ impl Recipe {
         Recipe {
             version: overlay.version.or(base.version),
             retrieve: merge_option(&base.retrieve, &overlay.retrieve, RetrieveConfig::merge),
-            expansion: overlay
-                .expansion
-                .as_ref()
-                .or(base.expansion.as_ref())
-                .cloned(),
+            expansion: merge_option(&base.expansion, &overlay.expansion, ExpansionConfig::merge),
             filter: overlay.filter.as_ref().or(base.filter.as_ref()).cloned(),
             fusion: merge_option(&base.fusion, &overlay.fusion, FusionConfig::merge),
-            rerank: overlay.rerank.as_ref().or(base.rerank.as_ref()).cloned(),
+            rerank: merge_option(&base.rerank, &overlay.rerank, RerankConfig::merge),
             transform: merge_option(&base.transform, &overlay.transform, TransformConfig::merge),
             prompt: overlay.prompt.as_ref().or(base.prompt.as_ref()).cloned(),
             rag_context_hits: overlay.rag_context_hits.or(base.rag_context_hits),
@@ -359,6 +405,7 @@ impl RetrieveConfig {
 impl BM25Config {
     fn merge(base: &Self, overlay: &Self) -> Self {
         BM25Config {
+            enabled: overlay.enabled.or(base.enabled),
             sources: overlay.sources.as_ref().or(base.sources.as_ref()).cloned(),
             spaces: overlay.spaces.as_ref().or(base.spaces.as_ref()).cloned(),
             k: overlay.k.or(base.k),
@@ -384,6 +431,7 @@ impl BM25Config {
 impl VectorRetrieveConfig {
     fn merge(base: &Self, overlay: &Self) -> Self {
         VectorRetrieveConfig {
+            enabled: overlay.enabled.or(base.enabled),
             collections: overlay
                 .collections
                 .as_ref()
@@ -391,6 +439,39 @@ impl VectorRetrieveConfig {
                 .cloned(),
             k: overlay.k.or(base.k),
             metric: overlay.metric.as_ref().or(base.metric.as_ref()).cloned(),
+        }
+    }
+}
+
+impl ExpansionConfig {
+    fn merge(base: &Self, overlay: &Self) -> Self {
+        ExpansionConfig {
+            enabled: overlay.enabled.or(base.enabled),
+            strategy: overlay
+                .strategy
+                .as_ref()
+                .or(base.strategy.as_ref())
+                .cloned(),
+            strong_signal_threshold: overlay
+                .strong_signal_threshold
+                .or(base.strong_signal_threshold),
+            strong_signal_gap: overlay.strong_signal_gap.or(base.strong_signal_gap),
+            min_shared_stems: overlay.min_shared_stems.or(base.min_shared_stems),
+            original_weight: overlay.original_weight.or(base.original_weight),
+        }
+    }
+}
+
+impl RerankConfig {
+    fn merge(base: &Self, overlay: &Self) -> Self {
+        RerankConfig {
+            enabled: overlay.enabled.or(base.enabled),
+            top_n: overlay.top_n.or(base.top_n),
+            blending: overlay
+                .blending
+                .as_ref()
+                .or(base.blending.as_ref())
+                .cloned(),
         }
     }
 }
@@ -477,6 +558,7 @@ pub fn builtin_defaults() -> Recipe {
             ..Default::default()
         }),
         expansion: Some(ExpansionConfig {
+            enabled: None, // on by default (presence = enabled)
             strategy: Some("full".into()),
             strong_signal_threshold: Some(0.85),
             strong_signal_gap: Some(0.15),
@@ -489,6 +571,7 @@ pub fn builtin_defaults() -> Recipe {
             ..Default::default()
         }),
         rerank: Some(RerankConfig {
+            enabled: None, // on by default
             top_n: Some(20),
             blending: Some(BlendingConfig {
                 rank_1_3: Some(0.75),
@@ -689,5 +772,42 @@ mod tests {
         let ctrl = merged.control.unwrap();
         assert_eq!(ctrl.budget_ms, Some(5000)); // from base
         assert_eq!(ctrl.snapshot_version, Some(42)); // from overlay
+    }
+
+    #[test]
+    fn test_enabled_false_disables_section() {
+        // Builtin has expansion enabled (no explicit enabled field = true).
+        let builtin = builtin_defaults();
+        assert!(builtin.expansion.as_ref().unwrap().is_enabled());
+
+        // Per-call override: enabled = false disables expansion.
+        let override_recipe = Recipe {
+            expansion: Some(ExpansionConfig {
+                enabled: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let resolved = Recipe::resolve(&builtin, &Recipe::default(), Some(&override_recipe));
+        // Expansion is present but disabled.
+        assert!(resolved.expansion.is_some());
+        assert!(!resolved.expansion.as_ref().unwrap().is_enabled());
+        // Other fields inherited from builtin.
+        assert_eq!(
+            resolved.expansion.as_ref().unwrap().strategy,
+            Some("full".into())
+        );
+    }
+
+    #[test]
+    fn test_enabled_false_via_json() {
+        // Simulate user passing {"expansion": {"enabled": false}} as JSON.
+        let json = r#"{"expansion": {"enabled": false}}"#;
+        let per_call: Recipe = serde_json::from_str(json).unwrap();
+        assert_eq!(per_call.expansion.as_ref().unwrap().enabled, Some(false));
+
+        let builtin = builtin_defaults();
+        let resolved = Recipe::resolve(&builtin, &Recipe::default(), Some(&per_call));
+        assert!(!resolved.expansion.as_ref().unwrap().is_enabled());
     }
 }
