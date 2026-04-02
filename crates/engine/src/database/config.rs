@@ -119,10 +119,9 @@ pub struct StorageConfig {
     /// Default: 10.
     #[serde(default = "default_bloom_bits_per_key")]
     pub bloom_bits_per_key: usize,
-    /// Compaction I/O rate limit in bytes per second.
-    /// Default: 50 MB/s. Set to 0 for unlimited (not recommended — can starve foreground reads).
-    /// On slow storage (SD cards), set to 5–10 MB/s.
-    #[serde(default = "default_compaction_rate_limit")]
+    /// Compaction I/O rate limit in bytes per second. 0 = unlimited (default).
+    /// On slow storage (SD cards), set to e.g. 5–10 MB/s to avoid starving user I/O.
+    #[serde(default)]
     pub compaction_rate_limit: u64,
     /// Maximum time (milliseconds) a write can be stalled waiting for L0 compaction.
     /// If exceeded, the write returns an error instead of blocking indefinitely.
@@ -165,10 +164,6 @@ fn default_l0_slowdown_writes_trigger() -> usize {
 
 fn default_l0_stop_writes_trigger() -> usize {
     0 // disabled — see l0_slowdown rationale above
-}
-
-fn default_compaction_rate_limit() -> u64 {
-    50 * 1024 * 1024 // 50 MB/s — leaves majority of bandwidth for foreground reads
 }
 
 fn default_background_threads() -> usize {
@@ -247,7 +242,7 @@ impl Default for StorageConfig {
             level_base_bytes: default_level_base_bytes(),
             data_block_size: default_data_block_size(),
             bloom_bits_per_key: default_bloom_bits_per_key(),
-            compaction_rate_limit: default_compaction_rate_limit(),
+            compaction_rate_limit: 0,
             write_stall_timeout_ms: default_write_stall_timeout_ms(),
             codec: default_codec(),
         }
@@ -505,7 +500,7 @@ auto_embed = false
 # level_base_bytes = 268435456  # 256 MiB; L1 target size (Pi: 32 MiB)
 # data_block_size = 4096        # 4 KiB; segment data block size
 # bloom_bits_per_key = 10       # bloom filter bits per key
-# compaction_rate_limit = 52428800  # 50 MB/s default; 0 = unlimited
+# compaction_rate_limit = 0     # 0 = unlimited; bytes/sec cap for compaction I/O
 "#
     }
 
@@ -1156,11 +1151,7 @@ auto_embed = false
     fn test_issue_1737_compaction_rate_limit_in_config() {
         // S-M7: compaction_rate_limit must be configurable via strata.toml
         let config = StorageConfig::default();
-        assert_eq!(
-            config.compaction_rate_limit,
-            50 * 1024 * 1024,
-            "default 50 MB/s"
-        );
+        assert_eq!(config.compaction_rate_limit, 0, "default 0 = unlimited");
     }
 
     #[test]
@@ -1212,7 +1203,7 @@ max_branches = 512
         assert_eq!(config.storage.level_base_bytes, 256 * 1024 * 1024);
         assert_eq!(config.storage.data_block_size, 4096);
         assert_eq!(config.storage.bloom_bits_per_key, 10);
-        assert_eq!(config.storage.compaction_rate_limit, 50 * 1024 * 1024);
+        assert_eq!(config.storage.compaction_rate_limit, 0);
     }
 
     #[cfg(unix)]
