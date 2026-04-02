@@ -2049,12 +2049,20 @@ mod tests {
     #[test]
     fn test_kv_count() {
         let db = create_strata();
+
+        // Capture baseline (system-created keys may exist on the branch)
+        let baseline = db.kv_count(None).unwrap();
+
         db.kv_put("count:a", "1").unwrap();
         db.kv_put("count:b", "2").unwrap();
         db.kv_put("other", "3").unwrap();
 
         let total = db.kv_count(None).unwrap();
-        assert_eq!(total, 3);
+        assert_eq!(
+            total - baseline,
+            3,
+            "Should have 3 user keys above baseline"
+        );
 
         let prefixed = db.kv_count(Some("count:")).unwrap();
         assert_eq!(prefixed, 2);
