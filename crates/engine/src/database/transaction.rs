@@ -38,6 +38,127 @@ fn release_freed_memory() {
     // macOS and other allocators return pages eagerly; no action needed.
 }
 
+/// One round of the self-re-scheduling compaction chain.
+///
+/// Modeled after RocksDB's `BackgroundCallCompaction`: each invocation picks
+/// the single highest-scoring compaction across all branches, executes it,
+/// then re-submits itself if more work exists. Between rounds the scheduler
+/// can process other tasks.
+fn compaction_round(
+    storage: Arc<SegmentedStore>,
+    write_stall_cv: Arc<parking_lot::Condvar>,
+    flag: Arc<std::sync::atomic::AtomicBool>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    scheduler: Arc<crate::background::BackgroundScheduler>,
+) {
+    if cancelled.load(Ordering::Acquire) {
+        flag.store(false, Ordering::Release);
+        return;
+    }
+
+    // Pick ONE compaction: highest-scoring (branch, level) across all branches.
+    let did_work = pick_and_run_one(&storage, &write_stall_cv);
+
+    if did_work {
+        // More work may exist — re-submit for another round.
+        if !cancelled.load(Ordering::Acquire) {
+            let s = Arc::clone(&storage);
+            let w = Arc::clone(&write_stall_cv);
+            let f = Arc::clone(&flag);
+            let c = Arc::clone(&cancelled);
+            let sch = Arc::clone(&scheduler);
+            if scheduler
+                .submit(crate::background::TaskPriority::High, move || {
+                    compaction_round(s, w, f, c, sch);
+                })
+                .is_err()
+            {
+                flag.store(false, Ordering::Release);
+            }
+        } else {
+            flag.store(false, Ordering::Release);
+        }
+    } else {
+        // No compaction work — run materialization, then release the flag.
+        if !cancelled.load(Ordering::Acquire) {
+            run_materialization(&storage);
+        }
+        release_freed_memory();
+        flag.store(false, Ordering::Release);
+    }
+}
+
+/// Pick the single highest-scoring compaction across all branches and execute it.
+///
+/// Returns `true` if a compaction was performed.
+fn pick_and_run_one(
+    storage: &SegmentedStore,
+    write_stall_cv: &parking_lot::Condvar,
+) -> bool {
+    let mut best_score = 0.0f64;
+    let mut best_branch = None;
+
+    for branch_id in storage.branch_ids() {
+        let scores = storage.compute_compaction_scores(&branch_id);
+        if let Some(top) = scores.first() {
+            if top.score >= 1.0 && top.score > best_score {
+                best_score = top.score;
+                best_branch = Some(branch_id);
+            }
+        }
+    }
+
+    if let Some(branch_id) = best_branch {
+        match storage.pick_and_compact(&branch_id, 0) {
+            Ok(Some(_)) => {
+                write_stall_cv.notify_all();
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                tracing::warn!(
+                    target: "strata::compact",
+                    ?branch_id,
+                    error = %e,
+                    "background compaction failed"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    }
+}
+
+/// Run materialization for branches with deep inherited layer chains (#1704).
+fn run_materialization(storage: &SegmentedStore) {
+    for branch_id in storage.branches_needing_materialization() {
+        let layer_count = storage.inherited_layer_count(&branch_id);
+        if layer_count > 0 {
+            let deepest = layer_count - 1;
+            match storage.materialize_layer(&branch_id, deepest) {
+                Ok(result) => {
+                    tracing::info!(
+                        target: "strata::materialize",
+                        ?branch_id,
+                        entries = result.entries_materialized,
+                        segments = result.segments_created,
+                        "materialized inherited layer"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "strata::materialize",
+                        ?branch_id,
+                        error = %e,
+                        "materialization failed"
+                    );
+                }
+            }
+        }
+    }
+}
+
 impl Database {
     // Transaction API
     // ========================================================================
@@ -94,11 +215,12 @@ impl Database {
         self.schedule_background_compaction();
     }
 
-    /// Submit a compaction + materialization task to the background scheduler.
+    /// Submit a compaction task to the background scheduler.
     ///
-    /// At most one background compaction task is in flight at a time. If one is
-    /// already running, this call is a no-op — the running task will pick up any
-    /// newly-flushed L0 segments.
+    /// At most one compaction chain is in flight at a time. Each task in the
+    /// chain performs ONE compaction (highest-scoring branch × level), then
+    /// re-submits itself if more work exists. This matches RocksDB's model:
+    /// one compaction per task, re-evaluate between rounds.
     fn schedule_background_compaction(&self) {
         if self
             .compaction_in_flight
@@ -112,76 +234,15 @@ impl Database {
         let write_stall_cv = Arc::clone(&self.write_stall_cv);
         let flag = Arc::clone(&self.compaction_in_flight);
         let cancelled = Arc::clone(&self.compaction_cancelled);
+        let scheduler = Arc::clone(&self.scheduler);
+        let scheduler2 = Arc::clone(&scheduler);
 
-        if self
-            .scheduler
+        if scheduler
             .submit(crate::background::TaskPriority::High, move || {
-                // Compact all branches that are over target.
-                let branch_ids = storage.branch_ids();
-                for branch_id in &branch_ids {
-                    if cancelled.load(Ordering::Acquire) {
-                        break;
-                    }
-                    loop {
-                        if cancelled.load(Ordering::Acquire) {
-                            break;
-                        }
-                        match storage.pick_and_compact(branch_id, 0) {
-                            Ok(Some(_)) => {
-                                write_stall_cv.notify_all();
-                            }
-                            Ok(None) => break,
-                            Err(e) => {
-                                tracing::warn!(
-                                    target: "strata::compact",
-                                    ?branch_id,
-                                    error = %e,
-                                    "background compaction failed"
-                                );
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                // Materialize inherited layers that exceed depth limit (#1704).
-                if !cancelled.load(Ordering::Acquire) {
-                    for branch_id in storage.branches_needing_materialization() {
-                        let layer_count = storage.inherited_layer_count(&branch_id);
-                        if layer_count > 0 {
-                            let deepest = layer_count - 1;
-                            match storage.materialize_layer(&branch_id, deepest) {
-                                Ok(result) => {
-                                    tracing::info!(
-                                        target: "strata::materialize",
-                                        ?branch_id,
-                                        entries = result.entries_materialized,
-                                        segments = result.segments_created,
-                                        "materialized inherited layer"
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        target: "strata::materialize",
-                                        ?branch_id,
-                                        error = %e,
-                                        "materialization failed"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Return freed segment pages to the OS (#2184).
-                release_freed_memory();
-
-                flag.store(false, Ordering::Release);
+                compaction_round(storage, write_stall_cv, flag, cancelled, scheduler2);
             })
             .is_err()
         {
-            // Submit failed (queue full or shutdown) — clear the flag so future
-            // compaction attempts are not permanently blocked.
             self.compaction_in_flight.store(false, Ordering::Release);
         }
     }
