@@ -27,6 +27,9 @@ fn apply_storage_config(storage: &SegmentedStore, cfg: &StorageConfig) {
     storage.set_level_base_bytes(cfg.level_base_bytes);
     storage.set_data_block_size(cfg.data_block_size);
     storage.set_bloom_bits_per_key(cfg.bloom_bits_per_key);
+    if cfg.compaction_rate_limit > 0 {
+        storage.set_compaction_rate_limit(cfg.compaction_rate_limit);
+    }
 }
 
 use strata_core::{StrataError, StrataResult};
@@ -321,6 +324,7 @@ impl Database {
             flush_handle: ParkingMutex::new(None), // No flush thread
             scheduler: Arc::new(BackgroundScheduler::new(bg_threads, 4096)),
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
+            compaction_cancelled: Arc::new(AtomicBool::new(false)),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
             _lock_file: None, // No lock acquired
@@ -564,9 +568,6 @@ impl Database {
         // Apply storage resource limits from config
         let storage = Arc::new(result.storage);
         apply_storage_config(&storage, &cfg.storage);
-        if cfg.storage.compaction_rate_limit > 0 {
-            storage.set_compaction_rate_limit(cfg.storage.compaction_rate_limit);
-        }
 
         let bg_threads = cfg.storage.background_threads.max(1);
 
@@ -587,6 +588,7 @@ impl Database {
             flush_handle: ParkingMutex::new(flush_handle),
             scheduler: Arc::new(BackgroundScheduler::new(bg_threads, 4096)),
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
+            compaction_cancelled: Arc::new(AtomicBool::new(false)),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
             _lock_file: lock_file,
@@ -668,6 +670,7 @@ impl Database {
             flush_handle: ParkingMutex::new(None),
             scheduler: Arc::new(BackgroundScheduler::new(bg_threads, 4096)),
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
+            compaction_cancelled: Arc::new(AtomicBool::new(false)),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
             _lock_file: None, // No lock for ephemeral databases
