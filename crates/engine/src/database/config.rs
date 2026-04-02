@@ -157,11 +157,14 @@ fn default_max_immutable_memtables() -> usize {
 }
 
 fn default_l0_slowdown_writes_trigger() -> usize {
-    20 // RocksDB default: 1ms yield per write when L0 count >= 20
+    0 // disabled — enabling with a rate-limited compaction creates a deadlock:
+      // writes stall waiting for L0 to drain, but compaction is throttled.
+      // Revisit when adaptive rate limiting is implemented (throttle only under
+      // read pressure, run at full speed during write-only phases).
 }
 
 fn default_l0_stop_writes_trigger() -> usize {
-    36 // RocksDB default: complete stall when L0 count >= 36
+    0 // disabled — see l0_slowdown rationale above
 }
 
 fn default_compaction_rate_limit() -> u64 {
