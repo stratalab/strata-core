@@ -91,10 +91,7 @@ fn compaction_round(
 /// Pick the single highest-scoring compaction across all branches and execute it.
 ///
 /// Returns `true` if a compaction was performed.
-fn pick_and_run_one(
-    storage: &SegmentedStore,
-    write_stall_cv: &parking_lot::Condvar,
-) -> bool {
+fn pick_and_run_one(storage: &SegmentedStore, write_stall_cv: &parking_lot::Condvar) -> bool {
     let mut best_score = 0.0f64;
     let mut best_branch = None;
 

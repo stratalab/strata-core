@@ -1410,6 +1410,19 @@ pub enum Command {
         branch: Option<BranchId>,
     },
 
+    /// Delete a recipe from a branch.
+    /// Built-in recipes on `_system_` branch cannot be deleted.
+    /// Deleting a user shadow restores the built-in fallback.
+    /// Returns: `Output::Unit`
+    RecipeDelete {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Recipe name to delete.
+        #[serde(default = "default_recipe_name")]
+        name: String,
+    },
+
     /// Delete a space (must be empty unless force=true).
     /// Returns: `Output::Unit`
     SpaceDelete {
@@ -1941,6 +1954,7 @@ impl Command {
                 | Command::GraphFreezeOntology { .. }
                 | Command::ReindexEmbeddings { .. }
                 | Command::RecipeSet { .. }
+                | Command::RecipeDelete { .. }
                 | Command::TagCreate { .. }
                 | Command::TagDelete { .. }
                 | Command::NoteAdd { .. }
@@ -2057,6 +2071,7 @@ impl Command {
             Command::RecipeGet { .. } => "RecipeGet",
             Command::RecipeGetDefault { .. } => "RecipeGetDefault",
             Command::RecipeList { .. } => "RecipeList",
+            Command::RecipeDelete { .. } => "RecipeDelete",
             Command::Embed { .. } => "Embed",
             Command::EmbedBatch { .. } => "EmbedBatch",
             Command::ModelsList => "ModelsList",
@@ -2208,7 +2223,8 @@ impl Command {
             Command::RecipeSet { branch, .. }
             | Command::RecipeGet { branch, .. }
             | Command::RecipeGetDefault { branch, .. }
-            | Command::RecipeList { branch, .. } => {
+            | Command::RecipeList { branch, .. }
+            | Command::RecipeDelete { branch, .. } => {
                 resolve_branch!(branch);
             }
 
@@ -2416,7 +2432,8 @@ impl Command {
             Command::RecipeSet { branch, .. }
             | Command::RecipeGet { branch, .. }
             | Command::RecipeGetDefault { branch, .. }
-            | Command::RecipeList { branch, .. } => branch.as_ref(),
+            | Command::RecipeList { branch, .. }
+            | Command::RecipeDelete { branch, .. } => branch.as_ref(),
 
             // Branch lifecycle, Transaction, Database — no data branch
             _ => None,

@@ -423,8 +423,38 @@ fn hash_entity(e: &EntityRef) -> u64 {
 mod tests {
     use super::*;
     use strata_core::Value;
-    use strata_engine::search::recipe::{TransformConfig, VectorRetrieveConfig};
-    use strata_engine::search::{builtin_defaults, Recipe};
+    use strata_engine::search::recipe::{
+        BM25Config, FusionConfig, RetrieveConfig, TransformConfig, VectorRetrieveConfig,
+    };
+    use strata_engine::search::Recipe;
+
+    /// Simple keyword recipe for tests (BM25 + RRF + limit 10).
+    fn test_recipe() -> Recipe {
+        Recipe {
+            version: Some(1),
+            retrieve: Some(RetrieveConfig {
+                bm25: Some(BM25Config {
+                    k: Some(50),
+                    k1: Some(0.9),
+                    b: Some(0.4),
+                    stemmer: Some("porter".into()),
+                    stopwords: Some("lucene33".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            fusion: Some(FusionConfig {
+                method: Some("rrf".into()),
+                k: Some(60),
+                ..Default::default()
+            }),
+            transform: Some(TransformConfig {
+                limit: Some(10),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
 
     /// Helper: create a test database and insert KV data.
     /// Returns (db, branch_id) so tests can use the same branch for search.
@@ -448,7 +478,7 @@ mod tests {
             ("doc2", "lazy brown dog"),
             ("doc3", "something completely different"),
         ]);
-        let recipe = builtin_defaults(); // BM25 only, no vector
+        let recipe = test_recipe(); // BM25 only, no vector
         let request = RetrievalRequest {
             query: "brown fox".into(),
             branch_id,
@@ -487,7 +517,7 @@ mod tests {
             ("e", "test data five"),
         ]);
 
-        let mut recipe = builtin_defaults();
+        let mut recipe = test_recipe();
         recipe.transform = Some(TransformConfig {
             limit: Some(2),
             ..Default::default()
@@ -511,7 +541,7 @@ mod tests {
     #[test]
     fn test_retrieve_empty_db() {
         let db = Database::cache().expect("Failed to create test database");
-        let recipe = builtin_defaults();
+        let recipe = test_recipe();
         let request = RetrievalRequest {
             query: "anything".into(),
             branch_id: BranchId::default(),
@@ -535,7 +565,7 @@ mod tests {
             ("y", "beta gamma delta"),
             ("z", "gamma delta epsilon"),
         ]);
-        let recipe = builtin_defaults();
+        let recipe = test_recipe();
 
         let req = RetrievalRequest {
             query: "gamma".into(),
@@ -722,7 +752,7 @@ mod tests {
         .expect("put");
         db.flush().expect("flush");
 
-        let recipe = builtin_defaults();
+        let recipe = test_recipe();
         let request = RetrievalRequest {
             query: "rust".into(),
             branch_id,
@@ -759,7 +789,7 @@ mod tests {
     fn test_retrieve_as_of_before_data() {
         // as_of before any data → empty results
         let (db, branch_id) = setup_db_with_kv(&[("doc", "some text about testing")]);
-        let recipe = builtin_defaults();
+        let recipe = test_recipe();
         let request = RetrievalRequest {
             query: "testing".into(),
             branch_id,
@@ -783,7 +813,7 @@ mod tests {
         // as_of=None should return all docs (regression test)
         let (db, branch_id) =
             setup_db_with_kv(&[("a", "alpha test data"), ("b", "beta test data")]);
-        let recipe = builtin_defaults();
+        let recipe = test_recipe();
         let request = RetrievalRequest {
             query: "test data".into(),
             branch_id,

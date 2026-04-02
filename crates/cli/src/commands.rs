@@ -747,6 +747,13 @@ fn build_search() -> Command {
                 .action(clap::ArgAction::SetTrue)
                 .help("Enable reranking"),
         )
+        .arg(
+            Arg::new("recipe")
+                .long("recipe")
+                .short('R')
+                .value_name("NAME_OR_JSON")
+                .help("Recipe name (e.g. 'keyword', 'hybrid') or inline JSON"),
+        )
 }
 
 // =========================================================================
@@ -1376,6 +1383,15 @@ fn build_recipe() -> Command {
             ),
         )
         .subcommand(Command::new("list").about("List all recipes"))
+        .subcommand(
+            Command::new("delete")
+                .about("Delete a recipe (built-ins cannot be deleted)")
+                .arg(
+                    Arg::new("name")
+                        .required(true)
+                        .help("Recipe name to delete"),
+                ),
+        )
 }
 
 fn build_up() -> Command {

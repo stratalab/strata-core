@@ -1363,10 +1363,17 @@ fn parse_recipe(matches: &ArgMatches, state: &SessionState) -> Result<CliAction,
         "list" => Ok(CliAction::Execute(Command::RecipeList {
             branch: branch(state),
         })),
+        "delete" => {
+            let name = m.get_one::<String>("name").unwrap().clone();
+            Ok(CliAction::Execute(Command::RecipeDelete {
+                branch: branch(state),
+                name,
+            }))
+        }
         other => Err(unknown_subcommand(
             "recipe",
             other,
-            &["show", "set", "get", "list"],
+            &["show", "set", "get", "list", "delete"],
         )),
     }
 }
@@ -1468,12 +1475,20 @@ fn parse_search(matches: &ArgMatches, state: &SessionState) -> Result<CliAction,
     let query = matches.get_one::<String>("query").unwrap().clone();
     let k = matches.get_one::<u64>("top-k").copied();
 
+    // --recipe: try to parse as JSON object, otherwise treat as recipe name
+    let recipe = matches.get_one::<String>("recipe").map(|s| {
+        match serde_json::from_str::<serde_json::Value>(s) {
+            Ok(v) if v.is_object() => v,
+            _ => serde_json::Value::String(s.clone()),
+        }
+    });
+
     Ok(CliAction::Execute(Command::Search {
         branch: branch(state),
         space: space(state),
         search: SearchQuery {
             query,
-            recipe: None,
+            recipe,
             precomputed_embedding: None,
             k,
             as_of: None,

@@ -332,6 +332,13 @@ impl Executor {
                 })?;
                 crate::handlers::recipe::recipe_list(&self.primitives, branch)
             }
+            Command::RecipeDelete { branch, name } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                crate::handlers::recipe::recipe_delete(&self.primitives, branch, name)
+            }
 
             Command::TimeRange { branch } => {
                 let branch = branch.ok_or(Error::InvalidInput {

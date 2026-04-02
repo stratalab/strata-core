@@ -20,11 +20,18 @@ fn system_branch_id() -> BranchId {
 
 /// Seed all built-in recipes onto the `_system_` branch.
 ///
-/// Called once at database creation time. Safe to call multiple times
-/// (overwrites existing built-ins with the latest definitions).
+/// Only writes recipes that don't already exist on `_system_`.
+/// Safe to call on every open — skips seeding if recipes are present.
 pub fn seed_builtin_recipes(db: &Database) -> StrataResult<()> {
     use crate::search::recipe::builtin_recipes;
     let sys_branch = system_branch_id();
+
+    // Quick check: if "default" exists on _system_, assume all built-ins are seeded.
+    let check_key = system_kv_key(sys_branch, "recipe:default");
+    if db.get_value_direct(&check_key)?.is_some() {
+        return Ok(());
+    }
+
     for (name, recipe) in builtin_recipes() {
         let key = system_kv_key(sys_branch, &format!("recipe:{name}"));
         let json = serde_json::to_string(&recipe)?;
