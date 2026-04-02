@@ -111,6 +111,7 @@ impl Database {
         let storage = Arc::clone(&self.storage);
         let write_stall_cv = Arc::clone(&self.write_stall_cv);
         let flag = Arc::clone(&self.compaction_in_flight);
+        let cancelled = Arc::clone(&self.compaction_cancelled);
 
         if self
             .scheduler
@@ -118,7 +119,13 @@ impl Database {
                 // Compact all branches that are over target.
                 let branch_ids = storage.branch_ids();
                 for branch_id in &branch_ids {
+                    if cancelled.load(Ordering::Acquire) {
+                        break;
+                    }
                     loop {
+                        if cancelled.load(Ordering::Acquire) {
+                            break;
+                        }
                         match storage.pick_and_compact(branch_id, 0) {
                             Ok(Some(_)) => {
                                 write_stall_cv.notify_all();
@@ -138,27 +145,29 @@ impl Database {
                 }
 
                 // Materialize inherited layers that exceed depth limit (#1704).
-                for branch_id in storage.branches_needing_materialization() {
-                    let layer_count = storage.inherited_layer_count(&branch_id);
-                    if layer_count > 0 {
-                        let deepest = layer_count - 1;
-                        match storage.materialize_layer(&branch_id, deepest) {
-                            Ok(result) => {
-                                tracing::info!(
-                                    target: "strata::materialize",
-                                    ?branch_id,
-                                    entries = result.entries_materialized,
-                                    segments = result.segments_created,
-                                    "materialized inherited layer"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    target: "strata::materialize",
-                                    ?branch_id,
-                                    error = %e,
-                                    "materialization failed"
-                                );
+                if !cancelled.load(Ordering::Acquire) {
+                    for branch_id in storage.branches_needing_materialization() {
+                        let layer_count = storage.inherited_layer_count(&branch_id);
+                        if layer_count > 0 {
+                            let deepest = layer_count - 1;
+                            match storage.materialize_layer(&branch_id, deepest) {
+                                Ok(result) => {
+                                    tracing::info!(
+                                        target: "strata::materialize",
+                                        ?branch_id,
+                                        entries = result.entries_materialized,
+                                        segments = result.segments_created,
+                                        "materialized inherited layer"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "strata::materialize",
+                                        ?branch_id,
+                                        error = %e,
+                                        "materialization failed"
+                                    );
+                                }
                             }
                         }
                     }

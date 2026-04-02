@@ -311,6 +311,11 @@ pub struct Database {
     /// Set to `true` when a compaction task is in flight; cleared when it completes.
     compaction_in_flight: Arc<AtomicBool>,
 
+    /// Cancellation flag for background compaction. Set during shutdown/drop to
+    /// stop the compaction loop promptly instead of waiting for it to exhaust
+    /// all branches and levels.
+    compaction_cancelled: Arc<AtomicBool>,
+
     /// Condition variable signalled by compaction when L0 count drops.
     /// Writers wait on this when L0 exceeds `l0_stop_writes_trigger`.
     write_stall_cv: Arc<parking_lot::Condvar>,
@@ -1069,6 +1074,8 @@ impl Database {
 
 impl Drop for Database {
     fn drop(&mut self) {
+        // Signal background compaction to stop promptly
+        self.compaction_cancelled.store(true, Ordering::Release);
         // Shut down the background task scheduler
         self.scheduler.shutdown();
 
