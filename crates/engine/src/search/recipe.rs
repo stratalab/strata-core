@@ -509,6 +509,212 @@ pub fn builtin_defaults() -> Recipe {
 }
 
 // ============================================================================
+// Named Built-in Recipes
+// ============================================================================
+
+/// Names of all built-in recipes shipped with Strata.
+pub const BUILTIN_RECIPE_NAMES: &[&str] =
+    &["keyword", "semantic", "hybrid", "default", "graph", "rag"];
+
+/// BM25 config shared across recipes that use keyword search.
+fn bm25_defaults() -> BM25Config {
+    BM25Config {
+        k: Some(50),
+        k1: Some(0.9),
+        b: Some(0.4),
+        stemmer: Some("porter".into()),
+        stopwords: Some("lucene33".into()),
+        phrase_boost: Some(2.0),
+        ..Default::default()
+    }
+}
+
+/// Returns all built-in recipes as (name, recipe) pairs.
+///
+/// These are written to the `_system_` branch at database creation time.
+/// Each recipe is fully self-contained — no inheritance, no merge.
+pub fn builtin_recipes() -> Vec<(&'static str, Recipe)> {
+    vec![
+        (
+            "keyword",
+            Recipe {
+                version: Some(1),
+                retrieve: Some(RetrieveConfig {
+                    bm25: Some(bm25_defaults()),
+                    ..Default::default()
+                }),
+                fusion: Some(FusionConfig {
+                    method: Some("rrf".into()),
+                    k: Some(60),
+                    ..Default::default()
+                }),
+                transform: Some(TransformConfig {
+                    limit: Some(10),
+                    ..Default::default()
+                }),
+                control: Some(ControlConfig {
+                    budget_ms: Some(5000),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ),
+        (
+            "semantic",
+            Recipe {
+                version: Some(1),
+                retrieve: Some(RetrieveConfig {
+                    vector: Some(VectorRetrieveConfig::default()),
+                    ..Default::default()
+                }),
+                transform: Some(TransformConfig {
+                    limit: Some(10),
+                    ..Default::default()
+                }),
+                models: Some(ModelsConfig {
+                    embed: Some("local:miniLM".into()),
+                    ..Default::default()
+                }),
+                control: Some(ControlConfig {
+                    budget_ms: Some(5000),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ),
+        (
+            "hybrid",
+            Recipe {
+                version: Some(1),
+                retrieve: Some(RetrieveConfig {
+                    bm25: Some(bm25_defaults()),
+                    vector: Some(VectorRetrieveConfig::default()),
+                    ..Default::default()
+                }),
+                fusion: Some(FusionConfig {
+                    method: Some("rrf".into()),
+                    k: Some(60),
+                    ..Default::default()
+                }),
+                transform: Some(TransformConfig {
+                    limit: Some(10),
+                    ..Default::default()
+                }),
+                models: Some(ModelsConfig {
+                    embed: Some("local:miniLM".into()),
+                    ..Default::default()
+                }),
+                control: Some(ControlConfig {
+                    budget_ms: Some(5000),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ),
+        ("default", builtin_defaults()),
+        (
+            "graph",
+            Recipe {
+                version: Some(1),
+                retrieve: Some(RetrieveConfig {
+                    bm25: Some(BM25Config {
+                        k: Some(50),
+                        k1: Some(0.9),
+                        b: Some(0.4),
+                        stemmer: Some("porter".into()),
+                        stopwords: Some("lucene33".into()),
+                        ..Default::default()
+                    }),
+                    graph: Some(GraphConfig {
+                        graph: None, // user must set via db.set_recipe
+                        max_hops: Some(2),
+                        k: Some(50),
+                    }),
+                    ..Default::default()
+                }),
+                fusion: Some(FusionConfig {
+                    method: Some("rrf".into()),
+                    k: Some(60),
+                    weights: Some(
+                        [("bm25".into(), 1.0), ("graph".into(), 0.3)]
+                            .into_iter()
+                            .collect(),
+                    ),
+                }),
+                transform: Some(TransformConfig {
+                    limit: Some(10),
+                    ..Default::default()
+                }),
+                control: Some(ControlConfig {
+                    budget_ms: Some(5000),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ),
+        (
+            "rag",
+            Recipe {
+                version: Some(1),
+                retrieve: Some(RetrieveConfig {
+                    bm25: Some(bm25_defaults()),
+                    vector: Some(VectorRetrieveConfig::default()),
+                    ..Default::default()
+                }),
+                expansion: Some(ExpansionConfig {
+                    strategy: Some("full".into()),
+                    strong_signal_threshold: Some(0.85),
+                    strong_signal_gap: Some(0.15),
+                    min_shared_stems: Some(2),
+                    original_weight: Some(2.0),
+                }),
+                fusion: Some(FusionConfig {
+                    method: Some("rrf".into()),
+                    k: Some(60),
+                    ..Default::default()
+                }),
+                rerank: Some(RerankConfig {
+                    top_n: Some(20),
+                    blending: Some(BlendingConfig {
+                        rank_1_3: Some(0.75),
+                        rank_4_10: Some(0.60),
+                        rank_11_plus: Some(0.40),
+                    }),
+                }),
+                transform: Some(TransformConfig {
+                    limit: Some(10),
+                    ..Default::default()
+                }),
+                prompt: Some(
+                    "Answer using only the provided context. Cite sources with [N].".into(),
+                ),
+                rag_context_hits: Some(5),
+                rag_max_tokens: Some(500),
+                models: Some(ModelsConfig {
+                    embed: Some("local:miniLM".into()),
+                    expand: Some("local:qwen3:1.7b".into()),
+                    rerank: Some("local:jina-reranker-v1-tiny".into()),
+                    generate: Some("anthropic:claude-sonnet-4-6".into()),
+                }),
+                control: Some(ControlConfig {
+                    budget_ms: Some(10000),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ),
+    ]
+}
+
+/// Look up a built-in recipe by name (in-memory, no DB access).
+pub fn get_builtin_recipe(name: &str) -> Option<Recipe> {
+    builtin_recipes()
+        .into_iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, r)| r)
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
