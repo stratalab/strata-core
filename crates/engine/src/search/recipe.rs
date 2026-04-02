@@ -1,8 +1,8 @@
 //! Recipe schema for search retrieval configuration.
 //!
 //! Recipes control all aspects of search behavior: BM25 tuning, vector search,
-//! fusion strategy, expansion, reranking, and more. Every field is `Option<T>`
-//! to support three-level merge: built-in defaults → branch recipe → per-call override.
+//! fusion strategy, expansion, reranking, and more. Each recipe is fully
+//! self-contained — what you see is what runs. No inheritance, no merge.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,7 +13,8 @@ use std::collections::HashMap;
 
 /// Search recipe — controls all retrieval behavior.
 ///
-/// All fields are `Option<T>` to support partial overrides via [`Recipe::merge`].
+/// Each recipe is fully self-contained. Presence of a section = enabled,
+/// absence = disabled. Named recipes are stored on the `_system_` branch.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Recipe {
     /// Schema version (currently 1).
@@ -293,175 +294,18 @@ pub struct ControlConfig {
 // ============================================================================
 // Merge
 // ============================================================================
-
-/// Merge two optional sub-configs using a merge function.
-fn merge_option<T, F>(base: &Option<T>, overlay: &Option<T>, merge_fn: F) -> Option<T>
-where
-    T: Clone,
-    F: FnOnce(&T, &T) -> T,
-{
-    match (base, overlay) {
-        (Some(b), Some(o)) => Some(merge_fn(b, o)),
-        (None, Some(o)) => Some(o.clone()),
-        (Some(b), None) => Some(b.clone()),
-        (None, None) => None,
-    }
-}
-
-impl Recipe {
-    /// Merge two recipes. Overlay fields win when `Some`; base fills gaps.
-    pub fn merge(base: &Recipe, overlay: &Recipe) -> Recipe {
-        Recipe {
-            version: overlay.version.or(base.version),
-            retrieve: merge_option(&base.retrieve, &overlay.retrieve, RetrieveConfig::merge),
-            expansion: overlay
-                .expansion
-                .as_ref()
-                .or(base.expansion.as_ref())
-                .cloned(),
-            filter: overlay.filter.as_ref().or(base.filter.as_ref()).cloned(),
-            fusion: merge_option(&base.fusion, &overlay.fusion, FusionConfig::merge),
-            rerank: overlay.rerank.as_ref().or(base.rerank.as_ref()).cloned(),
-            transform: merge_option(&base.transform, &overlay.transform, TransformConfig::merge),
-            prompt: overlay.prompt.as_ref().or(base.prompt.as_ref()).cloned(),
-            rag_context_hits: overlay.rag_context_hits.or(base.rag_context_hits),
-            rag_max_tokens: overlay.rag_max_tokens.or(base.rag_max_tokens),
-            models: merge_option(&base.models, &overlay.models, ModelsConfig::merge),
-            version_output: merge_option(
-                &base.version_output,
-                &overlay.version_output,
-                VersionOutputConfig::merge,
-            ),
-            control: merge_option(&base.control, &overlay.control, ControlConfig::merge),
-        }
-    }
-
-    /// Three-level resolution: built-in defaults → branch recipe → per-call override.
-    pub fn resolve(builtin: &Recipe, branch: &Recipe, per_call: Option<&Recipe>) -> Recipe {
-        let merged = Recipe::merge(builtin, branch);
-        match per_call {
-            Some(o) => Recipe::merge(&merged, o),
-            None => merged,
-        }
-    }
-}
-
-impl RetrieveConfig {
-    fn merge(base: &Self, overlay: &Self) -> Self {
-        RetrieveConfig {
-            bm25: merge_option(&base.bm25, &overlay.bm25, BM25Config::merge),
-            vector: merge_option(&base.vector, &overlay.vector, VectorRetrieveConfig::merge),
-            graph: overlay.graph.as_ref().or(base.graph.as_ref()).cloned(),
-        }
-    }
-}
-
-impl BM25Config {
-    fn merge(base: &Self, overlay: &Self) -> Self {
-        BM25Config {
-            sources: overlay.sources.as_ref().or(base.sources.as_ref()).cloned(),
-            spaces: overlay.spaces.as_ref().or(base.spaces.as_ref()).cloned(),
-            k: overlay.k.or(base.k),
-            k1: overlay.k1.or(base.k1),
-            b: overlay.b.or(base.b),
-            field_weights: overlay
-                .field_weights
-                .as_ref()
-                .or(base.field_weights.as_ref())
-                .cloned(),
-            stemmer: overlay.stemmer.as_ref().or(base.stemmer.as_ref()).cloned(),
-            stopwords: overlay
-                .stopwords
-                .as_ref()
-                .or(base.stopwords.as_ref())
-                .cloned(),
-            phrase_boost: overlay.phrase_boost.or(base.phrase_boost),
-            proximity_boost: overlay.proximity_boost.or(base.proximity_boost),
-        }
-    }
-}
-
-impl VectorRetrieveConfig {
-    fn merge(base: &Self, overlay: &Self) -> Self {
-        VectorRetrieveConfig {
-            collections: overlay
-                .collections
-                .as_ref()
-                .or(base.collections.as_ref())
-                .cloned(),
-            k: overlay.k.or(base.k),
-            metric: overlay.metric.as_ref().or(base.metric.as_ref()).cloned(),
-        }
-    }
-}
-
-impl FusionConfig {
-    fn merge(base: &Self, overlay: &Self) -> Self {
-        FusionConfig {
-            method: overlay.method.as_ref().or(base.method.as_ref()).cloned(),
-            k: overlay.k.or(base.k),
-            weights: overlay.weights.as_ref().or(base.weights.as_ref()).cloned(),
-        }
-    }
-}
-
-impl TransformConfig {
-    fn merge(base: &Self, overlay: &Self) -> Self {
-        TransformConfig {
-            limit: overlay.limit.or(base.limit),
-            dedup: overlay.dedup.as_ref().or(base.dedup.as_ref()).cloned(),
-        }
-    }
-}
-
-impl ModelsConfig {
-    fn merge(base: &Self, overlay: &Self) -> Self {
-        ModelsConfig {
-            embed: overlay.embed.as_ref().or(base.embed.as_ref()).cloned(),
-            rerank: overlay.rerank.as_ref().or(base.rerank.as_ref()).cloned(),
-            generate: overlay
-                .generate
-                .as_ref()
-                .or(base.generate.as_ref())
-                .cloned(),
-            expand: overlay.expand.as_ref().or(base.expand.as_ref()).cloned(),
-        }
-    }
-}
-
-impl ControlConfig {
-    fn merge(base: &Self, overlay: &Self) -> Self {
-        ControlConfig {
-            budget_ms: overlay.budget_ms.or(base.budget_ms),
-            max_candidates: overlay.max_candidates.or(base.max_candidates),
-            snapshot_version: overlay.snapshot_version.or(base.snapshot_version),
-        }
-    }
-}
-
-impl VersionOutputConfig {
-    fn merge(base: &Self, overlay: &Self) -> Self {
-        VersionOutputConfig {
-            include_version: overlay.include_version.or(base.include_version),
-            include_timestamp: overlay.include_timestamp.or(base.include_timestamp),
-            include_history: overlay.include_history.or(base.include_history),
-            depth: overlay.depth.or(base.depth),
-        }
-    }
-}
-
-// ============================================================================
 // Built-in Defaults
 // ============================================================================
 
-/// The built-in default recipe (level 0 of three-level merge).
-///
-/// Built-in default recipe with qmd-inspired search quality defaults.
+/// The full-featured default recipe.
 ///
 /// BM25 tuned to Anserini/Pyserini BEIR values (k1=0.9, b=0.4).
 /// Expansion and reranking enabled — gracefully degrade when models
 /// are not available (search still works, just without the quality knobs).
-pub fn builtin_defaults() -> Recipe {
+///
+/// Used internally by `builtin_recipes()` to define the "default" named recipe
+/// and as a fallback in `get_default_recipe()` for legacy/unseeded databases.
+pub(crate) fn builtin_defaults() -> Recipe {
     Recipe {
         version: Some(1),
         retrieve: Some(RetrieveConfig {
@@ -742,101 +586,39 @@ mod tests {
     }
 
     #[test]
-    fn test_recipe_merge_empty_overlay() {
-        let base = builtin_defaults();
-        let overlay = Recipe::default();
-        let merged = Recipe::merge(&base, &overlay);
-        assert_eq!(merged, base);
+    fn test_builtin_recipes_count() {
+        assert_eq!(BUILTIN_RECIPE_NAMES.len(), 6);
+        assert_eq!(builtin_recipes().len(), 6);
     }
 
     #[test]
-    fn test_recipe_merge_single_field_override() {
-        let base = builtin_defaults();
-        let overlay = Recipe {
-            retrieve: Some(RetrieveConfig {
-                bm25: Some(BM25Config {
-                    k1: Some(1.5),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let merged = Recipe::merge(&base, &overlay);
-
-        // k1 overridden
-        let bm25 = merged.retrieve.as_ref().unwrap().bm25.as_ref().unwrap();
-        assert_eq!(bm25.k1, Some(1.5));
-        // b still from base
-        assert_eq!(bm25.b, Some(0.4));
-        // k still from base
-        assert_eq!(bm25.k, Some(50));
-        // fusion still from base
-        assert_eq!(merged.fusion.as_ref().unwrap().method, Some("rrf".into()));
+    fn test_builtin_keyword_no_expansion() {
+        let r = get_builtin_recipe("keyword").unwrap();
+        assert!(r.retrieve.as_ref().unwrap().bm25.is_some());
+        assert!(r.retrieve.as_ref().unwrap().vector.is_none());
+        assert!(r.expansion.is_none());
+        assert!(r.rerank.is_none());
     }
 
     #[test]
-    fn test_recipe_resolve_three_levels() {
-        let builtin = builtin_defaults();
-
-        let branch = Recipe {
-            retrieve: Some(RetrieveConfig {
-                bm25: Some(BM25Config {
-                    k1: Some(1.2),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        let per_call = Recipe {
-            transform: Some(TransformConfig {
-                limit: Some(5),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        let resolved = Recipe::resolve(&builtin, &branch, Some(&per_call));
-
-        // k1 from branch level
-        assert_eq!(
-            resolved
-                .retrieve
-                .as_ref()
-                .unwrap()
-                .bm25
-                .as_ref()
-                .unwrap()
-                .k1,
-            Some(1.2)
-        );
-        // b from builtin (branch didn't override)
-        assert_eq!(
-            resolved.retrieve.as_ref().unwrap().bm25.as_ref().unwrap().b,
-            Some(0.4)
-        );
-        // limit from per_call
-        assert_eq!(resolved.transform.as_ref().unwrap().limit, Some(5));
-        // budget_ms from builtin (neither branch nor per_call overrode)
-        assert_eq!(resolved.control.as_ref().unwrap().budget_ms, Some(5000));
+    fn test_builtin_default_has_expansion() {
+        let r = get_builtin_recipe("default").unwrap();
+        assert!(r.expansion.is_some());
+        assert!(r.rerank.is_some());
+        assert!(r.retrieve.as_ref().unwrap().bm25.is_some());
+        assert!(r.retrieve.as_ref().unwrap().vector.is_some());
     }
 
     #[test]
-    fn test_builtin_defaults() {
-        let d = builtin_defaults();
-        assert_eq!(d.version, Some(1));
-        let bm25 = d.retrieve.as_ref().unwrap().bm25.as_ref().unwrap();
-        assert_eq!(bm25.k1, Some(0.9));
-        assert_eq!(bm25.b, Some(0.4));
-        assert_eq!(bm25.k, Some(50));
-        assert_eq!(bm25.stemmer, Some("porter".into()));
-        assert_eq!(bm25.stopwords, Some("lucene33".into()));
-        assert_eq!(d.fusion.as_ref().unwrap().method, Some("rrf".into()));
-        assert_eq!(d.fusion.as_ref().unwrap().k, Some(60));
-        assert_eq!(d.transform.as_ref().unwrap().limit, Some(10));
-        assert_eq!(d.control.as_ref().unwrap().budget_ms, Some(5000));
+    fn test_builtin_semantic_vector_only() {
+        let r = get_builtin_recipe("semantic").unwrap();
+        assert!(r.retrieve.as_ref().unwrap().bm25.is_none());
+        assert!(r.retrieve.as_ref().unwrap().vector.is_some());
+    }
+
+    #[test]
+    fn test_builtin_unknown_returns_none() {
+        assert!(get_builtin_recipe("nonexistent").is_none());
     }
 
     #[test]
@@ -845,55 +627,5 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: Recipe = serde_json::from_str(&json).unwrap();
         assert_eq!(original, deserialized);
-    }
-
-    #[test]
-    fn test_version_output_config_merge() {
-        let base = Recipe {
-            version_output: Some(VersionOutputConfig {
-                include_version: Some(true),
-                include_timestamp: Some(true),
-                include_history: None,
-                depth: None,
-            }),
-            ..Default::default()
-        };
-        let overlay = Recipe {
-            version_output: Some(VersionOutputConfig {
-                include_history: Some(true),
-                depth: Some(5),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let merged = Recipe::merge(&base, &overlay);
-        let vo = merged.version_output.unwrap();
-        assert_eq!(vo.include_version, Some(true)); // from base
-        assert_eq!(vo.include_timestamp, Some(true)); // from base
-        assert_eq!(vo.include_history, Some(true)); // from overlay
-        assert_eq!(vo.depth, Some(5)); // from overlay
-    }
-
-    #[test]
-    fn test_control_config_snapshot_version_merge() {
-        let base = Recipe {
-            control: Some(ControlConfig {
-                budget_ms: Some(5000),
-                max_candidates: None,
-                snapshot_version: None,
-            }),
-            ..Default::default()
-        };
-        let overlay = Recipe {
-            control: Some(ControlConfig {
-                snapshot_version: Some(42),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let merged = Recipe::merge(&base, &overlay);
-        let ctrl = merged.control.unwrap();
-        assert_eq!(ctrl.budget_ms, Some(5000)); // from base
-        assert_eq!(ctrl.snapshot_version, Some(42)); // from overlay
     }
 }

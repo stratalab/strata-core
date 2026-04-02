@@ -20,7 +20,7 @@ pub mod tokenizer;
 mod types;
 
 pub use index::{InvertedIndex, PostingEntry, PostingList, ScoredDocId};
-pub use recipe::{builtin_defaults, Recipe};
+pub use recipe::Recipe;
 pub use recovery::{extract_indexable_text, register_search_recovery, SearchSubsystem};
 pub use searchable::{
     build_search_response, build_search_response_with_index, build_search_response_with_scorer,

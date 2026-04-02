@@ -21,9 +21,18 @@ pub fn recipe_set(
         reason: format!("Invalid recipe JSON: {e}"),
         hint: None,
     })?;
-    recipe_store::set_recipe(&p.db, branch_id, &name, &recipe).map_err(|e| Error::Internal {
-        reason: e.to_string(),
-        hint: None,
+    recipe_store::set_recipe(&p.db, branch_id, &name, &recipe).map_err(|e| {
+        if e.to_string().contains("Cannot overwrite built-in") {
+            Error::InvalidInput {
+                reason: e.to_string(),
+                hint: Some("Built-in recipes on _system_ branch are read-only".into()),
+            }
+        } else {
+            Error::Internal {
+                reason: e.to_string(),
+                hint: None,
+            }
+        }
     })?;
     Ok(Output::Unit)
 }
@@ -61,6 +70,26 @@ pub fn recipe_get_default(p: &Arc<Primitives>, branch: BranchId) -> Result<Outpu
         hint: None,
     })?;
     Ok(Output::Maybe(Some(Value::String(json))))
+}
+
+/// Delete a named recipe from a branch.
+pub fn recipe_delete(p: &Arc<Primitives>, branch: BranchId, name: String) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+    recipe_store::delete_recipe(&p.db, branch_id, &name).map_err(|e| {
+        // InvalidInput from recipe_store means built-in protection
+        if e.to_string().contains("Cannot delete built-in") {
+            Error::InvalidInput {
+                reason: e.to_string(),
+                hint: Some("Built-in recipes on _system_ branch are read-only".into()),
+            }
+        } else {
+            Error::Internal {
+                reason: e.to_string(),
+                hint: None,
+            }
+        }
+    })?;
+    Ok(Output::Unit)
 }
 
 /// List all recipe names on a branch.

@@ -174,6 +174,10 @@ impl Strata {
         match Database::open_with_config(&data_dir, cfg) {
             Ok(db) => {
                 strata_graph::branch_dag::init_system_branch(&db);
+                // Seed built-in recipes if not already present
+                if let Err(e) = strata_engine::recipe_store::seed_builtin_recipes(&db) {
+                    tracing::warn!(error = %e, "Failed to seed built-in recipes");
+                }
                 let executor = Executor::new_with_mode(db, access_mode);
                 match access_mode {
                     AccessMode::ReadWrite => Self::ensure_default_branch(&executor)?,
