@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use strata_engine::search::recipe::TransformConfig;
-use strata_engine::search::{builtin_defaults, Recipe};
+use strata_engine::search::Recipe;
 use strata_search::substrate::{self, RetrievalRequest};
 
 use crate::bridge::{to_core_branch_id, Primitives};
@@ -18,7 +18,7 @@ use crate::{Error, Output, Result};
 /// Handle Search command via the retrieval substrate.
 ///
 /// The recipe is the single source of truth for search behavior.
-/// Three-level merge: builtin defaults → branch recipe → per-call override.
+/// Resolved by name (string) or used directly (inline JSON object).
 pub fn search(
     p: &Arc<Primitives>,
     branch: BranchId,
@@ -27,29 +27,59 @@ pub fn search(
 ) -> Result<Output> {
     let core_branch_id = to_core_branch_id(&branch)?;
 
-    // ---- Resolve recipe (three-level merge) ----
-    let builtin = builtin_defaults();
-    let branch_recipe = strata_engine::recipe_store::get_default_recipe(&p.db, core_branch_id)
-        .map_err(|e| Error::Internal {
-            reason: format!("Failed to get branch recipe: {}", e),
-            hint: None,
-        })?;
-
-    // Per-call override: inline recipe JSON + k shorthand
-    let mut per_call: Option<Recipe> = match sq.recipe {
-        Some(v) => Some(serde_json::from_value(v).map_err(|e| Error::InvalidInput {
-            reason: format!("Invalid recipe JSON: {}", e),
-            hint: None,
-        })?),
-        None => None,
+    // ---- Resolve recipe (name or inline) ----
+    let mut resolved: Recipe = match sq.recipe {
+        Some(ref v) if v.is_string() => {
+            // String → look up named recipe (user branch → _system_ fallback)
+            let name = v.as_str().unwrap();
+            strata_engine::recipe_store::get_recipe(&p.db, core_branch_id, name)
+                .map_err(|e| Error::Internal {
+                    reason: format!("Failed to look up recipe '{name}': {e}"),
+                    hint: None,
+                })?
+                .ok_or_else(|| Error::InvalidInput {
+                    reason: format!("Unknown recipe: '{name}'"),
+                    hint: Some(format!(
+                        "Available recipes: {:?}",
+                        strata_engine::recipe_store::list_recipes(&p.db, core_branch_id)
+                            .unwrap_or_default()
+                    )),
+                })?
+        }
+        Some(ref v) if v.is_object() => {
+            // JSON object → use directly as complete recipe
+            serde_json::from_value(v.clone()).map_err(|e| Error::InvalidInput {
+                reason: format!("Invalid recipe JSON: {e}"),
+                hint: None,
+            })?
+        }
+        Some(ref v) => {
+            return Err(Error::InvalidInput {
+                reason: format!(
+                    "recipe must be a string (name) or object (inline recipe), got: {}",
+                    v
+                ),
+                hint: None,
+            });
+        }
+        None => {
+            // Absent → use "default" recipe
+            strata_engine::recipe_store::get_default_recipe(&p.db, core_branch_id).map_err(|e| {
+                Error::Internal {
+                    reason: format!("Failed to get default recipe: {e}"),
+                    hint: None,
+                }
+            })?
+        }
     };
+
+    // Apply k shorthand (the one convenience patch)
     if let Some(k) = sq.k {
-        let r = per_call.get_or_insert_with(Recipe::default);
-        let t = r.transform.get_or_insert_with(TransformConfig::default);
+        let t = resolved
+            .transform
+            .get_or_insert_with(TransformConfig::default);
         t.limit = Some(k as usize);
     }
-
-    let resolved = Recipe::resolve(&builtin, &branch_recipe, per_call.as_ref());
 
     // ---- Embed query (intelligence layer) ----
     let has_vector = resolved

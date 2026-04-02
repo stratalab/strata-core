@@ -1,23 +1,56 @@
 //! Recipe storage in the `_system_` space.
 //!
-//! Recipes are stored as JSON strings under `recipe:{name}` keys in the
-//! per-branch `_system_` space. The "default" recipe is auto-created with
-//! built-in defaults on first access.
+//! Built-in recipes live on the `_system_` branch (seeded at database creation).
+//! User recipes live on the user's branch in `_system_` space.
+//! Lookup order: user branch → `_system_` branch fallback.
 
-use crate::search::recipe::{builtin_defaults, Recipe};
+use crate::primitives::branch::resolve_branch_name;
+use crate::search::recipe::{builtin_defaults, get_builtin_recipe, Recipe, BUILTIN_RECIPE_NAMES};
 use crate::system_space::system_kv_key;
 use crate::Database;
+use strata_core::branch_dag::SYSTEM_BRANCH;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_core::StrataResult;
 
+/// The branch ID for `_system_` where built-in recipes are stored.
+fn system_branch_id() -> BranchId {
+    resolve_branch_name(SYSTEM_BRANCH)
+}
+
+/// Seed all built-in recipes onto the `_system_` branch.
+///
+/// Called once at database creation time. Safe to call multiple times
+/// (overwrites existing built-ins with the latest definitions).
+pub fn seed_builtin_recipes(db: &Database) -> StrataResult<()> {
+    use crate::search::recipe::builtin_recipes;
+    let sys_branch = system_branch_id();
+    for (name, recipe) in builtin_recipes() {
+        let key = system_kv_key(sys_branch, &format!("recipe:{name}"));
+        let json = serde_json::to_string(&recipe)?;
+        db.transaction(sys_branch, |txn| {
+            txn.put(key.clone(), Value::String(json.clone()))
+        })?;
+    }
+    Ok(())
+}
+
 /// Store a named recipe on a branch.
+///
+/// If the target is the `_system_` branch and the name is a built-in,
+/// returns an error — built-in recipes are read-only.
 pub fn set_recipe(
     db: &Database,
     branch_id: BranchId,
     name: &str,
     recipe: &Recipe,
 ) -> StrataResult<()> {
+    // Protect built-ins on _system_ branch
+    if branch_id == system_branch_id() && BUILTIN_RECIPE_NAMES.contains(&name) {
+        return Err(strata_core::StrataError::InvalidInput {
+            message: format!("Cannot overwrite built-in recipe '{name}' on _system_ branch"),
+        });
+    }
     let key = system_kv_key(branch_id, &format!("recipe:{name}"));
     let json = serde_json::to_string(recipe)?;
     db.transaction(branch_id, |txn| {
@@ -26,47 +59,87 @@ pub fn set_recipe(
     Ok(())
 }
 
-/// Retrieve a named recipe from a branch. Returns `None` if not found.
-pub fn get_recipe(db: &Database, branch_id: BranchId, name: &str) -> StrataResult<Option<Recipe>> {
-    let key = system_kv_key(branch_id, &format!("recipe:{name}"));
-    match db.get_value_direct(&key)? {
-        Some(Value::String(s)) => {
-            let recipe: Recipe = serde_json::from_str(&s)?;
-            Ok(Some(recipe))
-        }
-        _ => Ok(None),
+/// Delete a named recipe from a branch.
+///
+/// If the target is the `_system_` branch and the name is a built-in,
+/// returns an error. Deleting a user shadow restores the built-in fallback.
+pub fn delete_recipe(db: &Database, branch_id: BranchId, name: &str) -> StrataResult<()> {
+    if branch_id == system_branch_id() && BUILTIN_RECIPE_NAMES.contains(&name) {
+        return Err(strata_core::StrataError::InvalidInput {
+            message: format!("Cannot delete built-in recipe '{name}' from _system_ branch"),
+        });
     }
+    let key = system_kv_key(branch_id, &format!("recipe:{name}"));
+    db.transaction(branch_id, |txn| txn.delete(key.clone()))?;
+    Ok(())
 }
 
-/// Get the default recipe, auto-creating it with built-in defaults if absent.
+/// Retrieve a named recipe. Checks user branch first, falls back to `_system_` branch.
+pub fn get_recipe(db: &Database, branch_id: BranchId, name: &str) -> StrataResult<Option<Recipe>> {
+    // 1. Check user's branch
+    let key = system_kv_key(branch_id, &format!("recipe:{name}"));
+    if let Some(Value::String(s)) = db.get_value_direct(&key)? {
+        let recipe: Recipe = serde_json::from_str(&s)?;
+        return Ok(Some(recipe));
+    }
+
+    // 2. Fall back to _system_ branch (if not already on it)
+    let sys_branch = system_branch_id();
+    if branch_id != sys_branch {
+        let sys_key = system_kv_key(sys_branch, &format!("recipe:{name}"));
+        if let Some(Value::String(s)) = db.get_value_direct(&sys_key)? {
+            let recipe: Recipe = serde_json::from_str(&s)?;
+            return Ok(Some(recipe));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Get the default recipe. Always succeeds (built-in "default" is always available).
 pub fn get_default_recipe(db: &Database, branch_id: BranchId) -> StrataResult<Recipe> {
     match get_recipe(db, branch_id, "default")? {
         Some(r) => Ok(r),
-        None => {
-            let defaults = builtin_defaults();
-            set_recipe(db, branch_id, "default", &defaults)?;
-            Ok(defaults)
-        }
+        // Fallback: if _system_ branch hasn't been seeded yet (e.g., legacy DB),
+        // return the in-memory built-in default.
+        None => Ok(get_builtin_recipe("default").unwrap_or_else(builtin_defaults)),
     }
 }
 
-/// List all recipe names on a branch.
+/// List all recipe names available to a branch (user + system, deduplicated).
 pub fn list_recipes(db: &Database, branch_id: BranchId) -> StrataResult<Vec<String>> {
+    use std::collections::BTreeSet;
     use strata_core::traits::Storage;
 
+    let mut names = BTreeSet::new();
+
+    // User branch recipes
     let prefix = system_kv_key(branch_id, "recipe:");
     let version = db.storage().version();
-    let entries = db.storage().scan_prefix(&prefix, version)?;
+    for (k, _) in db.storage().scan_prefix(&prefix, version)? {
+        if let Some(n) = k
+            .user_key_string()
+            .and_then(|s| s.strip_prefix("recipe:").map(|n| n.to_string()))
+        {
+            names.insert(n);
+        }
+    }
 
-    let mut names: Vec<String> = entries
-        .into_iter()
-        .filter_map(|(k, _)| {
-            k.user_key_string()
+    // _system_ branch recipes (includes built-ins)
+    let sys_branch = system_branch_id();
+    if branch_id != sys_branch {
+        let sys_prefix = system_kv_key(sys_branch, "recipe:");
+        for (k, _) in db.storage().scan_prefix(&sys_prefix, version)? {
+            if let Some(n) = k
+                .user_key_string()
                 .and_then(|s| s.strip_prefix("recipe:").map(|n| n.to_string()))
-        })
-        .collect();
-    names.sort();
-    Ok(names)
+            {
+                names.insert(n);
+            }
+        }
+    }
+
+    Ok(names.into_iter().collect())
 }
 
 // ============================================================================
@@ -114,29 +187,120 @@ mod tests {
     }
 
     #[test]
-    fn test_get_default_recipe_auto_creates() {
+    fn test_get_default_recipe() {
         let (_dir, db) = setup_db();
         let bid = BranchId::new();
 
-        // First call auto-creates
-        let r1 = get_default_recipe(&db, bid).unwrap();
-        assert_eq!(r1, builtin_defaults());
-
-        // Second call returns the stored one
-        let r2 = get_default_recipe(&db, bid).unwrap();
-        assert_eq!(r1, r2);
+        // Returns built-in default even without seeding
+        let r = get_default_recipe(&db, bid).unwrap();
+        assert_eq!(r.version, Some(1));
     }
 
     #[test]
-    fn test_list_recipes() {
+    fn test_seed_and_list_builtins() {
         let (_dir, db) = setup_db();
-        let bid = BranchId::new();
 
-        set_recipe(&db, bid, "alpha", &builtin_defaults()).unwrap();
-        set_recipe(&db, bid, "beta", &Recipe::default()).unwrap();
+        // Seed built-ins on _system_ branch
+        seed_builtin_recipes(&db).unwrap();
 
-        let names = list_recipes(&db, bid).unwrap();
-        assert_eq!(names, vec!["alpha", "beta"]);
+        // List from _system_ branch should include all built-ins
+        let sys = system_branch_id();
+        let names = list_recipes(&db, sys).unwrap();
+        for expected in BUILTIN_RECIPE_NAMES {
+            assert!(
+                names.contains(&expected.to_string()),
+                "Missing built-in: {}",
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_fallback_to_system_branch() {
+        let (_dir, db) = setup_db();
+
+        // Seed built-ins
+        seed_builtin_recipes(&db).unwrap();
+
+        // User branch should find "keyword" via fallback
+        let user_branch = BranchId::new();
+        let recipe = get_recipe(&db, user_branch, "keyword").unwrap();
+        assert!(recipe.is_some(), "Should fall back to _system_ branch");
+        // keyword recipe has no expansion
+        assert!(recipe.unwrap().expansion.is_none());
+    }
+
+    #[test]
+    fn test_user_shadows_builtin() {
+        let (_dir, db) = setup_db();
+        seed_builtin_recipes(&db).unwrap();
+
+        let user_branch = BranchId::new();
+        let custom = Recipe {
+            version: Some(99),
+            ..Default::default()
+        };
+        set_recipe(&db, user_branch, "keyword", &custom).unwrap();
+
+        // User version wins
+        let loaded = get_recipe(&db, user_branch, "keyword").unwrap().unwrap();
+        assert_eq!(loaded.version, Some(99));
+    }
+
+    #[test]
+    fn test_delete_shadow_restores_builtin() {
+        let (_dir, db) = setup_db();
+        seed_builtin_recipes(&db).unwrap();
+
+        let user_branch = BranchId::new();
+        let custom = Recipe {
+            version: Some(99),
+            ..Default::default()
+        };
+        set_recipe(&db, user_branch, "keyword", &custom).unwrap();
+
+        // Delete shadow
+        delete_recipe(&db, user_branch, "keyword").unwrap();
+
+        // Falls back to built-in (keyword has no expansion)
+        let loaded = get_recipe(&db, user_branch, "keyword").unwrap().unwrap();
+        assert!(
+            loaded.expansion.is_none(),
+            "Should be the built-in keyword recipe (no expansion)"
+        );
+    }
+
+    #[test]
+    fn test_cannot_overwrite_builtin_on_system() {
+        let (_dir, db) = setup_db();
+        seed_builtin_recipes(&db).unwrap();
+
+        let sys = system_branch_id();
+        let result = set_recipe(&db, sys, "keyword", &Recipe::default());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cannot_delete_builtin_on_system() {
+        let (_dir, db) = setup_db();
+        seed_builtin_recipes(&db).unwrap();
+
+        let sys = system_branch_id();
+        let result = delete_recipe(&db, sys, "keyword");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_list_includes_user_and_system() {
+        let (_dir, db) = setup_db();
+        seed_builtin_recipes(&db).unwrap();
+
+        let user_branch = BranchId::new();
+        set_recipe(&db, user_branch, "my_custom", &Recipe::default()).unwrap();
+
+        let names = list_recipes(&db, user_branch).unwrap();
+        assert!(names.contains(&"keyword".to_string())); // from system
+        assert!(names.contains(&"my_custom".to_string())); // from user
     }
 
     #[test]
@@ -147,28 +311,8 @@ mod tests {
 
         set_recipe(&db, b1, "private", &builtin_defaults()).unwrap();
 
-        // Not visible on other branch
-        assert!(get_recipe(&db, b2, "private").unwrap().is_none());
-    }
-
-    #[test]
-    fn test_recipe_overwrite() {
-        let (_dir, db) = setup_db();
-        let bid = BranchId::new();
-
-        let v1 = Recipe {
-            version: Some(1),
-            ..Default::default()
-        };
-        let v2 = Recipe {
-            version: Some(2),
-            ..Default::default()
-        };
-
-        set_recipe(&db, bid, "test", &v1).unwrap();
-        set_recipe(&db, bid, "test", &v2).unwrap();
-
-        let loaded = get_recipe(&db, bid, "test").unwrap().unwrap();
-        assert_eq!(loaded.version, Some(2), "Last write should win");
+        // Not visible on other branch (direct lookup, not via _system_ fallback)
+        let key = system_kv_key(b2, "recipe:private");
+        assert!(db.get_value_direct(&key).unwrap().is_none());
     }
 }

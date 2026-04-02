@@ -556,9 +556,10 @@ pub struct SearchQuery {
     /// Natural-language or keyword query string.
     pub query: String,
 
-    /// Per-call recipe override (level 3 of three-level merge).
-    /// Only specify fields you want to override. Everything else inherits
-    /// from the branch recipe (level 2) and built-in defaults (level 1).
+    /// Recipe for this search. Accepts:
+    /// - A JSON string: named recipe lookup (e.g., `"keyword"`, `"hybrid"`, `"default"`)
+    /// - A JSON object: complete inline recipe (used directly, no merge)
+    /// - Absent: uses the recipe named `"default"`
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe: Option<serde_json::Value>,
 
