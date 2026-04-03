@@ -693,32 +693,28 @@ impl BlockCache {
                 continue;
             }
             // Unreferenced — evict directly.
-            match slot.meta.compare_exchange(
-                meta,
-                CONSTRUCTION_BITS,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    let charge = slot.charge.load(Ordering::Relaxed) as usize;
-                    let priority_bits = meta_priority(meta);
-                    let ptr = slot.data.swap(std::ptr::null_mut(), Ordering::AcqRel);
-                    if !ptr.is_null() {
-                        unsafe {
-                            drop(Box::from_raw(ptr));
-                        }
-                    }
-                    slot.key_file_id.store(0, Ordering::Relaxed);
-                    slot.key_block_offset.store(0, Ordering::Relaxed);
-                    slot.charge.store(0, Ordering::Relaxed);
-                    slot.meta.store(0, Ordering::Release);
-                    self.occupancy.fetch_sub(1, Ordering::Relaxed);
-                    self.usage.fetch_sub(charge, Ordering::Relaxed);
-                    if priority_bits == 2 {
-                        self.pinned_usage.fetch_sub(charge, Ordering::Relaxed);
+            if slot
+                .meta
+                .compare_exchange(meta, CONSTRUCTION_BITS, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                let charge = slot.charge.load(Ordering::Relaxed) as usize;
+                let priority_bits = meta_priority(meta);
+                let ptr = slot.data.swap(std::ptr::null_mut(), Ordering::AcqRel);
+                if !ptr.is_null() {
+                    unsafe {
+                        drop(Box::from_raw(ptr));
                     }
                 }
-                Err(_) => {} // Another thread got it
+                slot.key_file_id.store(0, Ordering::Relaxed);
+                slot.key_block_offset.store(0, Ordering::Relaxed);
+                slot.charge.store(0, Ordering::Relaxed);
+                slot.meta.store(0, Ordering::Release);
+                self.occupancy.fetch_sub(1, Ordering::Relaxed);
+                self.usage.fetch_sub(charge, Ordering::Relaxed);
+                if priority_bits == 2 {
+                    self.pinned_usage.fetch_sub(charge, Ordering::Relaxed);
+                }
             }
         }
     }
