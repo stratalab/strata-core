@@ -1,6 +1,6 @@
 //! Vector store operations (7 MVP).
 //!
-//! MVP: upsert, get, delete, search, create_collection, delete_collection, list_collections
+//! MVP: upsert, get, delete, query, create_collection, delete_collection, list_collections
 
 use super::Strata;
 use crate::types::*;
@@ -157,14 +157,14 @@ impl Strata {
         }
     }
 
-    /// Search for similar vectors.
-    pub fn vector_search(
+    /// Query a vector collection for nearest neighbors.
+    pub fn vector_query(
         &self,
         collection: &str,
         query: Vec<f32>,
         k: u64,
     ) -> Result<Vec<VectorMatch>> {
-        match self.execute_cmd(Command::VectorSearch {
+        match self.execute_cmd(Command::VectorQuery {
             branch: self.branch_id(),
             space: self.space_id(),
             collection: collection.to_string(),
@@ -176,14 +176,14 @@ impl Strata {
         })? {
             Output::VectorMatches(matches) => Ok(matches),
             _ => Err(Error::Internal {
-                reason: "Unexpected output for VectorSearch".into(),
+                reason: "Unexpected output for VectorQuery".into(),
                 hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
     }
 
-    /// Search for similar vectors with optional filter, metric override, and time-travel.
-    pub fn vector_search_with_filter(
+    /// Query for nearest neighbors with optional filter, metric override, and time-travel.
+    pub fn vector_query_with_filter(
         &self,
         collection: &str,
         query: Vec<f32>,
@@ -192,7 +192,7 @@ impl Strata {
         metric: Option<DistanceMetric>,
         as_of: Option<u64>,
     ) -> Result<Vec<VectorMatch>> {
-        match self.execute_cmd(Command::VectorSearch {
+        match self.execute_cmd(Command::VectorQuery {
             branch: self.branch_id(),
             space: self.space_id(),
             collection: collection.to_string(),
@@ -204,7 +204,7 @@ impl Strata {
         })? {
             Output::VectorMatches(matches) => Ok(matches),
             _ => Err(Error::Internal {
-                reason: "Unexpected output for VectorSearch".into(),
+                reason: "Unexpected output for VectorQuery".into(),
                 hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }

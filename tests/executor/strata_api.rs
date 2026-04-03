@@ -186,7 +186,7 @@ fn vector_create_collection_and_upsert() {
 }
 
 #[test]
-fn vector_search() {
+fn vector_query() {
     let db = create_strata();
 
     db.vector_create_collection("search", 4u64, DistanceMetric::Cosine)
@@ -197,7 +197,7 @@ fn vector_search() {
         .unwrap();
 
     let matches = db
-        .vector_search("search", vec![1.0, 0.0, 0.0, 0.0], 10u64)
+        .vector_query("search", vec![1.0, 0.0, 0.0, 0.0], 10u64)
         .unwrap();
     assert_eq!(matches.len(), 2);
     assert_eq!(matches[0].key, "v1");

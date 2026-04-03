@@ -175,7 +175,7 @@ impl Session {
             | Command::VectorUpsert { .. }
             | Command::VectorGet { .. }
             | Command::VectorDelete { .. }
-            | Command::VectorSearch { .. }
+            | Command::VectorQuery { .. }
             | Command::VectorCreateCollection { .. }
             | Command::VectorDeleteCollection { .. }
             | Command::VectorListCollections { .. }

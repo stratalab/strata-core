@@ -538,9 +538,9 @@ pub enum Command {
         key: String,
     },
 
-    /// Search for similar vectors.
+    /// Query a vector collection for nearest neighbors.
     /// Returns: `Output::VectorMatches`
-    VectorSearch {
+    VectorQuery {
         /// Target branch (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
@@ -2001,7 +2001,7 @@ impl Command {
             Command::VectorUpsert { .. } => "VectorUpsert",
             Command::VectorGet { .. } => "VectorGet",
             Command::VectorDelete { .. } => "VectorDelete",
-            Command::VectorSearch { .. } => "VectorSearch",
+            Command::VectorQuery { .. } => "VectorQuery",
             Command::VectorCreateCollection { .. } => "VectorCreateCollection",
             Command::VectorDeleteCollection { .. } => "VectorDeleteCollection",
             Command::VectorListCollections { .. } => "VectorListCollections",
@@ -2174,7 +2174,7 @@ impl Command {
             | Command::VectorUpsert { branch, space, .. }
             | Command::VectorGet { branch, space, .. }
             | Command::VectorDelete { branch, space, .. }
-            | Command::VectorSearch { branch, space, .. }
+            | Command::VectorQuery { branch, space, .. }
             | Command::VectorCreateCollection { branch, space, .. }
             | Command::VectorDeleteCollection { branch, space, .. }
             | Command::VectorListCollections { branch, space, .. }
@@ -2359,7 +2359,7 @@ impl Command {
             | Command::VectorUpsert { branch, .. }
             | Command::VectorGet { branch, .. }
             | Command::VectorDelete { branch, .. }
-            | Command::VectorSearch { branch, .. }
+            | Command::VectorQuery { branch, .. }
             | Command::VectorCreateCollection { branch, .. }
             | Command::VectorDeleteCollection { branch, .. }
             | Command::VectorListCollections { branch, .. }

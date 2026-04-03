@@ -862,7 +862,7 @@ mod tests {
             .unwrap();
 
         let matches = db
-            .vector_search("vecs", vec![1.0, 0.0, 0.0, 0.0], 10u64)
+            .vector_query("vecs", vec![1.0, 0.0, 0.0, 0.0], 10u64)
             .unwrap();
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].key, "v1");
@@ -2002,7 +2002,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vector_search_with_filter() {
+    fn test_vector_query_with_filter() {
         let db = create_strata();
         db.vector_create_collection("fvecs", 4, DistanceMetric::Cosine)
             .unwrap();
@@ -2013,7 +2013,7 @@ mod tests {
 
         // No filter — should return both
         let matches = db
-            .vector_search_with_filter("fvecs", vec![1.0, 0.0, 0.0, 0.0], 10, None, None, None)
+            .vector_query_with_filter("fvecs", vec![1.0, 0.0, 0.0, 0.0], 10, None, None, None)
             .unwrap();
         assert_eq!(matches.len(), 2);
     }

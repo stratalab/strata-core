@@ -2,8 +2,8 @@
 //!
 //! This module provides the `QueryExpander` trait and types for expanding
 //! a natural language query into multiple typed search variants (lex/vec/hyde).
-//! The expanded queries are run through HybridSearch in multiple passes and
-//! fused with weighted RRF.
+//! The expanded queries are run through the retrieval substrate in multiple
+//! passes and fused with weighted RRF.
 //!
 //! # Expansion Types
 //!

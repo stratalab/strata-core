@@ -39,10 +39,10 @@ fn vector_upsert_to_nonexistent_collection_behavior() {
 }
 
 #[test]
-fn vector_search_in_nonexistent_collection_fails() {
+fn vector_query_in_nonexistent_collection_fails() {
     let executor = create_executor();
 
-    let result = executor.execute(Command::VectorSearch {
+    let result = executor.execute(Command::VectorQuery {
         branch: None,
         space: None,
         collection: "nonexistent".into(),

@@ -7,7 +7,7 @@ use strata_core::search_types::{DocRef, PrimitiveType, SearchRequest};
 use strata_core::types::{JsonDocId, BranchId};
 use strata_core::value::Value;
 use strata_engine::{KVStore, BranchIndex};
-use strata_search::DatabaseSearchExt;
+use crate::common::search::substrate_search;
 use std::collections::HashSet;
 
 // ============================================================================
@@ -171,9 +171,8 @@ fn test_tier6_cross_primitive_no_deduplication() {
     let branch_id = test_branch_id();
     populate_test_data(&db, &branch_id);
 
-    let hybrid = db.hybrid();
     let req = SearchRequest::new(branch_id, "test");
-    let response = hybrid.search(&req).unwrap();
+    let response = substrate_search(&db, &req);
 
     // Results from different primitives may logically refer to the same
     // entity, but DocRefs are distinct (different variants)

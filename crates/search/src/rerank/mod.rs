@@ -9,7 +9,7 @@
 //! Re-ranking sits between RRF fusion and final result return:
 //!
 //! ```text
-//! multi-pass HybridSearch → RRF fusion → top-N candidates
+//! multi-pass substrate retrieval → RRF fusion → top-N candidates
 //!     → LLM rerank via chat completions → position-aware blending
 //!     → return top-k results
 //! ```

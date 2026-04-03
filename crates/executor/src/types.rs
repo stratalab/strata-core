@@ -514,7 +514,7 @@ pub struct CapabilitySummary {
     /// Whether keyword search is available.
     pub search: bool,
     /// Whether vector similarity search is available.
-    pub vector_search: bool,
+    pub vector_query: bool,
     /// Whether text generation is available.
     pub generation: bool,
     /// Whether auto-embed is enabled.

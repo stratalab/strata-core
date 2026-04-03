@@ -279,7 +279,7 @@ fn test_issue_1910_merge_concurrent_overlapping_write() {
 ///
 /// Invariants tested: ARCH-002, ARCH-003
 #[test]
-fn test_issue_1910_vector_search_during_concurrent_upsert() {
+fn test_issue_1910_vector_query_during_concurrent_upsert() {
     let test_db = TestDb::new_in_memory();
     let vector = test_db.vector();
     let branch_id = test_db.branch_id;

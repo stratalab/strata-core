@@ -952,9 +952,9 @@ fn format_human(output: &Output) -> String {
                 d.config.provider, d.config.auto_embed, d.config.embed_model, d.config.durability
             ));
             lines.push(format!(
-                "Capabilities: search={}, vector_search={}, generation={}, auto_embed={}",
+                "Capabilities: search={}, vector_query={}, generation={}, auto_embed={}",
                 d.capabilities.search,
-                d.capabilities.vector_search,
+                d.capabilities.vector_query,
                 d.capabilities.generation,
                 d.capabilities.auto_embed
             ));

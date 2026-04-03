@@ -4,12 +4,13 @@
 //! These are sacred invariants that must never break.
 
 use crate::common::*;
+use crate::common::search::substrate_search;
 use strata_core::search_types::{PrimitiveType, SearchRequest, SearchResponse};
 use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_engine::{KVStore, BranchIndex};
 use strata_engine::search::{BM25LiteScorer, Scorer};
-use strata_search::{DatabaseSearchExt, Fuser, HybridSearch, RRFFuser};
+use strata_search::RRFFuser;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -98,16 +99,15 @@ fn test_tier1_rule2_primitive_search_returns_search_response() {
 // Rule 3: Composite Orchestrates, Doesn't Replace
 // ============================================================================
 
-/// Hybrid search orchestrates primitives
+/// Substrate orchestrates primitives
 #[test]
-fn test_tier1_rule3_hybrid_orchestrates() {
+fn test_tier1_rule3_substrate_orchestrates() {
     let db = create_test_db();
     let branch_id = test_branch_id();
     populate_test_data(&db, &branch_id);
 
-    let hybrid = db.hybrid();
     let req = SearchRequest::new(branch_id, "test");
-    let response = hybrid.search(&req).unwrap();
+    let response = substrate_search(&db, &req);
 
     // Results should come from primitives
     assert!(!response.hits.is_empty());
@@ -119,19 +119,20 @@ fn test_tier1_rule3_hybrid_orchestrates() {
     }
 }
 
-/// Hybrid search respects primitive filter
+/// Substrate respects primitive filter
 #[test]
-fn test_tier1_rule3_hybrid_respects_filter() {
+fn test_tier1_rule3_substrate_respects_filter() {
     let db = create_test_db();
     let branch_id = test_branch_id();
     populate_test_data(&db, &branch_id);
 
-    let hybrid = db.hybrid();
     let req = SearchRequest::new(branch_id, "test").with_primitive_filter(vec![PrimitiveType::Kv]);
-    let response = hybrid.search(&req).unwrap();
+    let response = substrate_search(&db, &req);
 
     // All results should be from KV only
-    assert_all_from_primitive(&response, PrimitiveType::Kv);
+    for hit in &response.hits {
+        assert_eq!(hit.doc_ref.primitive_type(), PrimitiveType::Kv);
+    }
 }
 
 // ============================================================================
@@ -222,18 +223,22 @@ fn test_tier1_rule6_fuser_is_trait() {
     accept_fuser(&fuser);
 }
 
-/// Can swap fuser in hybrid search
+/// RRF fuser is Send + Sync (can be shared across threads)
 #[test]
-fn test_tier1_rule6_can_swap_fuser() {
+fn test_tier1_rule6_fuser_send_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<RRFFuser>();
+}
+
+/// Substrate search produces results (plug-in orchestration works)
+#[test]
+fn test_tier1_rule6_substrate_orchestration() {
     let db = create_test_db();
     let branch_id = test_branch_id();
     populate_test_data(&db, &branch_id);
 
-    // Use custom fuser
-    let hybrid = HybridSearch::new(db.clone()).with_fuser(Arc::new(RRFFuser::default()));
-
     let req = SearchRequest::new(branch_id, "test");
-    let response = hybrid.search(&req).unwrap();
+    let response = substrate_search(&db, &req);
 
     assert!(!response.hits.is_empty());
 }

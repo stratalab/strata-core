@@ -362,7 +362,7 @@ fn vector_create_collection_and_upsert() {
 }
 
 #[test]
-fn vector_search_returns_matches() {
+fn vector_query_returns_matches() {
     let executor = create_executor();
 
     executor
@@ -398,7 +398,7 @@ fn vector_search_returns_matches() {
         .unwrap();
 
     let output = executor
-        .execute(Command::VectorSearch {
+        .execute(Command::VectorQuery {
             branch: None,
             space: None,
             collection: "search_test".into(),
