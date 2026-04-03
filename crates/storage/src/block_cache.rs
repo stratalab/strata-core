@@ -58,6 +58,12 @@ const CLOCK_INITIAL: u64 = 1;
 /// Prevents O(N) scans when the table is nearly full.
 const MAX_PROBES: usize = 128;
 
+/// When both acquire and release counters exceed this threshold, they are
+/// reset by subtracting the same value from both (preserving refcount).
+/// This prevents counter overflow into adjacent bit fields.
+/// Must be well below COUNT_MASK (4194303) to leave headroom.
+const COUNTER_RESET_THRESHOLD: u64 = 1 << 20; // ~1M
+
 // ---------------------------------------------------------------------------
 // Meta word encoding
 // ---------------------------------------------------------------------------
@@ -352,22 +358,22 @@ impl BlockCache {
                     self.refresh_clock(slot, old_meta);
 
                     // Release our reference.
-                    slot.meta.fetch_add(RELEASE_ONE, Ordering::Release);
+                    self.release_ref(slot, Ordering::Release);
                     self.hits.fetch_add(1, Ordering::Relaxed);
                     return Some(arc);
                 }
 
                 // Key mismatch — release reference.
-                slot.meta.fetch_add(RELEASE_ONE, Ordering::Release);
+                self.release_ref(slot, Ordering::Release);
             } else if meta_is_empty(old_meta) {
                 // Empty slot means key is not in the table.
-                self.undo_acquire(slot);
+                self.release_ref(slot, Ordering::Relaxed);
                 self.misses.fetch_add(1, Ordering::Relaxed);
                 return None;
             } else {
                 // Slot is occupied but not visible (under construction or
                 // invisible). Undo acquire and keep probing.
-                self.undo_acquire(slot);
+                self.release_ref(slot, Ordering::Relaxed);
             }
 
             idx = (idx + inc) & self.len_mask;
@@ -378,22 +384,50 @@ impl BlockCache {
         None
     }
 
-    /// Undo an optimistic acquire by incrementing the release counter.
+    /// Release a reference by incrementing the release counter.
+    /// Also checks for counter overflow and resets both counters if needed.
     #[inline(always)]
-    fn undo_acquire(&self, slot: &Slot) {
-        slot.meta.fetch_add(RELEASE_ONE, Ordering::Relaxed);
+    fn release_ref(&self, slot: &Slot, ordering: Ordering) {
+        let old = slot.meta.fetch_add(RELEASE_ONE, ordering);
+        // Check if both counters are large (overflow risk). This is the
+        // rare path — only triggers after ~1M lookups on the same entry.
+        let acquire = meta_acquire_count(old);
+        let release = meta_release_count(old) + 1; // after our increment
+        if release > COUNTER_RESET_THRESHOLD && acquire > COUNTER_RESET_THRESHOLD {
+            // Reset both counters by subtracting the smaller value from both.
+            // This preserves the refcount (acquire - release) while freeing
+            // counter space. Best-effort CAS — if it fails, another release
+            // will try again.
+            let drain = release.min(acquire);
+            let sub = (drain << ACQUIRE_SHIFT) | (drain << RELEASE_SHIFT);
+            let current = slot.meta.load(Ordering::Relaxed);
+            // Only reset if counters are still high (another thread may have reset).
+            if meta_acquire_count(current) > COUNTER_RESET_THRESHOLD {
+                let _ = slot.meta.compare_exchange_weak(
+                    current,
+                    current.wrapping_sub(sub),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+            }
+        }
     }
 
     /// Refresh the clock countdown to CLOCK_MAX (best-effort CAS).
     #[inline]
     fn refresh_clock(&self, slot: &Slot, old_meta: u64) {
-        let current_clock = meta_clock(old_meta + ACQUIRE_ONE); // after our acquire
+        let current_clock = meta_clock(old_meta);
         if current_clock < CLOCK_MAX {
-            let new_clock = CLOCK_MAX;
-            let delta = new_clock - current_clock;
-            // Add delta to the clock bits. This is safe because clock bits
-            // are in the lowest 3 bits and we're adding a small value.
-            slot.meta.fetch_add(delta, Ordering::Relaxed);
+            // Best-effort CAS: set clock bits to CLOCK_MAX. Use post-acquire
+            // meta as expected value since our fetch_add already incremented it.
+            let expected = old_meta + ACQUIRE_ONE;
+            let desired = (expected & !CLOCK_MASK) | CLOCK_MAX;
+            let _ = slot.meta.compare_exchange_weak(
+                expected,
+                desired,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
         }
     }
 
@@ -492,11 +526,11 @@ impl BlockCache {
                             let ptr = slot.data.load(Ordering::Acquire);
                             Arc::clone(&*ptr)
                         };
-                        slot.meta.fetch_add(RELEASE_ONE, Ordering::Release);
+                        self.release_ref(slot, Ordering::Release);
                         return existing;
                     } else {
                         // Slot changed state — undo and fall through.
-                        self.undo_acquire(slot);
+                        self.release_ref(slot, Ordering::Relaxed);
                     }
                 }
             }
@@ -679,9 +713,8 @@ impl BlockCache {
     /// Promote an existing cache entry to Pinned priority.
     pub fn promote_to_pinned(&self, file_id: u64, block_offset: u64) -> bool {
         let (mut idx, inc) = Self::probe(file_id, block_offset, self.len_mask);
-        let table_len = self.table_len();
 
-        for _ in 0..table_len {
+        for _ in 0..MAX_PROBES {
             let slot = &self.slots[idx];
             let meta = slot.meta.load(Ordering::Acquire);
 
