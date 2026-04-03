@@ -548,19 +548,26 @@ impl BlockCache {
     // CLOCK eviction (lock-free, parallel)
     // -----------------------------------------------------------------------
 
-    /// Run CLOCK eviction until usage is below capacity or we've scanned
-    /// the table up to CLOCK_MAX times.
+    /// Run CLOCK eviction until usage is below capacity or effort is exhausted.
+    ///
+    /// Effort is capped to avoid O(table_len) scans under heavy cache pressure
+    /// (e.g. 100M records with 20GB data in a 4GB cache). When the cap is hit,
+    /// the caller skips caching this block — a deliberate trade-off: it's better
+    /// to serve uncached reads than to spin scanning the entire table.
     fn evict_if_needed(&self, needed: usize) {
         let cap = self.capacity.load(Ordering::Relaxed);
         if self.usage.load(Ordering::Relaxed) + needed <= cap {
             return;
         }
 
+        // Cap eviction effort: scan at most ~1024 slots per insert.
+        // With EVICTION_STEP=8, that's 128 batches. Enough to free several
+        // entries under normal load; gives up quickly under thrashing.
+        const MAX_EVICTION_SCAN: u64 = 1024;
         let table_len = self.table_len() as u64;
-        let max_scan = table_len * (CLOCK_MAX + 1);
         let mut scanned: u64 = 0;
 
-        while self.usage.load(Ordering::Relaxed) + needed > cap && scanned < max_scan {
+        while self.usage.load(Ordering::Relaxed) + needed > cap && scanned < MAX_EVICTION_SCAN {
             let start = self
                 .clock_pointer
                 .fetch_add(EVICTION_STEP, Ordering::Relaxed);
