@@ -600,6 +600,12 @@ impl Database {
             subsystems: parking_lot::RwLock::new(Vec::new()),
         });
 
+        // Trigger compaction if any levels have accumulated segments from
+        // recovery. Without this, compaction only runs after the next write
+        // (via schedule_flush_if_needed), leaving L0 files uncompacted on
+        // reopen-without-writes.
+        db.schedule_background_compaction();
+
         Ok(db)
     }
 

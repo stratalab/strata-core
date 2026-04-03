@@ -38,52 +38,79 @@ fn release_freed_memory() {
     // macOS and other allocators return pages eagerly; no action needed.
 }
 
+/// Maximum consecutive no-work rounds before the compaction chain releases
+/// the in-flight flag. During bulk loads, new L0 files arrive every ~2-3s.
+/// Keeping the chain alive avoids the 500ms+ scheduler queue latency of
+/// re-submitting through `schedule_background_compaction`.
+const MAX_IDLE_ROUNDS: u32 = 5;
+
 /// One round of the self-re-scheduling compaction chain.
 ///
-/// Modeled after RocksDB's `BackgroundCallCompaction`: each invocation picks
-/// the single highest-scoring compaction across all branches, executes it,
-/// then re-submits itself if more work exists. Between rounds the scheduler
-/// can process other tasks.
+/// Each invocation picks the highest-scoring compaction across all branches,
+/// executes it, then re-submits itself. When no work is found, the chain
+/// stays alive for a few more rounds (re-submitting idle checks through the
+/// scheduler) to catch newly-flushed L0 files without the re-submission
+/// latency. After `MAX_IDLE_ROUNDS` consecutive no-work rounds, the chain
+/// releases `compaction_in_flight` and stops.
 fn compaction_round(
     storage: Arc<SegmentedStore>,
     write_stall_cv: Arc<parking_lot::Condvar>,
     flag: Arc<std::sync::atomic::AtomicBool>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
     scheduler: Arc<crate::background::BackgroundScheduler>,
+    idle_count: u32,
 ) {
     if cancelled.load(Ordering::Acquire) {
         flag.store(false, Ordering::Release);
         return;
     }
 
-    // Pick ONE compaction: highest-scoring (branch, level) across all branches.
     let did_work = pick_and_run_one(&storage, &write_stall_cv);
 
     if did_work {
-        // More work may exist — re-submit for another round.
-        if !cancelled.load(Ordering::Acquire) {
-            let s = Arc::clone(&storage);
-            let w = Arc::clone(&write_stall_cv);
-            let f = Arc::clone(&flag);
-            let c = Arc::clone(&cancelled);
-            let sch = Arc::clone(&scheduler);
-            if scheduler
-                .submit(crate::background::TaskPriority::High, move || {
-                    compaction_round(s, w, f, c, sch);
-                })
-                .is_err()
-            {
-                flag.store(false, Ordering::Release);
+        // Work done — reset idle counter, continue chain.
+        if idle_count == 0 {
+            // Run materialization on the transition from idle→active.
+        }
+        resubmit_chain(storage, write_stall_cv, flag, cancelled, scheduler, 0);
+    } else if idle_count < MAX_IDLE_ROUNDS {
+        // No work this round. Run materialization on the first idle round.
+        if idle_count == 0 {
+            if !cancelled.load(Ordering::Acquire) {
+                run_materialization(&storage);
             }
-        } else {
-            flag.store(false, Ordering::Release);
+            release_freed_memory();
         }
+        // Re-submit with incremented idle counter. The task goes through the
+        // scheduler queue (giving other tasks a chance to run) but the flag
+        // stays true, so no re-submission latency via schedule_background_compaction.
+        resubmit_chain(storage, write_stall_cv, flag, cancelled, scheduler, idle_count + 1);
     } else {
-        // No compaction work — run materialization, then release the flag.
-        if !cancelled.load(Ordering::Acquire) {
-            run_materialization(&storage);
-        }
-        release_freed_memory();
+        // Exceeded idle limit — release the flag.
+        flag.store(false, Ordering::Release);
+    }
+}
+
+/// Re-submit the compaction chain to the scheduler.
+fn resubmit_chain(
+    storage: Arc<SegmentedStore>,
+    write_stall_cv: Arc<parking_lot::Condvar>,
+    flag: Arc<std::sync::atomic::AtomicBool>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    scheduler: Arc<crate::background::BackgroundScheduler>,
+    idle_count: u32,
+) {
+    let s = Arc::clone(&storage);
+    let w = Arc::clone(&write_stall_cv);
+    let f = Arc::clone(&flag);
+    let c = Arc::clone(&cancelled);
+    let sch = Arc::clone(&scheduler);
+    if scheduler
+        .submit(crate::background::TaskPriority::High, move || {
+            compaction_round(s, w, f, c, sch, idle_count);
+        })
+        .is_err()
+    {
         flag.store(false, Ordering::Release);
     }
 }
@@ -107,7 +134,7 @@ fn pick_and_run_one(storage: &SegmentedStore, write_stall_cv: &parking_lot::Cond
 
     if let Some(branch_id) = best_branch {
         match storage.pick_and_compact(&branch_id, 0) {
-            Ok(Some(_)) => {
+            Ok(Some(_result)) => {
                 write_stall_cv.notify_all();
                 true
             }
@@ -218,7 +245,7 @@ impl Database {
     /// chain performs ONE compaction (highest-scoring branch × level), then
     /// re-submits itself if more work exists. This matches RocksDB's model:
     /// one compaction per task, re-evaluate between rounds.
-    fn schedule_background_compaction(&self) {
+    pub(super) fn schedule_background_compaction(&self) {
         if self
             .compaction_in_flight
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -236,7 +263,7 @@ impl Database {
 
         if scheduler
             .submit(crate::background::TaskPriority::High, move || {
-                compaction_round(storage, write_stall_cv, flag, cancelled, scheduler2);
+                compaction_round(storage, write_stall_cv, flag, cancelled, scheduler2, 0);
             })
             .is_err()
         {
