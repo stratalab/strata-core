@@ -76,7 +76,14 @@ fn compaction_round(
             }
             release_freed_memory();
         }
-        resubmit_chain(storage, write_stall_cv, flag, cancelled, scheduler, idle_count + 1);
+        resubmit_chain(
+            storage,
+            write_stall_cv,
+            flag,
+            cancelled,
+            scheduler,
+            idle_count + 1,
+        );
     } else {
         // Exceeded idle limit — release the flag.
         flag.store(false, Ordering::Release);
