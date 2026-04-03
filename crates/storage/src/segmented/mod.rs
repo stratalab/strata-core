@@ -2635,37 +2635,6 @@ impl SegmentedStore {
         })
     }
 
-    /// Print a compact summary of segment counts and bytes per level for all branches.
-    pub fn dump_level_stats(&self) {
-        for branch_ref in self.branches.iter() {
-            let branch_id = branch_ref.key();
-            let ver = branch_ref.version.load();
-            let mut parts = Vec::new();
-            for (level, segs) in ver.levels.iter().enumerate() {
-                if !segs.is_empty() {
-                    let bytes: u64 = segs.iter().map(|s| s.file_size()).sum();
-                    parts.push(format!(
-                        "L{}={} ({:.0}MB)",
-                        level,
-                        segs.len(),
-                        bytes as f64 / (1024.0 * 1024.0)
-                    ));
-                }
-            }
-            let frozen = branch_ref.frozen.len();
-            let active_bytes = branch_ref.active.approx_bytes();
-            if !parts.is_empty() || frozen > 0 || active_bytes > 0 {
-                let branch_hex = hex_encode_branch(branch_id);
-                let short = &branch_hex[..8];
-                eprintln!(
-                    "  branch {short}: active={:.0}MB frozen={frozen} {}",
-                    active_bytes as f64 / (1024.0 * 1024.0),
-                    parts.join(" "),
-                );
-            }
-        }
-    }
-
     /// Return the maximum commit_id across all flushed segments for a branch.
     ///
     /// Returns `None` if the branch has no segments.

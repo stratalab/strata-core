@@ -163,6 +163,7 @@ pub enum Priority {
 }
 
 impl Priority {
+    #[allow(dead_code)]
     fn from_bits(bits: u64) -> Self {
         match bits {
             1 => Priority::High,
