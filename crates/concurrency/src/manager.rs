@@ -27,19 +27,69 @@
 //! If crash occurs before step 7: Transaction is not durable, discarded on recovery.
 //! If crash occurs after step 7: Transaction is durable, replayed on recovery.
 
-use crate::payload::TransactionPayload;
+use crate::payload;
 use crate::{CommitError, TransactionContext, TransactionStatus};
 use dashmap::{DashMap, DashSet};
 use parking_lot::{Mutex, RwLock};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use strata_core::perf_time;
 use strata_core::traits::Storage;
 use strata_core::types::BranchId;
-use strata_durability::format::WalRecord;
 use strata_durability::now_micros;
 use strata_durability::wal::WalWriter;
+
+// Thread-local reusable buffers for WAL record serialization.
+// After warmup, these grow to accommodate the largest record and are
+// reused with zero heap allocations per commit.
+thread_local! {
+    static WAL_RECORD_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(4096));
+    static MSGPACK_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(4096));
+}
+
+// ── Commit-path profiling ───────────────────────────────────────────────────
+// Enabled by setting STRATA_PROFILE_COMMIT=1 environment variable.
+// Prints a breakdown every PROFILE_INTERVAL commits.
+
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
+
+static COMMIT_PROFILE_ENABLED: AtomicBool = AtomicBool::new(false);
+static COMMIT_PROFILE_CHECKED: AtomicBool = AtomicBool::new(false);
+
+fn commit_profile_enabled() -> bool {
+    if !COMMIT_PROFILE_CHECKED.load(Ordering::Relaxed) {
+        let enabled = std::env::var("STRATA_PROFILE_COMMIT").is_ok();
+        COMMIT_PROFILE_ENABLED.store(enabled, Ordering::Relaxed);
+        COMMIT_PROFILE_CHECKED.store(true, Ordering::Relaxed);
+    }
+    COMMIT_PROFILE_ENABLED.load(Ordering::Relaxed)
+}
+
+const PROFILE_INTERVAL: u64 = 10_000;
+
+struct CommitProfile {
+    count: u64,
+    lock_acquire_ns: u64,
+    validation_ns: u64,
+    version_alloc_ns: u64,
+    wal_serialize_ns: u64,
+    wal_mutex_ns: u64,
+    wal_io_ns: u64,
+    apply_ns: u64,
+    mark_version_ns: u64,
+    total_ns: u64,
+}
+
+thread_local! {
+    static COMMIT_PROF: RefCell<CommitProfile> = const { RefCell::new(CommitProfile {
+        count: 0, lock_acquire_ns: 0, validation_ns: 0, version_alloc_ns: 0,
+        wal_serialize_ns: 0, wal_mutex_ns: 0, wal_io_ns: 0,
+        apply_ns: 0, mark_version_ns: 0, total_ns: 0,
+    }) };
+}
 
 /// Manages transaction lifecycle and atomic commits
 ///
@@ -334,6 +384,9 @@ impl TransactionManager {
             return Ok(external_version.unwrap_or_else(|| self.version.load(Ordering::Acquire)));
         }
 
+        let profiling = commit_profile_enabled();
+        let t_total = Instant::now();
+
         #[cfg(feature = "perf-trace")]
         let commit_start = std::time::Instant::now();
         #[allow(unused_mut, unused_variables)]
@@ -342,6 +395,7 @@ impl TransactionManager {
         // Lock Level 1 (shared): Acquire quiesce read lock so checkpoint's
         // quiesced_version() can drain all in-flight commits before reading
         // the version counter (#1710).
+        let t0 = Instant::now();
         let _quiesce_guard = self.commit_quiesce.read();
 
         // Lock Level 5 → Level 2: Acquire per-branch commit lock.
@@ -354,6 +408,7 @@ impl TransactionManager {
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone(); // clone Arc, drop RefMut → releases shard lock (#1781)
         let _commit_guard = commit_mutex.lock(); // Lock Level 2
+        let lock_acquire_ns = t0.elapsed().as_nanos() as u64;
 
         // Reject commits on branches that are mid-deletion (#1916).
         if self.deleting_branches.contains(&txn.branch_id) {
@@ -361,6 +416,7 @@ impl TransactionManager {
         }
 
         // Skip OCC validation for blind writes (no reads, no CAS, no JSON snapshots)
+        let t0 = Instant::now();
         let can_skip_validation = txn.read_set.is_empty()
             && txn.cas_set.is_empty()
             && txn.json_snapshot_versions().map_or(true, |v| v.is_empty())
@@ -380,8 +436,10 @@ impl TransactionManager {
             });
             tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, "Validation passed");
         }
+        let validation_ns = t0.elapsed().as_nanos() as u64;
 
         // Version allocation: either from local counter or externally provided
+        let t0 = Instant::now();
         let commit_version = match external_version {
             None => self.allocate_version()?,
             Some(v) => {
@@ -395,6 +453,7 @@ impl TransactionManager {
                 v
             }
         };
+        let version_alloc_ns = t0.elapsed().as_nanos() as u64;
 
         // Materialize JSON patches into write_set (#1739 OCC-H1)
         if let Err(e) = txn.materialize_json_writes() {
@@ -406,20 +465,44 @@ impl TransactionManager {
         }
 
         // WAL write (durability)
+        //
+        // Uses fused zero-clone serialization: iterates write_set/delete_set
+        // by reference (no Key/Value clones), serializes msgpack + WAL envelope
+        // into thread-local reusable buffers (zero alloc after warmup).
         let has_wal = wal_mode.has_wal();
         let has_mutations = !txn.is_read_only();
+        let mut wal_serialize_ns = 0u64;
+        let mut wal_mutex_ns = 0u64;
+        let mut wal_io_ns = 0u64;
         if has_mutations {
             perf_time!(trace, wal_append_ns, {
                 match wal_mode {
                     WalMode::Direct(wal) => {
-                        let payload = TransactionPayload::from_transaction(txn, commit_version);
-                        let record = WalRecord::new(
-                            commit_version,
-                            *txn.branch_id.as_bytes(),
-                            now_micros(),
-                            payload.to_bytes(),
-                        );
-                        if let Err(e) = wal.append(&record) {
+                        let timestamp = now_micros();
+                        let result = WAL_RECORD_BUF.with(|rec_cell| {
+                            MSGPACK_BUF.with(|msg_cell| {
+                                let mut rec_buf = rec_cell.borrow_mut();
+                                let mut msg_buf = msg_cell.borrow_mut();
+                                let ts = Instant::now();
+                                payload::serialize_wal_record_into(
+                                    &mut rec_buf,
+                                    &mut msg_buf,
+                                    txn,
+                                    commit_version,
+                                    commit_version,
+                                    *txn.branch_id.as_bytes(),
+                                    timestamp,
+                                );
+                                wal_serialize_ns = ts.elapsed().as_nanos() as u64;
+                                // Direct mode: no separate mutex
+                                let tw = Instant::now();
+                                let r =
+                                    wal.append_pre_serialized(&rec_buf, commit_version, timestamp);
+                                wal_io_ns = tw.elapsed().as_nanos() as u64;
+                                r
+                            })
+                        });
+                        if let Err(e) = result {
                             txn.status = TransactionStatus::Aborted {
                                 reason: format!("WAL write failed: {}", e),
                             };
@@ -429,26 +512,38 @@ impl TransactionManager {
                         tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, commit_version, "WAL durable");
                     }
                     WalMode::Shared(wal_arc) => {
-                        let payload = TransactionPayload::from_transaction(txn, commit_version);
                         let timestamp = now_micros();
-                        let record = WalRecord::new(
-                            commit_version,
-                            *txn.branch_id.as_bytes(),
-                            timestamp,
-                            payload.to_bytes(),
-                        );
-                        let record_bytes = record.to_bytes();
-                        {
-                            let mut wal = wal_arc.lock(); // Lock Level 4: WAL append
-                            if let Err(e) =
-                                wal.append_pre_serialized(&record_bytes, commit_version, timestamp)
-                            {
-                                txn.status = TransactionStatus::Aborted {
-                                    reason: format!("WAL write failed: {}", e),
-                                };
-                                self.mark_version_applied(commit_version);
-                                return Err(CommitError::WALError(e.to_string()));
-                            }
+                        let result = WAL_RECORD_BUF.with(|rec_cell| {
+                            MSGPACK_BUF.with(|msg_cell| {
+                                let mut rec_buf = rec_cell.borrow_mut();
+                                let mut msg_buf = msg_cell.borrow_mut();
+                                let ts = Instant::now();
+                                payload::serialize_wal_record_into(
+                                    &mut rec_buf,
+                                    &mut msg_buf,
+                                    txn,
+                                    commit_version,
+                                    commit_version,
+                                    *txn.branch_id.as_bytes(),
+                                    timestamp,
+                                );
+                                wal_serialize_ns = ts.elapsed().as_nanos() as u64;
+                                let tm = Instant::now();
+                                let mut wal = wal_arc.lock(); // Lock Level 4: WAL append
+                                wal_mutex_ns = tm.elapsed().as_nanos() as u64;
+                                let tw = Instant::now();
+                                let r =
+                                    wal.append_pre_serialized(&rec_buf, commit_version, timestamp);
+                                wal_io_ns = tw.elapsed().as_nanos() as u64;
+                                r
+                            })
+                        });
+                        if let Err(e) = result {
+                            txn.status = TransactionStatus::Aborted {
+                                reason: format!("WAL write failed: {}", e),
+                            };
+                            self.mark_version_applied(commit_version);
+                            return Err(CommitError::WALError(e.to_string()));
                         }
                         tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, commit_version, "WAL durable");
                     }
@@ -458,6 +553,7 @@ impl TransactionManager {
         }
 
         // Apply to storage
+        let t0 = Instant::now();
         perf_time!(trace, write_set_apply_ns, {
             if let Err(e) = txn.apply_writes(store, commit_version) {
                 self.mark_version_applied(commit_version);
@@ -484,9 +580,62 @@ impl TransactionManager {
                 }
             }
         });
+        let apply_ns = t0.elapsed().as_nanos() as u64;
 
         // Version fully applied — advance visible_version (#1913)
+        let t0 = Instant::now();
         self.mark_version_applied(commit_version);
+        let mark_version_ns = t0.elapsed().as_nanos() as u64;
+
+        // Profile accumulation
+        if profiling {
+            let total_ns = t_total.elapsed().as_nanos() as u64;
+            COMMIT_PROF.with(|p| {
+                let mut p = p.borrow_mut();
+                p.count += 1;
+                p.lock_acquire_ns += lock_acquire_ns;
+                p.validation_ns += validation_ns;
+                p.version_alloc_ns += version_alloc_ns;
+                p.wal_serialize_ns += wal_serialize_ns;
+                p.wal_mutex_ns += wal_mutex_ns;
+                p.wal_io_ns += wal_io_ns;
+                p.apply_ns += apply_ns;
+                p.mark_version_ns += mark_version_ns;
+                p.total_ns += total_ns;
+
+                if p.count % PROFILE_INTERVAL == 0 {
+                    let n = PROFILE_INTERVAL as f64;
+                    let wal_total = p.wal_serialize_ns + p.wal_mutex_ns + p.wal_io_ns;
+                    eprintln!(
+                        "[commit-profile] {} commits | avg(us): \
+                         total={:.1}  branch_lock={:.1}  validate={:.1}  ver_alloc={:.1}  \
+                         wal[ser={:.1} mutex={:.1} io={:.1} sum={:.1}]  \
+                         apply={:.1}  mark_ver={:.1}",
+                        p.count,
+                        p.total_ns as f64 / n / 1000.0,
+                        p.lock_acquire_ns as f64 / n / 1000.0,
+                        p.validation_ns as f64 / n / 1000.0,
+                        p.version_alloc_ns as f64 / n / 1000.0,
+                        p.wal_serialize_ns as f64 / n / 1000.0,
+                        p.wal_mutex_ns as f64 / n / 1000.0,
+                        p.wal_io_ns as f64 / n / 1000.0,
+                        wal_total as f64 / n / 1000.0,
+                        p.apply_ns as f64 / n / 1000.0,
+                        p.mark_version_ns as f64 / n / 1000.0,
+                    );
+                    // Reset for next interval
+                    p.lock_acquire_ns = 0;
+                    p.validation_ns = 0;
+                    p.version_alloc_ns = 0;
+                    p.wal_serialize_ns = 0;
+                    p.wal_mutex_ns = 0;
+                    p.wal_io_ns = 0;
+                    p.apply_ns = 0;
+                    p.mark_version_ns = 0;
+                    p.total_ns = 0;
+                }
+            });
+        }
 
         #[cfg(feature = "perf-trace")]
         {
@@ -668,6 +817,7 @@ impl Default for TransactionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::payload::TransactionPayload;
     use crate::{JsonStoreExt, TransactionContext};
     use parking_lot::Mutex as ParkingMutex;
     use std::sync::Arc;

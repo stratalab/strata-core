@@ -314,6 +314,7 @@ impl Database {
             database_uuid,
             storage,
             wal_writer: None, // No WAL writer — read-only
+
             persistence_mode: PersistenceMode::Disk,
             coordinator,
             durability_mode: DurabilityMode::Cache, // Irrelevant for follower
@@ -368,11 +369,27 @@ impl Database {
                         if shutdown.load(Ordering::Relaxed) {
                             break;
                         }
-                        let mut wal = wal.lock();
-                        if let Err(e) = wal.sync_if_overdue() {
-                            tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
+                        // Background sync: briefly lock WAL to flush BufWriter
+                        // to OS page cache, then fdatasync outside the lock.
+                        // The lock hold is microseconds (BufWriter flush only),
+                        // not milliseconds (no fdatasync under lock).
+                        let sync_fd = {
+                            let mut w = wal.lock();
+                            w.flush_active_meta();
+                            match w.prepare_background_sync() {
+                                Ok(Some(fd)) => Some(fd),
+                                Ok(None) => None,
+                                Err(e) => {
+                                    tracing::error!(target: "strata::wal", error = %e, "Background WAL flush failed");
+                                    None
+                                }
+                            }
+                        }; // WAL lock released — held only for BufWriter flush + meta
+                        if let Some(fd) = sync_fd {
+                            if let Err(e) = fd.sync_all() {
+                                tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
+                            }
                         }
-                        wal.flush_active_meta();
                     }
                     // Final sync: flush any data written since the last periodic sync
                     let mut wal = wal.lock();
@@ -666,6 +683,7 @@ impl Database {
             database_uuid: [0u8; 16], // No persistence — UUID not needed
             storage: Arc::new(storage),
             wal_writer: None, // No WAL for ephemeral
+
             persistence_mode: PersistenceMode::Ephemeral,
             coordinator,
             durability_mode: DurabilityMode::Cache, // Irrelevant but set for consistency
