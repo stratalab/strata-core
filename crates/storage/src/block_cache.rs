@@ -387,13 +387,18 @@ impl BlockCache {
     /// Refresh the clock countdown to CLOCK_MAX (best-effort CAS).
     #[inline]
     fn refresh_clock(&self, slot: &Slot, old_meta: u64) {
-        let current_clock = meta_clock(old_meta + ACQUIRE_ONE); // after our acquire
+        let current_clock = meta_clock(old_meta);
         if current_clock < CLOCK_MAX {
-            let new_clock = CLOCK_MAX;
-            let delta = new_clock - current_clock;
-            // Add delta to the clock bits. This is safe because clock bits
-            // are in the lowest 3 bits and we're adding a small value.
-            slot.meta.fetch_add(delta, Ordering::Relaxed);
+            // Best-effort CAS: set clock bits to CLOCK_MAX. Use post-acquire
+            // meta as expected value since our fetch_add already incremented it.
+            let expected = old_meta + ACQUIRE_ONE;
+            let desired = (expected & !CLOCK_MASK) | CLOCK_MAX;
+            let _ = slot.meta.compare_exchange_weak(
+                expected,
+                desired,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
         }
     }
 
@@ -679,9 +684,8 @@ impl BlockCache {
     /// Promote an existing cache entry to Pinned priority.
     pub fn promote_to_pinned(&self, file_id: u64, block_offset: u64) -> bool {
         let (mut idx, inc) = Self::probe(file_id, block_offset, self.len_mask);
-        let table_len = self.table_len();
 
-        for _ in 0..table_len {
+        for _ in 0..MAX_PROBES {
             let slot = &self.slots[idx];
             let meta = slot.meta.load(Ordering::Acquire);
 
