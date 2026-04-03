@@ -33,7 +33,7 @@
 
 use crc32fast::Hasher;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// Magic bytes identifying a WAL segment file: "STRA"
@@ -186,13 +186,19 @@ impl SegmentHeader {
     }
 }
 
+/// WAL segment buffer size (8 KB). Batches multiple small WAL records
+/// into a single `write` syscall, reducing per-record kernel overhead.
+const WAL_BUF_SIZE: usize = 8192;
+
 /// WAL segment file handle.
 ///
 /// A segment is a single WAL file containing multiple records.
 /// Only the active segment is writable; closed segments are immutable.
 pub struct WalSegment {
-    /// File handle
-    file: File,
+    /// Buffered file handle — reduces syscalls for small writes.
+    /// `flush()` is called before `sync_all()` to ensure all buffered
+    /// data reaches the kernel before fsync (ACID-006).
+    file: BufWriter<File>,
 
     /// Segment number
     segment_number: u64,
@@ -224,7 +230,7 @@ impl WalSegment {
     ) -> std::io::Result<Self> {
         let path = Self::segment_path(dir, segment_number);
 
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .create_new(true)
             .write(true)
             .read(true)
@@ -237,9 +243,12 @@ impl WalSegment {
             let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
         }
 
-        // Write v2 header (36 bytes)
+        // Write v2 header (36 bytes) and flush to OS so the segment is
+        // immediately visible on disk (wal_disk_usage reads file metadata).
         let header = SegmentHeader::new(segment_number, database_uuid);
+        let mut file = BufWriter::with_capacity(WAL_BUF_SIZE, file);
         file.write_all(&header.to_bytes())?;
+        file.flush()?;
 
         // Fsync the parent directory so the new file's directory entry is
         // durable. Without this, a power loss can silently lose the entire
@@ -324,7 +333,7 @@ impl WalSegment {
         let write_position = file.seek(SeekFrom::End(0))?;
 
         Ok(WalSegment {
-            file,
+            file: BufWriter::with_capacity(WAL_BUF_SIZE, file),
             segment_number: header.segment_number,
             write_position,
             path,
@@ -392,7 +401,7 @@ impl WalSegment {
         let write_position = file.seek(SeekFrom::End(0))?;
 
         Ok(WalSegment {
-            file,
+            file: BufWriter::with_capacity(WAL_BUF_SIZE, file),
             segment_number: header.segment_number,
             write_position,
             path,
@@ -469,8 +478,30 @@ impl WalSegment {
     }
 
     /// Sync segment data to disk.
+    ///
+    /// Flushes the BufWriter to the OS page cache, then fsyncs the
+    /// underlying file to stable storage. Both steps are required for
+    /// ACID-006 (Always mode durability guarantee).
     pub fn sync(&mut self) -> std::io::Result<()> {
-        self.file.sync_all()
+        self.file.flush()?;
+        self.file.get_ref().sync_all()
+    }
+
+    /// Flush the BufWriter to the OS page cache without fsync.
+    ///
+    /// Used by the background sync path: flush under the WAL lock,
+    /// then fsync outside the lock via a cloned file descriptor.
+    pub fn flush_to_os(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+
+    /// Clone the underlying file descriptor for out-of-lock fsync.
+    ///
+    /// Returns a `File` handle that shares the same OS file descriptor.
+    /// Calling `sync_all()` on the clone fsyncs the same file without
+    /// needing to hold the WAL mutex.
+    pub fn try_clone_fd(&self) -> std::io::Result<File> {
+        self.file.get_ref().try_clone()
     }
 
     /// Mark segment as closed (immutable).
@@ -478,7 +509,8 @@ impl WalSegment {
     /// Syncs data to disk before closing.
     pub fn close(&mut self) -> std::io::Result<()> {
         if !self.closed {
-            self.file.sync_all()?;
+            self.file.flush()?;
+            self.file.get_ref().sync_all()?;
             self.closed = true;
         }
         Ok(())
@@ -489,9 +521,9 @@ impl WalSegment {
         self.closed
     }
 
-    /// Get mutable reference to file (for reading).
+    /// Get mutable reference to underlying file (for reading).
     pub fn file_mut(&mut self) -> &mut File {
-        &mut self.file
+        self.file.get_mut()
     }
 
     /// Seek to a specific position for reading.
@@ -521,7 +553,8 @@ impl WalSegment {
             ));
         }
 
-        self.file.set_len(position)?;
+        self.file.flush()?;
+        self.file.get_mut().set_len(position)?;
         self.write_position = position;
         self.file.seek(SeekFrom::Start(position))?;
         Ok(())
@@ -593,6 +626,48 @@ impl WalRecord {
         record.extend_from_slice(&crc.to_le_bytes());
 
         record
+    }
+
+    /// Build WAL record bytes from a borrowed writeset, writing into a
+    /// caller-provided buffer. Produces identical bytes to
+    /// `WalRecord::new(txn_id, branch_id, timestamp, writeset.to_vec()).to_bytes()`.
+    ///
+    /// Avoids constructing the intermediate `WalRecord` struct with its owned
+    /// `writeset: Vec<u8>`, and avoids the double-Vec allocation in `to_bytes()`.
+    pub fn build_bytes_from_writeset_into(
+        buf: &mut Vec<u8>,
+        txn_id: u64,
+        branch_id: [u8; 16],
+        timestamp: u64,
+        writeset: &[u8],
+    ) {
+        buf.clear();
+
+        // Payload: format_version(1) + length_crc(4) + txn_id(8) + branch_id(16) + timestamp(8) + writeset
+        let payload_len = 1 + 4 + 8 + 16 + 8 + writeset.len();
+        let total_len = payload_len + 4; // + main CRC
+        buf.reserve(4 + total_len);
+
+        // Length prefix
+        let length_bytes = (total_len as u32).to_le_bytes();
+        buf.extend_from_slice(&length_bytes);
+
+        // Payload
+        let payload_start = buf.len();
+        buf.push(WAL_RECORD_FORMAT_VERSION);
+        buf.extend_from_slice(&[0u8; 4]); // length_crc placeholder
+        buf.extend_from_slice(&txn_id.to_le_bytes());
+        buf.extend_from_slice(&branch_id);
+        buf.extend_from_slice(&timestamp.to_le_bytes());
+        buf.extend_from_slice(writeset);
+
+        // Fill in length CRC
+        let length_crc = Self::compute_crc(&length_bytes);
+        buf[payload_start + 1..payload_start + 5].copy_from_slice(&length_crc.to_le_bytes());
+
+        // Main CRC over payload
+        let crc = Self::compute_crc(&buf[payload_start..]);
+        buf.extend_from_slice(&crc.to_le_bytes());
     }
 
     /// Deserialize record from bytes.

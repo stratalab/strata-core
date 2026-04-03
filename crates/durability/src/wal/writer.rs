@@ -11,6 +11,7 @@ use crate::format::segment_meta::SegmentMeta;
 use crate::format::{WalRecord, WalSegment, SEGMENT_HEADER_SIZE_V2};
 use crate::wal::config::WalConfig;
 use crate::wal::reader::WalReader;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
@@ -102,6 +103,13 @@ pub struct WalWriter {
     total_bytes_written: u64,
     /// Cumulative: total nanoseconds spent in sync/fsync calls
     total_sync_nanos: u64,
+
+    // ── Per-call profiling (STRATA_PROFILE_WAL=1) ──
+    profile_wal: bool,
+    profile_wal_calls: u64,
+    profile_write_ns: u64,
+    profile_sync_ns: u64,
+    profile_sync_count: u64,
 }
 
 impl WalWriter {
@@ -135,6 +143,11 @@ impl WalWriter {
                 total_sync_calls: 0,
                 total_bytes_written: 0,
                 total_sync_nanos: 0,
+                profile_wal: false,
+                profile_wal_calls: 0,
+                profile_write_ns: 0,
+                profile_sync_ns: 0,
+                profile_sync_count: 0,
             });
         }
 
@@ -190,6 +203,11 @@ impl WalWriter {
             total_sync_calls: 0,
             total_bytes_written: 0,
             total_sync_nanos: 0,
+            profile_wal: std::env::var("STRATA_PROFILE_WAL").is_ok(),
+            profile_wal_calls: 0,
+            profile_write_ns: 0,
+            profile_sync_ns: 0,
+            profile_sync_count: 0,
         })
     }
 
@@ -205,7 +223,7 @@ impl WalWriter {
         }
 
         let record_bytes = record.to_bytes();
-        let encoded = self.codec.encode(&record_bytes);
+        let encoded = self.codec.encode_cow(&record_bytes);
         self.append_inner(&encoded, record.txn_id, record.timestamp)?;
         self.maybe_sync()
     }
@@ -227,7 +245,29 @@ impl WalWriter {
 
         let encoded = self.codec.encode_cow(record_bytes);
         self.append_inner(&encoded, txn_id, timestamp)?;
-        self.maybe_sync()
+        self.maybe_sync()?;
+
+        // Per-call profiling (env STRATA_PROFILE_WAL=1)
+        if self.profile_wal {
+            self.profile_wal_calls += 1;
+            if self.profile_wal_calls % 10_000 == 0 {
+                let n = 10_000f64;
+                eprintln!(
+                    "[wal-profile] {} appends | avg: write={:.1}us  sync={:.1}us  \
+                     syncs={} ({:.1}% of appends) | total_bytes={}",
+                    self.profile_wal_calls,
+                    self.profile_write_ns as f64 / n / 1000.0,
+                    self.profile_sync_ns as f64 / n / 1000.0,
+                    self.profile_sync_count,
+                    self.profile_sync_count as f64 / n * 100.0,
+                    self.total_bytes_written,
+                );
+                self.profile_write_ns = 0;
+                self.profile_sync_ns = 0;
+                self.profile_sync_count = 0;
+            }
+        }
+        Ok(())
     }
 
     /// Core append logic shared by `append()`, `append_pre_serialized()`,
@@ -248,7 +288,15 @@ impl WalWriter {
 
         // Write to segment
         let segment = self.segment.as_mut().unwrap();
+        let tw = if self.profile_wal {
+            Some(Instant::now())
+        } else {
+            None
+        };
         segment.write(encoded)?;
+        if let Some(tw) = tw {
+            self.profile_write_ns += tw.elapsed().as_nanos() as u64;
+        }
 
         // Track metadata for the current segment
         if let Some(ref mut meta) = self.current_segment_meta {
@@ -275,33 +323,23 @@ impl WalWriter {
                 self.perform_sync()?;
                 self.reset_sync_counters();
             }
-            DurabilityMode::Standard {
-                interval_ms,
-                batch_size,
-            } => {
-                // Standard mode: fsync is deferred to the background flush thread (#969).
-                // Data is already written to the BufWriter by append().
-                // The background thread periodically calls sync_if_overdue().
+            DurabilityMode::Standard { interval_ms, .. } => {
+                // Standard mode: fsync is deferred to the background flush thread.
+                // The background thread calls sync_if_overdue() every interval_ms/2.
                 //
-                // Sync triggers (whichever comes first):
-                // 1. batch_size writes reached — inline sync to bound data loss by write count
-                // 2. Safety net: background thread stalled (interval elapsed without sync)
-                let batch_triggered = self.writes_since_sync >= batch_size;
-                let deadline_ms = interval_ms;
+                // The only inline trigger is the interval_ms safety net — if the
+                // background thread has stalled beyond the interval, we sync inline
+                // to bound the durability window. No batch_size trigger: at high
+                // write rates, batch_size fsyncs dominated throughput (6.5ms fsync
+                // every 1000 writes = 40% overhead). The interval_ms bound is
+                // sufficient — it caps the wall-clock durability window regardless
+                // of write rate.
                 let elapsed_ms = self.last_sync_time.elapsed().as_millis() as u64;
-                let deadline_triggered = elapsed_ms >= deadline_ms;
-                if self.has_unsynced_data && (batch_triggered || deadline_triggered) {
-                    if deadline_triggered {
-                        debug!(target: "strata::wal",
-                            elapsed_ms,
-                            deadline_ms,
-                            "Inline sync fallback — background thread did not sync within interval");
-                    } else {
-                        debug!(target: "strata::wal",
-                            writes = self.writes_since_sync,
-                            batch_size,
-                            "Batch size reached — inline sync");
-                    }
+                if self.has_unsynced_data && elapsed_ms >= interval_ms {
+                    debug!(target: "strata::wal",
+                        elapsed_ms,
+                        interval_ms,
+                        "Inline sync fallback — background thread did not sync within interval");
                     self.perform_sync()?;
                     self.reset_sync_counters();
                 }
@@ -322,6 +360,10 @@ impl WalWriter {
             let elapsed = start.elapsed();
             self.total_sync_calls += 1;
             self.total_sync_nanos += elapsed.as_nanos() as u64;
+            if self.profile_wal {
+                self.profile_sync_ns += elapsed.as_nanos() as u64;
+                self.profile_sync_count += 1;
+            }
         }
         Ok(())
     }
@@ -398,14 +440,8 @@ impl WalWriter {
             return Ok(false);
         }
 
-        if let DurabilityMode::Standard {
-            interval_ms,
-            batch_size,
-        } = self.durability
-        {
-            if self.last_sync_time.elapsed().as_millis() as u64 >= interval_ms
-                || self.writes_since_sync >= batch_size
-            {
+        if let DurabilityMode::Standard { interval_ms, .. } = self.durability {
+            if self.last_sync_time.elapsed().as_millis() as u64 >= interval_ms {
                 self.perform_sync()?;
                 self.reset_sync_counters();
                 debug!(target: "strata::wal", segment = self.current_segment_number, "WAL periodic sync");
@@ -414,6 +450,41 @@ impl WalWriter {
         }
 
         Ok(false)
+    }
+
+    /// Flush BufWriter and prepare for out-of-lock fsync.
+    ///
+    /// Returns `Some(File)` if there is unsynced data that needs fsync,
+    /// `None` if no sync is needed. The caller should:
+    /// 1. Call this under the WAL lock
+    /// 2. Release the lock
+    /// 3. Call `file.sync_all()` on the returned File (outside the lock)
+    ///
+    /// Sync counters are reset before returning so the inline `maybe_sync`
+    /// safety net doesn't trigger a redundant fsync while the background
+    /// fdatasync is in progress.
+    pub fn prepare_background_sync(&mut self) -> std::io::Result<Option<File>> {
+        if !self.has_unsynced_data {
+            return Ok(None);
+        }
+
+        if let DurabilityMode::Standard { interval_ms, .. } = self.durability {
+            if self.last_sync_time.elapsed().as_millis() as u64 >= interval_ms {
+                // Flush BufWriter to OS page cache (fast, microseconds)
+                if let Some(ref mut segment) = self.segment {
+                    segment.flush_to_os()?;
+                    let fd = segment.try_clone_fd()?;
+                    // Reset counters NOW (before releasing lock) so the inline
+                    // maybe_sync in append_pre_serialized doesn't see the stale
+                    // last_sync_time and trigger a redundant inline fsync while
+                    // the background fdatasync is in progress.
+                    self.reset_sync_counters();
+                    return Ok(Some(fd));
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     /// Get the current durability mode.
@@ -643,7 +714,7 @@ impl WalWriter {
         self.reopen_if_needed()?;
 
         let record_bytes = record.to_bytes();
-        let encoded = self.codec.encode(&record_bytes);
+        let encoded = self.codec.encode_cow(&record_bytes);
         self.append_inner(&encoded, record.txn_id, record.timestamp)?;
 
         // Immediately flush for cross-process visibility
@@ -1581,46 +1652,11 @@ mod tests {
     }
 
     #[test]
-    fn test_issue_1714_batch_size_triggers_sync() {
-        // DurabilityMode::Standard { batch_size } should trigger fsync when
-        // writes_since_sync reaches batch_size, even if interval_ms hasn't elapsed.
-        let dir = tempdir().unwrap();
-        let wal_dir = dir.path().join("wal");
-
-        let mut writer = make_writer(
-            &wal_dir,
-            DurabilityMode::Standard {
-                interval_ms: 600_000, // 10 minutes — will never elapse during this test
-                batch_size: 5,
-            },
-        );
-
-        let sync_calls_before = writer.counters().sync_calls;
-
-        // Write exactly batch_size records
-        for i in 0..5 {
-            writer.append(&make_record(i)).unwrap();
-        }
-
-        let sync_calls_after = writer.counters().sync_calls;
-        assert!(
-            sync_calls_after > sync_calls_before,
-            "batch_size=5 should have triggered at least one sync after 5 writes, \
-             but sync_calls went from {} to {}",
-            sync_calls_before,
-            sync_calls_after,
-        );
-
-        // Verify counters were reset after the sync
-        assert_eq!(
-            writer.writes_since_sync, 0,
-            "writes_since_sync should be reset after batch_size-triggered sync"
-        );
-    }
-
-    #[test]
-    fn test_issue_1714_batch_size_sync_if_overdue() {
-        // sync_if_overdue() should also respect batch_size, not just interval_ms.
+    fn test_standard_mode_no_inline_batch_sync() {
+        // Standard mode no longer triggers inline fsync at batch_size.
+        // Fsync is deferred to the background thread (interval_ms only).
+        // This test verifies that writing batch_size records does NOT
+        // trigger an inline sync when interval_ms hasn't elapsed.
         let dir = tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
@@ -1628,35 +1664,51 @@ mod tests {
             &wal_dir,
             DurabilityMode::Standard {
                 interval_ms: 600_000, // 10 minutes — will never elapse
-                batch_size: 3,
+                batch_size: 5,
             },
         );
 
-        // Write 2 records (below batch_size), then simulate the state where
-        // maybe_sync didn't trigger (writes < batch_size) but we want to test
-        // sync_if_overdue's batch_size check directly.
-        writer.append(&make_record(1)).unwrap();
-        writer.append(&make_record(2)).unwrap();
+        let sync_calls_before = writer.counters().sync_calls;
 
-        // Manually set writes_since_sync to batch_size to test sync_if_overdue
-        // independently of maybe_sync (which already handles it inline).
-        writer.writes_since_sync = 3;
-        writer.has_unsynced_data = true;
+        // Write more than batch_size records
+        for i in 0..20 {
+            writer.append(&make_record(i)).unwrap();
+        }
+
+        let sync_calls_after = writer.counters().sync_calls;
+        assert_eq!(
+            sync_calls_after, sync_calls_before,
+            "Standard mode should NOT inline-sync at batch_size when interval_ms hasn't elapsed. \
+             sync_calls went from {} to {}",
+            sync_calls_before, sync_calls_after,
+        );
+    }
+
+    #[test]
+    fn test_standard_mode_interval_triggers_sync() {
+        // Standard mode fsyncs when interval_ms elapses (safety net).
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let mut writer = make_writer(
+            &wal_dir,
+            DurabilityMode::Standard {
+                interval_ms: 1, // 1ms — will elapse almost immediately
+                batch_size: 1_000_000,
+            },
+        );
+
+        // Write a record, then sleep to let interval_ms elapse
+        writer.append(&make_record(1)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
 
         let sync_calls_before = writer.total_sync_calls;
-        let synced = writer.sync_if_overdue().unwrap();
+        // This write should trigger the interval safety net
+        writer.append(&make_record(2)).unwrap();
 
         assert!(
-            synced,
-            "sync_if_overdue should return true when writes_since_sync >= batch_size"
-        );
-        assert!(
             writer.total_sync_calls > sync_calls_before,
-            "sync_if_overdue should have performed a sync"
-        );
-        assert_eq!(
-            writer.writes_since_sync, 0,
-            "writes_since_sync should be reset after sync_if_overdue"
+            "Standard mode should sync when interval_ms has elapsed"
         );
     }
 
