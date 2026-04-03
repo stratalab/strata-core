@@ -44,6 +44,23 @@ fn release_freed_memory() {
 /// re-submitting through `schedule_background_compaction`.
 const MAX_IDLE_ROUNDS: u32 = 5;
 
+// Compaction chain profiling counters.
+static COMPACT_WORK_ROUNDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static COMPACT_IDLE_ROUNDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static COMPACT_CHAIN_STARTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static COMPACT_CHAIN_ENDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Dump compaction chain profiling counters and reset.
+pub fn dump_compaction_profile() {
+    let work = COMPACT_WORK_ROUNDS.swap(0, Ordering::Relaxed);
+    let idle = COMPACT_IDLE_ROUNDS.swap(0, Ordering::Relaxed);
+    let starts = COMPACT_CHAIN_STARTS.swap(0, Ordering::Relaxed);
+    let ends = COMPACT_CHAIN_ENDS.swap(0, Ordering::Relaxed);
+    eprintln!(
+        "compaction_chain: {work} work rounds, {idle} idle rounds, {starts} chain starts, {ends} chain ends"
+    );
+}
+
 /// One round of the self-re-scheduling compaction chain.
 ///
 /// Each invocation picks the highest-scoring compaction across all branches,
@@ -68,25 +85,20 @@ fn compaction_round(
     let did_work = pick_and_run_one(&storage, &write_stall_cv);
 
     if did_work {
-        // Work done — reset idle counter, continue chain.
-        if idle_count == 0 {
-            // Run materialization on the transition from idle→active.
-        }
+        COMPACT_WORK_ROUNDS.fetch_add(1, Ordering::Relaxed);
         resubmit_chain(storage, write_stall_cv, flag, cancelled, scheduler, 0);
     } else if idle_count < MAX_IDLE_ROUNDS {
-        // No work this round. Run materialization on the first idle round.
+        COMPACT_IDLE_ROUNDS.fetch_add(1, Ordering::Relaxed);
         if idle_count == 0 {
             if !cancelled.load(Ordering::Acquire) {
                 run_materialization(&storage);
             }
             release_freed_memory();
         }
-        // Re-submit with incremented idle counter. The task goes through the
-        // scheduler queue (giving other tasks a chance to run) but the flag
-        // stays true, so no re-submission latency via schedule_background_compaction.
         resubmit_chain(storage, write_stall_cv, flag, cancelled, scheduler, idle_count + 1);
     } else {
         // Exceeded idle limit — release the flag.
+        COMPACT_CHAIN_ENDS.fetch_add(1, Ordering::Relaxed);
         flag.store(false, Ordering::Release);
     }
 }
@@ -253,6 +265,8 @@ impl Database {
         {
             return;
         }
+
+        COMPACT_CHAIN_STARTS.fetch_add(1, Ordering::Relaxed);
 
         let storage = Arc::clone(&self.storage);
         let write_stall_cv = Arc::clone(&self.write_stall_cv);
