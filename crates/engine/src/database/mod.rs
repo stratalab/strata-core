@@ -601,11 +601,6 @@ impl Database {
         &self.scheduler
     }
 
-    /// Dump compaction chain profiling counters to stderr and reset.
-    pub fn dump_compaction_profile(&self) {
-        transaction::dump_compaction_profile();
-    }
-
     /// Seconds since the database was opened.
     pub fn uptime_secs(&self) -> u64 {
         self.opened_at.elapsed().as_secs()

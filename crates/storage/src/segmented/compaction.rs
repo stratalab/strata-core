@@ -941,12 +941,10 @@ impl SegmentedStore {
             return Err(e);
         }
 
-        let _compact_t0 = std::time::Instant::now();
         let output_entries: u64 = outputs.iter().map(|(_, m)| m.entry_count).sum();
         let output_file_size: u64 = outputs.iter().map(|(_, m)| m.file_size).sum();
 
         // Open all output segments
-        let _compact_t2_open_start = std::time::Instant::now();
         let mut new_output_segments: Vec<Arc<KVSegment>> = Vec::new();
         for (path, _meta) in &outputs {
             match KVSegment::open(path) {
@@ -959,10 +957,8 @@ impl SegmentedStore {
                 }
             }
         }
-        let _compact_t2_seg_open = _compact_t2_open_start.elapsed();
 
         // ── 4. Atomic version swap ─────────────────────────────────────
-        let _compact_t2_swap_start = std::time::Instant::now();
         {
             let mut branch = self
                 .branches
@@ -992,39 +988,19 @@ impl SegmentedStore {
         }
 
         // ── 5. Cleanup ─────────────────────────────────────────────────
-        let _compact_t2_swap = _compact_t2_swap_start.elapsed();
 
         // Persist manifest BEFORE deleting old files (crash safety).
-        let _compact_t3_manifest_start = std::time::Instant::now();
         self.write_branch_manifest(branch_id);
-        let _compact_t3_manifest = _compact_t3_manifest_start.elapsed();
 
         // Delete old segment files (refcount-guarded).
-        let _compact_t4_delete_start = std::time::Instant::now();
         for seg in &input_segs {
             self.delete_segment_if_unreferenced(seg);
         }
         for seg in &overlap_segs {
             self.delete_segment_if_unreferenced(seg);
         }
-        let _compact_t4_delete = _compact_t4_delete_start.elapsed();
 
         let entries_pruned = total_input_entries.saturating_sub(output_entries);
-
-        // Log timing breakdown for rounds > 100ms
-        let total_ms = _compact_t0.elapsed().as_millis();
-        if total_ms > 100 {
-            eprintln!(
-                "    compact L{}→L{}: {}ms total (seg_open {}ms, version_swap {}ms, manifest {}ms, delete {}ms) — {} segs in, {} out, {:.1}MB",
-                level, level + 1, total_ms,
-                _compact_t2_seg_open.as_millis(),
-                _compact_t2_swap.as_millis(),
-                _compact_t3_manifest.as_millis(),
-                _compact_t4_delete.as_millis(),
-                segments_merged, outputs.len(),
-                output_file_size as f64 / (1024.0 * 1024.0),
-            );
-        }
 
         Ok(Some(CompactionResult {
             segments_merged,
