@@ -76,6 +76,68 @@ pub fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// A token with its position in the document.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Token {
+    /// Stemmed term.
+    pub term: String,
+    /// 0-indexed word position within the document. Stopwords and filtered
+    /// tokens consume positions but emit no Token, so gaps are expected.
+    pub position: u32,
+}
+
+/// Tokenize text, returning stemmed tokens with positions.
+///
+/// Same pipeline as [`tokenize()`] but tracks a position counter that
+/// increments for every UAX#29 word boundary — including stopwords and
+/// short-filtered tokens. This preserves accurate distance information
+/// for phrase and proximity queries.
+///
+/// # Example
+///
+/// ```
+/// use strata_engine::search::tokenizer::tokenize_with_positions;
+///
+/// let tokens = tokenize_with_positions("The quick brown fox");
+/// // "The" is a stopword → consumes position 0, no token emitted
+/// assert_eq!(tokens[0].term, "quick");
+/// assert_eq!(tokens[0].position, 1);
+/// assert_eq!(tokens[1].term, "brown");
+/// assert_eq!(tokens[1].position, 2);
+/// assert_eq!(tokens[2].term, "fox");
+/// assert_eq!(tokens[2].position, 3);
+/// ```
+pub fn tokenize_with_positions(text: &str) -> Vec<Token> {
+    let mut buf = String::with_capacity(32);
+    let mut tokens = Vec::new();
+
+    for (position, word) in text.unicode_words().map(strip_possessive).enumerate() {
+        buf.clear();
+        for c in word.chars() {
+            if c.is_alphanumeric() {
+                if c.is_ascii() {
+                    buf.push(c.to_ascii_lowercase());
+                } else {
+                    for lc in c.to_lowercase() {
+                        buf.push(lc);
+                    }
+                }
+            }
+        }
+
+        if buf.len() < 2 || is_stopword(&buf) {
+            continue; // position consumed, no token emitted
+        }
+
+        tokens.push(Token {
+            term: stemmer::stem(&buf),
+            position: position as u32,
+        });
+    }
+
+    tokens
+}
+
 /// Tokenize and deduplicate for query processing.
 ///
 /// # Example
@@ -293,5 +355,126 @@ mod tests {
         assert_eq!(t1, vec!["hello", "world"]);
         assert_eq!(t2, vec!["goodby", "planet"]);
         assert_eq!(t1, t3);
+    }
+
+    // ------------------------------------------------------------------
+    // tokenize_with_positions tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_positions_basic() {
+        let tokens = tokenize_with_positions("hello world");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(
+            tokens[0],
+            Token {
+                term: "hello".into(),
+                position: 0
+            }
+        );
+        assert_eq!(
+            tokens[1],
+            Token {
+                term: "world".into(),
+                position: 1
+            }
+        );
+    }
+
+    #[test]
+    fn test_positions_stopword_gaps() {
+        // "The" is a stopword → consumes position 0
+        let tokens = tokenize_with_positions("The quick brown fox");
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[0].term, "quick");
+        assert_eq!(tokens[0].position, 1);
+        assert_eq!(tokens[1].term, "brown");
+        assert_eq!(tokens[1].position, 2);
+        assert_eq!(tokens[2].term, "fox");
+        assert_eq!(tokens[2].position, 3);
+    }
+
+    #[test]
+    fn test_positions_multiple_stopwords() {
+        // "the", "and", "the" are all stopwords → positions 0, 2, 3 consumed
+        let tokens = tokenize_with_positions("the quick and the dead");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(
+            tokens[0],
+            Token {
+                term: "quick".into(),
+                position: 1
+            }
+        );
+        assert_eq!(
+            tokens[1],
+            Token {
+                term: "dead".into(),
+                position: 4
+            }
+        );
+    }
+
+    #[test]
+    fn test_positions_short_filtered() {
+        // "I" is filtered (< 2 chars) and also "a" (stopword) → both consume positions
+        let tokens = tokenize_with_positions("I am a test");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(
+            tokens[0],
+            Token {
+                term: "am".into(),
+                position: 1
+            }
+        );
+        assert_eq!(
+            tokens[1],
+            Token {
+                term: "test".into(),
+                position: 3
+            }
+        );
+    }
+
+    #[test]
+    fn test_positions_empty() {
+        let tokens = tokenize_with_positions("");
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn test_positions_all_stopwords() {
+        let tokens = tokenize_with_positions("the a an is");
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn test_positions_stemming() {
+        let tokens = tokenize_with_positions("running quickly");
+        assert_eq!(
+            tokens[0],
+            Token {
+                term: "run".into(),
+                position: 0
+            }
+        );
+        assert_eq!(
+            tokens[1],
+            Token {
+                term: "quickli".into(),
+                position: 1
+            }
+        );
+    }
+
+    #[test]
+    fn test_positions_consistent_with_tokenize() {
+        // Terms from tokenize_with_positions should match tokenize
+        let text = "The treatment of bacterial infections in patients";
+        let terms: Vec<String> = tokenize_with_positions(text)
+            .iter()
+            .map(|t| t.term.clone())
+            .collect();
+        assert_eq!(terms, tokenize(text));
     }
 }
