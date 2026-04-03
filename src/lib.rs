@@ -43,7 +43,7 @@
 //! | **Event Log** | Immutable audit trail | `event_append`, `event_get`, `event_get_by_type` |
 //! | **State Cell** | CAS-based coordination | `state_set`, `state_get`, `state_cas` |
 //! | **JSON Store** | Structured documents | `json_set`, `json_get`, `json_delete` |
-//! | **Vector Store** | Embeddings, similarity search | `vector_upsert`, `vector_search` |
+//! | **Vector Store** | Embeddings, similarity search | `vector_upsert`, `vector_query` |
 //! | **Branch** | Data isolation | `create_branch`, `set_branch`, `list_branches` |
 //!
 //! # Architecture

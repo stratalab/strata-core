@@ -533,7 +533,7 @@ fn test_is_write_classification() {
             key: "".into(),
             as_of: None,
         },
-        Command::VectorSearch {
+        Command::VectorQuery {
             branch: None,
             space: None,
             collection: "".into(),

@@ -667,7 +667,7 @@ fn parse_vector_cmd(matches: &ArgMatches, state: &SessionState) -> Result<CliAct
                     serde_json::from_str(s).map_err(|e| format!("Invalid filter JSON: {}", e))
                 })
                 .transpose()?;
-            Ok(CliAction::Execute(Command::VectorSearch {
+            Ok(CliAction::Execute(Command::VectorQuery {
                 branch: branch(state),
                 space: space(state),
                 collection,

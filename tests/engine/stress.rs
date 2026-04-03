@@ -241,7 +241,7 @@ fn stress_cross_primitive_transactions() {
 /// Vector search stress
 #[test]
 #[ignore]
-fn stress_vector_search() {
+fn stress_vector_query() {
     let test_db = TestDb::new_in_memory();
     let vector = test_db.vector();
     let branch_id = test_db.branch_id;

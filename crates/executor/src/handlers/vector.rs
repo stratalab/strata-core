@@ -238,9 +238,9 @@ pub fn vector_delete(
     })
 }
 
-/// Handle VectorSearch command.
+/// Handle VectorQuery command.
 #[allow(clippy::too_many_arguments)]
-pub fn vector_search(
+pub fn vector_query(
     p: &Arc<Primitives>,
     branch: BranchId,
     space: String,
@@ -501,9 +501,9 @@ pub fn vector_batch_delete(
     Ok(Output::BatchResults(results))
 }
 
-/// Handle VectorSearch with as_of timestamp (time-travel search).
+/// Handle VectorQuery with as_of timestamp (time-travel search).
 #[allow(clippy::too_many_arguments)]
-pub fn vector_search_at(
+pub fn vector_query_at(
     p: &Arc<Primitives>,
     branch: BranchId,
     space: String,

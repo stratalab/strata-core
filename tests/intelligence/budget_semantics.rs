@@ -6,7 +6,7 @@
 use crate::common::*;
 use strata_core::search_types::{SearchBudget, SearchRequest};
 use strata_engine::KVStore;
-use strata_search::DatabaseSearchExt;
+use crate::common::search::substrate_search;
 use std::collections::HashSet;
 
 // ============================================================================
@@ -149,20 +149,32 @@ fn test_tier3_scores_decreasing_with_budget() {
 /// Budget never introduces duplicates
 #[test]
 fn test_tier3_budget_no_duplicates() {
+    use strata_engine::search::recipe::get_builtin_recipe;
+    use strata_search::substrate::{self, RetrievalRequest};
+
     let db = create_test_db();
     let branch_id = test_branch_id();
     populate_large_dataset(&db, &branch_id, 50);
 
-    let hybrid = db.hybrid();
+    let mut recipe = get_builtin_recipe("keyword").expect("keyword recipe must exist");
+    recipe.transform = Some(strata_engine::search::recipe::TransformConfig {
+        limit: Some(50),
+        ..Default::default()
+    });
 
-    let budget = SearchBudget::default()
-        .with_candidates(30)
-        .with_per_primitive(30);
-    let req = SearchRequest::new(branch_id, "searchable")
-        .with_budget(budget)
-        .with_k(50);
+    let req = RetrievalRequest {
+        query: "searchable".into(),
+        branch_id,
+        space: "default".into(),
+        recipe,
+        embedding: None,
+        time_range: None,
+        primitive_filter: None,
+        as_of: None,
+        budget_ms: Some(500), // 500ms budget — exercises budget path
+    };
 
-    let response = hybrid.search(&req).unwrap();
+    let response = substrate::retrieve(&db, &req).unwrap();
 
     let refs: HashSet<_> = response.hits.iter().map(|h| &h.doc_ref).collect();
     assert_eq!(

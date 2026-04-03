@@ -1,7 +1,7 @@
 //! Retrieval substrate — the model-free, deterministic core of Strata search.
 //!
 //! The substrate executes a resolved [`Recipe`] to produce ranked results.
-//! It is the single entry point for all retrieval. The intelligence layer
+//! It is the **single entry point** for all retrieval. The intelligence layer
 //! (embedding, expansion, reranking, RAG) wraps the substrate — model-dependent
 //! operations happen outside, not inside.
 //!
@@ -10,6 +10,13 @@
 //! - **INV-1 Deterministic.** Same recipe + same snapshot = identical results.
 //! - **INV-2 Declarative.** The recipe is the complete spec. No hidden state.
 //! - **INV-3 Snapshot-isolated.** Retrieval runs against a consistent MVCC snapshot.
+//!
+//! # Parallelism
+//!
+//! BM25 fan-out and vector shadow-collection search run concurrently via
+//! `rayon::join()`. Multiple shadow collections are searched in parallel via
+//! `par_iter()`. This mirrors the performance characteristics of the former
+//! `HybridSearch` orchestrator while keeping all retrieval in one code path.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -17,12 +24,14 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
 
+use rayon::prelude::*;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::StrataResult;
 use strata_engine::search::recipe::FusionConfig;
 use strata_engine::search::{
     EntityRef, PrimitiveType, Recipe, SearchHit, SearchMode, SearchRequest, Searchable,
 };
+use strata_engine::system_space::SYSTEM_SPACE;
 use strata_engine::Database;
 
 // Primitive facades
@@ -52,6 +61,9 @@ pub struct RetrievalRequest {
     pub primitive_filter: Option<Vec<PrimitiveType>>,
     /// Point-in-time search: only return results visible at this timestamp (microseconds).
     pub as_of: Option<u64>,
+    /// Optional wall-clock budget in milliseconds. When exceeded, remaining stages
+    /// are skipped and `budget_exhausted` is set in stats. `None` means no limit.
+    pub budget_ms: Option<u64>,
 }
 
 /// Fixed response format — all fields always present.
@@ -98,138 +110,174 @@ pub struct StageStats {
 
 /// Execute a recipe against the database, returning ranked results.
 ///
-/// This is the single entry point for all retrieval. The caller is responsible
+/// This is the **single entry point** for all retrieval. The caller is responsible
 /// for resolving the recipe (three-level merge) and embedding the query
 /// (intelligence layer) before calling this function.
+///
+/// BM25 and vector retrieval run in parallel via `rayon::join()`. Shadow
+/// collections are discovered dynamically and searched with `par_iter()`.
 pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<RetrievalResponse> {
     let start = Instant::now();
     let recipe = &request.recipe;
-    let mut candidate_lists: Vec<(String, Vec<SearchHit>)> = Vec::new();
     let mut stages = HashMap::new();
+    let mut budget_exhausted = false;
+
+    // Compute deadline from optional budget.
+    let deadline: Option<Instant> = request
+        .budget_ms
+        .map(|ms| start + std::time::Duration::from_millis(ms));
 
     // INV-3: Snapshot isolation — all primitives see the same version.
     let snapshot = db.current_version();
 
-    // ---- Step 1: BM25 retrieval across primitives ----
-    if let Some(bm25_cfg) = recipe.retrieve.as_ref().and_then(|r| r.bm25.as_ref()) {
-        let bm25_start = Instant::now();
-        let k = bm25_cfg.k.unwrap_or(50);
+    let has_bm25 = recipe
+        .retrieve
+        .as_ref()
+        .and_then(|r| r.bm25.as_ref())
+        .is_some();
+    let has_vector = recipe
+        .retrieve
+        .as_ref()
+        .and_then(|r| r.vector.as_ref())
+        .is_some()
+        && request.embedding.is_some();
 
-        let mut search_req = SearchRequest::new(request.branch_id, &request.query)
-            .with_k(k)
-            .with_mode(SearchMode::Keyword)
-            .with_space(&request.space)
-            .with_snapshot_version(snapshot);
-        if let Some((start, end)) = request.time_range {
-            search_req = search_req.with_time_range(start, end);
-        }
-        if let Some(ref filter) = request.primitive_filter {
-            search_req = search_req.with_primitive_filter(filter.clone());
-        }
-
-        let mut bm25_hits = Vec::new();
-
-        // Fan out to BM25-capable primitives, respecting primitive filter.
-        let all_primitives: Vec<(PrimitiveType, Box<dyn Searchable>)> = vec![
-            (PrimitiveType::Kv, Box::new(KVStore::new(db.clone()))),
-            (PrimitiveType::Json, Box::new(JsonStore::new(db.clone()))),
-            (PrimitiveType::Event, Box::new(EventLog::new(db.clone()))),
-            (PrimitiveType::Graph, Box::new(GraphStore::new(db.clone()))),
-        ];
-
-        for (kind, prim) in &all_primitives {
-            if let Some(ref filter) = request.primitive_filter {
-                if !filter.contains(kind) {
-                    continue;
-                }
+    // ---- Parallel BM25 + Vector retrieval via rayon::join() ----
+    let (bm25_result, vector_result) = rayon::join(
+        || -> (Vec<SearchHit>, Option<StageStats>, bool) {
+            if !has_bm25 {
+                return (Vec::new(), None, false);
             }
-            match prim.search(&search_req) {
-                Ok(resp) => bm25_hits.extend(resp.hits),
-                Err(e) => tracing::warn!(
-                    primitive = %prim.primitive_kind(),
-                    error = %e,
-                    "BM25 retrieval error, skipping primitive"
-                ),
-            }
-        }
-
-        // Sort by score descending, deterministic tie-breaking by entity hash.
-        bm25_hits.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| entity_ref_order(&a.doc_ref, &b.doc_ref))
-        });
-        bm25_hits.truncate(k);
-
-        // Temporal post-filter: discard hits not visible at as_of timestamp.
-        if let Some(as_of_ts) = request.as_of {
-            let ns = Arc::new(Namespace::new(request.branch_id, request.space.clone()));
-            bm25_hits.retain(|hit| {
-                match &hit.doc_ref {
-                    EntityRef::Kv { key, .. } => db
-                        .get_at_timestamp(&Key::new_kv(ns.clone(), key.as_bytes()), as_of_ts)
-                        .ok()
-                        .flatten()
-                        .is_some(),
-                    EntityRef::Json { doc_id, .. } => db
-                        .get_at_timestamp(&Key::new_json(ns.clone(), doc_id), as_of_ts)
-                        .ok()
-                        .flatten()
-                        .is_some(),
-                    // Events are append-only — always visible once indexed.
-                    _ => true,
-                }
-            });
-        }
-
-        stages.insert(
-            "bm25".into(),
-            StageStats {
-                elapsed_ms: bm25_start.elapsed().as_secs_f64() * 1000.0,
-                candidates: bm25_hits.len(),
-            },
-        );
-        candidate_lists.push(("bm25".into(), bm25_hits));
-    }
-
-    // ---- Step 2: Vector retrieval ----
-    if let Some(vec_cfg) = recipe.retrieve.as_ref().and_then(|r| r.vector.as_ref()) {
-        if let Some(embedding) = &request.embedding {
-            let vec_start = Instant::now();
-            let k = vec_cfg.k.unwrap_or(50);
+            let bm25_cfg = recipe.retrieve.as_ref().unwrap().bm25.as_ref().unwrap();
+            let bm25_start = Instant::now();
+            let k = bm25_cfg.k.unwrap_or(50);
 
             let mut search_req = SearchRequest::new(request.branch_id, &request.query)
                 .with_k(k)
-                .with_mode(SearchMode::Vector)
+                .with_mode(SearchMode::Keyword)
                 .with_space(&request.space)
-                .with_precomputed_embedding(embedding.clone())
                 .with_snapshot_version(snapshot);
-            if let Some((start, end)) = request.time_range {
-                search_req = search_req.with_time_range(start, end);
+            if let Some((s, e)) = request.time_range {
+                search_req = search_req.with_time_range(s, e);
             }
+            if let Some(ref filter) = request.primitive_filter {
+                search_req = search_req.with_primitive_filter(filter.clone());
+            }
+
+            let mut bm25_hits = Vec::new();
+            let mut over_budget = false;
+
+            // Fan out to BM25-capable primitives, respecting primitive filter.
+            let all_primitives: Vec<(PrimitiveType, Box<dyn Searchable>)> = vec![
+                (PrimitiveType::Kv, Box::new(KVStore::new(db.clone()))),
+                (PrimitiveType::Json, Box::new(JsonStore::new(db.clone()))),
+                (PrimitiveType::Event, Box::new(EventLog::new(db.clone()))),
+                (PrimitiveType::Graph, Box::new(GraphStore::new(db.clone()))),
+            ];
+
+            for (kind, prim) in &all_primitives {
+                // Budget check between primitives.
+                if let Some(dl) = deadline {
+                    if Instant::now() >= dl {
+                        over_budget = true;
+                        break;
+                    }
+                }
+                if let Some(ref filter) = request.primitive_filter {
+                    if !filter.contains(kind) {
+                        continue;
+                    }
+                }
+                match prim.search(&search_req) {
+                    Ok(resp) => bm25_hits.extend(resp.hits),
+                    Err(e) => tracing::warn!(
+                        primitive = %prim.primitive_kind(),
+                        error = %e,
+                        "BM25 retrieval error, skipping primitive"
+                    ),
+                }
+            }
+
+            // Sort by score descending, deterministic tie-breaking by entity hash.
+            bm25_hits.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| entity_ref_order(&a.doc_ref, &b.doc_ref))
+            });
+            bm25_hits.truncate(k);
+
+            // Temporal post-filter: discard hits not visible at as_of timestamp.
+            if let Some(as_of_ts) = request.as_of {
+                let ns = Arc::new(Namespace::new(request.branch_id, request.space.clone()));
+                bm25_hits.retain(|hit| {
+                    match &hit.doc_ref {
+                        EntityRef::Kv { key, .. } => db
+                            .get_at_timestamp(&Key::new_kv(ns.clone(), key.as_bytes()), as_of_ts)
+                            .ok()
+                            .flatten()
+                            .is_some(),
+                        EntityRef::Json { doc_id, .. } => db
+                            .get_at_timestamp(&Key::new_json(ns.clone(), doc_id), as_of_ts)
+                            .ok()
+                            .flatten()
+                            .is_some(),
+                        // Events are append-only — always visible once indexed.
+                        _ => true,
+                    }
+                });
+            }
+
+            let stats = StageStats {
+                elapsed_ms: bm25_start.elapsed().as_secs_f64() * 1000.0,
+                candidates: bm25_hits.len(),
+            };
+            (bm25_hits, Some(stats), over_budget)
+        },
+        || -> (Vec<SearchHit>, Option<StageStats>, bool) {
+            if !has_vector {
+                return (Vec::new(), None, false);
+            }
+            let vec_cfg = recipe.retrieve.as_ref().unwrap().vector.as_ref().unwrap();
+            let embedding = request.embedding.as_ref().unwrap();
+            let vec_start = Instant::now();
+            let k = vec_cfg.k.unwrap_or(50);
 
             let vector = VectorStore::new(db.clone());
 
-            // When as_of is set, use temporal vector search.
-            if let Some(as_of_ts) = request.as_of {
-                // Search system embed collections at the given timestamp.
-                let collections = vec_cfg.collections.as_deref().unwrap_or(&[]).to_vec();
-                let collection_names: Vec<String> = if collections.is_empty() {
-                    // Default: search all _system_embed_ collections
-                    vec![
-                        format!("_system_embed_kv_{}", request.space),
-                        format!("_system_embed_json_{}", request.space),
-                    ]
-                } else {
-                    collections
-                };
+            // Discover shadow collections dynamically, or use explicit list from recipe.
+            let explicit_collections = vec_cfg
+                .collections
+                .as_ref()
+                .filter(|c| !c.is_empty())
+                .cloned();
 
-                let mut vec_hits = Vec::new();
+            let collection_names: Vec<String> = if let Some(explicit) = explicit_collections {
+                explicit
+            } else {
+                // Dynamic discovery: list all _system_embed_* collections.
+                vector
+                    .list_collections(request.branch_id, SYSTEM_SPACE)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|c| c.name.starts_with("_system_embed_") && c.count > 0)
+                    .map(|c| c.name)
+                    .collect()
+            };
+
+            if collection_names.is_empty() {
+                return (Vec::new(), None, false);
+            }
+
+            // Search shadow collections in parallel.
+            let vec_hits: Vec<SearchHit> = if let Some(as_of_ts) = request.as_of {
+                // Temporal: use search_at per collection (sequential — search_at
+                // does its own over-fetch internally).
+                let mut hits = Vec::new();
                 for coll in &collection_names {
                     match vector.search_at(
                         request.branch_id,
-                        &request.space,
+                        SYSTEM_SPACE,
                         coll,
                         embedding,
                         k,
@@ -238,7 +286,7 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
                     ) {
                         Ok(matches) => {
                             for m in matches {
-                                vec_hits.push(SearchHit {
+                                hits.push(SearchHit {
                                     doc_ref: EntityRef::vector(request.branch_id, coll, &m.key),
                                     score: m.score,
                                     rank: 0,
@@ -255,50 +303,100 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
                         }
                     }
                 }
-
-                // Sort and truncate
-                vec_hits.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(Ordering::Equal)
-                        .then_with(|| entity_ref_order(&a.doc_ref, &b.doc_ref))
-                });
-                vec_hits.truncate(k);
-                for (i, hit) in vec_hits.iter_mut().enumerate() {
-                    hit.rank = (i + 1) as u32;
-                }
-
-                stages.insert(
-                    "vector".into(),
-                    StageStats {
-                        elapsed_ms: vec_start.elapsed().as_secs_f64() * 1000.0,
-                        candidates: vec_hits.len(),
-                    },
-                );
-                if !vec_hits.is_empty() {
-                    candidate_lists.push(("vector".into(), vec_hits));
-                }
+                hits
             } else {
-                match Searchable::search(&vector, &search_req) {
-                    Ok(resp) => {
-                        stages.insert(
-                            "vector".into(),
-                            StageStats {
-                                elapsed_ms: vec_start.elapsed().as_secs_f64() * 1000.0,
-                                candidates: resp.hits.len(),
-                            },
-                        );
-                        candidate_lists.push(("vector".into(), resp.hits));
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Vector retrieval error, skipping");
-                    }
-                }
+                // Non-temporal: par_iter across shadow collections with source resolution.
+                collection_names
+                    .par_iter()
+                    .flat_map(|coll| {
+                        let matches = if let Some((s, e)) = request.time_range {
+                            vector.system_search_with_sources_in_range(
+                                request.branch_id,
+                                coll,
+                                embedding,
+                                k,
+                                s,
+                                e,
+                            )
+                        } else {
+                            vector.system_search_with_sources(request.branch_id, coll, embedding, k)
+                        };
+
+                        matches
+                            .into_iter()
+                            .flat_map(|results| results.into_iter())
+                            .map(|m| {
+                                let doc_ref = m.source_ref.unwrap_or_else(|| {
+                                    EntityRef::vector(request.branch_id, coll, &m.key)
+                                });
+                                let snippet = m
+                                    .metadata
+                                    .as_ref()
+                                    .map(|meta| truncate_text(&meta.to_string(), 100));
+                                SearchHit {
+                                    doc_ref,
+                                    score: m.score,
+                                    rank: 0,
+                                    snippet,
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
+            };
+
+            // Sort and truncate.
+            let mut vec_hits = vec_hits;
+            vec_hits.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| entity_ref_order(&a.doc_ref, &b.doc_ref))
+            });
+            vec_hits.truncate(k);
+            for (i, hit) in vec_hits.iter_mut().enumerate() {
+                hit.rank = (i + 1) as u32;
             }
+
+            let stats = StageStats {
+                elapsed_ms: vec_start.elapsed().as_secs_f64() * 1000.0,
+                candidates: vec_hits.len(),
+            };
+            (vec_hits, Some(stats), false)
+        },
+    );
+
+    // Collect results from parallel branches.
+    let (bm25_hits, bm25_stats, bm25_over_budget) = bm25_result;
+    let (vec_hits, vec_stats, _vec_over_budget) = vector_result;
+
+    if bm25_over_budget {
+        budget_exhausted = true;
+    }
+
+    let mut candidate_lists: Vec<(String, Vec<SearchHit>)> = Vec::new();
+
+    if let Some(stats) = bm25_stats {
+        stages.insert("bm25".into(), stats);
+        if !bm25_hits.is_empty() {
+            candidate_lists.push(("bm25".into(), bm25_hits));
+        }
+    }
+    if let Some(stats) = vec_stats {
+        stages.insert("vector".into(), stats);
+        if !vec_hits.is_empty() {
+            candidate_lists.push(("vector".into(), vec_hits));
         }
     }
 
-    // ---- Step 3: RRF Fusion ----
+    // ---- Budget check before fusion ----
+    if let Some(dl) = deadline {
+        if Instant::now() >= dl {
+            budget_exhausted = true;
+        }
+    }
+
+    // ---- RRF Fusion ----
     let fusion_start = Instant::now();
     let fused = rrf_fuse(&candidate_lists, recipe.fusion.as_ref());
     stages.insert(
@@ -309,7 +407,7 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
         },
     );
 
-    // ---- Step 4: Transform (limit) ----
+    // ---- Transform (limit) ----
     let limit = recipe
         .transform
         .as_ref()
@@ -322,7 +420,7 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
         hit.rank = (i + 1) as u32;
     }
 
-    // ---- Step 5: Return fixed-format response ----
+    // ---- Return fixed-format response ----
     Ok(RetrievalResponse {
         hits,
         answer: None,
@@ -334,9 +432,19 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
             recipe_used: "resolved".into(),
             elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
             stages,
-            budget_exhausted: false,
+            budget_exhausted,
         },
     })
+}
+
+/// Truncate text to approximately `max_chars` characters (Unicode-safe).
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    let truncated: String = text.chars().take(max_chars).collect();
+    if truncated.len() < text.len() {
+        format!("{}...", truncated)
+    } else {
+        truncated
+    }
 }
 
 // ============================================================================
@@ -488,6 +596,7 @@ mod tests {
             time_range: None,
             primitive_filter: None,
             as_of: None,
+            budget_ms: None,
         };
 
         let response = retrieve(&db, &request).unwrap();
@@ -532,6 +641,7 @@ mod tests {
             time_range: None,
             primitive_filter: None,
             as_of: None,
+            budget_ms: None,
         };
 
         let response = retrieve(&db, &request).unwrap();
@@ -551,6 +661,7 @@ mod tests {
             time_range: None,
             primitive_filter: None,
             as_of: None,
+            budget_ms: None,
         };
 
         let response = retrieve(&db, &request).unwrap();
@@ -576,6 +687,7 @@ mod tests {
             time_range: None,
             primitive_filter: None,
             as_of: None,
+            budget_ms: None,
         };
 
         let r1 = retrieve(&db, &req).unwrap();
@@ -610,6 +722,7 @@ mod tests {
             time_range: None,
             primitive_filter: None,
             as_of: None,
+            budget_ms: None,
         };
 
         let response = retrieve(&db, &request).unwrap();
@@ -762,6 +875,7 @@ mod tests {
             time_range: None,
             primitive_filter: None,
             as_of: Some(t1),
+            budget_ms: None,
         };
 
         let response = retrieve(&db, &request).unwrap();
@@ -799,6 +913,7 @@ mod tests {
             time_range: None,
             primitive_filter: None,
             as_of: Some(1), // microsecond 1 — before any data
+            budget_ms: None,
         };
 
         let response = retrieve(&db, &request).unwrap();
@@ -823,9 +938,109 @@ mod tests {
             time_range: None,
             primitive_filter: None,
             as_of: None,
+            budget_ms: None,
         };
 
         let response = retrieve(&db, &request).unwrap();
         assert_eq!(response.hits.len(), 2, "Both docs should be returned");
+    }
+
+    // ---- Budget enforcement tests ----
+
+    #[test]
+    fn test_retrieve_budget_no_limit() {
+        let (db, branch_id) = setup_db_with_kv(&[("a", "test budget enforcement")]);
+        let recipe = test_recipe();
+        let request = RetrievalRequest {
+            query: "test".into(),
+            branch_id,
+            space: "default".into(),
+            recipe,
+            embedding: None,
+            time_range: None,
+            primitive_filter: None,
+            as_of: None,
+            budget_ms: None, // No limit
+        };
+        let response = retrieve(&db, &request).unwrap();
+        assert!(!response.stats.budget_exhausted);
+    }
+
+    #[test]
+    fn test_retrieve_budget_generous() {
+        let (db, branch_id) = setup_db_with_kv(&[("a", "test budget generous")]);
+        let recipe = test_recipe();
+        let request = RetrievalRequest {
+            query: "test".into(),
+            branch_id,
+            space: "default".into(),
+            recipe,
+            embedding: None,
+            time_range: None,
+            primitive_filter: None,
+            as_of: None,
+            budget_ms: Some(10_000), // 10 seconds — should complete
+        };
+        let response = retrieve(&db, &request).unwrap();
+        assert!(!response.stats.budget_exhausted);
+        assert!(!response.hits.is_empty());
+    }
+
+    #[test]
+    fn test_retrieve_budget_zero_exhausts() {
+        let (db, branch_id) = setup_db_with_kv(&[("a", "test budget zero")]);
+        let recipe = test_recipe();
+        let request = RetrievalRequest {
+            query: "test".into(),
+            branch_id,
+            space: "default".into(),
+            recipe,
+            embedding: None,
+            time_range: None,
+            primitive_filter: None,
+            as_of: None,
+            budget_ms: Some(0), // Zero budget — exhausted immediately
+        };
+        let response = retrieve(&db, &request).unwrap();
+        assert!(
+            response.stats.budget_exhausted,
+            "Zero budget should be exhausted"
+        );
+    }
+
+    // ---- Rayon parallelism determinism test ----
+
+    #[test]
+    fn test_retrieve_parallel_deterministic() {
+        // Run the same query many times to catch any non-determinism from rayon.
+        let (db, branch_id) = setup_db_with_kv(&[
+            ("p1", "alpha beta gamma delta"),
+            ("p2", "beta gamma delta epsilon"),
+            ("p3", "gamma delta epsilon zeta"),
+            ("p4", "delta epsilon zeta eta"),
+        ]);
+        let recipe = test_recipe();
+        let request = RetrievalRequest {
+            query: "gamma delta".into(),
+            branch_id,
+            space: "default".into(),
+            recipe,
+            embedding: None,
+            time_range: None,
+            primitive_filter: None,
+            as_of: None,
+            budget_ms: None,
+        };
+
+        let baseline = retrieve(&db, &request).unwrap();
+        for _ in 0..10 {
+            let run = retrieve(&db, &request).unwrap();
+            assert_eq!(baseline.hits.len(), run.hits.len());
+            for (a, b) in baseline.hits.iter().zip(run.hits.iter()) {
+                assert_eq!(a.doc_ref, b.doc_ref, "Non-deterministic hit ordering");
+                assert_eq!(a.score, b.score, "Non-deterministic scores");
+                assert_eq!(a.rank, b.rank, "Non-deterministic ranks");
+            }
+        }
     }
 }

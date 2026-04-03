@@ -512,7 +512,7 @@ fn test_eventlog_stream_metadata_accuracy() {
 
 /// Test vector search with edge case floats (zeros, very small, very large)
 #[test]
-fn test_vector_search_edge_case_floats() {
+fn test_vector_query_edge_case_floats() {
     let (db, _temp, branch_id) = setup();
     let store = VectorStore::new(db.clone());
 

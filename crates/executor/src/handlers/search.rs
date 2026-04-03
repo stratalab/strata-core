@@ -314,6 +314,7 @@ fn try_expand_query(
         time_range: None,
         primitive_filter: None,
         as_of: None,
+        budget_ms: None,
     };
 
     if let Ok(probe) = substrate::retrieve(&p.db, &probe_req) {
@@ -443,6 +444,7 @@ fn multi_pass_retrieve(
             time_range,
             primitive_filter: primitive_filter.map(|f| f.to_vec()),
             as_of,
+            budget_ms: None,
         };
 
         if let Ok(response) = substrate::retrieve(&p.db, &request) {

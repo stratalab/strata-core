@@ -1086,7 +1086,7 @@ fn error_recovery() {
     let executor = create_executor();
 
     // Cause an error (search on nonexistent vector collection)
-    let result = executor.execute(Command::VectorSearch {
+    let result = executor.execute(Command::VectorQuery {
         branch: None,
         space: None,
         collection: "nonexistent".into(),

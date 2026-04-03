@@ -7,7 +7,7 @@ use strata_core::search_types::{PrimitiveType, SearchRequest};
 use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_engine::{KVStore, BranchIndex};
-use strata_search::DatabaseSearchExt;
+use crate::common::search::{substrate_search, verify_substrate_scores_decreasing};
 
 // ============================================================================
 // Determinism Tests
@@ -53,18 +53,17 @@ fn test_tier2_primitive_search_deterministic() {
     }
 }
 
-/// Hybrid search is deterministic
+/// Substrate search is deterministic
 #[test]
-fn test_tier2_hybrid_search_deterministic() {
+fn test_tier2_substrate_search_deterministic() {
     let db = create_test_db();
     let branch_id = test_branch_id();
     populate_test_data(&db, &branch_id);
 
-    let hybrid = db.hybrid();
     let req = SearchRequest::new(branch_id, "test");
 
-    let r1 = hybrid.search(&req).unwrap();
-    let r2 = hybrid.search(&req).unwrap();
+    let r1 = substrate_search(&db, &req);
+    let r2 = substrate_search(&db, &req);
 
     assert_eq!(r1.hits.len(), r2.hits.len());
     for (h1, h2) in r1.hits.iter().zip(r2.hits.iter()) {
@@ -141,9 +140,8 @@ fn test_tier2_nonexistent_branch_empty() {
     let db = create_test_db();
     let branch_id = BranchId::new();
 
-    let hybrid = db.hybrid();
     let req = SearchRequest::new(branch_id, "test");
-    let response = hybrid.search(&req).unwrap();
+    let response = substrate_search(&db, &req);
 
     assert!(
         response.hits.is_empty(),
@@ -162,14 +160,14 @@ fn test_tier2_primitive_filter_works() {
     let branch_id = test_branch_id();
     populate_test_data(&db, &branch_id);
 
-    let hybrid = db.hybrid();
-
     // Search only KV primitive
     let req = SearchRequest::new(branch_id, "test").with_primitive_filter(vec![PrimitiveType::Kv]);
-    let response = hybrid.search(&req).unwrap();
+    let response = substrate_search(&db, &req);
 
     // All results should be from KV only
-    assert_all_from_primitive(&response, PrimitiveType::Kv);
+    for hit in &response.hits {
+        assert_eq!(hit.doc_ref.primitive_type(), PrimitiveType::Kv);
+    }
 }
 
 /// Empty primitive filter means no results
@@ -179,11 +177,9 @@ fn test_tier2_empty_filter_no_results() {
     let branch_id = test_branch_id();
     populate_test_data(&db, &branch_id);
 
-    let hybrid = db.hybrid();
-
     // Search with empty filter
     let req = SearchRequest::new(branch_id, "test").with_primitive_filter(vec![]);
-    let response = hybrid.search(&req).unwrap();
+    let response = substrate_search(&db, &req);
 
     assert!(
         response.hits.is_empty(),
@@ -202,11 +198,10 @@ fn test_tier2_scores_monotonically_decreasing() {
     let branch_id = test_branch_id();
     populate_test_data(&db, &branch_id);
 
-    let hybrid = db.hybrid();
     let req = SearchRequest::new(branch_id, "test").with_k(20);
-    let response = hybrid.search(&req).unwrap();
+    let response = substrate_search(&db, &req);
 
-    verify_scores_decreasing(&response);
+    verify_substrate_scores_decreasing(&response.hits);
 }
 
 /// Ranks are sequential starting from 1
@@ -246,13 +241,11 @@ fn test_tier2_consistent_across_k_values() {
     let branch_id = test_branch_id();
     populate_test_data(&db, &branch_id);
 
-    let hybrid = db.hybrid();
-
     let req_k3 = SearchRequest::new(branch_id, "test").with_k(3);
     let req_k10 = SearchRequest::new(branch_id, "test").with_k(10);
 
-    let r3 = hybrid.search(&req_k3).unwrap();
-    let r10 = hybrid.search(&req_k10).unwrap();
+    let r3 = substrate_search(&db, &req_k3);
+    let r10 = substrate_search(&db, &req_k10);
 
     // Smaller k results should be prefix of larger k results
     for (i, hit) in r3.hits.iter().enumerate() {

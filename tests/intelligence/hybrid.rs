@@ -1,61 +1,50 @@
-//! Tier 8: Cross-Primitive Search (Hybrid)
+//! Tier 8: Cross-Primitive Search (Substrate)
 //!
-//! Tests for HybridSearch orchestration.
+//! Tests for the unified retrieval substrate orchestration.
 
 use crate::common::*;
+use crate::common::search::{substrate_search, verify_substrate_ranks_sequential, verify_substrate_scores_decreasing};
 use strata_core::search_types::{PrimitiveType, SearchRequest};
-use strata_search::{DatabaseSearchExt, HybridSearch, RRFFuser};
 use std::collections::HashSet;
-use std::sync::Arc;
 
 // ============================================================================
-// Hybrid Search Basic Tests
+// Substrate Search Basic Tests
 // ============================================================================
 
-/// db.hybrid() returns a HybridSearch
+/// Substrate search works on empty database
 #[test]
-fn test_tier8_db_hybrid_returns_hybrid_search() {
-    let db = create_test_db();
-    let _hybrid = db.hybrid();
-}
-
-/// Hybrid search works on empty database
-#[test]
-fn test_tier8_hybrid_empty_db() {
+fn test_tier8_substrate_empty_db() {
     let db = create_test_db();
     let branch_id = test_branch_id();
 
-    let hybrid = db.hybrid();
     let req = SearchRequest::new(branch_id, "test");
-    let response = hybrid.search(&req).unwrap();
+    let response = substrate_search(&db, &req);
 
     assert!(response.hits.is_empty());
 }
 
-/// Hybrid search finds results across primitives
+/// Substrate search finds results across primitives
 #[test]
-fn test_tier8_hybrid_finds_results() {
+fn test_tier8_substrate_finds_results() {
     let db = create_test_db();
     let branch_id = test_branch_id();
     populate_test_data(&db, &branch_id);
 
-    let hybrid = db.hybrid();
     let req = SearchRequest::new(branch_id, "test");
-    let response = hybrid.search(&req).unwrap();
+    let response = substrate_search(&db, &req);
 
     assert!(!response.hits.is_empty());
 }
 
-/// Hybrid search includes KV results
+/// Substrate search includes KV results
 #[test]
-fn test_tier8_hybrid_includes_kv() {
+fn test_tier8_substrate_includes_kv() {
     let db = create_test_db();
     let branch_id = test_branch_id();
     populate_test_data(&db, &branch_id);
 
-    let hybrid = db.hybrid();
     let req = SearchRequest::new(branch_id, "test");
-    let response = hybrid.search(&req).unwrap();
+    let response = substrate_search(&db, &req);
 
     let primitives: HashSet<_> = response
         .hits
@@ -67,19 +56,18 @@ fn test_tier8_hybrid_includes_kv() {
 }
 
 // ============================================================================
-// Hybrid Search Filter Tests
+// Substrate Search Filter Tests
 // ============================================================================
 
-/// Hybrid search respects primitive filter
+/// Substrate search respects primitive filter
 #[test]
-fn test_tier8_hybrid_respects_filter() {
+fn test_tier8_substrate_respects_filter() {
     let db = create_test_db();
     let branch_id = test_branch_id();
     populate_test_data(&db, &branch_id);
 
-    let hybrid = db.hybrid();
     let req = SearchRequest::new(branch_id, "test").with_primitive_filter(vec![PrimitiveType::Kv]);
-    let response = hybrid.search(&req).unwrap();
+    let response = substrate_search(&db, &req);
 
     for hit in &response.hits {
         assert_eq!(hit.doc_ref.primitive_type(), PrimitiveType::Kv);
@@ -88,82 +76,24 @@ fn test_tier8_hybrid_respects_filter() {
 
 /// Empty filter returns no results
 #[test]
-fn test_tier8_hybrid_empty_filter() {
+fn test_tier8_substrate_empty_filter() {
     let db = create_test_db();
     let branch_id = test_branch_id();
     populate_test_data(&db, &branch_id);
 
-    let hybrid = db.hybrid();
     let req = SearchRequest::new(branch_id, "test").with_primitive_filter(vec![]);
-    let response = hybrid.search(&req).unwrap();
+    let response = substrate_search(&db, &req);
 
     assert!(response.hits.is_empty());
 }
 
-/// Multiple primitive filter works
-#[test]
-fn test_tier8_hybrid_multi_filter() {
-    let db = create_test_db();
-    let branch_id = test_branch_id();
-    populate_test_data(&db, &branch_id);
-
-    let hybrid = db.hybrid();
-    let req = SearchRequest::new(branch_id, "test")
-        .with_primitive_filter(vec![PrimitiveType::Kv, PrimitiveType::Branch]);
-    let response = hybrid.search(&req).unwrap();
-
-    for hit in &response.hits {
-        let kind = hit.doc_ref.primitive_type();
-        assert!(
-            kind == PrimitiveType::Kv || kind == PrimitiveType::Branch,
-            "Should only include filtered primitives"
-        );
-    }
-}
-
 // ============================================================================
-// Hybrid Search Fuser Tests
+// Substrate Search Consistency Tests
 // ============================================================================
 
-/// Can use custom fuser
+/// Substrate search is deterministic
 #[test]
-fn test_tier8_hybrid_custom_fuser() {
-    let db = create_test_db();
-    let branch_id = test_branch_id();
-    populate_test_data(&db, &branch_id);
-
-    let hybrid = HybridSearch::new(db.clone()).with_fuser(Arc::new(RRFFuser::default()));
-
-    let req = SearchRequest::new(branch_id, "test");
-    let response = hybrid.search(&req).unwrap();
-
-    assert!(!response.hits.is_empty());
-}
-
-/// RRF fuser produces valid results
-#[test]
-fn test_tier8_hybrid_rrf_valid() {
-    let db = create_test_db();
-    let branch_id = test_branch_id();
-    populate_test_data(&db, &branch_id);
-
-    let hybrid = HybridSearch::new(db.clone()).with_fuser(Arc::new(RRFFuser::default()));
-
-    let req = SearchRequest::new(branch_id, "test").with_k(5);
-    let response = hybrid.search(&req).unwrap();
-
-    // Should have valid structure
-    verify_scores_decreasing(&response);
-    verify_ranks_sequential(&response);
-}
-
-// ============================================================================
-// Hybrid Search Consistency Tests
-// ============================================================================
-
-/// Hybrid search is deterministic
-#[test]
-fn test_tier8_hybrid_deterministic() {
+fn test_tier8_substrate_deterministic() {
     let db = create_test_db();
     let branch_id = test_branch_id();
     populate_test_data(&db, &branch_id);
@@ -172,61 +102,64 @@ fn test_tier8_hybrid_deterministic() {
     verify_deterministic(&db, &req);
 }
 
-/// Hybrid search results have valid ranks
+/// Substrate search results have valid ranks
 #[test]
-fn test_tier8_hybrid_valid_ranks() {
+fn test_tier8_substrate_valid_ranks() {
     let db = create_test_db();
     let branch_id = test_branch_id();
     populate_test_data(&db, &branch_id);
 
-    let hybrid = db.hybrid();
     let req = SearchRequest::new(branch_id, "test");
-    let response = hybrid.search(&req).unwrap();
+    let response = substrate_search(&db, &req);
 
-    verify_ranks_sequential(&response);
+    verify_substrate_ranks_sequential(&response.hits);
 }
 
-/// Hybrid search results have valid scores
+/// Substrate search results have valid scores
 #[test]
-fn test_tier8_hybrid_valid_scores() {
+fn test_tier8_substrate_valid_scores() {
     let db = create_test_db();
     let branch_id = test_branch_id();
     populate_test_data(&db, &branch_id);
 
-    let hybrid = db.hybrid();
     let req = SearchRequest::new(branch_id, "test");
-    let response = hybrid.search(&req).unwrap();
+    let response = substrate_search(&db, &req);
 
-    verify_scores_decreasing(&response);
+    verify_substrate_scores_decreasing(&response.hits);
 }
 
 // ============================================================================
-// Hybrid Search Stats Tests
+// Substrate Search Stats Tests
 // ============================================================================
 
-/// Hybrid search populates stats
+/// Substrate search populates stats
 #[test]
-fn test_tier8_hybrid_populates_stats() {
+fn test_tier8_substrate_populates_stats() {
     let db = create_test_db();
     let branch_id = test_branch_id();
     populate_test_data(&db, &branch_id);
 
-    let hybrid = db.hybrid();
     let req = SearchRequest::new(branch_id, "test");
-    let response = hybrid.search(&req).unwrap();
+    let response = substrate_search(&db, &req);
 
     // Stats should be populated
-    let _ = response.stats.elapsed_micros;
-    let _ = response.stats.candidates_considered;
+    assert!(response.stats.elapsed_ms >= 0.0);
+    assert!(response.stats.snapshot_version > 0);
 }
 
 // ============================================================================
-// HybridSearch Thread Safety Tests
+// Budget Exhaustion Tests
 // ============================================================================
 
-/// HybridSearch is Send + Sync
+/// Budget exhaustion flag is reported correctly
 #[test]
-fn test_tier8_hybrid_send_sync() {
-    fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<HybridSearch>();
+fn test_tier8_substrate_budget_exhaustion() {
+    let db = create_test_db();
+    let branch_id = test_branch_id();
+    populate_test_data(&db, &branch_id);
+
+    // Search with no budget — should not be exhausted
+    let req = SearchRequest::new(branch_id, "test");
+    let response = substrate_search(&db, &req);
+    assert!(!response.stats.budget_exhausted);
 }

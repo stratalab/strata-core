@@ -684,7 +684,7 @@ impl strata_engine::search::Searchable for VectorStore {
     /// - For SearchMode::Keyword, Vector returns empty results
     /// - Vector does not attempt to do keyword matching on metadata
     /// - For SearchMode::Vector or SearchMode::Hybrid, the caller must
-    ///   provide the query embedding via VectorSearchRequest extension
+    ///   provide the query embedding via VectorQueryRequest extension
     ///
     /// The hybrid search orchestrator is responsible for:
     /// 1. Embedding the text query (using an external model)

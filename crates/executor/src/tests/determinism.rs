@@ -247,7 +247,7 @@ fn test_kv_list_determinism() {
 // =============================================================================
 
 #[test]
-fn test_vector_search_determinism() {
+fn test_vector_query_determinism() {
     let executor = create_test_executor();
 
     // Create collection
@@ -281,7 +281,7 @@ fn test_vector_search_determinism() {
     let query = vec![1.0, 0.0, 0.0, 0.0];
     let results: Vec<_> = (0..5)
         .map(|_| {
-            executor.execute(Command::VectorSearch {
+            executor.execute(Command::VectorQuery {
                 branch: Some(BranchId::from("default")),
                 space: None,
                 collection: "embeddings".to_string(),

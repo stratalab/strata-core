@@ -169,7 +169,7 @@ pub fn describe(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
 
     let capabilities = CapabilitySummary {
         search,
-        vector_search: has_vector_collections,
+        vector_query: has_vector_collections,
         generation,
         auto_embed: cfg.auto_embed,
     };

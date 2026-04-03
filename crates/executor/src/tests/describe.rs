@@ -47,7 +47,7 @@ fn describe_empty_database() {
             assert_eq!(d.config.durability, "standard");
             assert!(d.config.default_model.is_none());
             // Capabilities
-            assert!(!d.capabilities.vector_search);
+            assert!(!d.capabilities.vector_query);
             assert!(!d.capabilities.generation);
             assert!(!d.capabilities.auto_embed);
         }
@@ -221,14 +221,14 @@ fn describe_lists_vector_collections() {
             assert_eq!(coll.dimension, 128);
             assert_eq!(coll.metric, DistanceMetric::Cosine);
             assert_eq!(coll.count, 0);
-            assert!(d.capabilities.vector_search);
+            assert!(d.capabilities.vector_query);
         }
         other => panic!("Expected Described, got {:?}", other),
     }
 }
 
 #[test]
-fn describe_vector_search_false_without_collections() {
+fn describe_vector_query_false_without_collections() {
     let executor = create_test_executor();
 
     let result = executor
@@ -239,7 +239,7 @@ fn describe_vector_search_false_without_collections() {
 
     match result {
         Output::Described(d) => {
-            assert!(!d.capabilities.vector_search);
+            assert!(!d.capabilities.vector_query);
         }
         other => panic!("Expected Described, got {:?}", other),
     }

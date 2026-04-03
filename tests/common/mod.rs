@@ -1113,8 +1113,38 @@ where
 pub mod search {
     use std::sync::Arc;
     use strata_core::PrimitiveType;
+    use strata_engine::search::recipe::get_builtin_recipe;
+    use strata_engine::search::SearchHit;
     use strata_engine::{Database, SearchRequest, SearchResponse};
-    use strata_search::DatabaseSearchExt;
+    use strata_search::substrate::{self, RetrievalRequest, RetrievalResponse};
+
+    /// Search via the unified retrieval substrate.
+    ///
+    /// Converts a `SearchRequest` into a `RetrievalRequest` using the builtin
+    /// recipe defaults, calls `substrate::retrieve()`, and returns the response.
+    /// This is the canonical way to run cross-primitive search in tests.
+    pub fn substrate_search(db: &Arc<Database>, req: &SearchRequest) -> RetrievalResponse {
+        let mut recipe = get_builtin_recipe("keyword").expect("keyword recipe must exist");
+        // Apply k from the SearchRequest to the recipe limit.
+        recipe.transform = Some(strata_engine::search::recipe::TransformConfig {
+            limit: Some(req.k),
+            ..Default::default()
+        });
+
+        let retrieval_req = RetrievalRequest {
+            query: req.query.clone(),
+            branch_id: req.branch_id,
+            space: req.space.clone(),
+            recipe,
+            embedding: req.precomputed_embedding.clone(),
+            time_range: req.time_range,
+            primitive_filter: req.primitive_filter.clone(),
+            as_of: None,
+            budget_ms: None,
+        };
+
+        substrate::retrieve(db, &retrieval_req).expect("substrate::retrieve failed")
+    }
 
     /// Assert all hits are from a specific primitive.
     pub fn assert_all_from_primitive(response: &SearchResponse, kind: PrimitiveType) {
@@ -1129,11 +1159,10 @@ pub mod search {
         }
     }
 
-    /// Verify search results are deterministic.
+    /// Verify search results are deterministic (via substrate).
     pub fn verify_deterministic(db: &Arc<Database>, req: &SearchRequest) {
-        let hybrid = db.hybrid();
-        let r1 = hybrid.search(req).unwrap();
-        let r2 = hybrid.search(req).unwrap();
+        let r1 = substrate_search(db, req);
+        let r2 = substrate_search(db, req);
 
         assert_eq!(r1.hits.len(), r2.hits.len());
         for (h1, h2) in r1.hits.iter().zip(r2.hits.iter()) {
@@ -1157,9 +1186,34 @@ pub mod search {
         }
     }
 
+    /// Verify substrate hit scores are monotonically decreasing.
+    pub fn verify_substrate_scores_decreasing(hits: &[SearchHit]) {
+        if hits.len() >= 2 {
+            for i in 1..hits.len() {
+                assert!(
+                    hits[i - 1].score >= hits[i].score,
+                    "Scores should be monotonically decreasing: {} vs {}",
+                    hits[i - 1].score,
+                    hits[i].score
+                );
+            }
+        }
+    }
+
     /// Verify ranks are sequential starting from 1.
     pub fn verify_ranks_sequential(response: &SearchResponse) {
         for (i, hit) in response.hits.iter().enumerate() {
+            assert_eq!(
+                hit.rank as usize,
+                i + 1,
+                "Ranks should be sequential starting from 1"
+            );
+        }
+    }
+
+    /// Verify substrate hit ranks are sequential starting from 1.
+    pub fn verify_substrate_ranks_sequential(hits: &[SearchHit]) {
+        for (i, hit) in hits.iter().enumerate() {
             assert_eq!(
                 hit.rank as usize,
                 i + 1,

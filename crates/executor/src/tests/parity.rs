@@ -349,7 +349,7 @@ fn test_vector_upsert_search_parity() {
         .unwrap();
 
     // Search via executor
-    let search_result = executor.execute(Command::VectorSearch {
+    let search_result = executor.execute(Command::VectorQuery {
         branch: None,
         space: None,
         collection: "vecs".to_string(),

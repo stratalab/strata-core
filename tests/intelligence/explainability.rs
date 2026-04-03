@@ -5,7 +5,7 @@
 use crate::common::*;
 use strata_core::search_types::{PrimitiveType, SearchRequest, SearchStats};
 use strata_engine::KVStore;
-use strata_search::DatabaseSearchExt;
+use crate::common::search::substrate_search;
 
 // ============================================================================
 // Result Provenance Tests
@@ -18,9 +18,8 @@ fn test_tier9_hit_has_primitive_kind() {
     let branch_id = test_branch_id();
     populate_test_data(&db, &branch_id);
 
-    let hybrid = db.hybrid();
     let req = SearchRequest::new(branch_id, "test");
-    let response = hybrid.search(&req).unwrap();
+    let response = substrate_search(&db, &req);
 
     for hit in &response.hits {
         let kind = hit.doc_ref.primitive_type();

@@ -75,8 +75,8 @@ fn event_append_roundtrip() {
 }
 
 #[test]
-fn vector_search_roundtrip() {
-    let cmd = Command::VectorSearch {
+fn vector_query_roundtrip() {
+    let cmd = Command::VectorQuery {
         branch: None,
         space: None,
         collection: "embeddings".into(),
@@ -254,13 +254,13 @@ fn deserialize_event_append() {
 }
 
 #[test]
-fn deserialize_vector_search() {
-    let json = r#"{"VectorSearch":{"collection":"emb","query":[1.0,0.0,0.0],"k":5}}"#;
+fn deserialize_vector_query() {
+    let json = r#"{"VectorQuery":{"collection":"emb","query":[1.0,0.0,0.0],"k":5}}"#;
 
     let cmd: Command = serde_json::from_str(json).unwrap();
 
     match cmd {
-        Command::VectorSearch {
+        Command::VectorQuery {
             collection,
             query,
             k,
@@ -270,7 +270,7 @@ fn deserialize_vector_search() {
             assert_eq!(query, vec![1.0, 0.0, 0.0]);
             assert_eq!(k, 5);
         }
-        _ => panic!("Expected VectorSearch"),
+        _ => panic!("Expected VectorQuery"),
     }
 }
 

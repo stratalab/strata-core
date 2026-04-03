@@ -871,7 +871,7 @@ impl Executor {
                     key,
                 )
             }
-            Command::VectorSearch {
+            Command::VectorQuery {
                 branch,
                 space,
                 collection,
@@ -887,7 +887,7 @@ impl Executor {
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
                 if let Some(ts) = as_of {
-                    crate::handlers::vector::vector_search_at(
+                    crate::handlers::vector::vector_query_at(
                         &self.primitives,
                         branch,
                         space,
@@ -899,7 +899,7 @@ impl Executor {
                         ts,
                     )
                 } else {
-                    crate::handlers::vector::vector_search(
+                    crate::handlers::vector::vector_query(
                         &self.primitives,
                         branch,
                         space,

@@ -112,7 +112,7 @@ pub enum SearchMode {
 ///
 /// This is the universal search request type used by both
 /// primitive-level search (e.g., `kv.search()`) and composite
-/// search (e.g., `db.hybrid().search()`).
+/// search (e.g., `substrate::retrieve()`).
 ///
 /// # Invariant
 ///
@@ -167,8 +167,8 @@ pub struct SearchRequest {
     pub space: String,
 
     /// Optional: MVCC snapshot version for cross-primitive consistency (#1921).
-    /// When set, all primitive searches in a HybridSearch query share the same
-    /// snapshot. Primitives that support versioned reads use this bound; the
+    /// When set, all primitive searches in a retrieval substrate query share the
+    /// same snapshot. Primitives that support versioned reads use this bound; the
     /// inverted index scoring is not yet version-bounded (future work).
     pub snapshot_version: Option<u64>,
 

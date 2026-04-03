@@ -210,8 +210,8 @@ fn test_command_vector_upsert() {
 }
 
 #[test]
-fn test_command_vector_search() {
-    test_command_round_trip(Command::VectorSearch {
+fn test_command_vector_query() {
+    test_command_round_trip(Command::VectorQuery {
         branch: Some(BranchId::from("default")),
         space: None,
         collection: "embeddings".to_string(),
@@ -411,7 +411,7 @@ fn test_output_described() {
         },
         capabilities: CapabilitySummary {
             search: true,
-            vector_search: true,
+            vector_query: true,
             generation: false,
             auto_embed: false,
         },
