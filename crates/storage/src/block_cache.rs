@@ -310,8 +310,10 @@ impl BlockCache {
     /// The increment is forced odd so it visits every slot before cycling.
     #[inline]
     fn probe(file_id: u64, block_offset: u64, len_mask: usize) -> (usize, usize) {
-        let h1 = file_id.wrapping_mul(0x517cc1b727220a95) ^ block_offset.wrapping_mul(0x9e3779b97f4a7c15);
-        let h2 = block_offset.wrapping_mul(0x517cc1b727220a95) ^ file_id.wrapping_mul(0x9e3779b97f4a7c15);
+        let h1 = file_id.wrapping_mul(0x517cc1b727220a95)
+            ^ block_offset.wrapping_mul(0x9e3779b97f4a7c15);
+        let h2 = block_offset.wrapping_mul(0x517cc1b727220a95)
+            ^ file_id.wrapping_mul(0x9e3779b97f4a7c15);
         let base = (h1 as usize) & len_mask;
         let inc = ((h2 as usize) & len_mask) | 1; // force odd
         (base, inc)
@@ -559,7 +561,9 @@ impl BlockCache {
         let mut scanned: u64 = 0;
 
         while self.usage.load(Ordering::Relaxed) + needed > cap && scanned < max_scan {
-            let start = self.clock_pointer.fetch_add(EVICTION_STEP, Ordering::Relaxed);
+            let start = self
+                .clock_pointer
+                .fetch_add(EVICTION_STEP, Ordering::Relaxed);
 
             for i in 0..EVICTION_STEP {
                 let slot_idx = ((start + i) % table_len) as usize;
@@ -693,7 +697,9 @@ impl BlockCache {
                     let priority_bits = meta_priority(meta);
                     let ptr = slot.data.swap(std::ptr::null_mut(), Ordering::AcqRel);
                     if !ptr.is_null() {
-                        unsafe { drop(Box::from_raw(ptr)); }
+                        unsafe {
+                            drop(Box::from_raw(ptr));
+                        }
                     }
                     slot.key_file_id.store(0, Ordering::Relaxed);
                     slot.key_block_offset.store(0, Ordering::Relaxed);
