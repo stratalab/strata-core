@@ -2168,19 +2168,25 @@ impl SegmentedStore {
     /// The O(1) fast path includes timestamps from all writes (puts,
     /// deletes, tombstones). The fallback path only scans live entries.
     pub fn time_range(&self, branch_id: BranchId) -> StrataResult<Option<(u64, u64)>> {
-        let branch = match self.branches.get(&branch_id) {
-            Some(b) => b,
-            None => return Ok(None),
-        };
-        let min_ts = branch.min_timestamp.load(Ordering::Relaxed);
-        let max_ts = branch.max_timestamp.load(Ordering::Relaxed);
-        if min_ts != u64::MAX {
-            return Ok(Some((min_ts, max_ts)));
+        // O(1) fast path: read atomic timestamps (populated by write path).
+        if let Some(branch) = self.branches.get(&branch_id) {
+            let min_ts = branch.min_timestamp.load(Ordering::Relaxed);
+            let max_ts = branch.max_timestamp.load(Ordering::Relaxed);
+            if min_ts != u64::MAX {
+                return Ok(Some((min_ts, max_ts)));
+            }
+        } else {
+            return Ok(None);
         }
 
         // Fallback: atomics not populated (e.g. after recovery from segments
-        // where WAL was truncated). Scan entries to find actual range.
-        let entries = self.list_branch_inner(&branch, branch_id);
+        // where WAL was truncated). Scan entries via snapshot to find range.
+        // Uses snapshot to avoid holding DashMap guard during I/O.
+        let snapshot = match self.snapshot_branch(&branch_id) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let entries = Self::list_branch_from_snapshot(&snapshot, branch_id);
         if entries.is_empty() {
             return Ok(None);
         }
@@ -2191,9 +2197,12 @@ impl SegmentedStore {
             scan_min = scan_min.min(ts);
             scan_max = scan_max.max(ts);
         }
-        // Populate atomics so subsequent calls are O(1)
-        branch.track_timestamp(scan_min);
-        branch.track_timestamp(scan_max);
+        // Populate atomics so subsequent calls are O(1).
+        // Re-acquire guard briefly to update the atomic timestamps.
+        if let Some(branch) = self.branches.get(&branch_id) {
+            branch.track_timestamp(scan_min);
+            branch.track_timestamp(scan_max);
+        }
         Ok(Some((scan_min, scan_max)))
     }
 
