@@ -342,6 +342,12 @@ fn test_issue_1702_delete_branch_cleans_up_segment_files() {
         branch_dir,
     );
 
+    // Drain background tasks (compaction may be running due to
+    // compaction-on-open and tiny write_buffer_size) before deleting.
+    // Without this, in-flight compaction may hold segment references or
+    // create output files that clear_branch misses.
+    db.scheduler().drain();
+
     // Delete the branch through the engine-level API.
     branch_index.delete_branch("doomed").unwrap();
 
