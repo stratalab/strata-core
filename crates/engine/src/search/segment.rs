@@ -1059,4 +1059,62 @@ mod tests {
         assert!(guard.contains(&2));
         assert!(!guard.contains(&99));
     }
+
+    // ------------------------------------------------------------------
+    // Position round-trip tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_v2_positions_roundtrip() {
+        let mut term_postings = BTreeMap::new();
+        let mut term_positions: BTreeMap<String, Vec<SmallVec<[u32; 4]>>> = BTreeMap::new();
+
+        // "hello" appears in doc 0 at positions [1, 3, 7] and doc 2 at [0, 5]
+        term_postings.insert(
+            "hello".to_string(),
+            vec![PostingEntry::new(0, 3, 10), PostingEntry::new(2, 2, 8)],
+        );
+        term_positions.insert(
+            "hello".to_string(),
+            vec![
+                SmallVec::from_slice(&[1, 3, 7]),
+                SmallVec::from_slice(&[0, 5]),
+            ],
+        );
+
+        // "world" appears in doc 1 at positions [2]
+        term_postings.insert("world".to_string(), vec![PostingEntry::new(1, 1, 5)]);
+        term_positions.insert("world".to_string(), vec![SmallVec::from_slice(&[2])]);
+
+        let seg = build_sealed_segment(1, term_postings, term_positions, 3, 23);
+
+        // Read back positions for "hello"
+        let mut pos_reader = seg.position_reader("hello").expect("should find hello");
+        let hello_doc0_pos = pos_reader.read_positions(3);
+        assert_eq!(hello_doc0_pos.as_slice(), &[1, 3, 7]);
+        let hello_doc2_pos = pos_reader.read_positions(2);
+        assert_eq!(hello_doc2_pos.as_slice(), &[0, 5]);
+
+        // Read back positions for "world"
+        let mut pos_reader = seg.position_reader("world").expect("should find world");
+        let world_doc1_pos = pos_reader.read_positions(1);
+        assert_eq!(world_doc1_pos.as_slice(), &[2]);
+
+        // Missing term
+        assert!(seg.position_reader("missing").is_none());
+    }
+
+    #[test]
+    fn test_v2_positions_empty_when_no_positions() {
+        // Using the no-positions convenience wrapper
+        let mut terms = BTreeMap::new();
+        terms.insert("test".to_string(), vec![PostingEntry::new(0, 2, 5)]);
+
+        let seg = build_sealed_segment_no_positions(1, terms, 1, 5);
+
+        // Position reader should exist but yield empty positions
+        let mut pos_reader = seg.position_reader("test").expect("should find test");
+        let positions = pos_reader.read_positions(0); // tf=0 since no real positions
+        assert!(positions.is_empty());
+    }
 }
