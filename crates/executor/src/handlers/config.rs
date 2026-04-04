@@ -44,8 +44,6 @@ const KNOWN_KEYS: &[&str] = &[
     "embed_model",
     "durability",
     "auto_embed",
-    "bm25_k1",
-    "bm25_b",
     "embed_batch_size",
     "model_endpoint",
     "model_name",
@@ -208,40 +206,6 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
                     value.trim()
                 ),
                 hint: None,
-            });
-        }
-    }
-
-    // Validate bm25_k1 (f32, finite, > 0)
-    if key_lower == "bm25_k1" {
-        let v: f32 = value.trim().parse().map_err(|_| Error::InvalidInput {
-            reason: format!(
-                "Invalid bm25_k1 value: {:?}. Expected a positive number",
-                value.trim()
-            ),
-            hint: Some("Typical range is 1.2\u{2013}2.0 (default: 1.2).".to_string()),
-        })?;
-        if !v.is_finite() || v <= 0.0 {
-            return Err(Error::InvalidInput {
-                reason: "bm25_k1 must be a finite number greater than 0".to_string(),
-                hint: Some("Typical range is 1.2\u{2013}2.0 (default: 1.2).".to_string()),
-            });
-        }
-    }
-
-    // Validate bm25_b (f32, finite, 0..=1)
-    if key_lower == "bm25_b" {
-        let v: f32 = value.trim().parse().map_err(|_| Error::InvalidInput {
-            reason: format!(
-                "Invalid bm25_b value: {:?}. Expected a number between 0 and 1",
-                value.trim()
-            ),
-            hint: Some("Typical range is 0.0\u{2013}1.0 (default: 0.75).".to_string()),
-        })?;
-        if !v.is_finite() || !(0.0..=1.0).contains(&v) {
-            return Err(Error::InvalidInput {
-                reason: "bm25_b must be a finite number between 0 and 1 (inclusive)".to_string(),
-                hint: Some("Typical range is 0.0\u{2013}1.0 (default: 0.75).".to_string()),
             });
         }
     }
@@ -453,8 +417,6 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
         "auto_embed" => value.trim().eq_ignore_ascii_case("true").to_string(),
         // Pre-existing validators above already reject non-numeric values,
         // so parse() here is guaranteed to succeed for valid inputs.
-        "bm25_k1" => value.trim().parse::<f32>().unwrap().to_string(),
-        "bm25_b" => value.trim().parse::<f32>().unwrap().to_string(),
         "embed_batch_size" => value.trim().parse::<usize>().unwrap().to_string(),
         _ => value.clone(),
     };
@@ -472,13 +434,6 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
         }
         "auto_embed" => {
             cfg.auto_embed = value.trim().eq_ignore_ascii_case("true");
-        }
-        "bm25_k1" => {
-            // Pre-existing validators above guarantee parse succeeds.
-            cfg.bm25_k1 = value.trim().parse().ok();
-        }
-        "bm25_b" => {
-            cfg.bm25_b = value.trim().parse().ok();
         }
         "embed_batch_size" => {
             cfg.embed_batch_size = value.trim().parse().ok();
@@ -516,8 +471,6 @@ pub fn configure_get_key(p: &Arc<Primitives>, key: String) -> Result<Output> {
         "embed_model" => Some(cfg.embed_model.clone()),
         "durability" => Some(cfg.durability.clone()),
         "auto_embed" => Some(cfg.auto_embed.to_string()),
-        "bm25_k1" => cfg.bm25_k1.map(|v| v.to_string()),
-        "bm25_b" => cfg.bm25_b.map(|v| v.to_string()),
         "embed_batch_size" => cfg.embed_batch_size.map(|v| v.to_string()),
         "model_endpoint" => cfg.model.as_ref().map(|m| m.endpoint.clone()),
         "model_name" => cfg.model.as_ref().map(|m| m.model.clone()),

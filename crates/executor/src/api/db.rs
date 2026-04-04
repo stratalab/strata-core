@@ -127,9 +127,9 @@ impl Strata {
 
     /// Set a configuration key.
     ///
-    /// All 15 keys are supported: `provider`, `default_model`,
+    /// All 13 keys are supported: `provider`, `default_model`,
     /// `anthropic_api_key`, `openai_api_key`, `google_api_key`, `embed_model`,
-    /// `durability`, `auto_embed`, `bm25_k1`, `bm25_b`, `embed_batch_size`,
+    /// `durability`, `auto_embed`, `embed_batch_size`,
     /// `model_endpoint`, `model_name`, `model_api_key`, `model_timeout_ms`.
     ///
     /// Values are validated at the handler level.  Changes are persisted to

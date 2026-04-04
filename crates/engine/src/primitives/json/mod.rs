@@ -1410,9 +1410,8 @@ impl JsonStore {
         }
 
         let query_terms = crate::search::tokenize(&req.query);
-        let scorer = self.db.config().bm25_scorer();
 
-        let top_k = index.score_top_k(&query_terms, &req.branch_id, req.k, scorer.k1, scorer.b);
+        let top_k = index.score_top_k(&query_terms, &req.branch_id, req.k, req.bm25_k1, req.bm25_b);
 
         let hits: Vec<SearchHit> = top_k
             .into_iter()

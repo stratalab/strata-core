@@ -1337,7 +1337,7 @@ pub enum Command {
     ///
     /// Supported keys: `provider`, `default_model`, `anthropic_api_key`,
     /// `openai_api_key`, `google_api_key`, `embed_model`, `durability`,
-    /// `auto_embed`, `bm25_k1`, `bm25_b`, `embed_batch_size`,
+    /// `auto_embed`, `embed_batch_size`,
     /// `model_endpoint`, `model_name`, `model_api_key`, `model_timeout_ms`.
     ///
     /// Returns: `Output::ConfigSetResult`

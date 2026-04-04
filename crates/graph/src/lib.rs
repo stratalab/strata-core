@@ -127,7 +127,6 @@ impl strata_engine::search::Searchable for GraphStore {
         }
 
         let query_terms = strata_engine::search::tokenize(&req.query);
-        let scorer = self.db.config().bm25_scorer();
 
         // Score all matching docs in the shared index, then filter to Graph refs.
         // Request more than k to account for non-graph results being filtered out.
@@ -135,8 +134,8 @@ impl strata_engine::search::Searchable for GraphStore {
             &query_terms,
             &req.branch_id,
             req.k.saturating_mul(4),
-            scorer.k1,
-            scorer.b,
+            req.bm25_k1,
+            req.bm25_b,
         );
 
         let hits: Vec<SearchHit> = top_k

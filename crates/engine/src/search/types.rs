@@ -180,6 +180,14 @@ pub struct SearchRequest {
     /// The field must have a secondary index. When set, results are returned
     /// in index order rather than sorted by doc_id or score.
     pub sort_by: Option<SortSpec>,
+
+    /// BM25 k1 parameter (term frequency saturation). Default: 0.9.
+    /// Set by the retrieval substrate from the recipe's BM25Config.
+    pub bm25_k1: f32,
+
+    /// BM25 b parameter (document length normalization). Default: 0.4.
+    /// Set by the retrieval substrate from the recipe's BM25Config.
+    pub bm25_b: f32,
 }
 
 impl SearchRequest {
@@ -207,6 +215,8 @@ impl SearchRequest {
             space: "default".to_string(),
             snapshot_version: None,
             field_filter: None,
+            bm25_k1: 0.9,
+            bm25_b: 0.4,
             sort_by: None,
         }
     }
@@ -271,6 +281,13 @@ impl SearchRequest {
     /// Builder: set space to search within
     pub fn with_space(mut self, space: impl Into<String>) -> Self {
         self.space = space.into();
+        self
+    }
+
+    /// Builder: set BM25 scoring parameters from recipe
+    pub fn with_bm25_params(mut self, k1: f32, b: f32) -> Self {
+        self.bm25_k1 = k1;
+        self.bm25_b = b;
         self
     }
 
