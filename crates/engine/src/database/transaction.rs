@@ -236,17 +236,24 @@ impl Database {
         // Update snapshot floor so compaction respects active snapshots (#1697).
         self.storage.set_snapshot_floor(self.gc_safe_point());
 
-        // Submit flush work to the background scheduler. The flush task
-        // drains all frozen memtables, updates the WAL watermark, and
-        // then triggers compaction. This keeps the writer thread fast.
-        let branches = self.storage.branches_needing_flush();
-        if !branches.is_empty() {
+        // Coalesce flush scheduling: skip if a flush task is already in flight.
+        // The in-flight task drains ALL frozen memtables (loop in the closure),
+        // so submitting redundant tasks during fast ingest just wastes scheduler
+        // queue capacity.
+        if self.storage.total_frozen_count() > 0
+            && self
+                .flush_in_flight
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+        {
             let storage = Arc::clone(&self.storage);
             let data_dir = self.data_dir.clone();
             let wal_dir = self.wal_dir.clone();
+            let flush_flag = Arc::clone(&self.flush_in_flight);
             let _ = self
                 .scheduler
                 .submit(crate::background::TaskPriority::High, move || {
+                    let branches = storage.branches_needing_flush();
                     for branch_id in &branches {
                         loop {
                             match storage.flush_oldest_frozen(branch_id) {
@@ -269,10 +276,11 @@ impl Database {
 
                     // Return freed memtable pages to the OS (#2184).
                     release_freed_memory();
+                    flush_flag.store(false, Ordering::Release);
                 });
         }
 
-        // Schedule compaction (separate from flush).
+        // Always check compaction — also runs materialization for COW branches.
         self.schedule_background_compaction();
     }
 
