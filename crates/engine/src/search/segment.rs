@@ -466,6 +466,9 @@ impl<'a> Iterator for PostingIter<'a> {
 /// Created via `SealedSegment::position_reader()`. Reads positions for one
 /// document at a time (call `read_positions(tf)` for each doc in the posting list,
 /// in the same order as `PostingIter` yields entries).
+///
+/// Infrastructure for phrase queries (#2239) and proximity scoring (#2240).
+#[allow(dead_code)]
 pub struct PositionReader<'a> {
     data: &'a [u8],
     pos: usize,
@@ -622,6 +625,7 @@ pub fn build_sealed_segment(
 }
 
 /// Build a sealed segment without positions (convenience for tests and position-disabled path).
+#[allow(dead_code)]
 pub fn build_sealed_segment_no_positions(
     segment_id: u64,
     term_postings: BTreeMap<String, Vec<PostingEntry>>,
