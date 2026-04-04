@@ -32,11 +32,55 @@ use strata_core::error::StrataError;
 use strata_core::types::Key;
 use strata_core::value::Value;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
+
+// ── Compaction cache bypass (RocksDB fill_cache=false pattern) ──────────
+//
+// Compaction reads entire segments sequentially. Caching these reads
+// evicts hot user data — at 1M records, cache hit rate drops to 21-73%
+// despite a 15GB cache for 1GB of data (issue #2262).
+//
+// Thread-local flag: compaction threads set fill_cache=false before
+// iterating, so read_data_block skips cache insertion on miss.
+// User read threads keep the default fill_cache=true.
+
+thread_local! {
+    static FILL_CACHE: Cell<bool> = const { Cell::new(true) };
+}
+
+/// Set whether block reads on this thread should populate the cache.
+///
+/// Compaction sets this to `false` to avoid polluting the cache with
+/// sequential reads that will be immediately invalidated.
+pub fn set_fill_cache(fill: bool) {
+    FILL_CACHE.with(|c| c.set(fill));
+}
+
+fn should_fill_cache() -> bool {
+    FILL_CACHE.with(|c| c.get())
+}
+
+/// RAII guard that sets `fill_cache = false` on creation and restores
+/// `true` on drop. Ensures the flag is restored even on panic.
+pub struct NoCacheGuard;
+
+impl NoCacheGuard {
+    /// Create a guard that disables cache insertion for the current thread.
+    pub fn new() -> Self {
+        set_fill_cache(false);
+        NoCacheGuard
+    }
+}
+
+impl Drop for NoCacheGuard {
+    fn drop(&mut self) {
+        set_fill_cache(true);
+    }
+}
 
 // ── Segment block read profiling (STRATA_PROFILE_SEGMENT=1) ─────────────
 
@@ -996,7 +1040,7 @@ impl KVSegment {
             }
         }
 
-        // Cache the decompressed block
+        // Cache the decompressed block (unless compaction bypass is active)
         if profiling {
             let pread_ns = t_pread.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
             SEG_PROF.with(|p| {
@@ -1008,7 +1052,13 @@ impl KVSegment {
                 Self::maybe_print_seg_profile(&mut p);
             });
         }
-        Ok(cache.insert(self.file_id, block_offset, decompressed))
+        if should_fill_cache() {
+            Ok(cache.insert(self.file_id, block_offset, decompressed))
+        } else {
+            // Compaction bypass: return without caching to avoid evicting
+            // hot user data with sequential compaction reads.
+            Ok(Arc::new(decompressed))
+        }
     }
 
     /// Scan a single data block for the newest version of a typed key at or below snapshot.

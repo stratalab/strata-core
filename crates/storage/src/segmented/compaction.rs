@@ -247,6 +247,10 @@ impl SegmentedStore {
         std::fs::create_dir_all(&branch_dir)?;
         let seg_path = branch_dir.join(format!("{}.sst", seg_id));
 
+        // Compaction reads bypass the block cache to avoid evicting hot user
+        // data with sequential scans (RocksDB fill_cache=false pattern, #2262).
+        let _no_cache = crate::segment::NoCacheGuard::new();
+
         // Build streaming source iterators from each segment.
         let limiter = self.compaction_rate_limiter.load_full();
         let (sources, corruption_flags) = streaming_sources(&old_segments, &limiter);
@@ -406,6 +410,7 @@ impl SegmentedStore {
         std::fs::create_dir_all(&branch_dir)?;
         let seg_path = branch_dir.join(format!("{}.sst", seg_id));
 
+        let _no_cache = crate::segment::NoCacheGuard::new();
         let limiter = self.compaction_rate_limiter.load_full();
         let (sources, corruption_flags) = streaming_sources(&selected_segments, &limiter);
 
@@ -598,6 +603,7 @@ impl SegmentedStore {
         all_inputs.extend(l0_segs.iter().cloned());
         all_inputs.extend(overlapping_l1.iter().cloned());
 
+        let _no_cache = crate::segment::NoCacheGuard::new();
         let limiter = self.compaction_rate_limiter.load_full();
         let (sources, corruption_flags) = streaming_sources(&all_inputs, &limiter);
         let merge = MergeIterator::new(sources);
@@ -858,6 +864,7 @@ impl SegmentedStore {
         all_inputs.extend(input_segs.iter().cloned());
         all_inputs.extend(overlap_segs.iter().cloned());
 
+        let _no_cache = crate::segment::NoCacheGuard::new();
         let limiter = self.compaction_rate_limiter.load_full();
         let (sources, corruption_flags) = streaming_sources(&all_inputs, &limiter);
         let merge = MergeIterator::new(sources);
