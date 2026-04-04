@@ -23,11 +23,60 @@ use crate::segment_builder::{SegmentBuilder, SplittingSegmentBuilder};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
+use std::cell::RefCell;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+// ── Read-path profiling (STRATA_PROFILE_READ=1) ────────────────────────────
+
+static READ_PROFILE_ENABLED: AtomicBool = AtomicBool::new(false);
+static READ_PROFILE_CHECKED: AtomicBool = AtomicBool::new(false);
+
+fn read_profile_enabled() -> bool {
+    if !READ_PROFILE_CHECKED.load(Ordering::Relaxed) {
+        let enabled = std::env::var("STRATA_PROFILE_READ").is_ok();
+        READ_PROFILE_ENABLED.store(enabled, Ordering::Relaxed);
+        READ_PROFILE_CHECKED.store(true, Ordering::Relaxed);
+    }
+    READ_PROFILE_ENABLED.load(Ordering::Relaxed)
+}
+
+const READ_PROFILE_INTERVAL: u64 = 100_000;
+
+struct ReadProfile {
+    count: u64,
+    found_active: u64,
+    found_frozen: u64,
+    found_l0: u64,
+    found_l1plus: u64,
+    found_inherited: u64,
+    not_found: u64,
+    l0_probes: u64,
+    snapshot_ns: u64,
+    key_encode_ns: u64,
+    memtable_ns: u64,
+    l0_ns: u64,
+    l1plus_ns: u64,
+    total_ns: u64,
+    // Per-level detail
+    levels_checked: u64,
+    bloom_rejects: u64,
+    bloom_passes: u64,
+}
+
+thread_local! {
+    static READ_PROF: RefCell<ReadProfile> = const { RefCell::new(ReadProfile {
+        count: 0,
+        found_active: 0, found_frozen: 0, found_l0: 0, found_l1plus: 0,
+        found_inherited: 0, not_found: 0, l0_probes: 0,
+        snapshot_ns: 0, key_encode_ns: 0, memtable_ns: 0,
+        l0_ns: 0, l1plus_ns: 0, total_ns: 0,
+        levels_checked: 0, bloom_rejects: 0, bloom_passes: 0,
+    }) };
+}
 
 use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{BranchId, Key, TypeTag};
@@ -3251,16 +3300,33 @@ impl SegmentedStore {
         key: &Key,
         max_version: u64,
     ) -> StrataResult<Option<(u64, MemtableEntry)>> {
+        let profiling = read_profile_enabled();
+        let t_total = if profiling { Some(Instant::now()) } else { None };
+
+        let t0 = if profiling { Some(Instant::now()) } else { None };
         let typed_key = encode_typed_key(key);
         let seek_ik = InternalKey::from_typed_key_bytes(&typed_key, u64::MAX);
         let seek_bytes = seek_ik.as_bytes();
+        let key_encode_ns = t0.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
 
         // 1. Active memtable
+        let t0 = if profiling { Some(Instant::now()) } else { None };
         if let Some(result) =
             snapshot
                 .active
                 .get_versioned_preencoded(&typed_key, seek_bytes, max_version)
         {
+            if profiling {
+                let memtable_ns = t0.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
+                let total_ns = t_total.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
+                READ_PROF.with(|p| {
+                    let mut p = p.borrow_mut();
+                    p.count += 1; p.found_active += 1;
+                    p.key_encode_ns += key_encode_ns; p.memtable_ns += memtable_ns;
+                    p.total_ns += total_ns;
+                    Self::maybe_print_read_profile(&mut p);
+                });
+            }
             return Ok(Some(result));
         }
 
@@ -3269,32 +3335,86 @@ impl SegmentedStore {
             if let Some(result) =
                 frozen.get_versioned_preencoded(&typed_key, seek_bytes, max_version)
             {
+                if profiling {
+                    let memtable_ns = t0.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
+                    let total_ns = t_total.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
+                    READ_PROF.with(|p| {
+                        let mut p = p.borrow_mut();
+                        p.count += 1; p.found_frozen += 1;
+                        p.key_encode_ns += key_encode_ns; p.memtable_ns += memtable_ns;
+                        p.total_ns += total_ns;
+                        Self::maybe_print_read_profile(&mut p);
+                    });
+                }
                 return Ok(Some(result));
             }
         }
+        let memtable_ns = t0.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
 
         // 3. L0 segments (newest first, overlapping — linear scan)
+        let t0 = if profiling { Some(Instant::now()) } else { None };
+        let l0_count = snapshot.segments.l0_segments().len();
         for seg in snapshot.segments.l0_segments() {
             if let Some(se) = seg.point_lookup_preencoded(&typed_key, seek_bytes, max_version)? {
                 let commit_id = se.commit_id;
+                if profiling {
+                    let l0_ns = t0.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
+                    let total_ns = t_total.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
+                    READ_PROF.with(|p| {
+                        let mut p = p.borrow_mut();
+                        p.count += 1; p.found_l0 += 1; p.l0_probes += l0_count as u64;
+                        p.key_encode_ns += key_encode_ns; p.memtable_ns += memtable_ns;
+                        p.l0_ns += l0_ns; p.total_ns += total_ns;
+                        Self::maybe_print_read_profile(&mut p);
+                    });
+                }
                 return Ok(Some((commit_id, segment_entry_to_memtable_entry(se))));
             }
         }
+        let l0_ns = t0.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
 
         // 4. L1+ segments (non-overlapping, sorted by key range — binary search per level)
+        let t0 = if profiling { Some(Instant::now()) } else { None };
+        let mut levels_checked = 0u64;
+        let mut bloom_rejects = 0u64;
+        let mut bloom_passes = 0u64;
+
         for level_idx in 1..snapshot.segments.levels.len() {
+            let l1_segments = &snapshot.segments.levels[level_idx];
+            if l1_segments.is_empty() {
+                continue;
+            }
+            levels_checked += 1;
+
             if let Some(se) = point_lookup_level_preencoded(
-                &snapshot.segments.levels[level_idx],
+                l1_segments,
                 &typed_key,
                 seek_bytes,
                 max_version,
             )? {
                 let commit_id = se.commit_id;
+                if profiling {
+                    let l1plus_ns = t0.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
+                    let total_ns = t_total.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
+                    READ_PROF.with(|p| {
+                        let mut p = p.borrow_mut();
+                        p.count += 1; p.found_l1plus += 1; p.l0_probes += l0_count as u64;
+                        p.key_encode_ns += key_encode_ns; p.memtable_ns += memtable_ns;
+                        p.l0_ns += l0_ns; p.l1plus_ns += l1plus_ns; p.total_ns += total_ns;
+                        p.levels_checked += levels_checked;
+                        p.bloom_rejects += bloom_rejects;
+                        p.bloom_passes += 1;
+                        Self::maybe_print_read_profile(&mut p);
+                    });
+                }
                 return Ok(Some((commit_id, segment_entry_to_memtable_entry(se))));
             }
+            // If we get here, bloom rejected or key not in this level
+            bloom_rejects += 1;
         }
 
         // 5. Inherited layers (COW branching — nearest ancestor first)
+        let l1plus_ns = t0.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
         for layer in &snapshot.inherited_layers {
             if layer.status == LayerStatus::Materialized {
                 continue;
@@ -3312,6 +3432,16 @@ impl SegmentedStore {
                     seg.point_lookup_preencoded(&src_typed_key, src_seek_bytes, effective_version)?
                 {
                     let commit_id = se.commit_id;
+                    if profiling {
+                        let total_ns = t_total.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
+                        READ_PROF.with(|p| {
+                            let mut p = p.borrow_mut();
+                            p.count += 1; p.found_inherited += 1; p.l0_probes += l0_count as u64;
+                            p.key_encode_ns += key_encode_ns; p.memtable_ns += memtable_ns;
+                            p.l0_ns += l0_ns; p.l1plus_ns += l1plus_ns; p.total_ns += total_ns;
+                            Self::maybe_print_read_profile(&mut p);
+                        });
+                    }
                     return Ok(Some((commit_id, segment_entry_to_memtable_entry(se))));
                 }
             }
@@ -3324,12 +3454,76 @@ impl SegmentedStore {
                     effective_version,
                 )? {
                     let commit_id = se.commit_id;
+                    if profiling {
+                        let total_ns = t_total.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
+                        READ_PROF.with(|p| {
+                            let mut p = p.borrow_mut();
+                            p.count += 1; p.found_inherited += 1; p.l0_probes += l0_count as u64;
+                            p.key_encode_ns += key_encode_ns; p.memtable_ns += memtable_ns;
+                            p.l0_ns += l0_ns; p.l1plus_ns += l1plus_ns; p.total_ns += total_ns;
+                            Self::maybe_print_read_profile(&mut p);
+                        });
+                    }
                     return Ok(Some((commit_id, segment_entry_to_memtable_entry(se))));
                 }
             }
         }
 
+        if profiling {
+            let total_ns = t_total.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
+            READ_PROF.with(|p| {
+                let mut p = p.borrow_mut();
+                p.count += 1; p.not_found += 1; p.l0_probes += l0_count as u64;
+                p.key_encode_ns += key_encode_ns; p.memtable_ns += memtable_ns;
+                p.l0_ns += l0_ns; p.l1plus_ns += l1plus_ns; p.total_ns += total_ns;
+                p.levels_checked += levels_checked;
+                p.bloom_rejects += bloom_rejects;
+                p.bloom_passes += bloom_passes;
+                Self::maybe_print_read_profile(&mut p);
+            });
+        }
+
         Ok(None)
+    }
+
+    fn maybe_print_read_profile(p: &mut ReadProfile) {
+        if p.count % READ_PROFILE_INTERVAL == 0 {
+            let n = READ_PROFILE_INTERVAL as f64;
+            let l1_reads = p.found_l1plus.max(1) as f64;
+            eprintln!(
+                "[read-profile] {} reads | avg(us): total={:.2} key_enc={:.2} mem={:.2} l0={:.2} l1+={:.2} | \
+                 found: active={:.0}% frozen={:.0}% l0={:.0}% l1+={:.0}% miss={:.0}% | l0_probes={:.1}",
+                p.count,
+                p.total_ns as f64 / n / 1000.0,
+                p.key_encode_ns as f64 / n / 1000.0,
+                p.memtable_ns as f64 / n / 1000.0,
+                p.l0_ns as f64 / n / 1000.0,
+                p.l1plus_ns as f64 / n / 1000.0,
+                p.found_active as f64 / n * 100.0,
+                p.found_frozen as f64 / n * 100.0,
+                p.found_l0 as f64 / n * 100.0,
+                p.found_l1plus as f64 / n * 100.0,
+                p.not_found as f64 / n * 100.0,
+                p.l0_probes as f64 / n,
+            );
+            if p.levels_checked > 0 {
+                eprintln!(
+                    "  L1+ detail: levels_checked={:.1}/read  bloom: pass={} reject={} ({:.0}% reject rate)",
+                    p.levels_checked as f64 / n,
+                    p.bloom_passes,
+                    p.bloom_rejects,
+                    if p.bloom_passes + p.bloom_rejects > 0 {
+                        p.bloom_rejects as f64 / (p.bloom_passes + p.bloom_rejects) as f64 * 100.0
+                    } else { 0.0 },
+                );
+            }
+            // Reset
+            p.found_active = 0; p.found_frozen = 0; p.found_l0 = 0;
+            p.found_l1plus = 0; p.found_inherited = 0; p.not_found = 0;
+            p.l0_probes = 0; p.snapshot_ns = 0; p.key_encode_ns = 0;
+            p.memtable_ns = 0; p.l0_ns = 0; p.l1plus_ns = 0; p.total_ns = 0;
+            p.levels_checked = 0; p.bloom_rejects = 0; p.bloom_passes = 0;
+        }
     }
 
     /// Collect all versions of a key from a [`BranchSnapshot`] — no DashMap guard held.

@@ -32,10 +32,58 @@ use strata_core::error::StrataError;
 use strata_core::types::Key;
 use strata_core::value::Value;
 
+use std::cell::RefCell;
 use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
+
+// ── Segment block read profiling (STRATA_PROFILE_SEGMENT=1) ─────────────
+
+struct SegmentProfile {
+    total_reads: u64,
+    cache_hits: u64,
+    cache_misses: u64,
+    pread_ns: u64,
+    pread_bytes: u64,
+}
+
+thread_local! {
+    static SEG_PROF: RefCell<SegmentProfile> = const { RefCell::new(SegmentProfile {
+        total_reads: 0, cache_hits: 0, cache_misses: 0,
+        pread_ns: 0, pread_bytes: 0,
+    }) };
+}
+
+struct BlockScanProfile {
+    count: u64,
+    read_block_ns: u64,
+    scan_ns: u64,
+    blocks_per_lookup: u64,
+    lookups: u64,
+}
+
+struct LookupProfile {
+    count: u64,
+    bloom_ns: u64,
+    index_and_block_ns: u64,
+    partitioned_count: u64,
+    top_search_ns: u64,
+    sub_lookup_ns: u64,
+}
+
+thread_local! {
+    static LOOKUP_PROF: RefCell<LookupProfile> = const { RefCell::new(LookupProfile {
+        count: 0, bloom_ns: 0, index_and_block_ns: 0, partitioned_count: 0,
+        top_search_ns: 0, sub_lookup_ns: 0,
+    }) };
+}
+
+thread_local! {
+    static BLOCK_SCAN_PROF: RefCell<BlockScanProfile> = const { RefCell::new(BlockScanProfile {
+        count: 0, read_block_ns: 0, scan_ns: 0, blocks_per_lookup: 0, lookups: 0,
+    }) };
+}
 
 /// Shorthand for `io::Error::new(io::ErrorKind::InvalidData, ...)`.
 macro_rules! invalid_data {
@@ -87,43 +135,192 @@ struct PartitionedBloom {
     partitions: Vec<Arc<Vec<u8>>>,
 }
 
+/// Cache-friendly flat index: all keys packed in a contiguous buffer.
+///
+/// Replaces `Vec<IndexEntry>` where each `IndexEntry.key` was a separate
+/// heap allocation. Binary search over 25K entries caused ~15 L2 cache
+/// misses at ~100ns each = 1.5-1.9us. With FlatIndex, all key data is
+/// in one `Vec<u8>` and offsets in one `Vec<u32>` — binary search touches
+/// contiguous memory with good cache locality.
+#[derive(Debug)]
+struct FlatIndex {
+    /// All keys packed contiguously: key_0 || key_1 || ... || key_n
+    key_data: Vec<u8>,
+    /// Byte offset into key_data where each key starts.
+    /// Length = num_entries + 1 (sentinel at end = key_data.len())
+    key_offsets: Vec<u32>,
+    /// Block file offset for each entry.
+    block_offsets: Vec<u64>,
+    /// Block data length for each entry.
+    block_data_lens: Vec<u32>,
+}
+
+impl FlatIndex {
+    /// Parse an on-disk index block directly into a FlatIndex.
+    ///
+    /// Same wire format as `parse_index_block`:
+    /// `[count:u32] [key_len:u32 | key | offset:u64 | data_len:u32]*`
+    fn parse(data: &[u8]) -> Option<Self> {
+        if data.len() < 4 {
+            return None;
+        }
+        let count = u32::from_le_bytes(data[..4].try_into().ok()?) as usize;
+        let mut key_data = Vec::new();
+        let mut key_offsets = Vec::with_capacity(count + 1);
+        let mut block_offsets = Vec::with_capacity(count);
+        let mut block_data_lens = Vec::with_capacity(count);
+        let mut pos = 4;
+
+        for _ in 0..count {
+            if pos + 4 > data.len() {
+                return None;
+            }
+            let key_len = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
+            pos += 4;
+            if pos + key_len + 8 + 4 > data.len() {
+                return None;
+            }
+            key_offsets.push(key_data.len() as u32);
+            key_data.extend_from_slice(&data[pos..pos + key_len]);
+            pos += key_len;
+            block_offsets.push(u64::from_le_bytes(data[pos..pos + 8].try_into().ok()?));
+            pos += 8;
+            block_data_lens.push(u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?));
+            pos += 4;
+        }
+        key_offsets.push(key_data.len() as u32); // sentinel
+
+        Some(FlatIndex {
+            key_data,
+            key_offsets,
+            block_offsets,
+            block_data_lens,
+        })
+    }
+
+    /// Convert from parsed IndexEntry slice (for backward compatibility).
+    fn from_entries(entries: &[IndexEntry]) -> Self {
+        let mut key_data = Vec::new();
+        let mut key_offsets = Vec::with_capacity(entries.len() + 1);
+        let mut block_offsets = Vec::with_capacity(entries.len());
+        let mut block_data_lens = Vec::with_capacity(entries.len());
+
+        for e in entries {
+            key_offsets.push(key_data.len() as u32);
+            key_data.extend_from_slice(&e.key);
+            block_offsets.push(e.block_offset);
+            block_data_lens.push(e.block_data_len);
+        }
+        key_offsets.push(key_data.len() as u32);
+
+        FlatIndex {
+            key_data,
+            key_offsets,
+            block_offsets,
+            block_data_lens,
+        }
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.block_offsets.len()
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.block_offsets.is_empty()
+    }
+
+    /// Get the key bytes for entry `i`.
+    #[inline]
+    fn key(&self, i: usize) -> &[u8] {
+        let start = self.key_offsets[i] as usize;
+        let end = self.key_offsets[i + 1] as usize;
+        &self.key_data[start..end]
+    }
+
+    #[inline]
+    fn block_offset(&self, i: usize) -> u64 {
+        self.block_offsets[i]
+    }
+
+    #[inline]
+    fn block_data_len(&self, i: usize) -> u32 {
+        self.block_data_lens[i]
+    }
+
+    /// Binary search for `seek_bytes`. Returns the block index to start from.
+    ///
+    /// Finds the last entry whose key is <= seek_bytes. Equivalent to the old
+    /// `entries.binary_search_by(|e| e.key.cmp(seek_bytes))` with Err(0)→0, Err(i)→i-1.
+    fn search(&self, seek_bytes: &[u8]) -> usize {
+        let n = self.len();
+        if n == 0 {
+            return 0;
+        }
+        // partition_point returns the first index where key > seek_bytes.
+        // We want the last index where key <= seek_bytes = partition_point - 1.
+        let pp = self.partition_point(seek_bytes);
+        if pp == 0 { 0 } else { pp - 1 }
+    }
+
+    /// Returns the first index where key > seek_bytes (like slice::partition_point).
+    #[inline]
+    fn partition_point(&self, seek_bytes: &[u8]) -> usize {
+        let mut lo = 0usize;
+        let mut hi = self.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.key(mid) <= seek_bytes {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    /// Total heap bytes used by this index.
+    fn heap_bytes(&self) -> usize {
+        self.key_data.capacity()
+            + self.key_offsets.capacity() * std::mem::size_of::<u32>()
+            + self.block_offsets.capacity() * std::mem::size_of::<u64>()
+            + self.block_data_lens.capacity() * std::mem::size_of::<u32>()
+    }
+}
+
 /// Two-level or monolithic index for a segment.
 enum SegmentIndex {
     /// All index entries loaded in memory (small segments or legacy format).
-    Monolithic(Vec<IndexEntry>),
+    Monolithic(FlatIndex),
     /// Two-level partitioned index with all sub-indexes pinned in memory.
     /// No block cache lookup or pread on the read hot path.
     Partitioned {
-        top_level: Vec<IndexEntry>,
+        top_level: FlatIndex,
         /// Pre-parsed sub-index entries, parallel to `top_level`.
-        sub_indexes: Vec<Vec<IndexEntry>>,
+        sub_indexes: Vec<FlatIndex>,
     },
 }
 
 impl SegmentIndex {
     /// Return the sub-index for a given partition, or `None` if out of bounds.
-    ///
-    /// For monolithic indexes, partition 0 returns the full index. For
-    /// partitioned indexes, returns the corresponding sub-index slice.
-    fn partition(&self, idx: usize) -> Option<&[IndexEntry]> {
+    fn partition(&self, idx: usize) -> Option<&FlatIndex> {
         match self {
-            SegmentIndex::Monolithic(entries) => {
+            SegmentIndex::Monolithic(fi) => {
                 if idx == 0 {
-                    Some(entries)
+                    Some(fi)
                 } else {
                     None
                 }
             }
-            SegmentIndex::Partitioned { sub_indexes, .. } => {
-                sub_indexes.get(idx).map(|v| v.as_slice())
-            }
+            SegmentIndex::Partitioned { sub_indexes, .. } => sub_indexes.get(idx),
         }
     }
 
     /// Whether the index is empty (no entries at all).
     fn is_empty(&self) -> bool {
         match self {
-            SegmentIndex::Monolithic(entries) => entries.is_empty(),
+            SegmentIndex::Monolithic(fi) => fi.is_empty(),
             SegmentIndex::Partitioned { sub_indexes, .. } => sub_indexes.is_empty(),
         }
     }
@@ -132,21 +329,14 @@ impl SegmentIndex {
     ///
     /// Returns `(partition_idx, block_within_partition)`.
     fn seek_position(&self, seek_bytes: &[u8]) -> (usize, usize) {
-        let search = |entries: &[IndexEntry]| -> usize {
-            match entries.binary_search_by(|e| e.key.as_slice().cmp(seek_bytes)) {
-                Ok(i) => i,
-                Err(0) => 0,
-                Err(i) => i - 1,
-            }
-        };
         match self {
-            SegmentIndex::Monolithic(entries) => (0, search(entries)),
+            SegmentIndex::Monolithic(fi) => (0, fi.search(seek_bytes)),
             SegmentIndex::Partitioned {
                 top_level,
                 sub_indexes,
             } => {
-                let part = search(top_level);
-                let block_in = search(&sub_indexes[part]);
+                let part = top_level.search(seek_bytes);
+                let block_in = sub_indexes[part].search(seek_bytes);
                 (part, block_in)
             }
         }
@@ -235,22 +425,25 @@ impl KVSegment {
         let index_entries =
             parse_index_block(idx_data).ok_or_else(|| invalid_data!("malformed index block"))?;
         let index = if footer.index_type == IDX_TYPE_PARTITIONED {
-            // Eagerly load all sub-index partitions into memory.
+            // Eagerly load all sub-index partitions into memory as FlatIndex.
             let mut sub_indexes = Vec::with_capacity(index_entries.len());
             for entry in &index_entries {
                 let raw = pread_exact(&file, entry.block_offset, entry.block_data_len as usize)?;
                 let (_, data) = parse_framed_block(&raw)
                     .ok_or_else(|| invalid_data!("sub-index partition CRC mismatch"))?;
-                let sub = parse_index_block(data)
+                let sub = FlatIndex::parse(data)
                     .ok_or_else(|| invalid_data!("malformed sub-index partition"))?;
                 sub_indexes.push(sub);
             }
             SegmentIndex::Partitioned {
-                top_level: index_entries,
+                top_level: FlatIndex::from_entries(&index_entries),
                 sub_indexes,
             }
         } else {
-            SegmentIndex::Monolithic(index_entries)
+            SegmentIndex::Monolithic(
+                FlatIndex::parse(idx_data)
+                    .ok_or_else(|| invalid_data!("malformed index block (flat)"))?
+            )
         };
 
         // Parse filter index block via pread (v5 partitioned bloom)
@@ -335,29 +528,34 @@ impl KVSegment {
         seek_bytes: &[u8],
         snapshot_commit: u64,
     ) -> Result<Option<SegmentEntry>, StrataError> {
+        let profiling = Self::segment_profile_enabled();
+
         // 1. Bloom check
+        let t0 = if profiling { Some(std::time::Instant::now()) } else { None };
         if !self.partitioned_bloom_check(typed_key) {
             return Ok(None);
         }
+        let bloom_ns = t0.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
 
-        match &self.index {
-            SegmentIndex::Monolithic(entries) => {
-                self.point_lookup_with_index(entries, typed_key, seek_bytes, snapshot_commit)
+        // 2. Index lookup + block scan
+        let t1 = if profiling { Some(std::time::Instant::now()) } else { None };
+        let result = match &self.index {
+            SegmentIndex::Monolithic(fi) => {
+                self.point_lookup_with_flat_index(fi, typed_key, seek_bytes, snapshot_commit)
             }
             SegmentIndex::Partitioned {
                 top_level,
                 sub_indexes,
             } => {
-                let part_idx =
-                    match top_level.binary_search_by(|e| e.key.as_slice().cmp(seek_bytes)) {
-                        Ok(i) => i,
-                        Err(0) => 0,
-                        Err(i) => i - 1,
-                    };
+                let tt = if profiling { Some(std::time::Instant::now()) } else { None };
+                let part_idx = top_level.search(seek_bytes);
+                let top_ns = tt.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
 
+                let ts = if profiling { Some(std::time::Instant::now()) } else { None };
+                let mut found = None;
                 for pi in part_idx..top_level.len() {
                     if pi > part_idx {
-                        let prev_key = &top_level[pi - 1].key;
+                        let prev_key = top_level.key(pi - 1);
                         if prev_key.len() >= COMMIT_ID_SUFFIX_LEN {
                             let prefix = &prev_key[..prev_key.len() - COMMIT_ID_SUFFIX_LEN];
                             if prefix > typed_key {
@@ -367,40 +565,118 @@ impl KVSegment {
                             break;
                         }
                     }
-                    // Sub-index is pinned in memory — no cache lookup, no pread.
-                    if let Some(entry) = self.point_lookup_with_index(
+                    if let Some(entry) = self.point_lookup_with_flat_index(
                         &sub_indexes[pi],
                         typed_key,
                         seek_bytes,
                         snapshot_commit,
                     )? {
-                        return Ok(Some(entry));
+                        found = Some(entry);
+                        break;
                     }
                 }
-                Ok(None)
+                let sub_ns = ts.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
+
+                if profiling {
+                    LOOKUP_PROF.with(|p| {
+                        let mut p = p.borrow_mut();
+                        p.top_search_ns += top_ns;
+                        p.sub_lookup_ns += sub_ns;
+                    });
+                }
+                Ok(found)
             }
+        };
+        let index_and_block_ns = t1.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
+
+        if profiling {
+            LOOKUP_PROF.with(|p| {
+                let mut p = p.borrow_mut();
+                p.count += 1;
+                p.bloom_ns += bloom_ns;
+                p.index_and_block_ns += index_and_block_ns;
+                // Track index type
+                if matches!(&self.index, SegmentIndex::Partitioned { .. }) {
+                    p.partitioned_count += 1;
+                }
+                if p.count % 100_000 == 0 {
+                    let n = 100_000f64;
+                    eprintln!(
+                        "[lookup-prof] {} lookups | avg(us): bloom={:.2} top={:.2} sub+block={:.2} total={:.2}",
+                        p.count,
+                        p.bloom_ns as f64 / n / 1000.0,
+                        p.top_search_ns as f64 / n / 1000.0,
+                        p.sub_lookup_ns as f64 / n / 1000.0,
+                        (p.bloom_ns + p.index_and_block_ns) as f64 / n / 1000.0,
+                    );
+                    p.bloom_ns = 0;
+                    p.index_and_block_ns = 0;
+                    p.partitioned_count = 0;
+                    p.top_search_ns = 0;
+                    p.sub_lookup_ns = 0;
+                }
+            });
+        }
+
+        result.map(|opt| opt)
+    }
+
+    // ── Segment read-path profiling (STRATA_PROFILE_SEGMENT=1) ──────────
+
+    fn segment_profile_enabled() -> bool {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static ENABLED: AtomicBool = AtomicBool::new(false);
+        static CHECKED: AtomicBool = AtomicBool::new(false);
+        if !CHECKED.load(Ordering::Relaxed) {
+            ENABLED.store(std::env::var("STRATA_PROFILE_SEGMENT").is_ok(), Ordering::Relaxed);
+            CHECKED.store(true, Ordering::Relaxed);
+        }
+        ENABLED.load(Ordering::Relaxed)
+    }
+
+    fn maybe_print_seg_profile(p: &mut SegmentProfile) {
+        if p.total_reads > 0 && p.total_reads % 100_000 == 0 {
+            let n = 100_000f64;
+            let hit_rate = p.cache_hits as f64 / n * 100.0;
+            let miss_rate = p.cache_misses as f64 / n * 100.0;
+            let avg_pread_us = if p.cache_misses > 0 {
+                p.pread_ns as f64 / p.cache_misses as f64 / 1000.0
+            } else {
+                0.0
+            };
+            eprintln!(
+                "[seg-profile] {} block reads | cache hit={:.1}% miss={:.1}% | \
+                 avg pread={:.1}us ({} bytes/miss)",
+                p.total_reads,
+                hit_rate,
+                miss_rate,
+                avg_pread_us,
+                if p.cache_misses > 0 { p.pread_bytes / p.cache_misses } else { 0 },
+            );
+            p.cache_hits = 0;
+            p.cache_misses = 0;
+            p.pread_ns = 0;
+            p.pread_bytes = 0;
         }
     }
 
-    /// Shared point lookup logic over a flat index entry slice.
-    fn point_lookup_with_index(
+    /// Point lookup using FlatIndex (cache-friendly contiguous keys).
+    fn point_lookup_with_flat_index(
         &self,
-        index: &[IndexEntry],
+        index: &FlatIndex,
         typed_key: &[u8],
         seek_bytes: &[u8],
         snapshot_commit: u64,
     ) -> Result<Option<SegmentEntry>, StrataError> {
-        let block_idx = match index.binary_search_by(|e| e.key.as_slice().cmp(seek_bytes)) {
-            Ok(i) => i,
-            Err(0) => 0,
-            Err(i) => i - 1,
-        };
+        let profiling = Self::segment_profile_enabled();
+        let ts = if profiling { Some(std::time::Instant::now()) } else { None };
+        let block_idx = index.search(seek_bytes);
+        let search_ns = ts.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
 
+        let mut blocks_scanned = 0u32;
         for bi in block_idx..index.len() {
-            let ie = &index[bi];
-
             if bi > block_idx {
-                let prev_key = &index[bi - 1].key;
+                let prev_key = index.key(bi - 1);
                 if prev_key.len() >= COMMIT_ID_SUFFIX_LEN {
                     let prefix = &prev_key[..prev_key.len() - COMMIT_ID_SUFFIX_LEN];
                     if prefix > typed_key {
@@ -411,9 +687,33 @@ impl KVSegment {
                 }
             }
 
-            if let Some(entry) = self.scan_block_for_key(ie, typed_key, snapshot_commit)? {
+            blocks_scanned += 1;
+            let ie = IndexEntry {
+                key: Vec::new(),
+                block_offset: index.block_offset(bi),
+                block_data_len: index.block_data_len(bi),
+            };
+            if let Some(entry) = self.scan_block_for_key(&ie, typed_key, snapshot_commit)? {
+                if profiling {
+                    BLOCK_SCAN_PROF.with(|p| {
+                        let mut p = p.borrow_mut();
+                        p.blocks_per_lookup += blocks_scanned as u64;
+                        p.lookups += 1;
+                    });
+                }
                 return Ok(Some(entry));
             }
+        }
+        if profiling {
+            BLOCK_SCAN_PROF.with(|p| {
+                let mut p = p.borrow_mut();
+                p.blocks_per_lookup += blocks_scanned as u64;
+                p.lookups += 1;
+            });
+            LOOKUP_PROF.with(|p| {
+                let mut p = p.borrow_mut();
+                p.top_search_ns += search_ns; // reuse field for sub-index search timing
+            });
         }
         Ok(None)
     }
@@ -510,23 +810,13 @@ impl KVSegment {
                 .sum::<u64>();
 
         let index: u64 = match &self.index {
-            SegmentIndex::Monolithic(entries) => entries
-                .iter()
-                .map(|e| e.key.len() as u64 + std::mem::size_of::<IndexEntry>() as u64)
-                .sum(),
+            SegmentIndex::Monolithic(fi) => fi.heap_bytes() as u64,
             SegmentIndex::Partitioned {
                 top_level,
                 sub_indexes,
             } => {
-                let top: u64 = top_level
-                    .iter()
-                    .map(|e| e.key.len() as u64 + std::mem::size_of::<IndexEntry>() as u64)
-                    .sum();
-                let subs: u64 = sub_indexes
-                    .iter()
-                    .flat_map(|sub| sub.iter())
-                    .map(|e| e.key.len() as u64 + std::mem::size_of::<IndexEntry>() as u64)
-                    .sum();
+                let top = top_level.heap_bytes() as u64;
+                let subs: u64 = sub_indexes.iter().map(|fi| fi.heap_bytes() as u64).sum();
                 top + subs
             }
         };
@@ -544,7 +834,7 @@ impl KVSegment {
     #[cfg(test)]
     fn index_entry_count(&self) -> usize {
         match &self.index {
-            SegmentIndex::Monolithic(entries) => entries.len(),
+            SegmentIndex::Monolithic(fi) => fi.len(),
             SegmentIndex::Partitioned { top_level, .. } => top_level.len(),
         }
     }
@@ -590,13 +880,23 @@ impl KVSegment {
     fn read_data_block(&self, ie: &IndexEntry) -> Result<Arc<Vec<u8>>, StrataError> {
         let cache = crate::block_cache::global_cache();
         let block_offset = ie.block_offset;
+        let profiling = Self::segment_profile_enabled();
 
         // Check cache first
         if let Some(cached) = cache.get(self.file_id, block_offset) {
+            if profiling {
+                SEG_PROF.with(|p| {
+                    let mut p = p.borrow_mut();
+                    p.cache_hits += 1;
+                    p.total_reads += 1;
+                    Self::maybe_print_seg_profile(&mut p);
+                });
+            }
             return Ok(cached);
         }
 
         // Cache miss: pread from file and decompress
+        let t_pread = if profiling { Some(std::time::Instant::now()) } else { None };
         let framed_len = FRAME_OVERHEAD + ie.block_data_len as usize;
         let raw = pread_exact(&self.file, block_offset, framed_len).map_err(|e| {
             StrataError::corruption(format!(
@@ -656,6 +956,17 @@ impl KVSegment {
         }
 
         // Cache the decompressed block
+        if profiling {
+            let pread_ns = t_pread.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
+            SEG_PROF.with(|p| {
+                let mut p = p.borrow_mut();
+                p.cache_misses += 1;
+                p.total_reads += 1;
+                p.pread_ns += pread_ns;
+                p.pread_bytes += framed_len as u64;
+                Self::maybe_print_seg_profile(&mut p);
+            });
+        }
         Ok(cache.insert(self.file_id, block_offset, decompressed))
     }
 
@@ -673,7 +984,13 @@ impl KVSegment {
         typed_key: &[u8],
         snapshot_commit: u64,
     ) -> Result<Option<SegmentEntry>, StrataError> {
+        let profiling = Self::segment_profile_enabled();
+
+        let t0 = if profiling { Some(std::time::Instant::now()) } else { None };
         let block_data = self.read_data_block(ie)?;
+        let read_block_ns = t0.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
+
+        let t0 = if profiling { Some(std::time::Instant::now()) } else { None };
         let data = &**block_data;
 
         // Strip hash index if present (v6+)
@@ -706,7 +1023,35 @@ impl KVSegment {
             (0, block.len())
         };
 
-        Ok(self.linear_scan_block_v4(data, scan_start, data_end, typed_key, snapshot_commit))
+        let result = self.linear_scan_block_v4(data, scan_start, data_end, typed_key, snapshot_commit);
+        let scan_ns = t0.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
+
+        if profiling {
+            BLOCK_SCAN_PROF.with(|p| {
+                let mut p = p.borrow_mut();
+                p.count += 1;
+                p.read_block_ns += read_block_ns;
+                p.scan_ns += scan_ns;
+                if p.count % 100_000 == 0 {
+                    let n = 100_000f64;
+                    let bpl = if p.lookups > 0 { p.blocks_per_lookup as f64 / p.lookups as f64 } else { 0.0 };
+                    eprintln!(
+                        "[block-scan] {} scans | avg(us): read_block={:.2} scan={:.2} total={:.2} | blocks/lookup={:.2}",
+                        p.count,
+                        p.read_block_ns as f64 / n / 1000.0,
+                        p.scan_ns as f64 / n / 1000.0,
+                        (p.read_block_ns + p.scan_ns) as f64 / n / 1000.0,
+                        bpl,
+                    );
+                    p.read_block_ns = 0;
+                    p.scan_ns = 0;
+                    p.blocks_per_lookup = 0;
+                    p.lookups = 0;
+                }
+            });
+        }
+
+        Ok(result)
     }
 
     /// Linear scan entries in `data[start..end]` for `typed_key` at or below `snapshot_commit`.
@@ -936,8 +1281,12 @@ fn load_next_block(
             }
         }
     };
-    let ie = &sub[*block_within_partition];
-    match segment.read_data_block(ie) {
+    let ie = IndexEntry {
+        key: Vec::new(),
+        block_offset: sub.block_offset(*block_within_partition),
+        block_data_len: sub.block_data_len(*block_within_partition),
+    };
+    match segment.read_data_block(&ie) {
         Ok(data) => {
             let de = block_data_end(&data);
             Ok(Some((data, de)))
