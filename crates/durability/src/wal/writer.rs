@@ -589,6 +589,20 @@ impl WalWriter {
         }
     }
 
+    /// Snapshot the active segment's metadata for out-of-lock writing.
+    ///
+    /// Returns `Some((meta_clone, wal_dir))` if there is metadata to flush,
+    /// `None` otherwise. The caller can then write the meta file without
+    /// holding the WAL lock.
+    pub fn snapshot_active_meta(&self) -> Option<(crate::format::SegmentMeta, std::path::PathBuf)> {
+        if let Some(ref meta) = self.current_segment_meta {
+            if !meta.is_empty() {
+                return Some((meta.clone(), self.wal_dir.clone()));
+            }
+        }
+        None
+    }
+
     /// Get the WAL directory path.
     pub fn wal_dir(&self) -> &Path {
         &self.wal_dir

@@ -804,6 +804,22 @@ impl SegmentedStore {
             (inputs, overlap, grandparents, non_overlap, bottom)
         };
 
+        // ── Compaction metrics logging ──────────────────────────────────
+        let input_bytes: u64 = input_segs.iter().map(|s| s.file_size()).sum();
+        let overlap_bytes: u64 = overlap_segs.iter().map(|s| s.file_size()).sum();
+        let compact_start = std::time::Instant::now();
+        if std::env::var("STRATA_LOG_COMPACT").is_ok() {
+            eprintln!(
+                "[compact] L{}→L{}: input_files={} overlap_files={} input_bytes={} overlap_bytes={} total_input_entries={}",
+                level, level + 1,
+                input_segs.len(),
+                overlap_segs.len(),
+                input_bytes,
+                overlap_bytes,
+                input_segs.iter().chain(overlap_segs.iter()).map(|s| s.entry_count()).sum::<u64>(),
+            );
+        }
+
         // ── 2. Check for trivial move ───────────────────────────────────
         if level > 0
             && input_segs.len() == 1
@@ -1001,6 +1017,18 @@ impl SegmentedStore {
         }
 
         let entries_pruned = total_input_entries.saturating_sub(output_entries);
+
+        if std::env::var("STRATA_LOG_COMPACT").is_ok() {
+            eprintln!(
+                "[compact] L{}→L{}: done in {:.1}ms output_files={} output_bytes={} output_entries={} pruned={}",
+                level, level + 1,
+                compact_start.elapsed().as_secs_f64() * 1000.0,
+                outputs.len(),
+                output_file_size,
+                output_entries,
+                entries_pruned,
+            );
+        }
 
         Ok(Some(CompactionResult {
             segments_merged,

@@ -300,7 +300,7 @@ pub fn flush_embed_buffer(p: &Arc<Primitives>) {
             "source_key": pe.key,
         });
 
-        if let Err(e) = p.vector.system_insert_with_source(
+        if let Err(_e) = p.vector.system_insert_with_source(
             pe.branch_id,
             pe.shadow_collection,
             &composite_key,
