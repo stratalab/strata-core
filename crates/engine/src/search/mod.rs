@@ -19,7 +19,9 @@ pub mod stemmer;
 pub mod tokenizer;
 mod types;
 
-pub use index::{InvertedIndex, PhraseConfig, PostingEntry, PostingList, ScoredDocId};
+pub use index::{
+    InvertedIndex, PhraseConfig, PostingEntry, PostingList, ProximityConfig, ScoredDocId,
+};
 pub use recipe::Recipe;
 pub use recovery::{extract_indexable_text, register_search_recovery, SearchSubsystem};
 pub use searchable::{

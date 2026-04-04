@@ -117,6 +117,101 @@ fn check_phrase_match(term_positions: &[SmallVec<[u32; 4]>], slop: u32) -> bool 
 }
 
 // ============================================================================
+// Proximity scoring
+// ============================================================================
+
+/// Configuration for proximity scoring in `score_top_k`.
+///
+/// When `enabled` is false or the query has fewer than 2 terms, proximity
+/// scoring is skipped entirely (zero overhead).
+pub struct ProximityConfig {
+    /// Enable proximity scoring. Default: true.
+    pub enabled: bool,
+    /// Window size for proximity normalization (in word positions).
+    /// Smaller values reward tighter clustering more aggressively. Default: 10.
+    pub window: u32,
+    /// Weight of the additive proximity boost. Default: 0.5.
+    /// Set to 0.0 to disable without turning off position gathering.
+    pub weight: f32,
+}
+
+impl ProximityConfig {
+    /// Default proximity config: enabled with window=10, weight=0.5.
+    pub fn default_on() -> Self {
+        ProximityConfig {
+            enabled: true,
+            window: 10,
+            weight: 0.5,
+        }
+    }
+
+    /// Disabled proximity config (zero overhead).
+    pub fn off() -> Self {
+        ProximityConfig {
+            enabled: false,
+            window: 10,
+            weight: 0.0,
+        }
+    }
+}
+
+/// Compute the minimum span (smallest window containing one position from each term).
+///
+/// Uses a sliding-window approach over sorted position lists:
+/// 1. Initialize one pointer per term at the first position.
+/// 2. The span is max(positions) - min(positions) + 1.
+/// 3. Advance the pointer at the minimum position.
+/// 4. Track the global minimum span.
+///
+/// Returns `None` if any term has an empty position list.
+/// Time: O(S × T) where S = total positions across all terms, T = number of terms.
+/// Linear scan over T pointers is faster than a heap for typical query sizes (T ≤ 10).
+fn compute_min_span(term_positions: &[SmallVec<[u32; 4]>]) -> Option<u32> {
+    let n = term_positions.len();
+    if n < 2 {
+        return Some(1);
+    }
+    if term_positions.iter().any(|p| p.is_empty()) {
+        return None;
+    }
+
+    // Pointers into each term's sorted position list
+    let mut ptrs = vec![0usize; n];
+    let mut best_span = u32::MAX;
+
+    loop {
+        // Find current min and max positions across all pointers
+        let mut min_pos = u32::MAX;
+        let mut max_pos = 0u32;
+        let mut min_idx = 0;
+
+        for (i, &ptr) in ptrs.iter().enumerate() {
+            let pos = term_positions[i][ptr];
+            if pos < min_pos {
+                min_pos = pos;
+                min_idx = i;
+            }
+            if pos > max_pos {
+                max_pos = pos;
+            }
+        }
+
+        let span = max_pos - min_pos + 1;
+        if span < best_span {
+            best_span = span;
+        }
+
+        // Advance the pointer at the minimum position
+        ptrs[min_idx] += 1;
+        if ptrs[min_idx] >= term_positions[min_idx].len() {
+            break; // exhausted one term's positions
+        }
+    }
+
+    Some(best_span)
+}
+
+// ============================================================================
 // PostingEntry
 // ============================================================================
 
@@ -586,6 +681,7 @@ impl InvertedIndex {
     ///   branch exists in the index.
     /// - **Dense Vec accumulator**: uses `Vec<f32>` indexed by doc_id instead of
     ///   HashMap for score accumulation.
+    #[allow(clippy::too_many_arguments)]
     pub fn score_top_k(
         &self,
         query_terms: &[String],
@@ -594,6 +690,7 @@ impl InvertedIndex {
         scorer_k1: f32,
         scorer_b: f32,
         phrase_cfg: &PhraseConfig<'_>,
+        prox_cfg: &ProximityConfig,
     ) -> Vec<ScoredDocId> {
         if !self.is_enabled() || query_terms.is_empty() || k == 0 {
             return Vec::new();
@@ -811,6 +908,73 @@ impl InvertedIndex {
                         }
                         scores[doc_id as usize] *= boost;
                     }
+                }
+            }
+        }
+
+        // --- Phase 3: Proximity scoring (zero overhead for single-term or disabled) ---
+        if prox_cfg.enabled && prox_cfg.weight > 0.0 && query_terms.len() >= 2 {
+            let num_query_terms = query_terms.len();
+
+            // Build doc_id → [positions per query term] for all touched docs
+            let mut doc_positions: HashMap<u32, Vec<SmallVec<[u32; 4]>>> = HashMap::new();
+
+            // Active segment
+            for (term_idx, term) in query_terms.iter().enumerate() {
+                if let Some(posting_list) = self.postings.get(term.as_str()) {
+                    for (entry_idx, entry) in posting_list.entries.iter().enumerate() {
+                        let did = entry.doc_id as usize;
+                        if did >= num_docs || !seen[did] {
+                            continue;
+                        }
+                        let e = doc_positions
+                            .entry(entry.doc_id)
+                            .or_insert_with(|| vec![SmallVec::new(); num_query_terms]);
+                        e[term_idx] = posting_list.positions[entry_idx].clone();
+                    }
+                }
+            }
+
+            // Sealed segments
+            for seg in sealed.iter() {
+                for (term_idx, term) in query_terms.iter().enumerate() {
+                    if let Some((iter, mut pr)) = seg.term_with_positions(term) {
+                        for entry in iter {
+                            let did = entry.doc_id as usize;
+                            if did >= num_docs || !seen[did] {
+                                pr.skip_positions(entry.tf);
+                                continue;
+                            }
+                            let positions = pr.read_positions(entry.tf);
+                            let e = doc_positions
+                                .entry(entry.doc_id)
+                                .or_insert_with(|| vec![SmallVec::new(); num_query_terms]);
+                            e[term_idx] = positions;
+                        }
+                    }
+                }
+            }
+
+            // Compute proximity boost per doc
+            let window = prox_cfg.window.max(1) as f32;
+            for (&doc_id, term_positions) in &doc_positions {
+                // Count how many query terms are present in this doc
+                let present: Vec<&SmallVec<[u32; 4]>> =
+                    term_positions.iter().filter(|p| !p.is_empty()).collect();
+                let terms_present = present.len();
+
+                if terms_present < 2 {
+                    continue; // Need at least 2 terms for proximity
+                }
+
+                // Compute min span over the present terms
+                let present_positions: Vec<SmallVec<[u32; 4]>> =
+                    present.into_iter().cloned().collect();
+                if let Some(span) = compute_min_span(&present_positions) {
+                    let coverage = terms_present as f32 / num_query_terms as f32;
+                    let proximity_score =
+                        prox_cfg.weight * coverage * coverage / (1.0 + span as f32 / window);
+                    scores[doc_id as usize] += proximity_score;
                 }
             }
         }
@@ -1600,7 +1764,15 @@ mod tests {
         // Index is disabled by default
         let branch_id = BranchId::new();
         let terms = vec!["hello".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert!(result.is_empty());
     }
 
@@ -1612,7 +1784,15 @@ mod tests {
         let doc = kv_ref(branch_id, "doc1");
         index.index_document(&doc, "hello world", None);
 
-        let result = index.score_top_k(&[], &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &[],
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert!(result.is_empty());
     }
 
@@ -1625,7 +1805,15 @@ mod tests {
         index.index_document(&doc, "hello world", None);
 
         let terms = vec!["hello".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 0, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            0,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert!(result.is_empty());
     }
 
@@ -1639,7 +1827,15 @@ mod tests {
 
         // Query with a term that doesn't exist in the index
         let terms = vec!["nonexistent".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert!(result.is_empty());
     }
 
@@ -1655,7 +1851,15 @@ mod tests {
         index.index_document(&doc2, "hello planet", None);
 
         let terms = vec!["hello".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
 
         // Both docs contain "hello", so both should appear
         assert_eq!(result.len(), 2);
@@ -1680,13 +1884,29 @@ mod tests {
 
         // Search branch_a: should only find doc_a
         let terms = vec!["hello".to_string()];
-        let result_a = index.score_top_k(&terms, &branch_a, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result_a = index.score_top_k(
+            &terms,
+            &branch_a,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result_a.len(), 1);
         let resolved = index.resolve_doc_id(result_a[0].doc_id).unwrap();
         assert_eq!(resolved, doc_a);
 
         // Search branch_b: should only find doc_b
-        let result_b = index.score_top_k(&terms, &branch_b, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result_b = index.score_top_k(
+            &terms,
+            &branch_b,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result_b.len(), 1);
         let resolved = index.resolve_doc_id(result_b[0].doc_id).unwrap();
         assert_eq!(resolved, doc_b);
@@ -1705,7 +1925,15 @@ mod tests {
         }
 
         let terms = vec!["common".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 5, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            5,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 5);
     }
 
@@ -1722,7 +1950,15 @@ mod tests {
         index.index_document(&doc2, "hello planet", None);
 
         let terms = vec!["hello".to_string(), "world".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
 
         assert_eq!(result.len(), 2);
         // doc1 matches both terms, so it should score higher
@@ -1756,8 +1992,15 @@ mod tests {
 
         // Search for "rare" — only doc0 should match
         let rare_terms = vec!["rare".to_string()];
-        let rare_result =
-            index.score_top_k(&rare_terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let rare_result = index.score_top_k(
+            &rare_terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(rare_result.len(), 1);
 
         // Search for "common" — all 10 docs match
@@ -1769,6 +2012,7 @@ mod tests {
             0.9,
             0.4,
             &PhraseConfig::none(),
+            &ProximityConfig::off(),
         );
         assert_eq!(common_result.len(), 10);
 
@@ -1807,7 +2051,15 @@ mod tests {
         index.index_document(&doc2, "hello hello hello", None);
 
         let terms = vec!["hello".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
 
         assert_eq!(result.len(), 2);
         let doc1_id = index.doc_id_map.get(&doc1).unwrap();
@@ -1837,7 +2089,15 @@ mod tests {
         }
 
         let terms = vec!["target".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
 
         // Verify strictly descending order
         for window in result.windows(2) {
@@ -1863,7 +2123,15 @@ mod tests {
         let k1 = 1.2_f32;
         let b = 0.75_f32;
         let terms = vec!["hello".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, k1, b, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            k1,
+            b,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 1);
 
         // Manual BM25 calculation:
@@ -1906,6 +2174,7 @@ mod tests {
             0.9,
             0.4,
             &PhraseConfig::none(),
+            &ProximityConfig::off(),
         );
         assert!(
             result.is_empty(),
@@ -1924,7 +2193,15 @@ mod tests {
 
         // Request k=100 but only 1 doc matches
         let terms = vec!["hello".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 100, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            100,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 1);
     }
 
@@ -1943,7 +2220,15 @@ mod tests {
         index.remove_document(&doc1);
 
         let terms = vec!["hello".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
 
         // Only doc2 should remain
         assert_eq!(result.len(), 1);
@@ -1971,7 +2256,15 @@ mod tests {
         index.index_document(&event_doc, "hello planet", None);
 
         let terms = vec!["hello".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
 
         // Both should match since we filter by branch_id, not entity type
         assert_eq!(result.len(), 2);
@@ -2016,7 +2309,15 @@ mod tests {
 
         // score_top_k should find results in sealed segment
         let terms = vec!["hello".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 20, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            20,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 10);
     }
 
@@ -2040,7 +2341,15 @@ mod tests {
 
         // Should find results from both segments
         let terms = vec!["hello".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 20, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            20,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 10);
 
         // doc_freq should sum across segments
@@ -2071,7 +2380,15 @@ mod tests {
 
         // Old terms should not match (tombstoned in sealed segment)
         let terms = vec!["hello".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert!(
             result.is_empty(),
             "Old term 'hello' should not match after re-index"
@@ -2079,7 +2396,15 @@ mod tests {
 
         // New terms should match (in active segment)
         let terms = vec!["alpha".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 1, "New term 'alpha' should match");
 
         let resolved = index.resolve_doc_id(result[0].doc_id).unwrap();
@@ -2109,7 +2434,15 @@ mod tests {
 
         // Search should only find doc2
         let terms = vec!["hello".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 1);
         let resolved = index.resolve_doc_id(result[0].doc_id).unwrap();
         assert_eq!(resolved, doc2);
@@ -2152,7 +2485,15 @@ mod tests {
 
         // Search after first seal
         let terms = vec!["alpha".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 20, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            20,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 5);
 
         // Second batch: 5 more docs
@@ -2163,7 +2504,15 @@ mod tests {
         index.seal_active();
 
         // Search after second seal — should span both sealed segments
-        let result = index.score_top_k(&terms, &branch_id, 20, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            20,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 10);
 
         // Third batch: 3 more docs still in active
@@ -2173,7 +2522,15 @@ mod tests {
         }
 
         // Search across 2 sealed + 1 active
-        let result = index.score_top_k(&terms, &branch_id, 20, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            20,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 13);
 
         assert_eq!(index.total_docs(), 13);
@@ -2219,7 +2576,15 @@ mod tests {
 
             // Search should only find doc2
             let terms = vec!["hello".to_string()];
-            let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+            let result = index.score_top_k(
+                &terms,
+                &branch_id,
+                10,
+                0.9,
+                0.4,
+                &PhraseConfig::none(),
+                &ProximityConfig::off(),
+            );
             assert_eq!(result.len(), 1);
             let resolved = index.resolve_doc_id(result[0].doc_id).unwrap();
             assert_eq!(resolved, kv_ref(branch_id, "doc2"));
@@ -2252,7 +2617,15 @@ mod tests {
             index.enable();
 
             let terms = vec!["hello".to_string()];
-            let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+            let result = index.score_top_k(
+                &terms,
+                &branch_id,
+                10,
+                0.9,
+                0.4,
+                &PhraseConfig::none(),
+                &ProximityConfig::off(),
+            );
             assert_eq!(result.len(), 2);
 
             // Verify exact EntityRef identity (not just is_some)
@@ -2282,7 +2655,15 @@ mod tests {
         let k1 = 1.2_f32;
         let b = 0.75_f32;
         let terms = vec!["hello".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, k1, b, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            k1,
+            b,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 1);
 
         // Manual BM25 calculation (same as active-segment test)
@@ -2323,7 +2704,15 @@ mod tests {
         index.remove_document(&doc2);
 
         let terms = vec!["hello".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 2);
 
         let resolved: Vec<EntityRef> = result
@@ -2352,7 +2741,15 @@ mod tests {
 
         // Search should still work correctly
         let terms = vec!["hello".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 5);
     }
 
@@ -2378,9 +2775,25 @@ mod tests {
 
         // Search should filter correctly per branch
         let terms = vec!["hello".to_string()];
-        let result_a = index.score_top_k(&terms, &branch_a, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result_a = index.score_top_k(
+            &terms,
+            &branch_a,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result_a.len(), 3);
-        let result_b = index.score_top_k(&terms, &branch_b, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result_b = index.score_top_k(
+            &terms,
+            &branch_b,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result_b.len(), 3);
     }
 
@@ -2397,7 +2810,15 @@ mod tests {
 
         // Search for branch_b (not in index) — should return empty via early return
         let terms = vec!["hello".to_string()];
-        let result = index.score_top_k(&terms, &branch_b, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_b,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert!(result.is_empty());
     }
 
@@ -2433,7 +2854,15 @@ mod tests {
             // Enable and search
             index.enable();
             let terms = vec!["hello".to_string()];
-            let result = index.score_top_k(&terms, &branch_id, 30, 0.9, 0.4, &PhraseConfig::none());
+            let result = index.score_top_k(
+                &terms,
+                &branch_id,
+                30,
+                0.9,
+                0.4,
+                &PhraseConfig::none(),
+                &ProximityConfig::off(),
+            );
             assert_eq!(result.len(), 20);
 
             // Verify doc_id resolution works
@@ -2461,7 +2890,15 @@ mod tests {
         let k1 = 1.2_f32;
         let b = 0.75_f32;
         let terms = vec!["hello".to_string(), "world".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, k1, b, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            k1,
+            b,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 1);
 
         // Manual BM25: N=1, avg_dl=3
@@ -2525,7 +2962,15 @@ mod tests {
 
         // All 4 docs found
         let terms = vec!["hello".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 4);
 
         // Now remove doc2 — sets has_tombstones on all segments
@@ -2539,7 +2984,15 @@ mod tests {
         }
 
         // Search should find 3 docs (doc2 tombstoned)
-        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 3);
 
         let resolved: Vec<EntityRef> = result
@@ -2572,12 +3025,28 @@ mod tests {
         assert_eq!(index.branch_ids.read().unwrap().len(), 1);
 
         let terms = vec!["hello".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 20, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            20,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 10);
 
         // Wrong branch should still return empty
         let other_branch = BranchId::new();
-        let result = index.score_top_k(&terms, &other_branch, 20, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &other_branch,
+            20,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert!(result.is_empty());
     }
 
@@ -2610,12 +3079,27 @@ mod tests {
 
             // Single-branch optimization should work after load
             let terms = vec!["hello".to_string()];
-            let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+            let result = index.score_top_k(
+                &terms,
+                &branch_id,
+                10,
+                0.9,
+                0.4,
+                &PhraseConfig::none(),
+                &ProximityConfig::off(),
+            );
             assert_eq!(result.len(), 5);
 
             let other_branch = BranchId::new();
-            let result =
-                index.score_top_k(&terms, &other_branch, 10, 0.9, 0.4, &PhraseConfig::none());
+            let result = index.score_top_k(
+                &terms,
+                &other_branch,
+                10,
+                0.9,
+                0.4,
+                &PhraseConfig::none(),
+                &ProximityConfig::off(),
+            );
             assert!(result.is_empty());
         }
     }
@@ -2652,7 +3136,15 @@ mod tests {
 
             // Search should still work correctly (only doc2)
             let terms = vec!["hello".to_string()];
-            let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+            let result = index.score_top_k(
+                &terms,
+                &branch_id,
+                10,
+                0.9,
+                0.4,
+                &PhraseConfig::none(),
+                &ProximityConfig::off(),
+            );
             assert_eq!(result.len(), 1);
             let resolved = index.resolve_doc_id(result[0].doc_id).unwrap();
             assert_eq!(resolved, kv_ref(branch_id, "doc2"));
@@ -2680,10 +3172,26 @@ mod tests {
         assert_eq!(index.branch_ids.read().unwrap().len(), 2);
 
         let terms = vec!["hello".to_string()];
-        let result_a = index.score_top_k(&terms, &branch_a, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result_a = index.score_top_k(
+            &terms,
+            &branch_a,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result_a.len(), 2);
 
-        let result_b = index.score_top_k(&terms, &branch_b, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result_b = index.score_top_k(
+            &terms,
+            &branch_b,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result_b.len(), 1);
         let resolved = index.resolve_doc_id(result_b[0].doc_id).unwrap();
         assert_eq!(resolved, doc_b1);
@@ -2711,7 +3219,15 @@ mod tests {
 
         // Multi-term query: "alpha beta"
         let terms = vec!["alpha".to_string(), "beta".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
 
         // All 3 docs match "alpha", doc1 and doc3 also match "beta"
         assert_eq!(result.len(), 3);
@@ -2957,7 +3473,15 @@ mod tests {
 
         // Search should find only doc2
         let terms = vec!["hello".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 1);
         let resolved = index.resolve_doc_id(result[0].doc_id).unwrap();
         assert_eq!(resolved, doc2);
@@ -2997,7 +3521,15 @@ mod tests {
 
         // Only doc2 should appear in search
         let terms = vec!["alpha".to_string()];
-        let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 1);
         let resolved = index.resolve_doc_id(result[0].doc_id).unwrap();
         assert_eq!(resolved, doc2);
@@ -3046,7 +3578,15 @@ mod tests {
             // doc_lengths was used for stat update
             // Search should only find doc2
             let terms = vec!["hello".to_string()];
-            let result = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+            let result = index.score_top_k(
+                &terms,
+                &branch_id,
+                10,
+                0.9,
+                0.4,
+                &PhraseConfig::none(),
+                &ProximityConfig::off(),
+            );
             assert_eq!(result.len(), 1);
             let resolved = index.resolve_doc_id(result[0].doc_id).unwrap();
             assert_eq!(resolved, doc2);
@@ -3087,12 +3627,28 @@ mod tests {
 
         // Old terms should not match (tombstoned in sealed)
         let query = vec!["hello".to_string()];
-        let result = index.score_top_k(&query, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &query,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert!(result.is_empty());
 
         // New terms should match (in active)
         let query = vec!["alpha".to_string()];
-        let result = index.score_top_k(&query, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let result = index.score_top_k(
+            &query,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         assert_eq!(result.len(), 1);
     }
 
@@ -3372,6 +3928,7 @@ mod tests {
                 slop: 0,
                 filter: false,
             },
+            &ProximityConfig::off(),
         );
 
         // All matching docs returned
@@ -3426,6 +3983,7 @@ mod tests {
                 slop: 0,
                 filter: true,
             },
+            &ProximityConfig::off(),
         );
 
         // doc1 has both words but not adjacent — should be filtered out
@@ -3464,6 +4022,7 @@ mod tests {
                 slop: 0,
                 filter: true,
             },
+            &ProximityConfig::off(),
         );
         let strict_keys: Vec<String> = strict
             .iter()
@@ -3491,6 +4050,7 @@ mod tests {
                 slop: 2,
                 filter: true,
             },
+            &ProximityConfig::off(),
         );
         let sloppy_keys: Vec<String> = sloppy
             .iter()
@@ -3529,9 +4089,17 @@ mod tests {
                 slop: 0,
                 filter: false,
             },
+            &ProximityConfig::off(),
         );
-        let without_phrases =
-            index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let without_phrases = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
 
         assert_eq!(with_phrases.len(), without_phrases.len());
         for (a, b) in with_phrases.iter().zip(without_phrases.iter()) {
@@ -3578,6 +4146,7 @@ mod tests {
                 slop: 0,
                 filter: true,
             },
+            &ProximityConfig::off(),
         );
         assert_eq!(
             result.len(),
@@ -3620,6 +4189,7 @@ mod tests {
                 slop: 0,
                 filter: true,
             },
+            &ProximityConfig::off(),
         );
         assert_eq!(result.len(), 1, "exact phrase 'quick brown' should match");
     }
@@ -3651,6 +4221,7 @@ mod tests {
                 slop: 0,
                 filter: true,
             },
+            &ProximityConfig::off(),
         );
         assert_eq!(result.len(), 1, "phrase should match in sealed segment");
     }
@@ -3663,7 +4234,15 @@ mod tests {
         let phrases = vec![vec!["machin".to_string(), "learn".to_string()]];
 
         // Get base score without phrases
-        let base = index.score_top_k(&terms, &branch_id, 10, 0.9, 0.4, &PhraseConfig::none());
+        let base = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
         // Get boosted score with phrases (boost=3.0)
         let boosted = index.score_top_k(
             &terms,
@@ -3677,6 +4256,7 @@ mod tests {
                 slop: 0,
                 filter: false,
             },
+            &ProximityConfig::off(),
         );
 
         // Find doc0 (has exact phrase) in both
@@ -3741,6 +4321,7 @@ mod tests {
                 slop: 0,
                 filter: false,
             },
+            &ProximityConfig::off(),
         );
         assert!(result.len() >= 2);
 
@@ -3769,6 +4350,352 @@ mod tests {
             "doc matching 2 phrases should score higher: both={} one={}",
             both_score,
             one_score
+        );
+    }
+
+    // ====================================================================
+    // Proximity scoring unit tests (#2240)
+    // ====================================================================
+
+    #[test]
+    fn test_compute_min_span_basic() {
+        // A at [5], B at [7], C at [9] → span = 9-5+1 = 5
+        let positions = vec![
+            SmallVec::from_slice(&[5u32]),
+            SmallVec::from_slice(&[7u32]),
+            SmallVec::from_slice(&[9u32]),
+        ];
+        assert_eq!(compute_min_span(&positions), Some(5));
+    }
+
+    #[test]
+    fn test_compute_min_span_adjacent() {
+        // Adjacent terms: span = 3
+        let positions = vec![
+            SmallVec::from_slice(&[0u32]),
+            SmallVec::from_slice(&[1u32]),
+            SmallVec::from_slice(&[2u32]),
+        ];
+        assert_eq!(compute_min_span(&positions), Some(3));
+    }
+
+    #[test]
+    fn test_compute_min_span_multiple_positions() {
+        // A at [5, 20, 100], B at [7, 50], C at [9, 80]
+        // Best window: [5, 7, 9] → span = 5
+        let positions = vec![
+            SmallVec::from_slice(&[5u32, 20, 100]),
+            SmallVec::from_slice(&[7u32, 50]),
+            SmallVec::from_slice(&[9u32, 80]),
+        ];
+        assert_eq!(compute_min_span(&positions), Some(5));
+    }
+
+    #[test]
+    fn test_compute_min_span_single_term() {
+        let positions = vec![SmallVec::from_slice(&[3u32])];
+        assert_eq!(compute_min_span(&positions), Some(1));
+    }
+
+    #[test]
+    fn test_compute_min_span_empty() {
+        let positions = vec![SmallVec::from_slice(&[3u32]), SmallVec::new()];
+        assert_eq!(compute_min_span(&positions), None);
+    }
+
+    #[test]
+    fn test_compute_min_span_same_position() {
+        // Two terms at the same position → span = 1
+        let positions = vec![SmallVec::from_slice(&[5u32]), SmallVec::from_slice(&[5u32])];
+        assert_eq!(compute_min_span(&positions), Some(1));
+    }
+
+    #[test]
+    fn test_compute_min_span_two_terms() {
+        // A at [0, 10], B at [3, 8] → best is [8, 10] span=3 or [0, 3] span=4
+        // Actually: pointer approach — start with (A=0, B=3), span=4.
+        // Advance min (A=0→10), now (A=10, B=3), span=8. Advance min (B=3→8),
+        // now (A=10, B=8), span=3. Advance min (B=8→exhausted). Best=3.
+        let positions = vec![
+            SmallVec::from_slice(&[0u32, 10]),
+            SmallVec::from_slice(&[3u32, 8]),
+        ];
+        assert_eq!(compute_min_span(&positions), Some(3));
+    }
+
+    // ====================================================================
+    // Proximity scoring integration tests
+    // ====================================================================
+
+    #[test]
+    fn test_proximity_boost_close_terms() {
+        let index = InvertedIndex::new();
+        index.enable();
+        let branch_id = BranchId::new();
+
+        // Doc with terms close together
+        let close = kv_ref(branch_id, "close");
+        index.index_document(&close, "machine learning algorithms today", None);
+
+        // Doc with terms far apart
+        let far = kv_ref(branch_id, "far");
+        index.index_document(
+            &far,
+            "machine tools and various other equipment for advanced learning",
+            None,
+        );
+
+        let terms = vec!["machin".to_string(), "learn".to_string()];
+
+        // With proximity enabled, "close" doc should score higher
+        let with_prox = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::default_on(),
+        );
+        assert_eq!(with_prox.len(), 2);
+        let close_score = with_prox
+            .iter()
+            .find(|r| {
+                let e = index.resolve_doc_id(r.doc_id).unwrap();
+                matches!(e, EntityRef::Kv { ref key, .. } if key == "close")
+            })
+            .unwrap()
+            .score;
+        let far_score = with_prox
+            .iter()
+            .find(|r| {
+                let e = index.resolve_doc_id(r.doc_id).unwrap();
+                matches!(e, EntityRef::Kv { ref key, .. } if key == "far")
+            })
+            .unwrap()
+            .score;
+        assert!(
+            close_score > far_score,
+            "close doc should score higher with proximity: close={} far={}",
+            close_score,
+            far_score
+        );
+    }
+
+    #[test]
+    fn test_proximity_disabled_no_effect() {
+        let index = InvertedIndex::new();
+        index.enable();
+        let branch_id = BranchId::new();
+
+        let doc = kv_ref(branch_id, "doc");
+        index.index_document(&doc, "machine learning algorithms", None);
+
+        let terms = vec!["machin".to_string(), "learn".to_string()];
+
+        let with_prox = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::default_on(),
+        );
+        let without_prox = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
+
+        // With proximity, score should be higher (additive boost)
+        assert!(
+            with_prox[0].score > without_prox[0].score,
+            "proximity should add to score: with={} without={}",
+            with_prox[0].score,
+            without_prox[0].score
+        );
+    }
+
+    #[test]
+    fn test_proximity_single_term_zero_overhead() {
+        let index = InvertedIndex::new();
+        index.enable();
+        let branch_id = BranchId::new();
+
+        let doc = kv_ref(branch_id, "doc");
+        index.index_document(&doc, "machine learning algorithms", None);
+
+        let terms = vec!["machin".to_string()];
+
+        // Single term: proximity should have no effect
+        let with_prox = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::default_on(),
+        );
+        let without_prox = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
+
+        assert_eq!(with_prox.len(), without_prox.len());
+        assert!(
+            (with_prox[0].score - without_prox[0].score).abs() < 1e-6,
+            "single term should have no proximity effect"
+        );
+    }
+
+    #[test]
+    fn test_proximity_partial_coverage() {
+        let index = InvertedIndex::new();
+        index.enable();
+        let branch_id = BranchId::new();
+
+        // Doc has 2 of 3 query terms
+        let doc = kv_ref(branch_id, "partial");
+        index.index_document(&doc, "machine learning", None);
+
+        let terms = vec![
+            "machin".to_string(),
+            "learn".to_string(),
+            "algorithm".to_string(),
+        ];
+
+        let with_prox = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::default_on(),
+        );
+        let without_prox = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
+
+        // Partial coverage should still add a (smaller) boost
+        assert!(
+            with_prox[0].score > without_prox[0].score,
+            "partial coverage should still boost: with={} without={}",
+            with_prox[0].score,
+            without_prox[0].score
+        );
+    }
+
+    #[test]
+    fn test_proximity_sealed_segment() {
+        let index = InvertedIndex::new();
+        index.enable();
+        let branch_id = BranchId::new();
+
+        let doc = kv_ref(branch_id, "sealed");
+        index.index_document(&doc, "machine learning algorithms", None);
+        index.seal_active();
+
+        let terms = vec!["machin".to_string(), "learn".to_string()];
+
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::default_on(),
+        );
+        let base = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
+
+        assert!(
+            result[0].score > base[0].score,
+            "proximity should work on sealed segments"
+        );
+    }
+
+    #[test]
+    fn test_proximity_weight_scales() {
+        let index = InvertedIndex::new();
+        index.enable();
+        let branch_id = BranchId::new();
+
+        let doc = kv_ref(branch_id, "doc");
+        index.index_document(&doc, "machine learning", None);
+
+        let terms = vec!["machin".to_string(), "learn".to_string()];
+
+        let base = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+        );
+        let w05 = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig {
+                enabled: true,
+                window: 10,
+                weight: 0.5,
+            },
+        );
+        let w10 = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig {
+                enabled: true,
+                window: 10,
+                weight: 1.0,
+            },
+        );
+
+        let boost_05 = w05[0].score - base[0].score;
+        let boost_10 = w10[0].score - base[0].score;
+
+        // weight=1.0 should give ~2x the boost of weight=0.5
+        let ratio = boost_10 / boost_05;
+        assert!(
+            (ratio - 2.0).abs() < 0.01,
+            "expected 2x ratio, got {}",
+            ratio
         );
     }
 }

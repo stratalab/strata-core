@@ -161,13 +161,17 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
                 .as_deref()
                 .map(|m| m == "filter")
                 .unwrap_or(false);
+            let prox_enabled = bm25_cfg.proximity.unwrap_or(true);
+            let prox_window = bm25_cfg.proximity_window.unwrap_or(10);
+            let prox_weight = bm25_cfg.proximity_weight.unwrap_or(0.5);
             let mut search_req = SearchRequest::new(request.branch_id, &request.query)
                 .with_k(k)
                 .with_mode(SearchMode::Keyword)
                 .with_space(&request.space)
                 .with_snapshot_version(snapshot)
                 .with_bm25_params(bm25_k1, bm25_b)
-                .with_phrase_params(phrase_boost, phrase_slop, phrase_filter);
+                .with_phrase_params(phrase_boost, phrase_slop, phrase_filter)
+                .with_proximity_params(prox_enabled, prox_window, prox_weight);
             if let Some((s, e)) = request.time_range {
                 search_req = search_req.with_time_range(s, e);
             }

@@ -119,9 +119,15 @@ pub struct BM25Config {
     /// Default: 2.0. Only used when phrase_mode = "boost".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phrase_boost: Option<f32>,
-    /// Term proximity boost factor.
+    /// Weight of the additive proximity boost. Default: 0.5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proximity_boost: Option<f32>,
+    pub proximity_weight: Option<f32>,
+    /// Enable proximity scoring for multi-term queries. Default: true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proximity: Option<bool>,
+    /// Window size (in word positions) for proximity normalization. Default: 10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proximity_window: Option<u32>,
     /// Phrase matching mode: "boost" (default) or "filter".
     /// "boost": phrase matches get score multiplied by phrase_boost.
     /// "filter": only documents containing exact phrases are returned.

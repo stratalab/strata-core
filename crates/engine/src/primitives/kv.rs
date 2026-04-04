@@ -608,6 +608,11 @@ impl crate::search::Searchable for KVStore {
             slop: req.phrase_slop,
             filter: req.phrase_filter,
         };
+        let prox_cfg = crate::search::ProximityConfig {
+            enabled: req.proximity,
+            window: req.proximity_window,
+            weight: req.proximity_weight,
+        };
 
         // Score top-k entirely inside the index (zero-copy posting iteration)
         let top_k = index.score_top_k(
@@ -617,6 +622,7 @@ impl crate::search::Searchable for KVStore {
             req.bm25_k1,
             req.bm25_b,
             &phrase_cfg,
+            &prox_cfg,
         );
 
         // Only resolve doc_ids and fetch text for the final top-k results

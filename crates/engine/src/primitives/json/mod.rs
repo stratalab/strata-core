@@ -1416,6 +1416,11 @@ impl JsonStore {
             slop: req.phrase_slop,
             filter: req.phrase_filter,
         };
+        let prox_cfg = crate::search::ProximityConfig {
+            enabled: req.proximity,
+            window: req.proximity_window,
+            weight: req.proximity_weight,
+        };
 
         let top_k = index.score_top_k(
             &parsed.terms,
@@ -1424,6 +1429,7 @@ impl JsonStore {
             req.bm25_k1,
             req.bm25_b,
             &phrase_cfg,
+            &prox_cfg,
         );
 
         let hits: Vec<SearchHit> = top_k
