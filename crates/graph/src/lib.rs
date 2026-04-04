@@ -126,16 +126,23 @@ impl strata_engine::search::Searchable for GraphStore {
             return Ok(strata_engine::SearchResponse::empty());
         }
 
-        let query_terms = strata_engine::search::tokenize(&req.query);
+        let parsed = strata_engine::search::tokenizer::parse_query(&req.query);
+        let phrase_cfg = strata_engine::search::PhraseConfig {
+            phrases: &parsed.phrases,
+            boost: req.phrase_boost,
+            slop: req.phrase_slop,
+            filter: req.phrase_filter,
+        };
 
         // Score all matching docs in the shared index, then filter to Graph refs.
         // Request more than k to account for non-graph results being filtered out.
         let top_k = index.score_top_k(
-            &query_terms,
+            &parsed.terms,
             &req.branch_id,
             req.k.saturating_mul(4),
             req.bm25_k1,
             req.bm25_b,
+            &phrase_cfg,
         );
 
         let hits: Vec<SearchHit> = top_k

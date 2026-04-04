@@ -188,6 +188,15 @@ pub struct SearchRequest {
     /// BM25 b parameter (document length normalization). Default: 0.4.
     /// Set by the retrieval substrate from the recipe's BM25Config.
     pub bm25_b: f32,
+
+    /// Phrase boost factor. Default: 2.0.
+    pub phrase_boost: f32,
+
+    /// Phrase slop (max word gap between phrase terms). Default: 0.
+    pub phrase_slop: u32,
+
+    /// Phrase mode: true = filter (exclude non-matching), false = boost (default).
+    pub phrase_filter: bool,
 }
 
 impl SearchRequest {
@@ -217,6 +226,9 @@ impl SearchRequest {
             field_filter: None,
             bm25_k1: 0.9,
             bm25_b: 0.4,
+            phrase_boost: 2.0,
+            phrase_slop: 0,
+            phrase_filter: false,
             sort_by: None,
         }
     }
@@ -288,6 +300,14 @@ impl SearchRequest {
     pub fn with_bm25_params(mut self, k1: f32, b: f32) -> Self {
         self.bm25_k1 = k1;
         self.bm25_b = b;
+        self
+    }
+
+    /// Builder: set phrase matching parameters from recipe
+    pub fn with_phrase_params(mut self, boost: f32, slop: u32, filter: bool) -> Self {
+        self.phrase_boost = boost;
+        self.phrase_slop = slop;
+        self.phrase_filter = filter;
         self
     }
 

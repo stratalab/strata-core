@@ -601,10 +601,23 @@ impl crate::search::Searchable for KVStore {
             return Ok(crate::SearchResponse::empty());
         }
 
-        let query_terms = crate::search::tokenize(&req.query);
+        let parsed = crate::search::tokenizer::parse_query(&req.query);
+        let phrase_cfg = crate::search::PhraseConfig {
+            phrases: &parsed.phrases,
+            boost: req.phrase_boost,
+            slop: req.phrase_slop,
+            filter: req.phrase_filter,
+        };
 
         // Score top-k entirely inside the index (zero-copy posting iteration)
-        let top_k = index.score_top_k(&query_terms, &req.branch_id, req.k, req.bm25_k1, req.bm25_b);
+        let top_k = index.score_top_k(
+            &parsed.terms,
+            &req.branch_id,
+            req.k,
+            req.bm25_k1,
+            req.bm25_b,
+            &phrase_cfg,
+        );
 
         // Only resolve doc_ids and fetch text for the final top-k results
         let hits: Vec<SearchHit> = top_k

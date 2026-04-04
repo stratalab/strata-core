@@ -138,6 +138,82 @@ pub fn tokenize_with_positions(text: &str) -> Vec<Token> {
     tokens
 }
 
+// ============================================================================
+// Query Parsing — phrase extraction
+// ============================================================================
+
+/// A parsed search query with optional quoted phrases.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedQuery {
+    /// All individual terms (stemmed, deduplicated), including terms from phrases.
+    /// Used for BM25 scoring.
+    pub terms: Vec<String>,
+    /// Quoted phrases, each as a list of stemmed terms.
+    /// Empty when the query has no quoted strings (zero overhead).
+    pub phrases: Vec<Vec<String>>,
+}
+
+/// Parse a query string, extracting quoted phrases and individual terms.
+///
+/// Quoted strings are treated as phrases: `"machine learning" algorithms`
+/// yields one phrase `["machin", "learn"]` and one term `"algorithm"`.
+/// All phrase terms are also included in the flat `terms` list for BM25.
+///
+/// Single-word "phrases" are demoted to regular terms. Unmatched quotes
+/// treat the rest of the string as regular text.
+///
+/// # Examples
+///
+/// ```
+/// use strata_engine::search::tokenizer::parse_query;
+///
+/// let pq = parse_query("\"machine learning\" algorithms");
+/// assert_eq!(pq.phrases.len(), 1);
+/// assert_eq!(pq.phrases[0], vec!["machin", "learn"]);
+/// assert!(pq.terms.contains(&"algorithm".to_string()));
+///
+/// let pq = parse_query("simple query");
+/// assert!(pq.phrases.is_empty());
+/// ```
+pub fn parse_query(query: &str) -> ParsedQuery {
+    let mut terms = Vec::new();
+    let mut phrases = Vec::new();
+    let mut remaining = query;
+
+    while let Some(start) = remaining.find('"') {
+        // Tokenize text before the opening quote
+        let before = &remaining[..start];
+        terms.extend(tokenize(before));
+
+        remaining = &remaining[start + 1..];
+        if let Some(end) = remaining.find('"') {
+            let phrase_text = &remaining[..end];
+            let phrase_terms = tokenize(phrase_text);
+            if phrase_terms.len() >= 2 {
+                terms.extend(phrase_terms.clone());
+                phrases.push(phrase_terms);
+            } else {
+                // Single-word "phrase" — just a regular term
+                terms.extend(phrase_terms);
+            }
+            remaining = &remaining[end + 1..];
+        } else {
+            // Unmatched quote — treat rest as regular text
+            terms.extend(tokenize(remaining));
+            remaining = "";
+        }
+    }
+
+    // Tokenize any remaining text after the last quote
+    terms.extend(tokenize(remaining));
+
+    // Deduplicate terms while preserving order
+    let mut seen = std::collections::HashSet::new();
+    terms.retain(|t| seen.insert(t.clone()));
+
+    ParsedQuery { terms, phrases }
+}
+
 /// Tokenize and deduplicate for query processing.
 ///
 /// # Example
@@ -476,5 +552,85 @@ mod tests {
             .map(|t| t.term.clone())
             .collect();
         assert_eq!(terms, tokenize(text));
+    }
+
+    // ------------------------------------------------------------------
+    // parse_query tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_query_no_phrases() {
+        let pq = parse_query("simple query terms");
+        assert!(pq.phrases.is_empty());
+        assert_eq!(pq.terms, vec!["simpl", "queri", "term"]);
+    }
+
+    #[test]
+    fn test_parse_query_single_phrase() {
+        let pq = parse_query("\"machine learning\" algorithms");
+        assert_eq!(pq.phrases.len(), 1);
+        assert_eq!(pq.phrases[0], vec!["machin", "learn"]);
+        assert!(pq.terms.contains(&"algorithm".to_string()));
+        // Phrase terms also in flat list
+        assert!(pq.terms.contains(&"machin".to_string()));
+        assert!(pq.terms.contains(&"learn".to_string()));
+    }
+
+    #[test]
+    fn test_parse_query_multiple_phrases() {
+        let pq = parse_query("\"error code\" \"stack trace\"");
+        assert_eq!(pq.phrases.len(), 2);
+        assert_eq!(pq.phrases[0], vec!["error", "code"]);
+        assert_eq!(pq.phrases[1], vec!["stack", "trace"]);
+    }
+
+    #[test]
+    fn test_parse_query_single_word_phrase_demoted() {
+        // A single-word "phrase" should be treated as a regular term
+        let pq = parse_query("\"hello\" world");
+        assert!(pq.phrases.is_empty());
+        assert!(pq.terms.contains(&"hello".to_string()));
+        assert!(pq.terms.contains(&"world".to_string()));
+    }
+
+    #[test]
+    fn test_parse_query_unmatched_quote() {
+        let pq = parse_query("\"unmatched phrase");
+        assert!(pq.phrases.is_empty());
+        // All words treated as regular terms
+        assert!(pq.terms.contains(&"unmatch".to_string()));
+        assert!(pq.terms.contains(&"phrase".to_string()));
+    }
+
+    #[test]
+    fn test_parse_query_phrase_terms_stemmed() {
+        let pq = parse_query("\"running quickly\"");
+        assert_eq!(pq.phrases.len(), 1);
+        assert_eq!(pq.phrases[0], vec!["run", "quickli"]);
+    }
+
+    #[test]
+    fn test_parse_query_deduplicates_terms() {
+        let pq = parse_query("\"machine learning\" machine");
+        // "machin" should appear only once in terms
+        let count = pq.terms.iter().filter(|t| *t == "machin").count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_parse_query_empty() {
+        let pq = parse_query("");
+        assert!(pq.terms.is_empty());
+        assert!(pq.phrases.is_empty());
+    }
+
+    #[test]
+    fn test_parse_query_mixed() {
+        let pq = parse_query("find \"error code\" in the \"log file\" please");
+        assert_eq!(pq.phrases.len(), 2);
+        assert_eq!(pq.phrases[0], vec!["error", "code"]);
+        assert_eq!(pq.phrases[1], vec!["log", "file"]);
+        assert!(pq.terms.contains(&"find".to_string()));
+        assert!(pq.terms.contains(&"pleas".to_string()));
     }
 }

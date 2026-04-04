@@ -154,12 +154,20 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
 
             let bm25_k1 = bm25_cfg.k1.unwrap_or(0.9);
             let bm25_b = bm25_cfg.b.unwrap_or(0.4);
+            let phrase_boost = bm25_cfg.phrase_boost.unwrap_or(2.0);
+            let phrase_slop = bm25_cfg.phrase_slop.unwrap_or(0);
+            let phrase_filter = bm25_cfg
+                .phrase_mode
+                .as_deref()
+                .map(|m| m == "filter")
+                .unwrap_or(false);
             let mut search_req = SearchRequest::new(request.branch_id, &request.query)
                 .with_k(k)
                 .with_mode(SearchMode::Keyword)
                 .with_space(&request.space)
                 .with_snapshot_version(snapshot)
-                .with_bm25_params(bm25_k1, bm25_b);
+                .with_bm25_params(bm25_k1, bm25_b)
+                .with_phrase_params(phrase_boost, phrase_slop, phrase_filter);
             if let Some((s, e)) = request.time_range {
                 search_req = search_req.with_time_range(s, e);
             }

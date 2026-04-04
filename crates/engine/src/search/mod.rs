@@ -19,7 +19,7 @@ pub mod stemmer;
 pub mod tokenizer;
 mod types;
 
-pub use index::{InvertedIndex, PostingEntry, PostingList, ScoredDocId};
+pub use index::{InvertedIndex, PhraseConfig, PostingEntry, PostingList, ScoredDocId};
 pub use recipe::Recipe;
 pub use recovery::{extract_indexable_text, register_search_recovery, SearchSubsystem};
 pub use searchable::{
@@ -27,7 +27,9 @@ pub use searchable::{
     truncate_text, BM25LiteScorer, Scorer, ScorerContext, SearchCandidate, SearchDoc, Searchable,
     SimpleScorer,
 };
-pub use tokenizer::{tokenize, tokenize_unique, tokenize_with_positions, Token};
+pub use tokenizer::{
+    parse_query, tokenize, tokenize_unique, tokenize_with_positions, ParsedQuery, Token,
+};
 pub use types::{
     EntityRef, FieldFilter, FieldPredicate, PrimitiveType, SearchBudget, SearchHit, SearchMode,
     SearchRequest, SearchResponse, SearchStats, SortDirection, SortSpec,
