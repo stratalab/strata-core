@@ -219,6 +219,7 @@ impl Database {
         if !index.is_enabled() {
             index.enable();
         }
+        index.set_positions_enabled(db.config().positions);
         db.set_subsystems(vec![Box::new(crate::search::SearchSubsystem)]);
 
         Ok(db)
@@ -342,6 +343,7 @@ impl Database {
         if !index.is_enabled() {
             index.enable();
         }
+        index.set_positions_enabled(db.config().positions);
         db.set_subsystems(vec![Box::new(crate::search::SearchSubsystem)]);
 
         Ok(db)
