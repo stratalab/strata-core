@@ -993,11 +993,25 @@ impl Database {
                             if shutdown.load(Ordering::Relaxed) {
                                 break;
                             }
-                            let mut wal = wal_clone.lock();
-                            if let Err(e) = wal.sync_if_overdue() {
-                                tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
+                            // Background sync: briefly lock for BufWriter flush,
+                            // then fdatasync outside the lock.
+                            let sync_fd = {
+                                let mut w = wal_clone.lock();
+                                w.flush_active_meta();
+                                match w.prepare_background_sync() {
+                                    Ok(Some(fd)) => Some(fd),
+                                    Ok(None) => None,
+                                    Err(e) => {
+                                        tracing::error!(target: "strata::wal", error = %e, "Background WAL flush failed");
+                                        None
+                                    }
+                                }
+                            };
+                            if let Some(fd) = sync_fd {
+                                if let Err(e) = fd.sync_all() {
+                                    tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
+                                }
                             }
-                            wal.flush_active_meta();
                         }
                         // Final sync
                         let mut wal = wal_clone.lock();

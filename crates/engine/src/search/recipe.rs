@@ -131,6 +131,11 @@ pub struct BM25Config {
     /// Default: 0 (exact adjacency).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phrase_slop: Option<u32>,
+    /// Store term positions in the inverted index.
+    /// Enables phrase queries and proximity scoring.
+    /// Default: true. Set to false for minimal index size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub positions: Option<bool>,
 }
 
 /// Vector (embedding) retrieval parameters.
