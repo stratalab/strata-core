@@ -290,11 +290,6 @@ pub struct StrataConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bm25_b: Option<f32>,
 
-    /// Store term positions in the inverted index for phrase/proximity queries.
-    /// Default: true. Set to false for ~30% smaller index (disables phrase queries).
-    #[serde(default = "default_positions")]
-    pub positions: bool,
-
     /// Embedding model name. Default: "miniLM".
     /// Changing after data is indexed requires re-indexing.
     #[serde(default = "default_embed_model")]
@@ -342,10 +337,6 @@ fn default_embed_batch_size() -> Option<usize> {
     Some(512)
 }
 
-fn default_positions() -> bool {
-    true
-}
-
 fn default_embed_model() -> String {
     "miniLM".to_string()
 }
@@ -367,7 +358,6 @@ impl Default for StrataConfig {
             embed_batch_size: Some(512),
             bm25_k1: None,
             bm25_b: None,
-            positions: true,
             embed_model: default_embed_model(),
             provider: default_provider(),
             default_model: None,

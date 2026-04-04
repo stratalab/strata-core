@@ -36,7 +36,7 @@
 
 use super::manifest::{self, ManifestData, SegmentManifestEntry};
 use super::segment::{self, SealedSegment};
-use super::tokenizer::{tokenize, tokenize_with_positions};
+use super::tokenizer::tokenize_with_positions;
 use super::types::EntityRef;
 use dashmap::DashMap;
 use smallvec::SmallVec;
@@ -318,9 +318,6 @@ pub struct InvertedIndex {
     /// Set of branch IDs seen across all indexed documents.
     /// When only one branch exists, score_top_k can skip per-doc branch checks.
     branch_ids: RwLock<HashSet<BranchId>>,
-    /// Whether to store term positions for phrase/proximity queries.
-    /// When false, positions are not stored, saving ~30% index size.
-    positions_enabled: AtomicBool,
 }
 
 impl Default for InvertedIndex {
@@ -349,7 +346,6 @@ impl InvertedIndex {
             active_doc_count: AtomicUsize::new(0),
             sealing: AtomicBool::new(false),
             branch_ids: RwLock::new(HashSet::new()),
-            positions_enabled: AtomicBool::new(true),
         }
     }
 
@@ -370,16 +366,6 @@ impl InvertedIndex {
     /// Disable the index
     pub fn disable(&self) {
         self.enabled.store(false, Ordering::Release);
-    }
-
-    /// Enable or disable position storage for phrase/proximity queries.
-    pub fn set_positions_enabled(&self, enabled: bool) {
-        self.positions_enabled.store(enabled, Ordering::Release);
-    }
-
-    /// Check if position storage is enabled.
-    pub fn positions_enabled(&self) -> bool {
-        self.positions_enabled.load(Ordering::Acquire)
     }
 
     /// Clear all index data
@@ -740,65 +726,38 @@ impl InvertedIndex {
             }
         }
 
-        let store_positions = self.positions_enabled.load(Ordering::Relaxed);
+        let tokens = tokenize_with_positions(text);
+        // doc_len = max_position + 1 (includes stopword gaps for accurate BM25 length norm)
+        let doc_len = tokens.last().map_or(0, |t| t.position + 1);
 
-        let (term_names, doc_len) = if store_positions {
-            let tokens = tokenize_with_positions(text);
-            // doc_len = max_position + 1 (includes stopword gaps for accurate BM25 length norm)
-            let doc_len = tokens.last().map_or(0, |t| t.position + 1);
+        // Build term → positions map
+        let mut term_positions: HashMap<String, SmallVec<[u32; 4]>> =
+            HashMap::with_capacity(tokens.len());
+        for token in tokens {
+            term_positions
+                .entry(token.term)
+                .or_default()
+                .push(token.position);
+        }
 
-            // Build term → positions map
-            let mut term_positions: HashMap<String, SmallVec<[u32; 4]>> =
-                HashMap::with_capacity(tokens.len());
-            for token in tokens {
-                term_positions
-                    .entry(token.term)
-                    .or_default()
-                    .push(token.position);
-            }
+        // Collect term names for the forward index before consuming term_positions
+        let term_names: Vec<String> = term_positions.keys().cloned().collect();
 
-            let names: Vec<String> = term_positions.keys().cloned().collect();
+        // Update posting lists with positions
+        for (term, positions) in term_positions {
+            let tf = positions.len() as u32;
+            let entry = PostingEntry::new(doc_id, tf, doc_len);
 
-            // Update posting lists with positions
-            for (term, positions) in term_positions {
-                let tf = positions.len() as u32;
-                let entry = PostingEntry::new(doc_id, tf, doc_len);
+            self.postings
+                .entry(term.clone())
+                .or_default()
+                .add_with_positions(entry, positions);
 
-                self.postings
-                    .entry(term.clone())
-                    .or_default()
-                    .add_with_positions(entry, positions);
-
-                self.doc_freqs
-                    .entry(term)
-                    .and_modify(|c| *c += 1)
-                    .or_insert(1);
-            }
-
-            (names, doc_len)
-        } else {
-            let tokens = tokenize(text);
-            let doc_len = tokens.len() as u32;
-
-            // Count term frequencies — no positions stored
-            let mut tf_map: HashMap<String, u32> = HashMap::with_capacity(tokens.len());
-            for token in tokens {
-                *tf_map.entry(token).or_insert(0) += 1;
-            }
-
-            let names: Vec<String> = tf_map.keys().cloned().collect();
-
-            for (term, tf) in tf_map {
-                let entry = PostingEntry::new(doc_id, tf, doc_len);
-                self.postings.entry(term.clone()).or_default().add(entry);
-                self.doc_freqs
-                    .entry(term)
-                    .and_modify(|c| *c += 1)
-                    .or_insert(1);
-            }
-
-            (names, doc_len)
-        };
+            self.doc_freqs
+                .entry(term)
+                .and_modify(|c| *c += 1)
+                .or_insert(1);
+        }
 
         // Store forward index (doc_id → terms) for O(terms) removal
         {
