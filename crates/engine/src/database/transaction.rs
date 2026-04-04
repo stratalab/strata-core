@@ -196,20 +196,10 @@ impl Database {
         Ok(())
     }
 
-    /// Flush frozen memtables synchronously and schedule compaction in the background.
-    ///
-    /// Flush runs inline to free memtable memory. Compaction and materialization
-    /// are deferred to the background scheduler so the writer thread is not
-    /// blocked by potentially slow I/O (#1736).
-    fn schedule_flush_if_needed(&self) {
-        if self.storage.segments_dir().is_none() {
-            return;
-        }
-
-        // Update snapshot floor so compaction respects active snapshots (#1697).
-        self.storage.set_snapshot_floor(self.gc_safe_point());
-
-        // 1. Flush frozen memtables synchronously (frees memtable memory).
+    /// Synchronous flush of all frozen memtables. Used only during write
+    /// backpressure to ensure L0 count is accurate before stall decisions.
+    /// Normal writes use the async path in `schedule_flush_if_needed`.
+    fn flush_frozen_sync(&self) {
         let branches = self.storage.branches_needing_flush();
         for branch_id in &branches {
             loop {
@@ -223,18 +213,66 @@ impl Database {
                             target: "strata::flush",
                             ?branch_id,
                             error = %e,
-                            "flush failed"
+                            "sync flush failed"
                         );
                         break;
                     }
                 }
             }
         }
-
-        // 2. Return freed memtable pages to the OS (#2184).
         release_freed_memory();
+    }
 
-        // 3. Schedule compaction and materialization on background thread.
+    /// Schedule flush and compaction on the background thread.
+    ///
+    /// Frozen memtable flush is deferred to the background scheduler to avoid
+    /// blocking the writer thread with SST build + disk I/O. Writes stall only
+    /// when L0 segment count exceeds `l0_stop_writes_trigger` (backpressure).
+    fn schedule_flush_if_needed(&self) {
+        if self.storage.segments_dir().is_none() {
+            return;
+        }
+
+        // Update snapshot floor so compaction respects active snapshots (#1697).
+        self.storage.set_snapshot_floor(self.gc_safe_point());
+
+        // Submit flush work to the background scheduler. The flush task
+        // drains all frozen memtables, updates the WAL watermark, and
+        // then triggers compaction. This keeps the writer thread fast.
+        let branches = self.storage.branches_needing_flush();
+        if !branches.is_empty() {
+            let storage = Arc::clone(&self.storage);
+            let data_dir = self.data_dir.clone();
+            let wal_dir = self.wal_dir.clone();
+            let _ = self
+                .scheduler
+                .submit(crate::background::TaskPriority::High, move || {
+                    for branch_id in &branches {
+                        loop {
+                            match storage.flush_oldest_frozen(branch_id) {
+                                Ok(true) => {
+                                    Self::update_flush_watermark(&storage, &data_dir, &wal_dir);
+                                }
+                                Ok(false) => break,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "strata::flush",
+                                        ?branch_id,
+                                        error = %e,
+                                        "flush failed"
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Return freed memtable pages to the OS (#2184).
+                    release_freed_memory();
+                });
+        }
+
+        // Schedule compaction (separate from flush).
         self.schedule_background_compaction();
     }
 
@@ -272,57 +310,76 @@ impl Database {
 
     /// Apply write backpressure when memtable memory exceeds safe limits.
     ///
+    /// How often to run expensive backpressure checks (memtable bytes, segment
+    /// metadata). These values change only on flush/compaction, not per write.
+    /// Checking every write wastes 200-300μs iterating all segments.
+    const BACKPRESSURE_EXPENSIVE_INTERVAL: u64 = 64;
+
     /// RocksDB-style write backpressure based on L0 file count and memtable
-    /// pressure.  Called after every write commit, outside any storage guards.
+    /// pressure. Called after every write commit, outside any storage guards.
     ///
     /// Three tiers (matching RocksDB semantics):
-    /// 1. L0 count >= `l0_stop_writes_trigger` → wait on condvar until
+    ///
+    /// 1. L0 count >= `l0_stop_writes_trigger` — wait on condvar until
     ///    compaction signals (complete stall).
-    /// 2. L0 count >= `l0_slowdown_writes_trigger` → yield 1 ms per write.
-    /// 3. Memtable bytes > threshold → yield 1 ms (OOM protection).
-    #[inline]
+    /// 2. L0 count >= `l0_slowdown_writes_trigger` — yield 1 ms per write.
+    /// 3. Memtable bytes > threshold — yield 1 ms (OOM protection).
     fn maybe_apply_write_backpressure(&self) -> StrataResult<()> {
         let cfg = self.config.read();
 
-        // L0-based stalling (protects read latency)
+        // L0-based stalling (protects read latency) — always check when active.
         let l0_stop = cfg.storage.l0_stop_writes_trigger;
         let l0_slow = cfg.storage.l0_slowdown_writes_trigger;
         let timeout_ms = cfg.storage.write_stall_timeout_ms;
         drop(cfg); // release config lock before potential sleep
 
-        let l0_count = self.storage.max_l0_segment_count();
-
-        if l0_stop > 0 && l0_count >= l0_stop {
-            // Complete stall: wait on condvar until compaction drains L0.
-            // Also trigger compaction in case none is running.
-            self.schedule_flush_if_needed();
-            let stall_start = std::time::Instant::now();
-            let timeout = std::time::Duration::from_millis(timeout_ms);
-
-            let mut guard = self.write_stall_mu.lock();
-            // Re-check after acquiring lock (compaction may have finished)
-            while self.storage.max_l0_segment_count() >= l0_stop {
-                if timeout_ms > 0 && stall_start.elapsed() >= timeout {
-                    let current_l0 = self.storage.max_l0_segment_count();
-                    tracing::warn!(
-                        target: "strata::backpressure",
-                        stall_ms = stall_start.elapsed().as_millis() as u64,
-                        l0_count = current_l0,
-                        "Write stall timeout — L0 compaction cannot keep up"
-                    );
-                    return Err(StrataError::write_stall_timeout(
-                        stall_start.elapsed().as_millis() as u64,
-                        current_l0,
-                    ));
-                }
-                self.write_stall_cv
-                    .wait_for(&mut guard, std::time::Duration::from_millis(10));
+        // L0 checks run every write when thresholds are active (correctness).
+        if l0_stop > 0 || l0_slow > 0 {
+            // If frozen memtables are pending, drain them synchronously so
+            // L0 count is accurate for backpressure.
+            if self.storage.total_frozen_count() > 0 {
+                self.flush_frozen_sync();
             }
-            return Ok(());
+            let l0_count = self.storage.max_l0_segment_count();
+
+            if l0_stop > 0 && l0_count >= l0_stop {
+                // Complete stall: wait on condvar until compaction drains L0.
+                self.schedule_background_compaction();
+                let stall_start = std::time::Instant::now();
+                let timeout = std::time::Duration::from_millis(timeout_ms);
+
+                let mut guard = self.write_stall_mu.lock();
+                // Re-check after acquiring lock (compaction may have finished)
+                while self.storage.max_l0_segment_count() >= l0_stop {
+                    if timeout_ms > 0 && stall_start.elapsed() >= timeout {
+                        let current_l0 = self.storage.max_l0_segment_count();
+                        tracing::warn!(
+                            target: "strata::backpressure",
+                            stall_ms = stall_start.elapsed().as_millis() as u64,
+                            l0_count = current_l0,
+                            "Write stall timeout — L0 compaction cannot keep up"
+                        );
+                        return Err(StrataError::write_stall_timeout(
+                            stall_start.elapsed().as_millis() as u64,
+                            current_l0,
+                        ));
+                    }
+                    self.write_stall_cv
+                        .wait_for(&mut guard, std::time::Duration::from_millis(10));
+                }
+                return Ok(());
+            }
+
+            if l0_slow > 0 && l0_count >= l0_slow {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                return Ok(());
+            }
         }
 
-        if l0_slow > 0 && l0_count >= l0_slow {
-            std::thread::sleep(std::time::Duration::from_millis(1));
+        // Expensive checks: memtable bytes and segment metadata.
+        // These iterate all branches/segments so we sample every N writes.
+        let count = self.backpressure_counter.fetch_add(1, Ordering::Relaxed);
+        if count % Self::BACKPRESSURE_EXPENSIVE_INTERVAL != 0 {
             return Ok(());
         }
 

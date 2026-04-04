@@ -328,6 +328,7 @@ impl Database {
             compaction_cancelled: Arc::new(AtomicBool::new(false)),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
+            backpressure_counter: AtomicU64::new(0),
             _lock_file: None, // No lock acquired
             wal_dir,
             wal_watermark,
@@ -373,21 +374,28 @@ impl Database {
                         // to OS page cache, then fdatasync outside the lock.
                         // The lock hold is microseconds (BufWriter flush only),
                         // not milliseconds (no fdatasync under lock).
-                        let sync_fd = {
+                        let (sync_fd, meta_snapshot) = {
                             let mut w = wal.lock();
-                            w.flush_active_meta();
-                            match w.prepare_background_sync() {
+                            let fd = match w.prepare_background_sync() {
                                 Ok(Some(fd)) => Some(fd),
                                 Ok(None) => None,
                                 Err(e) => {
                                     tracing::error!(target: "strata::wal", error = %e, "Background WAL flush failed");
                                     None
                                 }
-                            }
-                        }; // WAL lock released — held only for BufWriter flush + meta
+                            };
+                            let meta = w.snapshot_active_meta();
+                            (fd, meta)
+                        }; // WAL lock released — held only for BufWriter flush
                         if let Some(fd) = sync_fd {
                             if let Err(e) = fd.sync_all() {
                                 tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
+                            }
+                        }
+                        // Write .meta sidecar outside the lock (best-effort, 2 fsyncs).
+                        if let Some((meta, wal_dir)) = meta_snapshot {
+                            if let Err(e) = meta.write_to_file(&wal_dir) {
+                                tracing::debug!(target: "strata::wal", error = %e, "Background .meta write failed (non-fatal)");
                             }
                         }
                     }
@@ -608,6 +616,7 @@ impl Database {
             compaction_cancelled: Arc::new(AtomicBool::new(false)),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
+            backpressure_counter: AtomicU64::new(0),
             _lock_file: lock_file,
             wal_dir,
             wal_watermark,
@@ -697,6 +706,7 @@ impl Database {
             compaction_cancelled: Arc::new(AtomicBool::new(false)),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
+            backpressure_counter: AtomicU64::new(0),
             _lock_file: None, // No lock for ephemeral databases
             wal_dir: PathBuf::new(),
             wal_watermark: AtomicU64::new(0),

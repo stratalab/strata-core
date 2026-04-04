@@ -3044,6 +3044,11 @@ impl SegmentedStore {
         total
     }
 
+    /// Total number of frozen memtables across all branches.
+    pub fn total_frozen_count(&self) -> usize {
+        self.total_frozen_count.load(Ordering::Relaxed)
+    }
+
     /// Sum of `metadata_bytes()` across all open segments in all branches.
     ///
     /// This accounts for eagerly-loaded bloom filter partitions and index

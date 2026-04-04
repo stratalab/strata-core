@@ -322,6 +322,11 @@ pub struct Database {
     /// Mutex paired with `write_stall_cv` (value is unused).
     write_stall_mu: parking_lot::Mutex<()>,
 
+    /// Counter for amortizing backpressure checks. Only every Nth write runs the
+    /// full check (L0 count, memtable bytes, segment metadata), since these values
+    /// change only on flush/compaction, not per write.
+    backpressure_counter: AtomicU64,
+
     /// Exclusive lock file preventing concurrent process access to the same database.
     ///
     /// Held for the lifetime of the Database. Dropped automatically when the

@@ -316,6 +316,9 @@ fn test_issue_1702_delete_branch_cleans_up_segment_files() {
             .unwrap();
     }
 
+    // Wait for background flush to complete (flush is async since #2262).
+    db.scheduler().drain();
+
     // Compute the branch's on-disk directory.
     let segments_dir = temp_dir.path().join("segments");
     let branch_hex = {
