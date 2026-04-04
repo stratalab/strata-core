@@ -281,7 +281,7 @@ impl SegmentBuilder {
             // Flush block when it reaches target size
             if block_buf.len() >= self.data_block_size {
                 let bfk = block_first_key.take().unwrap();
-                let block_last = prev_key.clone();
+                let _block_last = prev_key.clone();
 
                 let (framed_size, on_disk_data_len) = flush_data_block(
                     &mut w,
@@ -295,7 +295,10 @@ impl SegmentBuilder {
                     &bfk,
                     &mut index_entries,
                 )?;
-                pending_index = Some((block_last, file_offset, on_disk_data_len));
+                // Store first key of this block as the index entry.
+                // The search finds the last block where first_key <= seek,
+                // which directly identifies the correct block (blocks/lookup=1.0).
+                index_entries.push((bfk, file_offset, on_disk_data_len));
                 file_offset += framed_size;
                 block_buf.clear();
                 restart_offsets.clear();
@@ -318,7 +321,6 @@ impl SegmentBuilder {
         // Flush final partial block
         if !block_buf.is_empty() {
             let bfk = block_first_key.take().unwrap_or_default();
-            let block_last = prev_key.clone();
 
             let (framed_size, on_disk_data_len) = flush_data_block(
                 &mut w,
@@ -332,17 +334,14 @@ impl SegmentBuilder {
                 &bfk,
                 &mut index_entries,
             )?;
-            let shortened = shorten_final_index_key(&block_last);
-            index_entries.push((shortened, file_offset, on_disk_data_len));
+            // Use first key for the final block too
+            index_entries.push((bfk, file_offset, on_disk_data_len));
             file_offset += framed_size;
             block_buf.clear();
         }
 
-        // Handle trailing pending entry (single-block segment)
-        if let Some((pending_last, offset, len)) = pending_index.take() {
-            let shortened = shorten_final_index_key(&pending_last);
-            index_entries.push((shortened, offset, len));
-        }
+        // Discard any trailing pending_index — we push first-key entries directly
+        pending_index.take();
 
         // Handle empty segment
         if entry_count == 0 {

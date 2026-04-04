@@ -251,15 +251,12 @@ impl FlatIndex {
 
     /// Binary search for `seek_bytes`. Returns the block index to start from.
     ///
-    /// Finds the last entry whose key is <= seek_bytes. Equivalent to the old
-    /// `entries.binary_search_by(|e| e.key.cmp(seek_bytes))` with Err(0)→0, Err(i)→i-1.
+    /// Finds the last entry whose key is <= seek_bytes.
     fn search(&self, seek_bytes: &[u8]) -> usize {
         let n = self.len();
         if n == 0 {
             return 0;
         }
-        // partition_point returns the first index where key > seek_bytes.
-        // We want the last index where key <= seek_bytes = partition_point - 1.
         let pp = self.partition_point(seek_bytes);
         if pp == 0 { 0 } else { pp - 1 }
     }
