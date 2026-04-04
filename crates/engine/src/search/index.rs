@@ -36,9 +36,10 @@
 
 use super::manifest::{self, ManifestData, SegmentManifestEntry};
 use super::segment::{self, SealedSegment};
-use super::tokenizer::tokenize;
+use super::tokenizer::tokenize_with_positions;
 use super::types::EntityRef;
 use dashmap::DashMap;
+use smallvec::SmallVec;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -172,37 +173,63 @@ impl DocIdMap {
 // PostingList
 // ============================================================================
 
-/// List of documents containing a term
+/// List of documents containing a term.
+///
+/// Stores compact [`PostingEntry`] values (12 bytes, Copy) for BM25 scoring,
+/// plus a parallel positions vector for phrase/proximity queries. The two
+/// vectors are kept in sync: `positions[i]` contains the term positions for
+/// `entries[i]`.
 #[derive(Debug, Clone, Default)]
 pub struct PostingList {
-    /// Document entries
+    /// Document entries (doc_id, tf, doc_len) — used by BM25 scoring.
     pub entries: Vec<PostingEntry>,
+    /// Per-entry term positions. `positions[i]` holds the positions for
+    /// `entries[i]`. SmallVec inlines up to 4 positions on the stack.
+    pub positions: Vec<SmallVec<[u32; 4]>>,
 }
 
 impl PostingList {
-    /// Create a new empty posting list
+    /// Create a new empty posting list.
     pub fn new() -> Self {
-        PostingList { entries: vec![] }
+        PostingList {
+            entries: Vec::new(),
+            positions: Vec::new(),
+        }
     }
 
-    /// Add an entry to the posting list
+    /// Add an entry without position data (backward-compat path).
     pub fn add(&mut self, entry: PostingEntry) {
         self.entries.push(entry);
+        self.positions.push(SmallVec::new());
     }
 
-    /// Remove entries matching a doc_id
+    /// Add an entry with position data.
+    pub fn add_with_positions(&mut self, entry: PostingEntry, pos: SmallVec<[u32; 4]>) {
+        self.entries.push(entry);
+        self.positions.push(pos);
+    }
+
+    /// Remove entries matching a doc_id. Returns number removed.
     pub fn remove_by_id(&mut self, doc_id: u32) -> usize {
         let before = self.entries.len();
-        self.entries.retain(|e| e.doc_id != doc_id);
+        let mut i = 0;
+        while i < self.entries.len() {
+            if self.entries[i].doc_id == doc_id {
+                self.entries.swap_remove(i);
+                self.positions.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
         before - self.entries.len()
     }
 
-    /// Number of documents containing this term
+    /// Number of documents containing this term.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Check if posting list is empty
+    /// Check if posting list is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -699,23 +726,32 @@ impl InvertedIndex {
             }
         }
 
-        let tokens = tokenize(text);
-        let doc_len = tokens.len() as u32;
+        let tokens = tokenize_with_positions(text);
+        // doc_len = max_position + 1 (includes stopword gaps for accurate BM25 length norm)
+        let doc_len = tokens.last().map_or(0, |t| t.position + 1);
 
-        // Count term frequencies — consume tokens to avoid cloning
-        let mut tf_map: HashMap<String, u32> = HashMap::with_capacity(tokens.len());
+        // Build term → positions map
+        let mut term_positions: HashMap<String, SmallVec<[u32; 4]>> =
+            HashMap::with_capacity(tokens.len());
         for token in tokens {
-            *tf_map.entry(token).or_insert(0) += 1;
+            term_positions
+                .entry(token.term)
+                .or_default()
+                .push(token.position);
         }
 
-        // Collect term names for the forward index before consuming tf_map
-        let term_names: Vec<String> = tf_map.keys().cloned().collect();
+        // Collect term names for the forward index before consuming term_positions
+        let term_names: Vec<String> = term_positions.keys().cloned().collect();
 
-        // Update posting lists
-        for (term, tf) in tf_map {
+        // Update posting lists with positions
+        for (term, positions) in term_positions {
+            let tf = positions.len() as u32;
             let entry = PostingEntry::new(doc_id, tf, doc_len);
 
-            self.postings.entry(term.clone()).or_default().add(entry);
+            self.postings
+                .entry(term.clone())
+                .or_default()
+                .add_with_positions(entry, positions);
 
             self.doc_freqs
                 .entry(term)
@@ -883,8 +919,9 @@ impl InvertedIndex {
             return;
         }
 
-        // Drain active segment into sorted term map
+        // Drain active segment into sorted term map (entries + positions).
         let mut term_postings: BTreeMap<String, Vec<PostingEntry>> = BTreeMap::new();
+        let mut term_positions: BTreeMap<String, Vec<SmallVec<[u32; 4]>>> = BTreeMap::new();
 
         // Collect and remove all entries from active postings.
         // Only remove doc_freqs for drained terms — concurrent inserts may have
@@ -893,6 +930,7 @@ impl InvertedIndex {
         for key in &keys {
             if let Some((term, posting_list)) = self.postings.remove(key) {
                 if !posting_list.entries.is_empty() {
+                    term_positions.insert(term.clone(), posting_list.positions);
                     term_postings.insert(term, posting_list.entries);
                 }
             }
@@ -918,10 +956,11 @@ impl InvertedIndex {
         // Relaxed: uniqueness is guaranteed by fetch_add atomicity.
         let segment_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
 
-        // Build the sealed segment
+        // Build the sealed segment (v2 with positions)
         let seg = segment::build_sealed_segment(
             segment_id,
             term_postings,
+            term_positions,
             actual_doc_count,
             active_total_doc_len,
         );

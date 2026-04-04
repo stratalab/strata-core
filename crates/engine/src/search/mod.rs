@@ -27,7 +27,7 @@ pub use searchable::{
     truncate_text, BM25LiteScorer, Scorer, ScorerContext, SearchCandidate, SearchDoc, Searchable,
     SimpleScorer,
 };
-pub use tokenizer::{tokenize, tokenize_unique};
+pub use tokenizer::{tokenize, tokenize_unique, tokenize_with_positions, Token};
 pub use types::{
     EntityRef, FieldFilter, FieldPredicate, PrimitiveType, SearchBudget, SearchHit, SearchMode,
     SearchRequest, SearchResponse, SearchStats, SortDirection, SortSpec,

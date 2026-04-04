@@ -41,13 +41,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{RwLock, RwLockReadGuard};
 
 use super::index::PostingEntry;
+use smallvec::SmallVec;
 
 /// Magic bytes for .sidx files
 const SIDX_MAGIC: &[u8; 4] = b"SIDX";
-/// Current format version
-const SIDX_VERSION: u32 = 1;
-/// Header size in bytes
-const HEADER_SIZE: usize = 48;
+/// Current format version (v2 adds positions section)
+const SIDX_VERSION: u32 = 2;
+/// Header size in bytes (v2: +8 bytes for positions_offset)
+const HEADER_SIZE: usize = 56;
 
 // ============================================================================
 // Varint (LEB128) Codec
@@ -122,6 +123,7 @@ pub struct SealedSegment {
     total_doc_len: u64,
     term_offsets_offset: u64,
     postings_offset: u64,
+    positions_offset: u64,
     /// Deleted doc_ids (not physically removed until compaction)
     tombstones: RwLock<HashSet<u32>>,
     /// Fast check: true if any tombstones exist (avoids RwLock read)
@@ -157,7 +159,10 @@ impl SealedSegment {
         if version != SIDX_VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("unsupported SIDX version {}", version),
+                format!(
+                    "unsupported SIDX version {} (expected {})",
+                    version, SIDX_VERSION
+                ),
             ));
         }
         let segment_id = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
@@ -166,6 +171,7 @@ impl SealedSegment {
         let total_doc_len = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
         let term_offsets_offset = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
         let postings_offset = u64::from_le_bytes(bytes[40..48].try_into().unwrap());
+        let positions_offset = u64::from_le_bytes(bytes[48..56].try_into().unwrap());
 
         Ok(SealedSegment {
             data,
@@ -175,6 +181,7 @@ impl SealedSegment {
             total_doc_len,
             term_offsets_offset,
             postings_offset,
+            positions_offset,
             tombstones: RwLock::new(HashSet::new()),
             has_tombstones: AtomicBool::new(false),
         })
@@ -245,7 +252,7 @@ impl SealedSegment {
     /// Get document frequency for a term in this segment.
     pub fn doc_freq(&self, term: &str) -> u32 {
         match self.find_term(term) {
-            Some((_, df, _, _)) => df,
+            Some((_, df, _, _, _)) => df,
             None => 0,
         }
     }
@@ -255,7 +262,7 @@ impl SealedSegment {
     /// Returns entries with absolute doc_ids (delta-decoded).
     /// Does NOT filter tombstones — caller must check.
     pub fn posting_entries(&self, term: &str) -> Option<Vec<PostingEntry>> {
-        let (_, _, posting_offset, posting_len) = self.find_term(term)?;
+        let (_, _, posting_offset, posting_len, _) = self.find_term(term)?;
         let bytes = self.data.as_bytes();
         let abs_offset = self.postings_offset as usize + posting_offset as usize;
         let end = abs_offset + posting_len as usize;
@@ -271,7 +278,7 @@ impl SealedSegment {
     /// Lazily decodes delta-encoded varints directly from the segment data.
     /// Does NOT filter tombstones — caller must check.
     pub fn posting_iter(&self, term: &str) -> Option<PostingIter<'_>> {
-        let (_, _, posting_offset, posting_len) = self.find_term(term)?;
+        let (_, _, posting_offset, posting_len, _) = self.find_term(term)?;
         let bytes = self.data.as_bytes();
         let abs_offset = self.postings_offset as usize + posting_offset as usize;
         let end = abs_offset + posting_len as usize;
@@ -296,8 +303,25 @@ impl SealedSegment {
     /// Callers can cache the result and later use `posting_iter_from_offset()`
     /// to avoid a redundant binary search.
     pub fn find_term_info(&self, term: &str) -> Option<(u32, u32, u32)> {
-        let (_, df, offset, len) = self.find_term(term)?;
+        let (_, df, offset, len, _) = self.find_term(term)?;
         Some((df, offset, len))
+    }
+
+    /// Create a PositionReader for a term's position data in this segment.
+    ///
+    /// The reader decodes positions for each document in the same order as
+    /// `PostingIter` yields entries. Call `read_positions(tf)` per document.
+    pub fn position_reader(&self, term: &str) -> Option<PositionReader<'_>> {
+        let (_, _, _, _, pos_offset) = self.find_term(term)?;
+        let bytes = self.data.as_bytes();
+        let abs_offset = self.positions_offset as usize + pos_offset as usize;
+        if abs_offset > bytes.len() {
+            return None;
+        }
+        Some(PositionReader {
+            data: &bytes[abs_offset..],
+            pos: 0,
+        })
     }
 
     /// Create a PostingIter from pre-cached offset and length (skips binary search).
@@ -327,8 +351,8 @@ impl SealedSegment {
 
     /// Binary search the term dictionary for a term.
     ///
-    /// Returns (term_dict_offset, df, posting_offset, posting_byte_len).
-    fn find_term(&self, term: &str) -> Option<(u32, u32, u32, u32)> {
+    /// Returns (term_dict_offset, df, posting_offset, posting_byte_len, position_offset).
+    fn find_term(&self, term: &str) -> Option<(u32, u32, u32, u32, u32)> {
         let bytes = self.data.as_bytes();
         let tc = self.term_count as usize;
         if tc == 0 {
@@ -355,7 +379,7 @@ impl SealedSegment {
                 u16::from_le_bytes(bytes[abs_pos..abs_pos + 2].try_into().unwrap()) as usize;
             let term_start = abs_pos + 2;
             let term_end = term_start + term_len;
-            if term_end + 12 > bytes.len() {
+            if term_end + 16 > bytes.len() {
                 return None;
             }
             let entry_term = std::str::from_utf8(&bytes[term_start..term_end]).ok()?;
@@ -367,7 +391,9 @@ impl SealedSegment {
                         u32::from_le_bytes(bytes[term_end + 4..term_end + 8].try_into().unwrap());
                     let p_len =
                         u32::from_le_bytes(bytes[term_end + 8..term_end + 12].try_into().unwrap());
-                    return Some((dict_offset as u32, df, p_offset, p_len));
+                    let pos_offset =
+                        u32::from_le_bytes(bytes[term_end + 12..term_end + 16].try_into().unwrap());
+                    return Some((dict_offset as u32, df, p_offset, p_len, pos_offset));
                 }
                 std::cmp::Ordering::Less => lo = mid + 1,
                 std::cmp::Ordering::Greater => hi = mid,
@@ -432,6 +458,49 @@ impl<'a> Iterator for PostingIter<'a> {
 }
 
 // ============================================================================
+// PositionReader — lazy position decoder
+// ============================================================================
+
+/// Lazily decodes delta-encoded positions from a sealed segment's positions section.
+///
+/// Created via `SealedSegment::position_reader()`. Reads positions for one
+/// document at a time (call `read_positions(tf)` for each doc in the posting list,
+/// in the same order as `PostingIter` yields entries).
+///
+/// Infrastructure for phrase queries (#2239) and proximity scoring (#2240).
+#[allow(dead_code)]
+pub struct PositionReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+#[allow(dead_code)]
+impl<'a> PositionReader<'a> {
+    /// Decode positions for one document (`tf` positions, delta-encoded).
+    pub fn read_positions(&mut self, tf: u32) -> SmallVec<[u32; 4]> {
+        let mut positions = SmallVec::with_capacity(tf as usize);
+        let mut prev = 0u32;
+        for _ in 0..tf {
+            if let Some((delta, n)) = decode_varint(&self.data[self.pos..]) {
+                self.pos += n;
+                prev += delta;
+                positions.push(prev);
+            }
+        }
+        positions
+    }
+
+    /// Skip positions for one document without decoding values.
+    pub fn skip_positions(&mut self, tf: u32) {
+        for _ in 0..tf {
+            if let Some((_, n)) = decode_varint(&self.data[self.pos..]) {
+                self.pos += n;
+            }
+        }
+    }
+}
+
+// ============================================================================
 // Segment Builder
 // ============================================================================
 
@@ -442,6 +511,7 @@ impl<'a> Iterator for PostingIter<'a> {
 pub fn build_sealed_segment(
     segment_id: u64,
     term_postings: BTreeMap<String, Vec<PostingEntry>>,
+    term_positions: BTreeMap<String, Vec<SmallVec<[u32; 4]>>>,
     doc_count: u32,
     total_doc_len: u64,
 ) -> SealedSegment {
@@ -449,40 +519,72 @@ pub fn build_sealed_segment(
 
     let mut dict_buf: Vec<u8> = Vec::new();
     let mut postings_buf: Vec<u8> = Vec::new();
+    let mut positions_buf: Vec<u8> = Vec::new();
     let mut term_offsets: Vec<u32> = Vec::with_capacity(term_postings.len());
 
-    for (term, mut entries) in term_postings {
+    // Collect sorted term names for deterministic iteration order.
+    let term_names: Vec<&String> = term_postings.keys().collect();
+
+    for term in &term_names {
         term_offsets.push(dict_buf.len() as u32);
 
-        // Sort entries by doc_id for delta encoding
-        entries.sort_by_key(|e| e.doc_id);
+        let entries = term_postings.get(*term).unwrap();
+        let positions_list = term_positions.get(*term);
 
-        let df = entries.len() as u32;
+        // Build (entry, positions) pairs sorted by doc_id for delta encoding.
+        let mut indexed: Vec<(usize, u32)> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (i, e.doc_id))
+            .collect();
+        indexed.sort_by_key(|&(_, doc_id)| doc_id);
+
+        let sorted_entries: Vec<PostingEntry> = indexed.iter().map(|&(i, _)| entries[i]).collect();
+
+        let df = sorted_entries.len() as u32;
         let posting_offset = postings_buf.len() as u32;
 
-        // Encode posting list
-        encode_posting_list(&entries, &mut postings_buf);
+        // Encode posting list (doc_id, tf, doc_len triples)
+        encode_posting_list(&sorted_entries, &mut postings_buf);
 
         let posting_byte_len = postings_buf.len() as u32 - posting_offset;
 
-        // Write term dictionary entry
+        // Encode positions section for this term
+        let position_offset = positions_buf.len() as u32;
+        for &(orig_idx, _) in &indexed {
+            let positions = positions_list
+                .and_then(|pl| pl.get(orig_idx))
+                .map(|p| p.as_slice())
+                .unwrap_or(&[]);
+            let mut prev_pos = 0u32;
+            for &pos in positions {
+                let delta = pos - prev_pos;
+                encode_varint(delta, &mut positions_buf);
+                prev_pos = pos;
+            }
+        }
+
+        // Write term dictionary entry (16 bytes of metadata)
         let term_bytes = term.as_bytes();
         dict_buf.extend_from_slice(&(term_bytes.len() as u16).to_le_bytes());
         dict_buf.extend_from_slice(term_bytes);
         dict_buf.extend_from_slice(&df.to_le_bytes());
         dict_buf.extend_from_slice(&posting_offset.to_le_bytes());
         dict_buf.extend_from_slice(&posting_byte_len.to_le_bytes());
+        dict_buf.extend_from_slice(&position_offset.to_le_bytes());
     }
 
     let dict_size = dict_buf.len();
     let offsets_size = term_offsets.len() * 4;
     let term_offsets_offset = (HEADER_SIZE + dict_size) as u64;
     let postings_offset = term_offsets_offset + offsets_size as u64;
+    let positions_offset = postings_offset + postings_buf.len() as u64;
 
-    let total_size = HEADER_SIZE + dict_size + offsets_size + postings_buf.len();
+    let total_size =
+        HEADER_SIZE + dict_size + offsets_size + postings_buf.len() + positions_buf.len();
     let mut buf = Vec::with_capacity(total_size);
 
-    // Header (48 bytes)
+    // Header (56 bytes)
     buf.extend_from_slice(SIDX_MAGIC);
     buf.extend_from_slice(&SIDX_VERSION.to_le_bytes());
     buf.extend_from_slice(&segment_id.to_le_bytes());
@@ -491,6 +593,7 @@ pub fn build_sealed_segment(
     buf.extend_from_slice(&total_doc_len.to_le_bytes());
     buf.extend_from_slice(&term_offsets_offset.to_le_bytes());
     buf.extend_from_slice(&postings_offset.to_le_bytes());
+    buf.extend_from_slice(&positions_offset.to_le_bytes());
     debug_assert_eq!(buf.len(), HEADER_SIZE);
 
     // Term dictionary
@@ -503,6 +606,9 @@ pub fn build_sealed_segment(
 
     // Postings section
     buf.extend_from_slice(&postings_buf);
+
+    // Positions section
+    buf.extend_from_slice(&positions_buf);
     debug_assert_eq!(buf.len(), total_size);
 
     SealedSegment {
@@ -513,9 +619,28 @@ pub fn build_sealed_segment(
         total_doc_len,
         term_offsets_offset,
         postings_offset,
+        positions_offset,
         tombstones: RwLock::new(HashSet::new()),
         has_tombstones: AtomicBool::new(false),
     }
+}
+
+/// Build a sealed segment without positions (convenience for tests and position-disabled path).
+#[allow(dead_code)]
+pub fn build_sealed_segment_no_positions(
+    segment_id: u64,
+    term_postings: BTreeMap<String, Vec<PostingEntry>>,
+    doc_count: u32,
+    total_doc_len: u64,
+) -> SealedSegment {
+    let empty_positions = BTreeMap::new();
+    build_sealed_segment(
+        segment_id,
+        term_postings,
+        empty_positions,
+        doc_count,
+        total_doc_len,
+    )
 }
 
 /// Encode a posting list as delta-encoded varint triples.
@@ -597,7 +722,7 @@ mod tests {
 
     #[test]
     fn test_empty_segment() {
-        let seg = build_sealed_segment(0, BTreeMap::new(), 0, 0);
+        let seg = build_sealed_segment_no_positions(0, BTreeMap::new(), 0, 0);
         assert_eq!(seg.doc_count(), 0);
         assert_eq!(seg.term_count, 0);
         assert_eq!(seg.doc_freq("anything"), 0);
@@ -612,7 +737,7 @@ mod tests {
             vec![PostingEntry::new(0, 2, 5), PostingEntry::new(3, 1, 3)],
         );
 
-        let seg = build_sealed_segment(1, terms, 2, 8);
+        let seg = build_sealed_segment_no_positions(1, terms, 2, 8);
         assert_eq!(seg.segment_id(), 1);
         assert_eq!(seg.doc_count(), 2);
         assert_eq!(seg.total_doc_len(), 8);
@@ -637,7 +762,7 @@ mod tests {
         terms.insert("gamma".to_string(), vec![PostingEntry::new(2, 3, 10)]);
         terms.insert("zeta".to_string(), vec![PostingEntry::new(3, 4, 10)]);
 
-        let seg = build_sealed_segment(2, terms, 4, 40);
+        let seg = build_sealed_segment_no_positions(2, terms, 4, 40);
 
         assert_eq!(seg.doc_freq("alpha"), 1);
         assert_eq!(seg.doc_freq("beta"), 1);
@@ -657,7 +782,7 @@ mod tests {
             "hello".to_string(),
             vec![PostingEntry::new(0, 1, 5), PostingEntry::new(1, 1, 3)],
         );
-        let seg = build_sealed_segment(1, terms, 2, 8);
+        let seg = build_sealed_segment_no_positions(1, terms, 2, 8);
 
         assert_eq!(seg.live_doc_count(), 2);
         assert!(!seg.is_tombstoned(0));
@@ -673,7 +798,7 @@ mod tests {
         terms.insert("hello".to_string(), vec![PostingEntry::new(0, 2, 5)]);
         terms.insert("world".to_string(), vec![PostingEntry::new(1, 1, 3)]);
 
-        let seg = build_sealed_segment(42, terms, 2, 8);
+        let seg = build_sealed_segment_no_positions(42, terms, 2, 8);
 
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("test.sidx");
@@ -702,7 +827,7 @@ mod tests {
                 PostingEntry::new(1000000, 3, 30),
             ],
         );
-        let seg = build_sealed_segment(1, terms, 3, 60);
+        let seg = build_sealed_segment_no_positions(1, terms, 3, 60);
 
         let entries = seg.posting_entries("test").unwrap();
         assert_eq!(entries.len(), 3);
@@ -717,7 +842,7 @@ mod tests {
         for i in 0..100 {
             terms.insert(format!("term_{:04}", i), vec![PostingEntry::new(i, 1, 10)]);
         }
-        let seg = build_sealed_segment(1, terms, 100, 1000);
+        let seg = build_sealed_segment_no_positions(1, terms, 100, 1000);
 
         // Check first, middle, and last terms
         assert_eq!(seg.doc_freq("term_0000"), 1);
@@ -752,7 +877,7 @@ mod tests {
         );
         terms.insert("world".to_string(), vec![PostingEntry::new(1, 4, 7)]);
 
-        let seg = build_sealed_segment(1, terms, 3, 15);
+        let seg = build_sealed_segment_no_positions(1, terms, 3, 15);
 
         // Verify posting_iter produces identical results to posting_entries
         for term in &["hello", "world"] {
@@ -771,14 +896,14 @@ mod tests {
     fn test_posting_iter_missing_term() {
         let mut terms = BTreeMap::new();
         terms.insert("alpha".to_string(), vec![PostingEntry::new(0, 1, 5)]);
-        let seg = build_sealed_segment(1, terms, 1, 5);
+        let seg = build_sealed_segment_no_positions(1, terms, 1, 5);
 
         assert!(seg.posting_iter("missing").is_none());
     }
 
     #[test]
     fn test_posting_iter_empty_segment() {
-        let seg = build_sealed_segment(0, BTreeMap::new(), 0, 0);
+        let seg = build_sealed_segment_no_positions(0, BTreeMap::new(), 0, 0);
         assert!(seg.posting_iter("anything").is_none());
     }
 
@@ -793,7 +918,7 @@ mod tests {
                 PostingEntry::new(1000000, 3, 30),
             ],
         );
-        let seg = build_sealed_segment(1, terms, 3, 60);
+        let seg = build_sealed_segment_no_positions(1, terms, 3, 60);
 
         let iter_entries: Vec<_> = seg.posting_iter("test").unwrap().collect();
         assert_eq!(iter_entries.len(), 3);
@@ -813,7 +938,7 @@ mod tests {
                 PostingEntry::new(2, 1, 5),
             ],
         );
-        let seg = build_sealed_segment(1, terms, 3, 15);
+        let seg = build_sealed_segment_no_positions(1, terms, 3, 15);
 
         let mut iter = seg.posting_iter("word").unwrap();
         assert_eq!(iter.size_hint(), (3, Some(3)));
@@ -833,7 +958,7 @@ mod tests {
             "hello".to_string(),
             vec![PostingEntry::new(0, 2, 5), PostingEntry::new(3, 1, 3)],
         );
-        let seg = build_sealed_segment(42, terms, 2, 8);
+        let seg = build_sealed_segment_no_positions(42, terms, 2, 8);
 
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("test.sidx");
@@ -863,7 +988,7 @@ mod tests {
             "hello".to_string(),
             vec![PostingEntry::new(0, 1, 5), PostingEntry::new(1, 1, 5)],
         );
-        let seg = build_sealed_segment(1, terms, 2, 10);
+        let seg = build_sealed_segment_no_positions(1, terms, 2, 10);
 
         assert!(!seg.has_tombstones());
         seg.add_tombstone(0);
@@ -872,7 +997,7 @@ mod tests {
 
     #[test]
     fn test_has_tombstones_via_set_tombstones() {
-        let seg = build_sealed_segment(0, BTreeMap::new(), 0, 0);
+        let seg = build_sealed_segment_no_positions(0, BTreeMap::new(), 0, 0);
 
         assert!(!seg.has_tombstones());
         let mut ts = HashSet::new();
@@ -892,7 +1017,7 @@ mod tests {
             vec![PostingEntry::new(0, 2, 5), PostingEntry::new(3, 1, 3)],
         );
         terms.insert("world".to_string(), vec![PostingEntry::new(1, 4, 7)]);
-        let seg = build_sealed_segment(1, terms, 3, 15);
+        let seg = build_sealed_segment_no_positions(1, terms, 3, 15);
 
         for term in &["hello", "world"] {
             let info = seg.find_term_info(term).unwrap();
@@ -927,7 +1052,7 @@ mod tests {
                 PostingEntry::new(2, 1, 5),
             ],
         );
-        let seg = build_sealed_segment(1, terms, 3, 15);
+        let seg = build_sealed_segment_no_positions(1, terms, 3, 15);
 
         seg.add_tombstone(0);
         seg.add_tombstone(2);
@@ -938,5 +1063,63 @@ mod tests {
         assert!(!guard.contains(&1));
         assert!(guard.contains(&2));
         assert!(!guard.contains(&99));
+    }
+
+    // ------------------------------------------------------------------
+    // Position round-trip tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_v2_positions_roundtrip() {
+        let mut term_postings = BTreeMap::new();
+        let mut term_positions: BTreeMap<String, Vec<SmallVec<[u32; 4]>>> = BTreeMap::new();
+
+        // "hello" appears in doc 0 at positions [1, 3, 7] and doc 2 at [0, 5]
+        term_postings.insert(
+            "hello".to_string(),
+            vec![PostingEntry::new(0, 3, 10), PostingEntry::new(2, 2, 8)],
+        );
+        term_positions.insert(
+            "hello".to_string(),
+            vec![
+                SmallVec::from_slice(&[1, 3, 7]),
+                SmallVec::from_slice(&[0, 5]),
+            ],
+        );
+
+        // "world" appears in doc 1 at positions [2]
+        term_postings.insert("world".to_string(), vec![PostingEntry::new(1, 1, 5)]);
+        term_positions.insert("world".to_string(), vec![SmallVec::from_slice(&[2])]);
+
+        let seg = build_sealed_segment(1, term_postings, term_positions, 3, 23);
+
+        // Read back positions for "hello"
+        let mut pos_reader = seg.position_reader("hello").expect("should find hello");
+        let hello_doc0_pos = pos_reader.read_positions(3);
+        assert_eq!(hello_doc0_pos.as_slice(), &[1, 3, 7]);
+        let hello_doc2_pos = pos_reader.read_positions(2);
+        assert_eq!(hello_doc2_pos.as_slice(), &[0, 5]);
+
+        // Read back positions for "world"
+        let mut pos_reader = seg.position_reader("world").expect("should find world");
+        let world_doc1_pos = pos_reader.read_positions(1);
+        assert_eq!(world_doc1_pos.as_slice(), &[2]);
+
+        // Missing term
+        assert!(seg.position_reader("missing").is_none());
+    }
+
+    #[test]
+    fn test_v2_positions_empty_when_no_positions() {
+        // Using the no-positions convenience wrapper
+        let mut terms = BTreeMap::new();
+        terms.insert("test".to_string(), vec![PostingEntry::new(0, 2, 5)]);
+
+        let seg = build_sealed_segment_no_positions(1, terms, 1, 5);
+
+        // Position reader should exist but yield empty positions
+        let mut pos_reader = seg.position_reader("test").expect("should find test");
+        let positions = pos_reader.read_positions(0); // tf=0 since no real positions
+        assert!(positions.is_empty());
     }
 }
