@@ -474,6 +474,7 @@ pub struct PositionReader<'a> {
     pos: usize,
 }
 
+#[allow(dead_code)]
 impl<'a> PositionReader<'a> {
     /// Decode positions for one document (`tf` positions, delta-encoded).
     pub fn read_positions(&mut self, tf: u32) -> SmallVec<[u32; 4]> {
