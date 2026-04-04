@@ -115,12 +115,22 @@ pub struct BM25Config {
     /// Stopword list (e.g., "lucene33").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopwords: Option<String>,
-    /// Phrase proximity boost factor.
+    /// Score multiplier for documents containing an exact phrase match.
+    /// Default: 2.0. Only used when phrase_mode = "boost".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phrase_boost: Option<f32>,
     /// Term proximity boost factor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proximity_boost: Option<f32>,
+    /// Phrase matching mode: "boost" (default) or "filter".
+    /// "boost": phrase matches get score multiplied by phrase_boost.
+    /// "filter": only documents containing exact phrases are returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phrase_mode: Option<String>,
+    /// Maximum word gap allowed between phrase terms.
+    /// Default: 0 (exact adjacency).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phrase_slop: Option<u32>,
     /// Store term positions in the inverted index.
     /// Enables phrase queries and proximity scoring.
     /// Default: true. Set to false for minimal index size.

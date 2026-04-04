@@ -1249,15 +1249,6 @@ mod tests {
     }
 
     #[test]
-    fn test_config_set_bm25() {
-        let db = create_strata();
-        db.config_set("bm25_k1", "1.5").unwrap();
-        db.config_set("bm25_b", "0.8").unwrap();
-        assert_eq!(db.config_get("bm25_k1").unwrap(), Some("1.5".into()));
-        assert_eq!(db.config_get("bm25_b").unwrap(), Some("0.8".into()));
-    }
-
-    #[test]
     fn test_config_set_invalid_key() {
         let db = create_strata();
         let err = db.config_set("nonexistent_key", "value").unwrap_err();
@@ -1277,12 +1268,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         {
             let db = Strata::open(dir.path()).unwrap();
-            db.config_set("bm25_k1", "2.0").unwrap();
             db.config_set("embed_batch_size", "256").unwrap();
         }
         {
             let db = Strata::open(dir.path()).unwrap();
-            assert_eq!(db.config_get("bm25_k1").unwrap(), Some("2".into()));
             assert_eq!(
                 db.config_get("embed_batch_size").unwrap(),
                 Some("256".into())

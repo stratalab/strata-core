@@ -916,163 +916,6 @@ fn configure_set_durability_case_insensitive() {
 }
 
 // =============================================================================
-// BM25 configuration
-// =============================================================================
-
-#[test]
-fn configure_set_and_get_bm25_k1() {
-    let executor = create_test_executor();
-
-    executor
-        .execute(Command::ConfigureSet {
-            key: "bm25_k1".into(),
-            value: "1.5".into(),
-        })
-        .unwrap();
-
-    let result = executor
-        .execute(Command::ConfigureGetKey {
-            key: "bm25_k1".into(),
-        })
-        .unwrap();
-    assert_eq!(result, Output::ConfigValue(Some("1.5".into())));
-}
-
-#[test]
-fn configure_get_bm25_k1_default_is_none() {
-    let executor = create_test_executor();
-
-    let result = executor
-        .execute(Command::ConfigureGetKey {
-            key: "bm25_k1".into(),
-        })
-        .unwrap();
-    assert_eq!(result, Output::ConfigValue(None));
-}
-
-#[test]
-fn configure_set_bm25_k1_zero_rejected() {
-    let executor = create_test_executor();
-
-    let result = executor.execute(Command::ConfigureSet {
-        key: "bm25_k1".into(),
-        value: "0".into(),
-    });
-    assert!(result.is_err());
-}
-
-#[test]
-fn configure_set_bm25_k1_negative_rejected() {
-    let executor = create_test_executor();
-
-    let result = executor.execute(Command::ConfigureSet {
-        key: "bm25_k1".into(),
-        value: "-1.0".into(),
-    });
-    assert!(result.is_err());
-}
-
-#[test]
-fn configure_set_bm25_k1_infinity_rejected() {
-    let executor = create_test_executor();
-
-    let result = executor.execute(Command::ConfigureSet {
-        key: "bm25_k1".into(),
-        value: "inf".into(),
-    });
-    assert!(result.is_err());
-}
-
-#[test]
-fn configure_set_bm25_k1_nan_rejected() {
-    let executor = create_test_executor();
-
-    let result = executor.execute(Command::ConfigureSet {
-        key: "bm25_k1".into(),
-        value: "NaN".into(),
-    });
-    assert!(result.is_err());
-}
-
-#[test]
-fn configure_set_bm25_k1_not_a_number_rejected() {
-    let executor = create_test_executor();
-
-    let result = executor.execute(Command::ConfigureSet {
-        key: "bm25_k1".into(),
-        value: "abc".into(),
-    });
-    assert!(result.is_err());
-}
-
-#[test]
-fn configure_set_and_get_bm25_b() {
-    let executor = create_test_executor();
-
-    executor
-        .execute(Command::ConfigureSet {
-            key: "bm25_b".into(),
-            value: "0.75".into(),
-        })
-        .unwrap();
-
-    let result = executor
-        .execute(Command::ConfigureGetKey {
-            key: "bm25_b".into(),
-        })
-        .unwrap();
-    assert_eq!(result, Output::ConfigValue(Some("0.75".into())));
-}
-
-#[test]
-fn configure_set_bm25_b_boundary_values() {
-    let executor = create_test_executor();
-
-    // 0.0 is valid
-    assert!(executor
-        .execute(Command::ConfigureSet {
-            key: "bm25_b".into(),
-            value: "0".into(),
-        })
-        .is_ok());
-
-    // 1.0 is valid
-    assert!(executor
-        .execute(Command::ConfigureSet {
-            key: "bm25_b".into(),
-            value: "1.0".into(),
-        })
-        .is_ok());
-
-    // > 1.0 is rejected
-    assert!(executor
-        .execute(Command::ConfigureSet {
-            key: "bm25_b".into(),
-            value: "1.1".into(),
-        })
-        .is_err());
-
-    // negative is rejected
-    assert!(executor
-        .execute(Command::ConfigureSet {
-            key: "bm25_b".into(),
-            value: "-0.1".into(),
-        })
-        .is_err());
-}
-
-#[test]
-fn configure_set_bm25_b_infinity_rejected() {
-    let executor = create_test_executor();
-
-    let result = executor.execute(Command::ConfigureSet {
-        key: "bm25_b".into(),
-        value: "inf".into(),
-    });
-    assert!(result.is_err());
-}
-
-// =============================================================================
 // embed_batch_size configuration
 // =============================================================================
 
@@ -1404,7 +1247,7 @@ fn unknown_key_error_lists_all_new_keys() {
     // The first 10 keys are shown directly; the rest are behind "and N more".
     // Verify that the visible keys include the ones within the display cap,
     // and that the truncation marker accounts for the remaining keys.
-    for expected in ["durability", "auto_embed", "bm25_k1", "bm25_b"] {
+    for expected in ["durability", "auto_embed", "embed_batch_size"] {
         assert!(
             msg.contains(expected),
             "Error should list new key {:?}: {}",
@@ -1414,7 +1257,7 @@ fn unknown_key_error_lists_all_new_keys() {
     }
     // Keys beyond the 10-candidate display cap are summarised as "and N more"
     assert!(
-        msg.contains("and 20 more"),
+        msg.contains("and 18 more"),
         "Error should indicate truncated keys: {}",
         msg
     );
@@ -1572,36 +1415,6 @@ fn configure_set_result_normalizes_auto_embed() {
 fn configure_set_result_normalizes_numeric_values() {
     let executor = create_test_executor();
 
-    // bm25_k1: "1.50" → "1.5" (f32 round-trip)
-    let result = executor
-        .execute(Command::ConfigureSet {
-            key: "bm25_k1".into(),
-            value: "1.50".into(),
-        })
-        .unwrap();
-
-    match result {
-        Output::ConfigSetResult { new_value, .. } => {
-            assert_eq!(new_value, "1.5", "Should normalize via f32 round-trip");
-        }
-        other => panic!("Expected ConfigSetResult, got {:?}", other),
-    }
-
-    // bm25_b: "0.750" → "0.75"
-    let result = executor
-        .execute(Command::ConfigureSet {
-            key: "bm25_b".into(),
-            value: "0.750".into(),
-        })
-        .unwrap();
-
-    match result {
-        Output::ConfigSetResult { new_value, .. } => {
-            assert_eq!(new_value, "0.75");
-        }
-        other => panic!("Expected ConfigSetResult, got {:?}", other),
-    }
-
     // embed_batch_size: "0512" → "512"
     let result = executor
         .execute(Command::ConfigureSet {
@@ -1629,8 +1442,6 @@ fn configure_set_result_matches_get_key() {
         ("default_model", "gpt-4"),
         ("embed_model", "BGE-M3"),
         ("auto_embed", "TRUE"),
-        ("bm25_k1", "1.50"),
-        ("bm25_b", "0.750"),
         ("embed_batch_size", "0256"),
     ];
 

@@ -313,6 +313,11 @@ impl SealedSegment {
     /// `PostingIter` yields entries. Call `read_positions(tf)` per document.
     pub fn position_reader(&self, term: &str) -> Option<PositionReader<'_>> {
         let (_, _, _, _, pos_offset) = self.find_term(term)?;
+        self.position_reader_at(pos_offset)
+    }
+
+    /// Create a PositionReader from a raw position offset (avoids binary search).
+    fn position_reader_at(&self, pos_offset: u32) -> Option<PositionReader<'_>> {
         let bytes = self.data.as_bytes();
         let abs_offset = self.positions_offset as usize + pos_offset as usize;
         if abs_offset > bytes.len() {
@@ -322,6 +327,17 @@ impl SealedSegment {
             data: &bytes[abs_offset..],
             pos: 0,
         })
+    }
+
+    /// Look up a term and return both a PostingIter and PositionReader
+    /// from a single binary search.
+    ///
+    /// Used by phrase matching to avoid redundant dictionary lookups.
+    pub fn term_with_positions(&self, term: &str) -> Option<(PostingIter<'_>, PositionReader<'_>)> {
+        let (_, _, p_offset, p_len, pos_offset) = self.find_term(term)?;
+        let iter = self.posting_iter_from_offset(p_offset, p_len)?;
+        let pr = self.position_reader_at(pos_offset)?;
+        Some((iter, pr))
     }
 
     /// Create a PostingIter from pre-cached offset and length (skips binary search).
@@ -467,14 +483,12 @@ impl<'a> Iterator for PostingIter<'a> {
 /// document at a time (call `read_positions(tf)` for each doc in the posting list,
 /// in the same order as `PostingIter` yields entries).
 ///
-/// Infrastructure for phrase queries (#2239) and proximity scoring (#2240).
-#[allow(dead_code)]
+/// Used by phrase queries (#2239) and proximity scoring (#2240).
 pub struct PositionReader<'a> {
     data: &'a [u8],
     pos: usize,
 }
 
-#[allow(dead_code)]
 impl<'a> PositionReader<'a> {
     /// Decode positions for one document (`tf` positions, delta-encoded).
     pub fn read_positions(&mut self, tf: u32) -> SmallVec<[u32; 4]> {
