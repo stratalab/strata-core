@@ -197,6 +197,15 @@ pub struct SearchRequest {
 
     /// Phrase mode: true = filter (exclude non-matching), false = boost (default).
     pub phrase_filter: bool,
+
+    /// Enable proximity scoring. Default: true.
+    pub proximity: bool,
+
+    /// Proximity window size (in word positions). Default: 10.
+    pub proximity_window: u32,
+
+    /// Proximity boost weight. Default: 0.5.
+    pub proximity_weight: f32,
 }
 
 impl SearchRequest {
@@ -229,6 +238,9 @@ impl SearchRequest {
             phrase_boost: 2.0,
             phrase_slop: 0,
             phrase_filter: false,
+            proximity: true,
+            proximity_window: 10,
+            proximity_weight: 0.5,
             sort_by: None,
         }
     }
@@ -308,6 +320,14 @@ impl SearchRequest {
         self.phrase_boost = boost;
         self.phrase_slop = slop;
         self.phrase_filter = filter;
+        self
+    }
+
+    /// Builder: set proximity scoring parameters from recipe
+    pub fn with_proximity_params(mut self, enabled: bool, window: u32, weight: f32) -> Self {
+        self.proximity = enabled;
+        self.proximity_window = window;
+        self.proximity_weight = weight;
         self
     }
 

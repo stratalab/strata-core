@@ -133,6 +133,11 @@ impl strata_engine::search::Searchable for GraphStore {
             slop: req.phrase_slop,
             filter: req.phrase_filter,
         };
+        let prox_cfg = strata_engine::search::ProximityConfig {
+            enabled: req.proximity,
+            window: req.proximity_window,
+            weight: req.proximity_weight,
+        };
 
         // Score all matching docs in the shared index, then filter to Graph refs.
         // Request more than k to account for non-graph results being filtered out.
@@ -143,6 +148,7 @@ impl strata_engine::search::Searchable for GraphStore {
             req.bm25_k1,
             req.bm25_b,
             &phrase_cfg,
+            &prox_cfg,
         );
 
         let hits: Vec<SearchHit> = top_k
