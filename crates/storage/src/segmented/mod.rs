@@ -3301,16 +3301,28 @@ impl SegmentedStore {
         max_version: u64,
     ) -> StrataResult<Option<(u64, MemtableEntry)>> {
         let profiling = read_profile_enabled();
-        let t_total = if profiling { Some(Instant::now()) } else { None };
+        let t_total = if profiling {
+            Some(Instant::now())
+        } else {
+            None
+        };
 
-        let t0 = if profiling { Some(Instant::now()) } else { None };
+        let t0 = if profiling {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let typed_key = encode_typed_key(key);
         let seek_ik = InternalKey::from_typed_key_bytes(&typed_key, u64::MAX);
         let seek_bytes = seek_ik.as_bytes();
         let key_encode_ns = t0.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
 
         // 1. Active memtable
-        let t0 = if profiling { Some(Instant::now()) } else { None };
+        let t0 = if profiling {
+            Some(Instant::now())
+        } else {
+            None
+        };
         if let Some(result) =
             snapshot
                 .active
@@ -3321,8 +3333,10 @@ impl SegmentedStore {
                 let total_ns = t_total.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
                 READ_PROF.with(|p| {
                     let mut p = p.borrow_mut();
-                    p.count += 1; p.found_active += 1;
-                    p.key_encode_ns += key_encode_ns; p.memtable_ns += memtable_ns;
+                    p.count += 1;
+                    p.found_active += 1;
+                    p.key_encode_ns += key_encode_ns;
+                    p.memtable_ns += memtable_ns;
                     p.total_ns += total_ns;
                     Self::maybe_print_read_profile(&mut p);
                 });
@@ -3340,8 +3354,10 @@ impl SegmentedStore {
                     let total_ns = t_total.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
                     READ_PROF.with(|p| {
                         let mut p = p.borrow_mut();
-                        p.count += 1; p.found_frozen += 1;
-                        p.key_encode_ns += key_encode_ns; p.memtable_ns += memtable_ns;
+                        p.count += 1;
+                        p.found_frozen += 1;
+                        p.key_encode_ns += key_encode_ns;
+                        p.memtable_ns += memtable_ns;
                         p.total_ns += total_ns;
                         Self::maybe_print_read_profile(&mut p);
                     });
@@ -3352,7 +3368,11 @@ impl SegmentedStore {
         let memtable_ns = t0.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
 
         // 3. L0 segments (newest first, overlapping — linear scan)
-        let t0 = if profiling { Some(Instant::now()) } else { None };
+        let t0 = if profiling {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let l0_count = snapshot.segments.l0_segments().len();
         for seg in snapshot.segments.l0_segments() {
             if let Some(se) = seg.point_lookup_preencoded(&typed_key, seek_bytes, max_version)? {
@@ -3362,9 +3382,13 @@ impl SegmentedStore {
                     let total_ns = t_total.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
                     READ_PROF.with(|p| {
                         let mut p = p.borrow_mut();
-                        p.count += 1; p.found_l0 += 1; p.l0_probes += l0_count as u64;
-                        p.key_encode_ns += key_encode_ns; p.memtable_ns += memtable_ns;
-                        p.l0_ns += l0_ns; p.total_ns += total_ns;
+                        p.count += 1;
+                        p.found_l0 += 1;
+                        p.l0_probes += l0_count as u64;
+                        p.key_encode_ns += key_encode_ns;
+                        p.memtable_ns += memtable_ns;
+                        p.l0_ns += l0_ns;
+                        p.total_ns += total_ns;
                         Self::maybe_print_read_profile(&mut p);
                     });
                 }
@@ -3374,10 +3398,14 @@ impl SegmentedStore {
         let l0_ns = t0.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
 
         // 4. L1+ segments (non-overlapping, sorted by key range — binary search per level)
-        let t0 = if profiling { Some(Instant::now()) } else { None };
+        let t0 = if profiling {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let mut levels_checked = 0u64;
         let mut bloom_rejects = 0u64;
-        let mut bloom_passes = 0u64;
+        let bloom_passes = 0u64;
 
         for level_idx in 1..snapshot.segments.levels.len() {
             let l1_segments = &snapshot.segments.levels[level_idx];
@@ -3386,21 +3414,23 @@ impl SegmentedStore {
             }
             levels_checked += 1;
 
-            if let Some(se) = point_lookup_level_preencoded(
-                l1_segments,
-                &typed_key,
-                seek_bytes,
-                max_version,
-            )? {
+            if let Some(se) =
+                point_lookup_level_preencoded(l1_segments, &typed_key, seek_bytes, max_version)?
+            {
                 let commit_id = se.commit_id;
                 if profiling {
                     let l1plus_ns = t0.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
                     let total_ns = t_total.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
                     READ_PROF.with(|p| {
                         let mut p = p.borrow_mut();
-                        p.count += 1; p.found_l1plus += 1; p.l0_probes += l0_count as u64;
-                        p.key_encode_ns += key_encode_ns; p.memtable_ns += memtable_ns;
-                        p.l0_ns += l0_ns; p.l1plus_ns += l1plus_ns; p.total_ns += total_ns;
+                        p.count += 1;
+                        p.found_l1plus += 1;
+                        p.l0_probes += l0_count as u64;
+                        p.key_encode_ns += key_encode_ns;
+                        p.memtable_ns += memtable_ns;
+                        p.l0_ns += l0_ns;
+                        p.l1plus_ns += l1plus_ns;
+                        p.total_ns += total_ns;
                         p.levels_checked += levels_checked;
                         p.bloom_rejects += bloom_rejects;
                         p.bloom_passes += 1;
@@ -3436,9 +3466,14 @@ impl SegmentedStore {
                         let total_ns = t_total.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
                         READ_PROF.with(|p| {
                             let mut p = p.borrow_mut();
-                            p.count += 1; p.found_inherited += 1; p.l0_probes += l0_count as u64;
-                            p.key_encode_ns += key_encode_ns; p.memtable_ns += memtable_ns;
-                            p.l0_ns += l0_ns; p.l1plus_ns += l1plus_ns; p.total_ns += total_ns;
+                            p.count += 1;
+                            p.found_inherited += 1;
+                            p.l0_probes += l0_count as u64;
+                            p.key_encode_ns += key_encode_ns;
+                            p.memtable_ns += memtable_ns;
+                            p.l0_ns += l0_ns;
+                            p.l1plus_ns += l1plus_ns;
+                            p.total_ns += total_ns;
                             Self::maybe_print_read_profile(&mut p);
                         });
                     }
@@ -3458,9 +3493,14 @@ impl SegmentedStore {
                         let total_ns = t_total.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
                         READ_PROF.with(|p| {
                             let mut p = p.borrow_mut();
-                            p.count += 1; p.found_inherited += 1; p.l0_probes += l0_count as u64;
-                            p.key_encode_ns += key_encode_ns; p.memtable_ns += memtable_ns;
-                            p.l0_ns += l0_ns; p.l1plus_ns += l1plus_ns; p.total_ns += total_ns;
+                            p.count += 1;
+                            p.found_inherited += 1;
+                            p.l0_probes += l0_count as u64;
+                            p.key_encode_ns += key_encode_ns;
+                            p.memtable_ns += memtable_ns;
+                            p.l0_ns += l0_ns;
+                            p.l1plus_ns += l1plus_ns;
+                            p.total_ns += total_ns;
                             Self::maybe_print_read_profile(&mut p);
                         });
                     }
@@ -3473,9 +3513,14 @@ impl SegmentedStore {
             let total_ns = t_total.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
             READ_PROF.with(|p| {
                 let mut p = p.borrow_mut();
-                p.count += 1; p.not_found += 1; p.l0_probes += l0_count as u64;
-                p.key_encode_ns += key_encode_ns; p.memtable_ns += memtable_ns;
-                p.l0_ns += l0_ns; p.l1plus_ns += l1plus_ns; p.total_ns += total_ns;
+                p.count += 1;
+                p.not_found += 1;
+                p.l0_probes += l0_count as u64;
+                p.key_encode_ns += key_encode_ns;
+                p.memtable_ns += memtable_ns;
+                p.l0_ns += l0_ns;
+                p.l1plus_ns += l1plus_ns;
+                p.total_ns += total_ns;
                 p.levels_checked += levels_checked;
                 p.bloom_rejects += bloom_rejects;
                 p.bloom_passes += bloom_passes;
@@ -3489,7 +3534,6 @@ impl SegmentedStore {
     fn maybe_print_read_profile(p: &mut ReadProfile) {
         if p.count % READ_PROFILE_INTERVAL == 0 {
             let n = READ_PROFILE_INTERVAL as f64;
-            let l1_reads = p.found_l1plus.max(1) as f64;
             eprintln!(
                 "[read-profile] {} reads | avg(us): total={:.2} key_enc={:.2} mem={:.2} l0={:.2} l1+={:.2} | \
                  found: active={:.0}% frozen={:.0}% l0={:.0}% l1+={:.0}% miss={:.0}% | l0_probes={:.1}",
@@ -3518,11 +3562,22 @@ impl SegmentedStore {
                 );
             }
             // Reset
-            p.found_active = 0; p.found_frozen = 0; p.found_l0 = 0;
-            p.found_l1plus = 0; p.found_inherited = 0; p.not_found = 0;
-            p.l0_probes = 0; p.snapshot_ns = 0; p.key_encode_ns = 0;
-            p.memtable_ns = 0; p.l0_ns = 0; p.l1plus_ns = 0; p.total_ns = 0;
-            p.levels_checked = 0; p.bloom_rejects = 0; p.bloom_passes = 0;
+            p.found_active = 0;
+            p.found_frozen = 0;
+            p.found_l0 = 0;
+            p.found_l1plus = 0;
+            p.found_inherited = 0;
+            p.not_found = 0;
+            p.l0_probes = 0;
+            p.snapshot_ns = 0;
+            p.key_encode_ns = 0;
+            p.memtable_ns = 0;
+            p.l0_ns = 0;
+            p.l1plus_ns = 0;
+            p.total_ns = 0;
+            p.levels_checked = 0;
+            p.bloom_rejects = 0;
+            p.bloom_passes = 0;
         }
     }
 

@@ -158,14 +158,21 @@ struct FlatIndex {
 impl FlatIndex {
     /// Parse an on-disk index block directly into a FlatIndex.
     ///
-    /// Same wire format as `parse_index_block`:
+    /// Same wire format as `parse_index_block` in segment_builder.rs:
     /// `[count:u32] [key_len:u32 | key | offset:u64 | data_len:u32]*`
+    ///
+    /// This duplicates the parsing logic to avoid the intermediate
+    /// `Vec<IndexEntry>` allocation. If the wire format changes,
+    /// both `parse_index_block` and this function must be updated.
     fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < 4 {
             return None;
         }
         let count = u32::from_le_bytes(data[..4].try_into().ok()?) as usize;
-        let mut key_data = Vec::new();
+        // Estimate total key bytes: (data_len - header - per_entry_overhead) ≈ key bytes
+        // Per entry overhead: 4 (key_len) + 8 (offset) + 4 (data_len) = 16 bytes
+        let estimated_key_bytes = data.len().saturating_sub(4 + count * 16);
+        let mut key_data = Vec::with_capacity(estimated_key_bytes);
         let mut key_offsets = Vec::with_capacity(count + 1);
         let mut block_offsets = Vec::with_capacity(count);
         let mut block_data_lens = Vec::with_capacity(count);
@@ -200,7 +207,8 @@ impl FlatIndex {
 
     /// Convert from parsed IndexEntry slice (for backward compatibility).
     fn from_entries(entries: &[IndexEntry]) -> Self {
-        let mut key_data = Vec::new();
+        let total_key_bytes: usize = entries.iter().map(|e| e.key.len()).sum();
+        let mut key_data = Vec::with_capacity(total_key_bytes);
         let mut key_offsets = Vec::with_capacity(entries.len() + 1);
         let mut block_offsets = Vec::with_capacity(entries.len());
         let mut block_data_lens = Vec::with_capacity(entries.len());
@@ -258,7 +266,11 @@ impl FlatIndex {
             return 0;
         }
         let pp = self.partition_point(seek_bytes);
-        if pp == 0 { 0 } else { pp - 1 }
+        if pp == 0 {
+            0
+        } else {
+            pp - 1
+        }
     }
 
     /// Returns the first index where key > seek_bytes (like slice::partition_point).
@@ -439,7 +451,7 @@ impl KVSegment {
         } else {
             SegmentIndex::Monolithic(
                 FlatIndex::parse(idx_data)
-                    .ok_or_else(|| invalid_data!("malformed index block (flat)"))?
+                    .ok_or_else(|| invalid_data!("malformed index block (flat)"))?,
             )
         };
 
@@ -528,14 +540,22 @@ impl KVSegment {
         let profiling = Self::segment_profile_enabled();
 
         // 1. Bloom check
-        let t0 = if profiling { Some(std::time::Instant::now()) } else { None };
+        let t0 = if profiling {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         if !self.partitioned_bloom_check(typed_key) {
             return Ok(None);
         }
         let bloom_ns = t0.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
 
         // 2. Index lookup + block scan
-        let t1 = if profiling { Some(std::time::Instant::now()) } else { None };
+        let t1 = if profiling {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let result = match &self.index {
             SegmentIndex::Monolithic(fi) => {
                 self.point_lookup_with_flat_index(fi, typed_key, seek_bytes, snapshot_commit)
@@ -544,12 +564,21 @@ impl KVSegment {
                 top_level,
                 sub_indexes,
             } => {
-                let tt = if profiling { Some(std::time::Instant::now()) } else { None };
+                let tt = if profiling {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
                 let part_idx = top_level.search(seek_bytes);
                 let top_ns = tt.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
 
-                let ts = if profiling { Some(std::time::Instant::now()) } else { None };
+                let ts = if profiling {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
                 let mut found = None;
+                #[allow(clippy::needless_range_loop)]
                 for pi in part_idx..top_level.len() {
                     if pi > part_idx {
                         let prev_key = top_level.key(pi - 1);
@@ -615,7 +644,7 @@ impl KVSegment {
             });
         }
 
-        result.map(|opt| opt)
+        result
     }
 
     // ── Segment read-path profiling (STRATA_PROFILE_SEGMENT=1) ──────────
@@ -625,7 +654,10 @@ impl KVSegment {
         static ENABLED: AtomicBool = AtomicBool::new(false);
         static CHECKED: AtomicBool = AtomicBool::new(false);
         if !CHECKED.load(Ordering::Relaxed) {
-            ENABLED.store(std::env::var("STRATA_PROFILE_SEGMENT").is_ok(), Ordering::Relaxed);
+            ENABLED.store(
+                std::env::var("STRATA_PROFILE_SEGMENT").is_ok(),
+                Ordering::Relaxed,
+            );
             CHECKED.store(true, Ordering::Relaxed);
         }
         ENABLED.load(Ordering::Relaxed)
@@ -648,7 +680,11 @@ impl KVSegment {
                 hit_rate,
                 miss_rate,
                 avg_pread_us,
-                if p.cache_misses > 0 { p.pread_bytes / p.cache_misses } else { 0 },
+                if p.cache_misses > 0 {
+                    p.pread_bytes / p.cache_misses
+                } else {
+                    0
+                },
             );
             p.cache_hits = 0;
             p.cache_misses = 0;
@@ -666,7 +702,11 @@ impl KVSegment {
         snapshot_commit: u64,
     ) -> Result<Option<SegmentEntry>, StrataError> {
         let profiling = Self::segment_profile_enabled();
-        let ts = if profiling { Some(std::time::Instant::now()) } else { None };
+        let ts = if profiling {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let block_idx = index.search(seek_bytes);
         let search_ns = ts.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
 
@@ -709,7 +749,7 @@ impl KVSegment {
             });
             LOOKUP_PROF.with(|p| {
                 let mut p = p.borrow_mut();
-                p.top_search_ns += search_ns; // reuse field for sub-index search timing
+                p.sub_lookup_ns += search_ns;
             });
         }
         Ok(None)
@@ -893,7 +933,11 @@ impl KVSegment {
         }
 
         // Cache miss: pread from file and decompress
-        let t_pread = if profiling { Some(std::time::Instant::now()) } else { None };
+        let t_pread = if profiling {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let framed_len = FRAME_OVERHEAD + ie.block_data_len as usize;
         let raw = pread_exact(&self.file, block_offset, framed_len).map_err(|e| {
             StrataError::corruption(format!(
@@ -983,11 +1027,19 @@ impl KVSegment {
     ) -> Result<Option<SegmentEntry>, StrataError> {
         let profiling = Self::segment_profile_enabled();
 
-        let t0 = if profiling { Some(std::time::Instant::now()) } else { None };
+        let t0 = if profiling {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let block_data = self.read_data_block(ie)?;
         let read_block_ns = t0.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
 
-        let t0 = if profiling { Some(std::time::Instant::now()) } else { None };
+        let t0 = if profiling {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let data = &**block_data;
 
         // Strip hash index if present (v6+)
@@ -1020,7 +1072,8 @@ impl KVSegment {
             (0, block.len())
         };
 
-        let result = self.linear_scan_block_v4(data, scan_start, data_end, typed_key, snapshot_commit);
+        let result =
+            self.linear_scan_block_v4(data, scan_start, data_end, typed_key, snapshot_commit);
         let scan_ns = t0.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
 
         if profiling {

@@ -281,7 +281,6 @@ impl SegmentBuilder {
             // Flush block when it reaches target size
             if block_buf.len() >= self.data_block_size {
                 let bfk = block_first_key.take().unwrap();
-                let _block_last = prev_key.clone();
 
                 let (framed_size, on_disk_data_len) = flush_data_block(
                     &mut w,
@@ -692,6 +691,7 @@ fn shortest_separator(a: &[u8], b: &[u8]) -> Vec<u8> {
 /// Find the shortest key that is >= `a` by incrementing the first non-0xFF byte.
 ///
 /// Used for the last block in a segment where there is no upper bound.
+#[allow(dead_code)]
 fn shortest_successor(a: &[u8]) -> Vec<u8> {
     for (i, &byte) in a.iter().enumerate() {
         if byte != 0xFF {
@@ -733,6 +733,7 @@ fn shorten_index_key(prev_last: &[u8], next_first: &[u8]) -> Vec<u8> {
 
 /// Shorten the index key for the last block in a segment.
 /// Uses `shortest_successor` on the typed_key_prefix, re-appends `u64::MAX`.
+#[allow(dead_code)]
 fn shorten_final_index_key(last_key: &[u8]) -> Vec<u8> {
     if last_key.len() < COMMIT_ID_SUFFIX_LEN {
         return last_key.to_vec();
