@@ -308,17 +308,29 @@ impl KVStore {
         start: Option<&str>,
         limit: Option<usize>,
     ) -> StrataResult<Vec<(String, Value)>> {
+        if limit == Some(0) {
+            return Ok(Vec::new());
+        }
+
+        let mut iter = self.scan_iter(branch_id, space)?;
         let ns = self.namespace_for(branch_id, space);
-        let scan_prefix = Key::new_kv(Arc::clone(&ns), "");
         let start_key = Key::new_kv(ns, start.unwrap_or(""));
-        let snapshot = self.db.current_version();
-        let results = self
-            .db
-            .scan_range(&scan_prefix, &start_key, snapshot, limit)?;
-        Ok(results
-            .into_iter()
-            .filter_map(|(key, vv)| key.user_key_string().map(|k| (k, vv.value)))
-            .collect())
+        iter.seek(&start_key)?;
+
+        let cap = limit.unwrap_or(1000).min(10_000);
+        let mut results = Vec::with_capacity(cap);
+        while let Some((key, vv)) = iter.next() {
+            if let Some(k) = key.user_key_string() {
+                results.push((k, vv.value));
+            }
+            if let Some(lim) = limit {
+                if results.len() >= lim {
+                    break;
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     /// Create a persistent iterator for cursor-based pagination.

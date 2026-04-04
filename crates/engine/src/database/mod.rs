@@ -527,6 +527,7 @@ impl Database {
     ///
     /// Bypasses the transaction layer (read-only, no conflict tracking needed).
     /// Uses the lazy merge pipeline with seek pushdown and optional limit.
+    #[allow(dead_code)]
     pub(crate) fn scan_range(
         &self,
         prefix: &Key,
