@@ -11,6 +11,7 @@ pub mod branch_dag;
 pub mod branch_status_cache;
 mod bulk;
 mod edges;
+pub mod ext;
 pub mod integrity;
 pub mod keys;
 mod lifecycle;
@@ -208,7 +209,7 @@ impl GraphStore {
     /// Index a graph node's text into the inverted index for BM25 search.
     ///
     /// Called after successful add_node/bulk_insert commits.
-    pub(crate) fn index_node_for_search(
+    pub fn index_node_for_search(
         &self,
         branch_id: BranchId,
         graph: &str,
@@ -234,7 +235,7 @@ impl GraphStore {
     /// Remove a graph node from the inverted index.
     ///
     /// Called after successful remove_node/delete_graph commits.
-    pub(crate) fn deindex_node_for_search(&self, branch_id: BranchId, graph: &str, node_id: &str) {
+    pub fn deindex_node_for_search(&self, branch_id: BranchId, graph: &str, node_id: &str) {
         let Ok(index) = self.db.extension::<strata_engine::search::InvertedIndex>() else {
             return;
         };

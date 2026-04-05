@@ -87,7 +87,7 @@ fn extract_quoted(msg: &str) -> Option<String> {
 }
 
 /// Parse a direction string to a Direction enum.
-fn parse_direction(s: Option<&str>) -> Result<Direction> {
+pub(crate) fn parse_direction(s: Option<&str>) -> Result<Direction> {
     match s {
         None | Some("outgoing") => Ok(Direction::Outgoing),
         Some("incoming") => Ok(Direction::Incoming),
@@ -103,7 +103,7 @@ fn parse_direction(s: Option<&str>) -> Result<Direction> {
 }
 
 /// Parse a cascade policy string.
-fn parse_cascade_policy(s: Option<&str>) -> Result<CascadePolicy> {
+pub(crate) fn parse_cascade_policy(s: Option<&str>) -> Result<CascadePolicy> {
     match s {
         None | Some("ignore") => Ok(CascadePolicy::Ignore),
         Some("cascade") => Ok(CascadePolicy::Cascade),
@@ -947,7 +947,7 @@ pub fn graph_sssp(
 }
 
 /// Convert serde_json::Value to strata_core::Value.
-fn serde_json_to_value(json: serde_json::Value) -> Result<Value> {
+pub(crate) fn serde_json_to_value(json: serde_json::Value) -> Result<Value> {
     crate::bridge::serde_json_to_value_public(json).map_err(|e| Error::Serialization {
         reason: e.to_string(),
     })
