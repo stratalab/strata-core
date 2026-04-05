@@ -1,6 +1,7 @@
 //! Graph lifecycle operations: create, delete, list, metadata.
 
 use super::*;
+use crate::ext::GraphStoreExt;
 
 impl GraphStore {
     /// Create a new graph with the given name and optional metadata.
@@ -12,27 +13,8 @@ impl GraphStore {
     ) -> StrataResult<()> {
         keys::validate_graph_name(graph)?;
         let meta = meta.unwrap_or_default();
-        let meta_json =
-            serde_json::to_string(&meta).map_err(|e| StrataError::serialization(e.to_string()))?;
-        let user_key = keys::meta_key(graph);
-        let storage_key = keys::storage_key(branch_id, &user_key);
-        let catalog_sk = keys::storage_key(branch_id, keys::graph_catalog_key());
-
         self.db.transaction(branch_id, |txn| {
-            txn.put(storage_key.clone(), Value::String(meta_json.clone()))?;
-
-            // Update catalog: read JSON array, append name, write back
-            let mut catalog: Vec<String> = match txn.get(&catalog_sk)? {
-                Some(Value::String(s)) => serde_json::from_str(&s).unwrap_or_default(),
-                _ => Vec::new(),
-            };
-            if !catalog.contains(&graph.to_string()) {
-                catalog.push(graph.to_string());
-                let catalog_json = serde_json::to_string(&catalog)
-                    .map_err(|e| StrataError::serialization(e.to_string()))?;
-                txn.put(catalog_sk.clone(), Value::String(catalog_json))?;
-            }
-            Ok(())
+            txn.graph_create(branch_id, graph, meta.clone())
         })
     }
 
@@ -42,23 +24,8 @@ impl GraphStore {
         branch_id: BranchId,
         graph: &str,
     ) -> StrataResult<Option<GraphMeta>> {
-        let user_key = keys::meta_key(graph);
-        let storage_key = keys::storage_key(branch_id, &user_key);
-
-        self.db.transaction(branch_id, |txn| {
-            let val = txn.get(&storage_key)?;
-            match val {
-                Some(Value::String(s)) => {
-                    let meta: GraphMeta = serde_json::from_str(&s)
-                        .map_err(|e| StrataError::serialization(e.to_string()))?;
-                    Ok(Some(meta))
-                }
-                Some(_) => Err(StrataError::serialization(
-                    "Graph meta is not a string".to_string(),
-                )),
-                None => Ok(None),
-            }
-        })
+        self.db
+            .transaction(branch_id, |txn| txn.graph_get_meta(branch_id, graph))
     }
 
     /// List all graph names on a branch.
@@ -67,46 +34,8 @@ impl GraphStore {
     /// Falls back to full scan if catalog is missing (legacy data), and lazily
     /// creates the catalog on fallback.
     pub fn list_graphs(&self, branch_id: BranchId) -> StrataResult<Vec<String>> {
-        let catalog_sk = keys::storage_key(branch_id, keys::graph_catalog_key());
-
-        // Try catalog first (fast path)
-        let catalog_val = self.db.transaction(branch_id, |txn| txn.get(&catalog_sk))?;
-
-        if let Some(Value::String(s)) = catalog_val {
-            let catalog: Vec<String> =
-                serde_json::from_str(&s).map_err(|e| StrataError::serialization(e.to_string()))?;
-            return Ok(catalog);
-        }
-
-        // Fallback: scan for __meta__ keys (legacy data without catalog)
-        let ns = keys::graph_namespace(branch_id);
-        let prefix_key = strata_core::types::Key::new_graph(ns, "");
-
-        let graphs = self.db.transaction(branch_id, |txn| {
-            let results = txn.scan_prefix(&prefix_key)?;
-            let mut graphs = Vec::new();
-            for (key, _) in results {
-                if let Some(user_key) = key.user_key_string() {
-                    if user_key.ends_with("/__meta__") {
-                        if let Some(name) = user_key.strip_suffix("/__meta__") {
-                            graphs.push(name.to_string());
-                        }
-                    }
-                }
-            }
-            Ok(graphs)
-        })?;
-
-        // Lazily create the catalog for next time
-        if !graphs.is_empty() {
-            let catalog_json = serde_json::to_string(&graphs)
-                .map_err(|e| StrataError::serialization(e.to_string()))?;
-            let _ = self.db.transaction(branch_id, |txn| {
-                txn.put(catalog_sk.clone(), Value::String(catalog_json.clone()))
-            });
-        }
-
-        Ok(graphs)
+        self.db
+            .transaction(branch_id, |txn| txn.graph_list(branch_id))
     }
 
     /// List graph names with cursor-based pagination.

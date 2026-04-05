@@ -613,3 +613,512 @@ fn session_drop_cleans_up_transaction() {
         Output::MaybeVersioned(None) | Output::Maybe(None)
     ));
 }
+
+// ============================================================================
+// Graph Transaction Tests
+// ============================================================================
+
+#[test]
+fn graph_add_node_in_txn_read_your_writes() {
+    let mut session = create_session();
+
+    session
+        .execute(Command::GraphCreate {
+            branch: None,
+            graph: "social".into(),
+            cascade_policy: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    let output = session
+        .execute(Command::GraphAddNode {
+            branch: None,
+            graph: "social".into(),
+            node_id: "alice".into(),
+            entity_ref: None,
+            properties: None,
+            object_type: None,
+        })
+        .unwrap();
+
+    match output {
+        Output::GraphWriteResult { node_id, created } => {
+            assert_eq!(node_id, "alice");
+            assert!(created);
+        }
+        _ => panic!("Expected GraphWriteResult"),
+    }
+
+    // Read within same txn should see the node
+    let output = session
+        .execute(Command::GraphGetNode {
+            branch: None,
+            graph: "social".into(),
+            node_id: "alice".into(),
+        })
+        .unwrap();
+
+    assert!(
+        matches!(output, Output::Maybe(Some(_))),
+        "Should see uncommitted node in same txn"
+    );
+
+    session.execute(Command::TxnCommit).unwrap();
+}
+
+#[test]
+fn graph_rollback_discards_writes() {
+    let mut session = create_session();
+
+    session
+        .execute(Command::GraphCreate {
+            branch: None,
+            graph: "social".into(),
+            cascade_policy: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::GraphAddNode {
+            branch: None,
+            graph: "social".into(),
+            node_id: "alice".into(),
+            entity_ref: None,
+            properties: None,
+            object_type: None,
+        })
+        .unwrap();
+
+    session.execute(Command::TxnRollback).unwrap();
+
+    let output = session
+        .execute(Command::GraphGetNode {
+            branch: None,
+            graph: "social".into(),
+            node_id: "alice".into(),
+        })
+        .unwrap();
+
+    assert!(
+        matches!(output, Output::Maybe(None)),
+        "Node should not exist after rollback"
+    );
+}
+
+#[test]
+fn graph_commit_makes_writes_visible() {
+    let db = strata_engine::Database::cache().unwrap();
+    strata_graph::branch_dag::init_system_branch(&db);
+    let mut session = Session::new(db.clone());
+
+    session
+        .execute(Command::GraphCreate {
+            branch: None,
+            graph: "social".into(),
+            cascade_policy: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::GraphAddNode {
+            branch: None,
+            graph: "social".into(),
+            node_id: "alice".into(),
+            entity_ref: None,
+            properties: None,
+            object_type: None,
+        })
+        .unwrap();
+
+    session.execute(Command::TxnCommit).unwrap();
+
+    // New session should see the committed node
+    let mut session2 = Session::new(db);
+    let output = session2
+        .execute(Command::GraphGetNode {
+            branch: None,
+            graph: "social".into(),
+            node_id: "alice".into(),
+        })
+        .unwrap();
+
+    assert!(
+        matches!(output, Output::Maybe(Some(_))),
+        "Committed node should be visible in new session"
+    );
+}
+
+#[test]
+fn graph_and_kv_atomic() {
+    let db = strata_engine::Database::cache().unwrap();
+    strata_graph::branch_dag::init_system_branch(&db);
+    let mut session = Session::new(db.clone());
+
+    session
+        .execute(Command::GraphCreate {
+            branch: None,
+            graph: "social".into(),
+            cascade_policy: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "user:alice".into(),
+            value: Value::String("Alice".into()),
+        })
+        .unwrap();
+
+    session
+        .execute(Command::GraphAddNode {
+            branch: None,
+            graph: "social".into(),
+            node_id: "alice".into(),
+            entity_ref: None,
+            properties: None,
+            object_type: None,
+        })
+        .unwrap();
+
+    session.execute(Command::TxnCommit).unwrap();
+
+    let mut session2 = Session::new(db);
+    let kv = session2
+        .execute(Command::KvGet {
+            branch: None,
+            space: None,
+            key: "user:alice".into(),
+            as_of: None,
+        })
+        .unwrap();
+
+    assert!(
+        !matches!(kv, Output::Maybe(None) | Output::MaybeVersioned(None)),
+        "KV write should be visible"
+    );
+
+    let node = session2
+        .execute(Command::GraphGetNode {
+            branch: None,
+            graph: "social".into(),
+            node_id: "alice".into(),
+        })
+        .unwrap();
+
+    assert!(
+        matches!(node, Output::Maybe(Some(_))),
+        "Graph node should be visible"
+    );
+}
+
+#[test]
+fn graph_add_edge_in_txn() {
+    let mut session = create_session();
+
+    session
+        .execute(Command::GraphCreate {
+            branch: None,
+            graph: "social".into(),
+            cascade_policy: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::GraphAddNode {
+            branch: None,
+            graph: "social".into(),
+            node_id: "alice".into(),
+            entity_ref: None,
+            properties: None,
+            object_type: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::GraphAddNode {
+            branch: None,
+            graph: "social".into(),
+            node_id: "bob".into(),
+            entity_ref: None,
+            properties: None,
+            object_type: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::GraphAddEdge {
+            branch: None,
+            graph: "social".into(),
+            src: "alice".into(),
+            dst: "bob".into(),
+            edge_type: "follows".into(),
+            weight: None,
+            properties: None,
+        })
+        .unwrap();
+
+    let output = session
+        .execute(Command::GraphNeighbors {
+            branch: None,
+            graph: "social".into(),
+            node_id: "alice".into(),
+            direction: Some("outgoing".into()),
+            edge_type: None,
+        })
+        .unwrap();
+
+    match output {
+        Output::GraphNeighbors(neighbors) => {
+            assert_eq!(neighbors.len(), 1);
+            assert_eq!(neighbors[0].node_id, "bob");
+            assert_eq!(neighbors[0].edge_type, "follows");
+        }
+        _ => panic!("Expected GraphNeighbors"),
+    }
+
+    session.execute(Command::TxnCommit).unwrap();
+}
+
+#[test]
+fn graph_list_nodes_in_txn() {
+    let mut session = create_session();
+
+    session
+        .execute(Command::GraphCreate {
+            branch: None,
+            graph: "social".into(),
+            cascade_policy: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    for name in &["alice", "bob", "charlie"] {
+        session
+            .execute(Command::GraphAddNode {
+                branch: None,
+                graph: "social".into(),
+                node_id: (*name).into(),
+                entity_ref: None,
+                properties: None,
+                object_type: None,
+            })
+            .unwrap();
+    }
+
+    let output = session
+        .execute(Command::GraphListNodes {
+            branch: None,
+            graph: "social".into(),
+        })
+        .unwrap();
+
+    match output {
+        Output::Keys(keys) => {
+            assert_eq!(keys.len(), 3, "Should see all 3 uncommitted nodes");
+        }
+        _ => panic!("Expected Keys output"),
+    }
+
+    session.execute(Command::TxnCommit).unwrap();
+}
+
+#[test]
+fn graph_remove_node_in_txn() {
+    let mut session = create_session();
+
+    // Create graph + node outside txn
+    session
+        .execute(Command::GraphCreate {
+            branch: None,
+            graph: "social".into(),
+            cascade_policy: None,
+        })
+        .unwrap();
+    session
+        .execute(Command::GraphAddNode {
+            branch: None,
+            graph: "social".into(),
+            node_id: "alice".into(),
+            entity_ref: None,
+            properties: None,
+            object_type: None,
+        })
+        .unwrap();
+
+    // Remove inside txn
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::GraphRemoveNode {
+            branch: None,
+            graph: "social".into(),
+            node_id: "alice".into(),
+        })
+        .unwrap();
+
+    // Should be gone within the txn
+    let output = session
+        .execute(Command::GraphGetNode {
+            branch: None,
+            graph: "social".into(),
+            node_id: "alice".into(),
+        })
+        .unwrap();
+
+    assert!(
+        matches!(output, Output::Maybe(None)),
+        "Removed node should not be visible in same txn"
+    );
+
+    session.execute(Command::TxnCommit).unwrap();
+}
+
+#[test]
+fn graph_kv_rollback_discards_both() {
+    let db = strata_engine::Database::cache().unwrap();
+    strata_graph::branch_dag::init_system_branch(&db);
+    let mut session = Session::new(db.clone());
+
+    session
+        .execute(Command::GraphCreate {
+            branch: None,
+            graph: "social".into(),
+            cascade_policy: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "user:alice".into(),
+            value: Value::String("Alice".into()),
+        })
+        .unwrap();
+
+    session
+        .execute(Command::GraphAddNode {
+            branch: None,
+            graph: "social".into(),
+            node_id: "alice".into(),
+            entity_ref: None,
+            properties: None,
+            object_type: None,
+        })
+        .unwrap();
+
+    session.execute(Command::TxnRollback).unwrap();
+
+    // Neither should be visible
+    let mut session2 = Session::new(db);
+    let kv = session2
+        .execute(Command::KvGet {
+            branch: None,
+            space: None,
+            key: "user:alice".into(),
+            as_of: None,
+        })
+        .unwrap();
+
+    assert!(
+        matches!(kv, Output::Maybe(None) | Output::MaybeVersioned(None)),
+        "KV write should be discarded on rollback"
+    );
+
+    let node = session2
+        .execute(Command::GraphGetNode {
+            branch: None,
+            graph: "social".into(),
+            node_id: "alice".into(),
+        })
+        .unwrap();
+
+    assert!(
+        matches!(node, Output::Maybe(None)),
+        "Graph node should be discarded on rollback"
+    );
+}
+
+#[test]
+fn graph_delete_rejected_in_txn() {
+    let mut session = create_session();
+
+    session
+        .execute(Command::GraphCreate {
+            branch: None,
+            graph: "social".into(),
+            cascade_policy: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    let result = session.execute(Command::GraphDelete {
+        branch: None,
+        graph: "social".into(),
+    });
+
+    assert!(result.is_err(), "GraphDelete should be rejected inside txn");
+
+    session.execute(Command::TxnRollback).unwrap();
+}

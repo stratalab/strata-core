@@ -24,8 +24,10 @@
 
 use std::sync::Arc;
 
-use strata_core::types::{Key, Namespace, TypeTag};
+use strata_core::types::{BranchId as CoreBranchId, Key, Namespace, TypeTag};
 use strata_engine::{Database, Transaction, TransactionContext, TransactionOps};
+use strata_graph::ext::GraphStoreExt;
+use strata_graph::types::NodeData;
 use strata_security::AccessMode;
 
 use crate::bridge::{
@@ -36,6 +38,21 @@ use crate::convert::convert_result;
 use crate::ipc::IpcClient;
 use crate::types::BranchId;
 use crate::{Command, Error, Executor, Output, Result};
+
+/// Deferred operations that run after a successful commit.
+enum PostCommitOp {
+    GraphIndexNode {
+        branch_id: CoreBranchId,
+        graph: String,
+        node_id: String,
+        data: NodeData,
+    },
+    GraphDeindexNode {
+        branch_id: CoreBranchId,
+        graph: String,
+        node_id: String,
+    },
+}
 
 /// A stateful session that wraps an [`Executor`] and manages an optional
 /// open transaction with read-your-writes semantics.
@@ -56,6 +73,8 @@ pub struct Session {
     txn_branch_id: Option<strata_core::types::BranchId>,
     /// Optional IPC client for remote sessions.
     ipc_client: Option<IpcClient>,
+    /// Deferred operations executed after a successful commit.
+    post_commit_ops: Vec<PostCommitOp>,
 }
 
 impl Session {
@@ -67,6 +86,7 @@ impl Session {
             txn_ctx: None,
             txn_branch_id: None,
             ipc_client: None,
+            post_commit_ops: Vec::new(),
         }
     }
 
@@ -78,6 +98,7 @@ impl Session {
             txn_ctx: None,
             txn_branch_id: None,
             ipc_client: None,
+            post_commit_ops: Vec::new(),
         }
     }
 
@@ -98,6 +119,7 @@ impl Session {
             txn_ctx: None,
             txn_branch_id: None,
             ipc_client: Some(client),
+            post_commit_ops: Vec::new(),
         }
     }
 
@@ -157,6 +179,25 @@ impl Session {
             {
                 Err(Error::InvalidInput {
                     reason: "Branch create/delete operations are not supported inside a transaction"
+                        .to_string(),
+                    hint: None,
+                })
+            }
+
+            // Graph delete uses batched multi-transaction deletion and cannot
+            // participate in a user transaction. Schema DDL (ontology) operations
+            // are also non-transactional.
+            Command::GraphDelete { .. }
+            | Command::GraphDefineObjectType { .. }
+            | Command::GraphDeleteObjectType { .. }
+            | Command::GraphDefineLinkType { .. }
+            | Command::GraphDeleteLinkType { .. }
+            | Command::GraphFreezeOntology { .. }
+            | Command::GraphBulkInsert { .. }
+                if self.txn_ctx.is_some() =>
+            {
+                Err(Error::InvalidInput {
+                    reason: "Graph delete, bulk insert, and ontology operations are not supported inside a transaction"
                         .to_string(),
                     hint: None,
                 })
@@ -264,11 +305,13 @@ impl Session {
         match self.db.commit_transaction(&mut ctx) {
             Ok(version) => {
                 self.db.end_transaction(ctx);
+                self.run_post_commit_ops();
                 Ok(Output::TxnCommitted { version })
             }
             Err(e) => {
                 // Return context to pool even on failure
                 self.db.end_transaction(ctx);
+                self.post_commit_ops.clear();
                 // Discriminate error types: only OCC validation failures
                 // become TransactionConflict; storage/WAL errors become Io;
                 // other errors become Internal.
@@ -304,6 +347,7 @@ impl Session {
             hint: Some("Start one with: begin".to_string()),
         })?;
         self.txn_branch_id = None;
+        self.post_commit_ops.clear();
         self.db.end_transaction(ctx);
         Ok(Output::TxnAborted)
     }
@@ -317,6 +361,39 @@ impl Session {
             })))
         } else {
             Ok(Output::TxnInfo(None))
+        }
+    }
+
+    // =========================================================================
+    // Post-commit hooks
+    // =========================================================================
+
+    fn run_post_commit_ops(&mut self) {
+        let ops = std::mem::take(&mut self.post_commit_ops);
+        let primitives = self.executor.primitives();
+
+        for op in ops {
+            match op {
+                PostCommitOp::GraphIndexNode {
+                    branch_id,
+                    graph,
+                    node_id,
+                    data,
+                } => {
+                    primitives
+                        .graph
+                        .index_node_for_search(branch_id, &graph, &node_id, &data);
+                }
+                PostCommitOp::GraphDeindexNode {
+                    branch_id,
+                    graph,
+                    node_id,
+                } => {
+                    primitives
+                        .graph
+                        .deindex_node_for_search(branch_id, &graph, &node_id);
+                }
+            }
         }
     }
 
@@ -354,7 +431,14 @@ impl Session {
 
         // Temporarily take the context to create a Transaction
         let mut ctx = self.txn_ctx.take().unwrap();
-        let result = Self::dispatch_in_txn(&self.executor, &mut ctx, ns, cmd);
+        let result = Self::dispatch_in_txn(
+            &self.executor,
+            &mut ctx,
+            ns,
+            branch_id,
+            cmd,
+            &mut self.post_commit_ops,
+        );
         self.txn_ctx = Some(ctx);
 
         result
@@ -364,7 +448,9 @@ impl Session {
         executor: &Executor,
         ctx: &mut TransactionContext,
         ns: Arc<Namespace>,
+        branch_id: strata_core::types::BranchId,
         cmd: Command,
+        post_commit_ops: &mut Vec<PostCommitOp>,
     ) -> Result<Output> {
         // Read commands use ctx.get() / ctx.scan_prefix() directly so they
         // fall through to the snapshot when the key isn't in the write-set.
@@ -539,8 +625,194 @@ impl Session {
                 Ok(Output::DeleteResult { key, deleted })
             }
 
+            // === Graph writes — via GraphStoreExt on TransactionContext ===
+            Command::GraphCreate {
+                graph,
+                cascade_policy,
+                ..
+            } => {
+                let policy =
+                    crate::handlers::graph::parse_cascade_policy(cascade_policy.as_deref())?;
+                let meta = strata_graph::types::GraphMeta {
+                    cascade_policy: policy,
+                    ..Default::default()
+                };
+                convert_result(ctx.graph_create(branch_id, &graph, meta))?;
+                Ok(Output::Unit)
+            }
+            Command::GraphAddNode {
+                graph,
+                node_id,
+                entity_ref,
+                properties,
+                object_type,
+                ..
+            } => {
+                let props = match properties {
+                    Some(v) => {
+                        let json = crate::bridge::value_to_serde_json_public(v)?;
+                        Some(json)
+                    }
+                    None => None,
+                };
+                let data = NodeData {
+                    entity_ref,
+                    properties: props,
+                    object_type,
+                };
+                let created =
+                    convert_result(ctx.graph_add_node(branch_id, &graph, &node_id, &data))?;
+                post_commit_ops.push(PostCommitOp::GraphIndexNode {
+                    branch_id,
+                    graph,
+                    node_id: node_id.clone(),
+                    data,
+                });
+                Ok(Output::GraphWriteResult { node_id, created })
+            }
+            Command::GraphRemoveNode { graph, node_id, .. } => {
+                convert_result(ctx.graph_remove_node(branch_id, &graph, &node_id))?;
+                post_commit_ops.push(PostCommitOp::GraphDeindexNode {
+                    branch_id,
+                    graph,
+                    node_id: node_id.clone(),
+                });
+                Ok(Output::Unit)
+            }
+            Command::GraphAddEdge {
+                graph,
+                src,
+                dst,
+                edge_type,
+                weight,
+                properties,
+                ..
+            } => {
+                let props = match properties {
+                    Some(v) => {
+                        let json = crate::bridge::value_to_serde_json_public(v)?;
+                        Some(json)
+                    }
+                    None => None,
+                };
+                let data = strata_graph::types::EdgeData {
+                    weight: weight.unwrap_or(1.0),
+                    properties: props,
+                };
+                let created = convert_result(
+                    ctx.graph_add_edge(branch_id, &graph, &src, &dst, &edge_type, &data),
+                )?;
+                Ok(Output::GraphEdgeWriteResult {
+                    src,
+                    dst,
+                    edge_type,
+                    created,
+                })
+            }
+            Command::GraphRemoveEdge {
+                graph,
+                src,
+                dst,
+                edge_type,
+                ..
+            } => {
+                convert_result(ctx.graph_remove_edge(branch_id, &graph, &src, &dst, &edge_type))?;
+                Ok(Output::Unit)
+            }
+
+            // === Graph reads — via GraphStoreExt for snapshot isolation ===
+            Command::GraphGetNode { graph, node_id, .. } => {
+                let node = convert_result(ctx.graph_get_node(branch_id, &graph, &node_id))?;
+                match node {
+                    Some(data) => {
+                        let json =
+                            serde_json::to_value(&data).map_err(|e| Error::Serialization {
+                                reason: e.to_string(),
+                            })?;
+                        Ok(Output::Maybe(Some(
+                            crate::handlers::graph::serde_json_to_value(json)?,
+                        )))
+                    }
+                    None => Ok(Output::Maybe(None)),
+                }
+            }
+            Command::GraphListNodes { graph, .. } => {
+                let nodes = convert_result(ctx.graph_list_nodes(branch_id, &graph))?;
+                Ok(Output::Keys(nodes))
+            }
+            Command::GraphGetMeta { graph, .. } => {
+                let meta = convert_result(ctx.graph_get_meta(branch_id, &graph))?;
+                match meta {
+                    Some(m) => {
+                        let json = serde_json::to_value(&m).map_err(|e| Error::Serialization {
+                            reason: e.to_string(),
+                        })?;
+                        Ok(Output::Maybe(Some(
+                            crate::handlers::graph::serde_json_to_value(json)?,
+                        )))
+                    }
+                    None => Ok(Output::Maybe(None)),
+                }
+            }
+            Command::GraphList { .. } => {
+                let graphs = convert_result(ctx.graph_list(branch_id))?;
+                Ok(Output::Keys(graphs))
+            }
+            Command::GraphNeighbors {
+                graph,
+                node_id,
+                direction,
+                edge_type,
+                ..
+            } => {
+                let dir = crate::handlers::graph::parse_direction(direction.as_deref())?;
+                let neighbors = match dir {
+                    strata_graph::types::Direction::Outgoing => {
+                        convert_result(ctx.graph_outgoing_neighbors(
+                            branch_id,
+                            &graph,
+                            &node_id,
+                            edge_type.as_deref(),
+                        ))?
+                    }
+                    strata_graph::types::Direction::Incoming => {
+                        convert_result(ctx.graph_incoming_neighbors(
+                            branch_id,
+                            &graph,
+                            &node_id,
+                            edge_type.as_deref(),
+                        ))?
+                    }
+                    strata_graph::types::Direction::Both => {
+                        let mut out = convert_result(ctx.graph_outgoing_neighbors(
+                            branch_id,
+                            &graph,
+                            &node_id,
+                            edge_type.as_deref(),
+                        ))?;
+                        let inc = convert_result(ctx.graph_incoming_neighbors(
+                            branch_id,
+                            &graph,
+                            &node_id,
+                            edge_type.as_deref(),
+                        ))?;
+                        out.extend(inc);
+                        out
+                    }
+                };
+                let hits: Vec<_> = neighbors
+                    .into_iter()
+                    .map(|n| crate::types::GraphNeighborHit {
+                        node_id: n.node_id,
+                        edge_type: n.edge_type,
+                        weight: n.edge_data.weight,
+                    })
+                    .collect();
+                Ok(Output::GraphNeighbors(hits))
+            }
+
             // Commands not directly mapped to TransactionOps — delegate to executor.
-            // This includes batch operations, history, CAS, scan, incr, etc.
+            // This includes batch operations, history, CAS, graph analytics, etc.
             other => executor.execute(other),
         }
     }
@@ -548,6 +820,7 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        self.post_commit_ops.clear();
         if let Some(ctx) = self.txn_ctx.take() {
             self.db.end_transaction(ctx);
         }

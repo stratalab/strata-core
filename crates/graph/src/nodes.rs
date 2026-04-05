@@ -1,6 +1,7 @@
 //! Node CRUD operations: add, get, list, remove, index queries.
 
 use super::*;
+use crate::ext::GraphStoreExt;
 
 impl GraphStore {
     /// Add or update a node in the graph.
@@ -25,54 +26,8 @@ impl GraphStore {
             }
         }
 
-        let node_json =
-            serde_json::to_string(&data).map_err(|e| StrataError::serialization(e.to_string()))?;
-        let user_key = keys::node_key(graph, node_id);
-        let storage_key = keys::storage_key(branch_id, &user_key);
-
-        // Build ref index key if entity_ref is present
-        let ref_key = data.entity_ref.as_ref().map(|uri| {
-            let rk = keys::ref_index_key(uri, graph, node_id);
-            keys::storage_key(branch_id, &rk)
-        });
-
-        // Build type index key if object_type is present
-        let type_key = data.object_type.as_ref().map(|ot| {
-            let tk = keys::type_index_key(graph, ot, node_id);
-            keys::storage_key(branch_id, &tk)
-        });
-
         let result = self.db.transaction(branch_id, |txn| {
-            // If updating, clean up old ref index and type index entries
-            let old_val = txn.get(&storage_key)?;
-            let created = old_val.is_none();
-            if let Some(Value::String(old_json)) = old_val {
-                if let Ok(old_data) = serde_json::from_str::<NodeData>(&old_json) {
-                    if let Some(old_uri) = old_data.entity_ref {
-                        let old_rk = keys::ref_index_key(&old_uri, graph, node_id);
-                        let old_sk = keys::storage_key(branch_id, &old_rk);
-                        txn.delete(old_sk)?;
-                    }
-                    if let Some(old_ot) = old_data.object_type {
-                        let old_tk = keys::type_index_key(graph, &old_ot, node_id);
-                        let old_sk = keys::storage_key(branch_id, &old_tk);
-                        txn.delete(old_sk)?;
-                    }
-                }
-            }
-
-            txn.put(storage_key.clone(), Value::String(node_json.clone()))?;
-
-            // Write ref index
-            if let Some(rk) = ref_key.clone() {
-                txn.put(rk, Value::Null)?;
-            }
-
-            // Write type index
-            if let Some(tk) = type_key.clone() {
-                txn.put(tk, Value::Null)?;
-            }
-            Ok(created)
+            txn.graph_add_node(branch_id, graph, node_id, &data)
         })?;
 
         // Post-commit: update search index
@@ -88,42 +43,15 @@ impl GraphStore {
         graph: &str,
         node_id: &str,
     ) -> StrataResult<Option<NodeData>> {
-        let user_key = keys::node_key(graph, node_id);
-        let storage_key = keys::storage_key(branch_id, &user_key);
-
         self.db.transaction(branch_id, |txn| {
-            let val = txn.get(&storage_key)?;
-            match val {
-                Some(Value::String(s)) => {
-                    let data: NodeData = serde_json::from_str(&s)
-                        .map_err(|e| StrataError::serialization(e.to_string()))?;
-                    Ok(Some(data))
-                }
-                Some(_) => Err(StrataError::serialization(
-                    "Node data is not a string".to_string(),
-                )),
-                None => Ok(None),
-            }
+            txn.graph_get_node(branch_id, graph, node_id)
         })
     }
 
     /// List all node IDs in a graph.
     pub fn list_nodes(&self, branch_id: BranchId, graph: &str) -> StrataResult<Vec<String>> {
-        let prefix = keys::all_nodes_prefix(graph);
-        let prefix_key = keys::storage_key(branch_id, &prefix);
-
-        self.db.transaction(branch_id, |txn| {
-            let results = txn.scan_prefix(&prefix_key)?;
-            let mut nodes = Vec::new();
-            for (key, _) in results {
-                if let Some(user_key) = key.user_key_string() {
-                    if let Some(id) = keys::parse_node_key(graph, &user_key) {
-                        nodes.push(id);
-                    }
-                }
-            }
-            Ok(nodes)
-        })
+        self.db
+            .transaction(branch_id, |txn| txn.graph_list_nodes(branch_id, graph))
     }
 
     /// List node IDs with cursor-based pagination.
@@ -171,100 +99,8 @@ impl GraphStore {
 
     /// Remove a node and all its incident edges.
     pub fn remove_node(&self, branch_id: BranchId, graph: &str, node_id: &str) -> StrataResult<()> {
-        let node_user_key = keys::node_key(graph, node_id);
-        let node_storage_key = keys::storage_key(branch_id, &node_user_key);
-        let fwd_adj_uk = keys::forward_adj_key(graph, node_id);
-        let fwd_adj_sk = keys::storage_key(branch_id, &fwd_adj_uk);
-        let rev_adj_uk = keys::reverse_adj_key(graph, node_id);
-        let rev_adj_sk = keys::storage_key(branch_id, &rev_adj_uk);
-
         self.db.transaction(branch_id, |txn| {
-            // Read node to get entity_ref for ref index cleanup
-            let node_val = txn.get(&node_storage_key)?;
-            if node_val.is_none() {
-                return Ok(());
-            }
-
-            // Clean up ref index and type index
-            if let Some(Value::String(json)) = &node_val {
-                if let Ok(data) = serde_json::from_str::<NodeData>(json) {
-                    if let Some(uri) = data.entity_ref {
-                        let rk = keys::ref_index_key(&uri, graph, node_id);
-                        let sk = keys::storage_key(branch_id, &rk);
-                        txn.delete(sk)?;
-                    }
-                    if let Some(ot) = data.object_type {
-                        let tk = keys::type_index_key(graph, &ot, node_id);
-                        let sk = keys::storage_key(branch_id, &tk);
-                        txn.delete(sk)?;
-                    }
-                }
-            }
-
-            // Track edge type counts to decrement (only from outgoing edges,
-            // since each edge is counted once via the forward adj list)
-            let mut edge_type_decrements: std::collections::HashMap<String, u64> =
-                std::collections::HashMap::new();
-
-            // Remove this node from each neighbor's reverse adjacency list
-            if let Some(Value::Bytes(fwd_bytes)) = txn.get(&fwd_adj_sk)? {
-                let outgoing = packed::decode(&fwd_bytes)?;
-                for (dst, edge_type, _) in &outgoing {
-                    *edge_type_decrements.entry(edge_type.clone()).or_insert(0) += 1;
-                    let dst_rev_uk = keys::reverse_adj_key(graph, dst);
-                    let dst_rev_sk = keys::storage_key(branch_id, &dst_rev_uk);
-                    if let Some(Value::Bytes(dst_rev_bytes)) = txn.get(&dst_rev_sk)? {
-                        if let Some(new_bytes) =
-                            packed::remove_edge(&dst_rev_bytes, node_id, edge_type)
-                        {
-                            if packed::edge_count(&new_bytes) == 0 {
-                                txn.delete(dst_rev_sk)?;
-                            } else {
-                                txn.put_replace(dst_rev_sk, Value::Bytes(new_bytes))?;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Count incoming edges that are NOT already counted as outgoing
-            // (i.e., exclude self-loops which were already counted above)
-            if let Some(Value::Bytes(rev_bytes)) = txn.get(&rev_adj_sk)? {
-                let incoming = packed::decode(&rev_bytes)?;
-                for (src, edge_type, _) in &incoming {
-                    // Only count incoming edges from OTHER nodes (self-loops already counted)
-                    if src != node_id {
-                        *edge_type_decrements.entry(edge_type.clone()).or_insert(0) += 1;
-                    }
-                    let src_fwd_uk = keys::forward_adj_key(graph, src);
-                    let src_fwd_sk = keys::storage_key(branch_id, &src_fwd_uk);
-                    if let Some(Value::Bytes(src_fwd_bytes)) = txn.get(&src_fwd_sk)? {
-                        if let Some(new_bytes) =
-                            packed::remove_edge(&src_fwd_bytes, node_id, edge_type)
-                        {
-                            if packed::edge_count(&new_bytes) == 0 {
-                                txn.delete(src_fwd_sk)?;
-                            } else {
-                                txn.put_replace(src_fwd_sk, Value::Bytes(new_bytes))?;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Decrement edge type counters
-            for (et, dec) in &edge_type_decrements {
-                let count_uk = keys::edge_type_count_key(graph, et);
-                let count_sk = keys::storage_key(branch_id, &count_uk);
-                let count = Self::read_edge_type_count(txn, &count_sk)?;
-                Self::write_edge_type_count(txn, &count_sk, count.saturating_sub(*dec))?;
-            }
-
-            // Delete the node's own adjacency lists and the node itself
-            txn.delete(fwd_adj_sk)?;
-            txn.delete(rev_adj_sk)?;
-            txn.delete(node_storage_key.clone())?;
-            Ok(())
+            txn.graph_remove_node(branch_id, graph, node_id)
         })?;
 
         // Post-commit: remove from search index

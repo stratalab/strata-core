@@ -1,6 +1,7 @@
 //! Edge CRUD operations: add, get, remove, neighbors, traversal helpers, edge type counters.
 
 use super::*;
+use crate::ext::GraphStoreExt;
 
 impl GraphStore {
     /// Add or update an edge in the graph.
@@ -28,67 +29,8 @@ impl GraphStore {
             }
         }
 
-        let src_node_uk = keys::node_key(graph, src);
-        let dst_node_uk = keys::node_key(graph, dst);
-        let src_node_key = keys::storage_key(branch_id, &src_node_uk);
-        let dst_node_key = keys::storage_key(branch_id, &dst_node_uk);
-
-        let fwd_uk = keys::forward_adj_key(graph, src);
-        let fwd_sk = keys::storage_key(branch_id, &fwd_uk);
-        let rev_uk = keys::reverse_adj_key(graph, dst);
-        let rev_sk = keys::storage_key(branch_id, &rev_uk);
-
-        let count_uk = keys::edge_type_count_key(graph, edge_type);
-        let count_sk = keys::storage_key(branch_id, &count_uk);
-
         self.db.transaction(branch_id, |txn| {
-            // Validate both nodes exist within the transaction (prevents TOCTOU)
-            if txn.get(&src_node_key)?.is_none() {
-                return Err(StrataError::invalid_input(format!(
-                    "Source node '{}' does not exist in graph '{}'",
-                    src, graph
-                )));
-            }
-            if txn.get(&dst_node_key)?.is_none() {
-                return Err(StrataError::invalid_input(format!(
-                    "Target node '{}' does not exist in graph '{}'",
-                    dst, graph
-                )));
-            }
-
-            // Read-modify-write forward adjacency list (src → dst)
-            let mut fwd_buf = match txn.get(&fwd_sk)? {
-                Some(Value::Bytes(b)) => b,
-                _ => packed::empty(),
-            };
-            // Remove existing edge if present (upsert semantics)
-            let was_update = if let Some(new_buf) = packed::remove_edge(&fwd_buf, dst, edge_type) {
-                fwd_buf = new_buf;
-                true
-            } else {
-                false
-            };
-            packed::append_edge(&mut fwd_buf, dst, edge_type, &data)?;
-            txn.put_replace(fwd_sk.clone(), Value::Bytes(fwd_buf))?;
-
-            // Read-modify-write reverse adjacency list (dst ← src)
-            let mut rev_buf = match txn.get(&rev_sk)? {
-                Some(Value::Bytes(b)) => b,
-                _ => packed::empty(),
-            };
-            if let Some(new_buf) = packed::remove_edge(&rev_buf, src, edge_type) {
-                rev_buf = new_buf;
-            }
-            packed::append_edge(&mut rev_buf, src, edge_type, &data)?;
-            txn.put_replace(rev_sk.clone(), Value::Bytes(rev_buf))?;
-
-            // Increment edge type counter only for new edges (not updates)
-            if !was_update {
-                let count = Self::read_edge_type_count(txn, &count_sk)?;
-                Self::write_edge_type_count(txn, &count_sk, count + 1)?;
-            }
-
-            Ok(!was_update)
+            txn.graph_add_edge(branch_id, graph, src, dst, edge_type, &data)
         })
     }
 
@@ -101,14 +43,9 @@ impl GraphStore {
         dst: &str,
         edge_type: &str,
     ) -> StrataResult<Option<EdgeData>> {
-        let fwd_uk = keys::forward_adj_key(graph, src);
-        let fwd_sk = keys::storage_key(branch_id, &fwd_uk);
-
-        self.db
-            .transaction(branch_id, |txn| match txn.get(&fwd_sk)? {
-                Some(Value::Bytes(bytes)) => Ok(packed::find_edge(&bytes, dst, edge_type)),
-                _ => Ok(None),
-            })
+        self.db.transaction(branch_id, |txn| {
+            txn.graph_get_edge(branch_id, graph, src, dst, edge_type)
+        })
     }
 
     /// Remove an edge (from both forward and reverse adjacency lists).
@@ -120,47 +57,8 @@ impl GraphStore {
         dst: &str,
         edge_type: &str,
     ) -> StrataResult<()> {
-        let fwd_uk = keys::forward_adj_key(graph, src);
-        let fwd_sk = keys::storage_key(branch_id, &fwd_uk);
-        let rev_uk = keys::reverse_adj_key(graph, dst);
-        let rev_sk = keys::storage_key(branch_id, &rev_uk);
-        let count_uk = keys::edge_type_count_key(graph, edge_type);
-        let count_sk = keys::storage_key(branch_id, &count_uk);
-
         self.db.transaction(branch_id, |txn| {
-            // Remove from forward adjacency list
-            let mut removed = false;
-            if let Some(Value::Bytes(fwd_bytes)) = txn.get(&fwd_sk)? {
-                if let Some(new_bytes) = packed::remove_edge(&fwd_bytes, dst, edge_type) {
-                    removed = true;
-                    if packed::edge_count(&new_bytes) == 0 {
-                        txn.delete(fwd_sk.clone())?;
-                    } else {
-                        txn.put_replace(fwd_sk.clone(), Value::Bytes(new_bytes))?;
-                    }
-                }
-            }
-
-            // Remove from reverse adjacency list
-            if let Some(Value::Bytes(rev_bytes)) = txn.get(&rev_sk)? {
-                if let Some(new_bytes) = packed::remove_edge(&rev_bytes, src, edge_type) {
-                    if packed::edge_count(&new_bytes) == 0 {
-                        txn.delete(rev_sk.clone())?;
-                    } else {
-                        txn.put_replace(rev_sk.clone(), Value::Bytes(new_bytes))?;
-                    }
-                }
-            }
-
-            // Decrement edge type counter
-            if removed {
-                let count = Self::read_edge_type_count(txn, &count_sk)?;
-                if count > 0 {
-                    Self::write_edge_type_count(txn, &count_sk, count - 1)?;
-                }
-            }
-
-            Ok(())
+            txn.graph_remove_edge(branch_id, graph, src, dst, edge_type)
         })
     }
 
@@ -176,30 +74,9 @@ impl GraphStore {
         node_id: &str,
         edge_type_filter: Option<&str>,
     ) -> StrataResult<Vec<Neighbor>> {
-        let fwd_uk = keys::forward_adj_key(graph, node_id);
-        let fwd_sk = keys::storage_key(branch_id, &fwd_uk);
-
-        self.db
-            .transaction(branch_id, |txn| match txn.get(&fwd_sk)? {
-                Some(Value::Bytes(bytes)) => {
-                    let edges = packed::decode(&bytes)?;
-                    let mut neighbors = Vec::new();
-                    for (dst, edge_type, edge_data) in edges {
-                        if let Some(filter) = edge_type_filter {
-                            if edge_type != filter {
-                                continue;
-                            }
-                        }
-                        neighbors.push(Neighbor {
-                            node_id: dst,
-                            edge_type,
-                            edge_data,
-                        });
-                    }
-                    Ok(neighbors)
-                }
-                _ => Ok(Vec::new()),
-            })
+        self.db.transaction(branch_id, |txn| {
+            txn.graph_outgoing_neighbors(branch_id, graph, node_id, edge_type_filter)
+        })
     }
 
     /// Get incoming neighbors of a node (optionally filtered by edge type).
@@ -210,30 +87,9 @@ impl GraphStore {
         node_id: &str,
         edge_type_filter: Option<&str>,
     ) -> StrataResult<Vec<Neighbor>> {
-        let rev_uk = keys::reverse_adj_key(graph, node_id);
-        let rev_sk = keys::storage_key(branch_id, &rev_uk);
-
-        self.db
-            .transaction(branch_id, |txn| match txn.get(&rev_sk)? {
-                Some(Value::Bytes(bytes)) => {
-                    let edges = packed::decode(&bytes)?;
-                    let mut neighbors = Vec::new();
-                    for (src, edge_type, edge_data) in edges {
-                        if let Some(filter) = edge_type_filter {
-                            if edge_type != filter {
-                                continue;
-                            }
-                        }
-                        neighbors.push(Neighbor {
-                            node_id: src,
-                            edge_type,
-                            edge_data,
-                        });
-                    }
-                    Ok(neighbors)
-                }
-                _ => Ok(Vec::new()),
-            })
+        self.db.transaction(branch_id, |txn| {
+            txn.graph_incoming_neighbors(branch_id, graph, node_id, edge_type_filter)
+        })
     }
 
     /// Get all edges in a graph (for snapshot).
