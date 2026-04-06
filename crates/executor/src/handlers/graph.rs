@@ -216,6 +216,28 @@ pub fn graph_get_node(
     }
 }
 
+/// Handle GraphGetNode with as_of timestamp (time-travel read).
+pub fn graph_get_node_at(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+    node_id: String,
+    as_of_ts: u64,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    let node = convert_result(p.graph.get_node_at(core_branch, &graph, &node_id, as_of_ts))
+        .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
+    match node {
+        Some(data) => {
+            let json = serde_json::to_value(&data).map_err(|e| Error::Serialization {
+                reason: e.to_string(),
+            })?;
+            Ok(Output::Maybe(Some(serde_json_to_value(json)?)))
+        }
+        None => Ok(Output::Maybe(None)),
+    }
+}
+
 /// Handle GraphRemoveNode command.
 pub fn graph_remove_node(
     p: &Arc<Primitives>,
@@ -233,6 +255,19 @@ pub fn graph_remove_node(
 pub fn graph_list_nodes(p: &Arc<Primitives>, branch: BranchId, graph: String) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
     let nodes = convert_result(p.graph.list_nodes(core_branch, &graph))
+        .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
+    Ok(Output::Keys(nodes))
+}
+
+/// Handle GraphListNodes with as_of timestamp (time-travel read).
+pub fn graph_list_nodes_at(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+    as_of_ts: u64,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    let nodes = convert_result(p.graph.list_nodes_at(core_branch, &graph, as_of_ts))
         .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
     Ok(Output::Keys(nodes))
 }
@@ -330,6 +365,41 @@ pub fn graph_neighbors(
                 .neighbors(core_branch, &graph, &node_id, dir, edge_type.as_deref()),
         )
         .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
+
+    let hits: Vec<crate::types::GraphNeighborHit> = neighbors
+        .into_iter()
+        .map(|n| crate::types::GraphNeighborHit {
+            node_id: n.node_id,
+            edge_type: n.edge_type,
+            weight: n.edge_data.weight,
+        })
+        .collect();
+
+    Ok(Output::GraphNeighbors(hits))
+}
+
+/// Handle GraphNeighbors with as_of timestamp (time-travel read).
+#[allow(clippy::too_many_arguments)]
+pub fn graph_neighbors_at(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    graph: String,
+    node_id: String,
+    direction: Option<String>,
+    edge_type: Option<String>,
+    as_of_ts: u64,
+) -> Result<Output> {
+    let core_branch = to_core_branch_id(&branch)?;
+    let dir = parse_direction(direction.as_deref())?;
+    let neighbors = convert_result(p.graph.neighbors_at(
+        core_branch,
+        &graph,
+        &node_id,
+        dir,
+        edge_type.as_deref(),
+        as_of_ts,
+    ))
+    .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
 
     let hits: Vec<crate::types::GraphNeighborHit> = neighbors
         .into_iter()

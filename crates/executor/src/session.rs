@@ -717,6 +717,14 @@ impl Session {
                 Ok(Output::Unit)
             }
 
+            // === Graph reads with as_of — bypass txn, use committed storage ===
+            Command::GraphGetNode { as_of: Some(_), .. }
+            | Command::GraphListNodes { as_of: Some(_), .. }
+            | Command::GraphNeighbors { as_of: Some(_), .. } => {
+                // as_of (time-travel) reads need committed store, not txn snapshot
+                executor.execute(cmd)
+            }
+
             // === Graph reads — via GraphStoreExt for snapshot isolation ===
             Command::GraphGetNode { graph, node_id, .. } => {
                 let node = convert_result(ctx.graph_get_node(branch_id, &graph, &node_id))?;

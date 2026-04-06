@@ -662,6 +662,7 @@ fn graph_add_node_in_txn_read_your_writes() {
             branch: None,
             graph: "social".into(),
             node_id: "alice".into(),
+            as_of: None,
         })
         .unwrap();
 
@@ -710,6 +711,7 @@ fn graph_rollback_discards_writes() {
             branch: None,
             graph: "social".into(),
             node_id: "alice".into(),
+            as_of: None,
         })
         .unwrap();
 
@@ -760,6 +762,7 @@ fn graph_commit_makes_writes_visible() {
             branch: None,
             graph: "social".into(),
             node_id: "alice".into(),
+            as_of: None,
         })
         .unwrap();
 
@@ -832,6 +835,7 @@ fn graph_and_kv_atomic() {
             branch: None,
             graph: "social".into(),
             node_id: "alice".into(),
+            as_of: None,
         })
         .unwrap();
 
@@ -901,6 +905,7 @@ fn graph_add_edge_in_txn() {
             node_id: "alice".into(),
             direction: Some("outgoing".into()),
             edge_type: None,
+            as_of: None,
         })
         .unwrap();
 
@@ -952,6 +957,7 @@ fn graph_list_nodes_in_txn() {
         .execute(Command::GraphListNodes {
             branch: None,
             graph: "social".into(),
+            as_of: None,
         })
         .unwrap();
 
@@ -1010,6 +1016,7 @@ fn graph_remove_node_in_txn() {
             branch: None,
             graph: "social".into(),
             node_id: "alice".into(),
+            as_of: None,
         })
         .unwrap();
 
@@ -1085,6 +1092,7 @@ fn graph_kv_rollback_discards_both() {
             branch: None,
             graph: "social".into(),
             node_id: "alice".into(),
+            as_of: None,
         })
         .unwrap();
 
@@ -1839,6 +1847,7 @@ fn all_primitives_atomic_commit() {
             branch: None,
             graph: "g".into(),
             node_id: "alice".into(),
+            as_of: None,
         })
         .unwrap();
     assert!(
@@ -1962,6 +1971,7 @@ fn all_primitives_atomic_rollback() {
             branch: None,
             graph: "g".into(),
             node_id: "alice".into(),
+            as_of: None,
         })
         .unwrap();
     assert!(

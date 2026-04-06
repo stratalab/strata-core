@@ -800,6 +800,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                 branch: branch(state),
                 graph,
                 node_id,
+                as_of: None,
             }))
         }
         "remove-node" => {
@@ -823,6 +824,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                 Ok(CliAction::Execute(Command::GraphListNodes {
                     branch: branch(state),
                     graph,
+                    as_of: None,
                 }))
             }
         }
@@ -871,6 +873,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                 node_id,
                 direction,
                 edge_type,
+                as_of: None,
             }))
         }
         // Bulk & Traversal
@@ -1710,6 +1713,7 @@ mod tests {
                 branch: Some(BranchId::from("default")),
                 graph: "social".into(),
                 node_id: "alice".into(),
+                as_of: None,
             }
         );
     }
@@ -1735,6 +1739,7 @@ mod tests {
             Command::GraphListNodes {
                 branch: Some(BranchId::from("default")),
                 graph: "social".into(),
+                as_of: None,
             }
         );
     }
@@ -1814,6 +1819,7 @@ mod tests {
                 node_id: "alice".into(),
                 direction: None,
                 edge_type: None,
+                as_of: None,
             }
         );
     }
@@ -1838,6 +1844,7 @@ mod tests {
                 node_id: "alice".into(),
                 direction: Some("incoming".into()),
                 edge_type: Some("FOLLOWS".into()),
+                as_of: None,
             }
         );
     }

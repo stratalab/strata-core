@@ -1609,12 +1609,28 @@ impl Executor {
                 branch,
                 graph,
                 node_id,
+                as_of,
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
-                crate::handlers::graph::graph_get_node(&self.primitives, branch, graph, node_id)
+                if let Some(ts) = as_of {
+                    crate::handlers::graph::graph_get_node_at(
+                        &self.primitives,
+                        branch,
+                        graph,
+                        node_id,
+                        ts,
+                    )
+                } else {
+                    crate::handlers::graph::graph_get_node(
+                        &self.primitives,
+                        branch,
+                        graph,
+                        node_id,
+                    )
+                }
             }
             Command::GraphRemoveNode {
                 branch,
@@ -1627,12 +1643,25 @@ impl Executor {
                 })?;
                 crate::handlers::graph::graph_remove_node(&self.primitives, branch, graph, node_id)
             }
-            Command::GraphListNodes { branch, graph } => {
+            Command::GraphListNodes {
+                branch,
+                graph,
+                as_of,
+            } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
-                crate::handlers::graph::graph_list_nodes(&self.primitives, branch, graph)
+                if let Some(ts) = as_of {
+                    crate::handlers::graph::graph_list_nodes_at(
+                        &self.primitives,
+                        branch,
+                        graph,
+                        ts,
+                    )
+                } else {
+                    crate::handlers::graph::graph_list_nodes(&self.primitives, branch, graph)
+                }
             }
             Command::GraphListNodesPaginated {
                 branch,
@@ -1702,19 +1731,32 @@ impl Executor {
                 node_id,
                 direction,
                 edge_type,
+                as_of,
             } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
-                crate::handlers::graph::graph_neighbors(
-                    &self.primitives,
-                    branch,
-                    graph,
-                    node_id,
-                    direction,
-                    edge_type,
-                )
+                if let Some(ts) = as_of {
+                    crate::handlers::graph::graph_neighbors_at(
+                        &self.primitives,
+                        branch,
+                        graph,
+                        node_id,
+                        direction,
+                        edge_type,
+                        ts,
+                    )
+                } else {
+                    crate::handlers::graph::graph_neighbors(
+                        &self.primitives,
+                        branch,
+                        graph,
+                        node_id,
+                        direction,
+                        edge_type,
+                    )
+                }
             }
             Command::GraphBulkInsert {
                 branch,

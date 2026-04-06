@@ -1519,6 +1519,9 @@ pub enum Command {
         graph: String,
         /// Node identifier.
         node_id: String,
+        /// Optional timestamp for time-travel reads (microseconds since epoch).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_of: Option<u64>,
     },
 
     /// Remove a node and its incident edges.
@@ -1541,6 +1544,9 @@ pub enum Command {
         branch: Option<BranchId>,
         /// Graph name.
         graph: String,
+        /// Optional timestamp for time-travel reads (microseconds since epoch).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_of: Option<u64>,
     },
 
     /// List node IDs with cursor-based pagination.
@@ -1612,6 +1618,9 @@ pub enum Command {
         /// Optional edge type filter.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         edge_type: Option<String>,
+        /// Optional timestamp for time-travel reads (microseconds since epoch).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_of: Option<u64>,
     },
 
     /// Bulk insert nodes and edges into a graph.
