@@ -154,54 +154,8 @@ pub trait JsonStoreExt {
     }
 }
 
-/// Vector store operations within a transaction
-///
-/// Note: VectorStore operations in transactions are limited due to
-/// the backend state management complexity. Only basic read/write ops
-/// are supported.
-///
-/// Implemented in `vector/store.rs`
-pub trait VectorStoreExt {
-    /// Get a vector by key
-    fn vector_get(&mut self, collection: &str, key: &str) -> StrataResult<Option<Vec<f32>>>;
-
-    /// Insert/upsert a vector, returns version
-    fn vector_insert(
-        &mut self,
-        collection: &str,
-        key: &str,
-        embedding: &[f32],
-    ) -> StrataResult<Version>;
-}
-
-// VectorStoreExt stub impl for TransactionContext.
-// Vector operations in transactions are not supported (require in-memory backends).
-impl VectorStoreExt for strata_concurrency::TransactionContext {
-    fn vector_get(&mut self, collection: &str, key: &str) -> StrataResult<Option<Vec<f32>>> {
-        let _ = (collection, key);
-        Err(strata_core::StrataError::invalid_input(
-            "VectorStore get operations are not supported in cross-primitive transactions. \
-             Embeddings are stored in in-memory backends not accessible from TransactionContext. \
-             Use VectorStore::get() directly outside of transactions."
-                .to_string(),
-        ))
-    }
-
-    fn vector_insert(
-        &mut self,
-        collection: &str,
-        key: &str,
-        embedding: &[f32],
-    ) -> StrataResult<Version> {
-        let _ = (collection, key, embedding);
-        Err(strata_core::StrataError::invalid_input(
-            "VectorStore insert operations are not supported in cross-primitive transactions. \
-             Vector operations require access to in-memory backends not accessible from \
-             TransactionContext. Use VectorStore::insert() directly outside of transactions."
-                .to_string(),
-        ))
-    }
-}
+// Note: VectorStoreExt is defined in strata-vector/src/ext.rs (not here)
+// because it needs access to vector-specific types (VectorRecord, VectorId, etc.).
 
 // Note: BranchIndex does not have an extension trait because run operations
 // are typically done outside of cross-primitive transactions. Run lifecycle

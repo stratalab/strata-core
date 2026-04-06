@@ -106,7 +106,6 @@ pub use primitives::{
     Searchable,
     SimpleScorer,
     SpaceIndex,
-    VectorStoreExt,
 };
 
 // Re-export bundle types at crate root

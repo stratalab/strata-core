@@ -1122,3 +1122,401 @@ fn graph_delete_rejected_in_txn() {
 
     session.execute(Command::TxnRollback).unwrap();
 }
+
+// ============================================================================
+// Vector Transaction Tests
+// ============================================================================
+
+/// Helper: create a collection on a session (outside any txn).
+fn create_test_collection(session: &mut Session, name: &str, dimension: u64) {
+    session
+        .execute(Command::VectorCreateCollection {
+            branch: None,
+            space: None,
+            collection: name.into(),
+            dimension,
+            metric: DistanceMetric::Cosine,
+        })
+        .unwrap();
+}
+
+#[test]
+fn vector_upsert_in_txn_read_your_writes() {
+    let mut session = create_session();
+    create_test_collection(&mut session, "emb", 3);
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::VectorUpsert {
+            branch: None,
+            space: None,
+            collection: "emb".into(),
+            key: "v1".into(),
+            vector: vec![1.0, 0.0, 0.0],
+            metadata: None,
+        })
+        .unwrap();
+
+    // Read within same txn should see the write
+    let output = session
+        .execute(Command::VectorGet {
+            branch: None,
+            space: None,
+            collection: "emb".into(),
+            key: "v1".into(),
+            as_of: None,
+        })
+        .unwrap();
+
+    assert!(
+        matches!(output, Output::VectorData(Some(_))),
+        "Should see uncommitted vector in same txn"
+    );
+
+    session.execute(Command::TxnCommit).unwrap();
+}
+
+#[test]
+fn vector_rollback_discards_writes() {
+    let mut session = create_session();
+    create_test_collection(&mut session, "emb", 3);
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::VectorUpsert {
+            branch: None,
+            space: None,
+            collection: "emb".into(),
+            key: "v1".into(),
+            vector: vec![1.0, 0.0, 0.0],
+            metadata: None,
+        })
+        .unwrap();
+
+    session.execute(Command::TxnRollback).unwrap();
+
+    // Vector should not be visible after rollback
+    let output = session
+        .execute(Command::VectorGet {
+            branch: None,
+            space: None,
+            collection: "emb".into(),
+            key: "v1".into(),
+            as_of: None,
+        })
+        .unwrap();
+
+    assert!(
+        matches!(output, Output::VectorData(None)),
+        "Vector should not exist after rollback"
+    );
+}
+
+#[test]
+fn vector_commit_makes_writes_visible() {
+    let db = strata_engine::Database::cache().unwrap();
+    strata_graph::branch_dag::init_system_branch(&db);
+    let mut session = Session::new(db.clone());
+    create_test_collection(&mut session, "emb", 3);
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::VectorUpsert {
+            branch: None,
+            space: None,
+            collection: "emb".into(),
+            key: "v1".into(),
+            vector: vec![1.0, 0.0, 0.0],
+            metadata: None,
+        })
+        .unwrap();
+
+    session.execute(Command::TxnCommit).unwrap();
+
+    // New session should see committed vector
+    let mut session2 = Session::new(db);
+    let output = session2
+        .execute(Command::VectorGet {
+            branch: None,
+            space: None,
+            collection: "emb".into(),
+            key: "v1".into(),
+            as_of: None,
+        })
+        .unwrap();
+
+    assert!(
+        matches!(output, Output::VectorData(Some(_))),
+        "Committed vector should be visible in new session"
+    );
+}
+
+#[test]
+fn vector_and_kv_atomic() {
+    let db = strata_engine::Database::cache().unwrap();
+    strata_graph::branch_dag::init_system_branch(&db);
+    let mut session = Session::new(db.clone());
+    create_test_collection(&mut session, "emb", 3);
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "vec_ref".into(),
+            value: Value::String("v1".into()),
+        })
+        .unwrap();
+
+    session
+        .execute(Command::VectorUpsert {
+            branch: None,
+            space: None,
+            collection: "emb".into(),
+            key: "v1".into(),
+            vector: vec![1.0, 0.0, 0.0],
+            metadata: None,
+        })
+        .unwrap();
+
+    session.execute(Command::TxnCommit).unwrap();
+
+    // Both should be visible
+    let mut session2 = Session::new(db);
+    let kv = session2
+        .execute(Command::KvGet {
+            branch: None,
+            space: None,
+            key: "vec_ref".into(),
+            as_of: None,
+        })
+        .unwrap();
+
+    assert!(
+        !matches!(kv, Output::Maybe(None) | Output::MaybeVersioned(None)),
+        "KV write should be visible"
+    );
+
+    let vec = session2
+        .execute(Command::VectorGet {
+            branch: None,
+            space: None,
+            collection: "emb".into(),
+            key: "v1".into(),
+            as_of: None,
+        })
+        .unwrap();
+
+    assert!(
+        matches!(vec, Output::VectorData(Some(_))),
+        "Vector should be visible"
+    );
+}
+
+#[test]
+fn vector_collection_ops_rejected_in_txn() {
+    let mut session = create_session();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    let result = session.execute(Command::VectorCreateCollection {
+        branch: None,
+        space: None,
+        collection: "emb".into(),
+        dimension: 3,
+        metric: DistanceMetric::Cosine,
+    });
+
+    assert!(
+        result.is_err(),
+        "VectorCreateCollection should be rejected inside txn"
+    );
+
+    session.execute(Command::TxnRollback).unwrap();
+}
+
+#[test]
+fn vector_delete_in_txn() {
+    let mut session = create_session();
+    create_test_collection(&mut session, "emb", 3);
+
+    // Insert outside txn
+    session
+        .execute(Command::VectorUpsert {
+            branch: None,
+            space: None,
+            collection: "emb".into(),
+            key: "v1".into(),
+            vector: vec![1.0, 0.0, 0.0],
+            metadata: None,
+        })
+        .unwrap();
+
+    // Delete inside txn
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::VectorDelete {
+            branch: None,
+            space: None,
+            collection: "emb".into(),
+            key: "v1".into(),
+        })
+        .unwrap();
+
+    // Should not be visible within txn
+    let output = session
+        .execute(Command::VectorGet {
+            branch: None,
+            space: None,
+            collection: "emb".into(),
+            key: "v1".into(),
+            as_of: None,
+        })
+        .unwrap();
+
+    assert!(
+        matches!(output, Output::VectorData(None)),
+        "Deleted vector should not be visible in same txn"
+    );
+
+    session.execute(Command::TxnCommit).unwrap();
+}
+
+#[test]
+fn vector_hnsw_updated_after_commit() {
+    let db = strata_engine::Database::cache().unwrap();
+    strata_graph::branch_dag::init_system_branch(&db);
+    let mut session = Session::new(db.clone());
+    create_test_collection(&mut session, "emb", 3);
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::VectorUpsert {
+            branch: None,
+            space: None,
+            collection: "emb".into(),
+            key: "v1".into(),
+            vector: vec![1.0, 0.0, 0.0],
+            metadata: None,
+        })
+        .unwrap();
+
+    session.execute(Command::TxnCommit).unwrap();
+
+    // HNSW should be updated post-commit — query should find the vector
+    let mut session2 = Session::new(db);
+    let output = session2
+        .execute(Command::VectorQuery {
+            branch: None,
+            space: None,
+            collection: "emb".into(),
+            query: vec![1.0, 0.0, 0.0],
+            k: 1,
+            filter: None,
+            metric: None,
+            as_of: None,
+        })
+        .unwrap();
+
+    match output {
+        Output::VectorMatches(matches) => {
+            assert_eq!(matches.len(), 1, "Should find committed vector via search");
+            assert_eq!(matches[0].key, "v1");
+        }
+        _ => panic!("Expected VectorMatches, got {:?}", output),
+    }
+}
+
+#[test]
+fn vector_rollback_does_not_update_hnsw() {
+    let db = strata_engine::Database::cache().unwrap();
+    strata_graph::branch_dag::init_system_branch(&db);
+    let mut session = Session::new(db.clone());
+    create_test_collection(&mut session, "emb", 3);
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::VectorUpsert {
+            branch: None,
+            space: None,
+            collection: "emb".into(),
+            key: "v1".into(),
+            vector: vec![1.0, 0.0, 0.0],
+            metadata: None,
+        })
+        .unwrap();
+
+    session.execute(Command::TxnRollback).unwrap();
+
+    // HNSW should NOT have been updated — query should find nothing
+    let mut session2 = Session::new(db);
+    let output = session2
+        .execute(Command::VectorQuery {
+            branch: None,
+            space: None,
+            collection: "emb".into(),
+            query: vec![1.0, 0.0, 0.0],
+            k: 1,
+            filter: None,
+            metric: None,
+            as_of: None,
+        })
+        .unwrap();
+
+    match output {
+        Output::VectorMatches(matches) => {
+            assert!(
+                matches.is_empty(),
+                "HNSW should not contain rolled-back vector"
+            );
+        }
+        _ => panic!("Expected VectorMatches, got {:?}", output),
+    }
+}

@@ -24,6 +24,7 @@ pub mod brute_force;
 pub mod collection;
 pub mod distance;
 pub mod error;
+pub mod ext;
 pub mod filter;
 pub mod heap;
 pub mod hnsw;

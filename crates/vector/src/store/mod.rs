@@ -154,7 +154,7 @@ impl VectorStore {
     ///
     /// This returns the shared `VectorBackendState` stored in the Database.
     /// All VectorStore instances for the same Database share this state.
-    fn state(&self) -> Result<Arc<VectorBackendState>, VectorError> {
+    pub fn state(&self) -> Result<Arc<VectorBackendState>, VectorError> {
         self.db
             .extension::<VectorBackendState>()
             .map_err(|e| VectorError::Storage(e.to_string()))
@@ -630,7 +630,7 @@ impl VectorStore {
     /// Uses double-checked locking to avoid TOCTOU races: the read-lock fast
     /// path avoids contention in the common case, while the write-lock slow
     /// path re-checks to prevent duplicate initialization.
-    pub(crate) fn ensure_collection_loaded(
+    pub fn ensure_collection_loaded(
         &self,
         branch_id: BranchId,
         space: &str,
@@ -794,23 +794,8 @@ impl strata_engine::search::Searchable for VectorStore {
 // Re-export now_micros from types for use in store submodules (via `use super::*`).
 use crate::types::now_micros;
 
-// =============================================================================
-// VectorStoreExt Implementation
-// =============================================================================
-//
-// Extension trait implementation for cross-primitive transactions.
-//
-// LIMITATION: VectorStore operations in transactions have limited support
-// because embeddings are stored in in-memory backends (VectorHeap/HNSW)
-// which are not accessible through TransactionContext. Full vector operations
-// require access to the VectorBackendState which is Database-scoped.
-//
-// Future enhancement: Could add pending_vector_ops to TransactionContext
-// and apply them at commit time, but this requires significant infrastructure.
-
-// NOTE: The VectorStoreExt impl for TransactionContext lives in
-// strata-engine/src/primitives/extensions.rs due to orphan rules
-// (neither the trait nor TransactionContext is defined in strata-vector).
+// VectorStoreExt implementation lives in crate::ext (ext.rs).
+// It implements vector operations directly on TransactionContext for OCC support.
 
 #[cfg(test)]
 mod tests {
@@ -3660,9 +3645,23 @@ mod tests {
             let delete_result = handle_a.join().unwrap();
             let insert_result = handle_b.join().unwrap();
 
-            // Both operations must succeed (no panics, no errors)
-            delete_result.unwrap();
-            insert_result.unwrap();
+            // With OCC, one of the concurrent operations may get a conflict
+            // error (TransactionAborted). This is correct: the race IS detected.
+            // At least one must succeed; both succeeding is also valid.
+            let delete_ok = delete_result.is_ok();
+            let insert_ok = insert_result.is_ok();
+            assert!(
+                delete_ok || insert_ok,
+                "At least one concurrent operation must succeed"
+            );
+
+            // If insert failed (OCC conflict), re-insert so consistency check works
+            if !insert_ok {
+                let emb_v2 = [0.0_f32, 1.0, 0.0, 0.0];
+                store
+                    .insert(branch_id, "default", "race", "key", &emb_v2, None)
+                    .unwrap();
+            }
 
             // KV and backend must agree on existence.
             let kv_exists = store
