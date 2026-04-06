@@ -851,6 +851,25 @@ impl Executor {
                     )
                 }
             }
+            Command::VectorGetv {
+                branch,
+                space,
+                collection,
+                key,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::vector::vector_getv(
+                    &self.primitives,
+                    branch,
+                    space,
+                    collection,
+                    key,
+                )
+            }
             Command::VectorDelete {
                 branch,
                 space,

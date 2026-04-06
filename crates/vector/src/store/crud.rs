@@ -228,6 +228,78 @@ impl VectorStore {
         }))
     }
 
+    /// Get the full version history for a vector key.
+    ///
+    /// Returns `None` if the key has never existed. Index `[0]` is the latest
+    /// version, `[1]` the previous, etc. Reads directly from the storage version
+    /// chain (non-transactional), so this is unaffected by collection load state.
+    ///
+    /// Tombstones and pre-embedding-storage legacy records are skipped, so a
+    /// single corrupt or partial entry does not break the whole history. If all
+    /// entries are skipped, returns `None`.
+    pub fn getv(
+        &self,
+        branch_id: BranchId,
+        space: &str,
+        collection: &str,
+        key: &str,
+    ) -> VectorResult<Option<strata_core::VersionedHistory<VectorEntry>>> {
+        let kv_key = Key::new_vector(self.namespace_for(branch_id, space), collection, key);
+
+        use strata_core::traits::Storage;
+        let raw_history = self
+            .db
+            .storage()
+            .get_history(&kv_key, None, None)
+            .map_err(|e| VectorError::Storage(e.to_string()))?;
+
+        let mut versions: Vec<Versioned<VectorEntry>> = Vec::with_capacity(raw_history.len());
+        for vv in raw_history {
+            // Tombstones and any non-Bytes values are skipped: the version chain
+            // includes delete markers, but a VectorEntry cannot be reconstructed
+            // from them.
+            let Value::Bytes(ref bytes) = vv.value else {
+                continue;
+            };
+            let record = match VectorRecord::from_bytes(bytes) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(
+                        target: "strata::vector",
+                        collection,
+                        key,
+                        error = %e,
+                        "Skipping corrupt historical vector record in getv"
+                    );
+                    continue;
+                }
+            };
+            // Legacy records pre-dating embedding storage cannot be reconstructed
+            // with a historical embedding; skip them rather than fail the whole
+            // history read.
+            if record.embedding.is_empty() {
+                warn!(
+                    target: "strata::vector",
+                    collection,
+                    key,
+                    "Skipping pre-embedding-storage historical vector record in getv"
+                );
+                continue;
+            }
+            let entry = VectorEntry {
+                key: key.to_string(),
+                embedding: record.embedding,
+                metadata: record.metadata,
+                vector_id: VectorId(record.vector_id),
+                version: Version::counter(record.version),
+                source_ref: record.source_ref,
+            };
+            versions.push(Versioned::with_timestamp(entry, vv.version, vv.timestamp));
+        }
+
+        Ok(strata_core::VersionedHistory::new(versions))
+    }
+
     /// Delete a vector by key
     ///
     /// Returns true if the vector existed and was deleted.

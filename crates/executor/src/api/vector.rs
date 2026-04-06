@@ -103,6 +103,31 @@ impl Strata {
         }
     }
 
+    /// Get the full version history for a vector key.
+    ///
+    /// Returns `None` if the key has never existed. Index `[0]` is the latest
+    /// version, `[1]` the previous, etc. Newest-first ordering. Reads directly
+    /// from the storage version chain and is unaffected by collection load
+    /// state.
+    pub fn vector_getv(
+        &self,
+        collection: &str,
+        key: &str,
+    ) -> Result<Option<Vec<VersionedVectorData>>> {
+        match self.execute_cmd(Command::VectorGetv {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            collection: collection.to_string(),
+            key: key.to_string(),
+        })? {
+            Output::VectorVersionHistory(h) => Ok(h),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for VectorGetv".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
+
     /// Delete a vector.
     pub fn vector_delete(&self, collection: &str, key: &str) -> Result<bool> {
         match self.execute_cmd(Command::VectorDelete {

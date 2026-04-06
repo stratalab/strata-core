@@ -1333,6 +1333,199 @@ mod tests {
         assert_eq!(entry.embedding, vec![0.0, 1.0, 0.0]);
     }
 
+    // ========================================
+    // Version History (getv) Tests
+    // ========================================
+
+    #[test]
+    fn test_getv_returns_all_versions() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        // Upsert same key three times with different embeddings
+        store
+            .insert(branch_id, "default", "test", "doc1", &[1.0, 0.0, 0.0], None)
+            .unwrap();
+        store
+            .insert(branch_id, "default", "test", "doc1", &[0.0, 1.0, 0.0], None)
+            .unwrap();
+        store
+            .insert(branch_id, "default", "test", "doc1", &[0.0, 0.0, 1.0], None)
+            .unwrap();
+
+        let history = store
+            .getv(branch_id, "default", "test", "doc1")
+            .unwrap()
+            .expect("history should be present");
+
+        assert_eq!(history.len(), 3, "should have 3 versions");
+        // Newest first
+        assert_eq!(history[0].value.embedding, vec![0.0, 0.0, 1.0]);
+        assert_eq!(history[1].value.embedding, vec![0.0, 1.0, 0.0]);
+        assert_eq!(history[2].value.embedding, vec![1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_getv_nonexistent_returns_none() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        let history = store.getv(branch_id, "default", "test", "missing").unwrap();
+        assert!(history.is_none());
+    }
+
+    #[test]
+    fn test_getv_preserves_metadata_per_version() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        // Upsert with metadata v1
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "doc1",
+                &[1.0, 0.0, 0.0],
+                Some(serde_json::json!({"tag": "v1"})),
+            )
+            .unwrap();
+
+        // Upsert with metadata v2
+        store
+            .insert(
+                branch_id,
+                "default",
+                "test",
+                "doc1",
+                &[0.0, 1.0, 0.0],
+                Some(serde_json::json!({"tag": "v2"})),
+            )
+            .unwrap();
+
+        let history = store
+            .getv(branch_id, "default", "test", "doc1")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(history.len(), 2);
+        // Newest version should carry the "v2" metadata
+        assert_eq!(
+            history[0].value.metadata,
+            Some(serde_json::json!({"tag": "v2"}))
+        );
+        assert_eq!(
+            history[1].value.metadata,
+            Some(serde_json::json!({"tag": "v1"}))
+        );
+    }
+
+    #[test]
+    fn test_getv_newest_first_ordering() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        store
+            .insert(branch_id, "default", "test", "doc1", &[1.0, 0.0, 0.0], None)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store
+            .insert(branch_id, "default", "test", "doc1", &[0.0, 1.0, 0.0], None)
+            .unwrap();
+
+        let history = store
+            .getv(branch_id, "default", "test", "doc1")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(history.len(), 2);
+        // Monotonic newest-first on timestamp
+        let ts_new: u64 = history[0].timestamp.into();
+        let ts_old: u64 = history[1].timestamp.into();
+        assert!(
+            ts_new >= ts_old,
+            "history[0].timestamp ({}) should be >= history[1].timestamp ({})",
+            ts_new,
+            ts_old
+        );
+    }
+
+    #[test]
+    fn test_getv_after_delete_skips_tombstone() {
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+
+        store
+            .insert(branch_id, "default", "test", "doc1", &[1.0, 0.0, 0.0], None)
+            .unwrap();
+        store.delete(branch_id, "default", "test", "doc1").unwrap();
+
+        // After delete, live version history (filtered) should still contain
+        // the single pre-delete version; tombstones are skipped.
+        let history = store
+            .getv(branch_id, "default", "test", "doc1")
+            .unwrap()
+            .expect("pre-delete version should remain visible via getv");
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].value.embedding, vec![1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_getv_works_without_collection_loaded() {
+        // getv reads directly from the storage version chain and should NOT
+        // require the collection to be loaded/present in the HNSW backend.
+        // This is important for post-delete or recovery scenarios.
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "test", config)
+            .unwrap();
+        store
+            .insert(branch_id, "default", "test", "doc1", &[1.0, 0.0, 0.0], None)
+            .unwrap();
+
+        // Delete the collection — HNSW backend is gone
+        store
+            .delete_collection(branch_id, "default", "test")
+            .unwrap();
+
+        // Version chain still has the historical entry. getv should return it
+        // without needing the collection to be loaded.
+        let history = store.getv(branch_id, "default", "test", "doc1").unwrap();
+        // Note: collection delete also tombstones vector keys, so we expect either
+        // Some(history) or None depending on tombstone semantics. The key is that
+        // the call does not error on missing collection backend.
+        let _ = history; // No assertion on value — behavior verified by not panicking.
+    }
+
     #[test]
     fn test_delete_vector() {
         let (_temp, _db, store) = setup();

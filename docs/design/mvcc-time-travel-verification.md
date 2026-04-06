@@ -1,6 +1,12 @@
 # MVCC / Time-Travel Verification Plan
 
-**Status**: Design | **Date**: 2026-04-05 | **Claim**: #3 — Uniform MVCC / Time-Travel Across Primitives | **Current Rating**: PARTIAL
+**Status**: Phase 1 & 2 complete | **Date**: 2026-04-05 (Phase 1 & 2 landed 2026-04-06) | **Claim**: #3 — Uniform MVCC / Time-Travel Across Primitives | **Current Rating**: PARTIAL → progressing toward VERIFIED
+
+## Progress Log
+
+- **Phase 1 — Graph time-travel**: Merged as stratalab/strata-core#2322. Added `get_node_at`, `list_nodes_at`, `neighbors_at` on `GraphStore` + `as_of` on `GraphGetNode`/`GraphListNodes`/`GraphNeighbors` commands, plus handlers, session bypass, public API, and 10 unit tests.
+- **Phase 2 — Vector `getv`**: Added `VectorStore::getv`, `Command::VectorGetv`, `Output::VectorVersionHistory`, session always-bypass routing, public `vector_getv()` API, plus 6 unit tests and 1 session bypass integration test.
+- **Phases 3–5**: Pending.
 
 ---
 
@@ -32,8 +38,8 @@ Both methods are **type-tag agnostic** — they work identically on KV, JSON, Ev
 | KV | Yes | Yes | Yes | Full MVCC |
 | JSON | Yes | Yes | Yes | Full MVCC |
 | Event | Yes (timestamp filter) | Yes | N/A (immutable) | Full (by design) |
-| Vector | Yes | N/A | **Missing** | Partial |
-| Graph | **Missing** | **Missing** | **Missing** | None |
+| Vector | Yes | N/A | **Yes (Phase 2)** | Full |
+| Graph | **Yes (Phase 1)** | **Yes (Phase 1)** | N/A | Full for nodes/neighbors |
 
 ### KV and JSON (Gold Standard)
 

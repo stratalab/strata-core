@@ -237,12 +237,13 @@ impl Session {
             | Command::SpaceCreate { .. }
             | Command::SpaceDelete { .. }
             | Command::SpaceExists { .. }
-            // Version history commands (KvGetv, JsonGetv) require
+            // Version history commands (KvGetv, JsonGetv, VectorGetv) require
             // storage-layer version chains which are not available through the
             // transaction context. These always read from the committed store,
             // even during an active transaction.
             | Command::KvGetv { .. }
-            | Command::JsonGetv { .. } => self.executor.execute(cmd),
+            | Command::JsonGetv { .. }
+            | Command::VectorGetv { .. } => self.executor.execute(cmd),
 
             // Data commands: route through txn if active, else delegate
             _ => {
