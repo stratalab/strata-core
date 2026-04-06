@@ -2591,6 +2591,92 @@ fn kv_get_as_of_bypasses_txn() {
 }
 
 #[test]
+fn kv_get_as_of_returns_historical_value_inside_txn() {
+    // Stronger positive test: inside an active session transaction,
+    // KvGet { as_of: Some(mid_ts) } must return the committed historical
+    // value at mid_ts — not the txn's write-set value, not the txn's
+    // snapshot value, and not None.
+    //
+    // This proves the bypass both (a) reaches committed storage and
+    // (b) correctly honors the requested timestamp against the version
+    // chain (rather than defaulting to None or the latest committed
+    // version).
+    let mut session = create_session();
+
+    // Commit v1 outside the transaction.
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "hist".into(),
+            value: Value::Int(1),
+        })
+        .unwrap();
+
+    // Capture a timestamp that is AFTER v1's commit but BEFORE v2's
+    // commit. Fence with sleeps so commit_ts(v1) < mid_ts < commit_ts(v2).
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let mid_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as u64;
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    // Commit v2 outside the transaction.
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "hist".into(),
+            value: Value::Int(2),
+        })
+        .unwrap();
+
+    // Start a txn and stage v3 inside it (uncommitted).
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "hist".into(),
+            value: Value::Int(3),
+        })
+        .unwrap();
+
+    // KvGet { as_of: Some(mid_ts) } must return v1 — NOT v2 (latest
+    // committed), NOT v3 (txn write-set), NOT None. This is the full
+    // end-to-end correctness check for the bypass path.
+    let output = session
+        .execute(Command::KvGet {
+            branch: None,
+            space: None,
+            key: "hist".into(),
+            as_of: Some(mid_ts),
+        })
+        .unwrap();
+
+    let got = match output {
+        Output::Maybe(v) => v,
+        Output::MaybeVersioned(v) => v.map(|vv| vv.value),
+        other => panic!("Expected Output::Maybe/MaybeVersioned, got {:?}", other),
+    };
+
+    assert_eq!(
+        got,
+        Some(Value::Int(1)),
+        "KvGet with as_of=mid_ts inside a txn should return v1 (historical committed), got {:?}",
+        got
+    );
+
+    session.execute(Command::TxnRollback).unwrap();
+}
+
+#[test]
 fn kv_list_as_of_bypasses_txn() {
     // KvList with as_of must always read from committed storage.
     let mut session = create_session();

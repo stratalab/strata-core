@@ -272,8 +272,6 @@ pub enum Command {
 
     /// Get full version history for a JSON document.
     /// Returns: `Output::VersionHistory`
-    /// Get full version history for a JSON document.
-    /// Returns: `Output::VersionHistory`
     ///
     /// Version history is inherently unbounded — there is no `as_of`
     /// variant. Callers that want a point-in-time read should use
