@@ -128,10 +128,15 @@ pub(crate) struct MergePostCommitCtx<'a> {
 /// A handler for per-primitive merge semantics.
 ///
 /// One implementation per `TypeTag`. Registered with a `MergeHandlerRegistry`
-/// constructed once per `merge_branches` call. The trait surface is
-/// intentionally minimal in Phase 2 (`precheck` + `post_commit` only); the
-/// `plan` method described in the design doc lands in Phase 3+ alongside the
-/// first handler that needs to produce a per-primitive write plan.
+/// constructed once per `merge_branches` call. The trait has three lifecycle
+/// methods: `precheck` (validate before any writes), `plan` (produce the
+/// per-primitive write actions), and `post_commit` (post-apply fix-ups).
+///
+/// Phase 2 introduced the dispatch with `precheck` + `post_commit`. Phase 3b
+/// added `plan` with a default impl that preserves Phase 2 behavior for
+/// KV/JSON/Vector/Event handlers (delegating to `classify_typed_entries_for_tag`).
+/// `GraphMergeHandler::plan` overrides the default with the real semantic
+/// graph merge.
 pub(crate) trait PrimitiveMergeHandler: Send + Sync {
     /// The primitive this handler owns.
     fn type_tag(&self) -> TypeTag;
