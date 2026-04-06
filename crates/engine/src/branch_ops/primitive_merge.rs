@@ -34,7 +34,10 @@ use std::sync::Arc;
 use strata_core::types::{BranchId, TypeTag};
 use strata_core::StrataResult;
 
-use super::{check_event_merge_divergence, MergeBase, MergeStrategy, TypedEntries};
+use super::{
+    check_event_merge_divergence, check_graph_merge_divergence, MergeBase, MergeStrategy,
+    TypedEntries,
+};
 use crate::database::Database;
 
 // =============================================================================
@@ -254,21 +257,40 @@ impl PrimitiveMergeHandler for VectorMergeHandler {
     }
 }
 
-/// Graph merge handler. Phase 2: pure no-op pass-through.
+/// Graph merge handler.
 ///
-/// Graph adjacency is stale after a generic merge today (no `GraphRefreshHook`
-/// exists). Fixing this requires backend work that belongs in Phase 3 alongside
-/// the rest of graph-aware merge (referential integrity, dangling edge
-/// detection, incremental adjacency rebuild).
+/// Phase 3 ships a tactical refusal of divergent graph merges, mirroring the
+/// Phase 1 Event safety pattern. The generic three-way merge treats the
+/// `{graph}/fwd/{src}` and `{graph}/rev/{dst}` packed adjacency lists as
+/// independent KV keys, which produces silent corruption (bidirectional
+/// adjacency inconsistency under LWW; dangling references from concurrent
+/// node-delete + edge-add) whenever both branches modify graph state since
+/// the merge base. `precheck` refuses these cases via
+/// `super::check_graph_merge_divergence`. Single-sided graph merges
+/// continue working — every edge addition writes both `fwd/{src}` and
+/// `rev/{dst}` together as one transactional unit, so the generic merge
+/// transports them as a coherent group.
+///
+/// Phase 3b (future) implements the real semantic merge: decoded-edge-level
+/// diffing, additive merging of disjoint edges, referential integrity
+/// validation, and the `plan` trait method. See the design doc.
 pub(crate) struct GraphMergeHandler;
 
 impl PrimitiveMergeHandler for GraphMergeHandler {
     fn type_tag(&self) -> TypeTag {
         TypeTag::Graph
     }
-    fn precheck(&self, _ctx: &MergePrecheckCtx<'_>) -> StrataResult<()> {
+
+    fn precheck(&self, ctx: &MergePrecheckCtx<'_>) -> StrataResult<()> {
+        for ((space, type_tag), cell) in &ctx.typed_entries.cells {
+            if *type_tag != TypeTag::Graph {
+                continue;
+            }
+            check_graph_merge_divergence(space, &cell.ancestor, &cell.source, &cell.target)?;
+        }
         Ok(())
     }
+
     fn post_commit(&self, _ctx: &MergePostCommitCtx<'_>) -> StrataResult<()> {
         Ok(())
     }
