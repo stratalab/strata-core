@@ -285,6 +285,37 @@ impl EventLog {
 
     // ========== Append Operation ==========
 
+    /// Idempotently register `space` on `branch_id` from inside an open
+    /// transaction.
+    ///
+    /// `EventLog::append` is the first place a user-visible space can come
+    /// into existence (the user calls `event.append(branch, "orders", ...)`
+    /// without ever touching `SpaceIndex` directly). Without this hook the
+    /// space data is durable but invisible to `SpaceIndex::list`, which in
+    /// turn means `branch_ops::merge_branches` and other space-iterating
+    /// callers silently skip it. See the discussion in PR #2330 — the cross-
+    /// space Event merge test had to call `space_index.register` explicitly
+    /// to work around this gap.
+    ///
+    /// Skips the well-known always-present spaces ("default" and the system
+    /// space). Reads the existing key to avoid bloating the WAL with no-op
+    /// puts on every append. Inlined into the caller's transaction so the
+    /// space metadata write is atomic with the event write.
+    fn ensure_space_registered_in_txn(
+        txn: &mut TransactionContext,
+        branch_id: &BranchId,
+        space: &str,
+    ) -> StrataResult<()> {
+        if space == "default" || space == crate::system_space::SYSTEM_SPACE {
+            return Ok(());
+        }
+        let space_meta_key = Key::new_space(*branch_id, space);
+        if txn.get(&space_meta_key)?.is_none() {
+            txn.put(space_meta_key, Value::String("{}".to_string()))?;
+        }
+        Ok(())
+    }
+
     /// Core event creation: hash, build, store event + type index, update metadata chain.
     ///
     /// Used by both `append()` and `batch_append()`. Caller is responsible
@@ -358,6 +389,8 @@ impl EventLog {
         let ns = self.namespace_for(branch_id, space);
 
         let result = self.db.transaction(*branch_id, |txn| {
+            Self::ensure_space_registered_in_txn(txn, branch_id, space)?;
+
             let meta_key = Key::new_event_meta(ns.clone());
             let mut meta: EventLogMeta = match txn.get(&meta_key)? {
                 Some(v) => from_stored_value(&v).map_err(|e| {
@@ -440,6 +473,8 @@ impl EventLog {
         let ns = self.namespace_for(branch_id, space);
 
         let sequences = self.db.transaction(*branch_id, |txn| {
+            Self::ensure_space_registered_in_txn(txn, branch_id, space)?;
+
             let meta_key = Key::new_event_meta(ns.clone());
             let mut meta: EventLogMeta = match txn.get(&meta_key)? {
                 Some(v) => from_stored_value(&v).map_err(|e| {

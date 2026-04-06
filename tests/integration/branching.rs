@@ -998,19 +998,94 @@ fn event_merge_target_only_appends_succeeds() {
 }
 
 #[test]
-fn event_merge_cross_space_divergence_succeeds() {
+fn event_append_auto_registers_space() {
+    // Regression test for the EventLog space auto-registration gap that was
+    // worked around in the Phase 1 cross-space merge test (PR #2330).
+    //
+    // `EventLog::append` must register non-default spaces with `SpaceIndex`
+    // so that `branch_ops::merge_branches` (which iterates via
+    // `SpaceIndex::list`) and other space-aware callers can see them.
     let test_db = TestDb::new();
     let branch_index = test_db.branch_index();
     let space_index = SpaceIndex::new(test_db.db.clone());
     let event = test_db.event();
 
-    // Seed both spaces on target before fork. Non-default spaces must be
-    // registered explicitly so `merge_branches` iterates them via
-    // `SpaceIndex::list` — `EventLog::append` does not auto-register.
     branch_index.create_branch("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
-    space_index.register(target_id, "orders").unwrap();
-    space_index.register(target_id, "users").unwrap();
+
+    // Spaces are absent from the index before any append.
+    let spaces_before = space_index.list(target_id).unwrap();
+    assert!(!spaces_before.contains(&"orders".to_string()));
+    assert!(!spaces_before.contains(&"users".to_string()));
+
+    // Append into two non-default spaces. Each should auto-register.
+    event
+        .append(&target_id, "orders", "created", int_payload(0))
+        .unwrap();
+    event
+        .append(&target_id, "users", "signup", int_payload(1))
+        .unwrap();
+
+    // Both spaces are now visible to SpaceIndex.
+    let spaces_after = space_index.list(target_id).unwrap();
+    assert!(
+        spaces_after.contains(&"orders".to_string()),
+        "orders space must be auto-registered by EventLog::append, got: {spaces_after:?}"
+    );
+    assert!(
+        spaces_after.contains(&"users".to_string()),
+        "users space must be auto-registered by EventLog::append, got: {spaces_after:?}"
+    );
+    assert!(
+        space_index.exists(target_id, "orders").unwrap(),
+        "SpaceIndex::exists must return true for auto-registered space"
+    );
+
+    // Idempotence: subsequent appends to the same space must not fail or
+    // duplicate the registration.
+    event
+        .append(&target_id, "orders", "paid", int_payload(2))
+        .unwrap();
+    let spaces_after_again = space_index.list(target_id).unwrap();
+    let orders_count = spaces_after_again
+        .iter()
+        .filter(|s| s.as_str() == "orders")
+        .count();
+    assert_eq!(
+        orders_count, 1,
+        "auto-registration must be idempotent — orders space appears {orders_count} times"
+    );
+
+    // batch_append should also auto-register a fresh space.
+    event
+        .batch_append(
+            &target_id,
+            "audits",
+            vec![
+                ("created".to_string(), int_payload(10)),
+                ("updated".to_string(), int_payload(11)),
+            ],
+        )
+        .unwrap();
+    let spaces_with_audits = space_index.list(target_id).unwrap();
+    assert!(
+        spaces_with_audits.contains(&"audits".to_string()),
+        "batch_append must auto-register the space, got: {spaces_with_audits:?}"
+    );
+}
+
+#[test]
+fn event_merge_cross_space_divergence_succeeds() {
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let event = test_db.event();
+
+    // Seed both spaces on target before fork. With EventLog auto-registering
+    // spaces on first append, no explicit `space_index.register` is needed
+    // for `merge_branches` to discover these spaces — this test exercises
+    // the auto-registration end-to-end through the merge path.
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     event
         .append(&target_id, "orders", "created", int_payload(0))
         .unwrap();
