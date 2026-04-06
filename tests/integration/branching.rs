@@ -739,11 +739,7 @@ fn test_fork_diff_merge_roundtrip() {
 /// (b) each event's `prev_hash` matches the previous event's stored `hash`.
 ///
 /// Returns the number of events walked on success, or a descriptive error.
-fn verify_event_chain(
-    event_log: &EventLog,
-    branch: &BranchId,
-    space: &str,
-) -> Result<u64, String> {
+fn verify_event_chain(event_log: &EventLog, branch: &BranchId, space: &str) -> Result<u64, String> {
     use strata_engine::primitives::event::compute_event_hash;
     let len = event_log.len(branch, space).map_err(|e| e.to_string())?;
     let mut prev_hash = [0u8; 32];
@@ -839,14 +835,9 @@ fn event_merge_divergent_rejects() {
 
     // Strict merge must also be rejected (the divergence check fires
     // regardless of strategy, before the strategy-specific branch runs).
-    let err = branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::Strict,
-        None,
-    )
-    .expect_err("divergent event merge must be rejected under Strict");
+    let err =
+        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+            .expect_err("divergent event merge must be rejected under Strict");
     assert!(
         err.to_string()
             .contains("merge unsupported: divergent event appends"),

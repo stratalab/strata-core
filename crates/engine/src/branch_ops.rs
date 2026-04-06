@@ -165,9 +165,8 @@ const EVENT_META_USER_KEY: &[u8] = b"__meta__";
 /// encoding used by `EventLog`). Returns `Err` on corruption.
 fn decode_event_meta(value: &Value) -> StrataResult<crate::primitives::event::EventLogMeta> {
     match value {
-        Value::String(s) => serde_json::from_str(s).map_err(|e| {
-            StrataError::serialization(format!("corrupt EventLog metadata: {e}"))
-        }),
+        Value::String(s) => serde_json::from_str(s)
+            .map_err(|e| StrataError::serialization(format!("corrupt EventLog metadata: {e}"))),
         _ => Err(StrataError::serialization(
             "EventLog metadata row is not a Value::String",
         )),
