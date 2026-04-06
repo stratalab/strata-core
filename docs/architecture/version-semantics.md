@@ -161,20 +161,22 @@ The executor layer knows which variant each command uses and reconstructs correc
 ### Problem 1: VectorStore insert() and get() return different Version variants
 
 **Severity**: Medium
+**Status**: **FIXED** (confirmed 2026-04-06 during Phase 4 of the MVCC time-travel verification work). All `VectorStore` read and write paths now consistently return `Version::counter(record.version)`. Verified at `crates/vector/src/store/crud.rs` lines 165, 226, 294, 522 and `crates/vector/src/ext.rs` line 239 — six independent paths, all uniform.
+
+Historical context for the original bug:
 
 ```rust
-// store.rs:459 — insert returns Counter
+// store.rs:459 — insert returned Counter
 Ok(Version::counter(record_version))
 
-// store.rs:519 — get returns Txn
+// store.rs:519 — get returned Txn
 version: Version::txn(record.version),
 ```
 
-The same `record.version` (a raw `u64`) is wrapped as `Version::counter()` on insert but `Version::txn()` on get. The client sees the same numeric value, but:
+The same `record.version` (a raw `u64`) was wrapped as `Version::counter()` on insert but `Version::txn()` on get. The client saw the same numeric value, but:
 
-- If code ever compares these with full enum equality, they won't match
+- Code comparing these with full enum equality wouldn't match
 - The Version variant carries semantic meaning — Counter means "per-entity mutation count" while Txn means "transaction commit version"
-- This inconsistency could cause confusion in any future code that inspects the variant
 
 ### Problem 2: EventGetByType silently returns version 0 for non-Sequence variants
 

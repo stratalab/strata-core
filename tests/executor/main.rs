@@ -12,6 +12,7 @@ mod common;
 mod adversarial;
 mod branch_invariants;
 mod command_dispatch;
+mod cross_primitive_time_travel;
 mod error_handling;
 mod serialization;
 mod session_transactions;

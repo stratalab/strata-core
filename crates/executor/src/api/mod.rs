@@ -1774,7 +1774,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_kv_get_as_of_returns_none_for_future_write() {
+    fn test_kv_get_at_returns_none_for_future_write() {
         let db = create_strata();
 
         // Read the time before writing
@@ -1783,11 +1783,11 @@ mod tests {
         db.kv_put("k", "v").unwrap();
 
         // as_of=None should return the latest value
-        let val = db.kv_get_as_of("k", None).unwrap();
+        let val = db.kv_get_at("k", None).unwrap();
         assert_eq!(val, Some(Value::String("v".into())));
 
         // as_of=0 (epoch start) should return nothing — value didn't exist yet
-        let val = db.kv_get_as_of("k", Some(0)).unwrap();
+        let val = db.kv_get_at("k", Some(0)).unwrap();
         // The key was written after epoch 0, so it should not appear.
         // However, time-travel semantics depend on the backend; if the
         // backend treats as_of=0 as "no filter", we accept Some too.
@@ -1797,34 +1797,34 @@ mod tests {
         // as_of with the timestamp before the write should also be empty
         // (if we captured a valid timestamp)
         if let Some(ts) = before_ts {
-            let val = db.kv_get_as_of("k", Some(ts.saturating_sub(1))).unwrap();
+            let val = db.kv_get_at("k", Some(ts.saturating_sub(1))).unwrap();
             let _ = val; // no assertion on value — just verifying no panic
         }
     }
 
     #[test]
-    fn test_kv_list_as_of() {
+    fn test_kv_list_at() {
         let db = create_strata();
         db.kv_put("p:1", "a").unwrap();
         db.kv_put("p:2", "b").unwrap();
 
         // as_of=None should list both keys
-        let keys = db.kv_list_as_of(Some("p:"), None, None, None).unwrap();
+        let keys = db.kv_list_at(Some("p:"), None, None, None).unwrap();
         assert_eq!(keys.len(), 2);
     }
 
     #[test]
-    fn test_json_get_as_of() {
+    fn test_json_get_at() {
         let db = create_strata();
         db.json_set("doc", "$", Value::String("hello".into()))
             .unwrap();
 
-        let val = db.json_get_as_of("doc", "$", None).unwrap();
+        let val = db.json_get_at("doc", "$", None).unwrap();
         assert!(val.is_some());
     }
 
     #[test]
-    fn test_event_get_as_of() {
+    fn test_event_get_at() {
         let db = create_strata();
         let seq = db
             .event_append(
@@ -1833,7 +1833,7 @@ mod tests {
             )
             .unwrap();
 
-        let evt = db.event_get_as_of(seq, None).unwrap();
+        let evt = db.event_get_at(seq, None).unwrap();
         assert!(evt.is_some());
     }
 
@@ -2157,29 +2157,29 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_json_list_as_of() {
+    fn test_json_list_at() {
         let db = create_strata();
         db.json_set("jl:1", "$", Value::Int(1)).unwrap();
         db.json_set("jl:2", "$", Value::Int(2)).unwrap();
 
         let (keys, cursor) = db
-            .json_list_as_of(Some("jl:".into()), None, 100, None)
+            .json_list_at(Some("jl:".into()), None, 100, None)
             .unwrap();
         assert_eq!(keys.len(), 2);
         assert!(cursor.is_none());
     }
 
     #[test]
-    fn test_vector_get_as_of() {
+    fn test_vector_get_at() {
         let db = create_strata();
         db.vector_create_collection("vga", 2, DistanceMetric::Cosine)
             .unwrap();
         db.vector_upsert("vga", "k1", vec![1.0, 0.0], None).unwrap();
 
-        let data = db.vector_get_as_of("vga", "k1", None).unwrap();
+        let data = db.vector_get_at("vga", "k1", None).unwrap();
         assert!(data.is_some());
 
-        let missing = db.vector_get_as_of("vga", "nonexistent", None).unwrap();
+        let missing = db.vector_get_at("vga", "nonexistent", None).unwrap();
         assert!(missing.is_none());
     }
 
