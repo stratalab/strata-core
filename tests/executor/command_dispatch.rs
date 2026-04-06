@@ -305,6 +305,7 @@ fn event_len_returns_count() {
         .execute(Command::EventLen {
             branch: None,
             space: None,
+            as_of: None,
         })
         .unwrap();
 

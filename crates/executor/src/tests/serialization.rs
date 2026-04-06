@@ -186,6 +186,7 @@ fn test_command_event_len() {
     test_command_round_trip(Command::EventLen {
         branch: Some(BranchId::from("default")),
         space: None,
+        as_of: None,
     });
 }
 

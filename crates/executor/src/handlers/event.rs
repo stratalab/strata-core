@@ -408,6 +408,55 @@ pub fn event_list_types(p: &Arc<Primitives>, branch: BranchId, space: String) ->
     Ok(Output::Keys(types))
 }
 
+/// Handle EventListTypes with as_of timestamp (time-travel read).
+pub fn event_list_types_at(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    as_of_ts: u64,
+) -> Result<Output> {
+    let core_branch_id = bridge::to_core_branch_id(&branch)?;
+    let types = convert_result(p.event.list_types_at(&core_branch_id, &space, as_of_ts))?;
+    Ok(Output::Keys(types))
+}
+
+/// Handle EventList — list events (optionally filtered by type), optionally
+/// as of a past timestamp.
+///
+/// When `as_of_ts` is `None`, returns all events in the log. When `Some`,
+/// only events whose `event.timestamp <= as_of_ts` are returned.
+pub fn event_list(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    event_type: Option<String>,
+    limit: Option<u64>,
+    as_of_ts: Option<u64>,
+) -> Result<Output> {
+    let core_branch_id = bridge::to_core_branch_id(&branch)?;
+    let limit_usize = limit.map(|l| l as usize);
+    // When no as_of is given, use u64::MAX so list_at returns every event.
+    let ts = as_of_ts.unwrap_or(u64::MAX);
+    let events = convert_result(p.event.list_at(
+        &core_branch_id,
+        &space,
+        event_type.as_deref(),
+        ts,
+        limit_usize,
+    ))
+    .map_err(|e| enrich_event_error(p, &core_branch_id, &space, e))?;
+
+    let versioned: Vec<VersionedValue> = events
+        .into_iter()
+        .map(|event| VersionedValue {
+            value: event.payload,
+            version: event.sequence,
+            timestamp: event.timestamp.into(),
+        })
+        .collect();
+    Ok(Output::VersionedValues(versioned))
+}
+
 /// Enrich a StreamNotFound error with fuzzy-match suggestions on event types.
 fn enrich_event_error(
     p: &Arc<Primitives>,
@@ -429,6 +478,21 @@ fn enrich_event_error(
 pub fn event_len(p: &Arc<Primitives>, branch: BranchId, space: String) -> Result<Output> {
     let core_branch_id = bridge::to_core_branch_id(&branch)?;
     let count = convert_result(p.event.len(&core_branch_id, &space))?;
+    Ok(Output::Uint(count))
+}
+
+/// Handle EventLen with as_of timestamp (time-travel read).
+///
+/// Returns `next_sequence` from the `EventLogMeta` snapshot visible at
+/// `as_of_ts` — counts events committed at or before that timestamp.
+pub fn event_len_at(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    as_of_ts: u64,
+) -> Result<Output> {
+    let core_branch_id = bridge::to_core_branch_id(&branch)?;
+    let count = convert_result(p.event.len_at(&core_branch_id, &space, as_of_ts))?;
     Ok(Output::Uint(count))
 }
 

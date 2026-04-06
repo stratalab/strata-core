@@ -586,6 +586,7 @@ fn parse_event(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
         "len" => Ok(CliAction::Execute(Command::EventLen {
             branch: branch(state),
             space: space(state),
+            as_of: None,
         })),
         other => Err(unknown_subcommand(
             "event",

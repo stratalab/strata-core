@@ -185,6 +185,7 @@ fn read_your_writes_event() {
         .execute(Command::EventLen {
             branch: None,
             space: None,
+            as_of: None,
         })
         .unwrap();
 
@@ -559,6 +560,7 @@ fn cross_primitive_transaction() {
         .execute(Command::EventLen {
             branch: None,
             space: None,
+            as_of: None,
         })
         .unwrap();
     match event_out {
@@ -1660,6 +1662,447 @@ fn event_get_by_type_sees_uncommitted() {
     }
 
     session.execute(Command::TxnCommit).unwrap();
+}
+
+#[test]
+fn event_get_as_of_bypasses_txn() {
+    // EventGet with as_of must always read from committed storage, even
+    // inside an active transaction. Regression test for the bug where
+    // session.dispatch_in_txn destructured `Command::EventGet { sequence, .. }`
+    // and silently dropped the `as_of` field.
+    let mut session = create_session();
+
+    // Commit an event outside the transaction at sequence 0
+    session
+        .execute(Command::EventAppend {
+            branch: None,
+            space: None,
+            event_type: "audit".into(),
+            payload: Value::object(std::collections::HashMap::from([(
+                "msg".to_string(),
+                Value::String("committed".into()),
+            )])),
+        })
+        .unwrap();
+
+    // Capture a timestamp BEFORE any event was committed
+    let ts_before = 0u64;
+
+    // Start a txn and append another event (uncommitted)
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    session
+        .execute(Command::EventAppend {
+            branch: None,
+            space: None,
+            event_type: "audit".into(),
+            payload: Value::object(std::collections::HashMap::from([(
+                "msg".to_string(),
+                Value::String("pending".into()),
+            )])),
+        })
+        .unwrap();
+
+    // event_get_as_of(sequence=0, as_of=0) should NOT return the committed
+    // event because its timestamp > 0. Before the bypass fix, this call
+    // would drop as_of and return the event regardless, breaking the
+    // time-travel semantic.
+    let output = session
+        .execute(Command::EventGet {
+            branch: None,
+            space: None,
+            sequence: 0,
+            as_of: Some(ts_before),
+        })
+        .unwrap();
+
+    match output {
+        Output::MaybeVersioned(None) => {
+            // Correct: committed event's timestamp > ts_before (=0), so filtered out.
+        }
+        other => panic!("EventGet with as_of=0 should return None, got {:?}", other),
+    }
+
+    session.execute(Command::TxnCommit).unwrap();
+}
+
+#[test]
+fn event_get_by_type_as_of_bypasses_txn() {
+    // Same regression check for EventGetByType.
+    let mut session = create_session();
+
+    session
+        .execute(Command::EventAppend {
+            branch: None,
+            space: None,
+            event_type: "audit".into(),
+            payload: Value::object(std::collections::HashMap::from([(
+                "msg".to_string(),
+                Value::String("committed".into()),
+            )])),
+        })
+        .unwrap();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    session
+        .execute(Command::EventAppend {
+            branch: None,
+            space: None,
+            event_type: "audit".into(),
+            payload: Value::object(std::collections::HashMap::from([(
+                "msg".to_string(),
+                Value::String("pending".into()),
+            )])),
+        })
+        .unwrap();
+
+    // With as_of=0, both the committed and the uncommitted event should
+    // be filtered out.
+    let output = session
+        .execute(Command::EventGetByType {
+            branch: None,
+            space: None,
+            event_type: "audit".into(),
+            limit: None,
+            after_sequence: None,
+            as_of: Some(0),
+        })
+        .unwrap();
+
+    match output {
+        Output::VersionedValues(events) => {
+            assert!(
+                events.is_empty(),
+                "EventGetByType with as_of=0 should return no events, got {:?}",
+                events
+            );
+        }
+        other => panic!("Expected VersionedValues, got {:?}", other),
+    }
+
+    session.execute(Command::TxnCommit).unwrap();
+}
+
+#[test]
+fn event_len_as_of_bypasses_txn() {
+    // EventLen with as_of must read the snapshot meta, not the txn's
+    // event_len (which reflects staged writes).
+    let mut session = create_session();
+
+    session
+        .execute(Command::EventAppend {
+            branch: None,
+            space: None,
+            event_type: "audit".into(),
+            payload: Value::object(std::collections::HashMap::from([(
+                "msg".to_string(),
+                Value::String("committed".into()),
+            )])),
+        })
+        .unwrap();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    session
+        .execute(Command::EventAppend {
+            branch: None,
+            space: None,
+            event_type: "audit".into(),
+            payload: Value::object(std::collections::HashMap::from([(
+                "msg".to_string(),
+                Value::String("pending".into()),
+            )])),
+        })
+        .unwrap();
+
+    // as_of=0 should see zero events (meta at ts=0 did not exist yet)
+    let output = session
+        .execute(Command::EventLen {
+            branch: None,
+            space: None,
+            as_of: Some(0),
+        })
+        .unwrap();
+
+    match output {
+        Output::Uint(count) => assert_eq!(count, 0, "len_at(0) should be 0, got {}", count),
+        other => panic!("Expected Uint, got {:?}", other),
+    }
+
+    session.execute(Command::TxnRollback).unwrap();
+}
+
+#[test]
+fn event_list_command_round_trip() {
+    // Exercises the new Command::EventList which wires the previously-orphan
+    // engine method EventLog::list_at.
+    let mut session = create_session();
+
+    for i in 0..5i64 {
+        session
+            .execute(Command::EventAppend {
+                branch: None,
+                space: None,
+                event_type: "audit".into(),
+                payload: Value::object(std::collections::HashMap::from([(
+                    "i".to_string(),
+                    Value::Int(i),
+                )])),
+            })
+            .unwrap();
+    }
+
+    // No filter, no limit — all events
+    let output = session
+        .execute(Command::EventList {
+            branch: None,
+            space: None,
+            event_type: None,
+            limit: None,
+            as_of: None,
+        })
+        .unwrap();
+
+    match output {
+        Output::VersionedValues(events) => {
+            assert_eq!(events.len(), 5);
+            // Verify payloads round-trip through EventList
+            match &events[0].value {
+                Value::Object(map) => {
+                    assert_eq!(map.get("i"), Some(&Value::Int(0)));
+                }
+                other => panic!("Expected Object payload, got {:?}", other),
+            }
+            match &events[4].value {
+                Value::Object(map) => {
+                    assert_eq!(map.get("i"), Some(&Value::Int(4)));
+                }
+                other => panic!("Expected Object payload, got {:?}", other),
+            }
+        }
+        other => panic!("Expected VersionedValues, got {:?}", other),
+    }
+
+    // Filter by type with limit
+    let output = session
+        .execute(Command::EventList {
+            branch: None,
+            space: None,
+            event_type: Some("audit".into()),
+            limit: Some(2),
+            as_of: None,
+        })
+        .unwrap();
+
+    match output {
+        Output::VersionedValues(events) => {
+            assert_eq!(events.len(), 2);
+        }
+        other => panic!("Expected VersionedValues, got {:?}", other),
+    }
+
+    // Filter by nonexistent type
+    let output = session
+        .execute(Command::EventList {
+            branch: None,
+            space: None,
+            event_type: Some("missing".into()),
+            limit: None,
+            as_of: None,
+        })
+        .unwrap();
+
+    match output {
+        Output::VersionedValues(events) => assert!(events.is_empty()),
+        other => panic!("Expected VersionedValues, got {:?}", other),
+    }
+}
+
+#[test]
+fn event_list_command_time_travel_round_trip() {
+    // Exercises the time-travel path through Command::EventList: append
+    // events at different times and verify that EventList { as_of: Some(..) }
+    // filters correctly.
+    let mut session = create_session();
+
+    // Append 2 events, then capture a midpoint timestamp, then append 2 more
+    for i in 0..2i64 {
+        session
+            .execute(Command::EventAppend {
+                branch: None,
+                space: None,
+                event_type: "early".into(),
+                payload: Value::object(std::collections::HashMap::from([(
+                    "i".to_string(),
+                    Value::Int(i),
+                )])),
+            })
+            .unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let mid_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as u64;
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    for i in 2..4i64 {
+        session
+            .execute(Command::EventAppend {
+                branch: None,
+                space: None,
+                event_type: "late".into(),
+                payload: Value::object(std::collections::HashMap::from([(
+                    "i".to_string(),
+                    Value::Int(i),
+                )])),
+            })
+            .unwrap();
+    }
+
+    // At mid_ts we should see only the first 2 events (type "early")
+    let output = session
+        .execute(Command::EventList {
+            branch: None,
+            space: None,
+            event_type: None,
+            limit: None,
+            as_of: Some(mid_ts),
+        })
+        .unwrap();
+
+    match output {
+        Output::VersionedValues(events) => {
+            assert_eq!(
+                events.len(),
+                2,
+                "at mid_ts, only early events should be visible"
+            );
+        }
+        other => panic!("Expected VersionedValues, got {:?}", other),
+    }
+
+    // Type filter + time travel: "early" at mid_ts returns 2, "late" at mid_ts returns 0
+    let output = session
+        .execute(Command::EventList {
+            branch: None,
+            space: None,
+            event_type: Some("late".into()),
+            limit: None,
+            as_of: Some(mid_ts),
+        })
+        .unwrap();
+
+    match output {
+        Output::VersionedValues(events) => {
+            assert!(
+                events.is_empty(),
+                "late events should not be visible at mid_ts, got {:?}",
+                events
+            );
+        }
+        other => panic!("Expected VersionedValues, got {:?}", other),
+    }
+
+    // At u64::MAX, all 4 events visible
+    let output = session
+        .execute(Command::EventList {
+            branch: None,
+            space: None,
+            event_type: None,
+            limit: None,
+            as_of: Some(u64::MAX),
+        })
+        .unwrap();
+
+    match output {
+        Output::VersionedValues(events) => {
+            assert_eq!(events.len(), 4);
+        }
+        other => panic!("Expected VersionedValues, got {:?}", other),
+    }
+}
+
+#[test]
+fn event_list_types_command_time_travel_round_trip() {
+    // Exercises the time-travel path through Command::EventListTypes.
+    let mut session = create_session();
+
+    session
+        .execute(Command::EventAppend {
+            branch: None,
+            space: None,
+            event_type: "TypeA".into(),
+            payload: Value::object(std::collections::HashMap::from([(
+                "i".to_string(),
+                Value::Int(1),
+            )])),
+        })
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let mid_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as u64;
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    session
+        .execute(Command::EventAppend {
+            branch: None,
+            space: None,
+            event_type: "TypeB".into(),
+            payload: Value::object(std::collections::HashMap::from([(
+                "i".to_string(),
+                Value::Int(2),
+            )])),
+        })
+        .unwrap();
+
+    // At mid_ts only TypeA should be visible
+    let output = session
+        .execute(Command::EventListTypes {
+            branch: None,
+            space: None,
+            as_of: Some(mid_ts),
+        })
+        .unwrap();
+
+    match output {
+        Output::Keys(types) => {
+            assert_eq!(types, vec!["TypeA"]);
+        }
+        other => panic!("Expected Keys, got {:?}", other),
+    }
+
+    // At u64::MAX both visible
+    let output = session
+        .execute(Command::EventListTypes {
+            branch: None,
+            space: None,
+            as_of: Some(u64::MAX),
+        })
+        .unwrap();
+
+    match output {
+        Output::Keys(mut types) => {
+            types.sort();
+            assert_eq!(types, vec!["TypeA", "TypeB"]);
+        }
+        other => panic!("Expected Keys, got {:?}", other),
+    }
 }
 
 #[test]

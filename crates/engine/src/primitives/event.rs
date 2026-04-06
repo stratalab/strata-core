@@ -540,6 +540,27 @@ impl EventLog {
         })
     }
 
+    /// Get the log length as of a past timestamp.
+    ///
+    /// Returns `next_sequence` from the `EventLogMeta` snapshot visible at
+    /// `as_of_ts`. This is the count of events committed at or before that
+    /// timestamp — the same commit-time semantic as KV/JSON time-travel reads.
+    /// Reads directly from the storage version chain (non-transactional).
+    pub fn len_at(&self, branch_id: &BranchId, space: &str, as_of_ts: u64) -> StrataResult<u64> {
+        let ns = self.namespace_for(branch_id, space);
+        let meta_key = Key::new_event_meta(ns);
+
+        match self.db.get_at_timestamp(&meta_key, as_of_ts)? {
+            Some(vv) => {
+                let meta: EventLogMeta = from_stored_value(&vv.value).map_err(|e| {
+                    StrataError::serialization(format!("corrupt EventLog metadata: {}", e))
+                })?;
+                Ok(meta.next_sequence)
+            }
+            None => Ok(0),
+        }
+    }
+
     /// List all known event types in the stream.
     ///
     /// Returns the event type names from the stream metadata.
@@ -558,6 +579,38 @@ impl EventLog {
 
             Ok(meta.streams.keys().cloned().collect())
         })
+    }
+
+    /// List event types visible as of a past timestamp.
+    ///
+    /// Returns only the event types whose first event was appended at or
+    /// before `as_of_ts` (i.e., `StreamMeta.first_timestamp <= as_of_ts`).
+    /// Reads the `EventLogMeta` snapshot as of `as_of_ts` from the storage
+    /// version chain (non-transactional), then filters stream metadata by
+    /// `first_timestamp`.
+    pub fn list_types_at(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        as_of_ts: u64,
+    ) -> StrataResult<Vec<String>> {
+        let ns = self.namespace_for(branch_id, space);
+        let meta_key = Key::new_event_meta(ns);
+
+        match self.db.get_at_timestamp(&meta_key, as_of_ts)? {
+            Some(vv) => {
+                let meta: EventLogMeta = from_stored_value(&vv.value).map_err(|e| {
+                    StrataError::serialization(format!("corrupt EventLog metadata: {}", e))
+                })?;
+                Ok(meta
+                    .streams
+                    .iter()
+                    .filter(|(_, sm)| sm.first_timestamp <= as_of_ts)
+                    .map(|(name, _)| name.clone())
+                    .collect())
+            }
+            None => Ok(Vec::new()),
+        }
     }
 
     // ========== Query by Type ==========

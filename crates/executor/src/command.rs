@@ -421,6 +421,9 @@ pub enum Command {
         /// Target space (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         space: Option<String>,
+        /// Optional timestamp for time-travel reads (microseconds since epoch).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_of: Option<u64>,
     },
 
     /// Query events by sequence range with pagination.
@@ -482,6 +485,34 @@ pub enum Command {
         /// Target space (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         space: Option<String>,
+        /// Optional timestamp for time-travel reads (microseconds since epoch).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_of: Option<u64>,
+    },
+
+    /// List events visible as of a timestamp, optionally filtered by type.
+    ///
+    /// When `as_of` is `None`, lists all events in the log (still optionally
+    /// filtered by `event_type` and bounded by `limit`). When `as_of` is
+    /// `Some(ts)`, only events whose `event.timestamp <= ts` are returned.
+    /// Returns: `Output::VersionedValues`
+    EventList {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Optional event type filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_type: Option<String>,
+        /// Maximum number of events to return.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u64>,
+        /// Optional timestamp for time-travel reads (microseconds since epoch).
+        /// When `None`, reads the current log.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_of: Option<u64>,
     },
 
     // ==================== Vector (7 MVP) ====================
@@ -2022,6 +2053,7 @@ impl Command {
             Command::EventRange { .. } => "EventRange",
             Command::EventRangeByTime { .. } => "EventRangeByTime",
             Command::EventListTypes { .. } => "EventListTypes",
+            Command::EventList { .. } => "EventList",
             Command::VectorUpsert { .. } => "VectorUpsert",
             Command::VectorGet { .. } => "VectorGet",
             Command::VectorGetv { .. } => "VectorGetv",
@@ -2195,6 +2227,7 @@ impl Command {
             | Command::EventRange { branch, space, .. }
             | Command::EventRangeByTime { branch, space, .. }
             | Command::EventListTypes { branch, space, .. }
+            | Command::EventList { branch, space, .. }
             // Vector (7 MVP)
             | Command::VectorUpsert { branch, space, .. }
             | Command::VectorGet { branch, space, .. }
@@ -2382,6 +2415,7 @@ impl Command {
             | Command::EventRange { branch, .. }
             | Command::EventRangeByTime { branch, .. }
             | Command::EventListTypes { branch, .. }
+            | Command::EventList { branch, .. }
             | Command::VectorUpsert { branch, .. }
             | Command::VectorGet { branch, .. }
             | Command::VectorGetv { branch, .. }
