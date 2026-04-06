@@ -968,14 +968,21 @@ impl SegmentedStore {
             }
 
             // 3. Remove manifest file and branch directory from disk.
-            if let Some(segments_dir) = &self.segments_dir {
+            //
+            // In-flight compaction for this branch may still be writing
+            // .tmp/.sst files to this directory even though we've already
+            // removed the branch from `self.branches`. gc_orphan_segments
+            // (step 4) will pick up any .sst files we missed, so we retry
+            // remove_dir AFTER gc runs. remove_dir (not remove_dir_all)
+            // keeps the original safety guarantee: if we somehow missed
+            // tracking a file, we leave it in place rather than nuking it.
+            let branch_dir_to_remove = self.segments_dir.as_ref().map(|segments_dir| {
                 let branch_hex = hex_encode_branch(branch_id);
                 let branch_dir = segments_dir.join(&branch_hex);
                 let _ = std::fs::remove_file(branch_dir.join("segments.manifest"));
-                // remove_dir only succeeds if empty (safe — won't delete
-                // files we missed).
-                let _ = std::fs::remove_dir(&branch_dir);
-            }
+                let _ = std::fs::remove_dir(&branch_dir); // first attempt
+                branch_dir
+            });
 
             // 4. Garbage-collect orphan segment files (#1705).
             // Refcount decrements above may have released the last reference to
@@ -983,6 +990,24 @@ impl SegmentedStore {
             // any .sst on disk not referenced by a live branch or the refcount
             // registry.
             self.gc_orphan_segments();
+
+            // 5. Retry directory removal after gc — gc may have deleted
+            // .sst files from in-flight compaction that landed between
+            // our step 1 and step 3. Still uses remove_dir (not recursive)
+            // to preserve the safety guarantee: if unknown files remain
+            // we leave them and log, rather than silently deleting.
+            if let Some(branch_dir) = branch_dir_to_remove {
+                if branch_dir.exists() {
+                    if let Err(e) = std::fs::remove_dir(&branch_dir) {
+                        tracing::warn!(
+                            target: "strata::branch",
+                            branch_dir = %branch_dir.display(),
+                            error = %e,
+                            "Branch directory not empty after clear_branch; leaving leftover files in place",
+                        );
+                    }
+                }
+            }
 
             true
         } else {

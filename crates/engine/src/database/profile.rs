@@ -12,6 +12,12 @@
 use crate::database::config::{StorageConfig, StrataConfig};
 use std::sync::OnceLock;
 
+/// Must match the default value returned by `default_vector_dtype()` in
+/// `config.rs`. Hardcoded here so `apply_profile_if_defaults` can compare
+/// without allocating a fresh `StrataConfig` on every call. Guarded by
+/// the `default_vector_dtype_constant_matches_config` test.
+const DEFAULT_VECTOR_DTYPE: &str = "f32";
+
 /// Detected host hardware. Memoized after first detection.
 #[derive(Debug, Clone, Copy)]
 pub struct HardwareInfo {
@@ -135,11 +141,6 @@ pub fn apply_hardware_profile_if_defaults(cfg: &mut StrataConfig) -> Profile {
 /// Apply a specific profile to `cfg`. Used by the CLI wizard for explicit
 /// profile pinning.
 pub fn apply_profile_if_defaults(cfg: &mut StrataConfig, profile: Profile, hw: HardwareInfo) {
-    // The default value for StrataConfig::default_vector_dtype. Hardcoded to
-    // avoid allocating a fresh StrataConfig on every call just to read one
-    // string. Must stay in sync with `default_vector_dtype()` in config.rs.
-    const DEFAULT_VECTOR_DTYPE: &str = "f32";
-
     let baseline = StorageConfig::default();
     let s = &mut cfg.storage;
     let memory_budget_set = s.memory_budget > 0;
@@ -387,10 +388,12 @@ mod tests {
     fn default_vector_dtype_constant_matches_config() {
         // If config.rs changes the default vector dtype, this test fails and
         // reminds us to update the DEFAULT_VECTOR_DTYPE const in profile.rs.
+        // Compares the module-level const against the runtime config default.
         let cfg = StrataConfig::default();
         assert_eq!(
-            cfg.default_vector_dtype, "f32",
-            "DEFAULT_VECTOR_DTYPE const in profile.rs must match config default"
+            cfg.default_vector_dtype,
+            super::DEFAULT_VECTOR_DTYPE,
+            "DEFAULT_VECTOR_DTYPE const in profile.rs must match config::default_vector_dtype()"
         );
     }
 
