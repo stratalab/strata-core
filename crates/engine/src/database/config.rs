@@ -79,7 +79,16 @@ pub struct StorageConfig {
     #[serde(default)]
     pub max_versions_per_key: usize,
     /// Block cache size in bytes. Caches decompressed segment data blocks.
-    /// Default: 0 (auto-detect from available RAM: max(256 MiB, available / 4)).
+    ///
+    /// Default: 0 (auto-tuned). When 0, the hardware profile detector
+    /// picks an appropriate size for the host:
+    /// - **Embedded** (< 1 GiB RAM): `min(ram / 8, 64 MiB)` — capped for
+    ///   Pi Zero–class devices.
+    /// - **Desktop** / **Server**: falls through to `auto_detect_capacity`,
+    ///   which uses `min(available_ram / 4, 4 GiB)` from `/proc/meminfo`.
+    ///
+    /// Set a non-zero value to override auto-tuning. Set `memory_budget`
+    /// to derive from a unified budget (takes precedence over this field).
     #[serde(default)]
     pub block_cache_size: usize,
     /// Memtable write buffer size in bytes. When a branch's active memtable
@@ -467,7 +476,9 @@ auto_embed = false
 # max_branches = 1024
 # max_write_buffer_entries = 500000
 # max_versions_per_key = 0    # 0 = unlimited; set to e.g. 100 to cap MVCC history
-# block_cache_size = 0          # 0 = auto (max(256 MiB, available_ram / 4))
+# block_cache_size = 0          # 0 = auto-tuned per hardware profile:
+#                                #   Embedded  (< 1 GiB RAM): min(ram/8, 64 MiB)
+#                                #   Desktop/Server: min(available_ram/4, 4 GiB)
 # write_buffer_size = 134217728  # 128 MiB; memtable rotation threshold
 # max_immutable_memtables = 4   # max frozen memtables per branch before write stalling
 # background_threads = 4        # compaction/flush workers; default min(4, CPU cores)
