@@ -1363,6 +1363,23 @@ pub(crate) fn gather_typed_entries(
         }
     }
 
+    // Helper: panics with a clear message if the invariant "every space in
+    // `space_set` has a seeded cell for every type_tag" is ever violated.
+    // The contains check above filters to known spaces, and the seed loop
+    // creates a cell for every (space, type_tag) where space ∈ spaces, so
+    // by construction this lookup must succeed. Using `.expect` instead of
+    // `if let Some(...)` so any future bug crashes loud rather than
+    // silently dropping entries.
+    fn cell_for<'c>(
+        cells: &'c mut BTreeMap<(String, TypeTag), TypedEntryCell>,
+        space: &str,
+        type_tag: TypeTag,
+    ) -> &'c mut TypedEntryCell {
+        cells
+            .get_mut(&(space.to_string(), type_tag))
+            .expect("seed loop creates a cell for every requested (space, type_tag)")
+    }
+
     for &type_tag in &DATA_TYPE_TAGS {
         // Single per-(branch, type_tag) read; partition into the per-space
         // cells in a single pass. Drops any rows whose space is not part
@@ -1376,9 +1393,9 @@ pub(crate) fn gather_typed_entries(
             if !space_set.contains(entry.key.namespace.space.as_str()) {
                 continue;
             }
-            if let Some(cell) = cells.get_mut(&(entry.key.namespace.space.clone(), type_tag)) {
-                cell.ancestor.push(entry);
-            }
+            cell_for(&mut cells, &entry.key.namespace.space, type_tag)
+                .ancestor
+                .push(entry);
         }
 
         // 2. Source state at snapshot (consistent point-in-time, #1917).
@@ -1391,9 +1408,9 @@ pub(crate) fn gather_typed_entries(
             if !space_set.contains(key.namespace.space.as_str()) {
                 continue;
             }
-            if let Some(cell) = cells.get_mut(&(key.namespace.space.clone(), type_tag)) {
-                cell.source.push((key, vv));
-            }
+            cell_for(&mut cells, &key.namespace.space, type_tag)
+                .source
+                .push((key, vv));
         }
 
         // 3. Target state at snapshot (consistent point-in-time, #1917).
@@ -1405,9 +1422,9 @@ pub(crate) fn gather_typed_entries(
             if !space_set.contains(key.namespace.space.as_str()) {
                 continue;
             }
-            if let Some(cell) = cells.get_mut(&(key.namespace.space.clone(), type_tag)) {
-                cell.target.push((key, vv));
-            }
+            cell_for(&mut cells, &key.namespace.space, type_tag)
+                .target
+                .push((key, vv));
         }
     }
 
