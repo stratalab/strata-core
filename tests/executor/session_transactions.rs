@@ -1233,6 +1233,91 @@ fn vector_rollback_discards_writes() {
 }
 
 #[test]
+fn vector_getv_bypasses_txn() {
+    // VectorGetv must always read from committed storage, even inside an
+    // active transaction. Uncommitted writes in the txn's staging area
+    // should not appear in the version history.
+    let mut session = create_session();
+    create_test_collection(&mut session, "emb", 3);
+
+    // Commit one version outside the transaction
+    session
+        .execute(Command::VectorUpsert {
+            branch: None,
+            space: None,
+            collection: "emb".into(),
+            key: "v1".into(),
+            vector: vec![1.0, 0.0, 0.0],
+            metadata: None,
+        })
+        .unwrap();
+
+    // Start a txn and stage a second write (uncommitted)
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::VectorUpsert {
+            branch: None,
+            space: None,
+            collection: "emb".into(),
+            key: "v1".into(),
+            vector: vec![0.0, 1.0, 0.0],
+            metadata: None,
+        })
+        .unwrap();
+
+    // getv inside the txn should only see the committed version (1 entry),
+    // not the pending staged write.
+    let output = session
+        .execute(Command::VectorGetv {
+            branch: None,
+            space: None,
+            collection: "emb".into(),
+            key: "v1".into(),
+        })
+        .unwrap();
+
+    match output {
+        Output::VectorVersionHistory(Some(history)) => {
+            assert_eq!(
+                history.len(),
+                1,
+                "getv should only see 1 committed version, not the pending txn write"
+            );
+            assert_eq!(history[0].data.embedding, vec![1.0, 0.0, 0.0]);
+        }
+        other => panic!("Expected VectorVersionHistory(Some), got {:?}", other),
+    }
+
+    // Commit and re-check — now both versions visible
+    session.execute(Command::TxnCommit).unwrap();
+
+    let output = session
+        .execute(Command::VectorGetv {
+            branch: None,
+            space: None,
+            collection: "emb".into(),
+            key: "v1".into(),
+        })
+        .unwrap();
+
+    match output {
+        Output::VectorVersionHistory(Some(history)) => {
+            assert_eq!(history.len(), 2, "After commit, should see both versions");
+            // Newest-first: [0] is the committed-in-txn write
+            assert_eq!(history[0].data.embedding, vec![0.0, 1.0, 0.0]);
+            assert_eq!(history[1].data.embedding, vec![1.0, 0.0, 0.0]);
+        }
+        other => panic!("Expected VectorVersionHistory(Some), got {:?}", other),
+    }
+}
+
+#[test]
 fn vector_commit_makes_writes_visible() {
     let db = strata_engine::Database::cache().unwrap();
     strata_graph::branch_dag::init_system_branch(&db);

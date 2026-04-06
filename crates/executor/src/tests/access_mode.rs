@@ -234,6 +234,12 @@ fn test_read_only_allows_all_reads() {
             branch: None,
             space: None,
         },
+        Command::VectorGetv {
+            branch: None,
+            space: None,
+            collection: "c".into(),
+            key: "k".into(),
+        },
         Command::BranchGet {
             branch: crate::types::BranchId::default(),
         },
@@ -532,6 +538,12 @@ fn test_is_write_classification() {
             collection: "".into(),
             key: "".into(),
             as_of: None,
+        },
+        Command::VectorGetv {
+            branch: None,
+            space: None,
+            collection: "".into(),
+            key: "".into(),
         },
         Command::VectorQuery {
             branch: None,

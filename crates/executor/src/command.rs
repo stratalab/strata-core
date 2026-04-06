@@ -538,6 +538,21 @@ pub enum Command {
         key: String,
     },
 
+    /// Get the full version history for a vector key.
+    /// Returns: `Output::VectorVersionHistory`
+    VectorGetv {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Collection name.
+        collection: String,
+        /// Vector key.
+        key: String,
+    },
+
     /// Query a vector collection for nearest neighbors.
     /// Returns: `Output::VectorMatches`
     VectorQuery {
@@ -2009,6 +2024,7 @@ impl Command {
             Command::EventListTypes { .. } => "EventListTypes",
             Command::VectorUpsert { .. } => "VectorUpsert",
             Command::VectorGet { .. } => "VectorGet",
+            Command::VectorGetv { .. } => "VectorGetv",
             Command::VectorDelete { .. } => "VectorDelete",
             Command::VectorQuery { .. } => "VectorQuery",
             Command::VectorCreateCollection { .. } => "VectorCreateCollection",
@@ -2182,6 +2198,7 @@ impl Command {
             // Vector (7 MVP)
             | Command::VectorUpsert { branch, space, .. }
             | Command::VectorGet { branch, space, .. }
+            | Command::VectorGetv { branch, space, .. }
             | Command::VectorDelete { branch, space, .. }
             | Command::VectorQuery { branch, space, .. }
             | Command::VectorCreateCollection { branch, space, .. }
@@ -2367,6 +2384,7 @@ impl Command {
             | Command::EventListTypes { branch, .. }
             | Command::VectorUpsert { branch, .. }
             | Command::VectorGet { branch, .. }
+            | Command::VectorGetv { branch, .. }
             | Command::VectorDelete { branch, .. }
             | Command::VectorQuery { branch, .. }
             | Command::VectorCreateCollection { branch, .. }

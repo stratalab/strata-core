@@ -216,6 +216,42 @@ pub fn vector_get_at(
     }
 }
 
+/// Handle VectorGetv command — full version history for a vector key.
+pub fn vector_getv(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    collection: String,
+    key: String,
+) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+    convert_result(validate_key(&key))?;
+    convert_result(validate_not_internal_collection(&collection))?;
+
+    let result = convert_vector_result(
+        p.vector.getv(branch_id, &space, &collection, &key),
+        branch_id,
+    )?;
+
+    let mapped = result
+        .map(|history| {
+            history
+                .into_versions()
+                .into_iter()
+                .map(|v| {
+                    // Use the outer storage version (matches vector_get), not the
+                    // inner VectorRecord counter.
+                    let version = extract_version(&v.version);
+                    let timestamp: u64 = v.timestamp.into();
+                    to_versioned_vector_data(&v.value, version, timestamp)
+                })
+                .collect::<Result<Vec<VersionedVectorData>>>()
+        })
+        .transpose()?;
+
+    Ok(Output::VectorVersionHistory(mapped))
+}
+
 /// Handle VectorDelete command.
 pub fn vector_delete(
     p: &Arc<Primitives>,

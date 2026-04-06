@@ -156,6 +156,10 @@ pub enum Output {
     /// Single vector data
     VectorData(Option<VersionedVectorData>),
 
+    /// Vector version history (getv operation).
+    /// None if the key has never existed. Ordered newest-first.
+    VectorVersionHistory(Option<Vec<VersionedVectorData>>),
+
     /// List of vector collections
     VectorCollectionList(Vec<CollectionInfo>),
 
