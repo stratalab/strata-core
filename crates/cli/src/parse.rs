@@ -423,7 +423,6 @@ fn parse_kv(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, Str
                 branch: branch(state),
                 space: space(state),
                 key,
-                as_of: None,
             }))
         }
         other => Err(unknown_subcommand(
@@ -522,7 +521,6 @@ fn parse_json(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, S
                 branch: branch(state),
                 space: space(state),
                 key,
-                as_of: None,
             }))
         }
         other => Err(unknown_subcommand(

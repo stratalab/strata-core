@@ -204,6 +204,10 @@ pub enum Command {
 
     /// Get full version history for a key.
     /// Returns: `Output::VersionHistory`
+    ///
+    /// Version history is inherently unbounded — there is no `as_of`
+    /// variant. Callers that want a point-in-time read should use
+    /// `KvGet { as_of: Some(ts) }` instead.
     KvGetv {
         /// Target branch (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -213,9 +217,6 @@ pub enum Command {
         space: Option<String>,
         /// Key to retrieve history for.
         key: String,
-        /// Optional timestamp for time-travel reads (microseconds since epoch).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        as_of: Option<u64>,
     },
 
     // ==================== JSON (4 MVP) ====================
@@ -271,6 +272,10 @@ pub enum Command {
 
     /// Get full version history for a JSON document.
     /// Returns: `Output::VersionHistory`
+    ///
+    /// Version history is inherently unbounded — there is no `as_of`
+    /// variant. Callers that want a point-in-time read should use
+    /// `JsonGet { as_of: Some(ts) }` instead.
     JsonGetv {
         /// Target branch (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -280,9 +285,6 @@ pub enum Command {
         space: Option<String>,
         /// Document key.
         key: String,
-        /// Optional timestamp for time-travel reads (microseconds since epoch).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        as_of: Option<u64>,
     },
 
     /// Batch set multiple JSON documents in a single transaction.

@@ -189,7 +189,6 @@ fn test_read_only_allows_all_reads() {
             branch: None,
             space: None,
             key: "k".into(),
-            as_of: None,
         },
         Command::JsonGet {
             branch: None,
@@ -202,7 +201,6 @@ fn test_read_only_allows_all_reads() {
             branch: None,
             space: None,
             key: "k".into(),
-            as_of: None,
         },
         Command::JsonList {
             branch: None,
@@ -504,7 +502,6 @@ fn test_is_write_classification() {
             branch: None,
             space: None,
             key: "".into(),
-            as_of: None,
         },
         Command::JsonGet {
             branch: None,
@@ -517,7 +514,6 @@ fn test_is_write_classification() {
             branch: None,
             space: None,
             key: "".into(),
-            as_of: None,
         },
         Command::JsonList {
             branch: None,

@@ -2521,3 +2521,330 @@ fn all_primitives_atomic_rollback() {
         "Vector should NOT be visible after rollback"
     );
 }
+
+// ============================================================================
+// KV / JSON session bypass regression tests
+//
+// Phase 3 fixed the Event session dispatch bug where `as_of` was silently
+// dropped via `{ sequence, .. }` destructuring. KV and JSON had the same
+// bug and were not fixed until a later audit. These tests prove the bypass
+// is now in place for all four commands.
+// ============================================================================
+
+#[test]
+fn kv_get_as_of_bypasses_txn() {
+    // KvGet with as_of must always read from committed storage, even
+    // inside an active transaction. Regression test for the bug where
+    // session.dispatch_in_txn destructured `Command::KvGet { key, .. }`
+    // and silently dropped the `as_of` field, causing the read to hit
+    // the txn's start_version snapshot instead of the timestamp filter.
+    let mut session = create_session();
+
+    // Commit a value outside the transaction.
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "k".into(),
+            value: Value::Int(1),
+        })
+        .unwrap();
+
+    // Start a txn and stage a second write (uncommitted).
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "k".into(),
+            value: Value::Int(2),
+        })
+        .unwrap();
+
+    // KvGet { as_of: Some(0) } inside the txn must bypass to committed
+    // storage. At ts=0, no value had been written (commit_ts > 0), so
+    // the result must be None. Before the bypass fix, this call would
+    // silently drop as_of and return the txn write-set value or the
+    // committed value — either way, not None.
+    let output = session
+        .execute(Command::KvGet {
+            branch: None,
+            space: None,
+            key: "k".into(),
+            as_of: Some(0),
+        })
+        .unwrap();
+
+    match output {
+        Output::Maybe(None) | Output::MaybeVersioned(None) => {
+            // Correct: as_of=0 is before any commit, so nothing is visible.
+        }
+        other => panic!("KvGet with as_of=0 should return None, got {:?}", other),
+    }
+
+    session.execute(Command::TxnCommit).unwrap();
+}
+
+#[test]
+fn kv_get_as_of_returns_historical_value_inside_txn() {
+    // Stronger positive test: inside an active session transaction,
+    // KvGet { as_of: Some(mid_ts) } must return the committed historical
+    // value at mid_ts — not the txn's write-set value, not the txn's
+    // snapshot value, and not None.
+    //
+    // This proves the bypass both (a) reaches committed storage and
+    // (b) correctly honors the requested timestamp against the version
+    // chain (rather than defaulting to None or the latest committed
+    // version).
+    let mut session = create_session();
+
+    // Commit v1 outside the transaction.
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "hist".into(),
+            value: Value::Int(1),
+        })
+        .unwrap();
+
+    // Capture a timestamp that is AFTER v1's commit but BEFORE v2's
+    // commit. Fence with sleeps so commit_ts(v1) < mid_ts < commit_ts(v2).
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let mid_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as u64;
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    // Commit v2 outside the transaction.
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "hist".into(),
+            value: Value::Int(2),
+        })
+        .unwrap();
+
+    // Start a txn and stage v3 inside it (uncommitted).
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "hist".into(),
+            value: Value::Int(3),
+        })
+        .unwrap();
+
+    // KvGet { as_of: Some(mid_ts) } must return v1 — NOT v2 (latest
+    // committed), NOT v3 (txn write-set), NOT None. This is the full
+    // end-to-end correctness check for the bypass path.
+    let output = session
+        .execute(Command::KvGet {
+            branch: None,
+            space: None,
+            key: "hist".into(),
+            as_of: Some(mid_ts),
+        })
+        .unwrap();
+
+    let got = match output {
+        Output::Maybe(v) => v,
+        Output::MaybeVersioned(v) => v.map(|vv| vv.value),
+        other => panic!("Expected Output::Maybe/MaybeVersioned, got {:?}", other),
+    };
+
+    assert_eq!(
+        got,
+        Some(Value::Int(1)),
+        "KvGet with as_of=mid_ts inside a txn should return v1 (historical committed), got {:?}",
+        got
+    );
+
+    session.execute(Command::TxnRollback).unwrap();
+}
+
+#[test]
+fn kv_list_as_of_bypasses_txn() {
+    // KvList with as_of must always read from committed storage.
+    let mut session = create_session();
+
+    // Commit outside the txn.
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "k".into(),
+            value: Value::Int(1),
+        })
+        .unwrap();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    // Stage another key inside the txn.
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "k2".into(),
+            value: Value::Int(2),
+        })
+        .unwrap();
+
+    // At ts=0, the committed store had no keys.
+    let output = session
+        .execute(Command::KvList {
+            branch: None,
+            space: None,
+            prefix: None,
+            cursor: None,
+            limit: None,
+            as_of: Some(0),
+        })
+        .unwrap();
+
+    match output {
+        Output::Keys(keys) => {
+            assert!(
+                keys.is_empty(),
+                "KvList with as_of=0 should return no keys, got {:?}",
+                keys
+            );
+        }
+        other => panic!("Expected Output::Keys, got {:?}", other),
+    }
+
+    session.execute(Command::TxnRollback).unwrap();
+}
+
+#[test]
+fn json_get_as_of_bypasses_txn() {
+    let mut session = create_session();
+
+    // Commit a document outside the txn.
+    session
+        .execute(Command::JsonSet {
+            branch: None,
+            space: None,
+            key: "doc".into(),
+            path: "$".into(),
+            value: Value::object(std::collections::HashMap::from([(
+                "v".to_string(),
+                Value::Int(1),
+            )])),
+        })
+        .unwrap();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    session
+        .execute(Command::JsonSet {
+            branch: None,
+            space: None,
+            key: "doc".into(),
+            path: "$.v".into(),
+            value: Value::Int(2),
+        })
+        .unwrap();
+
+    // as_of=0 must bypass the txn and return None from committed storage.
+    let output = session
+        .execute(Command::JsonGet {
+            branch: None,
+            space: None,
+            key: "doc".into(),
+            path: "$".into(),
+            as_of: Some(0),
+        })
+        .unwrap();
+
+    match output {
+        Output::Maybe(None) | Output::MaybeVersioned(None) => {
+            // Correct: as_of=0 is before any commit.
+        }
+        other => panic!("JsonGet with as_of=0 should return None, got {:?}", other),
+    }
+
+    session.execute(Command::TxnRollback).unwrap();
+}
+
+#[test]
+fn json_list_as_of_bypasses_txn() {
+    let mut session = create_session();
+
+    session
+        .execute(Command::JsonSet {
+            branch: None,
+            space: None,
+            key: "doc".into(),
+            path: "$".into(),
+            value: Value::object(std::collections::HashMap::from([(
+                "v".to_string(),
+                Value::Int(1),
+            )])),
+        })
+        .unwrap();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    session
+        .execute(Command::JsonSet {
+            branch: None,
+            space: None,
+            key: "doc2".into(),
+            path: "$".into(),
+            value: Value::object(std::collections::HashMap::from([(
+                "v".to_string(),
+                Value::Int(2),
+            )])),
+        })
+        .unwrap();
+
+    let output = session
+        .execute(Command::JsonList {
+            branch: None,
+            space: None,
+            prefix: None,
+            cursor: None,
+            limit: 100,
+            as_of: Some(0),
+        })
+        .unwrap();
+
+    match output {
+        Output::JsonListResult { keys, .. } => {
+            assert!(
+                keys.is_empty(),
+                "JsonList with as_of=0 should return no keys, got {:?}",
+                keys
+            );
+        }
+        other => panic!("Expected JsonListResult, got {:?}", other),
+    }
+
+    session.execute(Command::TxnRollback).unwrap();
+}
