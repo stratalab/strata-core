@@ -1027,48 +1027,72 @@ fn collect_target_rev_dsts(target: &PerGraphState) -> HashSet<String> {
     target.edges.keys().map(|(_, d, _)| d.clone()).collect()
 }
 
-/// Derive edge counter writes from the projected edge set. The counter is
-/// always recomputed from the projected state — we don't try to merge
-/// counters independently.
+/// Derive edge counter writes from the projected edge set.
+///
+/// Compares the projected per-type counts against target's *decoded* edge
+/// counts (not the stored counter), so the merge only emits counter writes
+/// when the merge actually changed the edge count for that type. This
+/// avoids two failure modes:
+///
+/// - **Stale counters get unintentionally rewritten on no-op merges.**
+///   If target's stored counter disagrees with target's actual edge count
+///   (e.g., from a pre-existing bug or duplicate-edge entries in the
+///   packed list), comparing against the stored counter would emit a
+///   write on a single-sided no-op merge — surprising the user with an
+///   unexpected counter mutation that doesn't correspond to any edge change.
+///
+/// - **Counter writes go out of sync with `fwd/rev` writes.** The
+///   adjacency-write projection compares NEW vs target re-encoded (both
+///   from the decoded HashMap). A duplicate-entries-on-disk case would
+///   produce no fwd/rev write (because both encodings dedupe to the same
+///   bytes) but the previous counter logic would still rewrite the
+///   counter — leaving the on-disk counter inconsistent with the unchanged
+///   on-disk fwd/rev lists.
+///
+/// The current rule: a counter is touched only when the merge legitimately
+/// changes the per-type count (an add or remove that actually flows
+/// through the projection). Pre-existing stale counters are left alone.
 fn project_edge_counter_writes(
     graph_name: &str,
     projected_edges: &HashMap<EdgeKey, EdgeData>,
     target: &PerGraphState,
     output: &mut GraphMergeOutput,
 ) {
-    let mut counts: HashMap<&str, u64> = HashMap::new();
+    // Per-type counts in the projected merge result.
+    let mut projected_counts: HashMap<&str, u64> = HashMap::new();
     for (_, _, edge_type) in projected_edges.keys() {
-        *counts.entry(edge_type.as_str()).or_insert(0) += 1;
+        *projected_counts.entry(edge_type.as_str()).or_insert(0) += 1;
+    }
+    // Per-type counts from target's *decoded* edges (NOT target.other's
+    // stored counter, which can be stale or disagree with the actual
+    // edge set).
+    let mut target_counts: HashMap<&str, u64> = HashMap::new();
+    for (_, _, edge_type) in target.edges.keys() {
+        *target_counts.entry(edge_type.as_str()).or_insert(0) += 1;
     }
 
-    // For each computed counter, emit a Put if it differs from target.
-    for (edge_type, count) in &counts {
-        let user_key = keys::edge_type_count_key(graph_name, edge_type);
-        let target_count = target
-            .other
-            .get(user_key.as_bytes())
-            .and_then(|v| match v {
-                Value::String(s) => s.parse::<u64>().ok(),
-                _ => None,
-            })
-            .unwrap_or(0);
+    // Emit a Put when the projected count differs from target's decoded
+    // count. The merge actually changed the per-type count → the counter
+    // needs updating to match the new edge set.
+    for (edge_type, count) in &projected_counts {
+        let target_count = target_counts.get(edge_type).copied().unwrap_or(0);
         if target_count != *count {
+            let user_key = keys::edge_type_count_key(graph_name, edge_type);
             output
                 .puts
                 .push((user_key, Value::String(count.to_string())));
         }
     }
 
-    // Delete counters for edge types that have no edges in the projected
-    // state but DID exist in target's counters.
-    let counter_prefix = format!("{graph_name}/__edge_count__/");
-    for key_bytes in target.other.keys() {
-        if let Ok(key_str) = std::str::from_utf8(key_bytes) {
-            if let Some(edge_type) = key_str.strip_prefix(&counter_prefix) {
-                if !counts.contains_key(edge_type) {
-                    output.deletes.push(key_str.to_string());
-                }
-            }
+    // Emit a Delete for counters whose edge type used to exist in target
+    // (decoded count > 0) but no longer exists in the projected state.
+    // We check target.edges (decoded), not target.other (stored counter),
+    // to avoid deleting stale-but-correct counter keys on no-op merges.
+    for edge_type in target_counts.keys() {
+        if !projected_counts.contains_key(edge_type) {
+            output
+                .deletes
+                .push(keys::edge_type_count_key(graph_name, edge_type));
         }
     }
 }
@@ -1575,6 +1599,66 @@ mod tests {
             classify_three_way::<&str>(None, Some(&v), None),
             ThreeWay::SourceAdded(_)
         ));
+    }
+
+    #[test]
+    fn no_op_merge_does_not_rewrite_stale_counters() {
+        // Regression for the post-implementation review fix:
+        // `project_edge_counter_writes` used to compare projected counts
+        // against target's *stored* counter (target.other), not target's
+        // *decoded* edge count. If the stored counter was stale (e.g.,
+        // duplicate-edge entries in the packed list, or pre-existing
+        // counter bug), a no-op merge would emit a counter Put that
+        // didn't correspond to any edge change — leaving the counter
+        // out of sync with the unchanged on-disk fwd/rev lists.
+        //
+        // This test pins the fix: a single-sided merge where neither
+        // side touches the relevant edge type must NOT emit a counter
+        // write even when target.other has a stale counter value.
+        let pre = vec![
+            ("alice", node(serde_json::json!({}))),
+            ("bob", node(serde_json::json!({}))),
+        ];
+        let mut ancestor =
+            state_with_nodes_and_edges("g", &pre, &[("alice", "bob", "follows", edge_data(1.0))]);
+        // Stale stored counter on ancestor: claims 5 follows-edges
+        // even though there's only 1 in the decoded edges map.
+        ancestor.graphs.get_mut("g").unwrap().other.insert(
+            b"g/__edge_count__/follows".to_vec(),
+            Value::String("5".into()),
+        );
+
+        let source = ancestor.clone();
+        let target = ancestor.clone();
+
+        let result =
+            compute_graph_merge(&ancestor, &source, &target, MergeStrategy::LastWriterWins);
+
+        // No conflicts, no actions — the merge is a true no-op.
+        assert!(
+            result.conflicts.is_empty(),
+            "no-op merge should produce no conflicts"
+        );
+        // Specifically: no counter write was emitted, even though target's
+        // stored counter (5) disagrees with the decoded edge count (1).
+        let counter_puts: Vec<&(String, Value)> = result
+            .puts
+            .iter()
+            .filter(|(k, _)| k.contains("__edge_count__"))
+            .collect();
+        assert!(
+            counter_puts.is_empty(),
+            "no-op merge must not rewrite counters; found {counter_puts:?}"
+        );
+        let counter_deletes: Vec<&String> = result
+            .deletes
+            .iter()
+            .filter(|k| k.contains("__edge_count__"))
+            .collect();
+        assert!(
+            counter_deletes.is_empty(),
+            "no-op merge must not delete counters; found {counter_deletes:?}"
+        );
     }
 
     #[test]
