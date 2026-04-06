@@ -242,18 +242,7 @@ impl Session {
             // transaction context. These always read from the committed store,
             // even during an active transaction.
             | Command::KvGetv { .. }
-            | Command::JsonGetv { .. }
-            // JsonList enumerates keys via storage-layer scan. Making it
-            // txn-aware would require merging the write-set with a committed
-            // prefix scan, which is non-trivial. It reads from the committed
-            // store even during an active transaction.
-            | Command::JsonList { .. }
-            // EventGetByType uses scan_prefix on per-type index keys.
-            // The transaction write-set has these keys (#1972), but
-            // scan_prefix is only available on the committed store, so
-            // this always reads from the committed store even during an
-            // active transaction.
-            | Command::EventGetByType { .. } => self.executor.execute(cmd),
+            | Command::JsonGetv { .. } => self.executor.execute(cmd),
 
             // Data commands: route through txn if active, else delegate
             _ => {
@@ -426,7 +415,11 @@ impl Session {
             | Command::JsonGet { space, .. }
             | Command::JsonGetv { space, .. }
             | Command::JsonDelete { space, .. }
-            | Command::JsonList { space, .. } => {
+            | Command::JsonList { space, .. }
+            | Command::KvBatchPut { space, .. }
+            | Command::KvBatchGet { space, .. }
+            | Command::KvBatchDelete { space, .. }
+            | Command::EventBatchAppend { space, .. } => {
                 space.clone().unwrap_or_else(|| "default".to_string())
             }
             _ => "default".to_string(),
@@ -927,8 +920,150 @@ impl Session {
                 }
             }
 
-            // Commands not directly mapped to TransactionOps — delegate to executor.
-            // This includes batch operations, history, CAS, graph analytics, etc.
+            // === JsonList — txn-aware via scan_prefix (write-set merge) ===
+            Command::JsonList {
+                prefix,
+                cursor,
+                limit,
+                ..
+            } => {
+                let prefix_key = match prefix {
+                    Some(ref p) => Key::new_json(ns.clone(), p),
+                    None => Key::new(ns.clone(), TypeTag::Json, vec![]),
+                };
+                let entries = ctx.scan_prefix(&prefix_key).map_err(Error::from)?;
+                let mut keys: Vec<String> = entries
+                    .into_iter()
+                    .filter_map(|(k, _)| k.user_key_string())
+                    .collect();
+                if let Some(ref cur) = cursor {
+                    keys.retain(|k| k.as_str() > cur.as_str());
+                }
+                let has_more = keys.len() > limit as usize;
+                keys.truncate(limit as usize);
+                let next_cursor = if has_more { keys.last().cloned() } else { None };
+                Ok(Output::JsonListResult {
+                    keys,
+                    has_more,
+                    cursor: next_cursor,
+                })
+            }
+
+            // === EventGetByType — txn-aware via type index scan ===
+            Command::EventGetByType {
+                event_type,
+                limit,
+                after_sequence,
+                ..
+            } => {
+                let type_prefix = Key::new_event_type_idx_prefix(ns.clone(), &event_type);
+                let idx_entries = ctx.scan_prefix(&type_prefix).map_err(Error::from)?;
+
+                let mut events = Vec::new();
+                for (idx_key, _) in &idx_entries {
+                    let user_key = &idx_key.user_key;
+                    if user_key.len() >= 8 {
+                        let seq_bytes: [u8; 8] = user_key[user_key.len() - 8..].try_into().unwrap();
+                        let seq = u64::from_be_bytes(seq_bytes);
+
+                        if after_sequence.is_some_and(|after| seq <= after) {
+                            continue;
+                        }
+
+                        let event_key = Key::new_event(ns.clone(), seq);
+                        if let Some(strata_core::Value::String(json)) =
+                            ctx.get(&event_key).map_err(Error::from)?
+                        {
+                            let event: strata_core::Event =
+                                serde_json::from_str(&json).map_err(|e| Error::Serialization {
+                                    reason: format!("corrupt event at sequence {}: {}", seq, e),
+                                })?;
+                            events.push(crate::types::VersionedValue {
+                                value: event.payload.clone(),
+                                version: seq,
+                                timestamp: event.timestamp.into(),
+                            });
+                        }
+
+                        if limit.is_some_and(|l| events.len() >= l as usize) {
+                            break;
+                        }
+                    }
+                }
+                Ok(Output::VersionedValues(events))
+            }
+
+            // === Batch KV operations — txn-aware ===
+            Command::KvBatchPut { entries, .. } => {
+                let mut results = vec![
+                    crate::types::BatchItemResult {
+                        version: None,
+                        error: None,
+                    };
+                    entries.len()
+                ];
+                for (i, entry) in entries.into_iter().enumerate() {
+                    let full_key = Key::new_kv(ns.clone(), &entry.key);
+                    match ctx.put(full_key, entry.value) {
+                        Ok(()) => {} // version assigned at commit time
+                        Err(e) => results[i].error = Some(e.to_string()),
+                    }
+                }
+                Ok(Output::BatchResults(results))
+            }
+            Command::KvBatchGet { keys, .. } => {
+                let mut results = Vec::with_capacity(keys.len());
+                for key in keys {
+                    let full_key = Key::new_kv(ns.clone(), &key);
+                    let value = ctx.get(&full_key).map_err(Error::from)?;
+                    results.push(crate::types::BatchGetItemResult {
+                        value,
+                        version: None,
+                        timestamp: None,
+                        error: None,
+                    });
+                }
+                Ok(Output::BatchGetResults(results))
+            }
+            Command::KvBatchDelete { keys, .. } => {
+                let mut results = vec![
+                    crate::types::BatchItemResult {
+                        version: None,
+                        error: None,
+                    };
+                    keys.len()
+                ];
+                for (i, key) in keys.into_iter().enumerate() {
+                    let full_key = Key::new_kv(ns.clone(), &key);
+                    match ctx.delete(full_key) {
+                        Ok(()) => {}
+                        Err(e) => results[i].error = Some(e.to_string()),
+                    }
+                }
+                Ok(Output::BatchResults(results))
+            }
+
+            // === EventBatchAppend — txn-aware via Transaction wrapper ===
+            Command::EventBatchAppend { entries, .. } => {
+                let mut results = vec![
+                    crate::types::BatchItemResult {
+                        version: None,
+                        error: None,
+                    };
+                    entries.len()
+                ];
+                let mut txn = Transaction::new(ctx, ns);
+                for (i, entry) in entries.into_iter().enumerate() {
+                    match txn.event_append(&entry.event_type, entry.payload) {
+                        Ok(version) => results[i].version = Some(extract_version(&version)),
+                        Err(e) => results[i].error = Some(e.to_string()),
+                    }
+                }
+                Ok(Output::BatchResults(results))
+            }
+
+            // Commands not directly mapped — delegate to executor.
+            // This includes version history, graph analytics, search, etc.
             other => executor.execute(other),
         }
     }
