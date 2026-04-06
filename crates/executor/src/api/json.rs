@@ -116,7 +116,6 @@ impl Strata {
             branch: self.branch_id(),
             space: self.space_id(),
             key: key.to_string(),
-            as_of: None,
         })? {
             Output::VersionHistory(h) => Ok(h),
             _ => Err(Error::Internal {

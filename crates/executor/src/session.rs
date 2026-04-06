@@ -455,6 +455,16 @@ impl Session {
         // Write commands create a Transaction which handles event sequencing
         // and other write-specific logic.
         match cmd {
+            // === KV / JSON reads with as_of — bypass txn, use committed storage ===
+            // Time-travel reads need the snapshot version chain, not the
+            // transaction's write-set (which only tracks the txn's
+            // start_version snapshot). Mirrors Event/Graph/Vector bypass
+            // pattern.
+            Command::KvGet { as_of: Some(_), .. }
+            | Command::KvList { as_of: Some(_), .. }
+            | Command::JsonGet { as_of: Some(_), .. }
+            | Command::JsonList { as_of: Some(_), .. } => executor.execute(cmd),
+
             // === KV reads — via ctx for snapshot fallback ===
             Command::KvGet { key, .. } => {
                 let full_key = Key::new_kv(ns, &key);
