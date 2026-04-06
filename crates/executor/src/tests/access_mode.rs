@@ -229,6 +229,7 @@ fn test_read_only_allows_all_reads() {
         Command::EventLen {
             branch: None,
             space: None,
+            as_of: None,
         },
         Command::VectorListCollections {
             branch: None,
@@ -531,6 +532,7 @@ fn test_is_write_classification() {
         Command::EventLen {
             branch: None,
             space: None,
+            as_of: None,
         },
         Command::VectorGet {
             branch: None,

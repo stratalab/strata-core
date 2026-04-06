@@ -726,13 +726,21 @@ impl Executor {
                     )
                 }
             }
-            Command::EventLen { branch, space } => {
+            Command::EventLen {
+                branch,
+                space,
+                as_of,
+            } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
-                crate::handlers::event::event_len(&self.primitives, branch, space)
+                if let Some(ts) = as_of {
+                    crate::handlers::event::event_len_at(&self.primitives, branch, space, ts)
+                } else {
+                    crate::handlers::event::event_len(&self.primitives, branch, space)
+                }
             }
             Command::EventRange {
                 branch,
@@ -786,13 +794,47 @@ impl Executor {
                     event_type,
                 )
             }
-            Command::EventListTypes { branch, space } => {
+            Command::EventListTypes {
+                branch,
+                space,
+                as_of,
+            } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
-                crate::handlers::event::event_list_types(&self.primitives, branch, space)
+                if let Some(ts) = as_of {
+                    crate::handlers::event::event_list_types_at(
+                        &self.primitives,
+                        branch,
+                        space,
+                        ts,
+                    )
+                } else {
+                    crate::handlers::event::event_list_types(&self.primitives, branch, space)
+                }
+            }
+            Command::EventList {
+                branch,
+                space,
+                event_type,
+                limit,
+                as_of,
+            } => {
+                let branch = branch.ok_or(Error::InvalidInput {
+                    reason: "Branch must be specified or resolved to default".into(),
+                    hint: None,
+                })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::event::event_list(
+                    &self.primitives,
+                    branch,
+                    space,
+                    event_type,
+                    limit,
+                    as_of,
+                )
             }
 
             // Vector commands

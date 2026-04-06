@@ -630,6 +630,144 @@ fn list_at_with_limit() {
     assert_eq!(result[2].payload, payload_int(2));
 }
 
+// ============================================================================
+// Time-travel: len_at and list_types_at
+// ============================================================================
+
+#[test]
+fn len_at_before_any_events_returns_zero() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    // Even without any appends, len_at(0) and len_at(MAX) should be 0
+    assert_eq!(
+        event.len_at(&test_db.branch_id, "default", 0).unwrap(),
+        0,
+        "empty log, as_of=0, should be 0"
+    );
+    assert_eq!(
+        event
+            .len_at(&test_db.branch_id, "default", u64::MAX)
+            .unwrap(),
+        0,
+        "empty log, as_of=MAX, should be 0"
+    );
+}
+
+#[test]
+fn len_at_returns_snapshot_count() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    // Append 3 events
+    for i in 0..3 {
+        event
+            .append(&test_db.branch_id, "default", "type", payload_int(i))
+            .unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let mid_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as u64;
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    // Append 2 more (total 5)
+    for i in 3..5 {
+        event
+            .append(&test_db.branch_id, "default", "type", payload_int(i))
+            .unwrap();
+    }
+
+    assert_eq!(
+        event.len_at(&test_db.branch_id, "default", mid_ts).unwrap(),
+        3,
+        "len_at(mid) should see the first 3 commits"
+    );
+    assert_eq!(
+        event
+            .len_at(&test_db.branch_id, "default", u64::MAX)
+            .unwrap(),
+        5,
+        "len_at(MAX) should see all 5 commits"
+    );
+    assert_eq!(
+        event.len(&test_db.branch_id, "default").unwrap(),
+        5,
+        "current len should match"
+    );
+}
+
+#[test]
+fn list_types_at_before_any_events_returns_empty() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    assert!(event
+        .list_types_at(&test_db.branch_id, "default", 0)
+        .unwrap()
+        .is_empty());
+    assert!(event
+        .list_types_at(&test_db.branch_id, "default", u64::MAX)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn list_types_at_filters_by_first_timestamp() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    // Append type A at t0
+    event
+        .append(&test_db.branch_id, "default", "TypeA", payload_int(1))
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let mid_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as u64;
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    // Append type B at t1 (> mid_ts)
+    event
+        .append(&test_db.branch_id, "default", "TypeB", payload_int(2))
+        .unwrap();
+
+    // At mid_ts, only TypeA should be visible (its first_timestamp <= mid_ts)
+    let at_mid = event
+        .list_types_at(&test_db.branch_id, "default", mid_ts)
+        .unwrap();
+    assert_eq!(at_mid, vec!["TypeA"]);
+
+    // At u64::MAX, both types visible
+    let mut at_max = event
+        .list_types_at(&test_db.branch_id, "default", u64::MAX)
+        .unwrap();
+    at_max.sort();
+    assert_eq!(at_max, vec!["TypeA", "TypeB"]);
+}
+
+#[test]
+fn list_types_at_after_all_equals_list_types() {
+    let test_db = TestDb::new();
+    let event = test_db.event();
+
+    for et in &["A", "B", "C"] {
+        event
+            .append(&test_db.branch_id, "default", et, payload_int(1))
+            .unwrap();
+    }
+
+    let mut at_max = event
+        .list_types_at(&test_db.branch_id, "default", u64::MAX)
+        .unwrap();
+    at_max.sort();
+    let mut current = event.list_types(&test_db.branch_id, "default").unwrap();
+    current.sort();
+    assert_eq!(at_max, current);
+}
+
 #[test]
 fn metadata_corruption_returns_error() {
     let test_db = TestDb::new();

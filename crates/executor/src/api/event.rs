@@ -66,10 +66,30 @@ impl Strata {
         match self.execute_cmd(Command::EventLen {
             branch: self.branch_id(),
             space: self.space_id(),
+            as_of: None,
         })? {
             Output::Uint(len) => Ok(len),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for EventLen".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
+
+    /// Get the event log length as of a past timestamp.
+    ///
+    /// Returns `next_sequence` from the `EventLogMeta` snapshot visible at
+    /// `as_of_ts` (microseconds since epoch). This counts events committed at
+    /// or before that timestamp.
+    pub fn event_len_as_of(&self, as_of_ts: u64) -> Result<u64> {
+        match self.execute_cmd(Command::EventLen {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            as_of: Some(as_of_ts),
+        })? {
+            Output::Uint(len) => Ok(len),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for EventLen (as_of)".into(),
                 hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
@@ -228,10 +248,57 @@ impl Strata {
         match self.execute_cmd(Command::EventListTypes {
             branch: self.branch_id(),
             space: self.space_id(),
+            as_of: None,
         })? {
             Output::Keys(types) => Ok(types),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for EventListTypes".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
+
+    /// List event types visible as of a past timestamp.
+    ///
+    /// Returns event types whose first event was appended at or before
+    /// `as_of_ts` (microseconds since epoch).
+    pub fn event_list_types_as_of(&self, as_of_ts: u64) -> Result<Vec<String>> {
+        match self.execute_cmd(Command::EventListTypes {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            as_of: Some(as_of_ts),
+        })? {
+            Output::Keys(types) => Ok(types),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for EventListTypes (as_of)".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
+
+    /// List events (optionally filtered by type), optionally as of a past
+    /// timestamp.
+    ///
+    /// When `as_of_ts` is `None`, returns all events in the log (still
+    /// optionally filtered by `event_type` and bounded by `limit`).
+    /// When `as_of_ts` is `Some(ts)`, only events whose `event.timestamp <= ts`
+    /// are returned.
+    pub fn event_list(
+        &self,
+        event_type: Option<&str>,
+        limit: Option<u64>,
+        as_of_ts: Option<u64>,
+    ) -> Result<Vec<crate::types::VersionedValue>> {
+        match self.execute_cmd(Command::EventList {
+            branch: self.branch_id(),
+            space: self.space_id(),
+            event_type: event_type.map(|s| s.to_string()),
+            limit,
+            as_of: as_of_ts,
+        })? {
+            Output::VersionedValues(events) => Ok(events),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for EventList".into(),
                 hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }

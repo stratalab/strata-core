@@ -571,6 +571,13 @@ impl Session {
                 })
             }
 
+            // === Event reads with as_of — bypass txn, use committed storage ===
+            // Time-travel reads need the snapshot version chain, not the
+            // transaction's write-set. Mirrors Graph/Vector bypass pattern.
+            Command::EventGet { as_of: Some(_), .. }
+            | Command::EventGetByType { as_of: Some(_), .. }
+            | Command::EventLen { as_of: Some(_), .. } => executor.execute(cmd),
+
             // === Event operations — use Transaction for hash chaining ===
             Command::EventAppend {
                 event_type,
