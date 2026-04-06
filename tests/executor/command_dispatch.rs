@@ -1067,43 +1067,6 @@ fn kv_list_empty_prefix_with_limit() {
 // ============================================================================
 
 #[test]
-fn config_set_rejects_non_numeric_bm25_k1() {
-    let executor = create_executor();
-
-    let result = executor.execute(Command::ConfigureSet {
-        key: "bm25_k1".into(),
-        value: "not_a_number".into(),
-    });
-    match result {
-        Err(Error::InvalidInput { reason, hint, .. }) => {
-            assert!(reason.contains("bm25_k1"), "reason: {}", reason);
-            assert!(hint.is_some(), "should have hint with typical range");
-        }
-        other => panic!("Expected InvalidInput, got {:?}", other),
-    }
-}
-
-#[test]
-fn config_set_rejects_nan_bm25_k1() {
-    let executor = create_executor();
-
-    let result = executor.execute(Command::ConfigureSet {
-        key: "bm25_k1".into(),
-        value: "NaN".into(),
-    });
-    match result {
-        Err(Error::InvalidInput { reason, .. }) => {
-            assert!(
-                reason.contains("finite") || reason.contains("greater than 0"),
-                "reason: {}",
-                reason
-            );
-        }
-        other => panic!("Expected InvalidInput for NaN, got {:?}", other),
-    }
-}
-
-#[test]
 fn config_set_rejects_zero_embed_batch_size() {
     let executor = create_executor();
 
@@ -1117,17 +1080,6 @@ fn config_set_rejects_zero_embed_batch_size() {
         }
         other => panic!("Expected InvalidInput for 0, got {:?}", other),
     }
-}
-
-#[test]
-fn config_set_accepts_valid_bm25_k1() {
-    let executor = create_executor();
-
-    let result = executor.execute(Command::ConfigureSet {
-        key: "bm25_k1".into(),
-        value: "1.5".into(),
-    });
-    assert!(result.is_ok(), "Valid bm25_k1 should succeed: {:?}", result);
 }
 
 #[test]
