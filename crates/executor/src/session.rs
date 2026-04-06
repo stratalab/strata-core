@@ -29,6 +29,7 @@ use strata_engine::{Database, Transaction, TransactionContext, TransactionOps};
 use strata_graph::ext::GraphStoreExt;
 use strata_graph::types::NodeData;
 use strata_security::AccessMode;
+use strata_vector::ext::{StagedVectorOp, VectorStoreExt};
 
 use crate::bridge::{
     extract_version, json_to_value, parse_path, to_core_branch_id, to_versioned_value,
@@ -52,6 +53,7 @@ enum PostCommitOp {
         graph: String,
         node_id: String,
     },
+    VectorBackendOp(StagedVectorOp),
 }
 
 /// A stateful session that wraps an [`Executor`] and manages an optional
@@ -157,17 +159,16 @@ impl Session {
             Command::TxnInfo => self.handle_txn_info(),
             Command::TxnIsActive => Ok(Output::Bool(self.in_transaction())),
 
-            // Vector write commands are not supported inside a transaction
-            // because the engine's vector store is not transactional.
-            Command::VectorUpsert { .. }
-            | Command::VectorDelete { .. }
-            | Command::VectorCreateCollection { .. }
-            | Command::VectorDeleteCollection { .. }
+            // Vector collection DDL modifies in-memory backend state (DashMap)
+            // and is not rollback-safe, so it's rejected inside transactions.
+            // Vector upsert/delete now participate in OCC via VectorStoreExt.
+            Command::VectorCreateCollection { .. } | Command::VectorDeleteCollection { .. }
                 if self.txn_ctx.is_some() =>
             {
                 Err(Error::InvalidInput {
-                    reason: "Vector write operations are not supported inside a transaction"
-                        .to_string(),
+                    reason:
+                        "Collection create/delete operations are not supported inside a transaction"
+                            .to_string(),
                     hint: None,
                 })
             }
@@ -211,11 +212,9 @@ impl Session {
             | Command::BranchList { .. }
             | Command::BranchExists { .. }
             | Command::BranchDelete { .. }
-            // Vector commands: writes delegate to executor outside txn,
-            // reads are always safe to delegate.
-            | Command::VectorUpsert { .. }
-            | Command::VectorGet { .. }
-            | Command::VectorDelete { .. }
+            // Vector: search/list always read committed HNSW (not txn-aware).
+            // DDL delegates to executor. Upsert/Delete/Get route through txn
+            // when active (handled in dispatch_in_txn).
             | Command::VectorQuery { .. }
             | Command::VectorCreateCollection { .. }
             | Command::VectorDeleteCollection { .. }
@@ -392,6 +391,11 @@ impl Session {
                     primitives
                         .graph
                         .deindex_node_for_search(branch_id, &graph, &node_id);
+                }
+                PostCommitOp::VectorBackendOp(staged_op) => {
+                    if let Ok(state) = primitives.vector.state() {
+                        strata_vector::ext::apply_staged_vector_op(&state, staged_op);
+                    }
                 }
             }
         }
@@ -809,6 +813,118 @@ impl Session {
                     })
                     .collect();
                 Ok(Output::GraphNeighbors(hits))
+            }
+
+            // === Vector writes — via VectorStoreExt on TransactionContext ===
+            Command::VectorUpsert {
+                space,
+                collection,
+                key,
+                vector,
+                metadata,
+                ..
+            } => {
+                let space = space.unwrap_or_else(|| "default".to_string());
+                convert_result(crate::bridge::validate_not_internal_collection(&collection))?;
+                let primitives = executor.primitives();
+                primitives
+                    .vector
+                    .ensure_collection_loaded(branch_id, &space, &collection)
+                    .map_err(|e| Error::from(e.into_strata_error(branch_id)))?;
+                let json_metadata = metadata
+                    .map(crate::bridge::value_to_serde_json_public)
+                    .transpose()
+                    .map_err(crate::Error::from)?;
+                let state = primitives
+                    .vector
+                    .state()
+                    .map_err(|e| Error::from(e.into_strata_error(branch_id)))?;
+                let (version, staged_op) = ctx
+                    .vector_upsert(
+                        branch_id,
+                        &space,
+                        &collection,
+                        &key,
+                        &vector,
+                        json_metadata,
+                        None, // source_ref: only used by internal auto-embed
+                        &state,
+                    )
+                    .map_err(|e| Error::from(e.into_strata_error(branch_id)))?;
+                post_commit_ops.push(PostCommitOp::VectorBackendOp(staged_op));
+                Ok(Output::VectorWriteResult {
+                    collection,
+                    key,
+                    version: extract_version(&version),
+                })
+            }
+            Command::VectorDelete {
+                space,
+                collection,
+                key,
+                ..
+            } => {
+                let space = space.unwrap_or_else(|| "default".to_string());
+                convert_result(crate::bridge::validate_not_internal_collection(&collection))?;
+                let primitives = executor.primitives();
+                primitives
+                    .vector
+                    .ensure_collection_loaded(branch_id, &space, &collection)
+                    .map_err(|e| Error::from(e.into_strata_error(branch_id)))?;
+                let state = primitives
+                    .vector
+                    .state()
+                    .map_err(|e| Error::from(e.into_strata_error(branch_id)))?;
+                let (existed, staged_op) = ctx
+                    .vector_delete(branch_id, &space, &collection, &key, &state)
+                    .map_err(|e| Error::from(e.into_strata_error(branch_id)))?;
+                if let Some(op) = staged_op {
+                    post_commit_ops.push(PostCommitOp::VectorBackendOp(op));
+                }
+                Ok(Output::VectorDeleteResult {
+                    collection,
+                    key,
+                    deleted: existed,
+                })
+            }
+
+            // === Vector reads — via VectorStoreExt for read-your-writes ===
+            Command::VectorGet { as_of: Some(_), .. } => {
+                // as_of (time-travel) reads need committed store, not txn snapshot
+                executor.execute(cmd)
+            }
+            Command::VectorGet {
+                space,
+                collection,
+                key,
+                ..
+            } => {
+                let space = space.unwrap_or_else(|| "default".to_string());
+                let record = ctx
+                    .vector_get(branch_id, &space, &collection, &key)
+                    .map_err(|e| Error::from(e.into_strata_error(branch_id)))?;
+                match record {
+                    Some(rec) => {
+                        let version = extract_version(&strata_core::Version::counter(rec.version));
+                        let metadata = rec
+                            .metadata
+                            .map(crate::bridge::serde_json_to_value_public)
+                            .transpose()
+                            .map_err(crate::Error::from)?;
+                        Ok(Output::VectorData(Some(
+                            crate::types::VersionedVectorData {
+                                key,
+                                data: crate::types::VectorData {
+                                    embedding: rec.embedding,
+                                    metadata,
+                                },
+                                version,
+                                timestamp: rec.updated_at,
+                            },
+                        )))
+                    }
+                    None => Ok(Output::VectorData(None)),
+                }
             }
 
             // Commands not directly mapped to TransactionOps — delegate to executor.
