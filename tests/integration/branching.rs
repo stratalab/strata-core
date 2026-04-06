@@ -1828,8 +1828,508 @@ fn graph_merge_conflicting_node_props_strict_rejects() {
 }
 
 // ============================================================================
-// Branch Isolation Stress Test
+// Phase 3c: Cherry-pick semantic graph merge + additive catalog
 // ============================================================================
+
+/// Phase 3c: cherry-pick of disjoint graph divergences succeeds (Phase 3b's
+/// per-handler `plan` dispatch is now wired into `cherry_pick_from_diff`).
+/// Before Phase 3c, this scenario was rejected by the old tactical refusal.
+#[test]
+fn cherry_pick_graph_disjoint_node_additions_succeeds() {
+    use strata_engine::branch_ops::CherryPickFilter;
+    use strata_graph::types::{EdgeData, NodeData};
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+
+    // Pre-fork: target has alice and bob.
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    p.graph.create_graph(target_id, "g", None).unwrap();
+    p.graph
+        .add_node(target_id, "g", "alice", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_node(target_id, "g", "bob", NodeData::default())
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source: adds carol + alice→carol.
+    p.graph
+        .add_node(source_id, "g", "carol", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_edge(
+            source_id,
+            "g",
+            "alice",
+            "carol",
+            "follows",
+            EdgeData::default(),
+        )
+        .unwrap();
+    // Target: adds dave + bob→dave (disjoint from source's changes).
+    p.graph
+        .add_node(target_id, "g", "dave", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_edge(
+            target_id,
+            "g",
+            "bob",
+            "dave",
+            "follows",
+            EdgeData::default(),
+        )
+        .unwrap();
+
+    // Cherry-pick with no filter (default = include everything). Phase 3c
+    // should hand this off to the per-handler plan dispatch, which produces
+    // the same semantic merge result as `merge_branches`.
+    branch_ops::cherry_pick_from_diff(
+        &test_db.db,
+        "source",
+        "target",
+        CherryPickFilter::default(),
+        None,
+    )
+    .expect("Phase 3c cherry-pick of disjoint graph divergences must succeed");
+
+    // Target now has all four nodes, with bidirectional consistency on the
+    // alice→carol edge that source added.
+    assert!(p.graph.get_node(target_id, "g", "alice").unwrap().is_some());
+    assert!(p.graph.get_node(target_id, "g", "carol").unwrap().is_some());
+    assert!(p.graph.get_node(target_id, "g", "dave").unwrap().is_some());
+
+    let alice_outgoing = p
+        .graph
+        .outgoing_neighbors(target_id, "g", "alice", None)
+        .unwrap();
+    let alice_targets: std::collections::HashSet<String> =
+        alice_outgoing.iter().map(|n| n.node_id.clone()).collect();
+    assert!(
+        alice_targets.contains("carol"),
+        "alice→carol must be visible after cherry-pick, got {alice_targets:?}"
+    );
+    let carol_incoming = p
+        .graph
+        .incoming_neighbors(target_id, "g", "carol", None)
+        .unwrap();
+    let carol_sources: std::collections::HashSet<String> =
+        carol_incoming.iter().map(|n| n.node_id.clone()).collect();
+    assert!(
+        carol_sources.contains("alice"),
+        "carol's incoming must include alice (bidirectional consistency), got {carol_sources:?}"
+    );
+}
+
+/// Phase 3c: dangling-edge scenarios still get rejected through cherry-pick
+/// — referential integrity is enforced inside the graph plan and fatal
+/// conflicts propagate as `Err`.
+#[test]
+fn cherry_pick_graph_dangling_edge_rejected() {
+    use strata_engine::branch_ops::CherryPickFilter;
+    use strata_graph::types::{EdgeData, NodeData};
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    p.graph.create_graph(target_id, "g", None).unwrap();
+    p.graph
+        .add_node(target_id, "g", "alice", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_node(target_id, "g", "carol", NodeData::default())
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source: adds edge alice→carol.
+    p.graph
+        .add_edge(
+            source_id,
+            "g",
+            "alice",
+            "carol",
+            "follows",
+            EdgeData::default(),
+        )
+        .unwrap();
+    // Target: deletes carol. After cherry-pick, the projected edge set would
+    // include alice→carol but the projected node set would lack carol →
+    // dangling edge / orphan reference, both fatal.
+    p.graph.remove_node(target_id, "g", "carol").unwrap();
+
+    let err = branch_ops::cherry_pick_from_diff(
+        &test_db.db,
+        "source",
+        "target",
+        CherryPickFilter::default(),
+        None,
+    )
+    .expect_err("dangling-edge cherry-pick must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("graph referential integrity violation")
+            || msg.contains("dangling")
+            || msg.contains("orphaned"),
+        "expected referential-integrity error from cherry-pick, got: {msg}"
+    );
+}
+
+/// Phase 3c: cherry-pick with `filter.keys` set to a partial subset of graph
+/// keys must refuse with the atomicity error — the filter would split a
+/// (space, Graph) cell's interdependent actions and break bidirectional
+/// consistency.
+#[test]
+fn cherry_pick_graph_atomic_filter_with_keys_rejected() {
+    use strata_engine::branch_ops::CherryPickFilter;
+    use strata_graph::types::{EdgeData, NodeData};
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    p.graph.create_graph(target_id, "g", None).unwrap();
+    p.graph
+        .add_node(target_id, "g", "alice", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_node(target_id, "g", "bob", NodeData::default())
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source: add a new node carol AND a new edge alice→carol. The plan
+    // produces multiple graph actions: n/carol, fwd/alice, rev/carol,
+    // __edge_count__/follows. A filter that names only g/n/carol would
+    // include the node but exclude the adjacency entries — exactly the
+    // partial-graph scenario the atomicity guard exists to catch.
+    p.graph
+        .add_node(source_id, "g", "carol", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_edge(
+            source_id,
+            "g",
+            "alice",
+            "carol",
+            "follows",
+            EdgeData::default(),
+        )
+        .unwrap();
+
+    let filter = CherryPickFilter {
+        spaces: None,
+        keys: Some(vec!["g/n/carol".to_string()]),
+        primitives: None,
+    };
+    let err = branch_ops::cherry_pick_from_diff(&test_db.db, "source", "target", filter, None)
+        .expect_err("partial graph key filter must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("graph data must be applied atomically"),
+        "expected atomicity error, got: {msg}"
+    );
+}
+
+/// Phase 3c: cherry-pick with `primitives = [KV]` cleanly drops all graph
+/// actions even when the source has divergent graph state. No atomicity
+/// error fires (the primitives filter partitions cells atomically).
+#[test]
+fn cherry_pick_graph_excluded_via_primitives_filter_works() {
+    use strata_core::PrimitiveType;
+    use strata_engine::branch_ops::CherryPickFilter;
+    use strata_engine::primitives::kv::KVStore;
+    use strata_graph::types::{EdgeData, NodeData};
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+    let kv: &KVStore = &p.kv;
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    p.graph.create_graph(target_id, "g", None).unwrap();
+    p.graph
+        .add_node(target_id, "g", "alice", NodeData::default())
+        .unwrap();
+    kv.put(&target_id, "default", "before_fork", Value::Int(1))
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source: divergent graph + new KV.
+    p.graph
+        .add_node(source_id, "g", "carol", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_edge(
+            source_id,
+            "g",
+            "alice",
+            "carol",
+            "follows",
+            EdgeData::default(),
+        )
+        .unwrap();
+    kv.put(&source_id, "default", "kv_only", Value::Int(42))
+        .unwrap();
+
+    // Filter to KV only. The graph plan produces actions but the primitives
+    // filter atomically excludes them all → no atomicity error.
+    let filter = CherryPickFilter {
+        spaces: None,
+        keys: None,
+        primitives: Some(vec![PrimitiveType::Kv]),
+    };
+    let info = branch_ops::cherry_pick_from_diff(&test_db.db, "source", "target", filter, None)
+        .expect("KV-only cherry-pick must succeed even with divergent graph");
+    assert!(info.keys_applied >= 1, "expected the kv_only put to apply");
+
+    // KV applied; graph state on target must be unchanged (carol absent).
+    assert_eq!(
+        kv.get(&target_id, "default", "kv_only").unwrap(),
+        Some(Value::Int(42))
+    );
+    assert!(
+        p.graph.get_node(target_id, "g", "carol").unwrap().is_none(),
+        "graph data must NOT have been applied under primitives=[KV] filter"
+    );
+}
+
+/// Phase 3c: cherry-pick where `filter.keys` is set to a non-graph key
+/// and the source has divergent graph data. The atomicity guard's
+/// "0 graph actions pass" branch must drop all graph actions atomically
+/// without raising an atomicity error. This is the only test that
+/// exercises the atomicity helper through the loop branch
+/// (`filter.keys.is_some()`) with a clean drop outcome — the
+/// `primitives = [KV]` test goes through the early-return path because
+/// `filter.keys` is None there.
+#[test]
+fn cherry_pick_graph_dropped_via_non_graph_key_filter_succeeds() {
+    use strata_engine::branch_ops::CherryPickFilter;
+    use strata_engine::primitives::kv::KVStore;
+    use strata_graph::types::{EdgeData, NodeData};
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+    let kv: &KVStore = &p.kv;
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    p.graph.create_graph(target_id, "g", None).unwrap();
+    p.graph
+        .add_node(target_id, "g", "alice", NodeData::default())
+        .unwrap();
+    kv.put(&target_id, "default", "doc/foo", Value::Int(1))
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source diverges in BOTH graph (adds carol + alice→carol) AND KV
+    // (adds doc/bar). The graph plan will produce multiple actions.
+    p.graph
+        .add_node(source_id, "g", "carol", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_edge(
+            source_id,
+            "g",
+            "alice",
+            "carol",
+            "follows",
+            EdgeData::default(),
+        )
+        .unwrap();
+    kv.put(&source_id, "default", "doc/bar", Value::Int(2))
+        .unwrap();
+
+    // Filter to a single KV key. None of the graph plan actions match it,
+    // so the atomicity check must observe `passed=0, total>0` and drop
+    // them all WITHOUT raising "graph data must be applied atomically".
+    let filter = CherryPickFilter {
+        spaces: None,
+        keys: Some(vec!["doc/bar".to_string()]),
+        primitives: None,
+    };
+    let info = branch_ops::cherry_pick_from_diff(&test_db.db, "source", "target", filter, None)
+        .expect("filter that drops all graph actions atomically must NOT raise atomicity error");
+    assert_eq!(info.keys_applied, 1, "only doc/bar should have applied");
+
+    // KV target side reflects the cherry-picked key.
+    assert_eq!(
+        kv.get(&target_id, "default", "doc/bar").unwrap(),
+        Some(Value::Int(2)),
+    );
+    // Graph side is untouched on target.
+    assert!(
+        p.graph.get_node(target_id, "g", "carol").unwrap().is_none(),
+        "graph data must NOT have been cherry-picked"
+    );
+}
+
+/// Phase 3c: KV-only cherry-pick when neither side touched graph state
+/// must succeed without invoking the atomicity guard at all (no graph
+/// actions in the plan).
+#[test]
+fn cherry_pick_kv_only_no_graph_changes_works() {
+    use strata_engine::branch_ops::CherryPickFilter;
+    use strata_engine::primitives::kv::KVStore;
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+    let kv: &KVStore = &p.kv;
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    kv.put(&target_id, "default", "k1", Value::Int(1)).unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    kv.put(&source_id, "default", "k2", Value::Int(2)).unwrap();
+
+    let info = branch_ops::cherry_pick_from_diff(
+        &test_db.db,
+        "source",
+        "target",
+        CherryPickFilter::default(),
+        None,
+    )
+    .expect("KV-only cherry-pick must succeed");
+    assert!(info.keys_applied >= 1);
+    assert_eq!(
+        kv.get(&target_id, "default", "k2").unwrap(),
+        Some(Value::Int(2))
+    );
+}
+
+/// Phase 3c additive catalog: both branches concurrently `create_graph` for
+/// different names. Phase 3b would have rejected this with `CatalogDivergence`.
+/// Phase 3c merges the catalogs as a set union — both new graphs coexist.
+#[test]
+fn graph_merge_catalog_additive_disjoint_creates_succeeds() {
+    use strata_graph::types::NodeData;
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    p.graph.create_graph(target_id, "g_pre", None).unwrap();
+    p.graph
+        .add_node(target_id, "g_pre", "x", NodeData::default())
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source creates a brand new graph "g_src".
+    p.graph.create_graph(source_id, "g_src", None).unwrap();
+    p.graph
+        .add_node(source_id, "g_src", "src_node", NodeData::default())
+        .unwrap();
+    // Target creates a brand new graph "g_tgt".
+    p.graph.create_graph(target_id, "g_tgt", None).unwrap();
+    p.graph
+        .add_node(target_id, "g_tgt", "tgt_node", NodeData::default())
+        .unwrap();
+
+    branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("Phase 3c additive catalog must merge concurrent creates of different graphs");
+
+    // Target now lists all three graphs.
+    let graphs = p.graph.list_graphs(target_id).unwrap();
+    let graph_set: std::collections::HashSet<String> = graphs.into_iter().collect();
+    assert!(
+        graph_set.contains("g_pre") && graph_set.contains("g_src") && graph_set.contains("g_tgt"),
+        "merged catalog must contain all three graphs, got {graph_set:?}"
+    );
+
+    // The new graphs' data is materialized too.
+    assert!(p
+        .graph
+        .get_node(target_id, "g_src", "src_node")
+        .unwrap()
+        .is_some());
+    assert!(p
+        .graph
+        .get_node(target_id, "g_tgt", "tgt_node")
+        .unwrap()
+        .is_some());
+}
+
+/// Phase 3c additive catalog: source deletes one graph, target creates a
+/// different graph. Both intents are honored — the deleted graph is dropped
+/// from the catalog, the new graph is added.
+#[test]
+fn graph_merge_catalog_additive_one_deletes_one_creates_succeeds() {
+    use strata_graph::types::NodeData;
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    p.graph.create_graph(target_id, "g_keep", None).unwrap();
+    p.graph
+        .add_node(target_id, "g_keep", "x", NodeData::default())
+        .unwrap();
+    p.graph.create_graph(target_id, "g_drop", None).unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source deletes g_drop.
+    p.graph.delete_graph(source_id, "g_drop").unwrap();
+    // Target creates g_new.
+    p.graph.create_graph(target_id, "g_new", None).unwrap();
+
+    branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("Phase 3c additive catalog must handle mixed delete + create");
+
+    let graphs: std::collections::HashSet<String> = p
+        .graph
+        .list_graphs(target_id)
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert!(graphs.contains("g_keep"), "g_keep must remain");
+    assert!(graphs.contains("g_new"), "g_new must be added by target");
+    assert!(
+        !graphs.contains("g_drop"),
+        "g_drop must be dropped (source's delete intent) — got {graphs:?}"
+    );
+}
 
 // ============================================================================
 // COW Inherited Layer Integration Tests (#1666, #1667)

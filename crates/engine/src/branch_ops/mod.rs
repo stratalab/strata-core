@@ -1416,12 +1416,13 @@ fn compute_merge_base(
 
 /// Per-(space, type_tag) entry slices gathered for a three-way merge.
 ///
-/// Produced by [`gather_typed_entries`] and consumed by both
-/// [`classify_typed_entries`] (which produces the flat action vector) and
-/// `PrimitiveMergeHandler::precheck` (which inspects the slices to validate
-/// per-primitive invariants — e.g. Event divergence). Splitting gather
-/// from classify lets handlers run their precheck on the same materialized
-/// snapshots the classifier uses, with no extra storage reads.
+/// Produced by [`gather_typed_entries`] and consumed by
+/// [`classify_typed_entries_for_tag`] (which produces the flat action vector
+/// for one type tag, used by the default `PrimitiveMergeHandler::plan` impl)
+/// and `PrimitiveMergeHandler::precheck` (which inspects the slices to
+/// validate per-primitive invariants — e.g. Event divergence). Splitting
+/// gather from classify lets handlers run their precheck on the same
+/// materialized snapshots the classifier uses, with no extra storage reads.
 ///
 /// Each `TypedEntryCell` is **pre-filtered to its own space**, so the
 /// total memory held by a `TypedEntries` instance is bounded by the actual
@@ -1564,10 +1565,11 @@ pub(crate) fn gather_typed_entries(
 /// Run the 14-case classification matrix on a single cell, accumulating
 /// actions and conflicts into the provided buffers.
 ///
-/// Extracted as a helper so both `classify_typed_entries` (all cells) and
-/// `classify_typed_entries_for_tag` (one type tag's cells, used by the
-/// per-handler `plan` default impl) share the same per-cell classification
-/// logic.
+/// Extracted as a helper so `classify_typed_entries_for_tag` (used by the
+/// per-handler `plan` default impl) has a single per-cell classification
+/// implementation. Phase 3c removed the unfiltered `classify_typed_entries`
+/// wrapper since the only remaining caller (cherry-pick) now uses the
+/// per-handler `plan` dispatch directly.
 fn classify_cell(
     space: &str,
     type_tag: TypeTag,
@@ -1716,33 +1718,6 @@ fn classify_cell(
     }
 }
 
-/// Run the 14-case classification matrix over pre-gathered typed entries
-/// and produce a flat `(actions, conflicts)` pair.
-///
-/// This is the existing classification logic, lifted unchanged out of the
-/// old `three_way_diff` function. The Phase 1 Event divergence check is
-/// **no longer here** — it now runs from `EventMergeHandler::precheck`,
-/// which is called before this function in `merge_branches`, and from a
-/// direct call in `cherry_pick_from_diff`.
-pub(crate) fn classify_typed_entries(
-    typed: &TypedEntries,
-    strategy: MergeStrategy,
-) -> (Vec<MergeAction>, Vec<ConflictEntry>) {
-    let mut actions = Vec::new();
-    let mut conflicts = Vec::new();
-    for ((space, type_tag), cell) in &typed.cells {
-        classify_cell(
-            space,
-            *type_tag,
-            cell,
-            strategy,
-            &mut actions,
-            &mut conflicts,
-        );
-    }
-    (actions, conflicts)
-}
-
 /// Run the 14-case classification matrix over only the cells matching
 /// `tag`. Used by the `PrimitiveMergeHandler::plan` default implementation
 /// — each handler asks for its own type tag's cells, so the cumulative
@@ -1772,9 +1747,11 @@ pub(crate) fn classify_typed_entries_for_tag(
 }
 
 // Note: the legacy `three_way_diff` wrapper was removed as part of Phase 2.
-// Both internal callers (`merge_branches` and `cherry_pick_from_diff`) now
-// invoke `gather_typed_entries` + `classify_typed_entries` directly so they
-// can interleave the Event safety check between gather and classify.
+// `merge_branches` and (since Phase 3c) `cherry_pick_from_diff` both call
+// `gather_typed_entries` followed by the per-handler `precheck` + `plan`
+// dispatch via `MergeHandlerRegistry`. The unfiltered `classify_typed_entries`
+// wrapper was removed in Phase 3c — its only remaining caller (cherry-pick)
+// now uses the per-handler plan dispatch.
 
 /// Reload secondary index backends after merge.
 fn reload_secondary_backends(db: &Arc<Database>, target_id: BranchId, source_id: BranchId) {
@@ -2800,6 +2777,104 @@ pub fn cherry_pick_keys(
     })
 }
 
+/// Phase 3c — graph cherry-pick atomicity guard.
+///
+/// Graph plan actions for the same `(space, Graph)` cell are interdependent
+/// (`n/X`, `fwd/X`, `rev/Y`, `__edge_count__/T` for the same logical change
+/// must apply atomically — bidirectional consistency depends on it). The
+/// `CherryPickFilter` has three orthogonal dimensions:
+///
+/// - `spaces` and `primitives` partition cells atomically: a (space, type_tag)
+///   cell is either entirely in or entirely out, regardless of which actions
+///   it produced.
+/// - `keys` is the dangerous one: a user-supplied set of `user_key` strings
+///   could include `g/n/alice` but exclude `g/fwd/alice`, leaving target with
+///   the node but no outgoing adjacency entry — the exact bidirectional
+///   inconsistency Phase 3 originally guarded against.
+///
+/// Rule: for each `(space, Graph)` cell that produced actions, count how many
+/// of the cell's graph actions pass the full filter. If 0 pass, drop them all
+/// (fine). If all pass, keep them all (fine). Otherwise the filter would split
+/// the cell — return a structured error.
+///
+/// Returns `Ok(())` immediately when `filter.keys` is `None`, since only the
+/// keys dimension can split graph actions within a cell.
+fn check_graph_action_atomicity(
+    actions: &[MergeAction],
+    filter: &CherryPickFilter,
+) -> StrataResult<()> {
+    if filter.keys.is_none() {
+        return Ok(());
+    }
+    let space_filter: Option<HashSet<&str>> = filter
+        .spaces
+        .as_ref()
+        .map(|s| s.iter().map(|x| x.as_str()).collect());
+    let key_filter: Option<HashSet<&str>> = filter
+        .keys
+        .as_ref()
+        .map(|k| k.iter().map(|x| x.as_str()).collect());
+    let prim_filter: Option<HashSet<PrimitiveType>> = filter
+        .primitives
+        .as_ref()
+        .map(|p| p.iter().copied().collect());
+
+    // Inline the predicate from the existing filter loop so the atomicity
+    // check sees the same pass/fail decisions as the actual filter.
+    let action_passes = |action: &MergeAction| -> bool {
+        if let Some(ref allowed) = space_filter {
+            if !allowed.contains(action.space.as_str()) {
+                return false;
+            }
+        }
+        if let Some(ref allowed) = key_filter {
+            let key_str = format_user_key(&action.raw_key);
+            if !allowed.contains(key_str.as_str()) {
+                return false;
+            }
+        }
+        if let Some(ref allowed) = prim_filter {
+            let prim = type_tag_to_primitive(action.type_tag);
+            if !allowed.contains(&prim) {
+                return false;
+            }
+        }
+        true
+    };
+
+    // Group graph actions by space and count (passed, total) per group.
+    let mut graph_actions_by_space: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for action in actions {
+        if action.type_tag != TypeTag::Graph {
+            continue;
+        }
+        let entry = graph_actions_by_space
+            .entry(action.space.as_str())
+            .or_insert((0, 0));
+        entry.1 += 1;
+        if action_passes(action) {
+            entry.0 += 1;
+        }
+    }
+
+    for (space, (passed, total)) in &graph_actions_by_space {
+        if *passed != 0 && *passed != *total {
+            return Err(StrataError::invalid_input(format!(
+                "cherry-pick: graph data must be applied atomically per cell. \
+                 Filter would include {passed} of {total} graph plan actions \
+                 for space '{space}'. Graph actions are interdependent \
+                 (nodes, forward/reverse adjacency, edge counters must apply \
+                 together to preserve bidirectional consistency). Use \
+                 `--primitives` or `--spaces` filters instead of `--keys` \
+                 when cherry-picking graph data, or include all graph keys \
+                 for the cell."
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// Cherry-pick from a three-way diff, applying only entries matching a filter.
 ///
 /// This is a selective merge: computes the three-way diff between source and
@@ -2837,12 +2912,20 @@ pub fn cherry_pick_from_diff(
     // Capture snapshot for consistent reads (#1917)
     let snapshot_version = db.current_version();
 
-    // Phase 2: gather typed entries directly so we can run the Event
-    // divergence safety check between gather and classify. The check used
-    // to live inline inside `three_way_diff`; it now lives in
-    // `EventMergeHandler::precheck` (called from `merge_branches`) and is
-    // invoked here explicitly so the cherry-pick path keeps the Phase 1
-    // safety contract.
+    // Phase 3c: cherry-pick uses the same per-handler `precheck` + `plan`
+    // dispatch as `merge_branches`, so it inherits the semantic graph merge
+    // (Phase 3b) and the additive catalog merge (Phase 3c). Before Phase 3c,
+    // this path called `check_graph_merge_divergence` directly and ran the
+    // generic `classify_typed_entries`, which both rejected divergent graph
+    // cherry-picks unconditionally and ignored Phase 3b's semantic merge.
+    //
+    // Strategy is always LastWriterWins for cherry-pick — non-fatal cell
+    // conflicts (NodeProperty / EdgeData / etc.) get silently resolved by the
+    // graph handler under LWW, matching cherry-pick's existing
+    // "ignore conflicts" semantics. Fatal conflicts (DanglingEdge,
+    // OrphanedReference) propagate as `Err` from `plan` and abort the
+    // cherry-pick before any writes happen. (CatalogDivergence is reserved
+    // but no longer produced after Phase 3c made `merge_catalog` additive.)
     let typed = gather_typed_entries(
         db,
         source_id,
@@ -2851,16 +2934,41 @@ pub fn cherry_pick_from_diff(
         &all_spaces,
         snapshot_version,
     )?;
-    for ((space, type_tag), cell) in &typed.cells {
-        if *type_tag == TypeTag::Event {
-            check_event_merge_divergence(space, &cell.ancestor, &cell.source, &cell.target)?;
-        }
-        if *type_tag == TypeTag::Graph {
-            check_graph_merge_divergence(space, &cell.ancestor, &cell.source, &cell.target)?;
-        }
+
+    let registry = primitive_merge::build_merge_registry();
+    let precheck_ctx = MergePrecheckCtx {
+        source_id,
+        target_id,
+        merge_base: &merge_base,
+        strategy: MergeStrategy::LastWriterWins,
+        typed_entries: &typed,
+    };
+    for &tag in &DATA_TYPE_TAGS {
+        registry.get(tag).precheck(&precheck_ctx)?;
     }
-    // LastWriterWins — we'll filter the actions afterwards.
-    let (actions, _conflicts) = classify_typed_entries(&typed, MergeStrategy::LastWriterWins);
+
+    let plan_ctx = MergePlanCtx {
+        source_id,
+        target_id,
+        merge_base: &merge_base,
+        strategy: MergeStrategy::LastWriterWins,
+        typed_entries: &typed,
+    };
+    let mut actions: Vec<MergeAction> = Vec::new();
+    for &tag in &DATA_TYPE_TAGS {
+        let plan = registry.get(tag).plan(&plan_ctx)?;
+        actions.extend(plan.actions);
+        // Cherry-pick discards non-fatal conflicts (LWW resolves them in
+        // place). Fatal conflicts already propagated via `plan(...)?` above.
+    }
+
+    // Phase 3c: graph plan actions are interdependent (n/X, fwd/X, rev/Y,
+    // __edge_count__/T must apply atomically for one logical change). If the
+    // user's CherryPickFilter would accept some but not all graph actions for
+    // the same (space, Graph) cell, refuse with a clear error so the caller
+    // can either widen their filter or use --primitives/--spaces instead of
+    // --keys.
+    check_graph_action_atomicity(&actions, &filter)?;
 
     // Filter by CherryPickFilter
     let space_filter: Option<HashSet<&str>> = filter

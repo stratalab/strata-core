@@ -168,8 +168,13 @@ fn format_fatal_conflict(conflict: &GraphMergeConflict) -> String {
             "orphaned reference: deleted node '{node_id}' in graph '{graph}' is still referenced by {edge_count} edge(s)"
         ),
         CatalogDivergence => {
-            "graph catalog modified differently on both sides (concurrent create_graph/delete_graph). \
-             Phase 3b.5 will add additive catalog merging."
+            // Phase 3c made `merge_catalog` additive, so this variant is
+            // no longer produced by the current algorithm. Kept here for
+            // forward compatibility — any future caller (e.g. an opt-in
+            // strict-catalog mode) that DID push it would still abort the
+            // merge with this message.
+            "graph catalog modified differently on both sides — \
+             unable to project an additive merge result"
                 .to_string()
         }
         // Non-fatal conflicts shouldn't reach this function.

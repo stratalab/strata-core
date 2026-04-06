@@ -493,7 +493,7 @@ For each `(space, TypeTag::Graph)` cell that the merge touches:
 2. **Compute three-way diff at the node level.** For each `node_id`, apply a generic `classify_three_way<NodeData>` 14-case matrix. Build the projected node set.
 3. **Compute three-way diff at the edge level.** For each `(src, dst, edge_type)` triple, apply `classify_three_way<EdgeData>`. Build the projected edge set.
 4. **Validate referential integrity.** Every projected edge's endpoints must be in the projected node set; every node deletion must leave no projected edges referencing it. Violations are *always* fatal regardless of `MergeStrategy`.
-5. **Catalog merge.** Treat the catalog as opaque KV: pass through unchanged sides, refuse divergent modifications as `CatalogDivergence`. (Phase 3b.5 will add additive catalog merging.)
+5. **Catalog merge.** Phase 3b shipped this as opaque-KV with `CatalogDivergence` refusal; Phase 3c rewrote it as per-name additive set-union. See the Phase 3c subsection for the projection rule and the `None`-vs-empty-set fallback semantics.
 6. **Project the post-merge state** into the canonical fwd/rev encoding. Sort each per-node edge list lexicographically before encoding so two equivalent merges produce byte-equal outputs.
 7. **Edge counters** are derived from the projected edge set (count edges per type), not merged independently.
 8. **Emit KV writes** for affected `n/{id}`, `fwd/{src}`, `rev/{dst}`, `__edge_count__/{type}`, and meta keys. Compare against target's current encoding to skip no-op writes.
@@ -538,29 +538,79 @@ The three "always reject" conflicts return `StrataError::invalid_input("merge un
 
 ---
 
-## Phase 3b.5 — Cherry-pick semantic merge + catalog additive merging (future)
+## Phase 3c — Cherry-pick semantic merge + additive catalog merging
 
-**Status:** spec, not implemented.
+**Status:** implemented.
 
-Phase 3b leaves two pieces of the design doc deferred:
+Phase 3b deferred two pieces of the original design that landed together as Phase 3c. (The doc previously called this slot "Phase 3b.5"; renamed to Phase 3c for consistency with the implementation history.)
 
 ### Cherry-pick semantic graph merge
 
-`cherry_pick_from_diff` still calls Phase 3's `check_graph_merge_divergence` helper directly (lines around `branch_ops/mod.rs:2774`). It does not use the per-handler plan dispatch. As a result, divergent graph cherry-picks are still tactically refused even when the semantic merge would handle them correctly.
+Before Phase 3c, `cherry_pick_from_diff` called `check_graph_merge_divergence` directly and used `classify_typed_entries` for action production — bypassing the per-handler `plan` dispatch and the Phase 3b semantic graph merge entirely. Divergent graph cherry-picks were unconditionally refused even when the underlying changes were compatible.
 
-Phase 3b.5 will refactor `cherry_pick_from_diff` to use `gather_typed_entries` + per-handler `plan` calls + cherry-pick filtering on the resulting actions. The trick is preserving cherry-pick's "filter actions by `CherryPickFilter`" semantic when the plan produces inter-dependent graph actions (e.g. fwd/X and rev/Y must be applied together). The simplest approach is to require atomic graph application — if the filter would split graph actions, refuse with a clear error.
+Phase 3c refactors `cherry_pick_from_diff` to use the same `gather → precheck → plan → filter → apply` pipeline `merge_branches` uses. Concretely:
+
+1. Build the `MergeHandlerRegistry` once.
+2. Run each handler's `precheck` against the gathered typed entries.
+3. Call each handler's `plan` to produce per-primitive `MergeAction`s. Cherry-pick always uses `MergeStrategy::LastWriterWins`, so non-fatal cell conflicts (NodeProperty, EdgeData, etc.) get silently resolved by the graph handler. Fatal conflicts (DanglingEdge / OrphanedReference) propagate as `Err` from the plan function and abort cherry-pick before any writes.
+4. Run a graph-action atomicity check on the unfiltered actions (see below).
+5. Apply the existing `CherryPickFilter` predicate to the actions and write the survivors in a single transaction.
+
+The unfiltered `classify_typed_entries` wrapper (used only by cherry-pick) is removed; the filtered `classify_typed_entries_for_tag` stays for the default `plan` impl.
+
+#### Graph action atomicity guard
+
+Graph plan actions are interdependent — for one logical change like "source added node carol and edge alice→carol", the plan emits `n/carol`, `fwd/alice`, `rev/carol`, and `__edge_count__/follows`. Applying any subset breaks bidirectional consistency (e.g. node added but no adjacency entry). Cherry-pick's `CherryPickFilter` has three orthogonal dimensions:
+
+- `spaces`: a (space, type_tag) cell is either entirely in or entirely out — atomic.
+- `primitives`: `Graph` is either fully included or fully excluded — atomic.
+- `keys`: a user-supplied set of `user_key` strings — *can* split actions within a cell.
+
+Phase 3c adds `check_graph_action_atomicity(actions, filter)` which runs only when `filter.keys` is `Some(_)`. For each `(space, Graph)` cell, it counts how many of the cell's graph actions pass the full filter. If 0 pass → drop them all (fine). If all pass → keep them all (fine). Otherwise → return a structured `StrataError::invalid_input("cherry-pick: graph data must be applied atomically per cell. ... Use --primitives or --spaces filters instead of --keys when cherry-picking graph data.")`.
+
+The check runs BEFORE the existing filter loop, so the error message reports the original counts before filtering modifies them.
 
 ### Additive catalog merging
 
-Concurrent `create_graph` on both sides (each adding a different graph name) is currently treated as `CatalogDivergence` — a fatal conflict. Phase 3b.5 will decode the catalog as a JSON list of graph names and merge it as a set union, allowing both new graphs to coexist post-merge.
+The catalog (`__catalog__`) is a `Value::String` containing a JSON array of graph names. Phase 3b treated it as opaque KV via the 14-case matrix and reported any divergent edit as fatal `CatalogDivergence` — concurrent `create_graph` on different names was unmergeable.
 
-### Ontology semantic merge
+Phase 3c rewrites `merge_catalog` in `crates/graph/src/merge.rs` to project per-name presence:
 
-Ontology entries (`{graph}/__types__/object/...`, `{graph}/__types__/link/...`) are merged via the 14-case matrix at the raw KV level today. Phase 3b doesn't introduce ontology-aware semantic merge. If users need richer ontology merging (e.g. additive type definitions), it warrants its own design pass.
+```text
+projected = (anc - deleted_by_source - deleted_by_target)
+            ∪ added_by_source ∪ added_by_target
+```
 
-### Estimated scope for Phase 3b.5
+Equivalently, for each name in `anc ∪ src ∪ tgt`:
+- If src deleted it AND tgt didn't add it back → drop
+- If tgt deleted it AND src didn't add it back → drop
+- Otherwise → keep
 
-~600-900 lines across `crates/engine/src/branch_ops/mod.rs` (cherry-pick refactor), `crates/graph/src/merge.rs` (catalog additive logic), and `tests/integration/branching.rs` (cherry-pick + catalog tests).
+Both sides are decoded into `BTreeSet<String>` and the projected set is re-encoded into the canonical JSON array. A `Put` is emitted only when `projected != tgt` (no spurious writes on no-op merges).
+
+Because the projection is purely set-membership over unit-typed presence values, **no conflict variant ever fires** from the new `merge_catalog`. `GraphMergeConflict::CatalogDivergence` is kept in the enum (it's `pub`; removing it would be a breaking API change with no benefit) and documented as "reserved — current Phase 3c additive merging never produces this variant". `is_fatal()` continues to return `true` for it, so any future caller that DID produce it (e.g. an opt-in strict-catalog merge mode) would still abort the merge.
+
+### Ontology semantic merge (still deferred)
+
+Ontology entries (`{graph}/__types__/object/...`, `{graph}/__types__/link/...`) continue to be merged via the 14-case matrix at the raw KV level. Phase 3c does NOT introduce ontology-aware semantic merge. If users need richer ontology merging (e.g. additive type definitions, schema migration semantics), it warrants its own design pass.
+
+### Phase 3c acceptance bar (met)
+
+- ✅ `cherry_pick_from_diff` of two divergent graph branches with disjoint additions succeeds, with bidirectional consistency on the merged edges.
+- ✅ A cherry-pick that would produce a dangling edge or orphaned reference is rejected with the same referential-integrity error `merge_branches` produces.
+- ✅ `cherry_pick_from_diff` with a partial-graph-key filter is rejected with a clear "graph cherry-pick must be applied atomically" error naming the cell.
+- ✅ `cherry_pick_from_diff` with `primitives = [KV]` cleanly drops all graph actions when source has divergent graph state, with no atomicity error.
+- ✅ Concurrent `create_graph("g_src")` + `create_graph("g_tgt")` merge produces a catalog containing both new graphs.
+- ✅ `delete_graph("g_drop")` on source + `create_graph("g_new")` on target merges into a catalog with `g_new` added and `g_drop` dropped — both intents honored.
+- ✅ `CatalogDivergence` is reserved but no longer reachable from `merge_catalog`.
+
+### Tests
+
+- 4 new unit tests in `crates/graph/src/merge.rs::tests` covering additive catalog merging (disjoint creates, mixed delete/create, both-delete-different, no-op when target already has the union).
+- 7 new integration tests in `tests/integration/branching.rs`:
+  - 4 cherry-pick scenarios: disjoint graph divergences, dangling-edge rejection, atomicity guard with `keys` filter, `primitives = [KV]` exclusion.
+  - 1 KV-only cherry-pick regression check (no graph changes).
+  - 2 additive catalog scenarios: disjoint creates, mixed delete + create.
 
 ---
 
