@@ -274,15 +274,19 @@ fn graph_conflict_to_entry(space: &str, conflict: GraphMergeConflict) -> Conflic
             source_value: None,
             target_value: None,
         },
-        OtherKeyConflict { user_key } => ConflictEntry {
+        OtherKeyConflict {
+            user_key,
+            source,
+            target,
+        } => ConflictEntry {
             key: format!(
                 "graph:other-key-conflict:{}",
                 String::from_utf8_lossy(&user_key)
             ),
             primitive: strata_core::PrimitiveType::Graph,
             space: space.to_string(),
-            source_value: None,
-            target_value: None,
+            source_value: source,
+            target_value: target,
         },
     }
 }

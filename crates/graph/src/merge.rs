@@ -161,7 +161,18 @@ pub enum GraphMergeConflict {
     CatalogDivergence,
     /// A non-graph-aware key (ontology, ref index, type index) had
     /// conflicting modifications. Honors strategy.
-    OtherKeyConflict { user_key: Vec<u8> },
+    ///
+    /// `source` and `target` carry the conflicting raw `Value`s when both
+    /// sides have a value (Conflict / BothAddedDifferent). They are `None`
+    /// for ModifyDelete / DeleteModify shapes where one side has no value.
+    /// These are surfaced into `ConflictEntry.source_value` /
+    /// `target_value` so users can inspect what's actually different on
+    /// ontology / ref-index / type-index keys.
+    OtherKeyConflict {
+        user_key: Vec<u8>,
+        source: Option<Value>,
+        target: Option<Value>,
+    },
 }
 
 impl GraphMergeConflict {
@@ -895,12 +906,15 @@ fn project_node_writes(
             let json = match serde_json::to_string(data) {
                 Ok(j) => j,
                 Err(e) => {
-                    // Serialization error — push as a fatal "other key" conflict
-                    // for visibility. Should be unreachable for well-formed
-                    // NodeData.
-                    output.conflicts.push(GraphMergeConflict::OtherKeyConflict {
-                        user_key: format!("node_serialize_error:{id}:{e}").into_bytes(),
-                    });
+                    // Serialization error — push as a "node modify-delete"
+                    // conflict for visibility. Should be unreachable for
+                    // well-formed NodeData.
+                    output
+                        .conflicts
+                        .push(GraphMergeConflict::NodeModifyDeleteConflict {
+                            graph: graph_name.to_string(),
+                            node_id: format!("{id} (serialize error: {e})"),
+                        });
                     continue;
                 }
             };
@@ -1110,10 +1124,26 @@ fn merge_meta(
     output: &mut GraphMergeOutput,
 ) {
     let key = keys::meta_key(graph_name);
-    let serialize = |meta: &GraphMeta| -> StrataResult<Value> {
-        serde_json::to_string(meta)
-            .map(Value::String)
-            .map_err(|e| StrataError::serialization(format!("graph meta serialize: {e}")))
+
+    // Serialize-or-flag helper. `serde_json::to_string(&GraphMeta)` is
+    // virtually infallible for well-formed metadata, but if it ever did
+    // fail (corrupt enum, out-of-memory…) we must NOT silently drop the
+    // put — that would let the merge proceed with stale meta. Push a
+    // synthetic MetaConflict instead, mirroring the project_node_writes
+    // serialization-error path. Returns false when the put was dropped.
+    let try_push_put = |meta: &GraphMeta, output: &mut GraphMergeOutput| -> bool {
+        match serde_json::to_string(meta) {
+            Ok(json) => {
+                output.puts.push((key.clone(), Value::String(json)));
+                true
+            }
+            Err(_) => {
+                output.conflicts.push(GraphMergeConflict::MetaConflict {
+                    graph: graph_name.to_string(),
+                });
+                false
+            }
+        }
     };
 
     match classify_three_way(
@@ -1129,9 +1159,7 @@ fn merge_meta(
         | ThreeWay::TargetDeleted
         | ThreeWay::BothDeleted => {}
         ThreeWay::SourceChanged(value) | ThreeWay::SourceAdded(value) => {
-            if let Ok(v) = serialize(value) {
-                output.puts.push((key, v));
-            }
+            try_push_put(value, output);
         }
         ThreeWay::SourceDeleted => {
             output.deletes.push(key);
@@ -1141,9 +1169,7 @@ fn merge_meta(
                 graph: graph_name.to_string(),
             });
             if strategy == MergeStrategy::LastWriterWins {
-                if let Ok(v) = serialize(source) {
-                    output.puts.push((key, v));
-                }
+                try_push_put(source, output);
             }
             let _ = target;
         }
@@ -1161,9 +1187,7 @@ fn merge_meta(
                 graph: graph_name.to_string(),
             });
             if strategy == MergeStrategy::LastWriterWins {
-                if let Ok(v) = serialize(source) {
-                    output.puts.push((key, v));
-                }
+                try_push_put(source, output);
             }
         }
     }
@@ -1226,24 +1250,28 @@ fn merge_other(
             | ThreeWay::BothAddedDifferent { source, target } => {
                 output.conflicts.push(GraphMergeConflict::OtherKeyConflict {
                     user_key: key_bytes.clone(),
+                    source: Some(source.clone()),
+                    target: Some(target.clone()),
                 });
                 if strategy == MergeStrategy::LastWriterWins {
                     output.puts.push((user_key_str, source.clone()));
                 }
-                let _ = target;
             }
             ThreeWay::DeleteModifyConflict { target } => {
                 output.conflicts.push(GraphMergeConflict::OtherKeyConflict {
                     user_key: key_bytes.clone(),
+                    source: None,
+                    target: Some(target.clone()),
                 });
                 if strategy == MergeStrategy::LastWriterWins {
                     output.deletes.push(user_key_str);
                 }
-                let _ = target;
             }
             ThreeWay::ModifyDeleteConflict { source } => {
                 output.conflicts.push(GraphMergeConflict::OtherKeyConflict {
                     user_key: key_bytes.clone(),
+                    source: Some(source.clone()),
+                    target: None,
                 });
                 if strategy == MergeStrategy::LastWriterWins {
                     output.puts.push((user_key_str, source.clone()));
@@ -1549,6 +1577,158 @@ mod tests {
         assert!(
             !result.puts.iter().any(|(k, _)| k == "g/n/alice"),
             "Strict should not emit a Put for n/alice"
+        );
+    }
+
+    #[test]
+    fn conflicting_edge_data_lww_source_wins() {
+        // Pre-fork: alice→bob with weight=1.0
+        // Source: alice→bob with weight=2.0 (modified)
+        // Target: alice→bob with weight=3.0 (modified differently)
+        let pre_nodes = vec![
+            ("alice", node(serde_json::json!({}))),
+            ("bob", node(serde_json::json!({}))),
+        ];
+        let ancestor = state_with_nodes_and_edges(
+            "g",
+            &pre_nodes,
+            &[("alice", "bob", "follows", edge_data(1.0))],
+        );
+        let source = state_with_nodes_and_edges(
+            "g",
+            &pre_nodes,
+            &[("alice", "bob", "follows", edge_data(2.0))],
+        );
+        let target = state_with_nodes_and_edges(
+            "g",
+            &pre_nodes,
+            &[("alice", "bob", "follows", edge_data(3.0))],
+        );
+
+        let result =
+            compute_graph_merge(&ancestor, &source, &target, MergeStrategy::LastWriterWins);
+
+        // Conflict reported with full source/target EdgeData.
+        let conflict = result
+            .conflicts
+            .iter()
+            .find_map(|c| match c {
+                GraphMergeConflict::EdgeDataConflict {
+                    src,
+                    dst,
+                    edge_type,
+                    source,
+                    target,
+                    ..
+                } => Some((src, dst, edge_type, source, target)),
+                _ => None,
+            })
+            .expect("expected EdgeDataConflict");
+        assert_eq!(conflict.0, "alice");
+        assert_eq!(conflict.1, "bob");
+        assert_eq!(conflict.2, "follows");
+        assert_eq!(conflict.3.weight, 2.0);
+        assert_eq!(conflict.4.weight, 3.0);
+
+        // Under LWW: the projected fwd/alice should encode the source's
+        // weight (2.0), since source wins the conflict. We verify by
+        // decoding the emitted Put and checking the EdgeData.
+        let fwd_alice = result
+            .puts
+            .iter()
+            .find(|(k, _)| k == "g/fwd/alice")
+            .expect("expected fwd/alice put under LWW conflict resolution");
+        if let Value::Bytes(b) = &fwd_alice.1 {
+            let edges = packed::decode(b).unwrap();
+            assert_eq!(edges.len(), 1, "fwd/alice should contain one edge");
+            assert_eq!(edges[0].2.weight, 2.0, "source's weight should win");
+        } else {
+            panic!("expected Value::Bytes for fwd/alice");
+        }
+    }
+
+    #[test]
+    fn conflicting_edge_data_strict_reports_no_put() {
+        // Same fork as above, but Strict strategy: conflict reported, no put.
+        let pre_nodes = vec![
+            ("alice", node(serde_json::json!({}))),
+            ("bob", node(serde_json::json!({}))),
+        ];
+        let ancestor = state_with_nodes_and_edges(
+            "g",
+            &pre_nodes,
+            &[("alice", "bob", "follows", edge_data(1.0))],
+        );
+        let source = state_with_nodes_and_edges(
+            "g",
+            &pre_nodes,
+            &[("alice", "bob", "follows", edge_data(2.0))],
+        );
+        let target = state_with_nodes_and_edges(
+            "g",
+            &pre_nodes,
+            &[("alice", "bob", "follows", edge_data(3.0))],
+        );
+
+        let result = compute_graph_merge(&ancestor, &source, &target, MergeStrategy::Strict);
+
+        assert!(result
+            .conflicts
+            .iter()
+            .any(|c| matches!(c, GraphMergeConflict::EdgeDataConflict { .. })));
+        // Under Strict the projected edge keeps target's value (3.0), so the
+        // re-encoded fwd/alice equals target's existing fwd/alice → no put.
+        assert!(
+            !result.puts.iter().any(|(k, _)| k == "g/fwd/alice"),
+            "Strict should not emit a Put for fwd/alice when target's value is preserved"
+        );
+    }
+
+    #[test]
+    fn other_key_conflict_carries_source_and_target_values() {
+        // Both branches concurrently set a different ontology entry for the
+        // same object_type. Phase 3b treats ontology as opaque KV via the
+        // 14-case matrix, but the resulting OtherKeyConflict must carry both
+        // sides' values so users can inspect what's actually different.
+        let key = b"g/__types__/object/Patient".to_vec();
+        let mut ancestor = state_with_nodes("g", &[]);
+        ancestor.graphs.get_mut("g").unwrap().other.insert(
+            key.clone(),
+            Value::String("{\"label\":\"original\"}".to_string()),
+        );
+        let mut source = state_with_nodes("g", &[]);
+        source.graphs.get_mut("g").unwrap().other.insert(
+            key.clone(),
+            Value::String("{\"label\":\"source\"}".to_string()),
+        );
+        let mut target = state_with_nodes("g", &[]);
+        target.graphs.get_mut("g").unwrap().other.insert(
+            key.clone(),
+            Value::String("{\"label\":\"target\"}".to_string()),
+        );
+
+        let result = compute_graph_merge(&ancestor, &source, &target, MergeStrategy::Strict);
+
+        let (got_user_key, got_source, got_target) = result
+            .conflicts
+            .iter()
+            .find_map(|c| match c {
+                GraphMergeConflict::OtherKeyConflict {
+                    user_key,
+                    source,
+                    target,
+                } => Some((user_key, source, target)),
+                _ => None,
+            })
+            .expect("expected OtherKeyConflict");
+        assert_eq!(got_user_key, &key);
+        assert_eq!(
+            got_source.as_ref().unwrap(),
+            &Value::String("{\"label\":\"source\"}".to_string())
+        );
+        assert_eq!(
+            got_target.as_ref().unwrap(),
+            &Value::String("{\"label\":\"target\"}".to_string())
         );
     }
 
