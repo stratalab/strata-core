@@ -2264,9 +2264,7 @@ fn graph_merge_catalog_additive_disjoint_creates_succeeds() {
     let graphs = p.graph.list_graphs(target_id).unwrap();
     let graph_set: std::collections::HashSet<String> = graphs.into_iter().collect();
     assert!(
-        graph_set.contains("g_pre")
-            && graph_set.contains("g_src")
-            && graph_set.contains("g_tgt"),
+        graph_set.contains("g_pre") && graph_set.contains("g_src") && graph_set.contains("g_tgt"),
         "merged catalog must contain all three graphs, got {graph_set:?}"
     );
 
@@ -2319,8 +2317,12 @@ fn graph_merge_catalog_additive_one_deletes_one_creates_succeeds() {
     )
     .expect("Phase 3c additive catalog must handle mixed delete + create");
 
-    let graphs: std::collections::HashSet<String> =
-        p.graph.list_graphs(target_id).unwrap().into_iter().collect();
+    let graphs: std::collections::HashSet<String> = p
+        .graph
+        .list_graphs(target_id)
+        .unwrap()
+        .into_iter()
+        .collect();
     assert!(graphs.contains("g_keep"), "g_keep must remain");
     assert!(graphs.contains("g_new"), "g_new must be added by target");
     assert!(
