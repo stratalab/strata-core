@@ -47,6 +47,7 @@ pub use strata_concurrency::TransactionContext;
 pub use strata_durability::wal::DurabilityMode;
 pub use strata_durability::WalCounters;
 pub use strata_storage::StorageIterator;
+pub use strata_storage::VersionedEntry;
 pub use transaction::{Transaction, TransactionPool, MAX_POOL_SIZE};
 pub use transaction_ops::TransactionOps;
 
@@ -114,8 +115,16 @@ pub use bundle::{BundleInfo, ExportInfo, ImportInfo};
 // Re-export branch_ops types at crate root
 pub use branch_ops::{
     BranchDiffEntry, BranchDiffResult, CherryPickFilter, CherryPickInfo, ConflictEntry, DiffFilter,
-    DiffOptions, DiffSummary, ForkInfo, MergeBaseInfo, MergeInfo, MergeStrategy, NoteInfo,
-    RevertInfo, SpaceDiff, TagInfo, ThreeWayChange, ThreeWayDiffEntry, ThreeWayDiffResult,
+    DiffOptions, DiffSummary, ForkInfo, MergeAction, MergeActionKind, MergeBase, MergeBaseInfo,
+    MergeInfo, MergeStrategy, NoteInfo, RevertInfo, SpaceDiff, TagInfo, ThreeWayChange,
+    ThreeWayDiffEntry, ThreeWayDiffResult, TypedEntries, TypedEntryCell,
+};
+
+// Phase 3b primitive-aware merge: registration hook for graph semantic
+// merge. The graph crate registers its `compute_graph_merge` adapter
+// here at startup; engine's `GraphMergeHandler::plan` dispatches to it.
+pub use branch_ops::primitive_merge::{
+    register_graph_merge_plan, GraphMergePlanFn, MergePlanCtx, PrimitiveMergePlan,
 };
 
 // Re-export branch_dag types from core at crate root for convenience

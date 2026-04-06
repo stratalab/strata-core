@@ -35,6 +35,11 @@ fn ensure_recovery_registered() {
     INIT_RECOVERY.call_once(|| {
         register_vector_recovery();
         register_search_recovery();
+        // Phase 3b: register the graph semantic merge plan with the
+        // engine's GraphMergeHandler. Without this call, the engine
+        // falls back to Phase 3's tactical refusal of divergent graph
+        // merges (which still works, just refuses safely-mergeable cases).
+        strata_graph::register_graph_semantic_merge();
     });
 }
 

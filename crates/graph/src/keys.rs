@@ -141,6 +141,16 @@ pub fn parse_forward_adj_key(graph: &str, user_key: &str) -> Option<String> {
     user_key.strip_prefix(&prefix).map(|s| s.to_string())
 }
 
+/// Parse a reverse adjacency key back into node_id.
+///
+/// Mirror of `parse_forward_adj_key`. Added for the Phase 3b semantic graph
+/// merge, which classifies storage entries by key shape and needs to identify
+/// reverse adjacency lists distinctly from forward adjacency lists.
+pub fn parse_reverse_adj_key(graph: &str, user_key: &str) -> Option<String> {
+    let prefix = format!("{}{SEP}rev{SEP}", graph);
+    user_key.strip_prefix(&prefix).map(|s| s.to_string())
+}
+
 // --- Node keys ---
 
 /// Key for a node: `{graph}/n/{node_id}`
@@ -380,6 +390,26 @@ mod tests {
     fn reverse_adj_key_format() {
         let key = reverse_adj_key("g", "B");
         assert_eq!(key, "g/rev/B");
+    }
+
+    #[test]
+    fn reverse_adj_key_roundtrip() {
+        let key = reverse_adj_key("g", "B");
+        let node_id = parse_reverse_adj_key("g", &key).unwrap();
+        assert_eq!(node_id, "B");
+    }
+
+    #[test]
+    fn parse_reverse_adj_key_wrong_graph_returns_none() {
+        let key = reverse_adj_key("g", "A");
+        assert!(parse_reverse_adj_key("other", &key).is_none());
+    }
+
+    #[test]
+    fn parse_reverse_adj_key_does_not_match_forward() {
+        // Reverse parser must NOT match forward keys (the only difference is fwd vs rev).
+        let fwd = forward_adj_key("g", "A");
+        assert!(parse_reverse_adj_key("g", &fwd).is_none());
     }
 
     #[test]

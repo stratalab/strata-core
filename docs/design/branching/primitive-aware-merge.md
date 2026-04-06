@@ -479,44 +479,88 @@ Five new tests in a "Graph Merge Safety" section:
 
 ---
 
-## Phase 3b — Semantic graph merge (future)
+## Phase 3b — Semantic graph merge (implemented)
 
-**Status:** spec, not implemented. Captured here so the next iteration starts from the right model.
+**Status:** **Implemented.** Replaces Phase 3's tactical refusal with a real semantic merge.
 
 **Goal:** real graph merge that preserves referential integrity, merges disjoint edges from both sides additively, and maintains bidirectional consistency between `fwd/*` and `rev/*` lists.
 
-### Required algorithm
+### Algorithm
 
 For each `(space, TypeTag::Graph)` cell that the merge touches:
 
-1. **Decode all packed adjacency lists** from ancestor / source / target via `crates/graph/src/packed.rs::decode`. Materialize the logical edge set per side: `Set<(src, dst, edge_type, EdgeData)>`. Materialize the node set per side from `n/{node_id}` keys.
-2. **Compute three-way diff at the node level.** For each node_id, apply the 14-case decision matrix to determine post-merge node state.
-3. **Compute three-way diff at the edge level.** For each `(src, dst, edge_type)` triple, apply the 14-case matrix to determine which edges survive.
-4. **Reject** if any post-merge edge has either endpoint missing from the post-merge node set (`DanglingEdgeReference`).
-5. **Reject** if any post-merge node deletion leaves edges referencing it (`OrphanedEdgeReference`).
-6. **Project the post-merge state** into the canonical fwd/rev encoding.
-7. **Emit KV writes** for affected node records and `fwd/{node_id}` / `rev/{node_id}` keys. Re-encode the projected adjacency lists with `packed::encode`.
-8. **post_commit**: nothing — storage IS the adjacency, no separate index to refresh.
+1. **Decode** all packed adjacency lists from ancestor / source / target via `crates/graph/src/packed.rs::decode`. Materialize the logical edge set per side: `HashMap<(src, dst, edge_type), EdgeData>`. Materialize the node set per side from `n/{node_id}` keys. Per-graph state lives in `PerGraphState`; the cell holds a `BTreeMap<graph_name, PerGraphState>` plus an optional catalog blob.
+2. **Compute three-way diff at the node level.** For each `node_id`, apply a generic `classify_three_way<NodeData>` 14-case matrix. Build the projected node set.
+3. **Compute three-way diff at the edge level.** For each `(src, dst, edge_type)` triple, apply `classify_three_way<EdgeData>`. Build the projected edge set.
+4. **Validate referential integrity.** Every projected edge's endpoints must be in the projected node set; every node deletion must leave no projected edges referencing it. Violations are *always* fatal regardless of `MergeStrategy`.
+5. **Catalog merge.** Treat the catalog as opaque KV: pass through unchanged sides, refuse divergent modifications as `CatalogDivergence`. (Phase 3b.5 will add additive catalog merging.)
+6. **Project the post-merge state** into the canonical fwd/rev encoding. Sort each per-node edge list lexicographically before encoding so two equivalent merges produce byte-equal outputs.
+7. **Edge counters** are derived from the projected edge set (count edges per type), not merged independently.
+8. **Emit KV writes** for affected `n/{id}`, `fwd/{src}`, `rev/{dst}`, `__edge_count__/{type}`, and meta keys. Compare against target's current encoding to skip no-op writes.
+9. **post_commit**: nothing — storage IS the adjacency, no separate index to refresh.
 
-### Required infrastructure
+### Architecture
 
-- Add `plan(&self, ctx: &MergePlanCtx<'_>) -> StrataResult<PrimitiveMergePlan>` to `PrimitiveMergeHandler`. Default impl delegates to `classify_typed_entries` for the handler's type_tag (matching today's pass-through behavior). `GraphMergeHandler::plan` overrides with the algorithm above.
-- Add a new module `crates/graph/src/merge.rs` exposing helpers: `decode_branch_edge_set(entries: &[VersionedEntry], graph_name: &str) -> Result<EdgeSet>`, `project_merged_state(...)`, `encode_node_adjacency(...)`.
-- Extend `merge_branches` to use `handler.plan(...)` instead of a single global `classify_typed_entries` call. Phase 2 deferred this; Phase 3b lands it.
-- New structured error variants for `DanglingEdgeReference` and `OrphanedEdgeReference`. Or — to stay consistent with Phase 1/2 — wrap them in `StrataError::invalid_input` with structured prefixes.
+The graph crate cannot be a direct dependency of the engine crate (graph already depends on engine — adding the reverse edge would be a cycle). Phase 3b uses a registration callback pattern, mirroring the existing `register_recovery_participant` / `register_vector_recovery` hooks:
 
-### Phase 3b acceptance bar
+- **`crates/graph/src/merge.rs`** — pure algorithm. `compute_graph_merge`, decode helpers, `GraphMergeOutput`/`GraphMergeConflict` types. Independent of engine dispatch.
+- **`crates/graph/src/merge_handler.rs`** — engine bridge. Defines a `graph_plan_fn(&MergePlanCtx) -> StrataResult<PrimitiveMergePlan>` function that decodes typed entries, calls `compute_graph_merge`, converts the output into engine-side `MergeAction`/`ConflictEntry`, and returns the plan. `pub fn register_graph_semantic_merge()` registers the function with the engine via `strata_engine::register_graph_merge_plan`.
+- **`crates/engine/src/branch_ops/primitive_merge.rs`** — `GraphMergeHandler::plan` dispatches to the registered function if present. If unset (e.g. engine-only unit tests), falls back to Phase 3's tactical refusal of divergent graph merges + the default classify path. The trait gains a `plan` method with a default impl (`classify_typed_entries_for_tag`) that KV/JSON/Vector/Event handlers use unchanged.
+- **Test fixtures** call `strata_graph::register_graph_semantic_merge()` from `ensure_recovery_registered` so all integration tests exercise the semantic merge path.
 
-- Two divergent graph branches with disjoint edge additions merge cleanly into a union of both sides' edges.
-- A merge that would produce a dangling edge is refused with a clear error naming the offending edge and missing node.
-- A merge that would produce an orphaned reference is refused with a clear error.
-- After any successful merge, traversing `outgoing_neighbors(X)` and `incoming_neighbors(Y)` always agree on the existence of edge X→Y.
-- A property-style test verifies bidirectional consistency for randomized merges.
-- The `plan` trait method is in place and KV/JSON/Vector handlers gracefully fall back to the default impl.
+### Conflict semantics
 
-### Estimated scope
+| Conflict type | Strict | LastWriterWins |
+|---|---|---|
+| Node properties differ | reported, abort | reported, source wins |
+| Edge data differs | reported, abort | reported, source wins |
+| Modify-vs-delete (node or edge) | reported, abort | reported, source wins |
+| Meta differ | reported, abort | reported, source wins |
+| Other key (ontology, ref idx, type idx) differ | reported, abort | reported, source wins |
+| **Dangling edge after merge** | **always reject** | **always reject** |
+| **Orphan reference after node delete** | **always reject** | **always reject** |
+| **Catalog divergence** | **always reject** | **always reject** |
 
-~1000-1500 lines across `crates/engine/src/branch_ops/primitive_merge.rs`, `crates/graph/src/merge.rs` (new), `tests/integration/branching.rs`, and the design doc. Substantial enough to deserve its own design pass and a dedicated PR.
+The three "always reject" conflicts return `StrataError::invalid_input("merge unsupported: graph referential integrity violation in space '{space}': ...")` from the plan function, aborting the merge before any writes. Cell-level conflicts flow through as `ConflictEntry` rows in `MergeInfo.conflicts` and are caught by `merge_branches`'s strict-strategy check under `Strict`.
+
+### Phase 3b acceptance bar (met)
+
+- ✅ Two divergent graph branches with disjoint edge additions merge cleanly into a union of both sides' edges.
+- ✅ A merge that would produce a dangling edge is refused with a clear error naming the offending edge and missing node.
+- ✅ A merge that would produce an orphaned reference is refused with a clear error.
+- ✅ After any successful merge, traversing `outgoing_neighbors(X)` and `incoming_neighbors(Y)` always agree on the existence of edge X→Y (verified by tests).
+- ✅ The `plan` trait method is in place and KV/JSON/Vector/Event handlers use the default impl unchanged.
+
+### Tests
+
+- 12 unit tests in `crates/graph/src/merge.rs::tests` covering decode, classify, disjoint merges, dangling edges, orphan references, catalog conflicts, LWW vs Strict for property conflicts, and bidirectional consistency.
+- 9 integration tests in `tests/integration/branching.rs::Graph Merge Safety` covering the same scenarios end-to-end through `merge_branches`, plus single-sided merges, KV-only regression, and Phase 3 scenarios that now succeed under Phase 3b.
+
+---
+
+## Phase 3b.5 — Cherry-pick semantic merge + catalog additive merging (future)
+
+**Status:** spec, not implemented.
+
+Phase 3b leaves two pieces of the design doc deferred:
+
+### Cherry-pick semantic graph merge
+
+`cherry_pick_from_diff` still calls Phase 3's `check_graph_merge_divergence` helper directly (lines around `branch_ops/mod.rs:2774`). It does not use the per-handler plan dispatch. As a result, divergent graph cherry-picks are still tactically refused even when the semantic merge would handle them correctly.
+
+Phase 3b.5 will refactor `cherry_pick_from_diff` to use `gather_typed_entries` + per-handler `plan` calls + cherry-pick filtering on the resulting actions. The trick is preserving cherry-pick's "filter actions by `CherryPickFilter`" semantic when the plan produces inter-dependent graph actions (e.g. fwd/X and rev/Y must be applied together). The simplest approach is to require atomic graph application — if the filter would split graph actions, refuse with a clear error.
+
+### Additive catalog merging
+
+Concurrent `create_graph` on both sides (each adding a different graph name) is currently treated as `CatalogDivergence` — a fatal conflict. Phase 3b.5 will decode the catalog as a JSON list of graph names and merge it as a set union, allowing both new graphs to coexist post-merge.
+
+### Ontology semantic merge
+
+Ontology entries (`{graph}/__types__/object/...`, `{graph}/__types__/link/...`) are merged via the 14-case matrix at the raw KV level today. Phase 3b doesn't introduce ontology-aware semantic merge. If users need richer ontology merging (e.g. additive type definitions), it warrants its own design pass.
+
+### Estimated scope for Phase 3b.5
+
+~600-900 lines across `crates/engine/src/branch_ops/mod.rs` (cherry-pick refactor), `crates/graph/src/merge.rs` (catalog additive logic), and `tests/integration/branching.rs` (cherry-pick + catalog tests).
 
 ---
 
