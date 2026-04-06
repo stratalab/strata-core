@@ -290,24 +290,90 @@ fn cross_primitive_branch_isolation_time_travel() {
     // Back to default — its history must be unchanged by the fork.
     db.set_branch("default").unwrap();
 
+    // Historical reads on default must return the round-1 seed values
+    // across every primitive.
     assert_kv_marker(&db, "kv:b", ts_seed, 10);
     assert_json_marker(&db, "doc:b", ts_seed, 10);
     assert_vector_embedding(&db, COLLECTION, "vec:b", ts_seed, [1.0, 0.0, 0.0]);
     assert_graph_marker(&db, GRAPH, "n:b", ts_seed, 10);
 
-    // Current values on default should still be the round-1 seed.
+    // Current values on default must also still be the round-1 seed —
+    // verify for every primitive (not just KV), so any fork leak is
+    // caught regardless of which primitive it happens in.
     assert_eq!(
         db.kv_get("kv:b").unwrap(),
         Some(Value::Int(10)),
-        "default branch should not see fork mutations"
+        "default KV should not see fork mutations"
+    );
+    assert_eq!(
+        db.json_get("doc:b", "$.v").unwrap(),
+        Some(Value::Int(10)),
+        "default JSON should not see fork mutations"
+    );
+    let default_vec = db
+        .vector_get(COLLECTION, "vec:b")
+        .unwrap()
+        .expect("default should still have vec:b");
+    assert_eq!(
+        default_vec.data.embedding,
+        vec![1.0, 0.0, 0.0],
+        "default vector embedding should not see fork mutations"
+    );
+    let default_node = db
+        .graph_get_node(GRAPH, "n:b")
+        .unwrap()
+        .expect("default should still have n:b");
+    let default_p = match &default_node {
+        Value::Object(map) => match map.get("properties") {
+            Some(Value::Object(props)) => props.get("p").cloned(),
+            _ => None,
+        },
+        _ => None,
+    };
+    assert_eq!(
+        default_p,
+        Some(Value::Int(10)),
+        "default graph node should not see fork mutations, got {:?}",
+        default_node
     );
 
-    // And the fork has its own mutated state.
+    // And the fork has its own mutated state across every primitive.
     db.set_branch("experiment").unwrap();
     assert_eq!(
         db.kv_get("kv:b").unwrap(),
         Some(Value::Int(99)),
-        "experiment branch should see its own mutations"
+        "experiment KV should see its own mutations"
+    );
+    assert_eq!(
+        db.json_get("doc:b", "$.v").unwrap(),
+        Some(Value::Int(99)),
+        "experiment JSON should see its own mutations"
+    );
+    let fork_vec = db
+        .vector_get(COLLECTION, "vec:b")
+        .unwrap()
+        .expect("experiment should have vec:b");
+    assert_eq!(
+        fork_vec.data.embedding,
+        vec![0.0, 0.0, 1.0],
+        "experiment vector embedding should see its own mutations"
+    );
+    let fork_node = db
+        .graph_get_node(GRAPH, "n:b")
+        .unwrap()
+        .expect("experiment should have n:b");
+    let fork_p = match &fork_node {
+        Value::Object(map) => match map.get("properties") {
+            Some(Value::Object(props)) => props.get("p").cloned(),
+            _ => None,
+        },
+        _ => None,
+    };
+    assert_eq!(
+        fork_p,
+        Some(Value::Int(99)),
+        "experiment graph node should see its own mutations, got {:?}",
+        fork_node
     );
 }
 
@@ -355,20 +421,27 @@ fn cross_primitive_as_of_max_returns_current() {
 }
 
 #[test]
-fn cross_primitive_rapid_writes_same_microsecond() {
-    // Write a tight burst of KV updates to the same key without any
-    // sleeps. The storage layer resolves timestamp ties by version-chain
-    // order (newest first), so the read must return the last write that
-    // was committed even when multiple writes share a microsecond.
+fn cross_primitive_rapid_writes_ordering() {
+    // Write a tight burst of KV updates to the same key. Multiple writes
+    // MAY share a microsecond timestamp on fast hardware; this test
+    // verifies that:
+    //   1. kv_getv returns all writes regardless of timestamp collisions
+    //   2. current read returns the last write (newest-first ordering
+    //      wins even when timestamps tie)
+    //   3. Ranging back by history index yields writes in reverse order
+    // If no two writes happen to share a microsecond on this run, the
+    // test still passes — but it logs whether any collisions occurred
+    // so regressions in the storage layer's tie-breaker are detectable.
     let db = create_strata();
 
-    for i in 0..20i64 {
+    const N: i64 = 200;
+    for i in 0..N {
         db.kv_put("rapid:k", Value::Int(i)).unwrap();
     }
 
     // The current read must return the last value written.
     let current = db.kv_get("rapid:k").unwrap();
-    assert_eq!(current, Some(Value::Int(19)));
+    assert_eq!(current, Some(Value::Int(N - 1)));
 
     // Full history must contain every write (no version-chain drops even
     // when timestamps collide).
@@ -378,11 +451,55 @@ fn cross_primitive_rapid_writes_same_microsecond() {
         .expect("history should exist");
     assert_eq!(
         history.len(),
-        20,
-        "kv_getv should return all 20 versions regardless of timestamp ties"
+        N as usize,
+        "kv_getv should return all {} versions regardless of timestamp ties",
+        N
+    );
+
+    // Newest-first ordering: history[0] must be the last write regardless
+    // of any timestamp collisions. This is the core invariant the test
+    // is checking — version-chain order wins over timestamp ties.
+    assert_eq!(
+        history[0].value,
+        Value::Int(N - 1),
+        "newest history entry should be the last write"
+    );
+    assert_eq!(
+        history[N as usize - 1].value,
+        Value::Int(0),
+        "oldest history entry should be the first write"
+    );
+
+    // Ensure every intermediate version is also present and in reverse
+    // order, so a version-chain bug that scrambles ordering would fail.
+    for (idx, entry) in history.iter().enumerate() {
+        let expected = N - 1 - (idx as i64);
+        assert_eq!(
+            entry.value,
+            Value::Int(expected),
+            "history[{}] expected Int({}), got {:?}",
+            idx,
+            expected,
+            entry.value
+        );
+    }
+
+    // Count how many adjacent pairs share a timestamp — documents whether
+    // the test actually exercised the same-microsecond branch on this
+    // hardware. On fast CI we typically see many collisions. This is
+    // informational only (no assertion), since it depends on clock
+    // resolution and scheduler timing.
+    let collisions = history
+        .windows(2)
+        .filter(|w| w[0].timestamp == w[1].timestamp)
+        .count();
+    eprintln!(
+        "rapid_writes: {}/{} adjacent pairs shared a microsecond timestamp",
+        collisions,
+        N as usize - 1
     );
 
     // With as_of = u64::MAX, the filter picks the newest version whose
     // timestamp <= u64::MAX — which is the last write.
-    assert_kv_marker(&db, "rapid:k", u64::MAX, 19);
+    assert_kv_marker(&db, "rapid:k", u64::MAX, N - 1);
 }
