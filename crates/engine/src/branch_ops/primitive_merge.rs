@@ -31,12 +31,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use once_cell::sync::OnceCell;
 use strata_core::types::{BranchId, TypeTag};
 use strata_core::StrataResult;
 
 use super::{
-    check_event_merge_divergence, check_graph_merge_divergence, MergeBase, MergeStrategy,
-    TypedEntries,
+    check_event_merge_divergence, check_graph_merge_divergence, classify_typed_entries_for_tag,
+    ConflictEntry, MergeAction, MergeBase, MergeStrategy, TypedEntries,
 };
 use crate::database::Database;
 
@@ -62,6 +63,49 @@ pub(crate) struct MergePrecheckCtx<'a> {
     pub typed_entries: &'a TypedEntries,
 }
 
+/// Context passed to `PrimitiveMergeHandler::plan`.
+///
+/// Plan runs after `precheck` and before the merge apply transaction.
+/// Each handler returns its own per-primitive write plan; the engine
+/// concatenates them all into the single apply transaction.
+///
+/// Phase 3b introduces this method on the trait alongside the
+/// `GraphMergeHandler::plan` semantic merge implementation. KV / JSON /
+/// Vector / Event handlers use the default trait implementation, which
+/// delegates to `classify_typed_entries_for_tag` for backward-compat with
+/// the Phase 2 single-classify behavior.
+///
+/// `pub` (re-exported from `strata_engine`) so primitive crates registering
+/// graph plan callbacks can borrow it through the function-pointer
+/// signature.
+#[allow(dead_code)] // forward-looking fields for Phase 4+ handlers
+pub struct MergePlanCtx<'a> {
+    /// The source branch (changes flowing into target).
+    pub source_id: BranchId,
+    /// The target branch (the merge destination).
+    pub target_id: BranchId,
+    /// Common ancestor metadata (branch + version).
+    pub merge_base: &'a MergeBase,
+    /// Conflict resolution strategy.
+    pub strategy: MergeStrategy,
+    /// Pre-gathered typed entries for ancestor / source / target.
+    pub typed_entries: &'a TypedEntries,
+}
+
+/// Result of one handler's `plan` method.
+///
+/// Contains the per-primitive write actions and any conflicts surfaced
+/// during planning. The engine concatenates plans from all handlers into
+/// the unified `merge_branches` apply transaction.
+pub struct PrimitiveMergePlan {
+    /// Write actions (puts and deletes) the engine should apply.
+    pub actions: Vec<MergeAction>,
+    /// Conflicts surfaced during planning. Cell-level conflicts honor
+    /// `MergeStrategy`; structural / referential-integrity conflicts are
+    /// always reported regardless of strategy.
+    pub conflicts: Vec<ConflictEntry>,
+}
+
 /// Context passed to `PrimitiveMergeHandler::post_commit`.
 ///
 /// Runs after the merge transaction has successfully committed. Phase 2
@@ -84,10 +128,15 @@ pub(crate) struct MergePostCommitCtx<'a> {
 /// A handler for per-primitive merge semantics.
 ///
 /// One implementation per `TypeTag`. Registered with a `MergeHandlerRegistry`
-/// constructed once per `merge_branches` call. The trait surface is
-/// intentionally minimal in Phase 2 (`precheck` + `post_commit` only); the
-/// `plan` method described in the design doc lands in Phase 3+ alongside the
-/// first handler that needs to produce a per-primitive write plan.
+/// constructed once per `merge_branches` call. The trait has three lifecycle
+/// methods: `precheck` (validate before any writes), `plan` (produce the
+/// per-primitive write actions), and `post_commit` (post-apply fix-ups).
+///
+/// Phase 2 introduced the dispatch with `precheck` + `post_commit`. Phase 3b
+/// added `plan` with a default impl that preserves Phase 2 behavior for
+/// KV/JSON/Vector/Event handlers (delegating to `classify_typed_entries_for_tag`).
+/// `GraphMergeHandler::plan` overrides the default with the real semantic
+/// graph merge.
 pub(crate) trait PrimitiveMergeHandler: Send + Sync {
     /// The primitive this handler owns.
     fn type_tag(&self) -> TypeTag;
@@ -96,9 +145,28 @@ pub(crate) trait PrimitiveMergeHandler: Send + Sync {
     ///
     /// Called once per merge, before any classification or write happens.
     /// Returning `Err` aborts the entire merge cleanly with no side
-    /// effects. Phase 2 only `EventMergeHandler` returns errors here; the
-    /// other handlers are no-ops.
+    /// effects. Phase 1 (Event) and Phase 3 (Graph) used this for tactical
+    /// refusal of unsafe merges. Phase 3b's semantic graph merge moves
+    /// validation into `plan`, so `GraphMergeHandler::precheck` becomes a
+    /// no-op while the Event check still lives here.
     fn precheck(&self, ctx: &MergePrecheckCtx<'_>) -> StrataResult<()>;
+
+    /// Produce the per-primitive write plan.
+    ///
+    /// Default implementation delegates to `classify_typed_entries_for_tag`
+    /// — the same 14-case decision matrix that ran globally before Phase 3b.
+    /// Handlers that need primitive-aware merge logic (like Graph, which
+    /// needs to decode packed adjacency lists and validate referential
+    /// integrity) override this with their own implementation.
+    ///
+    /// The default impl makes Phase 3b a strict superset of Phase 2 for
+    /// non-graph primitives: KV, JSON, Vector, and Event keep their exact
+    /// pre-Phase-3b classification behavior with zero overhead.
+    fn plan(&self, ctx: &MergePlanCtx<'_>) -> StrataResult<PrimitiveMergePlan> {
+        let (actions, conflicts) =
+            classify_typed_entries_for_tag(ctx.typed_entries, ctx.strategy, self.type_tag());
+        Ok(PrimitiveMergePlan { actions, conflicts })
+    }
 
     /// Apply post-commit fix-ups to secondary state.
     ///
@@ -257,23 +325,56 @@ impl PrimitiveMergeHandler for VectorMergeHandler {
     }
 }
 
+/// Function pointer type for the graph semantic merge plan.
+///
+/// The graph crate provides this implementation via
+/// `register_graph_merge_plan`. The engine's `GraphMergeHandler::plan`
+/// method dispatches to it if registered, falling back to the Phase 3
+/// tactical refusal + default classify behavior if not.
+///
+/// Returns the per-handler `PrimitiveMergePlan` shape directly so the
+/// graph crate doesn't need access to engine-internal types beyond what's
+/// already `pub` (`MergeAction`, `ConflictEntry`).
+///
+/// The function may return `Err` if decoding the cell's adjacency lists
+/// fails (e.g., corrupt packed binary on disk).
+pub type GraphMergePlanFn = fn(&MergePlanCtx<'_>) -> StrataResult<PrimitiveMergePlan>;
+
+/// Registered graph semantic merge implementation, set by the graph
+/// crate at startup via `register_graph_merge_plan`. If unset (e.g.
+/// in unit tests that don't load the graph crate), `GraphMergeHandler`
+/// falls back to Phase 3's tactical refusal + the default classify
+/// behavior.
+static GRAPH_MERGE_PLAN_FN: OnceCell<GraphMergePlanFn> = OnceCell::new();
+
+/// Register the graph crate's semantic merge implementation.
+///
+/// Should be called once at application/test startup, before any
+/// `merge_branches` calls. Subsequent calls are no-ops (the first
+/// registration wins).
+///
+/// The standard test fixtures call this from `ensure_recovery_registered`
+/// alongside the existing `register_vector_recovery` / `register_search_recovery`
+/// hooks.
+pub fn register_graph_merge_plan(plan_fn: GraphMergePlanFn) {
+    let _ = GRAPH_MERGE_PLAN_FN.set(plan_fn);
+}
+
 /// Graph merge handler.
 ///
-/// Phase 3 ships a tactical refusal of divergent graph merges, mirroring the
-/// Phase 1 Event safety pattern. The generic three-way merge treats the
-/// `{graph}/fwd/{src}` and `{graph}/rev/{dst}` packed adjacency lists as
-/// independent KV keys, which produces silent corruption (bidirectional
-/// adjacency inconsistency under LWW; dangling references from concurrent
-/// node-delete + edge-add) whenever both branches modify graph state since
-/// the merge base. `precheck` refuses these cases via
-/// `super::check_graph_merge_divergence`. Single-sided graph merges
-/// continue working — every edge addition writes both `fwd/{src}` and
-/// `rev/{dst}` together as one transactional unit, so the generic merge
-/// transports them as a coherent group.
+/// Phase 3b ships a real semantic graph merge in the graph crate that
+/// decodes packed adjacency lists, validates referential integrity, and
+/// re-encodes the projected state. The graph crate registers its
+/// implementation via `register_graph_merge_plan`. This handler dispatches
+/// to it when `plan` is called.
 ///
-/// Phase 3b (future) implements the real semantic merge: decoded-edge-level
-/// diffing, additive merging of disjoint edges, referential integrity
-/// validation, and the `plan` trait method. See the design doc.
+/// If no graph plan function is registered (typical for engine-only unit
+/// tests that don't load the graph crate), the handler falls back to:
+/// - `precheck`: Phase 3 tactical refusal of divergent graph merges
+/// - `plan`: the default 14-case classification (unchanged from Phase 2)
+///
+/// `cherry_pick_from_diff` still uses the Phase 3 tactical refusal helper
+/// directly. Phase 3b.5 will refactor cherry-pick to use the semantic merge.
 pub(crate) struct GraphMergeHandler;
 
 impl PrimitiveMergeHandler for GraphMergeHandler {
@@ -282,6 +383,12 @@ impl PrimitiveMergeHandler for GraphMergeHandler {
     }
 
     fn precheck(&self, ctx: &MergePrecheckCtx<'_>) -> StrataResult<()> {
+        // If a semantic merge is registered, validation lives inside `plan`.
+        // Otherwise, fall back to Phase 3's tactical refusal so divergent
+        // graph merges still get caught.
+        if GRAPH_MERGE_PLAN_FN.get().is_some() {
+            return Ok(());
+        }
         for ((space, type_tag), cell) in &ctx.typed_entries.cells {
             if *type_tag != TypeTag::Graph {
                 continue;
@@ -291,7 +398,25 @@ impl PrimitiveMergeHandler for GraphMergeHandler {
         Ok(())
     }
 
+    fn plan(&self, ctx: &MergePlanCtx<'_>) -> StrataResult<PrimitiveMergePlan> {
+        if let Some(plan_fn) = GRAPH_MERGE_PLAN_FN.get() {
+            return plan_fn(ctx);
+        }
+        // No semantic merge registered → use the default classify path.
+        // Phase 3's tactical refusal already fired in precheck above for
+        // divergent merges; this branch only runs for safe (single-sided
+        // or empty) graph merges, where the default classify is correct.
+        let (actions, conflicts) =
+            classify_typed_entries_for_tag(ctx.typed_entries, ctx.strategy, TypeTag::Graph);
+        Ok(PrimitiveMergePlan { actions, conflicts })
+    }
+
     fn post_commit(&self, _ctx: &MergePostCommitCtx<'_>) -> StrataResult<()> {
+        // Phase 3b: nothing to refresh post-commit. The packed adjacency
+        // lists ARE the storage; there's no in-memory cache to rebuild
+        // (`AdjacencyIndex` is built on demand). The semantic merge in
+        // `plan` already wrote the projected fwd/rev lists with
+        // bidirectional consistency.
         Ok(())
     }
 }

@@ -1148,20 +1148,19 @@ fn event_merge_cross_space_divergence_succeeds() {
 }
 
 // ============================================================================
-// Graph Merge Safety (Phase 3 of primitive-aware merge)
+// Graph Merge Safety (Phase 3b of primitive-aware merge)
 // ============================================================================
 //
-// See docs/design/branching/primitive-aware-merge.md §Phase 3. The generic
-// three-way merge treats `{graph}/fwd/{src}` and `{graph}/rev/{dst}` packed
-// adjacency lists as independent KV keys, which produces silent corruption
-// when both branches modify graph state since the merge base. Phase 3 adds
-// a tactical refusal that fires before any writes happen. Single-sided
-// graph merges (only one branch touches graph data) continue working
-// because every edge addition writes both fwd/{src} and rev/{dst} together
-// as one transactional unit.
+// See docs/design/branching/primitive-aware-merge.md §Phase 3b. Phase 3b
+// replaces Phase 3's tactical refusal of divergent graph merges with a
+// real semantic merge: decoded-edge-level diffing, additive merging of
+// disjoint edges, and referential integrity validation. Single-sided
+// merges still work, dangling-edge / orphan-reference scenarios still
+// reject (with structured errors), and disjoint additions on both sides
+// now SUCCEED instead of being conservatively rejected.
 
 #[test]
-fn graph_merge_divergent_rejects() {
+fn graph_merge_disjoint_node_additions_succeeds() {
     use strata_graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
@@ -1213,53 +1212,64 @@ fn graph_merge_divergent_rejects() {
         )
         .unwrap();
 
-    // LWW must reject.
-    let err = branch_ops::merge_branches(
+    // Phase 3b: disjoint additions on both sides merge cleanly. Phase 3
+    // would have rejected this scenario; the semantic merge correctly
+    // recognizes that source's "carol+alice→carol" and target's
+    // "dave+bob→dave" are independent and combinable.
+    branch_ops::merge_branches(
         &test_db.db,
         "source",
         "target",
         MergeStrategy::LastWriterWins,
         None,
     )
-    .expect_err("divergent graph merge must be rejected");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("merge unsupported: divergent graph writes"),
-        "error message should identify the refusal, got: {msg}"
-    );
-    assert!(
-        msg.contains("space '_graph_'"),
-        "error message should name the graph space, got: {msg}"
-    );
+    .expect("disjoint divergent graph merge should succeed under Phase 3b");
 
-    // Strict must also reject.
-    let err =
-        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
-            .expect_err("divergent graph merge must be rejected under Strict");
-    assert!(
-        err.to_string()
-            .contains("merge unsupported: divergent graph writes"),
-        "Strict rejection should also use the divergence error"
-    );
-
-    // Target state must be untouched. Target still has its own dave node and
-    // bob→dave edge; source's carol node and alice→carol edge did NOT leak in.
+    // After the merge, target has BOTH source's additions AND its own.
+    assert!(p.graph.get_node(target_id, "g", "alice").unwrap().is_some());
+    assert!(p.graph.get_node(target_id, "g", "bob").unwrap().is_some());
+    assert!(p.graph.get_node(target_id, "g", "carol").unwrap().is_some());
     assert!(p.graph.get_node(target_id, "g", "dave").unwrap().is_some());
-    assert!(p.graph.get_node(target_id, "g", "carol").unwrap().is_none());
+
+    // Bidirectional consistency: alice→carol visible from both sides.
     let alice_outgoing = p
         .graph
         .outgoing_neighbors(target_id, "g", "alice", None)
         .unwrap();
+    let alice_targets: std::collections::HashSet<String> =
+        alice_outgoing.iter().map(|n| n.node_id.clone()).collect();
     assert!(
-        alice_outgoing.is_empty(),
-        "source's alice→carol edge must not have leaked into target"
+        alice_targets.contains("carol"),
+        "alice→carol missing on target"
     );
+
+    let carol_incoming = p
+        .graph
+        .incoming_neighbors(target_id, "g", "carol", None)
+        .unwrap();
+    let carol_sources: std::collections::HashSet<String> =
+        carol_incoming.iter().map(|n| n.node_id.clone()).collect();
+    assert!(
+        carol_sources.contains("alice"),
+        "carol's incoming must include alice (bidirectional consistency)"
+    );
+
+    // bob→dave (target's edge) also intact.
     let bob_outgoing = p
         .graph
         .outgoing_neighbors(target_id, "g", "bob", None)
         .unwrap();
-    assert_eq!(bob_outgoing.len(), 1, "target's bob→dave edge must survive");
-    assert_eq!(bob_outgoing[0].node_id, "dave");
+    let bob_targets: std::collections::HashSet<String> =
+        bob_outgoing.iter().map(|n| n.node_id.clone()).collect();
+    assert!(bob_targets.contains("dave"));
+
+    let dave_incoming = p
+        .graph
+        .incoming_neighbors(target_id, "g", "dave", None)
+        .unwrap();
+    let dave_sources: std::collections::HashSet<String> =
+        dave_incoming.iter().map(|n| n.node_id.clone()).collect();
+    assert!(dave_sources.contains("bob"));
 }
 
 #[test]
@@ -1472,13 +1482,12 @@ fn graph_merge_concurrent_node_delete_and_edge_add_rejected() {
 
     // Scenario B from the design doc — the most subtle corruption pattern.
     // Pre-fork: nodes alice and bob exist on target.
-    // Source: deletes alice (drops n/alice, fwd/alice, and updates rev/* for
-    //         every node alice referenced).
-    // Target: adds an outgoing edge alice→bob (writes fwd/alice and rev/bob).
-    // Generic merge would resolve n/alice and fwd/alice via LWW (source wins),
-    // but rev/bob's new entry from target would be classified TargetAdded and
-    // survive — leaving rev/bob referencing the now-deleted alice node.
-    // Phase 3's tactical refusal must catch this before any writes happen.
+    // Source: deletes alice.
+    // Target: adds an outgoing edge alice→bob (alice still exists on target).
+    // Phase 3b's semantic merge sees: projected nodes lacks alice, but
+    // projected edges has alice→bob → DanglingEdge / OrphanedReference.
+    // Both are fatal regardless of strategy, so the merge is refused with
+    // a structured error before any writes happen.
     let test_db = TestDb::new();
     let branch_index = test_db.branch_index();
     let p = test_db.all_primitives();
@@ -1510,7 +1519,9 @@ fn graph_merge_concurrent_node_delete_and_edge_add_rejected() {
         )
         .unwrap();
 
-    // Merge must reject — both sides modified graph state since the fork.
+    // LWW must reject — referential integrity is fatal regardless of
+    // strategy. Phase 3b emits a structured error from the graph plan
+    // function naming the violation.
     let err = branch_ops::merge_branches(
         &test_db.db,
         "source",
@@ -1518,11 +1529,25 @@ fn graph_merge_concurrent_node_delete_and_edge_add_rejected() {
         MergeStrategy::LastWriterWins,
         None,
     )
-    .expect_err("concurrent node delete + edge add must be rejected");
+    .expect_err("dangling edge / orphan reference must be rejected even under LWW");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("merge unsupported: graph referential integrity violation"),
+        "rejection must use the Phase 3b structured error, got: {msg}"
+    );
+    assert!(
+        msg.contains("alice"),
+        "error must name the offending node, got: {msg}"
+    );
+
+    // Strict must also reject (same error path).
+    let err =
+        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+            .expect_err("dangling edge / orphan reference must reject under Strict too");
     assert!(
         err.to_string()
-            .contains("merge unsupported: divergent graph writes"),
-        "rejection must use the graph divergence error, got: {err}"
+            .contains("merge unsupported: graph referential integrity violation"),
+        "Strict rejection should use the same Phase 3b structured error"
     );
 
     // Target state untouched: alice still exists, alice→bob edge intact.
@@ -1533,6 +1558,273 @@ fn graph_merge_concurrent_node_delete_and_edge_add_rejected() {
         .unwrap();
     assert_eq!(alice_outgoing.len(), 1);
     assert_eq!(alice_outgoing[0].node_id, "bob");
+}
+
+// ============================================================================
+// Phase 3b: new test cases
+// ============================================================================
+
+#[test]
+fn graph_merge_disjoint_edge_additions_succeeds() {
+    use strata_graph::types::{EdgeData, NodeData};
+
+    // Pre-fork: alice, bob, carol, dave (no edges).
+    // Source adds alice→carol. Target adds bob→dave.
+    // Phase 3 would have rejected this. Phase 3b merges additively.
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    p.graph.create_graph(target_id, "g", None).unwrap();
+    for n in &["alice", "bob", "carol", "dave"] {
+        p.graph
+            .add_node(target_id, "g", n, NodeData::default())
+            .unwrap();
+    }
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    p.graph
+        .add_edge(
+            source_id,
+            "g",
+            "alice",
+            "carol",
+            "follows",
+            EdgeData::default(),
+        )
+        .unwrap();
+    p.graph
+        .add_edge(
+            target_id,
+            "g",
+            "bob",
+            "dave",
+            "follows",
+            EdgeData::default(),
+        )
+        .unwrap();
+
+    branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("disjoint edge additions on both sides should merge cleanly");
+
+    // Both edges present and bidirectionally consistent on target.
+    let alice_out = p
+        .graph
+        .outgoing_neighbors(target_id, "g", "alice", None)
+        .unwrap();
+    assert_eq!(alice_out.len(), 1);
+    assert_eq!(alice_out[0].node_id, "carol");
+
+    let carol_in = p
+        .graph
+        .incoming_neighbors(target_id, "g", "carol", None)
+        .unwrap();
+    assert_eq!(carol_in.len(), 1);
+    assert_eq!(carol_in[0].node_id, "alice");
+
+    let bob_out = p
+        .graph
+        .outgoing_neighbors(target_id, "g", "bob", None)
+        .unwrap();
+    assert_eq!(bob_out.len(), 1);
+    assert_eq!(bob_out[0].node_id, "dave");
+
+    let dave_in = p
+        .graph
+        .incoming_neighbors(target_id, "g", "dave", None)
+        .unwrap();
+    assert_eq!(dave_in.len(), 1);
+    assert_eq!(dave_in[0].node_id, "bob");
+}
+
+#[test]
+fn graph_merge_dangling_edge_rejected() {
+    use strata_graph::types::{EdgeData, NodeData};
+
+    // Pre-fork: alice, carol exist.
+    // Source adds edge alice→carol.
+    // Target deletes carol.
+    // Result: projected edges has alice→carol but projected nodes lacks
+    // carol → DanglingEdge → fatal regardless of strategy.
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    p.graph.create_graph(target_id, "g", None).unwrap();
+    p.graph
+        .add_node(target_id, "g", "alice", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_node(target_id, "g", "carol", NodeData::default())
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    p.graph
+        .add_edge(
+            source_id,
+            "g",
+            "alice",
+            "carol",
+            "follows",
+            EdgeData::default(),
+        )
+        .unwrap();
+    p.graph.remove_node(target_id, "g", "carol").unwrap();
+
+    let err = branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect_err("dangling edge must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("merge unsupported: graph referential integrity violation"),
+        "rejection must use the Phase 3b structured error, got: {msg}"
+    );
+    assert!(
+        msg.contains("carol") || msg.contains("alice"),
+        "error must name an involved node, got: {msg}"
+    );
+}
+
+#[test]
+fn graph_merge_conflicting_node_props_lww_source_wins() {
+    use strata_graph::types::NodeData;
+
+    // Pre-fork: alice exists with role=user.
+    // Source modifies alice's properties to role=admin.
+    // Target modifies alice's properties to role=guest.
+    // Under LWW, source wins; under Strict, the merge rejects.
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    p.graph.create_graph(target_id, "g", None).unwrap();
+    let original = NodeData {
+        entity_ref: None,
+        properties: Some(serde_json::json!({"role": "user"})),
+        object_type: None,
+    };
+    p.graph.add_node(target_id, "g", "alice", original).unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    let source_data = NodeData {
+        entity_ref: None,
+        properties: Some(serde_json::json!({"role": "admin"})),
+        object_type: None,
+    };
+    let target_data = NodeData {
+        entity_ref: None,
+        properties: Some(serde_json::json!({"role": "guest"})),
+        object_type: None,
+    };
+    p.graph
+        .add_node(source_id, "g", "alice", source_data.clone())
+        .unwrap();
+    p.graph
+        .add_node(target_id, "g", "alice", target_data)
+        .unwrap();
+
+    let info = branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("LWW node prop conflict should resolve, not error");
+
+    // Conflict was reported in MergeInfo.conflicts even though merge succeeded.
+    assert!(
+        !info.conflicts.is_empty(),
+        "conflict should be reported in MergeInfo.conflicts under LWW"
+    );
+
+    // Source's value won.
+    let alice = p
+        .graph
+        .get_node(target_id, "g", "alice")
+        .unwrap()
+        .expect("alice still exists post-merge");
+    assert_eq!(alice, source_data);
+}
+
+#[test]
+fn graph_merge_conflicting_node_props_strict_rejects() {
+    use strata_graph::types::NodeData;
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    p.graph.create_graph(target_id, "g", None).unwrap();
+    let original = NodeData {
+        entity_ref: None,
+        properties: Some(serde_json::json!({"role": "user"})),
+        object_type: None,
+    };
+    p.graph
+        .add_node(target_id, "g", "alice", original.clone())
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    p.graph
+        .add_node(
+            source_id,
+            "g",
+            "alice",
+            NodeData {
+                entity_ref: None,
+                properties: Some(serde_json::json!({"role": "admin"})),
+                object_type: None,
+            },
+        )
+        .unwrap();
+    p.graph
+        .add_node(
+            target_id,
+            "g",
+            "alice",
+            NodeData {
+                entity_ref: None,
+                properties: Some(serde_json::json!({"role": "guest"})),
+                object_type: None,
+            },
+        )
+        .unwrap();
+
+    let err =
+        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+            .expect_err("Strict must reject node property conflicts");
+    assert!(
+        err.to_string().contains("Merge conflict"),
+        "Strict rejection message should mention conflict, got: {err}"
+    );
 }
 
 // ============================================================================

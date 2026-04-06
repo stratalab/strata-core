@@ -67,13 +67,19 @@ use crate::ipc::{Backend, IpcClient};
 use crate::types::BranchId;
 use crate::{Command, Error, Executor, Output, Result, Session};
 
-/// Ensure recovery participants are registered before opening any database.
+/// Ensure recovery participants and primitive merge handlers are registered
+/// before opening any database.
 static RECOVERY_INIT: Once = Once::new();
 
 fn ensure_vector_recovery() {
     RECOVERY_INIT.call_once(|| {
         strata_vector::register_vector_recovery();
         strata_engine::register_search_recovery();
+        // Phase 3b: register the semantic graph merge implementation. Without
+        // this, `merge_branches` falls back to the Phase 3 tactical refusal
+        // and rejects all divergent graph merges, even disjoint ones that
+        // Phase 3b would handle correctly.
+        strata_graph::register_graph_semantic_merge();
     });
 }
 

@@ -15,12 +15,16 @@ pub mod ext;
 pub mod integrity;
 pub mod keys;
 mod lifecycle;
+pub mod merge;
+pub mod merge_handler;
 mod nodes;
 pub mod ontology;
 pub mod packed;
 mod snapshot;
 pub mod traversal;
 pub mod types;
+
+pub use merge_handler::register_graph_semantic_merge;
 
 pub use branch_dag::GraphSubsystem;
 pub use strata_core::branch_dag::{
