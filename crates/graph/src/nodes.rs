@@ -142,6 +142,66 @@ impl GraphStore {
         })
     }
 
+    // =========================================================================
+    // Time-Travel API
+    // =========================================================================
+
+    /// Get node data as of a past timestamp (microseconds since epoch).
+    ///
+    /// Returns the latest node data whose commit timestamp <= as_of_ts, or None.
+    /// This is a non-transactional read directly from the storage version chain.
+    pub fn get_node_at(
+        &self,
+        branch_id: BranchId,
+        graph: &str,
+        node_id: &str,
+        as_of_ts: u64,
+    ) -> StrataResult<Option<NodeData>> {
+        let user_key = keys::node_key(graph, node_id);
+        let storage_key = keys::storage_key(branch_id, &user_key);
+        let result = self.db.get_at_timestamp(&storage_key, as_of_ts)?;
+        match result {
+            Some(vv) => {
+                let data = if let Value::String(s) = vv.value {
+                    serde_json::from_str(&s).map_err(|e| {
+                        StrataError::serialization(format!(
+                            "Corrupt node data in graph '{}': {}",
+                            graph, e
+                        ))
+                    })?
+                } else {
+                    NodeData::default()
+                };
+                Ok(Some(data))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// List node IDs as of a past timestamp (microseconds since epoch).
+    ///
+    /// Returns node IDs whose values existed at the given timestamp.
+    /// This is a non-transactional read directly from the storage version chain.
+    pub fn list_nodes_at(
+        &self,
+        branch_id: BranchId,
+        graph: &str,
+        as_of_ts: u64,
+    ) -> StrataResult<Vec<String>> {
+        let prefix = keys::all_nodes_prefix(graph);
+        let prefix_key = keys::storage_key(branch_id, &prefix);
+        let results = self.db.scan_prefix_at_timestamp(&prefix_key, as_of_ts)?;
+        let mut node_ids = Vec::new();
+        for (key, _) in results {
+            if let Some(user_key) = key.user_key_string() {
+                if let Some(node_id) = keys::parse_node_key(graph, &user_key) {
+                    node_ids.push(node_id);
+                }
+            }
+        }
+        Ok(node_ids)
+    }
+
     /// Look up all (graph, node_id) pairs bound to a given entity ref URI.
     pub fn nodes_for_entity(
         &self,
@@ -887,5 +947,145 @@ mod tests {
 
         assert!(page.items.is_empty());
         assert!(page.next_cursor.is_none());
+    }
+
+    // =========================================================================
+    // Time-travel tests
+    // =========================================================================
+
+    /// Helper: current timestamp in microseconds.
+    fn now_micros() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64
+    }
+
+    #[test]
+    fn get_node_at_returns_historical_value() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(
+            b,
+            "g",
+            "n1",
+            NodeData {
+                properties: Some(serde_json::json!({"v": 1})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Record timestamp after v1
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let ts_after_v1 = now_micros();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // Update to v2
+        gs.add_node(
+            b,
+            "g",
+            "n1",
+            NodeData {
+                properties: Some(serde_json::json!({"v": 2})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // get_node_at(ts_after_v1) should return v1
+        let old = gs.get_node_at(b, "g", "n1", ts_after_v1).unwrap().unwrap();
+        assert_eq!(old.properties, Some(serde_json::json!({"v": 1})));
+
+        // Current get_node should return v2
+        let current = gs.get_node(b, "g", "n1").unwrap().unwrap();
+        assert_eq!(current.properties, Some(serde_json::json!({"v": 2})));
+    }
+
+    #[test]
+    fn get_node_at_returns_none_before_creation() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        let ts_before = now_micros();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "n1", NodeData::default()).unwrap();
+
+        assert!(gs.get_node_at(b, "g", "n1", ts_before).unwrap().is_none());
+    }
+
+    #[test]
+    fn get_node_at_returns_none_after_deletion() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "n1", NodeData::default()).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let ts_before_delete = now_micros();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        gs.remove_node(b, "g", "n1").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let ts_after_delete = now_micros();
+
+        // Before deletion: visible
+        assert!(gs
+            .get_node_at(b, "g", "n1", ts_before_delete)
+            .unwrap()
+            .is_some());
+        // After deletion: gone
+        assert!(gs
+            .get_node_at(b, "g", "n1", ts_after_delete)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn list_nodes_at_returns_historical_list() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "a", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "b", NodeData::default()).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let ts1 = now_micros();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // Add c, remove a
+        gs.add_node(b, "g", "c", NodeData::default()).unwrap();
+        gs.remove_node(b, "g", "a").unwrap();
+
+        // At ts1: should see [a, b]
+        let mut old = gs.list_nodes_at(b, "g", ts1).unwrap();
+        old.sort();
+        assert_eq!(old, vec!["a", "b"]);
+
+        // Current: should see [b, c]
+        let mut current = gs.list_nodes(b, "g").unwrap();
+        current.sort();
+        assert_eq!(current, vec!["b", "c"]);
+    }
+
+    #[test]
+    fn list_nodes_at_empty_before_any_data() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        let ts_before = now_micros();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "a", NodeData::default()).unwrap();
+
+        let nodes = gs.list_nodes_at(b, "g", ts_before).unwrap();
+        assert!(nodes.is_empty());
     }
 }

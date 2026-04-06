@@ -124,10 +124,34 @@ impl Strata {
             branch: self.branch_id(),
             graph: graph.to_string(),
             node_id: node_id.to_string(),
+            as_of: None,
         })? {
             Output::Maybe(v) => Ok(v),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphGetNode".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
+
+    /// Get a node's data as of a past timestamp, or None if it didn't exist then.
+    ///
+    /// `as_of_ts` is microseconds since epoch.
+    pub fn graph_get_node_at(
+        &self,
+        graph: &str,
+        node_id: &str,
+        as_of_ts: u64,
+    ) -> Result<Option<Value>> {
+        match self.execute_cmd(Command::GraphGetNode {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+            node_id: node_id.to_string(),
+            as_of: Some(as_of_ts),
+        })? {
+            Output::Maybe(v) => Ok(v),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphGetNode (as_of)".into(),
                 hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
@@ -153,10 +177,28 @@ impl Strata {
         match self.execute_cmd(Command::GraphListNodes {
             branch: self.branch_id(),
             graph: graph.to_string(),
+            as_of: None,
         })? {
             Output::Keys(ids) => Ok(ids),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphListNodes".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
+
+    /// List all node IDs in a graph as of a past timestamp.
+    ///
+    /// `as_of_ts` is microseconds since epoch.
+    pub fn graph_list_nodes_at(&self, graph: &str, as_of_ts: u64) -> Result<Vec<String>> {
+        match self.execute_cmd(Command::GraphListNodes {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+            as_of: Some(as_of_ts),
+        })? {
+            Output::Keys(ids) => Ok(ids),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphListNodes (as_of)".into(),
                 hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
@@ -349,10 +391,39 @@ impl Strata {
             node_id: node_id.to_string(),
             direction: Some(direction.to_string()),
             edge_type: edge_type.map(|s| s.to_string()),
+            as_of: None,
         })? {
             Output::GraphNeighbors(hits) => Ok(hits),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for GraphNeighbors".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
+
+    /// Get neighbors of a node as of a past timestamp.
+    ///
+    /// `direction` can be `"outgoing"` (default), `"incoming"`, or `"both"`.
+    /// `as_of_ts` is microseconds since epoch.
+    pub fn graph_neighbors_at(
+        &self,
+        graph: &str,
+        node_id: &str,
+        direction: &str,
+        edge_type: Option<&str>,
+        as_of_ts: u64,
+    ) -> Result<Vec<GraphNeighborHit>> {
+        match self.execute_cmd(Command::GraphNeighbors {
+            branch: self.branch_id(),
+            graph: graph.to_string(),
+            node_id: node_id.to_string(),
+            direction: Some(direction.to_string()),
+            edge_type: edge_type.map(|s| s.to_string()),
+            as_of: Some(as_of_ts),
+        })? {
+            Output::GraphNeighbors(hits) => Ok(hits),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for GraphNeighbors (as_of)".into(),
                 hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }

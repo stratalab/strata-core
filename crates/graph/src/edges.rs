@@ -92,6 +92,113 @@ impl GraphStore {
         })
     }
 
+    // =========================================================================
+    // Time-Travel API
+    // =========================================================================
+
+    /// Get neighbors of a node as of a past timestamp (microseconds since epoch).
+    ///
+    /// Reads the packed adjacency list from the storage version chain at the
+    /// given timestamp. This is a non-transactional read.
+    pub fn neighbors_at(
+        &self,
+        branch_id: BranchId,
+        graph: &str,
+        node_id: &str,
+        direction: Direction,
+        edge_type_filter: Option<&str>,
+        as_of_ts: u64,
+    ) -> StrataResult<Vec<Neighbor>> {
+        match direction {
+            Direction::Outgoing => {
+                self.outgoing_neighbors_at(branch_id, graph, node_id, edge_type_filter, as_of_ts)
+            }
+            Direction::Incoming => {
+                self.incoming_neighbors_at(branch_id, graph, node_id, edge_type_filter, as_of_ts)
+            }
+            Direction::Both => {
+                let mut out = self.outgoing_neighbors_at(
+                    branch_id,
+                    graph,
+                    node_id,
+                    edge_type_filter,
+                    as_of_ts,
+                )?;
+                let inc = self.incoming_neighbors_at(
+                    branch_id,
+                    graph,
+                    node_id,
+                    edge_type_filter,
+                    as_of_ts,
+                )?;
+                out.extend(inc);
+                Ok(out)
+            }
+        }
+    }
+
+    fn outgoing_neighbors_at(
+        &self,
+        branch_id: BranchId,
+        graph: &str,
+        node_id: &str,
+        edge_type_filter: Option<&str>,
+        as_of_ts: u64,
+    ) -> StrataResult<Vec<Neighbor>> {
+        let user_key = keys::forward_adj_key(graph, node_id);
+        let storage_key = keys::storage_key(branch_id, &user_key);
+        match self.db.get_at_timestamp(&storage_key, as_of_ts)? {
+            Some(vv) => {
+                if let Value::Bytes(bytes) = vv.value {
+                    let adj = packed::decode(&bytes)?;
+                    Ok(adj
+                        .into_iter()
+                        .filter(|(_, et, _)| edge_type_filter.is_none_or(|f| et == f))
+                        .map(|(target_id, edge_type, edge_data)| Neighbor {
+                            node_id: target_id,
+                            edge_type,
+                            edge_data,
+                        })
+                        .collect())
+                } else {
+                    Ok(Vec::new())
+                }
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn incoming_neighbors_at(
+        &self,
+        branch_id: BranchId,
+        graph: &str,
+        node_id: &str,
+        edge_type_filter: Option<&str>,
+        as_of_ts: u64,
+    ) -> StrataResult<Vec<Neighbor>> {
+        let user_key = keys::reverse_adj_key(graph, node_id);
+        let storage_key = keys::storage_key(branch_id, &user_key);
+        match self.db.get_at_timestamp(&storage_key, as_of_ts)? {
+            Some(vv) => {
+                if let Value::Bytes(bytes) = vv.value {
+                    let adj = packed::decode(&bytes)?;
+                    Ok(adj
+                        .into_iter()
+                        .filter(|(_, et, _)| edge_type_filter.is_none_or(|f| et == f))
+                        .map(|(target_id, edge_type, edge_data)| Neighbor {
+                            node_id: target_id,
+                            edge_type,
+                            edge_data,
+                        })
+                        .collect())
+                } else {
+                    Ok(Vec::new())
+                }
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Get all edges in a graph (for snapshot).
     pub fn all_edges(&self, branch_id: BranchId, graph: &str) -> StrataResult<Vec<Edge>> {
         let prefix = keys::all_forward_adj_prefix(graph);
@@ -815,5 +922,162 @@ mod tests {
             "All 40 concurrent edges should be present, got {}",
             out.len()
         );
+    }
+
+    // =========================================================================
+    // Time-travel tests
+    // =========================================================================
+
+    /// Helper: current timestamp in microseconds.
+    fn now_micros() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64
+    }
+
+    #[test]
+    fn neighbors_at_returns_historical_edges() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
+
+        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let ts1 = now_micros();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        gs.add_edge(b, "g", "A", "C", "KNOWS", EdgeData::default())
+            .unwrap();
+
+        // At ts1: A should have only B as outgoing neighbor
+        let old = gs
+            .neighbors_at(b, "g", "A", Direction::Outgoing, None, ts1)
+            .unwrap();
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].node_id, "B");
+
+        // Current: A should have B and C
+        let current = gs.outgoing_neighbors(b, "g", "A", None).unwrap();
+        assert_eq!(current.len(), 2);
+    }
+
+    #[test]
+    fn neighbors_at_returns_empty_after_edge_removal() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+
+        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let ts_before_remove = now_micros();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        gs.remove_edge(b, "g", "A", "B", "KNOWS").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let ts_after_remove = now_micros();
+
+        // Before removal: edge exists
+        let before = gs
+            .neighbors_at(b, "g", "A", Direction::Outgoing, None, ts_before_remove)
+            .unwrap();
+        assert_eq!(before.len(), 1);
+
+        // After removal: no edges
+        let after = gs
+            .neighbors_at(b, "g", "A", Direction::Outgoing, None, ts_after_remove)
+            .unwrap();
+        assert!(after.is_empty());
+    }
+
+    #[test]
+    fn neighbors_at_incoming_direction() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+
+        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let ts = now_micros();
+
+        // B should have A as incoming neighbor at ts
+        let incoming = gs
+            .neighbors_at(b, "g", "B", Direction::Incoming, None, ts)
+            .unwrap();
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].node_id, "A");
+    }
+
+    #[test]
+    fn neighbors_at_with_edge_type_filter() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
+
+        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "A", "C", "TRUSTS", EdgeData::default())
+            .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let ts = now_micros();
+
+        // Filter to KNOWS only
+        let knows_only = gs
+            .neighbors_at(b, "g", "A", Direction::Outgoing, Some("KNOWS"), ts)
+            .unwrap();
+        assert_eq!(knows_only.len(), 1);
+        assert_eq!(knows_only[0].node_id, "B");
+
+        // Filter to TRUSTS only
+        let trusts_only = gs
+            .neighbors_at(b, "g", "A", Direction::Outgoing, Some("TRUSTS"), ts)
+            .unwrap();
+        assert_eq!(trusts_only.len(), 1);
+        assert_eq!(trusts_only[0].node_id, "C");
+    }
+
+    #[test]
+    fn neighbors_at_both_directions() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+
+        gs.create_graph(b, "g", None).unwrap();
+        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
+
+        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "g", "C", "A", "FOLLOWS", EdgeData::default())
+            .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let ts = now_micros();
+
+        let both = gs
+            .neighbors_at(b, "g", "A", Direction::Both, None, ts)
+            .unwrap();
+        assert_eq!(both.len(), 2, "Should have 1 outgoing + 1 incoming");
     }
 }
