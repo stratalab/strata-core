@@ -2587,8 +2587,14 @@ impl SegmentedStore {
             Some(b) => b,
             None => {
                 // Branch was deleted between Phase 1 and Phase 3.
-                // Clean up the orphan segment file we just built.
+                // Clean up the orphan segment file we just built. Also try
+                // to remove the branch directory — `create_dir_all` above
+                // may have recreated it after `clear_branch` already tried
+                // to remove it, leaving an empty orphan dir behind.
+                // Best-effort: `remove_dir` only succeeds if empty, so this
+                // is safe against concurrent writes.
                 let _ = std::fs::remove_file(&seg_path);
+                let _ = std::fs::remove_dir(&branch_dir);
                 return Ok(true);
             }
         };
