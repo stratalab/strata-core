@@ -240,6 +240,11 @@ impl Database {
         // The in-flight task drains ALL frozen memtables (loop in the closure),
         // so submitting redundant tasks during fast ingest just wastes scheduler
         // queue capacity.
+        //
+        // Wake-up bit pattern: the in-flight task re-checks for new frozen
+        // memtables after clearing its flag, in case a writer raced in between
+        // the final drain and the flag clear (TOCTOU). This guarantees no
+        // frozen memtable is permanently orphaned.
         if self.storage.total_frozen_count() > 0
             && self
                 .flush_in_flight
@@ -253,30 +258,45 @@ impl Database {
             let _ = self
                 .scheduler
                 .submit(crate::background::TaskPriority::High, move || {
-                    let branches = storage.branches_needing_flush();
-                    for branch_id in &branches {
-                        loop {
-                            match storage.flush_oldest_frozen(branch_id) {
-                                Ok(true) => {
-                                    Self::update_flush_watermark(&storage, &data_dir, &wal_dir);
-                                }
-                                Ok(false) => break,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        target: "strata::flush",
-                                        ?branch_id,
-                                        error = %e,
-                                        "flush failed"
-                                    );
-                                    break;
+                    // Drain all known frozen memtables, with a bounded number
+                    // of rounds to handle the TOCTOU race where a writer
+                    // creates a new frozen memtable between branches_needing_flush
+                    // enumeration and drain completion. In practice 1-2 rounds.
+                    const MAX_ROUNDS: usize = 32;
+                    for _round in 0..MAX_ROUNDS {
+                        let branches = storage.branches_needing_flush();
+                        if branches.is_empty() {
+                            break;
+                        }
+                        for branch_id in &branches {
+                            loop {
+                                match storage.flush_oldest_frozen(branch_id) {
+                                    Ok(true) => {
+                                        Self::update_flush_watermark(&storage, &data_dir, &wal_dir);
+                                    }
+                                    Ok(false) => break,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            target: "strata::flush",
+                                            ?branch_id,
+                                            error = %e,
+                                            "flush failed"
+                                        );
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
 
+                    // Clear the in-flight flag. If a writer raced in between
+                    // our last check and now, the next write's
+                    // schedule_flush_if_needed will see the flag clear and
+                    // submit a fresh task.
+                    flush_flag.store(false, Ordering::Release);
+
                     // Return freed memtable pages to the OS (#2184).
                     release_freed_memory();
-                    flush_flag.store(false, Ordering::Release);
                 });
         }
 
