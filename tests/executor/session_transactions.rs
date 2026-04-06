@@ -1932,6 +1932,180 @@ fn event_list_command_round_trip() {
 }
 
 #[test]
+fn event_list_command_time_travel_round_trip() {
+    // Exercises the time-travel path through Command::EventList: append
+    // events at different times and verify that EventList { as_of: Some(..) }
+    // filters correctly.
+    let mut session = create_session();
+
+    // Append 2 events, then capture a midpoint timestamp, then append 2 more
+    for i in 0..2i64 {
+        session
+            .execute(Command::EventAppend {
+                branch: None,
+                space: None,
+                event_type: "early".into(),
+                payload: Value::object(std::collections::HashMap::from([(
+                    "i".to_string(),
+                    Value::Int(i),
+                )])),
+            })
+            .unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let mid_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as u64;
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    for i in 2..4i64 {
+        session
+            .execute(Command::EventAppend {
+                branch: None,
+                space: None,
+                event_type: "late".into(),
+                payload: Value::object(std::collections::HashMap::from([(
+                    "i".to_string(),
+                    Value::Int(i),
+                )])),
+            })
+            .unwrap();
+    }
+
+    // At mid_ts we should see only the first 2 events (type "early")
+    let output = session
+        .execute(Command::EventList {
+            branch: None,
+            space: None,
+            event_type: None,
+            limit: None,
+            as_of: Some(mid_ts),
+        })
+        .unwrap();
+
+    match output {
+        Output::VersionedValues(events) => {
+            assert_eq!(
+                events.len(),
+                2,
+                "at mid_ts, only early events should be visible"
+            );
+        }
+        other => panic!("Expected VersionedValues, got {:?}", other),
+    }
+
+    // Type filter + time travel: "early" at mid_ts returns 2, "late" at mid_ts returns 0
+    let output = session
+        .execute(Command::EventList {
+            branch: None,
+            space: None,
+            event_type: Some("late".into()),
+            limit: None,
+            as_of: Some(mid_ts),
+        })
+        .unwrap();
+
+    match output {
+        Output::VersionedValues(events) => {
+            assert!(
+                events.is_empty(),
+                "late events should not be visible at mid_ts, got {:?}",
+                events
+            );
+        }
+        other => panic!("Expected VersionedValues, got {:?}", other),
+    }
+
+    // At u64::MAX, all 4 events visible
+    let output = session
+        .execute(Command::EventList {
+            branch: None,
+            space: None,
+            event_type: None,
+            limit: None,
+            as_of: Some(u64::MAX),
+        })
+        .unwrap();
+
+    match output {
+        Output::VersionedValues(events) => {
+            assert_eq!(events.len(), 4);
+        }
+        other => panic!("Expected VersionedValues, got {:?}", other),
+    }
+}
+
+#[test]
+fn event_list_types_command_time_travel_round_trip() {
+    // Exercises the time-travel path through Command::EventListTypes.
+    let mut session = create_session();
+
+    session
+        .execute(Command::EventAppend {
+            branch: None,
+            space: None,
+            event_type: "TypeA".into(),
+            payload: Value::object(std::collections::HashMap::from([(
+                "i".to_string(),
+                Value::Int(1),
+            )])),
+        })
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let mid_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as u64;
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    session
+        .execute(Command::EventAppend {
+            branch: None,
+            space: None,
+            event_type: "TypeB".into(),
+            payload: Value::object(std::collections::HashMap::from([(
+                "i".to_string(),
+                Value::Int(2),
+            )])),
+        })
+        .unwrap();
+
+    // At mid_ts only TypeA should be visible
+    let output = session
+        .execute(Command::EventListTypes {
+            branch: None,
+            space: None,
+            as_of: Some(mid_ts),
+        })
+        .unwrap();
+
+    match output {
+        Output::Keys(types) => {
+            assert_eq!(types, vec!["TypeA"]);
+        }
+        other => panic!("Expected Keys, got {:?}", other),
+    }
+
+    // At u64::MAX both visible
+    let output = session
+        .execute(Command::EventListTypes {
+            branch: None,
+            space: None,
+            as_of: Some(u64::MAX),
+        })
+        .unwrap();
+
+    match output {
+        Output::Keys(mut types) => {
+            types.sort();
+            assert_eq!(types, vec!["TypeA", "TypeB"]);
+        }
+        other => panic!("Expected Keys, got {:?}", other),
+    }
+}
+
+#[test]
 fn json_list_sees_uncommitted() {
     let mut session = create_session();
 

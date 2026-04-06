@@ -231,6 +231,18 @@ fn test_read_only_allows_all_reads() {
             space: None,
             as_of: None,
         },
+        Command::EventListTypes {
+            branch: None,
+            space: None,
+            as_of: None,
+        },
+        Command::EventList {
+            branch: None,
+            space: None,
+            event_type: None,
+            limit: None,
+            as_of: None,
+        },
         Command::VectorListCollections {
             branch: None,
             space: None,
@@ -532,6 +544,18 @@ fn test_is_write_classification() {
         Command::EventLen {
             branch: None,
             space: None,
+            as_of: None,
+        },
+        Command::EventListTypes {
+            branch: None,
+            space: None,
+            as_of: None,
+        },
+        Command::EventList {
+            branch: None,
+            space: None,
+            event_type: None,
+            limit: None,
             as_of: None,
         },
         Command::VectorGet {
