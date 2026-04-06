@@ -192,6 +192,8 @@ Critically:
 
 This table is the north star. Each slice below fills in one row.
 
+> **Phased trait surface.** The trait above is the eventual shape. Phase 2 ships only `precheck` + `post_commit` — the `plan` method is added in Phase 3+ when individual handlers actually need to produce per-primitive write plans. Adding `plan` in Phase 2 with every handler returning a pass-through wrapper would be dead architecture.
+
 ---
 
 ## Phase 1 — Event safety (4.1 + 4.2)
@@ -264,102 +266,153 @@ This fix-up is intentionally kept local to `branch_ops.rs` at this phase — it 
 
 ---
 
-## Phase 2 — `PrimitiveMergeHandler` trait + KV/JSON handlers
+## Phase 2 — `PrimitiveMergeHandler` dispatch scaffold
 
-**Goal:** introduce the dispatch architecture without changing behavior for already-working primitives.
+**Goal:** introduce the dispatch architecture and migrate the Phase 1 Event check into a real `EventMergeHandler`. Pure architectural plumbing — no new user-visible behavior beyond what Phase 1 already shipped.
 
-### Step 2.1: Create the trait and registry
+### Scope deviation from earlier draft
+
+An earlier draft of this section said Phase 2 should also add "Vector and Graph divergent merges return `Unsupported`." Code-first exploration of the post-Phase-1 codebase revealed that rule is wrong:
+
+- **Vector merges are actually safe today.** `VectorRefreshHook::post_merge_reload` (`crates/engine/src/recovery.rs:566`) does a *full* HNSW rebuild from KV state on every merge. Disjoint and conflicting vector merges both produce correct HNSW after the rebuild. There is no silent corruption to refuse — Phase 4's job is to make the rebuild *incremental*, not to add a refusal.
+- **Graph merges have a real staleness gap** — there is no `GraphRefreshHook`, so the in-memory adjacency cache is stale post-merge until the next compaction. Fixing this properly requires new graph backend code (a `GraphRefreshHook` implementation), which belongs in Phase 3 alongside the rest of the graph-aware merge work.
+- **JSON merges have a real staleness gap** too — there is no `JsonRefreshHook`, so JSON inverted-index entries are stale post-merge. Fixing this requires per-key index refresh plumbing, which belongs in Phase 5 alongside path-level merge.
+
+Phase 2 is therefore scoped to **scaffolding only**. Every per-primitive semantic improvement lives in its dedicated phase where the primitive gets focused attention.
+
+### Step 2.1: Convert `branch_ops.rs` to a directory module
+
+**File move:** `crates/engine/src/branch_ops.rs` → `crates/engine/src/branch_ops/mod.rs` (no content change in this step). Adds `pub mod primitive_merge;`. Cleaner than dumping ~200 more lines into the existing 2,500-line file.
+
+### Step 2.2: Create the trait and registry
 
 **New file:** `crates/engine/src/branch_ops/primitive_merge.rs`
 
-Define `PrimitiveMergeHandler`, `MergePrecheckCtx`, `MergePlanCtx`, `MergePostCommitCtx`, `PrimitiveMergePlan`, `PrimitiveConflict`, `MergeError::Unsupported { .. }`.
-
-Define `MergeHandlerRegistry`:
-
 ```rust
+pub trait PrimitiveMergeHandler: Send + Sync {
+    fn type_tag(&self) -> TypeTag;
+    fn precheck(&self, ctx: &MergePrecheckCtx<'_>) -> StrataResult<()>;
+    fn post_commit(&self, ctx: &MergePostCommitCtx<'_>) -> StrataResult<()>;
+}
+
+pub struct MergePrecheckCtx<'a> {
+    pub source_id: BranchId,
+    pub target_id: BranchId,
+    pub merge_base: &'a MergeBase,
+    pub strategy: MergeStrategy,
+    pub typed_entries: &'a TypedEntries,
+}
+
+pub struct MergePostCommitCtx<'a> {
+    pub db: &'a Arc<Database>,
+    pub source_id: BranchId,
+    pub target_id: BranchId,
+    pub merge_version: Option<u64>,
+}
+
 pub struct MergeHandlerRegistry {
     handlers: BTreeMap<TypeTag, Arc<dyn PrimitiveMergeHandler>>,
 }
 ```
 
-`BTreeMap` (not `HashMap`) for deterministic iteration order, matching the existing `DATA_TYPE_TAGS` ordering.
+Note that **`plan` is not on the trait yet** — see the "Phased trait surface" callout in §Architecture above. Phases 3+ will add it when individual handlers need per-primitive write plans.
 
-### Step 2.2: Refactor `three_way_diff` output
+### Step 2.3: Split `three_way_diff` into gather + classify
 
-**File:** `crates/engine/src/branch_ops.rs`
+**File:** `crates/engine/src/branch_ops/mod.rs`
 
-Change `three_way_diff` to return decisions grouped by `(space, type_tag)` rather than a flat `Vec<MergeAction>`. The classification matrix and conflict detection are unchanged; only the shape of the return value changes.
-
-### Step 2.3: Route merge through handlers
-
-`merge_branches()` becomes:
+`three_way_diff` is split into two functions so the gathered entry slices can be reused by `EventMergeHandler::precheck`:
 
 ```rust
-let diff = three_way_diff(...);
-let registry = build_merge_registry(&db);
-
-// Precheck all handlers before producing any writes.
-for tag in DATA_TYPE_TAGS {
-    let handler = registry.get(tag);
-    handler.precheck(&MergePrecheckCtx { .. })?;
+pub(crate) struct TypedEntries {
+    pub cells: BTreeMap<(String, TypeTag), TypedEntryCell>,
 }
 
-// Produce plans.
-let mut combined_puts = Vec::new();
-let mut combined_deletes = Vec::new();
-let mut conflicts = Vec::new();
-for tag in DATA_TYPE_TAGS {
-    let plan = registry.get(tag).plan(&MergePlanCtx { .. })?;
-    combined_puts.extend(plan.puts);
-    combined_deletes.extend(plan.deletes);
-    conflicts.extend(plan.conflicts);
+pub(crate) struct TypedEntryCell {
+    pub ancestor: Vec<VersionedEntry>,
+    pub source: Vec<(Key, VersionedValue)>,
+    pub target: Vec<(Key, VersionedValue)>,
 }
 
-// Apply in one transaction (unchanged).
-db.transaction(target, |txn| { ... })?;
+fn gather_typed_entries(...) -> StrataResult<TypedEntries> { ... }
+fn classify_typed_entries(typed: &TypedEntries, strategy: MergeStrategy)
+    -> (Vec<MergeAction>, Vec<ConflictEntry>) { ... }
 
-// Post-commit fix-ups.
-for tag in DATA_TYPE_TAGS {
-    registry.get(tag).post_commit(&MergePostCommitCtx { .. })?;
+fn three_way_diff(...) -> StrataResult<(Vec<MergeAction>, Vec<ConflictEntry>)> {
+    let typed = gather_typed_entries(...)?;
+    Ok(classify_typed_entries(&typed, strategy))
 }
 ```
 
-### Step 2.4: `KvMergeHandler`
+The 14-case `classify_change` matrix is unchanged. `cherry_pick_from_diff` keeps calling `three_way_diff` and consuming the same flat `(actions, conflicts)` shape — no caller-side change.
 
-Trivial pass-through. `precheck` is a no-op. `plan` converts the 14-case decisions straight into puts/deletes — literally the current logic, lifted into the handler. `post_commit` is a no-op.
+The Phase 1 Event divergence check is **removed from the per-cell loop** in this step. It moves to `EventMergeHandler::precheck` (Step 2.5) and is also called explicitly from `cherry_pick_from_diff` (Step 2.6) so the cherry-pick API keeps the safety contract.
 
-### Step 2.5: `JsonMergeHandler` (v1 — pass-through parity)
+### Step 2.4: Route `merge_branches` through handlers
 
-Same as `KvMergeHandler` for v1. `post_commit` refreshes **only** the JSON index entries for keys this handler touched, not the whole backend. This is an incremental improvement over `reload_secondary_backends()` but preserves existing semantics.
+```rust
+let typed = gather_typed_entries(...)?;
+let registry = build_merge_registry();
+let precheck_ctx = MergePrecheckCtx { source_id, target_id, merge_base: &merge_base, strategy, typed_entries: &typed };
+for tag in DATA_TYPE_TAGS {
+    registry.get(tag).precheck(&precheck_ctx)?;     // ← EventHandler runs Phase 1 check here
+}
+let (actions, conflicts) = classify_typed_entries(&typed, strategy);
+// ... existing strict-conflict short-circuit + OCC TOCTOU + apply transaction ...
+let post_ctx = MergePostCommitCtx { db, source_id, target_id, merge_version };
+for tag in DATA_TYPE_TAGS {
+    registry.get(tag).post_commit(&post_ctx)?;      // ← all no-ops in Phase 2
+}
+reload_secondary_backends(db, target_id, source_id);
+```
 
-Path-level semantic merge is deferred to Phase 5 (see §Phase 5).
+`reload_secondary_backends` stays put after the post_commit loop — see Step 2.7.
 
-### Step 2.6: `EventMergeHandler`
+### Step 2.5: Five handler structs
 
-Absorbs the Phase 1 safety logic into the trait:
-- `precheck` returns `Unsupported` for divergent Event writes (the Phase 1.2 detector moves here).
-- `plan` handles the one-sided case (the Phase 1.5 logic moves here).
-- `post_commit` recomputes `EventLogMeta` and `StreamMeta`.
+| Handler | `precheck` | `post_commit` |
+|---|---|---|
+| `KvMergeHandler` | no-op | no-op |
+| `JsonMergeHandler` | no-op | no-op (Phase 5 will add per-key index refresh) |
+| `EventMergeHandler` | iterates `ctx.typed_entries.cells`, calls `check_event_merge_divergence` for each `(space, TypeTag::Event)` cell | no-op |
+| `VectorMergeHandler` | no-op | no-op (Vector is safe today via full HNSW rebuild) |
+| `GraphMergeHandler` | no-op | no-op (Phase 3 will add adjacency rebuild + dangling-edge detection) |
 
-### Step 2.7: `VectorMergeHandler` (placeholder)
+Each handler is a unit struct. The `check_event_merge_divergence` helper from Phase 1 stays as a free function in `branch_ops/mod.rs`; `EventMergeHandler` calls it via the `super::` path.
 
-`precheck` returns `Unsupported` for any divergent vector writes. `plan` handles only the trivial "no vector changes either side" case. This is a deliberate hold until Phase 4.
+### Step 2.6: Update `cherry_pick_from_diff`
 
-### Step 2.8: `GraphMergeHandler` (placeholder)
+`cherry_pick_from_diff` does not use the handler registry (it has its own filtering pipeline). To preserve the Phase 1 Event safety contract for cherry-pick, the function is updated to call `gather_typed_entries` directly and run the Event check before classification:
 
-Same shape as Vector — `precheck` rejects divergent graph writes; single-sided graph merges flow through a trivial pass-through that also invokes the existing adjacency reload. Full semantic handler is Phase 3.
+```rust
+let typed = gather_typed_entries(db, source_id, target_id, &merge_base, &all_spaces, snapshot_version)?;
+for ((space, type_tag), cell) in &typed.cells {
+    if *type_tag == TypeTag::Event {
+        check_event_merge_divergence(space, &cell.ancestor, &cell.source, &cell.target)?;
+    }
+}
+let (actions, _conflicts) = classify_typed_entries(&typed, MergeStrategy::LastWriterWins);
+// ... existing filter + apply unchanged ...
+```
 
-### Step 2.9: Regression sweep
+One safety helper, two callers.
 
-Every existing test in `tests/integration/branching.rs` must pass unchanged. Because KV is pass-through and JSON is pass-through+narrower index refresh, no behavior change is expected.
+### Step 2.7: `reload_secondary_backends` stays untouched
+
+The earlier draft proposed removing or reducing `reload_secondary_backends` in Phase 2. With the scoped-down handler set (every Phase 2 handler has a no-op `post_commit`), nothing replaces what the existing reload sweep does for Vector. Touching `reload_secondary_backends` now without per-handler refresh logic is churn. It is kept exactly as-is and gets retired incrementally as Phases 3 (Graph adjacency rebuild) and 5 (JSON per-key refresh) introduce real handler-owned post_commit logic.
+
+### Step 2.8: Regression sweep
+
+Every existing test in `tests/integration/branching.rs` must pass unchanged. The Phase 1 event_merge_* tests in particular must keep passing because the Event safety is now sourced from `EventMergeHandler::precheck` instead of an inline check inside `three_way_diff`. One new unit test pins the registry contract: `build_merge_registry()` returns exactly the five expected `TypeTag` keys.
 
 ### Phase 2 acceptance bar
 
-- All five primitives route through `PrimitiveMergeHandler`.
-- KV and JSON merges behave identically to today at user-visible level.
-- Vector and Graph divergent merges now return `Unsupported` with clear error messages instead of silently producing inconsistent state.
-- Event handler is Phase 1's logic, restructured into the new trait.
-- `reload_secondary_backends()` is either removed or reduced to a handler-internal helper (not a blanket post-merge operation).
+- All five primitives route through `PrimitiveMergeHandler` via the registry.
+- KV, JSON, Vector, and Graph merges behave identically to today at the user-visible level.
+- The Phase 1 Event divergence check is now sourced from `EventMergeHandler::precheck`, not from an inline check inside `three_way_diff`.
+- `cherry_pick_from_diff` continues to refuse divergent Event input via the same shared helper.
+- `reload_secondary_backends` is unchanged. Phases 3 and 5 will retire it incrementally.
+- All 33 existing branching tests + 4 Phase 1 event merge tests pass without modification.
 
 ---
 
