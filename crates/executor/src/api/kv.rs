@@ -170,13 +170,13 @@ impl Strata {
     }
 
     // =========================================================================
-    // KV as_of Variants
+    // KV Time-Travel Variants
     // =========================================================================
 
     /// Get a value from the KV store at a specific point in time.
     ///
     /// `as_of` is a timestamp in microseconds since epoch.
-    pub fn kv_get_as_of(&self, key: &str, as_of: Option<u64>) -> Result<Option<Value>> {
+    pub fn kv_get_at(&self, key: &str, as_of: Option<u64>) -> Result<Option<Value>> {
         match self.execute_cmd(Command::KvGet {
             branch: self.branch_id(),
             space: self.space_id(),
@@ -196,7 +196,7 @@ impl Strata {
     ///
     /// Supports cursor-based pagination via `cursor` and `limit`.
     /// `as_of` is a timestamp in microseconds since epoch.
-    pub fn kv_list_as_of(
+    pub fn kv_list_at(
         &self,
         prefix: Option<&str>,
         cursor: Option<&str>,

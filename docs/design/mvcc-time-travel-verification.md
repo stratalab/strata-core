@@ -1,12 +1,14 @@
 # MVCC / Time-Travel Verification Plan
 
-**Status**: Phase 1 & 2 complete | **Date**: 2026-04-05 (Phase 1 & 2 landed 2026-04-06) | **Claim**: #3 — Uniform MVCC / Time-Travel Across Primitives | **Current Rating**: PARTIAL → progressing toward VERIFIED
+**Status**: All phases complete | **Date**: 2026-04-05 (phases landed 2026-04-06) | **Claim**: #3 — Uniform MVCC / Time-Travel Across Primitives | **Current Rating**: **VERIFIED**
 
 ## Progress Log
 
 - **Phase 1 — Graph time-travel**: Merged as stratalab/strata-core#2322. Added `get_node_at`, `list_nodes_at`, `neighbors_at` on `GraphStore` + `as_of` on `GraphGetNode`/`GraphListNodes`/`GraphNeighbors` commands, plus handlers, session bypass, public API, and 10 unit tests.
-- **Phase 2 — Vector `getv`**: Added `VectorStore::getv`, `Command::VectorGetv`, `Output::VectorVersionHistory`, session always-bypass routing, public `vector_getv()` API, plus 6 unit tests and 1 session bypass integration test.
-- **Phases 3–5**: Pending.
+- **Phase 2 — Vector `getv`**: Merged as stratalab/strata-core#2323. Added `VectorStore::getv`, `Command::VectorGetv`, `Output::VectorVersionHistory`, session always-bypass routing, public `vector_getv()` API, plus 6 unit tests and 1 session bypass integration test. Follow-up stratalab/strata-core#2324 fixed a CLI format break.
+- **Phase 3 — Event time-travel parity**: Merged as stratalab/strata-core#2325. Added `EventLog::len_at`, `EventLog::list_types_at`, `as_of` on `EventLen` and `EventListTypes`, new `Command::EventList` wiring the previously-orphan `EventLog::list_at`, plus **fixed a correctness bug** in session dispatch where `EventGet`/`EventGetByType`/`EventLen` silently dropped `as_of` via `{ sequence, .. }` destructuring. 11 new tests (5 engine + 4 session bypass regression tests + 2 review-pass round-trip tests).
+- **Phase 4 — Naming standardization**: Renamed 8 `Strata` facade methods from `_as_of` to `_at` (hard rename, no deprecated aliases) for consistency with the engine-level convention already used by Graph. `kv_get_as_of` → `kv_get_at`, etc. The `VectorStore::Version::counter` vs `Version::txn` inconsistency flagged in `version-semantics.md` was already fixed in earlier work.
+- **Phase 5 — Cross-primitive consistency tests**: New file `tests/executor/cross_primitive_time_travel.rs` with 6 tests covering same-timestamp visibility, tombstone consistency, branch isolation, `as_of=0`, `as_of=u64::MAX`, and same-microsecond rapid-write ordering — all 5 primitives observed from one `as_of` timestamp in a single test.
 
 ---
 

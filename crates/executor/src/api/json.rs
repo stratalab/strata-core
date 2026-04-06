@@ -209,18 +209,13 @@ impl Strata {
     }
 
     // =========================================================================
-    // JSON as_of Variant
+    // JSON Time-Travel Variants
     // =========================================================================
 
     /// Get a JSON value at a path at a specific point in time.
     ///
     /// `as_of` is a timestamp in microseconds since epoch.
-    pub fn json_get_as_of(
-        &self,
-        key: &str,
-        path: &str,
-        as_of: Option<u64>,
-    ) -> Result<Option<Value>> {
+    pub fn json_get_at(&self, key: &str, path: &str, as_of: Option<u64>) -> Result<Option<Value>> {
         match self.execute_cmd(Command::JsonGet {
             branch: self.branch_id(),
             space: self.space_id(),
@@ -240,7 +235,7 @@ impl Strata {
     /// List JSON documents with cursor-based pagination at a specific point in time.
     ///
     /// `as_of` is a timestamp in microseconds since epoch.
-    pub fn json_list_as_of(
+    pub fn json_list_at(
         &self,
         prefix: Option<String>,
         cursor: Option<String>,

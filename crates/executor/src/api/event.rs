@@ -81,7 +81,7 @@ impl Strata {
     /// Returns `next_sequence` from the `EventLogMeta` snapshot visible at
     /// `as_of_ts` (microseconds since epoch). This counts events committed at
     /// or before that timestamp.
-    pub fn event_len_as_of(&self, as_of_ts: u64) -> Result<u64> {
+    pub fn event_len_at(&self, as_of_ts: u64) -> Result<u64> {
         match self.execute_cmd(Command::EventLen {
             branch: self.branch_id(),
             space: self.space_id(),
@@ -96,13 +96,13 @@ impl Strata {
     }
 
     // =========================================================================
-    // Event as_of Variant
+    // Event Time-Travel Variants
     // =========================================================================
 
     /// Read a specific event by sequence number at a specific point in time.
     ///
     /// `as_of` is a timestamp in microseconds since epoch.
-    pub fn event_get_as_of(
+    pub fn event_get_at(
         &self,
         sequence: u64,
         as_of: Option<u64>,
@@ -262,7 +262,7 @@ impl Strata {
     ///
     /// Returns event types whose first event was appended at or before
     /// `as_of_ts` (microseconds since epoch).
-    pub fn event_list_types_as_of(&self, as_of_ts: u64) -> Result<Vec<String>> {
+    pub fn event_list_types_at(&self, as_of_ts: u64) -> Result<Vec<String>> {
         match self.execute_cmd(Command::EventListTypes {
             branch: self.branch_id(),
             space: self.space_id(),

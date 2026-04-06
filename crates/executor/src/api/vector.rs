@@ -283,7 +283,7 @@ impl Strata {
     /// Get a vector by key at a specific point in time.
     ///
     /// `as_of` is a timestamp in microseconds since epoch.
-    pub fn vector_get_as_of(
+    pub fn vector_get_at(
         &self,
         collection: &str,
         key: &str,
