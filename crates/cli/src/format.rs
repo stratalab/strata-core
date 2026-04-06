@@ -335,6 +335,12 @@ fn format_raw(output: &Output) -> String {
             .join("\n"),
         Output::VectorData(None) => String::new(),
         Output::VectorData(Some(vd)) => format!("{:?}", vd.data.embedding),
+        Output::VectorVersionHistory(None) => String::new(),
+        Output::VectorVersionHistory(Some(vals)) => vals
+            .iter()
+            .map(|vd| format!("{}\t{:?}", vd.version, vd.data.embedding))
+            .collect::<Vec<_>>()
+            .join("\n"),
         Output::VectorCollectionList(colls) => colls
             .iter()
             .map(|c| c.name.clone())
@@ -741,6 +747,26 @@ fn format_human(output: &Output) -> String {
                 lines.push(format!("metadata: {}", format_value_human(meta)));
             }
             lines.join("\n")
+        }
+        Output::VectorVersionHistory(None) => "(nil)".to_string(),
+        Output::VectorVersionHistory(Some(vals)) => {
+            if vals.is_empty() {
+                "(empty list)".to_string()
+            } else {
+                // Already newest-first from the engine
+                vals.iter()
+                    .enumerate()
+                    .map(|(i, vd)| {
+                        format!(
+                            "{}) v{}: embedding={:?}",
+                            i + 1,
+                            vd.version,
+                            vd.data.embedding
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
         }
         Output::VectorCollectionList(colls) => {
             if colls.is_empty() {
