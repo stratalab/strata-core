@@ -416,65 +416,107 @@ Every existing test in `tests/integration/branching.rs` must pass unchanged. The
 
 ---
 
-## Phase 3 — Graph-aware merge
+## Phase 3 — Graph merge tactical refusal
 
-**Goal:** Graph handler with real node/edge reconciliation and incremental adjacency rebuild.
+**Goal:** refuse divergent graph branch merges with a structured error, mirroring the Phase 1 Event safety pattern. Single-sided graph merges continue to work. Real semantic graph merge is deferred to a follow-up phase (see "Phase 3b" below).
 
-### Step 3.1: Graph merge model
+### Storage model correction
 
-Graph state in the reserved `_graph_` space decomposes into:
+An earlier draft of this section assumed graph storage decomposed into separate node records, edge records, and an adjacency index. Code-first exploration of `crates/graph/` revealed this model is wrong:
 
-- **Node records** — identity + properties.
-- **Edge records** — identity + src/dst + properties.
-- **Adjacency index entries** — `(node_id, direction) → edge_id` postings.
+- Edges are not stored as standalone records. Each edge has exactly two physical representations: an entry in `{graph}/fwd/{src}` (the source's outgoing list, packed binary) and an entry in `{graph}/rev/{dst}` (the destination's incoming list, packed binary). The packed adjacency lists ARE the edge storage. See `crates/graph/src/keys.rs:118-136` and `crates/graph/src/packed.rs`.
+- There is no in-memory adjacency cache to "rebuild post-merge". `AdjacencyIndex` (`crates/graph/src/adjacency.rs:12`) is built on demand by `build_adjacency_index`, not maintained as backend state. The earlier claim that "adjacency is stale post-merge" was incorrect — there's no cache to be stale.
+- The real merge problem is **maintaining bidirectional consistency between `fwd/*` and `rev/*` entries**, which the generic LWW path treats as independent KV keys.
 
-Edges have referential integrity against nodes. Adjacency is derived from edge records.
+The Phase 3 spec is therefore being split:
 
-Merge decisions per category:
+- **Phase 3 (this section, ships now)** — tactical refusal of divergent graph merges, mirroring Phase 1's Event pattern.
+- **Phase 3b (future, ships later)** — real semantic graph merge with referential integrity, additive edge merging, decoded-edge-level diffing, and the `plan` trait method. Spec captured below.
 
-| Category | v1 Rule |
-|---|---|
-| Node add/modify/delete with no conflict | Apply directly |
-| Node conflict (both sides modified properties) | LWW or Strict (unchanged from generic) |
-| Edge add where both endpoints exist post-merge | Apply directly |
-| Edge add where an endpoint is missing post-merge | **Reject** with `DanglingEdgeReference` conflict |
-| Node delete where edges still reference the node post-merge | **Reject** with `OrphanedEdgeReference` conflict |
+### Corruption modes the tactical refusal closes
 
-These two rejection cases are the minimum referential-integrity guarantees; richer semantic merge (property cell-level merge, topology-aware conflict detection) is out of scope for v1.
+**Scenario A — bidirectional adjacency inconsistency under LWW.** Both branches add an outgoing edge from the same node (different targets). Generic merge classifies `fwd/X` as `Conflict`; LWW picks one whole list, losing the other side's edge. The losing side's `rev/{Z}` (which the winning side never touched) still references X, but X's `fwd/X` no longer references Z. `incoming_neighbors(Z)` returns X; `outgoing_neighbors(X)` does not return Z. Silent corruption.
 
-### Step 3.2: Plan construction
+**Scenario B — concurrent node delete and edge add.** Source deletes node X (drops `n/X`, `fwd/X`, and updates every `rev/*` that referenced X). Target adds edge X→Y (writes `fwd/X` and `rev/Y` with the new entry). LWW resolves `n/X` as `DeleteModifyConflict` → source wins → `n/X` deleted. `fwd/X` same. But `rev/Y` is `TargetAdded` → kept on target. Result: `rev/Y` references X but `n/X` doesn't exist. Dangling reference.
 
-`GraphMergeHandler::plan` runs a two-pass algorithm over the diff output scoped to `TypeTag::Graph`:
+Neither scenario is theoretical. Both fall out of standard `LastWriterWins` whenever two branches independently modify the same neighborhood. There are zero existing tests covering graph merge today, so neither corruption mode is regression-gated.
 
-1. **Pass 1** — compute the projected final state of nodes (which node IDs exist after merge).
-2. **Pass 2** — validate every edge write against the projected node set; reject edges whose endpoints would be absent.
+### Step 3.1: Add `check_graph_merge_divergence` helper
 
-Adjacency index writes are **not** included in the plan's `puts`/`deletes`. They are rebuilt in `post_commit` from the merged edge set.
+**File:** `crates/engine/src/branch_ops/mod.rs`
 
-### Step 3.3: Incremental adjacency rebuild
+Add a free function next to the existing `check_event_merge_divergence`. Same parameter shape (space + ancestor entries + source entries + target entries). Builds three maps via the existing `build_ancestor_map` / `build_live_map` helpers, then checks "did source's keys differ from ancestor's at any key, AND did target's keys differ at any (possibly different) key". Returns `Err(StrataError::invalid_input("merge unsupported: divergent graph writes in space '{space}' since fork. ..."))` if both sides diverged.
 
-`GraphMergeHandler::post_commit`:
+### Step 3.2: Wire into `GraphMergeHandler::precheck`
 
-1. Collect the set of `affected_node_ids` from the merge decisions.
-2. For each affected node, drop the existing adjacency entries and re-emit them from the current edge state.
-3. Do **not** touch adjacency for unaffected nodes.
+**File:** `crates/engine/src/branch_ops/primitive_merge.rs`
 
-This is strictly narrower than `reload_secondary_backends()`, which today re-initializes the entire graph backend.
+`GraphMergeHandler::precheck` (currently a no-op) iterates `ctx.typed_entries.cells` for `(space, TypeTag::Graph)` cells and calls the helper for each. Structurally identical to `EventMergeHandler::precheck`.
 
-### Step 3.4: Graph merge tests
+### Step 3.3: Extend `cherry_pick_from_diff`
 
-- `graph_merge_disjoint_nodes_succeeds`
-- `graph_merge_disjoint_edges_succeeds`
-- `graph_merge_dangling_edge_rejected`
-- `graph_merge_orphaned_edge_on_node_delete_rejected`
-- `graph_merge_adjacency_consistent_after_merge` — property-style: after merge, traversing adjacency indexes reproduces exactly the set of edges in storage.
-- `graph_merge_cross_primitive` — combined KV + Graph merge, verify both land atomically.
+**File:** `crates/engine/src/branch_ops/mod.rs`
+
+The existing typed-cells safety loop in `cherry_pick_from_diff` already calls `check_event_merge_divergence` for Event cells. Add a sibling call for Graph cells inside the same loop.
+
+### Step 3.4: Tests
+
+**File:** `tests/integration/branching.rs`
+
+Five new tests in a "Graph Merge Safety" section:
+- `graph_merge_divergent_rejects` — fork, both sides add nodes/edges, merge under LWW and Strict, both reject
+- `graph_merge_single_sided_source_succeeds` — only source has graph writes; merge succeeds; bidirectional consistency holds via `outgoing_neighbors`/`incoming_neighbors`
+- `graph_merge_single_sided_target_succeeds` — symmetric
+- `graph_merge_no_changes_succeeds` — fork with KV-only writes on both sides; graph divergence check does not falsely fire
+- `graph_merge_concurrent_node_delete_and_edge_add_rejected` — Scenario B above (most important — pins down the most subtle corruption pattern)
 
 ### Phase 3 acceptance bar
 
-- Graph merge never produces dangling edges or orphaned adjacency entries.
-- Adjacency rebuild is incremental (cost is proportional to the merge diff, not the graph size).
-- All graph merge tests pass.
+- Divergent graph branch merges always refused with a structured error.
+- Single-sided graph merges still work and produce bidirectionally consistent state.
+- `cherry_pick_from_diff` also refuses divergent graph cherry-picks.
+- All Phase 1 + Phase 2 tests still pass without modification.
+
+---
+
+## Phase 3b — Semantic graph merge (future)
+
+**Status:** spec, not implemented. Captured here so the next iteration starts from the right model.
+
+**Goal:** real graph merge that preserves referential integrity, merges disjoint edges from both sides additively, and maintains bidirectional consistency between `fwd/*` and `rev/*` lists.
+
+### Required algorithm
+
+For each `(space, TypeTag::Graph)` cell that the merge touches:
+
+1. **Decode all packed adjacency lists** from ancestor / source / target via `crates/graph/src/packed.rs::decode`. Materialize the logical edge set per side: `Set<(src, dst, edge_type, EdgeData)>`. Materialize the node set per side from `n/{node_id}` keys.
+2. **Compute three-way diff at the node level.** For each node_id, apply the 14-case decision matrix to determine post-merge node state.
+3. **Compute three-way diff at the edge level.** For each `(src, dst, edge_type)` triple, apply the 14-case matrix to determine which edges survive.
+4. **Reject** if any post-merge edge has either endpoint missing from the post-merge node set (`DanglingEdgeReference`).
+5. **Reject** if any post-merge node deletion leaves edges referencing it (`OrphanedEdgeReference`).
+6. **Project the post-merge state** into the canonical fwd/rev encoding.
+7. **Emit KV writes** for affected node records and `fwd/{node_id}` / `rev/{node_id}` keys. Re-encode the projected adjacency lists with `packed::encode`.
+8. **post_commit**: nothing — storage IS the adjacency, no separate index to refresh.
+
+### Required infrastructure
+
+- Add `plan(&self, ctx: &MergePlanCtx<'_>) -> StrataResult<PrimitiveMergePlan>` to `PrimitiveMergeHandler`. Default impl delegates to `classify_typed_entries` for the handler's type_tag (matching today's pass-through behavior). `GraphMergeHandler::plan` overrides with the algorithm above.
+- Add a new module `crates/graph/src/merge.rs` exposing helpers: `decode_branch_edge_set(entries: &[VersionedEntry], graph_name: &str) -> Result<EdgeSet>`, `project_merged_state(...)`, `encode_node_adjacency(...)`.
+- Extend `merge_branches` to use `handler.plan(...)` instead of a single global `classify_typed_entries` call. Phase 2 deferred this; Phase 3b lands it.
+- New structured error variants for `DanglingEdgeReference` and `OrphanedEdgeReference`. Or — to stay consistent with Phase 1/2 — wrap them in `StrataError::invalid_input` with structured prefixes.
+
+### Phase 3b acceptance bar
+
+- Two divergent graph branches with disjoint edge additions merge cleanly into a union of both sides' edges.
+- A merge that would produce a dangling edge is refused with a clear error naming the offending edge and missing node.
+- A merge that would produce an orphaned reference is refused with a clear error.
+- After any successful merge, traversing `outgoing_neighbors(X)` and `incoming_neighbors(Y)` always agree on the existence of edge X→Y.
+- A property-style test verifies bidirectional consistency for randomized merges.
+- The `plan` trait method is in place and KV/JSON/Vector handlers gracefully fall back to the default impl.
+
+### Estimated scope
+
+~1000-1500 lines across `crates/engine/src/branch_ops/primitive_merge.rs`, `crates/graph/src/merge.rs` (new), `tests/integration/branching.rs`, and the design doc. Substantial enough to deserve its own design pass and a dedicated PR.
 
 ---
 

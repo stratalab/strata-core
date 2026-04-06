@@ -282,6 +282,120 @@ fn check_event_merge_divergence(
 }
 
 // =============================================================================
+// Graph merge safety (Phase 3 of primitive-aware merge)
+// =============================================================================
+//
+// See docs/design/branching/primitive-aware-merge.md §Phase 3. The generic
+// three-way merge treats `_graph_` keys as opaque KV under `TypeTag::Graph`,
+// which produces two distinct corruption modes when both branches modify
+// graph state since the merge base:
+//
+//   1. **Bidirectional adjacency inconsistency under LWW.** Edges live as
+//      packed binary in two physical locations: `{graph}/fwd/{src}` and
+//      `{graph}/rev/{dst}`. The generic LWW path treats those as
+//      independent KV keys. If both branches add an outgoing edge from the
+//      same source node, LWW picks one whole `fwd/X` list and silently
+//      drops the other side's edges in the forward direction — but the
+//      losing side's `rev/{dst}` entries (which the winner never touched)
+//      survive, leaving `incoming_neighbors` and `outgoing_neighbors`
+//      disagreeing about edge existence.
+//
+//   2. **Concurrent node delete + edge add.** Source deletes node X
+//      (drops `n/X`, `fwd/X`, and updates every `rev/*` that referenced X).
+//      Target adds an edge X→Y. Generic merge resolves `n/X` and `fwd/X` to
+//      the source side, but target's freshly-added `rev/Y` entry is
+//      classified `TargetAdded` and survives — leaving a dangling reference
+//      to the now-deleted node X.
+//
+// Phase 3 closes both with a tactical refusal: if BOTH source and target
+// have any graph writes since the merge base, we abort the merge before
+// any classification or write happens. Single-sided graph merges (only
+// one branch touched graph state) continue working unchanged because each
+// edge addition writes both `fwd/{src}` and `rev/{dst}` together as one
+// transactional unit, so the generic merge transports them as a coherent
+// group.
+//
+// Phase 3b (future) implements the real semantic merge — decoded-edge
+// diffing, additive merging of disjoint edges, referential integrity
+// validation. See docs/design/branching/primitive-aware-merge.md §Phase 3b.
+
+/// Returns `true` if `side` differs from `ancestor` at any key. Used by
+/// `check_graph_merge_divergence` to detect "this branch made any graph
+/// modification since the merge base."
+///
+/// `ancestor` is the tombstone-aware view (`Some(None)` = tombstone),
+/// matching the shape produced by `build_ancestor_map`. `side` is the
+/// live-only view (no tombstones), matching `build_live_map`.
+///
+/// A side is "modified" iff:
+///   - it has a key whose value differs from ancestor's live value,
+///   - it has a key that ancestor either lacked or had as a tombstone, OR
+///   - it lacks a key that ancestor had live (i.e. the side deleted it).
+fn graph_side_modified(
+    ancestor: &HashMap<Vec<u8>, Option<Value>>,
+    side: &HashMap<Vec<u8>, Value>,
+) -> bool {
+    // Side adds, replaces, or modifies relative to ancestor.
+    for (k, v) in side {
+        match ancestor.get(k) {
+            // Ancestor never had this key, or had a tombstone here.
+            None => return true,
+            Some(None) => return true,
+            // Ancestor had a live value; modified iff different.
+            Some(Some(av)) if av != v => return true,
+            _ => {}
+        }
+    }
+    // Side deleted a key the ancestor had live.
+    for (k, av) in ancestor {
+        if av.is_some() && !side.contains_key(k) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Return `Err` if both source and target have made any modifications to
+/// graph data in `space` since the merge base. This is the Phase 3
+/// "refuse divergent Graph merge" check described in
+/// docs/design/branching/primitive-aware-merge.md.
+///
+/// The rule is per-space: cross-space divergence (source touched space A,
+/// target touched space B) is allowed because each space's graph keys
+/// classify cleanly under the generic three-way merge. Today Graph is
+/// hardwired to the reserved `_graph_` space (Phase 6 will lift this), so
+/// in practice only one space is checked per merge — but the rule is
+/// space-agnostic by construction.
+///
+/// Single-sided graph merges (only one of source/target has graph writes
+/// since the merge base) intentionally pass through this check unchanged.
+fn check_graph_merge_divergence(
+    space: &str,
+    ancestor_entries: &[strata_storage::VersionedEntry],
+    source_entries: &[(Key, VersionedValue)],
+    target_entries: &[(Key, VersionedValue)],
+) -> StrataResult<()> {
+    let ancestor_map = build_ancestor_map(ancestor_entries, space);
+    let source_map = build_live_map(source_entries, space);
+    let target_map = build_live_map(target_entries, space);
+
+    let source_modified = graph_side_modified(&ancestor_map, &source_map);
+    let target_modified = graph_side_modified(&ancestor_map, &target_map);
+
+    if source_modified && target_modified {
+        return Err(StrataError::invalid_input(format!(
+            "merge unsupported: divergent graph writes in space '{space}' since fork. \
+             Graph branch merge with concurrent writes on both sides of the fork is \
+             not yet semantically safe — single-sided graph merges still work. \
+             See docs/design/branching/primitive-aware-merge.md for the full design \
+             and the path to a semantic graph merge (Phase 3b)."
+        )));
+    }
+
+    Ok(())
+}
+
+// =============================================================================
 // Public result types
 // =============================================================================
 
@@ -2656,6 +2770,9 @@ pub fn cherry_pick_from_diff(
     for ((space, type_tag), cell) in &typed.cells {
         if *type_tag == TypeTag::Event {
             check_event_merge_divergence(space, &cell.ancestor, &cell.source, &cell.target)?;
+        }
+        if *type_tag == TypeTag::Graph {
+            check_graph_merge_divergence(space, &cell.ancestor, &cell.source, &cell.target)?;
         }
     }
     // LastWriterWins — we'll filter the actions afterwards.

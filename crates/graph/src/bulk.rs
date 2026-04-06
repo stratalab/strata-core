@@ -22,6 +22,16 @@ impl GraphStore {
     ) -> StrataResult<(usize, usize)> {
         keys::validate_graph_name(graph)?;
 
+        // Ensure the reserved `_graph_` space is registered with SpaceIndex
+        // before any bulk chunks run. Same gap as #2331's EventLog fix —
+        // without this, branches with bulk-inserted graph data are invisible
+        // to `merge_branches` and other space-iterating callers. The chunk
+        // transactions below would each pay the cost of an idempotent check
+        // anyway; centralizing it here in one small transaction is cheaper.
+        self.db.transaction(branch_id, |txn| {
+            crate::ext::ensure_graph_space_registered(txn, branch_id)
+        })?;
+
         // Read ontology status once before the loop
         let is_frozen = self
             .get_graph_meta(branch_id, graph)?
@@ -269,6 +279,13 @@ impl GraphStore {
             keys::validate_node_id(dst)?;
             keys::validate_edge_type(edge_type)?;
         }
+
+        // Auto-register the reserved `_graph_` space with SpaceIndex so
+        // `merge_branches` and other space-aware callers can see graph
+        // data on this branch. Mirrors the bulk_insert pattern above.
+        self.db.transaction(branch_id, |txn| {
+            crate::ext::ensure_graph_space_registered(txn, branch_id)
+        })?;
 
         // Check ontology constraints if frozen
         let is_frozen = self
