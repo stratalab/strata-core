@@ -104,6 +104,13 @@ pub use strata_engine::WalCounters;
 // Re-export configuration types so users don't need strata-engine directly
 pub use strata_engine::{ModelConfig, StorageConfig, StrataConfig, SystemMetrics};
 
+// Re-export hardware profile types so the CLI (and users) can detect + tune
+// without depending on strata-engine directly.
+pub use strata_engine::{
+    apply_hardware_profile_if_defaults, apply_profile_if_defaults, detect_hardware, HardwareInfo,
+    Profile,
+};
+
 // Re-export Database and DurabilityMode so users can open/create databases
 // and create sessions without depending on strata-engine directly
 pub use strata_engine::{Database, DurabilityMode};
