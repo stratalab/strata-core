@@ -8,12 +8,23 @@
 //! - `fork_branch` — Create a copy of a branch with all its data
 //! - `diff_branches` — Compare two branches and return structured differences
 //! - `merge_branches` — Merge data from one branch into another
+//!
+//! ## Submodules
+//!
+//! - [`primitive_merge`] — `PrimitiveMergeHandler` trait and per-primitive
+//!   handlers (Phase 2 of primitive-aware merge). See
+//!   `docs/design/branching/primitive-aware-merge.md`.
+
+mod primitive_merge;
 
 use crate::database::Database;
 use crate::primitives::branch::resolve_branch_name;
 use crate::BranchIndex;
 use crate::SpaceIndex;
-use std::collections::{HashMap, HashSet};
+use primitive_merge::{
+    build_merge_registry, MergeHandlerRegistry, MergePostCommitCtx, MergePrecheckCtx,
+};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -28,7 +39,10 @@ use tracing::info;
 // Constants and key-format helpers
 // =============================================================================
 
-const DATA_TYPE_TAGS: [TypeTag; 5] = [
+/// All primitive type tags that participate in the per-primitive merge
+/// dispatch. `pub(crate)` so the `primitive_merge` submodule's registry can
+/// iterate the same tag set.
+pub(crate) const DATA_TYPE_TAGS: [TypeTag; 5] = [
     TypeTag::KV,
     TypeTag::Event,
     TypeTag::Json,
@@ -1022,12 +1036,15 @@ fn cow_diff_branches(
 // =============================================================================
 
 /// Common ancestor state for three-way merge.
+///
+/// `pub(crate)` so the `primitive_merge` submodule can borrow it through
+/// `MergePrecheckCtx`.
 #[derive(Debug, Clone)]
-struct MergeBase {
+pub(crate) struct MergeBase {
     /// Branch to read ancestor state from.
-    branch_id: BranchId,
+    pub(crate) branch_id: BranchId,
     /// MVCC version to read at.
-    version: u64,
+    pub(crate) version: u64,
 }
 
 /// Classification of a key in a three-way merge.
@@ -1204,18 +1221,22 @@ fn classify_change(
 }
 
 /// A merge action to apply to the target branch.
-struct MergeAction {
-    space: String,
-    raw_key: Vec<u8>,
-    type_tag: TypeTag,
-    action: MergeActionKind,
+///
+/// `pub(crate)` so the `pub(crate) classify_typed_entries` function in
+/// this module can return it without leaking a private type. Phase 3+
+/// handlers may also consume `MergeAction` directly.
+pub(crate) struct MergeAction {
+    pub(crate) space: String,
+    pub(crate) raw_key: Vec<u8>,
+    pub(crate) type_tag: TypeTag,
+    pub(crate) action: MergeActionKind,
     /// What the diff saw in the target at snapshot time.
     /// `None` means the key did not exist in the target.
     /// Used to validate target hasn't changed between diff and apply (#1917).
-    expected_target: Option<Value>,
+    pub(crate) expected_target: Option<Value>,
 }
 
-enum MergeActionKind {
+pub(crate) enum MergeActionKind {
     Put(Value),
     Delete,
 }
@@ -1273,198 +1294,248 @@ fn compute_merge_base(
 ///
 /// For each key across all spaces and data type tags, classifies the change
 /// using the 14-case decision matrix and produces Put/Delete actions.
-fn three_way_diff(
+/// Per-(space, type_tag) entry slices gathered for a three-way merge.
+///
+/// Produced by [`gather_typed_entries`] and consumed by both
+/// [`classify_typed_entries`] (which produces the flat action vector) and
+/// `PrimitiveMergeHandler::precheck` (which inspects the slices to validate
+/// per-primitive invariants — e.g. Event divergence). Splitting gather
+/// from classify lets handlers run their precheck on the same materialized
+/// snapshots the classifier uses, with no extra storage reads.
+///
+/// `BTreeMap` for deterministic iteration order.
+pub(crate) struct TypedEntries {
+    pub cells: BTreeMap<(String, TypeTag), TypedEntryCell>,
+}
+
+/// Ancestor / source / target entry slices for one (space, type_tag) cell.
+pub(crate) struct TypedEntryCell {
+    /// Ancestor state at `merge_base.version`, with tombstones.
+    pub ancestor: Vec<strata_storage::VersionedEntry>,
+    /// Source state at `snapshot_version`, live entries only.
+    pub source: Vec<(Key, VersionedValue)>,
+    /// Target state at `snapshot_version`, live entries only.
+    pub target: Vec<(Key, VersionedValue)>,
+}
+
+/// Read ancestor / source / target entry slices for every (space, type_tag)
+/// cell that this merge will touch.
+///
+/// All reads are version-scoped (`list_by_type_at_version`) for consistent
+/// point-in-time snapshots; this matches the original `three_way_diff`
+/// reads exactly. Returns a `TypedEntries` map keyed by `(space, type_tag)`
+/// so handlers and the classifier can both index into it.
+pub(crate) fn gather_typed_entries(
     db: &Arc<Database>,
     source_id: BranchId,
     target_id: BranchId,
     merge_base: &MergeBase,
     spaces: &[String],
-    strategy: MergeStrategy,
     snapshot_version: u64,
-) -> StrataResult<(Vec<MergeAction>, Vec<ConflictEntry>)> {
+) -> StrataResult<TypedEntries> {
     let storage = db.storage();
-    let mut actions = Vec::new();
-    let mut conflicts = Vec::new();
+    let mut cells: BTreeMap<(String, TypeTag), TypedEntryCell> = BTreeMap::new();
 
     for space in spaces {
         for &type_tag in &DATA_TYPE_TAGS {
             // 1. Ancestor state (at merge base version, WITH tombstones)
-            let ancestor_entries = storage.list_by_type_at_version(
+            let ancestor = storage.list_by_type_at_version(
                 &merge_base.branch_id,
                 type_tag,
                 merge_base.version,
             );
 
             // 2. Source state at snapshot (consistent point-in-time, #1917)
-            let source_entries = live_entries_from_versioned(storage.list_by_type_at_version(
+            let source = live_entries_from_versioned(storage.list_by_type_at_version(
                 &source_id,
                 type_tag,
                 snapshot_version,
             ));
 
             // 3. Target state at snapshot (consistent point-in-time, #1917)
-            let target_entries = live_entries_from_versioned(storage.list_by_type_at_version(
+            let target = live_entries_from_versioned(storage.list_by_type_at_version(
                 &target_id,
                 type_tag,
                 snapshot_version,
             ));
 
-            // Phase 1 primitive-aware merge: refuse divergent Event appends
-            // before running the generic classification loop. See
-            // docs/design/branching/primitive-aware-merge.md.
-            if type_tag == TypeTag::Event {
-                check_event_merge_divergence(
-                    space,
-                    &ancestor_entries,
-                    &source_entries,
-                    &target_entries,
-                )?;
-            }
+            cells.insert(
+                (space.clone(), type_tag),
+                TypedEntryCell {
+                    ancestor,
+                    source,
+                    target,
+                },
+            );
+        }
+    }
 
-            let ancestor_map = build_ancestor_map(&ancestor_entries, space);
-            let source_map = build_live_map(&source_entries, space);
-            let target_map = build_live_map(&target_entries, space);
+    Ok(TypedEntries { cells })
+}
 
-            // Union all keys and classify
-            let all_keys: HashSet<Vec<u8>> = ancestor_map
-                .keys()
-                .chain(source_map.keys())
-                .chain(target_map.keys())
-                .cloned()
-                .collect();
+/// Run the 14-case classification matrix over pre-gathered typed entries
+/// and produce a flat `(actions, conflicts)` pair.
+///
+/// This is the existing classification logic, lifted unchanged out of the
+/// old `three_way_diff` function. The Phase 1 Event divergence check is
+/// **no longer here** — it now runs from `EventMergeHandler::precheck`,
+/// which is called before this function in `merge_branches`, and from a
+/// direct call in `cherry_pick_from_diff`.
+pub(crate) fn classify_typed_entries(
+    typed: &TypedEntries,
+    strategy: MergeStrategy,
+) -> (Vec<MergeAction>, Vec<ConflictEntry>) {
+    let mut actions = Vec::new();
+    let mut conflicts = Vec::new();
 
-            for user_key in &all_keys {
-                // Ancestor: flatten Option<Option<Value>> → Option<&Value>
-                // ancestor_map entry = Some(None) means tombstone → treat as absent
-                // ancestor_map entry = Some(Some(v)) means live value
-                // ancestor_map entry = None means key never existed at ancestor
-                let ancestor_val = ancestor_map.get(user_key).and_then(|opt| opt.as_ref());
-                let source_val = source_map.get(user_key);
-                let target_val = target_map.get(user_key);
+    for ((space, type_tag), cell) in &typed.cells {
+        let ancestor_map = build_ancestor_map(&cell.ancestor, space);
+        let source_map = build_live_map(&cell.source, space);
+        let target_map = build_live_map(&cell.target, space);
 
-                let change = classify_change(ancestor_val, source_val, target_val);
+        // Union all keys and classify
+        let all_keys: HashSet<Vec<u8>> = ancestor_map
+            .keys()
+            .chain(source_map.keys())
+            .chain(target_map.keys())
+            .cloned()
+            .collect();
 
-                match change {
-                    ThreeWayChange::Unchanged
-                    | ThreeWayChange::TargetChanged
-                    | ThreeWayChange::BothChangedSame
-                    | ThreeWayChange::TargetAdded
-                    | ThreeWayChange::BothAddedSame
-                    | ThreeWayChange::TargetDeleted
-                    | ThreeWayChange::BothDeleted => {
-                        // No action needed — target already has the correct state
-                    }
+        for user_key in &all_keys {
+            // Ancestor: flatten Option<Option<Value>> → Option<&Value>
+            // ancestor_map entry = Some(None) means tombstone → treat as absent
+            // ancestor_map entry = Some(Some(v)) means live value
+            // ancestor_map entry = None means key never existed at ancestor
+            let ancestor_val = ancestor_map.get(user_key).and_then(|opt| opt.as_ref());
+            let source_val = source_map.get(user_key);
+            let target_val = target_map.get(user_key);
 
-                    ThreeWayChange::SourceChanged { value }
-                    | ThreeWayChange::SourceAdded { value } => {
+            let change = classify_change(ancestor_val, source_val, target_val);
+
+            match change {
+                ThreeWayChange::Unchanged
+                | ThreeWayChange::TargetChanged
+                | ThreeWayChange::BothChangedSame
+                | ThreeWayChange::TargetAdded
+                | ThreeWayChange::BothAddedSame
+                | ThreeWayChange::TargetDeleted
+                | ThreeWayChange::BothDeleted => {
+                    // No action needed — target already has the correct state
+                }
+
+                ThreeWayChange::SourceChanged { value } | ThreeWayChange::SourceAdded { value } => {
+                    actions.push(MergeAction {
+                        space: space.clone(),
+                        raw_key: user_key.clone(),
+                        type_tag: *type_tag,
+                        action: MergeActionKind::Put(value),
+                        expected_target: target_val.cloned(),
+                    });
+                }
+
+                ThreeWayChange::SourceDeleted => {
+                    actions.push(MergeAction {
+                        space: space.clone(),
+                        raw_key: user_key.clone(),
+                        type_tag: *type_tag,
+                        action: MergeActionKind::Delete,
+                        expected_target: target_val.cloned(),
+                    });
+                }
+
+                // Conflicts — always report, resolve per strategy
+                ThreeWayChange::Conflict {
+                    source_value,
+                    target_value,
+                } => {
+                    conflicts.push(ConflictEntry {
+                        key: format_user_key(user_key),
+                        primitive: type_tag_to_primitive(*type_tag),
+                        space: space.clone(),
+                        source_value: Some(source_value.clone()),
+                        target_value: Some(target_value),
+                    });
+                    if strategy == MergeStrategy::LastWriterWins {
                         actions.push(MergeAction {
                             space: space.clone(),
                             raw_key: user_key.clone(),
-                            type_tag,
-                            action: MergeActionKind::Put(value),
+                            type_tag: *type_tag,
+                            action: MergeActionKind::Put(source_value),
                             expected_target: target_val.cloned(),
                         });
                     }
+                }
 
-                    ThreeWayChange::SourceDeleted => {
+                ThreeWayChange::BothAddedDifferent {
+                    source_value,
+                    target_value,
+                } => {
+                    conflicts.push(ConflictEntry {
+                        key: format_user_key(user_key),
+                        primitive: type_tag_to_primitive(*type_tag),
+                        space: space.clone(),
+                        source_value: Some(source_value.clone()),
+                        target_value: Some(target_value),
+                    });
+                    if strategy == MergeStrategy::LastWriterWins {
                         actions.push(MergeAction {
                             space: space.clone(),
                             raw_key: user_key.clone(),
-                            type_tag,
+                            type_tag: *type_tag,
+                            action: MergeActionKind::Put(source_value),
+                            expected_target: target_val.cloned(),
+                        });
+                    }
+                }
+
+                ThreeWayChange::ModifyDeleteConflict { source_value } => {
+                    conflicts.push(ConflictEntry {
+                        key: format_user_key(user_key),
+                        primitive: type_tag_to_primitive(*type_tag),
+                        space: space.clone(),
+                        source_value: Some(source_value.clone()),
+                        target_value: None,
+                    });
+                    if strategy == MergeStrategy::LastWriterWins {
+                        actions.push(MergeAction {
+                            space: space.clone(),
+                            raw_key: user_key.clone(),
+                            type_tag: *type_tag,
+                            action: MergeActionKind::Put(source_value),
+                            expected_target: target_val.cloned(),
+                        });
+                    }
+                }
+
+                ThreeWayChange::DeleteModifyConflict { target_value } => {
+                    conflicts.push(ConflictEntry {
+                        key: format_user_key(user_key),
+                        primitive: type_tag_to_primitive(*type_tag),
+                        space: space.clone(),
+                        source_value: None,
+                        target_value: Some(target_value),
+                    });
+                    if strategy == MergeStrategy::LastWriterWins {
+                        actions.push(MergeAction {
+                            space: space.clone(),
+                            raw_key: user_key.clone(),
+                            type_tag: *type_tag,
                             action: MergeActionKind::Delete,
                             expected_target: target_val.cloned(),
                         });
-                    }
-
-                    // Conflicts — always report, resolve per strategy
-                    ThreeWayChange::Conflict {
-                        source_value,
-                        target_value,
-                    } => {
-                        conflicts.push(ConflictEntry {
-                            key: format_user_key(user_key),
-                            primitive: type_tag_to_primitive(type_tag),
-                            space: space.clone(),
-                            source_value: Some(source_value.clone()),
-                            target_value: Some(target_value),
-                        });
-                        if strategy == MergeStrategy::LastWriterWins {
-                            actions.push(MergeAction {
-                                space: space.clone(),
-                                raw_key: user_key.clone(),
-                                type_tag,
-                                action: MergeActionKind::Put(source_value),
-                                expected_target: target_val.cloned(),
-                            });
-                        }
-                    }
-
-                    ThreeWayChange::BothAddedDifferent {
-                        source_value,
-                        target_value,
-                    } => {
-                        conflicts.push(ConflictEntry {
-                            key: format_user_key(user_key),
-                            primitive: type_tag_to_primitive(type_tag),
-                            space: space.clone(),
-                            source_value: Some(source_value.clone()),
-                            target_value: Some(target_value),
-                        });
-                        if strategy == MergeStrategy::LastWriterWins {
-                            actions.push(MergeAction {
-                                space: space.clone(),
-                                raw_key: user_key.clone(),
-                                type_tag,
-                                action: MergeActionKind::Put(source_value),
-                                expected_target: target_val.cloned(),
-                            });
-                        }
-                    }
-
-                    ThreeWayChange::ModifyDeleteConflict { source_value } => {
-                        conflicts.push(ConflictEntry {
-                            key: format_user_key(user_key),
-                            primitive: type_tag_to_primitive(type_tag),
-                            space: space.clone(),
-                            source_value: Some(source_value.clone()),
-                            target_value: None,
-                        });
-                        if strategy == MergeStrategy::LastWriterWins {
-                            actions.push(MergeAction {
-                                space: space.clone(),
-                                raw_key: user_key.clone(),
-                                type_tag,
-                                action: MergeActionKind::Put(source_value),
-                                expected_target: target_val.cloned(),
-                            });
-                        }
-                    }
-
-                    ThreeWayChange::DeleteModifyConflict { target_value } => {
-                        conflicts.push(ConflictEntry {
-                            key: format_user_key(user_key),
-                            primitive: type_tag_to_primitive(type_tag),
-                            space: space.clone(),
-                            source_value: None,
-                            target_value: Some(target_value),
-                        });
-                        if strategy == MergeStrategy::LastWriterWins {
-                            actions.push(MergeAction {
-                                space: space.clone(),
-                                raw_key: user_key.clone(),
-                                type_tag,
-                                action: MergeActionKind::Delete,
-                                expected_target: target_val.cloned(),
-                            });
-                        }
                     }
                 }
             }
         }
     }
 
-    Ok((actions, conflicts))
+    (actions, conflicts)
 }
+
+// Note: the legacy `three_way_diff` wrapper was removed as part of Phase 2.
+// Both internal callers (`merge_branches` and `cherry_pick_from_diff`) now
+// invoke `gather_typed_entries` + `classify_typed_entries` directly so they
+// can interleave the Event safety check between gather and classify.
 
 /// Reload secondary index backends after merge.
 fn reload_secondary_backends(db: &Arc<Database>, target_id: BranchId, source_id: BranchId) {
@@ -1533,16 +1604,35 @@ pub fn merge_branches(
     // Capture snapshot version for consistent reads during diff (#1917)
     let snapshot_version = db.current_version();
 
-    // Three-way diff (reads at snapshot_version for both source and target)
-    let (actions, conflicts) = three_way_diff(
+    // Phase 2: gather typed entries once, then route through the
+    // PrimitiveMergeHandler registry. The registry's `precheck` step is
+    // where Phase 1's Event divergence safety check now lives — see
+    // `EventMergeHandler::precheck` and the design doc at
+    // docs/design/branching/primitive-aware-merge.md.
+    let typed = gather_typed_entries(
         db,
         source_id,
         target_id,
         &merge_base,
         &all_spaces,
-        strategy,
         snapshot_version,
     )?;
+
+    let registry: MergeHandlerRegistry = build_merge_registry();
+    let precheck_ctx = MergePrecheckCtx {
+        source_id,
+        target_id,
+        merge_base: &merge_base,
+        strategy,
+        typed_entries: &typed,
+    };
+    for &tag in &DATA_TYPE_TAGS {
+        registry.get(tag).precheck(&precheck_ctx)?;
+    }
+
+    // Classify the gathered entries into the flat (actions, conflicts)
+    // shape the existing apply path consumes.
+    let (actions, conflicts) = classify_typed_entries(&typed, strategy);
 
     // If strict and conflicts exist, return error
     if strategy == MergeStrategy::Strict && !conflicts.is_empty() {
@@ -1617,6 +1707,20 @@ pub fn merge_branches(
             Ok(())
         })?;
         merge_version = Some(version);
+    }
+
+    // Phase 2: post-commit handlers run before the existing reload sweep.
+    // All Phase 2 handlers are no-ops here; Phases 3 (Graph adjacency) and
+    // 5 (JSON per-key index refresh) will fill them in and incrementally
+    // retire `reload_secondary_backends`.
+    let post_ctx = MergePostCommitCtx {
+        db,
+        source_id,
+        target_id,
+        merge_version,
+    };
+    for &tag in &DATA_TYPE_TAGS {
+        registry.get(tag).post_commit(&post_ctx)?;
     }
 
     // Reload secondary index backends
@@ -2477,16 +2581,27 @@ pub fn cherry_pick_from_diff(
     // Capture snapshot for consistent reads (#1917)
     let snapshot_version = db.current_version();
 
-    // Compute three-way diff with LastWriterWins (we'll filter the actions)
-    let (actions, _conflicts) = three_way_diff(
+    // Phase 2: gather typed entries directly so we can run the Event
+    // divergence safety check between gather and classify. The check used
+    // to live inline inside `three_way_diff`; it now lives in
+    // `EventMergeHandler::precheck` (called from `merge_branches`) and is
+    // invoked here explicitly so the cherry-pick path keeps the Phase 1
+    // safety contract.
+    let typed = gather_typed_entries(
         db,
         source_id,
         target_id,
         &merge_base,
         &all_spaces,
-        MergeStrategy::LastWriterWins,
         snapshot_version,
     )?;
+    for ((space, type_tag), cell) in &typed.cells {
+        if *type_tag == TypeTag::Event {
+            check_event_merge_divergence(space, &cell.ancestor, &cell.source, &cell.target)?;
+        }
+    }
+    // LastWriterWins — we'll filter the actions afterwards.
+    let (actions, _conflicts) = classify_typed_entries(&typed, MergeStrategy::LastWriterWins);
 
     // Filter by CherryPickFilter
     let space_filter: Option<HashSet<&str>> = filter
