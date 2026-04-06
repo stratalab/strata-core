@@ -344,7 +344,14 @@ impl SegmentIndex {
                 top_level,
                 sub_indexes,
             } => {
-                let part = top_level.search(seek_bytes);
+                // Top-level keys are partition UPPER BOUNDS (last key in each
+                // partition). We need the first partition whose upper bound
+                // >= target, which is partition_point (not search, which
+                // finds last entry <= target and would pick the previous
+                // partition).
+                let part = top_level
+                    .partition_point(seek_bytes)
+                    .min(sub_indexes.len() - 1);
                 let block_in = sub_indexes[part].search(seek_bytes);
                 (part, block_in)
             }

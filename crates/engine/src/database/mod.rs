@@ -307,6 +307,12 @@ pub struct Database {
     /// Background task scheduler for deferred work (embedding, GC, etc.)
     scheduler: Arc<BackgroundScheduler>,
 
+    /// Flag preventing duplicate background flush submissions.
+    /// Set to `true` when a flush task is in flight; cleared when it completes.
+    /// The in-flight task drains all frozen memtables, so redundant submissions
+    /// during fast ingest are pure waste.
+    flush_in_flight: Arc<AtomicBool>,
+
     /// Flag preventing duplicate background compaction submissions.
     /// Set to `true` when a compaction task is in flight; cleared when it completes.
     compaction_in_flight: Arc<AtomicBool>,
@@ -521,6 +527,7 @@ impl Database {
     ///
     /// Bypasses the transaction layer (read-only, no conflict tracking needed).
     /// Uses the lazy merge pipeline with seek pushdown and optional limit.
+    #[allow(dead_code)]
     pub(crate) fn scan_range(
         &self,
         prefix: &Key,

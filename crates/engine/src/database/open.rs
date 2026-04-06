@@ -324,6 +324,7 @@ impl Database {
             flush_shutdown: Arc::new(AtomicBool::new(false)),
             flush_handle: ParkingMutex::new(None), // No flush thread
             scheduler: Arc::new(BackgroundScheduler::new(bg_threads, 4096)),
+            flush_in_flight: Arc::new(AtomicBool::new(false)),
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
             compaction_cancelled: Arc::new(AtomicBool::new(false)),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
@@ -612,6 +613,7 @@ impl Database {
             flush_shutdown,
             flush_handle: ParkingMutex::new(flush_handle),
             scheduler: Arc::new(BackgroundScheduler::new(bg_threads, 4096)),
+            flush_in_flight: Arc::new(AtomicBool::new(false)),
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
             compaction_cancelled: Arc::new(AtomicBool::new(false)),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
@@ -702,6 +704,7 @@ impl Database {
             flush_shutdown: Arc::new(AtomicBool::new(false)),
             flush_handle: ParkingMutex::new(None),
             scheduler: Arc::new(BackgroundScheduler::new(bg_threads, 4096)),
+            flush_in_flight: Arc::new(AtomicBool::new(false)),
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
             compaction_cancelled: Arc::new(AtomicBool::new(false)),
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),

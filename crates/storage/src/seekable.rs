@@ -71,54 +71,61 @@ pub trait SeekableIterator: Send {
 /// On each `seek()`, collects entries from the seek position into an owned
 /// `Vec`. This is the correct Rust approach — crossbeam SkipMap's `range()`
 /// returns a borrowing iterator that cannot be stored alongside the `Arc`.
-/// Collection is bounded by `write_buffer_size` and the range from seek
-/// position, so it's fast (all in-memory).
+/// Cursor-based memtable iterator. Fetches one entry at a time from the
+/// skiplist instead of collecting the entire range into a Vec. This avoids
+/// cloning thousands of 1KB values when only a few are needed (e.g., scan
+/// with limit=10).
 pub struct MemtableSeekableIter {
     memtable: Arc<Memtable>,
-    prefix: Key,
-    entries: Vec<(InternalKey, MemtableEntry)>,
-    pos: usize,
+    prefix_bytes: Vec<u8>,
+    current: Option<(InternalKey, MemtableEntry)>,
 }
 
 impl MemtableSeekableIter {
     /// Create a new memtable iterator. Call `seek()` before iterating.
     pub fn new(memtable: Arc<Memtable>, prefix: Key) -> Self {
+        let prefix_bytes = encode_typed_key_prefix(&prefix);
         Self {
             memtable,
-            prefix,
-            entries: Vec::new(),
-            pos: 0,
+            prefix_bytes,
+            current: None,
         }
+    }
+
+    /// Fetch the first entry >= `seek_ik_bytes` within the prefix range.
+    fn fetch_first(&self, seek_ik_bytes: &[u8]) -> Option<(InternalKey, MemtableEntry)> {
+        self.memtable
+            .iter_range_raw(seek_ik_bytes, &self.prefix_bytes)
+            .next()
     }
 }
 
 impl SeekableIterator for MemtableSeekableIter {
     fn seek(&mut self, target: &[u8]) {
-        let prefix_bytes = encode_typed_key_prefix(&self.prefix);
-        self.entries = self
-            .memtable
-            .iter_range_raw(target, &prefix_bytes)
-            .collect();
-        self.pos = 0;
+        self.current = self.fetch_first(target);
     }
 
     fn advance(&mut self) -> bool {
-        if self.pos < self.entries.len() {
-            self.pos += 1;
+        if let Some((ref ik, _)) = self.current {
+            // Advance past the current entry by seeking to the byte after it.
+            // InternalKey bytes are ordered so appending \0 gives the next position.
+            let mut next = ik.as_bytes().to_vec();
+            next.push(0);
+            self.current = self.fetch_first(&next);
         }
-        self.pos < self.entries.len()
+        self.current.is_some()
     }
 
     fn valid(&self) -> bool {
-        self.pos < self.entries.len()
+        self.current.is_some()
     }
 
     fn current_key(&self) -> &InternalKey {
-        &self.entries[self.pos].0
+        &self.current.as_ref().unwrap().0
     }
 
     fn current_entry(&self) -> &MemtableEntry {
-        &self.entries[self.pos].1
+        &self.current.as_ref().unwrap().1
     }
 }
 
