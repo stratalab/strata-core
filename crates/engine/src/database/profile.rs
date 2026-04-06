@@ -88,7 +88,15 @@ fn detect_ram_bytes() -> u64 {
 
 #[cfg(target_os = "macos")]
 fn detect_ram_bytes() -> u64 {
-    // libc::sysctlbyname("hw.memsize", ...) — direct syscall, no shell-out.
+    // Direct sysctlbyname syscall — avoids shelling out to /usr/sbin/sysctl.
+    //
+    // SAFETY:
+    // - `name` is a valid null-terminated C string constant.
+    // - `size` is a valid, writable u64 on the stack.
+    // - `len` initially holds size_of::<u64>() = 8, matching the size of
+    //   hw.memsize (uint64_t in Apple's sysctl.h).
+    // - newp and newlen are null/0 (we're reading, not writing).
+    // - A return value of 0 means success; any other value means error.
     unsafe {
         let mut size: u64 = 0;
         let mut len = std::mem::size_of::<u64>();
@@ -127,10 +135,14 @@ pub fn apply_hardware_profile_if_defaults(cfg: &mut StrataConfig) -> Profile {
 /// Apply a specific profile to `cfg`. Used by the CLI wizard for explicit
 /// profile pinning.
 pub fn apply_profile_if_defaults(cfg: &mut StrataConfig, profile: Profile, hw: HardwareInfo) {
+    // The default value for StrataConfig::default_vector_dtype. Hardcoded to
+    // avoid allocating a fresh StrataConfig on every call just to read one
+    // string. Must stay in sync with `default_vector_dtype()` in config.rs.
+    const DEFAULT_VECTOR_DTYPE: &str = "f32";
+
     let baseline = StorageConfig::default();
     let s = &mut cfg.storage;
     let memory_budget_set = s.memory_budget > 0;
-    let default_vector_dtype = StrataConfig::default().default_vector_dtype;
 
     match profile {
         Profile::Embedded => {
@@ -154,7 +166,7 @@ pub fn apply_profile_if_defaults(cfg: &mut StrataConfig, profile: Profile, hw: H
             if s.compaction_rate_limit == baseline.compaction_rate_limit {
                 s.compaction_rate_limit = 5 * 1024 * 1024;
             }
-            if cfg.default_vector_dtype == default_vector_dtype {
+            if cfg.default_vector_dtype == DEFAULT_VECTOR_DTYPE {
                 cfg.default_vector_dtype = "binary".to_string();
             }
         }
@@ -372,6 +384,17 @@ mod tests {
     }
 
     #[test]
+    fn default_vector_dtype_constant_matches_config() {
+        // If config.rs changes the default vector dtype, this test fails and
+        // reminds us to update the DEFAULT_VECTOR_DTYPE const in profile.rs.
+        let cfg = StrataConfig::default();
+        assert_eq!(
+            cfg.default_vector_dtype, "f32",
+            "DEFAULT_VECTOR_DTYPE const in profile.rs must match config default"
+        );
+    }
+
+    #[test]
     fn detect_hardware_returns_positive() {
         let hw = detect_hardware();
         assert!(hw.ram_bytes > 0);
@@ -384,5 +407,87 @@ mod tests {
         let b = detect_hardware();
         assert_eq!(a.ram_bytes, b.ram_bytes);
         assert_eq!(a.cores, b.cores);
+    }
+
+    #[test]
+    fn embedded_block_cache_caps_at_64mb_for_512gb_host() {
+        // Pathological case: 512 GB host classified as Server, but profile
+        // should NOT apply Embedded caps. Verify classification gate works.
+        let hw = HardwareInfo {
+            ram_bytes: 512 * 1024 * 1024 * 1024,
+            cores: 128,
+        };
+        let profile = Profile::classify(hw);
+        assert_eq!(profile, Profile::Server);
+
+        let mut cfg = StrataConfig::default();
+        apply_profile_if_defaults(&mut cfg, profile, hw);
+        // Server profile does NOT override block_cache_size — left at 0
+        // so that open_finish's auto-detect path runs.
+        assert_eq!(cfg.storage.block_cache_size, 0);
+    }
+
+    #[test]
+    fn zero_ram_defensive() {
+        // Defensive: ensure degenerate 0-RAM input doesn't panic or produce
+        // negative cache sizes. Profile::classify(0) returns Embedded.
+        let hw = HardwareInfo {
+            ram_bytes: 0,
+            cores: 1,
+        };
+        let mut cfg = StrataConfig::default();
+        apply_profile_if_defaults(&mut cfg, Profile::Embedded, hw);
+        // ram_bytes/8 = 0, capped at 64 MB → 0 → cache remains 0 (auto-detect fallback)
+        assert_eq!(cfg.storage.block_cache_size, 0);
+    }
+
+    #[test]
+    fn user_explicit_level_base_bytes_not_clobbered() {
+        let mut cfg = StrataConfig::default();
+        cfg.storage.level_base_bytes = 1024 * 1024 * 1024; // 1 GB explicit
+        apply_profile_if_defaults(&mut cfg, Profile::Embedded, pi_zero());
+        assert_eq!(cfg.storage.level_base_bytes, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn user_explicit_target_file_size_not_clobbered() {
+        let mut cfg = StrataConfig::default();
+        cfg.storage.target_file_size = 256 * 1024 * 1024;
+        apply_profile_if_defaults(&mut cfg, Profile::Embedded, pi_zero());
+        assert_eq!(cfg.storage.target_file_size, 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn user_explicit_compaction_rate_limit_not_clobbered() {
+        let mut cfg = StrataConfig::default();
+        cfg.storage.compaction_rate_limit = 100 * 1024 * 1024;
+        apply_profile_if_defaults(&mut cfg, Profile::Embedded, pi_zero());
+        assert_eq!(cfg.storage.compaction_rate_limit, 100 * 1024 * 1024);
+    }
+
+    /// Integration test: `Database::cache()` applies profile to `db.config()`.
+    /// This verifies the full pathway works end-to-end, not just the
+    /// pure function.
+    #[test]
+    fn cache_database_applies_profile_to_runtime_config() {
+        use crate::Database;
+        let db = Database::cache().expect("cache db should open");
+        let cfg = db.config.read();
+        let hw = detect_hardware();
+        let expected_profile = Profile::classify(hw);
+
+        match expected_profile {
+            Profile::Embedded => {
+                assert_eq!(cfg.storage.write_buffer_size, 16 * 1024 * 1024);
+                assert_eq!(cfg.storage.background_threads, 1);
+            }
+            Profile::Desktop => {
+                assert_eq!(cfg.storage.background_threads, hw.cores.min(4));
+            }
+            Profile::Server => {
+                assert_eq!(cfg.storage.write_buffer_size, 256 * 1024 * 1024);
+                assert_eq!(cfg.storage.background_threads, hw.cores.min(8));
+            }
+        }
     }
 }

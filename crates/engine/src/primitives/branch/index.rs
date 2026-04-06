@@ -371,6 +371,15 @@ impl BranchIndex {
         crate::primitives::kv::invalidate_kv_namespace_cache(&executor_branch_id);
         crate::system_space::invalidate_cache(&executor_branch_id);
 
+        // Drain background tasks before clearing storage. The delete
+        // transaction above commits writes which schedule flush/compaction
+        // via `schedule_flush_if_needed`. If compaction runs concurrently
+        // with clear_branch_storage, it can create .tmp/.sst files in the
+        // branch directory AFTER clear_branch_storage tries to remove the
+        // directory, leaving the directory non-empty. Draining here ensures
+        // all delete-triggered background work has completed.
+        self.db.scheduler().drain();
+
         // Clean up storage-layer segments, manifest, and refcounts (#1702).
         // Must happen after logical deletion so in-progress reads see the
         // deletion before files disappear.
