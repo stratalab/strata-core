@@ -723,6 +723,356 @@ fn test_fork_diff_merge_roundtrip() {
 }
 
 // ============================================================================
+// Event Merge Safety (Phase 1 of primitive-aware merge)
+// ============================================================================
+//
+// See docs/design/branching/primitive-aware-merge.md. The generic three-way
+// merge treats EventLog records as opaque key/value pairs and silently
+// corrupts the hash chain when both sides of a fork have appended to the
+// same space. These tests pin down the new refusal behavior and verify
+// that single-sided and cross-space-disjoint merges still produce a
+// verifiable chain.
+
+/// Walk a branch's event log seq=0..len and verify:
+/// (a) each event's stored `hash` matches `compute_event_hash` recomputed
+///     from its fields + the previous hash, and
+/// (b) each event's `prev_hash` matches the previous event's stored `hash`.
+///
+/// Returns the number of events walked on success, or a descriptive error.
+fn verify_event_chain(event_log: &EventLog, branch: &BranchId, space: &str) -> Result<u64, String> {
+    use strata_engine::primitives::event::compute_event_hash;
+    let len = event_log.len(branch, space).map_err(|e| e.to_string())?;
+    let mut prev_hash = [0u8; 32];
+    for seq in 0..len {
+        let v = event_log
+            .get(branch, space, seq)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("missing event at seq={seq}"))?;
+        let ev = &v.value;
+        if ev.prev_hash != prev_hash {
+            return Err(format!(
+                "prev_hash mismatch at seq={seq}: expected chain head {:?}, event stores {:?}",
+                prev_hash, ev.prev_hash
+            ));
+        }
+        let recomputed = compute_event_hash(
+            ev.sequence,
+            &ev.event_type,
+            &ev.payload,
+            ev.timestamp.as_micros(),
+            &prev_hash,
+        )
+        .map_err(|e| e.to_string())?;
+        if recomputed != ev.hash {
+            return Err(format!(
+                "hash mismatch at seq={seq}: recomputed {:?}, stored {:?}",
+                recomputed, ev.hash
+            ));
+        }
+        prev_hash = ev.hash;
+    }
+    Ok(len)
+}
+
+#[test]
+fn event_merge_divergent_rejects() {
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let event = test_db.event();
+
+    // Seed target with 3 events before fork so ancestor next_sequence=3.
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    event
+        .append(&target_id, "default", "t0", int_payload(0))
+        .unwrap();
+    event
+        .append(&target_id, "default", "t1", int_payload(1))
+        .unwrap();
+    event
+        .append(&target_id, "default", "t2", int_payload(2))
+        .unwrap();
+    assert_eq!(event.len(&target_id, "default").unwrap(), 3);
+
+    // Fork target → source (source inherits the 3 events).
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source appends 1 event of its own type.
+    event
+        .append(&source_id, "default", "src_type", int_payload(100))
+        .unwrap();
+    assert_eq!(event.len(&source_id, "default").unwrap(), 4);
+
+    // Target appends 2 events of different types. Both sides have now
+    // advanced past the fork's next_sequence=3.
+    event
+        .append(&target_id, "default", "tgt_a", int_payload(200))
+        .unwrap();
+    event
+        .append(&target_id, "default", "tgt_b", int_payload(201))
+        .unwrap();
+    assert_eq!(event.len(&target_id, "default").unwrap(), 5);
+
+    // LWW merge must be rejected.
+    let err = branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect_err("divergent event merge must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("merge unsupported: divergent event appends"),
+        "error message should identify the refusal, got: {msg}"
+    );
+    assert!(
+        msg.contains("space 'default'"),
+        "error message should name the divergent space, got: {msg}"
+    );
+
+    // Strict merge must also be rejected (the divergence check fires
+    // regardless of strategy, before the strategy-specific branch runs).
+    let err =
+        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+            .expect_err("divergent event merge must be rejected under Strict");
+    assert!(
+        err.to_string()
+            .contains("merge unsupported: divergent event appends"),
+        "Strict rejection should also use the divergence error"
+    );
+
+    // Target state must be untouched by the refused merges.
+    assert_eq!(event.len(&target_id, "default").unwrap(), 5);
+    let tgt_a_hits = event
+        .get_by_type(&target_id, "default", "tgt_a", None, None)
+        .unwrap();
+    assert_eq!(tgt_a_hits.len(), 1, "target's tgt_a event must survive");
+    assert_eq!(tgt_a_hits[0].value.payload, int_payload(200));
+    let src_hits = event
+        .get_by_type(&target_id, "default", "src_type", None, None)
+        .unwrap();
+    assert!(
+        src_hits.is_empty(),
+        "source's events must not have leaked into target"
+    );
+
+    // Target's own chain is still walkable end-to-end.
+    let walked = verify_event_chain(&event, &target_id, "default").expect("target chain valid");
+    assert_eq!(walked, 5);
+}
+
+#[test]
+fn event_merge_single_sided_same_space_succeeds() {
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let event = test_db.event();
+
+    // Seed target with 3 events before fork.
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    event
+        .append(&target_id, "default", "t0", int_payload(0))
+        .unwrap();
+    event
+        .append(&target_id, "default", "t1", int_payload(1))
+        .unwrap();
+    event
+        .append(&target_id, "default", "t2", int_payload(2))
+        .unwrap();
+
+    // Fork, then append only on source.
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+    event
+        .append(&source_id, "default", "src_a", int_payload(100))
+        .unwrap();
+    event
+        .append(&source_id, "default", "src_b", int_payload(101))
+        .unwrap();
+    assert_eq!(event.len(&source_id, "default").unwrap(), 5);
+    assert_eq!(event.len(&target_id, "default").unwrap(), 3);
+
+    // Single-sided merge should succeed through the generic path.
+    let info = branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("single-sided event merge should succeed");
+    assert!(
+        info.keys_applied > 0,
+        "merge should apply source's new event records and metadata row"
+    );
+
+    // Target now has all 5 events.
+    assert_eq!(event.len(&target_id, "default").unwrap(), 5);
+
+    // Chain walks cleanly from seq=0 to seq=4.
+    let walked = verify_event_chain(&event, &target_id, "default")
+        .expect("target chain must verify after single-sided merge");
+    assert_eq!(walked, 5);
+
+    // Per-type index is consistent: source's events are queryable on target.
+    let src_a_hits = event
+        .get_by_type(&target_id, "default", "src_a", None, None)
+        .unwrap();
+    assert_eq!(src_a_hits.len(), 1);
+    assert_eq!(src_a_hits[0].value.payload, int_payload(100));
+    let src_b_hits = event
+        .get_by_type(&target_id, "default", "src_b", None, None)
+        .unwrap();
+    assert_eq!(src_b_hits.len(), 1);
+    assert_eq!(src_b_hits[0].value.payload, int_payload(101));
+
+    // Target's pre-fork events are still in place too.
+    let t0_hits = event
+        .get_by_type(&target_id, "default", "t0", None, None)
+        .unwrap();
+    assert_eq!(t0_hits.len(), 1);
+    assert_eq!(t0_hits[0].value.payload, int_payload(0));
+}
+
+#[test]
+fn event_merge_target_only_appends_succeeds() {
+    // Symmetric to `event_merge_single_sided_same_space_succeeds`: only target
+    // appends after fork. The event divergence check must pass and the merge
+    // must leave target's new events intact (merge is a no-op for Event on
+    // the generic path because source's meta matches ancestor → `SourceChanged`
+    // is never produced, and target's own additions classify as `TargetAdded`).
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let event = test_db.event();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    event
+        .append(&target_id, "default", "t0", int_payload(0))
+        .unwrap();
+    event
+        .append(&target_id, "default", "t1", int_payload(1))
+        .unwrap();
+    event
+        .append(&target_id, "default", "t2", int_payload(2))
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Target only: append two events. Source is untouched.
+    event
+        .append(&target_id, "default", "tgt_new", int_payload(50))
+        .unwrap();
+    event
+        .append(&target_id, "default", "tgt_new", int_payload(51))
+        .unwrap();
+    assert_eq!(event.len(&source_id, "default").unwrap(), 3);
+    assert_eq!(event.len(&target_id, "default").unwrap(), 5);
+
+    // Merge source → target with LWW. Check must not falsely fire (source
+    // did not diverge from ancestor).
+    branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("target-only event merge should succeed");
+
+    // Target's new events must still be present and walkable end-to-end.
+    assert_eq!(event.len(&target_id, "default").unwrap(), 5);
+    let walked = verify_event_chain(&event, &target_id, "default")
+        .expect("target chain must verify after target-only merge");
+    assert_eq!(walked, 5);
+    let new_hits = event
+        .get_by_type(&target_id, "default", "tgt_new", None, None)
+        .unwrap();
+    assert_eq!(new_hits.len(), 2);
+    assert_eq!(new_hits[0].value.payload, int_payload(50));
+    assert_eq!(new_hits[1].value.payload, int_payload(51));
+}
+
+#[test]
+fn event_merge_cross_space_divergence_succeeds() {
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let space_index = SpaceIndex::new(test_db.db.clone());
+    let event = test_db.event();
+
+    // Seed both spaces on target before fork. Non-default spaces must be
+    // registered explicitly so `merge_branches` iterates them via
+    // `SpaceIndex::list` — `EventLog::append` does not auto-register.
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    space_index.register(target_id, "orders").unwrap();
+    space_index.register(target_id, "users").unwrap();
+    event
+        .append(&target_id, "orders", "created", int_payload(0))
+        .unwrap();
+    event
+        .append(&target_id, "orders", "paid", int_payload(1))
+        .unwrap();
+    event
+        .append(&target_id, "users", "signup", int_payload(10))
+        .unwrap();
+    event
+        .append(&target_id, "users", "login", int_payload(11))
+        .unwrap();
+
+    // Fork.
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source appends only in "orders"; target appends only in "users".
+    // Each space is single-sided from the merge's point of view.
+    event
+        .append(&source_id, "orders", "shipped", int_payload(2))
+        .unwrap();
+    event
+        .append(&target_id, "users", "logout", int_payload(12))
+        .unwrap();
+
+    // Merge should succeed: per-space divergence check allows this shape.
+    branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("cross-space divergent event merge should succeed");
+
+    // "orders" space on target got source's new event.
+    assert_eq!(event.len(&target_id, "orders").unwrap(), 3);
+    let shipped_hits = event
+        .get_by_type(&target_id, "orders", "shipped", None, None)
+        .unwrap();
+    assert_eq!(shipped_hits.len(), 1);
+    assert_eq!(shipped_hits[0].value.payload, int_payload(2));
+
+    // "users" space on target kept its own new event.
+    assert_eq!(event.len(&target_id, "users").unwrap(), 3);
+    let logout_hits = event
+        .get_by_type(&target_id, "users", "logout", None, None)
+        .unwrap();
+    assert_eq!(logout_hits.len(), 1);
+    assert_eq!(logout_hits[0].value.payload, int_payload(12));
+
+    // Both spaces' chains walk cleanly.
+    let orders_len = verify_event_chain(&event, &target_id, "orders")
+        .expect("orders chain must verify after merge");
+    assert_eq!(orders_len, 3);
+    let users_len = verify_event_chain(&event, &target_id, "users")
+        .expect("users chain must verify after merge");
+    assert_eq!(users_len, 3);
+}
+
+// ============================================================================
 // Branch Isolation Stress Test
 // ============================================================================
 

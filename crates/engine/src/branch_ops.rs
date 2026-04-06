@@ -142,6 +142,132 @@ fn build_live_space_map(entries: &[(Key, VersionedValue)]) -> HashMap<(String, V
 }
 
 // =============================================================================
+// Event merge safety (Phase 1 of primitive-aware merge)
+// =============================================================================
+//
+// See docs/design/branching/primitive-aware-merge.md for context. The generic
+// three-way merge treats EventLog records as opaque `(space, TypeTag::Event,
+// user_key)` triples, which silently corrupts the hash chain and per-type
+// index when both sides of a fork have appended to the same space. Phase 1
+// detects this case and refuses the merge before any writes happen.
+//
+// The detection lives inside `three_way_diff` (see below) and piggybacks on
+// the version-scoped reads the diff already performs, so there is no extra
+// storage cost. Single-sided merges and merges where the divergence is
+// across different spaces continue through the existing generic path
+// unchanged.
+
+/// The fixed user_key bytes used by `EventLog` for its per-(branch, space)
+/// metadata row. Keep in sync with `Key::new_event_meta` in core.
+const EVENT_META_USER_KEY: &[u8] = b"__meta__";
+
+/// Decode the stored `EventLogMeta` from a raw `Value::String` (the on-disk
+/// encoding used by `EventLog`). Returns `Err` on corruption.
+fn decode_event_meta(value: &Value) -> StrataResult<crate::primitives::event::EventLogMeta> {
+    match value {
+        Value::String(s) => serde_json::from_str(s)
+            .map_err(|e| StrataError::serialization(format!("corrupt EventLog metadata: {e}"))),
+        _ => Err(StrataError::serialization(
+            "EventLog metadata row is not a Value::String",
+        )),
+    }
+}
+
+/// Extract the `EventLogMeta` row for `space` from a slice of ancestor-side
+/// `VersionedEntry` records (the shape returned by `list_by_type_at_version`).
+/// Returns `Ok(None)` when the space has no `__meta__` row yet (i.e. no
+/// events have been appended on that side) or when the latest version is a
+/// tombstone.
+fn extract_event_meta_from_versioned(
+    entries: &[strata_storage::VersionedEntry],
+    space: &str,
+) -> StrataResult<Option<crate::primitives::event::EventLogMeta>> {
+    for entry in entries {
+        if entry.key.namespace.space == *space
+            && entry.key.type_tag == TypeTag::Event
+            && entry.key.user_key.as_ref() == EVENT_META_USER_KEY
+        {
+            if entry.is_tombstone {
+                return Ok(None);
+            }
+            return Ok(Some(decode_event_meta(&entry.value)?));
+        }
+    }
+    Ok(None)
+}
+
+/// Extract the `EventLogMeta` row for `space` from a slice of live
+/// `(Key, VersionedValue)` pairs (the shape produced by
+/// `live_entries_from_versioned`).
+fn extract_event_meta_from_live(
+    entries: &[(Key, VersionedValue)],
+    space: &str,
+) -> StrataResult<Option<crate::primitives::event::EventLogMeta>> {
+    for (key, vv) in entries {
+        if key.namespace.space == *space
+            && key.type_tag == TypeTag::Event
+            && key.user_key.as_ref() == EVENT_META_USER_KEY
+        {
+            return Ok(Some(decode_event_meta(&vv.value)?));
+        }
+    }
+    Ok(None)
+}
+
+/// Return `Err` if both source and target have appended events to `space`
+/// since the merge base. This is the Phase 1 "refuse divergent Event merge"
+/// check described in docs/design/branching/primitive-aware-merge.md.
+///
+/// The rule is per-space: cross-space divergence (e.g. source wrote to
+/// "orders" while target wrote to "users") is allowed because each space's
+/// EventLogMeta is a separate row and classifies cleanly under the generic
+/// three-way merge.
+fn check_event_merge_divergence(
+    space: &str,
+    ancestor_entries: &[strata_storage::VersionedEntry],
+    source_entries: &[(Key, VersionedValue)],
+    target_entries: &[(Key, VersionedValue)],
+) -> StrataResult<()> {
+    let ancestor_meta = extract_event_meta_from_versioned(ancestor_entries, space)?;
+    let source_meta = extract_event_meta_from_live(source_entries, space)?;
+    let target_meta = extract_event_meta_from_live(target_entries, space)?;
+
+    let anc_next = ancestor_meta.as_ref().map(|m| m.next_sequence).unwrap_or(0);
+    let anc_head = ancestor_meta
+        .as_ref()
+        .map(|m| m.head_hash)
+        .unwrap_or([0u8; 32]);
+    let src_next = source_meta.as_ref().map(|m| m.next_sequence).unwrap_or(0);
+    let src_head = source_meta
+        .as_ref()
+        .map(|m| m.head_hash)
+        .unwrap_or([0u8; 32]);
+    let tgt_next = target_meta.as_ref().map(|m| m.next_sequence).unwrap_or(0);
+    let tgt_head = target_meta
+        .as_ref()
+        .map(|m| m.head_hash)
+        .unwrap_or([0u8; 32]);
+
+    // Primary rule: both sides advanced next_sequence past ancestor.
+    let seq_divergent = src_next > anc_next && tgt_next > anc_next;
+    // Defense-in-depth: both sides' hash chain heads moved off the ancestor.
+    // Catches any theoretical "same count, different content" state that
+    // `next_sequence` alone would miss.
+    let hash_divergent = src_head != anc_head && tgt_head != anc_head;
+
+    if seq_divergent || hash_divergent {
+        return Err(StrataError::invalid_input(format!(
+            "merge unsupported: divergent event appends in space '{space}' since fork \
+             (ancestor next_sequence={anc_next}, source={src_next}, target={tgt_next}). \
+             Event log merge with concurrent appends on both sides of the fork is not \
+             yet supported; see docs/design/branching/primitive-aware-merge.md."
+        )));
+    }
+
+    Ok(())
+}
+
+// =============================================================================
 // Public result types
 // =============================================================================
 
@@ -1182,6 +1308,18 @@ fn three_way_diff(
                 type_tag,
                 snapshot_version,
             ));
+
+            // Phase 1 primitive-aware merge: refuse divergent Event appends
+            // before running the generic classification loop. See
+            // docs/design/branching/primitive-aware-merge.md.
+            if type_tag == TypeTag::Event {
+                check_event_merge_divergence(
+                    space,
+                    &ancestor_entries,
+                    &source_entries,
+                    &target_entries,
+                )?;
+            }
 
             let ancestor_map = build_ancestor_map(&ancestor_entries, space);
             let source_map = build_live_map(&source_entries, space);
