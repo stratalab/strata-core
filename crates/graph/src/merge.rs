@@ -27,16 +27,21 @@
 //! `compute_graph_merge` and converts the resulting `GraphMergeOutput`
 //! into the engine's per-handler `PrimitiveMergePlan` shape.
 //!
-//! ## What Phase 3b doesn't do
+//! ## Phase 3c additions on top of Phase 3b
 //!
-//! - **Catalog additive merging.** Concurrent `create_graph` on both sides
-//!   produces a `CatalogDivergence` conflict (always fatal). Phase 3b.5
-//!   will add additive catalog merging.
+//! - **Additive catalog merging.** `merge_catalog` decodes each side as a
+//!   `BTreeSet<String>` and projects per-name presence. Concurrent
+//!   independent `create_graph` calls now merge cleanly. The
+//!   `CatalogDivergence` variant is reserved but no longer produced.
+//! - **Cherry-pick semantic merge.** `cherry_pick_from_diff` now uses the
+//!   same per-handler `plan` dispatch as `merge_branches`, so cherry-pick
+//!   inherits the Phase 3b semantic merge and Phase 3c additive catalog.
+//!
+//! ## What Phase 3b/3c don't do
+//!
 //! - **Ontology semantic merge.** Ontology entries are merged as opaque KV
-//!   via the 14-case matrix. Phase 3b.5 (or later) can add ontology-aware
-//!   merging if needed.
-//! - **Cherry-pick.** Cherry-pick still uses Phase 3's tactical refusal.
-//!   Phase 3b.5 will refactor cherry-pick to use this semantic merge.
+//!   via the 14-case matrix. A richer ontology-aware merge (additive type
+//!   definitions, schema migration semantics) warrants its own design pass.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -64,9 +69,10 @@ pub struct GraphCellState {
     /// Per-graph state, keyed by graph name. Sorted for deterministic
     /// iteration during the merge.
     pub graphs: BTreeMap<String, PerGraphState>,
-    /// Raw `__catalog__` value if present on this side. Phase 3b treats
-    /// the catalog as opaque KV and detects divergent modifications;
-    /// Phase 3b.5 will add additive catalog merging.
+    /// Raw `__catalog__` value if present on this side. Decoded by
+    /// `merge_catalog` as a JSON list of graph names and merged
+    /// per-name additively (Phase 3c). `None` means "this side has not
+    /// touched the catalog" (NOT "this side deleted everything").
     pub catalog: Option<Value>,
 }
 
@@ -597,22 +603,34 @@ fn merge_catalog(
 ) {
     let key = keys::graph_catalog_key().to_string();
 
-    // Decode each side as a BTreeSet of graph names. A missing catalog or one
-    // that fails to parse is treated as the empty set — which is the right
-    // semantic both for fresh databases (no catalog yet) and for legacy data
-    // where `list_graphs` lazily creates the catalog from a prefix scan.
-    let parse = |v: Option<&Value>| -> BTreeSet<String> {
+    // Decode each side as a BTreeSet of graph names. The fallback semantics
+    // matter: a side with no catalog value at all (`None`) means "this side
+    // has not touched the catalog", NOT "this side deleted the catalog".
+    // Conflating those would silently drop entries on legacy data
+    // (graphs created before the catalog key existed). Fall back to the
+    // ancestor's set so an absent value contributes nothing to the additive
+    // merge — equivalent to treating the side as unchanged for catalog
+    // purposes while still letting the per-graph data merge run normally.
+    //
+    // The same fallback applies to malformed catalog values (wrong Value
+    // type, JSON parse failure): we don't know what was intended, so we
+    // refuse to silently drop entries. The per-graph merge will still
+    // surface any data-level conflicts.
+    let parse_or = |v: Option<&Value>, fallback: &BTreeSet<String>| -> BTreeSet<String> {
         match v {
-            Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_default(),
-            _ => BTreeSet::new(),
+            Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| fallback.clone()),
+            Some(_) => fallback.clone(),
+            None => fallback.clone(),
         }
     };
-    let anc = parse(ancestor.catalog.as_ref());
-    let src = parse(source.catalog.as_ref());
-    let tgt = parse(target.catalog.as_ref());
+    let empty: BTreeSet<String> = BTreeSet::new();
+    let anc = parse_or(ancestor.catalog.as_ref(), &empty);
+    let src = parse_or(source.catalog.as_ref(), &anc);
+    let tgt = parse_or(target.catalog.as_ref(), &anc);
 
     // Project per-name presence. Iterate the union of all three sides and
-    // decide membership for each unique name.
+    // decide membership for each unique name. Skip duplicates that the chain
+    // iterator may yield when a name appears on multiple sides.
     let mut projected: BTreeSet<String> = BTreeSet::new();
     for name in anc.iter().chain(src.iter()).chain(tgt.iter()) {
         if projected.contains(name) {
@@ -621,31 +639,23 @@ fn merge_catalog(
         let in_anc = anc.contains(name);
         let in_src = src.contains(name);
         let in_tgt = tgt.contains(name);
+        // A name is in the projected set iff at least one side has it AND
+        // neither side deleted it (i.e. it wasn't in ancestor and removed by
+        // exactly one of source/target). The additive set merge:
+        //   projected = (anc ∪ src ∪ tgt) - source_only_deletes - target_only_deletes
         let deleted_by_source = in_anc && !in_src;
         let deleted_by_target = in_anc && !in_tgt;
-        let added_by_source = !in_anc && in_src;
-        let added_by_target = !in_anc && in_tgt;
-        let kept_by_both = in_anc && in_src && in_tgt;
-        let in_projected = kept_by_both
-            || added_by_source
-            || added_by_target
-            || (in_anc && !deleted_by_source && !deleted_by_target);
-        if in_projected {
+        if !deleted_by_source && !deleted_by_target && (in_anc || in_src || in_tgt) {
             projected.insert(name.clone());
         }
     }
 
     // Emit a Put only when the projected catalog actually differs from
     // target's current decoded catalog. The wire format is the same JSON
-    // array shape `list_graphs` / `create_graph` use; sorted-by-BTreeSet
-    // gives deterministic byte-equal output for equivalent merges.
+    // array shape `list_graphs` / `create_graph` use; the BTreeSet gives
+    // deterministic sorted order, so equivalent merges produce byte-equal
+    // output.
     if projected != tgt {
-        if projected.is_empty() && tgt.is_empty() {
-            // Both empty — nothing to write. (Already covered by `projected
-            // != tgt`, but keep the check explicit so the Delete branch
-            // below is unambiguous.)
-            return;
-        }
         let projected_vec: Vec<String> = projected.into_iter().collect();
         let json = serde_json::to_string(&projected_vec)
             .expect("BTreeSet<String> JSON serialization is infallible");
@@ -1886,6 +1896,55 @@ mod tests {
         );
         let merged = extract_catalog_put(&result).expect("expected a catalog Put");
         assert_eq!(merged, vec!["g1"]);
+    }
+
+    #[test]
+    fn catalog_additive_legacy_target_without_catalog_preserved() {
+        // Regression for the post-implementation review fix:
+        // `merge_catalog` previously collapsed `None` catalog Values to the
+        // empty set, which made "target has legacy data and never wrote a
+        // catalog" indistinguishable from "target deleted everything from
+        // the catalog". The bug:
+        //
+        //   - ancestor: Some([g1])  (g1 was created pre-fork)
+        //   - source:   Some([g1, g2])  (source ran create_graph("g2"))
+        //   - target:   None  (legacy / pre-catalog data; g1 lives on disk
+        //                       but the __catalog__ key was never written)
+        //
+        // The empty-set collapse interpreted target=None as "g1 was
+        // deleted", projected the catalog to [g2], and emitted a Put. After
+        // the merge target's __catalog__ would explicitly say only g2
+        // exists, hiding g1 from `list_graphs`.
+        //
+        // The fallback fix treats `None` as "this side hasn't touched the
+        // catalog" → falls back to ancestor's set. The projected catalog
+        // becomes [g1, g2] which correctly reflects all graphs that exist
+        // on either side post-merge.
+        let mut ancestor = empty_state();
+        ancestor.catalog = Some(Value::String("[\"g1\"]".to_string()));
+        let mut source = empty_state();
+        source.catalog = Some(Value::String("[\"g1\",\"g2\"]".to_string()));
+        let target = empty_state(); // catalog: None — never written
+
+        let result =
+            compute_graph_merge(&ancestor, &source, &target, MergeStrategy::LastWriterWins);
+
+        assert!(
+            !result
+                .conflicts
+                .iter()
+                .any(|c| matches!(c, GraphMergeConflict::CatalogDivergence)),
+            "no fatal conflict expected, got {:?}",
+            result.conflicts
+        );
+        let merged = extract_catalog_put(&result)
+            .expect("expected a catalog Put — projected differs from target's None");
+        assert_eq!(
+            merged,
+            vec!["g1", "g2"],
+            "legacy target's missing __catalog__ must NOT cause g1 to be \
+             dropped — both names must survive the merge"
+        );
     }
 
     #[test]

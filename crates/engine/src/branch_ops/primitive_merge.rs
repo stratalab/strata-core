@@ -373,8 +373,9 @@ pub fn register_graph_merge_plan(plan_fn: GraphMergePlanFn) {
 /// - `precheck`: Phase 3 tactical refusal of divergent graph merges
 /// - `plan`: the default 14-case classification (unchanged from Phase 2)
 ///
-/// `cherry_pick_from_diff` still uses the Phase 3 tactical refusal helper
-/// directly. Phase 3b.5 will refactor cherry-pick to use the semantic merge.
+/// Both `merge_branches` and (since Phase 3c) `cherry_pick_from_diff` go
+/// through this handler via the per-handler `plan` dispatch, so cherry-pick
+/// inherits the same semantic merge as merge.
 pub(crate) struct GraphMergeHandler;
 
 impl PrimitiveMergeHandler for GraphMergeHandler {

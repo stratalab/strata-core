@@ -493,7 +493,7 @@ For each `(space, TypeTag::Graph)` cell that the merge touches:
 2. **Compute three-way diff at the node level.** For each `node_id`, apply a generic `classify_three_way<NodeData>` 14-case matrix. Build the projected node set.
 3. **Compute three-way diff at the edge level.** For each `(src, dst, edge_type)` triple, apply `classify_three_way<EdgeData>`. Build the projected edge set.
 4. **Validate referential integrity.** Every projected edge's endpoints must be in the projected node set; every node deletion must leave no projected edges referencing it. Violations are *always* fatal regardless of `MergeStrategy`.
-5. **Catalog merge.** Treat the catalog as opaque KV: pass through unchanged sides, refuse divergent modifications as `CatalogDivergence`. (Phase 3b.5 will add additive catalog merging.)
+5. **Catalog merge.** Phase 3b shipped this as opaque-KV with `CatalogDivergence` refusal; Phase 3c rewrote it as per-name additive set-union. See the Phase 3c subsection for the projection rule and the `None`-vs-empty-set fallback semantics.
 6. **Project the post-merge state** into the canonical fwd/rev encoding. Sort each per-node edge list lexicographically before encoding so two equivalent merges produce byte-equal outputs.
 7. **Edge counters** are derived from the projected edge set (count edges per type), not merged independently.
 8. **Emit KV writes** for affected `n/{id}`, `fwd/{src}`, `rev/{dst}`, `__edge_count__/{type}`, and meta keys. Compare against target's current encoding to skip no-op writes.
