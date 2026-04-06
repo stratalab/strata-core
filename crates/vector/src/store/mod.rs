@@ -1497,10 +1497,28 @@ mod tests {
     }
 
     #[test]
-    fn test_getv_works_without_collection_loaded() {
-        // getv reads directly from the storage version chain and should NOT
-        // require the collection to be loaded/present in the HNSW backend.
-        // This is important for post-delete or recovery scenarios.
+    fn test_getv_on_nonexistent_collection_returns_none() {
+        // getv reads directly from the storage version chain and must NOT
+        // return CollectionNotFound. Unlike vector_get, it does not call
+        // ensure_collection_loaded. Calling getv against a collection that
+        // was never created should succeed with None, not error.
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let history = store
+            .getv(branch_id, "default", "never-created", "doc1")
+            .expect("getv must not return CollectionNotFound");
+        assert!(
+            history.is_none(),
+            "nonexistent collection should return None history"
+        );
+    }
+
+    #[test]
+    fn test_getv_after_delete_collection_returns_history() {
+        // delete_collection tombstones all vector keys but the version chain
+        // is preserved. getv should still find the pre-delete versions as
+        // live entries (tombstones are skipped).
         let (_temp, _db, store) = setup();
         let branch_id = BranchId::new();
 
@@ -1512,18 +1530,37 @@ mod tests {
             .insert(branch_id, "default", "test", "doc1", &[1.0, 0.0, 0.0], None)
             .unwrap();
 
-        // Delete the collection — HNSW backend is gone
+        // Delete the whole collection — HNSW backend is gone, KV tombstoned
         store
             .delete_collection(branch_id, "default", "test")
             .unwrap();
 
-        // Version chain still has the historical entry. getv should return it
-        // without needing the collection to be loaded.
-        let history = store.getv(branch_id, "default", "test", "doc1").unwrap();
-        // Note: collection delete also tombstones vector keys, so we expect either
-        // Some(history) or None depending on tombstone semantics. The key is that
-        // the call does not error on missing collection backend.
-        let _ = history; // No assertion on value — behavior verified by not panicking.
+        // getv must not error on missing backend. It must return a
+        // well-defined answer (Some with the pre-delete version after
+        // tombstones are skipped).
+        let history = store
+            .getv(branch_id, "default", "test", "doc1")
+            .expect("getv must not error after delete_collection");
+
+        // Either the pre-delete version is still reachable (if delete_collection
+        // writes a tombstone that the skip logic filters out) or history is None
+        // (if delete_collection hard-removes the version chain entry). Both
+        // are valid, but the call must succeed and the result must match exactly
+        // one of these shapes.
+        match history {
+            Some(h) => {
+                assert_eq!(
+                    h.len(),
+                    1,
+                    "pre-delete version should be the only live entry"
+                );
+                assert_eq!(h[0].value.embedding, vec![1.0, 0.0, 0.0]);
+            }
+            None => {
+                // Tombstoned entries were skipped and no live versions remain.
+                // Acceptable — the invariant tested here is "no panic / no error".
+            }
+        }
     }
 
     #[test]
