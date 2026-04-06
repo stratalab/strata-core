@@ -1290,10 +1290,6 @@ fn compute_merge_base(
     None
 }
 
-/// Compute three-way diff and produce merge actions.
-///
-/// For each key across all spaces and data type tags, classifies the change
-/// using the 14-case decision matrix and produces Put/Delete actions.
 /// Per-(space, type_tag) entry slices gathered for a three-way merge.
 ///
 /// Produced by [`gather_typed_entries`] and consumed by both
@@ -1303,18 +1299,29 @@ fn compute_merge_base(
 /// from classify lets handlers run their precheck on the same materialized
 /// snapshots the classifier uses, with no extra storage reads.
 ///
+/// Each `TypedEntryCell` is **pre-filtered to its own space**, so the
+/// total memory held by a `TypedEntries` instance is bounded by the actual
+/// merge surface (sum of per-space slices), not by `n_spaces × full_branch_data`.
 /// `BTreeMap` for deterministic iteration order.
 pub(crate) struct TypedEntries {
     pub cells: BTreeMap<(String, TypeTag), TypedEntryCell>,
 }
 
 /// Ancestor / source / target entry slices for one (space, type_tag) cell.
+///
+/// Entries are pre-filtered to the cell's `space` at gather time so cells
+/// don't redundantly hold cross-space data. Downstream filters (e.g. in
+/// `build_ancestor_map`) become no-ops on these slices, but they're kept
+/// in place to preserve the contract of those helpers for other callers.
 pub(crate) struct TypedEntryCell {
-    /// Ancestor state at `merge_base.version`, with tombstones.
+    /// Ancestor state at `merge_base.version`, with tombstones,
+    /// pre-filtered to the cell's space.
     pub ancestor: Vec<strata_storage::VersionedEntry>,
-    /// Source state at `snapshot_version`, live entries only.
+    /// Source state at `snapshot_version`, live entries only,
+    /// pre-filtered to the cell's space.
     pub source: Vec<(Key, VersionedValue)>,
-    /// Target state at `snapshot_version`, live entries only.
+    /// Target state at `snapshot_version`, live entries only,
+    /// pre-filtered to the cell's space.
     pub target: Vec<(Key, VersionedValue)>,
 }
 
@@ -1322,9 +1329,12 @@ pub(crate) struct TypedEntryCell {
 /// cell that this merge will touch.
 ///
 /// All reads are version-scoped (`list_by_type_at_version`) for consistent
-/// point-in-time snapshots; this matches the original `three_way_diff`
-/// reads exactly. Returns a `TypedEntries` map keyed by `(space, type_tag)`
-/// so handlers and the classifier can both index into it.
+/// point-in-time snapshots, matching the original `three_way_diff` reads.
+/// Per-(branch, type_tag) reads are issued exactly once and the resulting
+/// rows are partitioned across the per-space cells in a single pass — both
+/// fewer storage calls and bounded memory regardless of how many spaces
+/// the merge touches. Each cell ends up holding only the rows whose
+/// `namespace.space` matches the cell key.
 pub(crate) fn gather_typed_entries(
     db: &Arc<Database>,
     source_id: BranchId,
@@ -1334,39 +1344,70 @@ pub(crate) fn gather_typed_entries(
     snapshot_version: u64,
 ) -> StrataResult<TypedEntries> {
     let storage = db.storage();
+    let space_set: HashSet<&str> = spaces.iter().map(|s| s.as_str()).collect();
     let mut cells: BTreeMap<(String, TypeTag), TypedEntryCell> = BTreeMap::new();
 
+    // Seed an empty cell for every requested (space, type_tag) so the
+    // classifier and handler precheck always see an entry for every
+    // expected key, even if a particular cell happens to be empty.
     for space in spaces {
         for &type_tag in &DATA_TYPE_TAGS {
-            // 1. Ancestor state (at merge base version, WITH tombstones)
-            let ancestor = storage.list_by_type_at_version(
-                &merge_base.branch_id,
-                type_tag,
-                merge_base.version,
-            );
-
-            // 2. Source state at snapshot (consistent point-in-time, #1917)
-            let source = live_entries_from_versioned(storage.list_by_type_at_version(
-                &source_id,
-                type_tag,
-                snapshot_version,
-            ));
-
-            // 3. Target state at snapshot (consistent point-in-time, #1917)
-            let target = live_entries_from_versioned(storage.list_by_type_at_version(
-                &target_id,
-                type_tag,
-                snapshot_version,
-            ));
-
             cells.insert(
                 (space.clone(), type_tag),
                 TypedEntryCell {
-                    ancestor,
-                    source,
-                    target,
+                    ancestor: Vec::new(),
+                    source: Vec::new(),
+                    target: Vec::new(),
                 },
             );
+        }
+    }
+
+    for &type_tag in &DATA_TYPE_TAGS {
+        // Single per-(branch, type_tag) read; partition into the per-space
+        // cells in a single pass. Drops any rows whose space is not part
+        // of this merge (defensive: list_by_type_at_version may return
+        // rows in any space the branch holds).
+
+        // 1. Ancestor state (at merge base version, WITH tombstones)
+        for entry in
+            storage.list_by_type_at_version(&merge_base.branch_id, type_tag, merge_base.version)
+        {
+            if !space_set.contains(entry.key.namespace.space.as_str()) {
+                continue;
+            }
+            if let Some(cell) = cells.get_mut(&(entry.key.namespace.space.clone(), type_tag)) {
+                cell.ancestor.push(entry);
+            }
+        }
+
+        // 2. Source state at snapshot (consistent point-in-time, #1917).
+        //    `live_entries_from_versioned` drops tombstones.
+        for (key, vv) in live_entries_from_versioned(storage.list_by_type_at_version(
+            &source_id,
+            type_tag,
+            snapshot_version,
+        )) {
+            if !space_set.contains(key.namespace.space.as_str()) {
+                continue;
+            }
+            if let Some(cell) = cells.get_mut(&(key.namespace.space.clone(), type_tag)) {
+                cell.source.push((key, vv));
+            }
+        }
+
+        // 3. Target state at snapshot (consistent point-in-time, #1917).
+        for (key, vv) in live_entries_from_versioned(storage.list_by_type_at_version(
+            &target_id,
+            type_tag,
+            snapshot_version,
+        )) {
+            if !space_set.contains(key.namespace.space.as_str()) {
+                continue;
+            }
+            if let Some(cell) = cells.get_mut(&(key.namespace.space.clone(), type_tag)) {
+                cell.target.push((key, vv));
+            }
         }
     }
 
