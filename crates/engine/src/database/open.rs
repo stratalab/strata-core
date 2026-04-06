@@ -164,7 +164,7 @@ impl Database {
     pub(super) fn open_internal<P: AsRef<Path>>(
         path: P,
         durability_mode: DurabilityMode,
-        cfg: StrataConfig,
+        mut cfg: StrataConfig,
     ) -> StrataResult<Arc<Self>> {
         // Create directory first so we can canonicalize the path
         let data_dir = path.as_ref().to_path_buf();
@@ -199,6 +199,10 @@ impl Database {
                 canonical_path.display()
             ))
         })?;
+
+        // Apply hardware profile to any fields still at their default value.
+        // In-memory only — does NOT persist to strata.toml. See profile.rs.
+        crate::database::profile::apply_hardware_profile_if_defaults(&mut cfg);
 
         let db = Self::open_finish(
             canonical_path.clone(),
@@ -251,8 +255,12 @@ impl Database {
 
     fn open_follower_internal(
         canonical_path: PathBuf,
-        cfg: StrataConfig,
+        mut cfg: StrataConfig,
     ) -> StrataResult<Arc<Self>> {
+        // Apply hardware profile to any fields still at their default value
+        // (in-memory only — followers never persist config).
+        crate::database::profile::apply_hardware_profile_if_defaults(&mut cfg);
+
         let wal_dir = canonical_path.join("wal");
 
         // Segments directory for reading existing segments (read-only, no create)
@@ -675,7 +683,21 @@ impl Database {
     /// | `cache()` | None | None | No |
     /// | `open(path)` | Yes | Yes (per config) | Yes |
     pub fn cache() -> StrataResult<Arc<Self>> {
-        let cfg = StrataConfig::default();
+        let mut cfg = StrataConfig::default();
+        // Apply hardware profile so resource-constrained hosts (Pi Zero, etc.)
+        // get appropriate sizing. Without this, cache() would inherit the
+        // 256 MB DEFAULT_CAPACITY_BYTES from the global block cache singleton,
+        // which is fatal on 512 MB devices.
+        crate::database::profile::apply_hardware_profile_if_defaults(&mut cfg);
+
+        // Apply effective block cache size to the global singleton so that
+        // in-memory reads use the profile-tuned capacity instead of the
+        // 256 MB default. On Desktop/Server this is a no-op (effective == 0
+        // triggers the existing auto-detect behavior elsewhere).
+        let effective_cache = cfg.storage.effective_block_cache_size();
+        if effective_cache > 0 {
+            strata_storage::block_cache::set_global_capacity(effective_cache);
+        }
 
         // Create fresh storage with config limits
         let storage = SegmentedStore::new();
@@ -698,7 +720,7 @@ impl Database {
             durability_mode: DurabilityMode::Cache, // Irrelevant but set for consistency
             accepting_transactions: AtomicBool::new(true),
             extensions: DashMap::new(),
-            config: parking_lot::RwLock::new(StrataConfig::default()),
+            config: parking_lot::RwLock::new(cfg),
             flush_shutdown: Arc::new(AtomicBool::new(false)),
             flush_handle: ParkingMutex::new(None),
             scheduler: Arc::new(BackgroundScheduler::new(bg_threads, 4096)),

@@ -10,15 +10,12 @@ use std::path::{Path, PathBuf};
 use strata_executor::Strata;
 
 // =========================================================================
-// Hardware detection
+// Hardware detection — engine provides RAM/cores/Profile; CLI adds storage kind
 // =========================================================================
 
-#[derive(Debug)]
-struct HardwareInfo {
-    ram_bytes: u64,
-    cores: usize,
-    storage: StorageKind,
-}
+use strata_executor::{
+    apply_profile_if_defaults, detect_hardware as engine_detect_hardware, HardwareInfo, Profile,
+};
 
 #[derive(Debug, Clone, Copy)]
 enum StorageKind {
@@ -37,54 +34,6 @@ impl std::fmt::Display for StorageKind {
             StorageKind::Unknown => write!(f, "unknown storage"),
         }
     }
-}
-
-fn detect_hardware() -> HardwareInfo {
-    HardwareInfo {
-        ram_bytes: detect_ram(),
-        cores: detect_cores(),
-        storage: detect_storage(),
-    }
-}
-
-fn detect_ram() -> u64 {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(contents) = std::fs::read_to_string("/proc/meminfo") {
-            for line in contents.lines() {
-                if let Some(rest) = line.strip_prefix("MemTotal:") {
-                    if let Some(kb_str) = rest.split_whitespace().next() {
-                        if let Ok(kb) = kb_str.parse::<u64>() {
-                            return kb * 1024;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(output) = std::process::Command::new("sysctl")
-            .args(["-n", "hw.memsize"])
-            .output()
-        {
-            if let Ok(s) = std::str::from_utf8(&output.stdout) {
-                if let Ok(bytes) = s.trim().parse::<u64>() {
-                    return bytes;
-                }
-            }
-        }
-    }
-
-    // Fallback: assume 4 GB
-    4 * 1024 * 1024 * 1024
-}
-
-fn detect_cores() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
 }
 
 fn detect_storage() -> StorageKind {
@@ -130,76 +79,12 @@ fn detect_storage() -> StorageKind {
 }
 
 // =========================================================================
-// Profile classification
+// Config generation — delegates to engine
 // =========================================================================
 
-#[derive(Debug, Clone, Copy)]
-enum Profile {
-    Embedded,
-    Desktop,
-    Server,
-}
-
-impl std::fmt::Display for Profile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Profile::Embedded => write!(f, "embedded"),
-            Profile::Desktop => write!(f, "desktop"),
-            Profile::Server => write!(f, "server"),
-        }
-    }
-}
-
-fn classify(hw: &HardwareInfo) -> Profile {
-    let gb = hw.ram_bytes / (1024 * 1024 * 1024);
-    if gb < 1 {
-        Profile::Embedded
-    } else if gb <= 16 {
-        Profile::Desktop
-    } else {
-        Profile::Server
-    }
-}
-
-// =========================================================================
-// Config generation
-// =========================================================================
-
-fn build_config(profile: Profile, hw: &HardwareInfo) -> strata_executor::StrataConfig {
-    use strata_executor::StorageConfig;
-
+fn build_config(profile: Profile, hw: HardwareInfo) -> strata_executor::StrataConfig {
     let mut cfg = strata_executor::StrataConfig::default();
-
-    match profile {
-        Profile::Embedded => {
-            cfg.storage = StorageConfig {
-                write_buffer_size: 16 * 1024 * 1024,
-                block_cache_size: ((hw.ram_bytes / 8) as usize).min(64 * 1024 * 1024),
-                background_threads: 1,
-                target_file_size: 4 * 1024 * 1024,
-                level_base_bytes: 32 * 1024 * 1024,
-                compaction_rate_limit: 5 * 1024 * 1024,
-                ..StorageConfig::default()
-            };
-            cfg.default_vector_dtype = "binary".to_string();
-        }
-        Profile::Desktop => {
-            cfg.storage = StorageConfig {
-                background_threads: hw.cores.min(4),
-                ..StorageConfig::default()
-            };
-        }
-        Profile::Server => {
-            cfg.storage = StorageConfig {
-                write_buffer_size: 256 * 1024 * 1024,
-                background_threads: hw.cores.min(8),
-                target_file_size: 128 * 1024 * 1024,
-                level_base_bytes: 512 * 1024 * 1024,
-                ..StorageConfig::default()
-            };
-        }
-    }
-
+    apply_profile_if_defaults(&mut cfg, profile, hw);
     cfg
 }
 
@@ -628,13 +513,14 @@ fn print_welcome_banner() {
 
 fn detect_and_print_hardware() -> (HardwareInfo, Profile) {
     eprintln!("  Detecting hardware...");
-    let hw = detect_hardware();
+    let hw = engine_detect_hardware();
+    let storage = detect_storage();
     let ram_gb = hw.ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     eprintln!(
         "  \u{2713} {} cores \u{00b7} {:.0} GB RAM \u{00b7} {}",
-        hw.cores, ram_gb, hw.storage
+        hw.cores, ram_gb, storage
     );
-    let profile = classify(&hw);
+    let profile = Profile::classify(hw);
     eprintln!("  \u{2713} Profile: {}", profile);
     (hw, profile)
 }
@@ -642,7 +528,7 @@ fn detect_and_print_hardware() -> (HardwareInfo, Profile) {
 fn create_and_open_db(
     db_path: &Path,
     profile: Profile,
-    hw: &HardwareInfo,
+    hw: HardwareInfo,
 ) -> Result<Strata, String> {
     std::fs::create_dir_all(db_path)
         .map_err(|e| format!("Failed to create directory {}: {}", db_path.display(), e))?;
@@ -706,7 +592,7 @@ pub fn run_init(default_path: &str, non_interactive: bool) -> Result<(), String>
 
     let db_path = expand_tilde(&chosen_path);
 
-    let db = create_and_open_db(&db_path, profile, &hw)?;
+    let db = create_and_open_db(&db_path, profile, hw)?;
     eprintln!("  \u{2713} Database ready at {}", db_path.display());
 
     let config_path = db_path.join("strata.toml");
@@ -747,7 +633,7 @@ pub fn run_init_in_place(non_interactive: bool) -> Result<Strata, String> {
 
     let db_path = PathBuf::from(".strata");
 
-    let db = create_and_open_db(&db_path, profile, &hw)?;
+    let db = create_and_open_db(&db_path, profile, hw)?;
     eprintln!("  \u{2713} Database ready at .strata/");
 
     let config_path = db_path.join("strata.toml");
@@ -771,64 +657,17 @@ pub fn run_init_in_place(non_interactive: bool) -> Result<Strata, String> {
 mod tests {
     use super::*;
 
+    // Classification and config tests live in strata_engine::database::profile.
+    // CLI tests below verify delegation and storage detection only.
+
     #[test]
-    fn classify_embedded() {
+    fn build_config_delegates_to_engine_embedded() {
         let hw = HardwareInfo {
             ram_bytes: 512 * 1024 * 1024,
             cores: 1,
-            storage: StorageKind::Unknown,
         };
-        assert!(matches!(classify(&hw), Profile::Embedded));
-    }
-
-    #[test]
-    fn classify_desktop() {
-        let hw = HardwareInfo {
-            ram_bytes: 8 * 1024 * 1024 * 1024,
-            cores: 4,
-            storage: StorageKind::Ssd,
-        };
-        assert!(matches!(classify(&hw), Profile::Desktop));
-    }
-
-    #[test]
-    fn classify_server() {
-        let hw = HardwareInfo {
-            ram_bytes: 32 * 1024 * 1024 * 1024,
-            cores: 16,
-            storage: StorageKind::Nvme,
-        };
-        assert!(matches!(classify(&hw), Profile::Server));
-    }
-
-    #[test]
-    fn classify_boundary_16gb_is_desktop() {
-        let hw = HardwareInfo {
-            ram_bytes: 16 * 1024 * 1024 * 1024,
-            cores: 8,
-            storage: StorageKind::Ssd,
-        };
-        assert!(matches!(classify(&hw), Profile::Desktop));
-    }
-
-    #[test]
-    fn classify_boundary_17gb_is_server() {
-        let hw = HardwareInfo {
-            ram_bytes: 17 * 1024 * 1024 * 1024,
-            cores: 8,
-            storage: StorageKind::Ssd,
-        };
-        assert!(matches!(classify(&hw), Profile::Server));
-    }
-
-    #[test]
-    fn config_embedded_small_buffers() {
-        let hw = HardwareInfo {
-            ram_bytes: 512 * 1024 * 1024,
-            cores: 1,
-            storage: StorageKind::Unknown,
-        };
-        let cfg = build_config(Profile::Embedded, &hw);
+        let cfg = build_config(Profile::Embedded, hw);
+        // Engine profile sets these values — CLI just re-exports.
         assert_eq!(cfg.storage.write_buffer_size, 16 * 1024 * 1024);
         assert_eq!(cfg.storage.background_threads, 1);
         assert_eq!(cfg.storage.target_file_size, 4 * 1024 * 1024);
@@ -836,27 +675,22 @@ mod tests {
     }
 
     #[test]
-    fn config_server_large_buffers() {
+    fn build_config_delegates_to_engine_server() {
         let hw = HardwareInfo {
             ram_bytes: 64 * 1024 * 1024 * 1024,
             cores: 32,
-            storage: StorageKind::Nvme,
         };
-        let cfg = build_config(Profile::Server, &hw);
+        let cfg = build_config(Profile::Server, hw);
         assert_eq!(cfg.storage.write_buffer_size, 256 * 1024 * 1024);
         assert_eq!(cfg.storage.background_threads, 8);
         assert_eq!(cfg.storage.target_file_size, 128 * 1024 * 1024);
-        assert_eq!(cfg.storage.compaction_rate_limit, 0);
     }
 
     #[test]
-    fn detect_cores_positive() {
-        assert!(detect_cores() >= 1);
-    }
-
-    #[test]
-    fn detect_ram_positive() {
-        assert!(detect_ram() > 0);
+    fn engine_hardware_detect_positive() {
+        let hw = engine_detect_hardware();
+        assert!(hw.ram_bytes > 0);
+        assert!(hw.cores >= 1);
     }
 
     #[test]

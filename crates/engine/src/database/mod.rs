@@ -20,9 +20,14 @@
 //! Per spec Section 4: Implicit transactions wrap legacy-style operations.
 
 pub mod config;
+pub mod profile;
 mod registry;
 
 pub use config::{ModelConfig, StorageConfig, StrataConfig, SHADOW_EVENT, SHADOW_JSON, SHADOW_KV};
+pub use profile::{
+    apply_hardware_profile_if_defaults, apply_profile_if_defaults, detect_hardware, HardwareInfo,
+    Profile,
+};
 pub use registry::OPEN_DATABASES;
 
 use crate::background::BackgroundScheduler;
