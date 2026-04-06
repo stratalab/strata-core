@@ -2109,6 +2109,79 @@ fn cherry_pick_graph_excluded_via_primitives_filter_works() {
     );
 }
 
+/// Phase 3c: cherry-pick where `filter.keys` is set to a non-graph key
+/// and the source has divergent graph data. The atomicity guard's
+/// "0 graph actions pass" branch must drop all graph actions atomically
+/// without raising an atomicity error. This is the only test that
+/// exercises the atomicity helper through the loop branch
+/// (`filter.keys.is_some()`) with a clean drop outcome — the
+/// `primitives = [KV]` test goes through the early-return path because
+/// `filter.keys` is None there.
+#[test]
+fn cherry_pick_graph_dropped_via_non_graph_key_filter_succeeds() {
+    use strata_engine::branch_ops::CherryPickFilter;
+    use strata_engine::primitives::kv::KVStore;
+    use strata_graph::types::{EdgeData, NodeData};
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+    let kv: &KVStore = &p.kv;
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    p.graph.create_graph(target_id, "g", None).unwrap();
+    p.graph
+        .add_node(target_id, "g", "alice", NodeData::default())
+        .unwrap();
+    kv.put(&target_id, "default", "doc/foo", Value::Int(1))
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source diverges in BOTH graph (adds carol + alice→carol) AND KV
+    // (adds doc/bar). The graph plan will produce multiple actions.
+    p.graph
+        .add_node(source_id, "g", "carol", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_edge(
+            source_id,
+            "g",
+            "alice",
+            "carol",
+            "follows",
+            EdgeData::default(),
+        )
+        .unwrap();
+    kv.put(&source_id, "default", "doc/bar", Value::Int(2))
+        .unwrap();
+
+    // Filter to a single KV key. None of the graph plan actions match it,
+    // so the atomicity check must observe `passed=0, total>0` and drop
+    // them all WITHOUT raising "graph data must be applied atomically".
+    let filter = CherryPickFilter {
+        spaces: None,
+        keys: Some(vec!["doc/bar".to_string()]),
+        primitives: None,
+    };
+    let info = branch_ops::cherry_pick_from_diff(&test_db.db, "source", "target", filter, None)
+        .expect("filter that drops all graph actions atomically must NOT raise atomicity error");
+    assert_eq!(info.keys_applied, 1, "only doc/bar should have applied");
+
+    // KV target side reflects the cherry-picked key.
+    assert_eq!(
+        kv.get(&target_id, "default", "doc/bar").unwrap(),
+        Some(Value::Int(2)),
+    );
+    // Graph side is untouched on target.
+    assert!(
+        p.graph.get_node(target_id, "g", "carol").unwrap().is_none(),
+        "graph data must NOT have been cherry-picked"
+    );
+}
+
 /// Phase 3c: KV-only cherry-pick when neither side touched graph state
 /// must succeed without invoking the atomicity guard at all (no graph
 /// actions in the plan).

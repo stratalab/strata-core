@@ -2922,8 +2922,10 @@ pub fn cherry_pick_from_diff(
     // Strategy is always LastWriterWins for cherry-pick — non-fatal cell
     // conflicts (NodeProperty / EdgeData / etc.) get silently resolved by the
     // graph handler under LWW, matching cherry-pick's existing
-    // "ignore conflicts" semantics. Fatal conflicts (DanglingEdge /
-    // OrphanedReference / CatalogDivergence) propagate as `Err` from `plan`.
+    // "ignore conflicts" semantics. Fatal conflicts (DanglingEdge,
+    // OrphanedReference) propagate as `Err` from `plan` and abort the
+    // cherry-pick before any writes happen. (CatalogDivergence is reserved
+    // but no longer produced after Phase 3c made `merge_catalog` additive.)
     let typed = gather_typed_entries(
         db,
         source_id,
