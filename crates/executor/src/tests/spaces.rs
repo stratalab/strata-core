@@ -560,3 +560,79 @@ fn test_spaces_independent_across_branches() {
         Value::String("b2-alpha".into())
     );
 }
+
+// =============================================================================
+// Phase 6: Graph honors current_space (matches KV / JSON / Vector / Event)
+// =============================================================================
+
+/// Phase 6: `db.graph_create("g")` writes to `current_space/g`, not the
+/// legacy `_graph_/g`. Verifies that `Strata::graph_*` methods auto-fill
+/// `space` from `self.space_id()` exactly the way `kv_put` does.
+#[test]
+fn graph_honors_current_space_via_strata_api() {
+    let mut db = strata();
+
+    // Default space: create a graph and add a node.
+    db.graph_create("social").unwrap();
+    db.graph_add_node("social", "alice", None, None).unwrap();
+
+    // Switch to a user space and create the SAME graph name with
+    // a different node — this is only possible if graph honors
+    // current_space (Phase 6 behavior).
+    db.set_space("tenant_a").unwrap();
+    db.graph_create("social").unwrap();
+    db.graph_add_node("social", "bob", None, None).unwrap();
+
+    // tenant_a sees only its own node.
+    let tenant_a_nodes = db.graph_list_nodes("social").unwrap();
+    let set: std::collections::HashSet<&str> = tenant_a_nodes.iter().map(|s| s.as_str()).collect();
+    assert!(
+        set.contains("bob"),
+        "tenant_a graph should contain its own node, got {tenant_a_nodes:?}"
+    );
+    assert!(
+        !set.contains("alice"),
+        "tenant_a graph must NOT see default-space alice, got {tenant_a_nodes:?}"
+    );
+
+    // Switch back to default and verify isolation in the other direction.
+    db.set_space("default").unwrap();
+    let default_nodes = db.graph_list_nodes("social").unwrap();
+    let set: std::collections::HashSet<&str> = default_nodes.iter().map(|s| s.as_str()).collect();
+    assert!(
+        set.contains("alice"),
+        "default graph should contain alice, got {default_nodes:?}"
+    );
+    assert!(
+        !set.contains("bob"),
+        "default graph must NOT see tenant_a bob, got {default_nodes:?}"
+    );
+}
+
+/// Phase 6: graphs in three different user spaces are fully independent.
+/// Strengthens `graph_honors_current_space_via_strata_api` by exercising
+/// three distinct spaces and verifying every (space, graph_name)
+/// combination is isolated.
+#[test]
+fn graph_three_user_spaces_independent_via_strata_api() {
+    let mut db = strata();
+
+    for tenant in &["tenant-a", "tenant-b", "tenant-c"] {
+        db.set_space(tenant).unwrap();
+        db.graph_create("shared_name").unwrap();
+        db.graph_add_node("shared_name", &format!("node-{tenant}"), None, None)
+            .unwrap();
+    }
+
+    // Each tenant sees only its own node in the shared graph name.
+    for tenant in &["tenant-a", "tenant-b", "tenant-c"] {
+        db.set_space(tenant).unwrap();
+        let nodes = db.graph_list_nodes("shared_name").unwrap();
+        assert_eq!(
+            nodes.len(),
+            1,
+            "{tenant}/shared_name should have exactly one node, got {nodes:?}"
+        );
+        assert_eq!(nodes[0], format!("node-{tenant}"));
+    }
+}

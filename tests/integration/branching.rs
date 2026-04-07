@@ -3651,11 +3651,14 @@ fn graph_in_user_space_referential_integrity_rejects_dangling() {
     );
 }
 
-/// Phase 6 regression: graphs in the legacy `_graph_` space still work the
-/// same way they did before Phase 6 — as long as the caller passes
-/// `keys::GRAPH_SPACE` explicitly.
+/// Phase 6: the lower-level `GraphStore::*` API accepts any space name,
+/// including the reserved `_graph_` space that `branch_dag.rs` uses for
+/// the system DAG. This is unreachable through the user-facing
+/// `Strata::graph_*` API (space-name validation rejects `_`-prefixed
+/// names), but direct GraphStore callers — branch_dag, recovery, test
+/// fixtures — must still be able to target it.
 #[test]
-fn graph_in_legacy_graph_space_still_works() {
+fn graph_store_accepts_reserved_system_dag_space() {
     use strata_graph::types::NodeData;
 
     let test_db = TestDb::new();
@@ -3684,7 +3687,8 @@ fn graph_in_legacy_graph_space_still_works() {
         .unwrap();
     assert!(alice.is_some());
 
-    // Default space and tenant_a space are isolated from _graph_.
+    // The user-facing `default` space is fully isolated from the
+    // reserved system DAG space.
     assert!(p
         .graph
         .get_node(branch_id, "default", "g", "alice")
@@ -3692,7 +3696,7 @@ fn graph_in_legacy_graph_space_still_works() {
         .is_none());
     assert!(p
         .graph
-        .get_node(branch_id, "tenant_a", "g", "alice")
+        .get_node(branch_id, "tenant-a", "g", "alice")
         .unwrap()
         .is_none());
 }

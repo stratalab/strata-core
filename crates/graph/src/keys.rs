@@ -94,15 +94,17 @@ pub fn validate_edge_type(t: &str) -> StrataResult<()> {
 // Key Construction
 // =============================================================================
 
-/// The well-known space name for the system branch DAG graph.
+/// The reserved space name where the system branch DAG graph lives.
 ///
-/// Phase 6 changed the meaning of this constant. Before Phase 6 it was
-/// "the only space graph data could live in". After Phase 6 it's still
-/// the well-known name where `branch_dag.rs` keeps the system DAG, and
-/// it's a sensible value to pass when you want to stay backwards-compatible
-/// with pre-Phase-6 graph data — but it is no longer a default for user
-/// graph CRUD. User graph CRUD goes through `Strata::current_space`
-/// (default `"default"`), exactly like KV / JSON / Vector / Event.
+/// Phase 6 narrowed this constant: it's used **only** by `branch_dag.rs`
+/// to keep the system DAG isolated from user spaces. It is NOT a default
+/// for user graph CRUD — user graph CRUD goes through
+/// `Strata::current_space` (default `"default"`), exactly like KV /
+/// JSON / Vector / Event.
+///
+/// `_graph_` is also unreachable through the user API because space-name
+/// validation rejects names starting with `_`. Direct GraphStore
+/// callers (test fixtures, branch_dag) can still pass it explicitly.
 pub const GRAPH_SPACE: &str = "_graph_";
 
 /// Build a namespace for graph operations on `(branch_id, space)`.

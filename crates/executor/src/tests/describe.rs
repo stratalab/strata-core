@@ -267,7 +267,7 @@ fn describe_lists_graphs_with_edges() {
         executor
             .execute(Command::GraphAddNode {
                 branch: Some(BranchId::default()),
-            space: None,
+                space: None,
                 graph: "social".into(),
                 node_id: node.into(),
                 entity_ref: None,

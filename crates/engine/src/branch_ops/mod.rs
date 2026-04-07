@@ -286,9 +286,11 @@ fn check_event_merge_divergence(
 // =============================================================================
 //
 // See docs/design/branching/primitive-aware-merge.md §Phase 3. The generic
-// three-way merge treats `_graph_` keys as opaque KV under `TypeTag::Graph`,
+// three-way merge treats `(space, TypeTag::Graph)` cells as opaque KV,
 // which produces two distinct corruption modes when both branches modify
-// graph state since the merge base:
+// graph state since the merge base. Phase 6 made graph data space-aware
+// (it can live in any user space), so this check now runs per `(space,
+// Graph)` cell rather than only against the legacy `_graph_` space.
 //
 //   1. **Bidirectional adjacency inconsistency under LWW.** Edges live as
 //      packed binary in two physical locations: `{graph}/fwd/{src}` and
@@ -362,10 +364,14 @@ fn graph_side_modified(
 ///
 /// The rule is per-space: cross-space divergence (source touched space A,
 /// target touched space B) is allowed because each space's graph keys
-/// classify cleanly under the generic three-way merge. Today Graph is
-/// hardwired to the reserved `_graph_` space (Phase 6 will lift this), so
-/// in practice only one space is checked per merge — but the rule is
-/// space-agnostic by construction.
+/// classify cleanly under the generic three-way merge. Phase 6 lifted
+/// the `_graph_` reservation, so this check now runs once per
+/// `(space, TypeTag::Graph)` cell — graph data in any user space goes
+/// through the same path.
+///
+/// This helper is only reachable from `GraphMergeHandler::precheck`'s
+/// fallback when no semantic merge is registered (engine-only unit
+/// tests). In production the Phase 3b semantic merge runs instead.
 ///
 /// Single-sided graph merges (only one of source/target has graph writes
 /// since the merge base) intentionally pass through this check unchanged.

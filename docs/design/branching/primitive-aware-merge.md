@@ -732,40 +732,38 @@ Add a JSON diff helper that, given `(ancestor_doc, source_doc, target_doc)`, ret
 
 ### Behavior change for users
 
-After Phase 6, `db.graph_create("g")` writes to `current_space/g` (default `"default"/g`), NOT `_graph_/g`. Existing databases with graph data in `_graph_` need a one-line migration: `db.set_space("_graph_")?` before any graph call. This matches how KV/JSON/Vector/Event already work.
+After Phase 6, `db.graph_create("g")` writes to `current_space/g` (default `"default"/g`), NOT `_graph_/g`. Graph operations honor `Strata::set_space(...)` exactly like KV / JSON / Vector / Event do.
 
-### Migration story
+`_graph_` is no longer reachable through the user API: space-name validation rejects names starting with `_`, so `db.set_space("_graph_")` errors out. The constant `keys::GRAPH_SPACE = "_graph_"` is now used **only** by `branch_dag.rs` to keep the system DAG isolated from user spaces — it's no longer a user-facing default for anything.
 
-Migration is opt-in and one-liner:
-
-```rust
-let mut db = Strata::open("/path/to/data")?;
-db.set_space("_graph_")?;  // restore pre-Phase-6 behavior for legacy graph data
-let graphs = db.graph_list()?;
-```
+Pre-Phase-6 databases that have user data in `_graph_` will need to be migrated outside the public API (or treated as new). This is acceptable because Phase 6 is part of the Claim 4 sequence that hasn't shipped a stable user-facing release yet.
 
 The lower-level `GraphStore::*` API takes `space: &str` as a required parameter — no defaults — so test fixtures and `branch_dag.rs` are explicit about which space they target.
 
 ### Phase 6 acceptance bar (met)
 
-- ✅ Graph data can live in any user space (`graph_in_user_space_create_and_query_succeeds`).
-- ✅ Two graphs with the same name in different spaces are independent (`graph_in_two_spaces_independent`).
+- ✅ Graph data can live in any user space (`graph_in_user_space_create_and_query_succeeds`, GraphStore API).
+- ✅ Two graphs with the same name in different spaces are independent (`graph_in_two_spaces_independent`, GraphStore API).
 - ✅ Fork inherits user-space graph data (`graph_in_user_space_survives_fork`).
 - ✅ Phase 3b semantic merge applies to user-space graphs (`graph_in_user_space_phase_3b_semantic_merge_succeeds`).
 - ✅ Phase 3b referential-integrity rejection applies to user-space graphs (`graph_in_user_space_referential_integrity_rejects_dangling`).
-- ✅ Legacy `_graph_` space still works when callers pass `keys::GRAPH_SPACE` explicitly (`graph_in_legacy_graph_space_still_works`).
-- ✅ Claim 4's "Graph is not space-symmetric" caveat removed from docs/12.
+- ✅ The lower-level `GraphStore::*` API can target the reserved `_graph_` system DAG space that `branch_dag.rs` uses (`graph_store_accepts_reserved_system_dag_space`).
+- ✅ `Strata::graph_*` honors `current_space` end-to-end (`graph_honors_current_space_via_strata_api` in `crates/executor/src/tests/spaces.rs`).
+- ✅ Three independent user spaces don't bleed into each other (`graph_three_user_spaces_independent_via_strata_api`).
+- ✅ Claim 4's "Graph is not space-symmetric" caveat removed from the architectural-claims doc.
 
 ### Tests
 
-- 6 new integration tests in `tests/integration/branching.rs::Phase 6: Graph space symmetry`.
-- All ~466 graph crate unit tests pass with mechanical signature updates (added `"default"` argument at every call site).
+- 6 new integration tests in `tests/integration/branching.rs::Phase 6: Graph space symmetry` (GraphStore-direct API).
+- 2 new Strata-API end-to-end tests in `crates/executor/src/tests/spaces.rs` (verifies `set_space` + `graph_*` auto-fill).
+- All 466 graph crate unit tests pass with mechanical signature updates (added `"default"` argument at every call site).
 - All Phase 1–3c regression tests pass (the existing tests use `"default"` space, which is what `current_space` resolves to).
+- Arrow-feature build verified: `cargo check -p strata-executor --features arrow` clean.
 
 ### Out of scope
 
 - **`EntityRef::Graph` carrying space**: same cross-primitive limitation as KV/JSON/Vector. Adding a `space` field to `EntityRef` is a breaking change to the search index format and ripples through the recovery path. Tracked separately.
-- **Multi-space graph in `describe` / `export` handlers**: Phase 6 keeps these handlers reading from `_graph_` (legacy default). Multi-space describe / export would need to enumerate every space with graph data, which is a separate concern.
+- **Multi-space graph aggregation in `describe`**: `describe` summarizes the `"default"` space's graphs. Multi-space describe — aggregating graphs across every space with data — is a separate concern.
 - **strata-python SDK API parity**: lives in a separate repo; coordination is a follow-up.
 
 ---

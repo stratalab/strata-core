@@ -285,8 +285,6 @@ Graph data is **branch- AND space-scoped** — graphs honor `Strata::current_spa
 
 Entity refs can still point into any space (e.g. `kv://default/key`, `json://other-space/doc`) — they're a logical pointer mechanism, not tied to the graph's own space. Graph names serve as the namespace boundary within a `(branch, space)` pair.
 
-> **Migration note (Phase 6):** before Phase 6, all graph data lived in a reserved `_graph_` space regardless of `current_space`. Existing databases with graph data in `_graph_` need a one-line migration: call `db.set_space("_graph_")?` before any graph call to read the legacy data, or migrate the data forward by reading from `_graph_` and writing to your preferred user space.
-
 Each branch has its own independent copy of graph state, and graphs created on one branch are not visible on others:
 
 ```rust

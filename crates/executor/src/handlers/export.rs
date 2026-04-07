@@ -116,14 +116,11 @@ fn collect_events(
 fn collect_graph(
     p: &Arc<Primitives>,
     branch_id: strata_core::types::BranchId,
+    space: &str,
     prefix: Option<&str>,
     limit: Option<u64>,
 ) -> Result<Vec<ExportRow>> {
-    // Phase 6: export graph data from the legacy `_graph_` space. Multi-space
-    // graph export is a separate concern and would require enumerating all
-    // spaces with graph data.
-    let graph_space = strata_graph::keys::GRAPH_SPACE;
-    let graphs = convert_result(p.graph.list_graphs(branch_id, graph_space))?;
+    let graphs = convert_result(p.graph.list_graphs(branch_id, space))?;
     let max = limit.map(|l| l as usize).unwrap_or(usize::MAX);
     let mut rows = Vec::new();
 
@@ -133,16 +130,13 @@ fn collect_graph(
                 continue;
             }
         }
-        let nodes = convert_result(p.graph.list_nodes(branch_id, graph_space, graph_name))?;
+        let nodes = convert_result(p.graph.list_nodes(branch_id, space, graph_name))?;
         for node_id in nodes {
             if rows.len() >= max {
                 return Ok(rows);
             }
             if let Some(data) =
-                convert_result(
-                    p.graph
-                        .get_node(branch_id, graph_space, graph_name, &node_id),
-                )?
+                convert_result(p.graph.get_node(branch_id, space, graph_name, &node_id))?
             {
                 let key = format!("{}/{}", graph_name, node_id);
                 let value = serde_json::to_string(&data)
@@ -441,7 +435,7 @@ pub fn db_export(
         ExportPrimitive::Kv => collect_kv(p, branch_id, &space, prefix.as_deref(), limit)?,
         ExportPrimitive::Json => collect_json(p, branch_id, &space, prefix.as_deref(), limit)?,
         ExportPrimitive::Events => collect_events(p, branch_id, &space, limit)?,
-        ExportPrimitive::Graph => collect_graph(p, branch_id, prefix.as_deref(), limit)?,
+        ExportPrimitive::Graph => collect_graph(p, branch_id, &space, prefix.as_deref(), limit)?,
         ExportPrimitive::Vector => {
             return Err(Error::InvalidInput {
                 reason: "Vector export requires the 'arrow' feature and --output <FILE>".into(),

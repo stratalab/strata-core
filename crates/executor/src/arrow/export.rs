@@ -77,10 +77,10 @@ pub fn export_to_batches(
             export_vector(primitives, branch_id, space, &collection, limit)
         }
         ExportSource::GraphNodes { graph } => {
-            export_graph_nodes(primitives, branch_id, &graph, limit)
+            export_graph_nodes(primitives, branch_id, space, &graph, limit)
         }
         ExportSource::GraphEdges { graph } => {
-            export_graph_edges(primitives, branch_id, &graph, limit)
+            export_graph_edges(primitives, branch_id, space, &graph, limit)
         }
     }
 }
@@ -428,6 +428,7 @@ fn export_vector(
 fn export_graph_nodes(
     p: &Arc<Primitives>,
     branch_id: strata_core::types::BranchId,
+    space: &str,
     graph: &str,
     limit: Option<usize>,
 ) -> Result<(Schema, Vec<RecordBatch>)> {
@@ -437,7 +438,7 @@ fn export_graph_nodes(
         Field::new("properties", DataType::Utf8, true),
     ]);
 
-    let nodes = convert_result(p.graph.all_nodes(branch_id, graph))?;
+    let nodes = convert_result(p.graph.all_nodes(branch_id, space, graph))?;
     let max = limit.unwrap_or(usize::MAX);
 
     let mut id_builder = StringBuilder::new();
@@ -486,6 +487,7 @@ fn export_graph_nodes(
 fn export_graph_edges(
     p: &Arc<Primitives>,
     branch_id: strata_core::types::BranchId,
+    space: &str,
     graph: &str,
     limit: Option<usize>,
 ) -> Result<(Schema, Vec<RecordBatch>)> {
@@ -497,7 +499,7 @@ fn export_graph_edges(
         Field::new("properties", DataType::Utf8, true),
     ]);
 
-    let edges = convert_result(p.graph.all_edges(branch_id, graph))?;
+    let edges = convert_result(p.graph.all_edges(branch_id, space, graph))?;
     let max = limit.unwrap_or(usize::MAX);
 
     let mut src_builder = StringBuilder::new();
