@@ -4711,3 +4711,989 @@ fn vector_cherry_pick_refreshes_hnsw_backend() {
          (post_commit dispatch missing — Phase 4 regression)"
     );
 }
+
+// ============================================================================
+// JSON path-level merge
+// ============================================================================
+//
+// See docs/design/branching/primitive-aware-merge.md.
+// `JsonMergeHandler::plan` runs a per-document path-level three-way merge
+// on JSON documents, combining disjoint path edits from both sides into
+// a single merged document instead of falling back to whole-doc LWW.
+// Same-path edits to different values still produce a conflict that
+// honors `MergeStrategy`. `post_commit` refreshes secondary indexes
+// and the BM25 inverted index for documents the merge touched.
+
+#[test]
+fn json_merge_disjoint_paths_auto_merges() {
+    // Both branches modify the same document but at disjoint top-level
+    // keys. The path-level merge combines both edits without raising
+    // a conflict.
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let json = test_db.json();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    json.create(
+        &target_id,
+        "default",
+        "doc-1",
+        json_value(serde_json::json!({"a": 1, "b": 2})),
+    )
+    .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source modifies "a", target modifies "b" — disjoint edits.
+    json.set(
+        &source_id,
+        "default",
+        "doc-1",
+        &"a".parse().unwrap(),
+        json_value(serde_json::json!(10)),
+    )
+    .unwrap();
+    json.set(
+        &target_id,
+        "default",
+        "doc-1",
+        &"b".parse().unwrap(),
+        json_value(serde_json::json!(20)),
+    )
+    .unwrap();
+
+    let info =
+        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+            .expect("disjoint path merge should succeed under Strict (no conflicts)");
+    assert_eq!(
+        info.conflicts.len(),
+        0,
+        "disjoint path edits must not produce conflicts"
+    );
+
+    let merged = json
+        .get(&target_id, "default", "doc-1", &root())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        merged.as_inner(),
+        &serde_json::json!({"a": 10, "b": 20}),
+        "merged document should combine both sides' edits"
+    );
+}
+
+#[test]
+fn json_merge_same_path_same_value_no_conflict() {
+    // Both branches edit the same path to the same new value. The merge
+    // should converge silently — no conflict, no LWW arbitration.
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let json = test_db.json();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    json.create(
+        &target_id,
+        "default",
+        "doc-1",
+        json_value(serde_json::json!({"status": "draft"})),
+    )
+    .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    json.set(
+        &source_id,
+        "default",
+        "doc-1",
+        &"status".parse().unwrap(),
+        json_value(serde_json::json!("published")),
+    )
+    .unwrap();
+    json.set(
+        &target_id,
+        "default",
+        "doc-1",
+        &"status".parse().unwrap(),
+        json_value(serde_json::json!("published")),
+    )
+    .unwrap();
+
+    let info =
+        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+            .expect("same-path same-value merge should be conflict-free under Strict");
+    assert_eq!(info.conflicts.len(), 0);
+
+    let merged = json
+        .get(&target_id, "default", "doc-1", &root())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        merged.as_inner(),
+        &serde_json::json!({"status": "published"})
+    );
+}
+
+#[test]
+fn json_merge_same_path_different_values_lww() {
+    // Both branches edit the same path to different values. Strict
+    // mode rejects with a conflict; LWW resolves source-wins.
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let json = test_db.json();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    json.create(
+        &target_id,
+        "default",
+        "doc-1",
+        json_value(serde_json::json!({"name": "Alice", "age": 30})),
+    )
+    .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Both sides edit "name" — same path, different values → conflict.
+    json.set(
+        &source_id,
+        "default",
+        "doc-1",
+        &"name".parse().unwrap(),
+        json_value(serde_json::json!("Bob")),
+    )
+    .unwrap();
+    json.set(
+        &target_id,
+        "default",
+        "doc-1",
+        &"name".parse().unwrap(),
+        json_value(serde_json::json!("Carol")),
+    )
+    .unwrap();
+
+    // Strict refuses.
+    let strict =
+        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None);
+    assert!(
+        strict.is_err(),
+        "same-path different-values merge must be rejected under Strict"
+    );
+
+    // Target should be unchanged after the failed strict merge.
+    let after_strict = json
+        .get(&target_id, "default", "doc-1", &root())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after_strict.as_inner(),
+        &serde_json::json!({"name": "Carol", "age": 30}),
+        "Strict failure must not mutate the target"
+    );
+
+    // LWW resolves source-wins on the conflicting path. The merged
+    // document still has age=30 (unchanged on both sides).
+    let info = branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("LWW merge should succeed despite the path-level conflict");
+    assert!(
+        !info.conflicts.is_empty(),
+        "LWW merge should still surface the conflict to the caller"
+    );
+    let merged = json
+        .get(&target_id, "default", "doc-1", &root())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        merged.as_inner(),
+        &serde_json::json!({"name": "Bob", "age": 30}),
+        "LWW should pick source's name and keep the unchanged age"
+    );
+}
+
+#[test]
+fn json_merge_subtree_delete_vs_edit_conflict() {
+    // One side deletes a subtree (a nested key) while the other side
+    // edits within that subtree. The handler reports this as a
+    // path-level conflict — there is no obvious correct merge.
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let json = test_db.json();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    json.create(
+        &target_id,
+        "default",
+        "doc-1",
+        json_value(serde_json::json!({
+            "user": {"name": "Alice", "email": "a@example.com"},
+            "active": true,
+        })),
+    )
+    .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source deletes the entire user.email key.
+    json.delete_at_path(
+        &source_id,
+        "default",
+        "doc-1",
+        &"user.email".parse().unwrap(),
+    )
+    .unwrap();
+    // Target edits user.email to a new value.
+    json.set(
+        &target_id,
+        "default",
+        "doc-1",
+        &"user.email".parse().unwrap(),
+        json_value(serde_json::json!("alice@new.com")),
+    )
+    .unwrap();
+
+    // Strict mode rejects with the conflict surfaced.
+    let strict =
+        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None);
+    assert!(
+        strict.is_err(),
+        "delete-vs-edit on the same path must be rejected under Strict"
+    );
+
+    // LWW: source-wins → email is removed in the merged result.
+    let info = branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("LWW merge should succeed for delete-vs-edit");
+    assert!(
+        !info.conflicts.is_empty(),
+        "LWW must still report the path-level conflict"
+    );
+
+    let merged = json
+        .get(&target_id, "default", "doc-1", &root())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        merged.as_inner(),
+        &serde_json::json!({
+            "user": {"name": "Alice"},
+            "active": true,
+        }),
+        "LWW source-wins must drop the deleted email key"
+    );
+}
+
+#[test]
+fn json_merge_nested_disjoint_paths_auto_merge() {
+    // Disjoint edits inside the same nested object — exercises the
+    // recursive object-walk path of `merge_json_values`.
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let json = test_db.json();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    json.create(
+        &target_id,
+        "default",
+        "doc-1",
+        json_value(serde_json::json!({
+            "user": {"name": "Alice", "age": 30},
+            "tags": "admin"
+        })),
+    )
+    .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    json.set(
+        &source_id,
+        "default",
+        "doc-1",
+        &"user.name".parse().unwrap(),
+        json_value(serde_json::json!("Bob")),
+    )
+    .unwrap();
+    json.set(
+        &target_id,
+        "default",
+        "doc-1",
+        &"user.age".parse().unwrap(),
+        json_value(serde_json::json!(31)),
+    )
+    .unwrap();
+
+    let info =
+        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+            .expect("disjoint nested path edits should be conflict-free");
+    assert_eq!(info.conflicts.len(), 0);
+
+    let merged = json
+        .get(&target_id, "default", "doc-1", &root())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        merged.as_inner(),
+        &serde_json::json!({
+            "user": {"name": "Bob", "age": 31},
+            "tags": "admin"
+        }),
+    );
+}
+
+#[test]
+fn json_merge_secondary_index_refreshed_post_commit() {
+    // post_commit refreshes secondary index entries for the documents
+    // touched by the merge. Without that refresh, an index lookup on
+    // the merged target would still return the pre-merge field value.
+    use strata_engine::primitives::json::index::IndexType;
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let json = test_db.json();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    json.create(
+        &target_id,
+        "default",
+        "doc-1",
+        json_value(serde_json::json!({"price": 10.0, "name": "widget"})),
+    )
+    .unwrap();
+    json.create_index(
+        &target_id,
+        "default",
+        "price_idx",
+        "$.price",
+        IndexType::Numeric,
+    )
+    .unwrap();
+    // Backfill the existing doc into the freshly created index by
+    // re-touching its price (set is the only public mutation that
+    // re-runs the index update path).
+    json.set(
+        &target_id,
+        "default",
+        "doc-1",
+        &"price".parse().unwrap(),
+        json_value(serde_json::json!(10.0)),
+    )
+    .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source updates price 10 → 25. Target leaves it alone.
+    json.set(
+        &source_id,
+        "default",
+        "doc-1",
+        &"price".parse().unwrap(),
+        json_value(serde_json::json!(25.0)),
+    )
+    .unwrap();
+
+    branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("merge with index-touching change should succeed");
+
+    // The merged target's doc value should be the source's update.
+    let merged = json
+        .get(&target_id, "default", "doc-1", &root())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        merged.as_inner().get("price"),
+        Some(&serde_json::json!(25.0))
+    );
+
+    // The secondary index for price should now resolve a query for
+    // value=25 to doc-1 and NOT resolve a query for value=10 to doc-1.
+    // We use the lower-level lookup_eq helper because the public
+    // search() API requires a recipe.
+    use strata_engine::primitives::json::index;
+    let encoded_25 = index::encode_numeric(25.0);
+    let encoded_10 = index::encode_numeric(10.0);
+    let mut hits_25: Vec<String> = Vec::new();
+    let mut hits_10: Vec<String> = Vec::new();
+    test_db
+        .db
+        .transaction(target_id, |txn| {
+            hits_25 = index::lookup_eq(txn, &target_id, "default", "price_idx", &encoded_25)?;
+            hits_10 = index::lookup_eq(txn, &target_id, "default", "price_idx", &encoded_10)?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        hits_25,
+        vec!["doc-1".to_string()],
+        "post_commit must populate the index entry for the merged value"
+    );
+    assert!(
+        hits_10.is_empty(),
+        "post_commit must remove the index entry for the pre-merge value; \
+         found stale entries: {:?}",
+        hits_10
+    );
+}
+
+#[test]
+fn json_merge_source_only_new_doc_propagates() {
+    // Source creates a brand-new doc that target doesn't have. The
+    // merge should propagate it as a SourceAdded action and refresh
+    // any secondary indexes on target.
+    use strata_engine::primitives::json::index::IndexType;
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let json = test_db.json();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    // Create the index on target BEFORE forking so source inherits it.
+    json.create_index(
+        &target_id,
+        "default",
+        "qty_idx",
+        "$.qty",
+        IndexType::Numeric,
+    )
+    .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source creates a new doc — target has nothing.
+    json.create(
+        &source_id,
+        "default",
+        "doc-new",
+        json_value(serde_json::json!({"qty": 7, "name": "fresh"})),
+    )
+    .unwrap();
+
+    let info =
+        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+            .expect("source-only new doc merge should succeed under Strict");
+    assert_eq!(info.conflicts.len(), 0);
+    assert!(info.keys_applied >= 1);
+
+    // Target should now have the new doc with the same value.
+    let merged = json
+        .get(&target_id, "default", "doc-new", &root())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        merged.as_inner(),
+        &serde_json::json!({"qty": 7, "name": "fresh"})
+    );
+
+    // Secondary index on $.qty should resolve a query for value=7 to
+    // the merged doc — proves post_commit emitted the index entry for
+    // the new doc, not just for pre-existing target docs.
+    use strata_engine::primitives::json::index;
+    let encoded_7 = index::encode_numeric(7.0);
+    let mut hits: Vec<String> = Vec::new();
+    test_db
+        .db
+        .transaction(target_id, |txn| {
+            hits = index::lookup_eq(txn, &target_id, "default", "qty_idx", &encoded_7)?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        hits,
+        vec!["doc-new".to_string()],
+        "post_commit must populate the index entry for a source-added doc"
+    );
+}
+
+#[test]
+fn json_merge_source_deletes_doc_propagates() {
+    // Source deletes a doc that target has unchanged from the fork
+    // point. SourceDeleted → the merge should delete the doc on target
+    // AND drop its secondary index entries.
+    use strata_engine::primitives::json::index::IndexType;
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let json = test_db.json();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    json.create(
+        &target_id,
+        "default",
+        "doc-doomed",
+        json_value(serde_json::json!({"qty": 99, "label": "ephemeral"})),
+    )
+    .unwrap();
+    json.create_index(
+        &target_id,
+        "default",
+        "qty_idx",
+        "$.qty",
+        IndexType::Numeric,
+    )
+    .unwrap();
+    // Backfill the existing doc into the index by re-touching its qty.
+    json.set(
+        &target_id,
+        "default",
+        "doc-doomed",
+        &"qty".parse().unwrap(),
+        json_value(serde_json::json!(99)),
+    )
+    .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source destroys the doc; target leaves it alone.
+    let existed = json.destroy(&source_id, "default", "doc-doomed").unwrap();
+    assert!(existed);
+
+    let info =
+        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+            .expect("source-delete merge should succeed under Strict");
+    assert_eq!(info.conflicts.len(), 0);
+    assert!(info.keys_deleted >= 1);
+
+    // Doc should be gone on target.
+    let after = json
+        .get(&target_id, "default", "doc-doomed", &root())
+        .unwrap();
+    assert!(
+        after.is_none(),
+        "doc should be deleted on target after merge"
+    );
+
+    // Index entry for value=99 should also be gone — post_commit
+    // delegated the cleanup to update_index_entries(old=Some, new=None).
+    use strata_engine::primitives::json::index;
+    let encoded_99 = index::encode_numeric(99.0);
+    let mut hits: Vec<String> = Vec::new();
+    test_db
+        .db
+        .transaction(target_id, |txn| {
+            hits = index::lookup_eq(txn, &target_id, "default", "qty_idx", &encoded_99)?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        hits.is_empty(),
+        "index entry for the deleted doc must be removed by post_commit; \
+         found stale entries: {:?}",
+        hits
+    );
+}
+
+#[test]
+fn json_merge_multiple_docs_in_one_pass() {
+    // The handler walks every JSON cell user_key. A single merge that
+    // touches several distinct documents must produce one merge action
+    // per affected doc and refresh all of them.
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let json = test_db.json();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    // Three docs on the target side, each with the same shape.
+    for i in 0..3 {
+        json.create(
+            &target_id,
+            "default",
+            &format!("doc-{}", i),
+            json_value(serde_json::json!({"a": i, "b": 0})),
+        )
+        .unwrap();
+    }
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source modifies each doc's "a" field; target modifies each doc's
+    // "b" field. Disjoint paths within each doc → all three should
+    // path-level merge cleanly.
+    for i in 0..3 {
+        json.set(
+            &source_id,
+            "default",
+            &format!("doc-{}", i),
+            &"a".parse().unwrap(),
+            json_value(serde_json::json!(100 + i)),
+        )
+        .unwrap();
+        json.set(
+            &target_id,
+            "default",
+            &format!("doc-{}", i),
+            &"b".parse().unwrap(),
+            json_value(serde_json::json!(200 + i)),
+        )
+        .unwrap();
+    }
+
+    let info =
+        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+            .expect("multi-doc disjoint-path merge should succeed under Strict");
+    assert_eq!(info.conflicts.len(), 0);
+    assert!(
+        info.keys_applied >= 3,
+        "expected at least 3 doc updates, got {}",
+        info.keys_applied
+    );
+
+    for i in 0..3 {
+        let merged = json
+            .get(&target_id, "default", &format!("doc-{}", i), &root())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            merged.as_inner(),
+            &serde_json::json!({"a": 100 + i, "b": 200 + i}),
+            "doc-{} should have both sides' edits merged",
+            i
+        );
+    }
+}
+
+#[test]
+fn json_merge_path_level_via_cherry_pick() {
+    // `cherry_pick_from_diff` routes through the same per-handler
+    // dispatch as `merge_branches`. This test pins that contract for
+    // JSON: a cherry-pick of a disjoint-path edit must produce the same
+    // merged-doc result as a full merge would, AND the secondary index
+    // for the cherry-picked field must be refreshed.
+    //
+    // Without the per-handler dispatch in cherry_pick, this test would
+    // fail because cherry_pick would fall back to the generic 14-case
+    // classifier, which writes source's whole doc verbatim and never
+    // refreshes the index. (Mirrors the
+    // `vector_cherry_pick_refreshes_hnsw_backend` regression test.)
+    use strata_engine::branch_ops::CherryPickFilter;
+    use strata_engine::primitives::json::index::IndexType;
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let json = test_db.json();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    json.create(
+        &target_id,
+        "default",
+        "doc-1",
+        json_value(serde_json::json!({"a": 1, "b": 2, "price": 10.0})),
+    )
+    .unwrap();
+    json.create_index(
+        &target_id,
+        "default",
+        "price_idx",
+        "$.price",
+        IndexType::Numeric,
+    )
+    .unwrap();
+    json.set(
+        &target_id,
+        "default",
+        "doc-1",
+        &"price".parse().unwrap(),
+        json_value(serde_json::json!(10.0)),
+    )
+    .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source edits "a" and "price"; target edits "b" — three disjoint
+    // edits across the same doc. The path-level merge should combine
+    // all three.
+    json.set(
+        &source_id,
+        "default",
+        "doc-1",
+        &"a".parse().unwrap(),
+        json_value(serde_json::json!(11)),
+    )
+    .unwrap();
+    json.set(
+        &source_id,
+        "default",
+        "doc-1",
+        &"price".parse().unwrap(),
+        json_value(serde_json::json!(42.0)),
+    )
+    .unwrap();
+    json.set(
+        &target_id,
+        "default",
+        "doc-1",
+        &"b".parse().unwrap(),
+        json_value(serde_json::json!(22)),
+    )
+    .unwrap();
+
+    branch_ops::cherry_pick_from_diff(
+        &test_db.db,
+        "source",
+        "target",
+        CherryPickFilter::default(),
+        None,
+    )
+    .expect("cherry-pick of a disjoint-path JSON edit should succeed");
+
+    let merged = json
+        .get(&target_id, "default", "doc-1", &root())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        merged.as_inner(),
+        &serde_json::json!({"a": 11, "b": 22, "price": 42.0}),
+        "cherry-pick must produce the same path-merged result as merge_branches"
+    );
+
+    // Index for the cherry-picked price field must be refreshed.
+    use strata_engine::primitives::json::index;
+    let encoded_42 = index::encode_numeric(42.0);
+    let encoded_10 = index::encode_numeric(10.0);
+    let mut hits_42: Vec<String> = Vec::new();
+    let mut hits_10: Vec<String> = Vec::new();
+    test_db
+        .db
+        .transaction(target_id, |txn| {
+            hits_42 = index::lookup_eq(txn, &target_id, "default", "price_idx", &encoded_42)?;
+            hits_10 = index::lookup_eq(txn, &target_id, "default", "price_idx", &encoded_10)?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        hits_42,
+        vec!["doc-1".to_string()],
+        "cherry-pick post_commit must populate the index entry for the merged price; \
+         a regression here means cherry_pick_from_diff is bypassing JsonMergeHandler"
+    );
+    assert!(
+        hits_10.is_empty(),
+        "cherry-pick post_commit must remove the index entry for the pre-merge price; \
+         found stale entries: {:?}",
+        hits_10
+    );
+}
+
+#[test]
+fn json_merge_both_sides_deleted_doc_no_action() {
+    // Both source and target deleted the same doc since the merge base.
+    // The handler must take no action — the doc is already gone on
+    // target, and the secondary indexes were already cleaned up by
+    // whichever side did the delete on target. Pins the
+    // `(_, None, None, _, _, _)` arm of `merge_one_doc`.
+    use strata_engine::primitives::json::index::IndexType;
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let json = test_db.json();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    json.create(
+        &target_id,
+        "default",
+        "doomed",
+        json_value(serde_json::json!({"qty": 5})),
+    )
+    .unwrap();
+    json.create_index(
+        &target_id,
+        "default",
+        "qty_idx",
+        "$.qty",
+        IndexType::Numeric,
+    )
+    .unwrap();
+    // Backfill the index for the existing doc.
+    json.set(
+        &target_id,
+        "default",
+        "doomed",
+        &"qty".parse().unwrap(),
+        json_value(serde_json::json!(5)),
+    )
+    .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Both sides destroy the doc independently.
+    let src_existed = json.destroy(&source_id, "default", "doomed").unwrap();
+    let tgt_existed = json.destroy(&target_id, "default", "doomed").unwrap();
+    assert!(src_existed && tgt_existed);
+
+    // Sanity: target's index entry for value=5 should already be gone
+    // because target's `destroy` ran update_index_entries.
+    use strata_engine::primitives::json::index;
+    let encoded_5 = index::encode_numeric(5.0);
+    let mut pre_merge_hits: Vec<String> = Vec::new();
+    test_db
+        .db
+        .transaction(target_id, |txn| {
+            pre_merge_hits = index::lookup_eq(txn, &target_id, "default", "qty_idx", &encoded_5)?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        pre_merge_hits.is_empty(),
+        "target should have cleaned up its index pre-merge"
+    );
+
+    let info =
+        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+            .expect("both-sides-deleted merge should succeed under Strict");
+    // The merge produces no actions for the JSON cell (both sides agree
+    // the doc is gone). It may produce an empty merge_version because
+    // no other primitives changed either, which is fine.
+    assert_eq!(info.conflicts.len(), 0);
+
+    // Doc still gone on target.
+    let after = json.get(&target_id, "default", "doomed", &root()).unwrap();
+    assert!(after.is_none());
+
+    // Index still empty for value=5.
+    let mut post_merge_hits: Vec<String> = Vec::new();
+    test_db
+        .db
+        .transaction(target_id, |txn| {
+            post_merge_hits = index::lookup_eq(txn, &target_id, "default", "qty_idx", &encoded_5)?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        post_merge_hits.is_empty(),
+        "both-sides-deleted merge must not resurrect index entries; \
+         got: {:?}",
+        post_merge_hits
+    );
+}
+
+#[test]
+fn json_merge_parent_subtree_deleted_vs_child_edited_conflicts() {
+    // Source removes a whole nested object; target edits a leaf inside
+    // that nested object. The recursive merge should report a path-
+    // level conflict at the parent path (the deleted subtree) — not
+    // at the child path that target edited. LWW source-wins drops the
+    // entire subtree.
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let json = test_db.json();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    json.create(
+        &target_id,
+        "default",
+        "doc-1",
+        json_value(serde_json::json!({
+            "user": {"name": "Alice", "email": "a@example.com"},
+            "active": true,
+        })),
+    )
+    .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source deletes the WHOLE user object (the parent subtree).
+    json.delete_at_path(&source_id, "default", "doc-1", &"user".parse().unwrap())
+        .unwrap();
+    // Target edits a leaf INSIDE the deleted subtree.
+    json.set(
+        &target_id,
+        "default",
+        "doc-1",
+        &"user.email".parse().unwrap(),
+        json_value(serde_json::json!("alice@new.com")),
+    )
+    .unwrap();
+
+    // Strict mode rejects.
+    let strict =
+        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None);
+    assert!(
+        strict.is_err(),
+        "parent-subtree-delete vs child-edit must be rejected under Strict"
+    );
+
+    // LWW: source-wins drops the entire user subtree.
+    let info = branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("LWW should succeed for parent-delete-vs-child-edit");
+    assert!(
+        !info.conflicts.is_empty(),
+        "LWW must still report the path-level conflict"
+    );
+    // The conflict path should reference the deleted parent ("user"),
+    // not the leaf the target edited. This pins the recursive walk's
+    // behavior of reporting the conflict at the highest mismatching
+    // node.
+    let has_user_conflict = info
+        .conflicts
+        .iter()
+        .any(|c| c.key.contains("@user") && !c.key.contains("@user."));
+    assert!(
+        has_user_conflict,
+        "expected a conflict reported at parent path 'user', got conflicts: {:?}",
+        info.conflicts.iter().map(|c| &c.key).collect::<Vec<_>>()
+    );
+
+    let merged = json
+        .get(&target_id, "default", "doc-1", &root())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        merged.as_inner(),
+        &serde_json::json!({"active": true}),
+        "LWW source-wins must drop the entire user subtree"
+    );
+}

@@ -14,10 +14,13 @@
 //!
 //! - `KvMergeHandler` is a no-op pass-through — KV semantics are fully
 //!   captured by the generic 14-case classification matrix.
-//! - `JsonMergeHandler` is a no-op today. Per-key inverted-index refresh
-//!   in `post_commit` and path-level conflict detection in `precheck`
-//!   are TODO; the current generic merge path leaves JSON indexes stale
-//!   post-merge.
+//! - `JsonMergeHandler` runs a per-document path-level three-way merge
+//!   in `plan` (combining disjoint path edits on the same JSON document
+//!   instead of falling back to whole-doc LWW) and refreshes secondary
+//!   indexes (`_idx/{space}/{name}`) plus the BM25 `InvertedIndex` for
+//!   affected documents in `post_commit`. See
+//!   `crates/engine/src/branch_ops/json_merge.rs` for the recursive
+//!   object-walk algorithm.
 //! - `EventMergeHandler::precheck` runs the Event hash-chain divergence
 //!   check via `super::check_event_merge_divergence`. The check itself
 //!   lives in `branch_ops/mod.rs` as a free function for historical
@@ -43,14 +46,19 @@ use std::sync::Arc;
 
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
+use strata_core::primitives::json::JsonValue;
 use strata_core::types::{BranchId, TypeTag};
-use strata_core::StrataResult;
+use strata_core::value::Value;
+use strata_core::{PrimitiveType, StrataResult};
 
+use super::json_merge::merge_json_values;
 use super::{
-    check_event_merge_divergence, check_graph_merge_divergence, classify_typed_entries_for_tag,
-    ConflictEntry, MergeAction, MergeBase, MergeStrategy, TypedEntries,
+    build_ancestor_map, build_live_map, check_event_merge_divergence, check_graph_merge_divergence,
+    classify_typed_entries_for_tag, format_user_key, ConflictEntry, MergeAction, MergeActionKind,
+    MergeBase, MergeStrategy, TypedEntries,
 };
 use crate::database::Database;
+use crate::primitives::json::{JsonDoc, JsonStore};
 
 // =============================================================================
 // Lifecycle contexts
@@ -222,7 +230,7 @@ pub(crate) fn build_merge_registry() -> MergeHandlerRegistry {
     let mut handlers: BTreeMap<TypeTag, Arc<dyn PrimitiveMergeHandler>> = BTreeMap::new();
     let entries: Vec<Arc<dyn PrimitiveMergeHandler>> = vec![
         Arc::new(KvMergeHandler),
-        Arc::new(JsonMergeHandler),
+        Arc::new(JsonMergeHandler::new()),
         Arc::new(EventMergeHandler),
         Arc::new(VectorMergeHandler::new()),
         Arc::new(GraphMergeHandler),
@@ -262,23 +270,486 @@ impl PrimitiveMergeHandler for KvMergeHandler {
     }
 }
 
-/// JSON merge handler. Pure no-op pass-through.
+/// One per-document merge outcome that the JSON handler needs to fix up
+/// in `post_commit`. Tracks what value the document held in the target
+/// before the merge transaction (so secondary index entries for the old
+/// value can be deleted) and what value the merge wrote (so secondary
+/// index entries for the new value can be re-emitted and the BM25
+/// inverted index can be re-indexed). The merge action itself flows
+/// through the standard `merge_branches` apply transaction; this struct
+/// only carries the information needed to keep derived state in sync.
+struct JsonAffectedDoc {
+    space: String,
+    doc_id: String,
+    /// Pre-merge target document value, if the doc existed there.
+    /// `None` means the doc was new on target.
+    old_target_value: Option<JsonValue>,
+    /// Post-merge document value, or `None` if the merge deleted the doc.
+    new_value: Option<JsonValue>,
+}
+
+/// JSON merge handler.
 ///
-/// Per-key inverted-index refresh in `post_commit` and path-level
-/// conflict detection in `precheck` are TODO. The current generic merge
-/// path leaves JSON indexes stale post-merge — that's a real bug but
-/// fixing it requires a `JsonRefreshHook` which doesn't exist yet.
-pub(crate) struct JsonMergeHandler;
+/// Implements per-document path-level merge: when both source and target
+/// modified the same JSON document but at disjoint paths, the merged
+/// document combines both edits instead of falling through to the
+/// 14-case classifier's whole-document LWW. Path-level conflicts (same
+/// path edited to different values, or subtree-delete vs. edit) honor
+/// `MergeStrategy`.
+///
+/// Per-document affected list is populated in `plan` and drained in
+/// `post_commit` to refresh:
+/// 1. Secondary indexes (`_idx/{space}/{name}`) using
+///    `JsonStore::update_index_entries`.
+/// 2. The BM25 `InvertedIndex` extension via
+///    `JsonStore::index_json_doc` / `deindex_json_doc`.
+///
+/// Each merge gets a fresh handler instance via `build_merge_registry()`,
+/// so the `affected` mutex is uncontended in practice — it exists only
+/// because the trait methods take `&self`.
+pub(crate) struct JsonMergeHandler {
+    affected: Mutex<Vec<JsonAffectedDoc>>,
+}
+
+impl JsonMergeHandler {
+    pub(crate) fn new() -> Self {
+        Self {
+            affected: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Decode an MVCC `Value::Bytes` payload into a `JsonDoc`. Returns
+    /// `None` for any decode failure — corrupt rows fall through to the
+    /// generic 14-case classifier (which copies bytes verbatim) so a
+    /// single bad row doesn't poison the whole merge.
+    fn decode_doc(value: &Value) -> Option<JsonDoc> {
+        JsonStore::deserialize_doc(value).ok()
+    }
+}
 
 impl PrimitiveMergeHandler for JsonMergeHandler {
     fn type_tag(&self) -> TypeTag {
         TypeTag::Json
     }
+
     fn precheck(&self, _ctx: &MergePrecheckCtx<'_>) -> StrataResult<()> {
         Ok(())
     }
-    fn post_commit(&self, _ctx: &MergePostCommitCtx<'_>) -> StrataResult<()> {
+
+    fn plan(&self, ctx: &MergePlanCtx<'_>) -> StrataResult<PrimitiveMergePlan> {
+        let mut actions: Vec<MergeAction> = Vec::new();
+        let mut conflicts: Vec<ConflictEntry> = Vec::new();
+        let mut affected: Vec<JsonAffectedDoc> = Vec::new();
+
+        for ((space, type_tag), cell) in &ctx.typed_entries.cells {
+            if *type_tag != TypeTag::Json {
+                continue;
+            }
+
+            // Build per-cell maps keyed by raw user_key bytes (= doc_id
+            // bytes), reusing the same helpers the 14-case classifier
+            // uses so the JSON handler observes identical filtering /
+            // tombstone semantics.
+            let ancestor_map = build_ancestor_map(&cell.ancestor, space);
+            let source_map = build_live_map(&cell.source, space);
+            let target_map = build_live_map(&cell.target, space);
+
+            let mut all_keys: BTreeSet<&Vec<u8>> = BTreeSet::new();
+            all_keys.extend(ancestor_map.keys());
+            all_keys.extend(source_map.keys());
+            all_keys.extend(target_map.keys());
+
+            for user_key in all_keys {
+                let ancestor_val = ancestor_map.get(user_key).and_then(|opt| opt.as_ref());
+                let source_val = source_map.get(user_key);
+                let target_val = target_map.get(user_key);
+
+                // doc_id is the user_key as UTF-8. JSON keys are always
+                // UTF-8 (`Key::new_json` only accepts `&str`); a non-UTF-8
+                // user_key can only happen if a row is corrupt — fall
+                // through to the opaque fallback inside `merge_one_doc`
+                // by passing `None`.
+                let doc_id = std::str::from_utf8(user_key).ok();
+
+                merge_one_doc(
+                    space,
+                    user_key,
+                    doc_id,
+                    ancestor_val,
+                    source_val,
+                    target_val,
+                    ctx.strategy,
+                    &mut actions,
+                    &mut conflicts,
+                    &mut affected,
+                );
+            }
+        }
+
+        // Stash the affected list for post_commit. New handler instance
+        // per merge → uncontended.
+        *self.affected.lock() = affected;
+
+        Ok(PrimitiveMergePlan { actions, conflicts })
+    }
+
+    fn post_commit(&self, ctx: &MergePostCommitCtx<'_>) -> StrataResult<()> {
+        // No actions applied → nothing to refresh.
+        if ctx.merge_version.is_none() {
+            return Ok(());
+        }
+
+        let affected = std::mem::take(&mut *self.affected.lock());
+        if affected.is_empty() {
+            return Ok(());
+        }
+
+        // Group by space so we load index defs once per space.
+        let mut by_space: BTreeMap<String, Vec<JsonAffectedDoc>> = BTreeMap::new();
+        for doc in affected {
+            by_space.entry(doc.space.clone()).or_default().push(doc);
+        }
+
+        for (space, docs) in by_space {
+            // Run secondary index refresh in a single transaction per
+            // space so the per-doc deltas commit atomically. The merge
+            // transaction has already committed at this point, so a
+            // failure here leaves KV in the merged state with stale
+            // index entries — the next compaction / db open will fall
+            // back on the existing recovery path. We log and continue
+            // instead of returning an error to mirror the vector
+            // post-commit failure mode.
+            let txn_result = ctx.db.transaction(ctx.target_id, |txn| {
+                let indexes = JsonStore::load_indexes(txn, &ctx.target_id, &space)?;
+                if indexes.is_empty() {
+                    return Ok(());
+                }
+                for doc in &docs {
+                    JsonStore::update_index_entries(
+                        txn,
+                        &ctx.target_id,
+                        &space,
+                        &doc.doc_id,
+                        doc.old_target_value.as_ref(),
+                        doc.new_value.as_ref(),
+                        &indexes,
+                    )?;
+                }
+                Ok(())
+            });
+            if let Err(e) = txn_result {
+                tracing::warn!(
+                    target: "strata::branch_ops",
+                    space = %space,
+                    error = %e,
+                    "JSON merge: failed to refresh secondary index entries — falling back to next recovery"
+                );
+            }
+
+            // BM25 inverted index updates are not transactional — they
+            // mutate the in-memory `InvertedIndex` extension directly.
+            // Update each affected doc independently. Calls are no-ops
+            // when BM25 is disabled.
+            for doc in &docs {
+                let r = match &doc.new_value {
+                    Some(v) => JsonStore::index_json_doc(ctx.db, &ctx.target_id, &doc.doc_id, v),
+                    None => JsonStore::deindex_json_doc(ctx.db, &ctx.target_id, &doc.doc_id),
+                };
+                if let Err(e) = r {
+                    tracing::warn!(
+                        target: "strata::branch_ops",
+                        space = %space,
+                        doc_id = %doc.doc_id,
+                        error = %e,
+                        "JSON merge: failed to refresh BM25 inverted-index entry"
+                    );
+                }
+            }
+        }
+
         Ok(())
+    }
+}
+
+/// Merge one document's three-way state into actions / conflicts /
+/// affected list. Splitting this out keeps `JsonMergeHandler::plan`
+/// readable.
+#[allow(clippy::too_many_arguments)]
+fn merge_one_doc(
+    space: &str,
+    user_key: &[u8],
+    doc_id: Option<&str>,
+    ancestor_val: Option<&Value>,
+    source_val: Option<&Value>,
+    target_val: Option<&Value>,
+    strategy: MergeStrategy,
+    actions: &mut Vec<MergeAction>,
+    conflicts: &mut Vec<ConflictEntry>,
+    affected: &mut Vec<JsonAffectedDoc>,
+) {
+    // Decode known-decodable sides into JsonDocs. Sides that fail to
+    // decode (corrupt bytes) are treated as opaque and routed through
+    // the byte-equality fallback below.
+    let ancestor_doc = ancestor_val.and_then(JsonMergeHandler::decode_doc);
+    let source_doc = source_val.and_then(JsonMergeHandler::decode_doc);
+    let target_doc = target_val.and_then(JsonMergeHandler::decode_doc);
+
+    // Helper closures
+    let push_put = |actions: &mut Vec<MergeAction>, value: Value| {
+        actions.push(MergeAction {
+            space: space.to_string(),
+            raw_key: user_key.to_vec(),
+            type_tag: TypeTag::Json,
+            action: MergeActionKind::Put(value),
+            expected_target: target_val.cloned(),
+        });
+    };
+    let push_delete = |actions: &mut Vec<MergeAction>| {
+        actions.push(MergeAction {
+            space: space.to_string(),
+            raw_key: user_key.to_vec(),
+            type_tag: TypeTag::Json,
+            action: MergeActionKind::Delete,
+            expected_target: target_val.cloned(),
+        });
+    };
+    let push_conflict = |conflicts: &mut Vec<ConflictEntry>,
+                         source_value: Option<&Value>,
+                         target_value: Option<&Value>| {
+        conflicts.push(ConflictEntry {
+            key: format_user_key(user_key),
+            primitive: PrimitiveType::Json,
+            space: space.to_string(),
+            source_value: source_value.cloned(),
+            target_value: target_value.cloned(),
+        });
+    };
+    let track_affected =
+        |affected: &mut Vec<JsonAffectedDoc>, old: Option<&JsonDoc>, new: Option<&JsonDoc>| {
+            if let Some(id) = doc_id {
+                affected.push(JsonAffectedDoc {
+                    space: space.to_string(),
+                    doc_id: id.to_string(),
+                    old_target_value: old.map(|d| d.value.clone()),
+                    new_value: new.map(|d| d.value.clone()),
+                });
+            }
+        };
+
+    // Doc-level cases.
+    match (
+        ancestor_val,
+        source_val,
+        target_val,
+        ancestor_doc.as_ref(),
+        source_doc.as_ref(),
+        target_doc.as_ref(),
+    ) {
+        // Source absent, target absent — both already in agreement.
+        (_, None, None, _, _, _) => {}
+
+        // Source absent (deleted or never had it). Both ancestor and
+        // target decoded — handle the SourceDeleted / DeleteModify cases
+        // with full doc tracking.
+        (Some(_), None, Some(_), Some(_), _, Some(tgt)) => {
+            if values_equal(ancestor_val, target_val) {
+                // SourceDeleted: target unchanged from ancestor → apply
+                // delete to target.
+                push_delete(actions);
+                track_affected(affected, Some(tgt), None);
+            } else {
+                // DeleteModifyConflict: source deleted, target modified.
+                push_conflict(conflicts, None, target_val);
+                if strategy == MergeStrategy::LastWriterWins {
+                    push_delete(actions);
+                    track_affected(affected, Some(tgt), None);
+                }
+            }
+        }
+        (None, None, Some(_), _, _, _) => {
+            // Source absent, target added (no ancestor) → no action.
+        }
+        (Some(_), None, Some(_), _, _, _) => {
+            // Ancestor or target failed to decode; fall back to opaque
+            // byte equality. Index refresh is skipped when the target
+            // doc can't be decoded — corrupt rows can't index correctly
+            // anyway and the next full recovery cleans them up.
+            if values_equal(ancestor_val, target_val) {
+                push_delete(actions);
+                if let Some(tgt) = target_doc.as_ref() {
+                    track_affected(affected, Some(tgt), None);
+                }
+            } else {
+                push_conflict(conflicts, None, target_val);
+                if strategy == MergeStrategy::LastWriterWins {
+                    push_delete(actions);
+                    if let Some(tgt) = target_doc.as_ref() {
+                        track_affected(affected, Some(tgt), None);
+                    }
+                }
+            }
+        }
+
+        // Target absent.
+        (_, Some(_), None, _, Some(src), _) => {
+            if values_equal(ancestor_val, source_val) {
+                // TargetDeleted: source unchanged from ancestor → no action.
+            } else if ancestor_val.is_none() {
+                // SourceAdded: doc didn't exist on either side, source created it.
+                let value = source_val.unwrap().clone();
+                push_put(actions, value);
+                track_affected(affected, None, Some(src));
+            } else {
+                // ModifyDeleteConflict: source modified, target deleted.
+                push_conflict(conflicts, source_val, None);
+                if strategy == MergeStrategy::LastWriterWins {
+                    push_put(actions, source_val.unwrap().clone());
+                    track_affected(affected, None, Some(src));
+                }
+            }
+        }
+        (_, Some(_), None, _, None, _) => {
+            // Source decode failed; opaque-equality fallback.
+            if values_equal(ancestor_val, source_val) {
+                // no-op
+            } else if ancestor_val.is_none() {
+                push_put(actions, source_val.unwrap().clone());
+            } else {
+                push_conflict(conflicts, source_val, None);
+                if strategy == MergeStrategy::LastWriterWins {
+                    push_put(actions, source_val.unwrap().clone());
+                }
+            }
+        }
+
+        // Both source and target present.
+        (_, Some(_), Some(_), _, Some(src), Some(tgt)) => {
+            // Trivial: bytes are identical → no action.
+            if values_equal(source_val, target_val) {
+                return;
+            }
+            // Single-sided: source unchanged from ancestor → target's
+            // value already wins, no action.
+            if values_equal(source_val, ancestor_val) {
+                return;
+            }
+            // Single-sided: target unchanged from ancestor → apply
+            // source's value verbatim. Path-level merge would degenerate
+            // to the same result; skip the cost.
+            if values_equal(target_val, ancestor_val) {
+                push_put(actions, source_val.unwrap().clone());
+                track_affected(affected, Some(tgt), Some(src));
+                return;
+            }
+
+            // True three-way divergence — run the path-level merge.
+            let merge = merge_json_values(
+                ancestor_doc.as_ref().map(|d| &d.value),
+                &src.value,
+                &tgt.value,
+                strategy,
+            );
+
+            // `merge_json_values` always returns `Some` when both source
+            // and target are present (which is the precondition for this
+            // arm), so unwrapping is safe. The recursive worker only
+            // returns `None` when both sides are absent at a sub-path.
+            let merged_value = merge
+                .merged
+                .expect("merge_json_values returns Some when both sides are present");
+
+            // Surface path-level conflicts. Each conflict path is
+            // reported as its own ConflictEntry under the doc's user_key
+            // so callers see one row per conflicting path within the doc.
+            if !merge.conflict_paths.is_empty() {
+                for conflict_path in &merge.conflict_paths {
+                    conflicts.push(ConflictEntry {
+                        key: format!("{}@{}", format_user_key(user_key), conflict_path),
+                        primitive: PrimitiveType::Json,
+                        space: space.to_string(),
+                        source_value: source_val.cloned(),
+                        target_value: target_val.cloned(),
+                    });
+                }
+                if strategy != MergeStrategy::LastWriterWins {
+                    // Strict: do not write a put. The caller (merge_branches)
+                    // sees the conflicts and aborts before applying actions.
+                    return;
+                }
+            }
+
+            // Re-envelope the merged value into a JsonDoc. Identity
+            // (`id`, `created_at`) inherits from the target side (the
+            // merge writes back into target). `version` bumps to
+            // `max(source, target) + 1`; `updated_at` is the latest of
+            // the two sides. The 14-case fallback used to produce a
+            // version-with-source-bytes envelope, which had the same
+            // staleness; this is strictly more correct.
+            let merged_doc = JsonDoc {
+                id: tgt.id.clone(),
+                value: merged_value,
+                version: src.version.max(tgt.version) + 1,
+                created_at: tgt.created_at.min(src.created_at),
+                updated_at: src.updated_at.max(tgt.updated_at),
+            };
+            let serialized = match JsonStore::serialize_doc(&merged_doc) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "strata::branch_ops",
+                        error = %e,
+                        space = %space,
+                        "JSON merge: failed to serialize merged doc — falling back to source bytes"
+                    );
+                    push_put(actions, source_val.unwrap().clone());
+                    track_affected(affected, Some(tgt), Some(src));
+                    return;
+                }
+            };
+            push_put(actions, serialized);
+            // Track the affected doc so post_commit can refresh
+            // secondary indexes against the actual merged value (not
+            // src.value, which only matches in the LWW degenerate case).
+            // Skip tracking when doc_id isn't valid UTF-8 — JSON keys
+            // should always be UTF-8 (`Key::new_json` only accepts
+            // `&str`), so this branch only fires for corrupt rows.
+            if let Some(id) = doc_id {
+                affected.push(JsonAffectedDoc {
+                    space: space.to_string(),
+                    doc_id: id.to_string(),
+                    old_target_value: Some(tgt.value.clone()),
+                    new_value: Some(merged_doc.value.clone()),
+                });
+            }
+        }
+
+        // Both present but at least one fails to decode → opaque
+        // 14-case-equivalent fallback.
+        (_, Some(_), Some(_), _, _, _) => {
+            if values_equal(source_val, target_val) {
+                return;
+            }
+            if values_equal(source_val, ancestor_val) {
+                return;
+            }
+            if values_equal(target_val, ancestor_val) {
+                push_put(actions, source_val.unwrap().clone());
+                return;
+            }
+            // True conflict.
+            push_conflict(conflicts, source_val, target_val);
+            if strategy == MergeStrategy::LastWriterWins {
+                push_put(actions, source_val.unwrap().clone());
+            }
+        }
+    }
+}
+
+fn values_equal(a: Option<&Value>, b: Option<&Value>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => x == y,
+        _ => false,
     }
 }
 

@@ -445,7 +445,10 @@ impl JsonStore {
 
     /// Index a JSON document into the InvertedIndex for BM25 search.
     /// Zero overhead when the index is disabled.
-    fn index_json_doc(
+    ///
+    /// `pub(crate)` so `branch_ops::primitive_merge::JsonMergeHandler` can
+    /// refresh BM25 index entries for documents touched by a JSON merge.
+    pub(crate) fn index_json_doc(
         db: &Arc<Database>,
         branch_id: &BranchId,
         doc_id: &str,
@@ -459,6 +462,27 @@ impl JsonStore {
                 doc_id: doc_id.to_string(),
             };
             idx.index_document(&entity_ref, &text, None);
+        }
+        Ok(())
+    }
+
+    /// Remove a JSON document from the InvertedIndex for BM25 search.
+    /// Used when a merge deletes a document on the target side.
+    ///
+    /// `pub(crate)` so `branch_ops::primitive_merge::JsonMergeHandler` can
+    /// drop BM25 index entries for documents removed by a JSON merge.
+    pub(crate) fn deindex_json_doc(
+        db: &Arc<Database>,
+        branch_id: &BranchId,
+        doc_id: &str,
+    ) -> StrataResult<()> {
+        let idx = db.extension::<crate::search::InvertedIndex>()?;
+        if idx.is_enabled() {
+            let entity_ref = crate::search::EntityRef::Json {
+                branch_id: *branch_id,
+                doc_id: doc_id.to_string(),
+            };
+            idx.remove_document(&entity_ref);
         }
         Ok(())
     }
@@ -1319,7 +1343,10 @@ impl JsonStore {
     }
 
     /// Load all index definitions for a space (internal helper).
-    fn load_indexes(
+    ///
+    /// `pub(crate)` so `branch_ops::primitive_merge::JsonMergeHandler` can
+    /// re-derive index entries for documents touched by a JSON merge.
+    pub(crate) fn load_indexes(
         txn: &mut TransactionContext,
         branch_id: &BranchId,
         space: &str,
@@ -1345,7 +1372,11 @@ impl JsonStore {
     ///
     /// If `old_value` is Some, removes old index entries first (for updates).
     /// Then writes new index entries for the new value.
-    fn update_index_entries(
+    ///
+    /// `pub(crate)` so `branch_ops::primitive_merge::JsonMergeHandler` can
+    /// refresh secondary index entries for documents touched by a JSON
+    /// merge using the same delta logic as the per-write path.
+    pub(crate) fn update_index_entries(
         txn: &mut TransactionContext,
         branch_id: &BranchId,
         space: &str,

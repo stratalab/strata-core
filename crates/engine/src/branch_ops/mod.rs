@@ -13,7 +13,10 @@
 //!
 //! - [`primitive_merge`] — `PrimitiveMergeHandler` trait and per-primitive
 //!   handlers. See `docs/design/branching/primitive-aware-merge.md`.
+//! - [`json_merge`] — Per-document JSON three-way merge helpers used by
+//!   `JsonMergeHandler` to combine disjoint path edits on the same doc.
 
+pub(crate) mod json_merge;
 pub mod primitive_merge;
 
 use crate::database::Database;
@@ -75,7 +78,7 @@ fn note_prefix(branch: &str) -> String {
 /// Build an ancestor-style map from versioned entries, tombstone-aware.
 ///
 /// Entries outside `space` are skipped. Tombstones map to `None`.
-fn build_ancestor_map(
+pub(crate) fn build_ancestor_map(
     entries: &[strata_storage::VersionedEntry],
     space: &str,
 ) -> HashMap<Vec<u8>, Option<Value>> {
@@ -111,7 +114,10 @@ fn live_entries_from_versioned(
 }
 
 /// Build a live-entry map from `(Key, VersionedValue)` pairs, filtered by space.
-fn build_live_map(entries: &[(Key, VersionedValue)], space: &str) -> HashMap<Vec<u8>, Value> {
+pub(crate) fn build_live_map(
+    entries: &[(Key, VersionedValue)],
+    space: &str,
+) -> HashMap<Vec<u8>, Value> {
     let mut map = HashMap::new();
     for (key, vv) in entries {
         if key.namespace.space == *space {
@@ -661,7 +667,7 @@ fn type_tag_to_primitive(tag: TypeTag) -> PrimitiveType {
 }
 
 /// Format a user key as a readable string (UTF-8 or hex for binary).
-fn format_user_key(user_key: &[u8]) -> String {
+pub(crate) fn format_user_key(user_key: &[u8]) -> String {
     match std::str::from_utf8(user_key) {
         Ok(s) => s.to_string(),
         Err(_) => {
@@ -1947,12 +1953,14 @@ pub fn merge_branches(
     }
 
     // Per-primitive post-commit handlers run before the existing reload
-    // sweep. All handlers are no-ops today; secondary index refresh
-    // currently happens via the `reload_secondary_backends` call below.
-    // The per-primitive hook is preserved so individual primitives can
-    // take ownership of their own post-merge refresh incrementally
-    // (e.g. JSON inverted-index refresh, which is still a TODO inside
-    // `JsonMergeHandler`).
+    // sweep. KV / Event are no-ops; Vector rebuilds the affected
+    // collections' HNSW backends; JSON refreshes secondary indexes and
+    // the BM25 inverted index for affected documents; Graph is a no-op
+    // because the semantic merge in `plan` already wrote the projected
+    // adjacency lists. The legacy `reload_secondary_backends` sweep
+    // below remains for refresh hooks that haven't migrated to
+    // per-handler `post_commit` yet (currently a no-op for the
+    // registered VectorRefreshHook).
     let post_ctx = MergePostCommitCtx {
         db,
         source_id,
@@ -3073,17 +3081,20 @@ pub fn cherry_pick_from_diff(
     }
 
     // Per-primitive post-commit handlers — symmetric with merge_branches.
-    // The vector handler rebuilds the HNSW backends for collections that
-    // its `plan` recorded as affected; without this dispatch, vectors
-    // cherry-picked into the target would land in KV correctly but the
-    // in-memory backend would be stale until the next full recovery.
+    // - Vector: rebuilds HNSW backends for collections that `plan`
+    //   recorded as affected.
+    // - JSON: refreshes secondary index entries and BM25 inverted-index
+    //   entries for documents `plan` recorded as affected.
     //
-    // Note: the affected set was populated from the unfiltered plan
-    // actions, so a cherry-pick that filters out a collection's writes
-    // entirely will still trigger a redundant rebuild for that
-    // collection. The rebuild reads from KV (which is unchanged for
-    // filtered collections) so it's wasted work but produces correct
-    // state.
+    // Without this dispatch, the cherry-picked rows would land in KV
+    // correctly but derived state would be stale until the next full
+    // recovery.
+    //
+    // Note: the affected set is populated from the UNFILTERED plan
+    // actions, so a cherry-pick that filters out a doc/collection's
+    // writes entirely will still trigger a redundant refresh for that
+    // doc/collection. The refresh reads from KV (which is unchanged for
+    // filtered rows) so it's wasted work but produces correct state.
     let post_ctx = MergePostCommitCtx {
         db,
         source_id,
@@ -3094,9 +3105,9 @@ pub fn cherry_pick_from_diff(
         registry.get(tag).post_commit(&post_ctx)?;
     }
 
-    // Reload secondary index backends — vector refresh hook is a no-op
-    // after Phase 4 (handler owns the rebuild path); preserved for
-    // future per-primitive refresh hooks (e.g. JSON inverted-index).
+    // Reload secondary index backends — preserved for any RefreshHook
+    // that hasn't migrated to per-handler `post_commit` yet (currently
+    // a no-op for the registered VectorRefreshHook).
     reload_secondary_backends(db, target_id, source_id);
 
     info!(
