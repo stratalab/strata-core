@@ -48,7 +48,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu cmake
 
-      - name: Build (full features: embed + arrow + cloud)
+      - name: "Build (full features: embed + arrow + cloud)"
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-gcc' || '' }}
         run: cargo build --release --features embed,arrow,cloud --package strata-cli --target ${{ matrix.target }}
