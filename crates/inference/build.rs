@@ -14,7 +14,16 @@ fn build_llama_cpp() {
         .define("LLAMA_BUILD_TESTS", "OFF")
         .define("LLAMA_BUILD_EXAMPLES", "OFF")
         .define("LLAMA_BUILD_SERVER", "OFF")
-        .define("LLAMA_CURL", "OFF");
+        .define("LLAMA_CURL", "OFF")
+        // Disable the BLAS backend explicitly. Without this, cmake auto-detects
+        // a BLAS provider on macOS (Accelerate) and `ggml-backend-reg.cpp`
+        // references `ggml_backend_blas_reg`, but the build.rs below doesn't
+        // know to link `libggml-blas.a` — we end up with an undefined symbol
+        // at link time on aarch64-apple-darwin. The MiniLM embedding model
+        // we ship doesn't benefit meaningfully from BLAS, and the local
+        // generation path is acceptable without it for the v0.6.x line.
+        // Re-enable when we actually need BLAS-accelerated prompt eval.
+        .define("GGML_BLAS", "OFF");
 
     // Metal: cmake auto-detects (ON on Apple, OFF elsewhere).
     // We just need to embed the Metal library so it doesn't need a .metallib file at runtime.
