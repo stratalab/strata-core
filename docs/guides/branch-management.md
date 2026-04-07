@@ -38,7 +38,7 @@ strata:my-branch/default> use nonexistent
 
 ## Listing Branches
 
-`branch list` returns all branch names:
+`branch list` returns all user-visible branch names:
 
 ```
 $ strata --cache
@@ -51,6 +51,8 @@ strata:default/default> branch list
 - branch-b
 - default
 ```
+
+The list deliberately excludes engine-internal branches whose names start with `_system`. Strata always has a `_system_` branch that auto-creates on database open and stores cross-branch metadata (the branch DAG, tags, and notes) — `branch list` filters it out so it doesn't pollute the user's view. See [Concepts: The `_system_` branch](../concepts/branches.md#the-_system_-branch) for what lives there and why you don't normally see it.
 
 ## Deleting Branches
 
