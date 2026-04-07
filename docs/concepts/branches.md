@@ -121,16 +121,28 @@ strata --cache branch exists my-branch
 strata --cache branch del my-branch
 ```
 
-## Branch Internals
+## How merges work
 
-Under the hood, every key in storage is prefixed with its branch ID. When you run `kv put key value`, the storage layer stores it under `{branch_id}:kv:key`. This makes branch isolation automatic — no filtering needed, because the keys are simply different.
+Strata supports three-way branch merges. When you merge `source` into `target`, the engine computes the **merge base** — the common ancestor where the two branches diverged (the fork point, or the version of a previous merge if the branches have been merged before) — then reads three snapshots: ancestor, source, and target. Each primitive's data is routed through a per-primitive handler that knows that primitive's invariants.
 
-This also means:
-- Deleting a branch is O(branch size), scanning only that branch's keys
-- Branches share no state, so they cannot conflict with each other
-- Cross-branch operations (fork, diff, merge) are available — see the [Branch Management Guide](../guides/branch-management.md)
+The handlers are not generic. **KV** uses a 14-case classification matrix at the cell level. **JSON** walks each document recursively and merges disjoint paths automatically. **Vector** rebuilds affected HNSW collections per-collection and refuses dimension/metric mismatches. **Graph** decodes adjacency lists, validates referential integrity, and merges disjoint nodes and edges additively. **Event** refuses divergent appends to the same hash-chained stream. The merge transaction is atomic across all five — every primitive's merged state is durable in the WAL by the time the merge call returns, and a crash mid-merge cannot leave the target half-merged.
+
+Merges take a strategy: `Strict` refuses any conflict (target unchanged); `LastWriterWins` auto-resolves by taking the source side. Some conflicts are always fatal regardless of strategy — referential integrity violations, dimension mismatches, hash-chain divergence — because they represent structural impossibilities, not value disagreements. See the [Merge Semantics](../guides/merge-semantics.md) guide for the per-primitive details and the [Branching Strategies](../guides/branching-strategies.md) guide for when to use which.
+
+## Storage model: copy-on-write
+
+Forks are O(1). The destination branch shares storage with its parent through inherited segment layers — no data is copied at fork time. Reads on the child fall through to the parent's segments via the inheritance chain. Writes only ever land in the writing branch's own segments, so the parent is never disturbed by what its children do.
+
+This means you can fork millions of branches and pay only the per-branch metadata cost. A branch that never writes costs essentially nothing in storage. A branch that diverges by 1% of the parent's data costs roughly 1% of the parent's storage.
+
+The trade-off is read-path overhead on deep fork chains: a read on a 10-level-deep chain may walk up to 10 inherited layers before finding the latest version. For long-lived branches that serve heavy read traffic, **materialize** the branch to collapse its inherited layers into own segments. See [Branching Strategies §When to materialize](../guides/branching-strategies.md#when-to-materialize).
+
+Under the hood, every key in storage is prefixed with its branch ID. Branch isolation is automatic — no filtering needed, because the keys are simply different. Deleting a branch is O(branch size), scanning only that branch's keys. Cross-branch operations (fork, diff, merge, cherry-pick, materialize, revert, tag, note) are described in the [Branch Management Guide](../guides/branch-management.md) and the [Branching API Reference](../reference/branching-api.md).
 
 ## Next
 
 - [Primitives](primitives.md) — the six data types
-- [Branch Management Guide](../guides/branch-management.md) — complete API walkthrough
+- [Branch Management Guide](../guides/branch-management.md) — complete CLI walkthrough
+- [Merge Semantics](../guides/merge-semantics.md) — what each merge does, per primitive
+- [Branching Strategies](../guides/branching-strategies.md) — when to use fork, merge, cherry-pick, materialize, tag
+- [Branching API Reference](../reference/branching-api.md) — every operation, every field
