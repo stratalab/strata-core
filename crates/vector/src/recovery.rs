@@ -106,8 +106,17 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
         //
         // We scan space metadata directly via the storage layer rather than
         // calling `SpaceIndex::list`, because that helper requires
-        // `Arc<Database>` and recovery only has `&Database`. The scan logic
-        // mirrors `SpaceIndex::list` (`crates/engine/src/primitives/space.rs`).
+        // `Arc<Database>` and recovery only has `&Database`.
+        //
+        // Phase 3 cross-reference: this metadata scan now matches the
+        // semantics of `SpaceIndex::discover_used_spaces` + `list` (union
+        // of metadata and discovery) because Phase 3's startup repair runs
+        // BEFORE this recovery participant. By the time we get here, every
+        // space with real data has a metadata entry, so the metadata-only
+        // scan below is functionally equivalent to a full data scan. If
+        // that ordering ever changes, switch this loop to use
+        // `SpaceIndex::discover_used_spaces` directly (see
+        // `crates/engine/src/primitives/space.rs`).
         let space_prefix = Key::new_space_prefix(branch_id);
         let mut spaces: Vec<String> = match db
             .storage()

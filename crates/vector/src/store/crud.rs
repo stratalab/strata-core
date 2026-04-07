@@ -70,6 +70,9 @@ impl VectorStore {
         let (version, staged_op) = self
             .db
             .transaction(branch_id, |txn| {
+                strata_engine::primitives::space::ensure_space_registered_in_txn(
+                    txn, &branch_id, space,
+                )?;
                 txn.vector_upsert(
                     branch_id,
                     space,
@@ -418,6 +421,9 @@ impl VectorStore {
         // Commit all KV writes in a single transaction
         self.db
             .transaction(branch_id, |txn| {
+                strata_engine::primitives::space::ensure_space_registered_in_txn(
+                    txn, &branch_id, space,
+                )?;
                 for (key, value) in &kv_writes {
                     txn.put(key.clone(), value.clone())?;
                 }

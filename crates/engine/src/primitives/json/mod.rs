@@ -287,6 +287,8 @@ impl JsonStore {
         let doc = JsonDoc::new(doc_id, value.clone());
 
         let version = self.db.transaction(*branch_id, |txn| {
+            crate::primitives::space::ensure_space_registered_in_txn(txn, branch_id, space)?;
+
             // Check if document already exists
             if txn.get(&key)?.is_some() {
                 return Err(StrataError::invalid_input(format!(
@@ -594,6 +596,7 @@ impl JsonStore {
 
         let key = self.key_for(branch_id, space, doc_id);
         let result = self.db.transaction(*branch_id, |txn| {
+            crate::primitives::space::ensure_space_registered_in_txn(txn, branch_id, space)?;
             let indexes = Self::load_indexes(txn, branch_id, space)?;
             Self::set_in_txn(
                 txn, &key, doc_id, path, value, true, branch_id, space, &indexes,
@@ -634,6 +637,7 @@ impl JsonStore {
         let doc_ids: Vec<String> = entries.iter().map(|(id, _, _)| id.clone()).collect();
 
         let results = self.db.transaction(*branch_id, |txn| {
+            crate::primitives::space::ensure_space_registered_in_txn(txn, branch_id, space)?;
             let indexes = Self::load_indexes(txn, branch_id, space)?;
             let mut results = Vec::with_capacity(entries.len());
             for (doc_id, path, value) in &entries {
@@ -755,6 +759,7 @@ impl JsonStore {
 
         let key = self.key_for(branch_id, space, doc_id);
         let (version, doc_value) = self.db.transaction(*branch_id, |txn| {
+            crate::primitives::space::ensure_space_registered_in_txn(txn, branch_id, space)?;
             let indexes = Self::load_indexes(txn, branch_id, space)?;
             Self::set_in_txn(
                 txn, &key, doc_id, path, value, false, branch_id, space, &indexes,
@@ -3099,7 +3104,7 @@ mod tests {
         let history = store.getv(&branch_id, "default", "doc1").unwrap();
         assert!(history.is_some());
         let versions = history.unwrap().into_versions();
-        assert!(versions.len() >= 1, "Should have at least one version");
+        assert!(!versions.is_empty(), "Should have at least one version");
         // Latest version should be "v2"
         assert_eq!(versions[0].value.as_str(), Some("v2"));
     }

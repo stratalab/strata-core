@@ -33,34 +33,6 @@ pub(crate) fn read_edge_type_count(
     }
 }
 
-/// Idempotently register the given `space` on `branch_id` from inside an
-/// open transaction.
-///
-/// The `SpaceIndex` (which `branch_ops::merge_branches` and other
-/// space-aware callers iterate via `space_index.list()`) only tracks
-/// spaces that have been explicitly registered. Without this hook,
-/// branches with graph data have an empty space list, and
-/// `merge_branches` silently skips graph state entirely — which means
-/// the graph divergence safety check never fires either. This is
-/// the same gap PR #2331 closed for EventLog.
-///
-/// Callers pass the user space they want to write graph data into.
-///
-/// Skip the read+write if the metadata key already exists to avoid
-/// bloating the WAL with no-op puts on every graph mutation. The
-/// conditional `txn.get` is a memtable hit on the hot path.
-pub(crate) fn ensure_graph_space_registered(
-    txn: &mut TransactionContext,
-    branch_id: BranchId,
-    space: &str,
-) -> StrataResult<()> {
-    let space_meta_key = Key::new_space(branch_id, space);
-    if txn.get(&space_meta_key)?.is_none() {
-        txn.put(space_meta_key, Value::String("{}".to_string()))?;
-    }
-    Ok(())
-}
-
 /// Write an edge type count in a transaction.
 pub(crate) fn write_edge_type_count(
     txn: &mut TransactionContext,
@@ -214,7 +186,7 @@ impl GraphStoreExt for TransactionContext {
         meta: GraphMeta,
     ) -> StrataResult<()> {
         keys::validate_graph_name(graph)?;
-        ensure_graph_space_registered(self, branch_id, space)?;
+        strata_engine::primitives::space::ensure_space_registered_in_txn(self, &branch_id, space)?;
         let meta_json =
             serde_json::to_string(&meta).map_err(|e| StrataError::serialization(e.to_string()))?;
         let user_key = keys::meta_key(graph);
@@ -307,7 +279,7 @@ impl GraphStoreExt for TransactionContext {
     ) -> StrataResult<bool> {
         keys::validate_graph_name(graph)?;
         keys::validate_node_id(node_id)?;
-        ensure_graph_space_registered(self, branch_id, space)?;
+        strata_engine::primitives::space::ensure_space_registered_in_txn(self, &branch_id, space)?;
         let node_json =
             serde_json::to_string(data).map_err(|e| StrataError::serialization(e.to_string()))?;
         let user_key = keys::node_key(graph, node_id);
@@ -388,7 +360,6 @@ impl GraphStoreExt for TransactionContext {
         graph: &str,
         node_id: &str,
     ) -> StrataResult<()> {
-        ensure_graph_space_registered(self, branch_id, space)?;
         let node_user_key = keys::node_key(graph, node_id);
         let node_storage_key = keys::storage_key(branch_id, space, &node_user_key);
         let fwd_adj_uk = keys::forward_adj_key(graph, node_id);
@@ -516,7 +487,7 @@ impl GraphStoreExt for TransactionContext {
         keys::validate_node_id(src)?;
         keys::validate_node_id(dst)?;
         keys::validate_edge_type(edge_type)?;
-        ensure_graph_space_registered(self, branch_id, space)?;
+        strata_engine::primitives::space::ensure_space_registered_in_txn(self, &branch_id, space)?;
         let src_node_uk = keys::node_key(graph, src);
         let dst_node_uk = keys::node_key(graph, dst);
         let src_node_key = keys::storage_key(branch_id, space, &src_node_uk);
@@ -587,7 +558,6 @@ impl GraphStoreExt for TransactionContext {
         dst: &str,
         edge_type: &str,
     ) -> StrataResult<()> {
-        ensure_graph_space_registered(self, branch_id, space)?;
         let fwd_uk = keys::forward_adj_key(graph, src);
         let fwd_sk = keys::storage_key(branch_id, space, &fwd_uk);
         let rev_uk = keys::reverse_adj_key(graph, dst);

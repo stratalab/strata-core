@@ -23,6 +23,16 @@ impl GraphStore {
     ) -> StrataResult<(usize, usize)> {
         keys::validate_graph_name(graph)?;
 
+        // Empty-input fast path: do not open any transaction. Without this
+        // guard, calling `bulk_insert` with both `nodes` and `edges` empty
+        // would still register the target space in `SpaceIndex` even though
+        // no data was written — exactly the phantom-space bug Phase 3 closes
+        // for delete commands. Mirrors the empty-input guard in
+        // `batch_add_edges` below.
+        if nodes.is_empty() && edges.is_empty() {
+            return Ok((0, 0));
+        }
+
         // Ensure the target space is registered with SpaceIndex before any
         // bulk chunks run. Same gap as #2331's EventLog fix — without this,
         // branches with bulk-inserted graph data are invisible to
@@ -30,7 +40,7 @@ impl GraphStore {
         // transactions below would each pay the cost of an idempotent check
         // anyway; centralizing it here in one small transaction is cheaper.
         self.db.transaction(branch_id, |txn| {
-            crate::ext::ensure_graph_space_registered(txn, branch_id, space)
+            strata_engine::primitives::space::ensure_space_registered_in_txn(txn, &branch_id, space)
         })?;
 
         // Read ontology status once before the loop
@@ -288,7 +298,7 @@ impl GraphStore {
         // and other space-aware callers can see graph data on this branch.
         // Mirrors the bulk_insert pattern above.
         self.db.transaction(branch_id, |txn| {
-            crate::ext::ensure_graph_space_registered(txn, branch_id, space)
+            strata_engine::primitives::space::ensure_space_registered_in_txn(txn, &branch_id, space)
         })?;
 
         // Check ontology constraints if frozen

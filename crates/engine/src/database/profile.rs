@@ -301,8 +301,10 @@ mod tests {
 
     #[test]
     fn user_explicit_vector_dtype_not_clobbered() {
-        let mut cfg = StrataConfig::default();
-        cfg.default_vector_dtype = "int8".to_string();
+        let mut cfg = StrataConfig {
+            default_vector_dtype: "int8".to_string(),
+            ..StrataConfig::default()
+        };
         apply_profile_if_defaults(&mut cfg, Profile::Embedded, pi_zero());
         assert_eq!(cfg.default_vector_dtype, "int8");
     }

@@ -167,9 +167,10 @@ impl KVStore {
 
         let storage_key = self.key_for(branch_id, space, key);
         let branch_id = *branch_id;
-        let ((), commit_version) = self
-            .db
-            .transaction_with_version(branch_id, |txn| txn.put(storage_key, value))?;
+        let ((), commit_version) = self.db.transaction_with_version(branch_id, |txn| {
+            crate::primitives::space::ensure_space_registered_in_txn(txn, &branch_id, space)?;
+            txn.put(storage_key, value)
+        })?;
 
         // Post-commit: update inverted index for BM25 search (zero overhead when disabled)
         if let Some(text) = text_for_index {
@@ -435,6 +436,7 @@ impl KVStore {
             .collect();
 
         let ((), commit_version) = self.db.transaction_with_version(*branch_id, |txn| {
+            crate::primitives::space::ensure_space_registered_in_txn(txn, branch_id, space)?;
             for (key, value) in &entries {
                 let storage_key = self.key_for(branch_id, space, key);
                 txn.put(storage_key, value.clone())?;
