@@ -691,6 +691,7 @@ impl InvertedIndex {
         scorer_b: f32,
         phrase_cfg: &PhraseConfig<'_>,
         prox_cfg: &ProximityConfig,
+        requested_space: Option<&str>,
     ) -> Vec<ScoredDocId> {
         if !self.is_enabled() || query_terms.is_empty() || k == 0 {
             return Vec::new();
@@ -763,10 +764,30 @@ impl InvertedIndex {
         for (term, idf, _) in &term_data {
             if let Some(posting_list) = self.postings.get(*term) {
                 for entry in &posting_list.entries {
-                    if !skip_branch_check {
+                    // Combined branch + space filter (one map lookup).
+                    // When `skip_branch_check` is true (single-branch index)
+                    // and no space filter is requested, we skip the lookup
+                    // entirely — preserving the existing fast path.
+                    //
+                    // `EntityRef::Branch` returns `None` for `space()` and is
+                    // kept unconditionally — those refs are space-less metadata.
+                    if !skip_branch_check || requested_space.is_some() {
                         match id_to_ref.get(entry.doc_id as usize) {
-                            Some(entity_ref) if entity_ref.branch_id() == *branch_id => {}
-                            _ => continue,
+                            Some(entity_ref) => {
+                                if !skip_branch_check && entity_ref.branch_id() != *branch_id {
+                                    continue;
+                                }
+                                if let Some(s) = requested_space {
+                                    if let Some(es) = entity_ref.space() {
+                                        if es != s {
+                                            continue;
+                                        }
+                                    }
+                                    // entity_ref.space() == None → space-less
+                                    // ref (Branch); keep it.
+                                }
+                            }
+                            None => continue,
                         }
                     }
                     let tf = entry.tf as f32;
@@ -808,10 +829,23 @@ impl InvertedIndex {
                             continue;
                         }
                     }
-                    if !skip_branch_check {
+                    // Combined branch + space filter (mirrors active loop).
+                    // Branch refs (space() == None) are kept unconditionally.
+                    if !skip_branch_check || requested_space.is_some() {
                         match id_to_ref.get(entry.doc_id as usize) {
-                            Some(entity_ref) if entity_ref.branch_id() == *branch_id => {}
-                            _ => continue,
+                            Some(entity_ref) => {
+                                if !skip_branch_check && entity_ref.branch_id() != *branch_id {
+                                    continue;
+                                }
+                                if let Some(s) = requested_space {
+                                    if let Some(es) = entity_ref.space() {
+                                        if es != s {
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                            None => continue,
                         }
                     }
                     let tf = entry.tf as f32;
@@ -1774,6 +1808,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert!(result.is_empty());
     }
@@ -1794,6 +1829,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert!(result.is_empty());
     }
@@ -1815,6 +1851,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert!(result.is_empty());
     }
@@ -1837,6 +1874,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert!(result.is_empty());
     }
@@ -1861,6 +1899,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
 
         // Both docs contain "hello", so both should appear
@@ -1894,6 +1933,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result_a.len(), 1);
         let resolved = index.resolve_doc_id(result_a[0].doc_id).unwrap();
@@ -1908,10 +1948,224 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result_b.len(), 1);
         let resolved = index.resolve_doc_id(result_b[0].doc_id).unwrap();
         assert_eq!(resolved, doc_b);
+    }
+
+    /// Two KV docs in the same branch but different spaces, identical key.
+    /// Searching with `requested_space = Some("tenant_a")` must return only
+    /// the tenant_a doc — never leak the tenant_b doc.
+    #[test]
+    fn test_score_top_k_kv_space_filter() {
+        let index = InvertedIndex::new();
+        index.enable();
+        let branch_id = BranchId::new();
+
+        let doc_a = EntityRef::Kv {
+            branch_id,
+            space: "tenant_a".to_string(),
+            key: "shared_key".to_string(),
+        };
+        let doc_b = EntityRef::Kv {
+            branch_id,
+            space: "tenant_b".to_string(),
+            key: "shared_key".to_string(),
+        };
+        index.index_document(&doc_a, "alpha bravo charlie", None);
+        index.index_document(&doc_b, "alpha bravo charlie", None);
+
+        let terms = vec!["bravo".to_string()];
+
+        // Filter to tenant_a → only doc_a
+        let result_a = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+            Some("tenant_a"),
+        );
+        assert_eq!(result_a.len(), 1, "tenant_a should see exactly its own doc");
+        let resolved = index.resolve_doc_id(result_a[0].doc_id).unwrap();
+        assert_eq!(resolved, doc_a);
+
+        // Filter to tenant_b → only doc_b
+        let result_b = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+            Some("tenant_b"),
+        );
+        assert_eq!(result_b.len(), 1, "tenant_b should see exactly its own doc");
+        let resolved = index.resolve_doc_id(result_b[0].doc_id).unwrap();
+        assert_eq!(resolved, doc_b);
+
+        // No filter (None) → both docs (cross-space recovery scan)
+        let result_all = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+            None,
+        );
+        assert_eq!(result_all.len(), 2, "None requested_space sees all spaces");
+    }
+
+    /// Same as above for `EntityRef::Json` — same identity collision pattern,
+    /// same expected outcome.
+    #[test]
+    fn test_score_top_k_json_space_filter() {
+        let index = InvertedIndex::new();
+        index.enable();
+        let branch_id = BranchId::new();
+
+        let doc_a = EntityRef::Json {
+            branch_id,
+            space: "tenant_a".to_string(),
+            doc_id: "doc1".to_string(),
+        };
+        let doc_b = EntityRef::Json {
+            branch_id,
+            space: "tenant_b".to_string(),
+            doc_id: "doc1".to_string(),
+        };
+        index.index_document(&doc_a, "delta echo foxtrot", None);
+        index.index_document(&doc_b, "delta echo foxtrot", None);
+
+        let terms = vec!["echo".to_string()];
+
+        let result_a = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+            Some("tenant_a"),
+        );
+        assert_eq!(result_a.len(), 1);
+        assert_eq!(index.resolve_doc_id(result_a[0].doc_id).unwrap(), doc_a);
+    }
+
+    /// Same as above for `EntityRef::Event`.
+    #[test]
+    fn test_score_top_k_event_space_filter() {
+        let index = InvertedIndex::new();
+        index.enable();
+        let branch_id = BranchId::new();
+
+        let doc_a = EntityRef::Event {
+            branch_id,
+            space: "tenant_a".to_string(),
+            sequence: 1,
+        };
+        let doc_b = EntityRef::Event {
+            branch_id,
+            space: "tenant_b".to_string(),
+            sequence: 1,
+        };
+        index.index_document(&doc_a, "golf hotel india", None);
+        index.index_document(&doc_b, "golf hotel india", None);
+
+        let terms = vec!["hotel".to_string()];
+
+        let result_a = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+            Some("tenant_a"),
+        );
+        assert_eq!(result_a.len(), 1);
+        assert_eq!(index.resolve_doc_id(result_a[0].doc_id).unwrap(), doc_a);
+    }
+
+    /// Sealed-segment path also needs the space filter. Index two docs,
+    /// seal, then search.
+    #[test]
+    fn test_score_top_k_space_filter_sealed_segment() {
+        let index = InvertedIndex::new();
+        index.enable();
+        let branch_id = BranchId::new();
+
+        let doc_a = EntityRef::Kv {
+            branch_id,
+            space: "tenant_a".to_string(),
+            key: "k".to_string(),
+        };
+        let doc_b = EntityRef::Kv {
+            branch_id,
+            space: "tenant_b".to_string(),
+            key: "k".to_string(),
+        };
+        index.index_document(&doc_a, "juliet kilo lima", None);
+        index.index_document(&doc_b, "juliet kilo lima", None);
+        index.seal_active();
+
+        let terms = vec!["kilo".to_string()];
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+            Some("tenant_a"),
+        );
+        assert_eq!(
+            result.len(),
+            1,
+            "sealed-segment search must filter by space"
+        );
+        assert_eq!(index.resolve_doc_id(result[0].doc_id).unwrap(), doc_a);
+    }
+
+    /// `EntityRef::Branch` has no space (`space()` returns `None`). When a
+    /// space filter is requested it must NOT drop Branch refs — they are
+    /// space-less metadata that always belong to the caller's view.
+    #[test]
+    fn test_score_top_k_keeps_branch_refs_under_space_filter() {
+        let index = InvertedIndex::new();
+        index.enable();
+        let branch_id = BranchId::new();
+
+        let branch_ref = EntityRef::Branch { branch_id };
+        index.index_document(&branch_ref, "alpha bravo charlie", None);
+
+        let terms = vec!["bravo".to_string()];
+        let result = index.score_top_k(
+            &terms,
+            &branch_id,
+            10,
+            0.9,
+            0.4,
+            &PhraseConfig::none(),
+            &ProximityConfig::off(),
+            Some("tenant_a"),
+        );
+        assert_eq!(
+            result.len(),
+            1,
+            "Branch refs must survive a space filter — they have no space"
+        );
+        assert_eq!(index.resolve_doc_id(result[0].doc_id).unwrap(), branch_ref);
     }
 
     #[test]
@@ -1935,6 +2189,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 5);
     }
@@ -1960,6 +2215,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
 
         assert_eq!(result.len(), 2);
@@ -2002,6 +2258,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(rare_result.len(), 1);
 
@@ -2015,6 +2272,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(common_result.len(), 10);
 
@@ -2061,6 +2319,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
 
         assert_eq!(result.len(), 2);
@@ -2099,6 +2358,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
 
         // Verify strictly descending order
@@ -2133,6 +2393,7 @@ mod tests {
             b,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 1);
 
@@ -2177,6 +2438,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert!(
             result.is_empty(),
@@ -2203,6 +2465,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 1);
     }
@@ -2230,6 +2493,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
 
         // Only doc2 should remain
@@ -2268,6 +2532,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
 
         // Both should match since we filter by branch_id, not entity type
@@ -2321,6 +2586,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 10);
     }
@@ -2353,6 +2619,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 10);
 
@@ -2392,6 +2659,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert!(
             result.is_empty(),
@@ -2408,6 +2676,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 1, "New term 'alpha' should match");
 
@@ -2446,6 +2715,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 1);
         let resolved = index.resolve_doc_id(result[0].doc_id).unwrap();
@@ -2497,6 +2767,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 5);
 
@@ -2516,6 +2787,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 10);
 
@@ -2534,6 +2806,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 13);
 
@@ -2588,6 +2861,7 @@ mod tests {
                 0.4,
                 &PhraseConfig::none(),
                 &ProximityConfig::off(),
+                None,
             );
             assert_eq!(result.len(), 1);
             let resolved = index.resolve_doc_id(result[0].doc_id).unwrap();
@@ -2629,6 +2903,7 @@ mod tests {
                 0.4,
                 &PhraseConfig::none(),
                 &ProximityConfig::off(),
+                None,
             );
             assert_eq!(result.len(), 2);
 
@@ -2667,6 +2942,7 @@ mod tests {
             b,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 1);
 
@@ -2716,6 +2992,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 2);
 
@@ -2753,6 +3030,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 5);
     }
@@ -2787,6 +3065,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result_a.len(), 3);
         let result_b = index.score_top_k(
@@ -2797,6 +3076,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result_b.len(), 3);
     }
@@ -2822,6 +3102,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert!(result.is_empty());
     }
@@ -2866,6 +3147,7 @@ mod tests {
                 0.4,
                 &PhraseConfig::none(),
                 &ProximityConfig::off(),
+                None,
             );
             assert_eq!(result.len(), 20);
 
@@ -2902,6 +3184,7 @@ mod tests {
             b,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 1);
 
@@ -2974,6 +3257,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 4);
 
@@ -2996,6 +3280,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 3);
 
@@ -3037,6 +3322,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 10);
 
@@ -3050,6 +3336,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert!(result.is_empty());
     }
@@ -3091,6 +3378,7 @@ mod tests {
                 0.4,
                 &PhraseConfig::none(),
                 &ProximityConfig::off(),
+                None,
             );
             assert_eq!(result.len(), 5);
 
@@ -3103,6 +3391,7 @@ mod tests {
                 0.4,
                 &PhraseConfig::none(),
                 &ProximityConfig::off(),
+                None,
             );
             assert!(result.is_empty());
         }
@@ -3148,6 +3437,7 @@ mod tests {
                 0.4,
                 &PhraseConfig::none(),
                 &ProximityConfig::off(),
+                None,
             );
             assert_eq!(result.len(), 1);
             let resolved = index.resolve_doc_id(result[0].doc_id).unwrap();
@@ -3184,6 +3474,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result_a.len(), 2);
 
@@ -3195,6 +3486,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result_b.len(), 1);
         let resolved = index.resolve_doc_id(result_b[0].doc_id).unwrap();
@@ -3231,6 +3523,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
 
         // All 3 docs match "alpha", doc1 and doc3 also match "beta"
@@ -3485,6 +3778,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 1);
         let resolved = index.resolve_doc_id(result[0].doc_id).unwrap();
@@ -3533,6 +3827,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 1);
         let resolved = index.resolve_doc_id(result[0].doc_id).unwrap();
@@ -3590,6 +3885,7 @@ mod tests {
                 0.4,
                 &PhraseConfig::none(),
                 &ProximityConfig::off(),
+                None,
             );
             assert_eq!(result.len(), 1);
             let resolved = index.resolve_doc_id(result[0].doc_id).unwrap();
@@ -3639,6 +3935,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert!(result.is_empty());
 
@@ -3652,6 +3949,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 1);
     }
@@ -3938,6 +4236,7 @@ mod tests {
                 filter: false,
             },
             &ProximityConfig::off(),
+            None,
         );
 
         // All matching docs returned
@@ -3993,6 +4292,7 @@ mod tests {
                 filter: true,
             },
             &ProximityConfig::off(),
+            None,
         );
 
         // doc1 has both words but not adjacent — should be filtered out
@@ -4035,6 +4335,7 @@ mod tests {
                 filter: true,
             },
             &ProximityConfig::off(),
+            None,
         );
         let strict_keys: Vec<String> = strict
             .iter()
@@ -4063,6 +4364,7 @@ mod tests {
                 filter: true,
             },
             &ProximityConfig::off(),
+            None,
         );
         let sloppy_keys: Vec<String> = sloppy
             .iter()
@@ -4102,6 +4404,7 @@ mod tests {
                 filter: false,
             },
             &ProximityConfig::off(),
+            None,
         );
         let without_phrases = index.score_top_k(
             &terms,
@@ -4111,6 +4414,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
 
         assert_eq!(with_phrases.len(), without_phrases.len());
@@ -4159,6 +4463,7 @@ mod tests {
                 filter: true,
             },
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(
             result.len(),
@@ -4205,6 +4510,7 @@ mod tests {
                 filter: true,
             },
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 1, "exact phrase 'quick brown' should match");
     }
@@ -4237,6 +4543,7 @@ mod tests {
                 filter: true,
             },
             &ProximityConfig::off(),
+            None,
         );
         assert_eq!(result.len(), 1, "phrase should match in sealed segment");
     }
@@ -4257,6 +4564,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         // Get boosted score with phrases (boost=3.0)
         let boosted = index.score_top_k(
@@ -4272,6 +4580,7 @@ mod tests {
                 filter: false,
             },
             &ProximityConfig::off(),
+            None,
         );
 
         // Find doc0 (has exact phrase) in both
@@ -4337,6 +4646,7 @@ mod tests {
                 filter: false,
             },
             &ProximityConfig::off(),
+            None,
         );
         assert!(result.len() >= 2);
 
@@ -4471,6 +4781,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::default_on(),
+            None,
         );
         assert_eq!(with_prox.len(), 2);
         let close_score = with_prox
@@ -4516,6 +4827,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::default_on(),
+            None,
         );
         let without_prox = index.score_top_k(
             &terms,
@@ -4525,6 +4837,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
 
         // With proximity, score should be higher (additive boost)
@@ -4556,6 +4869,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::default_on(),
+            None,
         );
         let without_prox = index.score_top_k(
             &terms,
@@ -4565,6 +4879,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
 
         assert_eq!(with_prox.len(), without_prox.len());
@@ -4598,6 +4913,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::default_on(),
+            None,
         );
         let without_prox = index.score_top_k(
             &terms,
@@ -4607,6 +4923,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
 
         // Partial coverage should still add a (smaller) boost
@@ -4638,6 +4955,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::default_on(),
+            None,
         );
         let base = index.score_top_k(
             &terms,
@@ -4647,6 +4965,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
 
         assert!(
@@ -4674,6 +4993,7 @@ mod tests {
             0.4,
             &PhraseConfig::none(),
             &ProximityConfig::off(),
+            None,
         );
         let w05 = index.score_top_k(
             &terms,
@@ -4687,6 +5007,7 @@ mod tests {
                 window: 10,
                 weight: 0.5,
             },
+            None,
         );
         let w10 = index.score_top_k(
             &terms,
@@ -4700,6 +5021,7 @@ mod tests {
                 window: 10,
                 weight: 1.0,
             },
+            None,
         );
 
         let boost_05 = w05[0].score - base[0].score;

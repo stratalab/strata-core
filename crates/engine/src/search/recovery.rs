@@ -44,6 +44,16 @@ pub fn extract_indexable_text(value: &Value) -> Option<String> {
     }
 }
 
+/// True if `space` is a JSON-internal space (secondary index storage).
+///
+/// `JsonStore::create_index` writes index metadata to `_idx_meta/{space}` and
+/// index entries to `_idx/{space}/{name}`, both stored under `TypeTag::Json`.
+/// Recovery scans of `TypeTag::Json` see them across every space in the
+/// branch — these are not user documents and must not feed BM25.
+fn is_json_internal_space(space: &str) -> bool {
+    space.starts_with("_idx/") || space.starts_with("_idx_meta/")
+}
+
 /// Recovery function for the InvertedIndex.
 ///
 /// Called by Database during startup to restore search index state.
@@ -212,6 +222,41 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
             index.index_document(&entity_ref, &text, None);
             docs_indexed += 1;
         }
+
+        // --- JSON entries ---
+        // After Phase 0 bumped the BM25 manifest version, the slow path runs
+        // on every existing DB. Without this loop, JSON documents silently
+        // disappear from BM25 until the next user-triggered re-put.
+        //
+        // `list_by_type` returns JSON entries across ALL spaces in this
+        // branch, including secondary-index storage (`_idx/{space}/{name}`)
+        // and index metadata (`_idx_meta/{space}`). Skip those by space
+        // prefix — they are not user documents.
+        for (key, vv) in db.storage().list_by_type(&branch_id, TypeTag::Json) {
+            if is_json_internal_space(&key.namespace.space) {
+                continue;
+            }
+
+            let doc_id = match key.user_key_string() {
+                Some(k) => k,
+                None => continue,
+            };
+
+            let doc = match crate::primitives::json::JsonStore::deserialize_doc(&vv.value) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            let text = serde_json::to_string(doc.value.as_inner()).unwrap_or_default();
+
+            let entity_ref = crate::search::EntityRef::Json {
+                branch_id,
+                space: key.namespace.space.to_string(),
+                doc_id,
+            };
+            index.index_document(&entity_ref, &text, None);
+            docs_indexed += 1;
+        }
     }
 
     // Freeze to disk for next startup (fast path).
@@ -336,6 +381,40 @@ fn reconcile_index(db: &Database, index: &InvertedIndex) -> StrataResult<u64> {
                 None => continue,
             };
 
+            index.index_document(&entity_ref, &text, None);
+            reconciled += 1;
+        }
+
+        // --- JSON entries ---
+        // Mirror the slow-path skip: never reconcile JSON-internal spaces
+        // (`_idx/...`, `_idx_meta/...`) — these are secondary-index storage,
+        // not user documents.
+        for (key, vv) in db.storage().list_by_type(&branch_id, TypeTag::Json) {
+            if is_json_internal_space(&key.namespace.space) {
+                continue;
+            }
+
+            let doc_id = match key.user_key_string() {
+                Some(k) => k,
+                None => continue,
+            };
+
+            let entity_ref = crate::search::EntityRef::Json {
+                branch_id,
+                space: key.namespace.space.to_string(),
+                doc_id,
+            };
+
+            if index.has_document(&entity_ref) {
+                continue;
+            }
+
+            let doc = match crate::primitives::json::JsonStore::deserialize_doc(&vv.value) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            let text = serde_json::to_string(doc.value.as_inner()).unwrap_or_default();
             index.index_document(&entity_ref, &text, None);
             reconciled += 1;
         }

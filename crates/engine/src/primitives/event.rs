@@ -1116,6 +1116,7 @@ impl crate::search::Searchable for EventLog {
             req.bm25_b,
             &phrase_cfg,
             &prox_cfg,
+            Some(&req.space),
         );
 
         let hits: Vec<SearchHit> = top_k

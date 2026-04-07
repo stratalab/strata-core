@@ -746,20 +746,23 @@ impl strata_engine::search::Searchable for VectorStore {
                 };
 
             for m in matches {
-                // Shadow collections (`_system_embed_*`) always live in
-                // SYSTEM_SPACE (see `list_collections` call above). When a
-                // match has no source_ref we fall back to pointing at the
-                // shadow vector itself, which is in SYSTEM_SPACE — not
-                // `req.space` (the caller's scope).
-                let doc_ref = m.source_ref.unwrap_or_else(|| {
-                    EntityRef::vector(req.branch_id, SYSTEM_SPACE, &col.name, &m.key)
-                });
+                // Phase 1 Part 2: drop matches whose source isn't in the
+                // caller's space, and drop matches with no `source_ref`
+                // entirely. Shadow collections (`_system_embed_*`) live in
+                // SYSTEM_SPACE and intermix entities from every user
+                // space, so the source_ref is the only honest signal.
+                let Some(source) = m.source_ref else {
+                    continue; // no source → can't attribute to a space
+                };
+                if source.space() != Some(req.space.as_str()) {
+                    continue; // wrong space, or space-less Branch ref
+                }
                 let snippet = m
                     .metadata
                     .as_ref()
                     .map(|meta| truncate_text(&meta.to_string(), 100));
                 all_hits.push(SearchHit {
-                    doc_ref,
+                    doc_ref: source,
                     score: m.score,
                     rank: 0,
                     snippet,
@@ -4039,27 +4042,31 @@ mod tests {
         let (_temp, _db, store) = setup();
         let branch_id = BranchId::new();
 
-        // Create a system embed collection and insert vectors
+        // Create a system embed collection and insert vectors. Each shadow
+        // record points back at a real KV entry in the user's `default`
+        // space — the only honest way to attribute a hit to a space.
         let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
         store
             .create_system_collection(branch_id, "_system_embed_kv", config)
             .unwrap();
         store
-            .system_insert(
+            .system_insert_with_source(
                 branch_id,
                 "_system_embed_kv",
                 "key-a",
                 &[1.0, 0.0, 0.0],
                 None,
+                EntityRef::kv(branch_id, "default", "key-a"),
             )
             .unwrap();
         store
-            .system_insert(
+            .system_insert_with_source(
                 branch_id,
                 "_system_embed_kv",
                 "key-b",
                 &[0.0, 1.0, 0.0],
                 None,
+                EntityRef::kv(branch_id, "default", "key-b"),
             )
             .unwrap();
 
@@ -4074,12 +4081,109 @@ mod tests {
         assert_eq!(response.hits[0].rank, 1);
         assert!(response.hits[0].score > response.hits[1].score);
         assert!(response.stats.index_used);
-        // Verify doc_refs are EntityRef::Vector with correct collection/key
+        // doc_refs are now the source refs, not the shadow vectors.
         assert!(matches!(
             &response.hits[0].doc_ref,
-            EntityRef::Vector { collection, key, .. }
-            if collection == "_system_embed_kv" && key == "key-a"
+            EntityRef::Kv { space, key, .. }
+            if space == "default" && key == "key-a"
         ));
+    }
+
+    /// Phase 1 Part 2: hybrid vector search must drop matches whose source
+    /// is in a different space than the request, and must drop matches with
+    /// no source_ref entirely.
+    #[test]
+    fn test_searchable_vector_filters_cross_space_sources() {
+        use strata_engine::search::{SearchMode, Searchable};
+        use strata_engine::SearchRequest;
+
+        let (_temp, _db, store) = setup();
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_system_collection(branch_id, "_system_embed_kv", config)
+            .unwrap();
+
+        // Two records with identical embeddings, different source spaces
+        store
+            .system_insert_with_source(
+                branch_id,
+                "_system_embed_kv",
+                "shadow-a",
+                &[1.0, 0.0, 0.0],
+                None,
+                EntityRef::kv(branch_id, "tenant_a", "real_key"),
+            )
+            .unwrap();
+        store
+            .system_insert_with_source(
+                branch_id,
+                "_system_embed_kv",
+                "shadow-b",
+                &[1.0, 0.0, 0.0],
+                None,
+                EntityRef::kv(branch_id, "tenant_b", "real_key"),
+            )
+            .unwrap();
+        // A third record with NO source_ref — must be dropped under
+        // space-filtered hybrid mode (no honest space attribution).
+        store
+            .system_insert(
+                branch_id,
+                "_system_embed_kv",
+                "shadow-orphan",
+                &[1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+
+        // Search from tenant_a → exactly the tenant_a hit
+        let req_a = SearchRequest::new(branch_id, "")
+            .with_mode(SearchMode::Vector)
+            .with_precomputed_embedding(vec![1.0, 0.0, 0.0])
+            .with_space("tenant_a")
+            .with_k(10);
+        let resp_a = Searchable::search(&store, &req_a).unwrap();
+        assert_eq!(
+            resp_a.len(),
+            1,
+            "tenant_a should see exactly its own hit, got {}",
+            resp_a.len()
+        );
+        if let EntityRef::Kv { space, .. } = &resp_a.hits[0].doc_ref {
+            assert_eq!(space, "tenant_a");
+        } else {
+            panic!("expected EntityRef::Kv");
+        }
+
+        // Search from tenant_b → exactly the tenant_b hit
+        let req_b = SearchRequest::new(branch_id, "")
+            .with_mode(SearchMode::Vector)
+            .with_precomputed_embedding(vec![1.0, 0.0, 0.0])
+            .with_space("tenant_b")
+            .with_k(10);
+        let resp_b = Searchable::search(&store, &req_b).unwrap();
+        assert_eq!(resp_b.len(), 1);
+        if let EntityRef::Kv { space, .. } = &resp_b.hits[0].doc_ref {
+            assert_eq!(space, "tenant_b");
+        } else {
+            panic!("expected EntityRef::Kv");
+        }
+
+        // Search from a third space → zero hits (no source matches it,
+        // and the orphan with no source_ref must also be dropped).
+        let req_c = SearchRequest::new(branch_id, "")
+            .with_mode(SearchMode::Vector)
+            .with_precomputed_embedding(vec![1.0, 0.0, 0.0])
+            .with_space("tenant_c")
+            .with_k(10);
+        let resp_c = Searchable::search(&store, &req_c).unwrap();
+        assert_eq!(
+            resp_c.len(),
+            0,
+            "tenant_c has no source-matching hits and orphan must be dropped"
+        );
     }
 
     #[test]
@@ -4164,25 +4268,32 @@ mod tests {
             .create_system_collection(branch_id, "_system_embed_json", config)
             .unwrap();
 
-        // Insert into kv collection — close to query
+        // Insert into kv collection — close to query.
+        // Each shadow record points back at a real source in `default`.
         store
-            .system_insert(
+            .system_insert_with_source(
                 branch_id,
                 "_system_embed_kv",
                 "kv-hit",
                 &[0.9, 0.1, 0.0],
                 None,
+                EntityRef::kv(branch_id, "default", "kv-hit"),
             )
             .unwrap();
 
         // Insert into json collection — exact match to query
         store
-            .system_insert(
+            .system_insert_with_source(
                 branch_id,
                 "_system_embed_json",
                 "json-hit",
                 &[1.0, 0.0, 0.0],
                 None,
+                EntityRef::Json {
+                    branch_id,
+                    space: "default".to_string(),
+                    doc_id: "json-hit".to_string(),
+                },
             )
             .unwrap();
 
@@ -4198,17 +4309,17 @@ mod tests {
         assert!(response.hits[0].score >= response.hits[1].score);
         assert_eq!(response.hits[0].rank, 1);
         assert_eq!(response.hits[1].rank, 2);
-        // Verify hits come from different collections
-        let collections: Vec<&str> = response
-            .hits
-            .iter()
-            .filter_map(|h| match &h.doc_ref {
-                EntityRef::Vector { collection, .. } => Some(collection.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert!(collections.contains(&"_system_embed_json"));
-        assert!(collections.contains(&"_system_embed_kv"));
+        // Verify hits resolve back to their source primitives.
+        let mut saw_kv = false;
+        let mut saw_json = false;
+        for h in &response.hits {
+            match &h.doc_ref {
+                EntityRef::Kv { key, .. } if key == "kv-hit" => saw_kv = true,
+                EntityRef::Json { doc_id, .. } if doc_id == "json-hit" => saw_json = true,
+                other => panic!("unexpected doc_ref: {:?}", other),
+            }
+        }
+        assert!(saw_kv && saw_json);
     }
 
     #[test]

@@ -157,6 +157,8 @@ impl strata_engine::search::Searchable for GraphStore {
 
         // Score all matching docs in the shared index, then filter to Graph refs.
         // Request more than k to account for non-graph results being filtered out.
+        // Pass `Some(&req.space)` so cross-space hits are dropped at the
+        // index level — graph nodes from other tenants must never leak in.
         let top_k = index.score_top_k(
             &parsed.terms,
             &req.branch_id,
@@ -165,6 +167,7 @@ impl strata_engine::search::Searchable for GraphStore {
             req.bm25_b,
             &phrase_cfg,
             &prox_cfg,
+            Some(&req.space),
         );
 
         let hits: Vec<SearchHit> = top_k
