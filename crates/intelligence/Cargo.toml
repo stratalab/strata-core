@@ -23,6 +23,9 @@ strata-core = { path = "../core" }
 strata-engine = { path = "../engine" }
 strata-search = { path = "../search" }
 tracing = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = "0.10"
 strata-inference = { path = "../inference", optional = true, features = ["local", "download"] }
 
 [dev-dependencies]

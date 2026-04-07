@@ -207,6 +207,14 @@ pub struct ExpansionConfig {
     /// Top-p / nucleus sampling for the expansion model (default: 0.8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
+    /// Enable expansion result caching (default: true).
+    /// Cached entries live in `_system_` space on the branch and survive restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_enabled: Option<bool>,
+    /// Maximum cached entries per branch (default: 1000).
+    /// FIFO eviction when capacity is exceeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_capacity: Option<usize>,
 }
 
 /// Pre-retrieval filter configuration.
@@ -367,6 +375,8 @@ pub(crate) fn builtin_defaults() -> Recipe {
             temperature: Some(0.7),
             top_k: Some(20),
             top_p: Some(0.8),
+            cache_enabled: Some(true),
+            cache_capacity: Some(1000),
         }),
         fusion: Some(FusionConfig {
             method: Some("rrf".into()),
@@ -557,6 +567,8 @@ pub fn builtin_recipes() -> Vec<(&'static str, Recipe)> {
                     temperature: Some(0.7),
                     top_k: Some(20),
                     top_p: Some(0.8),
+                    cache_enabled: Some(true),
+                    cache_capacity: Some(1000),
                 }),
                 fusion: Some(FusionConfig {
                     method: Some("rrf".into()),
@@ -753,5 +765,45 @@ mod tests {
         assert_eq!(exp.top_k, Some(20));
         assert_eq!(exp.top_p, Some(0.8));
         assert_eq!(r.rerank.as_ref().unwrap().min_candidates, Some(3));
+    }
+
+    #[test]
+    fn test_expansion_cache_fields_deserialize() {
+        let json = r#"{
+            "expansion": {
+                "cache_enabled": false,
+                "cache_capacity": 500
+            }
+        }"#;
+        let recipe: Recipe = serde_json::from_str(json).unwrap();
+        let expansion = recipe.expansion.unwrap();
+        assert_eq!(expansion.cache_enabled, Some(false));
+        assert_eq!(expansion.cache_capacity, Some(500));
+    }
+
+    #[test]
+    fn test_expansion_cache_fields_backward_compat() {
+        // Recipes without the cache fields must still parse (default to None).
+        let json = r#"{"expansion":{"strategy":"full"}}"#;
+        let recipe: Recipe = serde_json::from_str(json).unwrap();
+        let expansion = recipe.expansion.unwrap();
+        assert!(expansion.cache_enabled.is_none());
+        assert!(expansion.cache_capacity.is_none());
+    }
+
+    #[test]
+    fn test_builtin_defaults_populates_cache_fields() {
+        let r = builtin_defaults();
+        let exp = r.expansion.as_ref().unwrap();
+        assert_eq!(exp.cache_enabled, Some(true));
+        assert_eq!(exp.cache_capacity, Some(1000));
+    }
+
+    #[test]
+    fn test_builtin_rag_populates_cache_fields() {
+        let r = get_builtin_recipe("rag").unwrap();
+        let exp = r.expansion.as_ref().unwrap();
+        assert_eq!(exp.cache_enabled, Some(true));
+        assert_eq!(exp.cache_capacity, Some(1000));
     }
 }

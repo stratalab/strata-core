@@ -338,8 +338,13 @@ fn try_expand_query(
         .and_then(|m| m.expand.clone())
         .unwrap_or_else(|| "qwen3:1.7b".to_string());
 
-    let expansions =
-        strata_intelligence::expand::expand_query(&p.db, query, expansion_cfg, &expand_model);
+    let expansions = strata_intelligence::expand::expand_query(
+        &p.db,
+        query,
+        expansion_cfg,
+        &expand_model,
+        branch_id,
+    );
 
     if expansions.is_empty() {
         return (

@@ -5,9 +5,12 @@
 //! The caller (search handler) routes each variant to the appropriate
 //! substrate retrieval pass.
 
+use strata_core::types::BranchId;
 use strata_engine::search::recipe::ExpansionConfig;
 use strata_engine::search::tokenize_unique;
 use strata_search::expand::{ExpandedQuery, QueryType};
+
+use crate::expand_cache;
 
 /// GBNF grammar that constrains expansion output to parseable `type: content` lines.
 const EXPAND_GRAMMAR: &str = r#"root ::= line+
@@ -17,19 +20,54 @@ content ::= [^\n]+"#;
 
 /// Expand a query using a generation model with grammar constraints.
 ///
-/// Returns the filtered expansion variants. Returns empty vec on any failure
-/// (graceful degradation — search continues with the original query only).
+/// Reads from the per-branch persistent cache first; on a miss, calls the
+/// model, filters the result, and writes the filtered variants back to the
+/// cache. All failures are non-fatal — search continues with whatever
+/// variants are available (or with the original query alone on total
+/// failure).
 pub fn expand_query(
     db: &strata_engine::Database,
     query: &str,
     config: &ExpansionConfig,
     model_spec: &str,
+    branch_id: BranchId,
 ) -> Vec<ExpandedQuery> {
+    let cache_enabled = config.cache_enabled.unwrap_or(true);
+    let key_hex = expand_cache::cache_key(query, model_spec);
+
+    // Cache read: graceful miss on any failure.
+    if cache_enabled {
+        if let Some(cached) = expand_cache::get(db, branch_id, &key_hex) {
+            tracing::debug!(
+                target: "strata::expand",
+                query = %query,
+                "expansion cache hit"
+            );
+            return cached;
+        }
+    }
+
     let raw = generate_expansions(db, query, config, model_spec);
     if raw.is_empty() {
         return vec![];
     }
-    filter_expansions(query, raw, config)
+    let filtered = filter_expansions(query, raw, config);
+
+    // Cache write: non-fatal on failure.
+    if cache_enabled && !filtered.is_empty() {
+        let capacity = config.cache_capacity.unwrap_or(1000);
+        if let Err(e) = expand_cache::put(
+            db, branch_id, &key_hex, query, model_spec, &filtered, capacity,
+        ) {
+            tracing::warn!(
+                target: "strata::expand",
+                error = %e,
+                "expansion cache write failed"
+            );
+        }
+    }
+
+    filtered
 }
 
 /// Check if BM25 results have a strong enough signal to skip expansion.
